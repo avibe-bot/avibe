@@ -8,7 +8,6 @@ commit that produced the artifacts on disk turns that into one shallow fetch.
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -47,12 +46,6 @@ def make_upstream(tmp_path: Path) -> Path:
     git("add", "-A", cwd=upstream)
     git("commit", "-m", "one", cwd=upstream)
     return upstream
-
-
-def checkout_record(manager: show_runtime.ShowRuntimeManager, source_dir: Path) -> show_runtime._GitHubCheckoutRecord:
-    record = manager._read_github_checkout_record(source_dir)
-    assert record is not None
-    return record
 
 
 class Harness:
@@ -101,48 +94,7 @@ def test_first_install_builds_and_records_the_commit_it_built(tmp_path: Path) ->
     source_dir = harness.manager._github_source_dir()
     expected_revision = git("rev-parse", "HEAD", cwd=upstream)
     assert harness.manager._read_github_build_marker(source_dir) == expected_revision
-    assert checkout_record(harness.manager, source_dir).revision == expected_revision
-    assert harness.manager._github_checkout_marker_path(source_dir).is_relative_to(source_dir)
-
-
-@pytest.mark.parametrize("failure_phase", ["staging", "record", "publish"])
-def test_first_install_does_not_publish_a_checkout_without_ownership_evidence(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    failure_phase: str,
-) -> None:
-    upstream = make_upstream(tmp_path)
-    failed = Harness(tmp_path, upstream)
-    source_dir = failed.manager._github_source_dir()
-
-    with monkeypatch.context() as scoped:
-        if failure_phase == "staging":
-            def fail_staging(**_kwargs: object) -> str:
-                raise OSError
-
-            scoped.setattr(show_runtime.tempfile, "mkdtemp", fail_staging)
-        elif failure_phase == "record":
-            scoped.setattr(failed.manager, "_write_github_checkout_record", lambda *_args: False)
-        else:
-            real_rename = Path.rename
-
-            def fail_publish(path: Path, target: Path) -> Path:
-                if path.name.startswith(".main.clone-"):
-                    raise OSError
-                return real_rename(path, target)
-
-            scoped.setattr(Path, "rename", fail_publish)
-        result = failed.manager.prepare()
-
-    assert result["ok"] is False
-    assert result["reason"] == "runtime_github_source_update_failed"
-    assert not source_dir.exists()
-
-    retried_manager = Harness(tmp_path, upstream).manager
-    retried = retried_manager.prepare()
-
-    assert retried["ok"] is True
-    assert checkout_record(retried_manager, source_dir).revision == git("rev-parse", "HEAD", cwd=upstream)
+    assert harness.manager.status()["github_source"] == {"built_revision": expected_revision}
 
 
 def test_unchanged_upstream_reuses_the_build_instead_of_repeating_it(tmp_path: Path) -> None:
@@ -183,301 +135,6 @@ def test_force_install_rebuilds_even_when_the_commit_matches(tmp_path: Path) -> 
     assert harness.manager._install_github_runtime(force=True).command
 
     assert [command[1:] for command in harness.npm_commands] == [["ci"], ["run", "build"]]
-
-
-def test_force_install_refuses_locally_modified_source_without_touching_the_runtime(tmp_path: Path) -> None:
-    upstream = make_upstream(tmp_path)
-    harness = Harness(tmp_path, upstream)
-    installed = harness.manager.prepare()
-    assert installed["ok"] is True
-    source_dir = harness.manager._github_source_dir()
-    cli_path = Path(installed["command"][1])
-    original_cli = cli_path.read_text(encoding="utf-8")
-    (source_dir / "package.json").write_text('{"name": "locally-edited"}\n', encoding="utf-8")
-    harness.npm_commands.clear()
-
-    result = harness.manager.prepare(force=True)
-
-    assert result["ok"] is False
-    assert result["reason"] == "runtime_github_source_dirty"
-    assert result["status"]["install"]["state"] == "installed"
-    assert (source_dir / "package.json").read_text(encoding="utf-8") == '{"name": "locally-edited"}\n'
-    assert cli_path.read_text(encoding="utf-8") == original_cli
-    assert harness.npm_commands == []
-
-
-def test_force_install_refuses_local_commits_without_moving_the_checkout_or_runtime(tmp_path: Path) -> None:
-    upstream = make_upstream(tmp_path)
-    harness = Harness(tmp_path, upstream)
-    installed = harness.manager.prepare()
-    assert installed["ok"] is True
-    source_dir = harness.manager._github_source_dir()
-    cli_path = Path(installed["command"][1])
-    original_cli = cli_path.read_text(encoding="utf-8")
-    (source_dir / "local.txt").write_text("local commit\n", encoding="utf-8")
-    git("add", "local.txt", cwd=source_dir)
-    git("commit", "-m", "local work", cwd=source_dir)
-    local_revision = git("rev-parse", "HEAD", cwd=source_dir)
-    harness.npm_commands.clear()
-
-    result = harness.manager.prepare(force=True)
-
-    assert result["ok"] is False
-    assert result["reason"] == "runtime_github_source_revision_changed"
-    assert result["status"]["install"]["state"] == "installed"
-    assert git("rev-parse", "HEAD", cwd=source_dir) == local_revision
-    assert (source_dir / "local.txt").read_text(encoding="utf-8") == "local commit\n"
-    assert cli_path.read_text(encoding="utf-8") == original_cli
-    assert harness.npm_commands == []
-
-
-def test_automatic_update_builds_local_commit_without_moving_the_checkout(tmp_path: Path) -> None:
-    upstream = make_upstream(tmp_path)
-    installed = Harness(tmp_path, upstream)
-    initial = installed.manager.prepare()
-    assert initial["ok"] is True
-    source_dir = installed.manager._github_source_dir()
-    managed_revision = checkout_record(installed.manager, source_dir).revision
-    (source_dir / "local.txt").write_text("local commit\n", encoding="utf-8")
-    git("add", "local.txt", cwd=source_dir)
-    git("commit", "-m", "local work", cwd=source_dir)
-    local_revision = git("rev-parse", "HEAD", cwd=source_dir)
-    (upstream / "package.json").write_text('{"name": "runtime", "version": "2"}\n', encoding="utf-8")
-    git("commit", "-am", "upstream update", cwd=upstream)
-    automatic = Harness(tmp_path, upstream)
-
-    result = automatic.manager.prepare(automatic=True)
-
-    assert result["ok"] is True
-    assert git("rev-parse", "HEAD", cwd=source_dir) == local_revision
-    assert checkout_record(automatic.manager, source_dir).revision == managed_revision
-    assert automatic.manager._read_github_build_marker(source_dir) is None
-    assert [command[1:] for command in automatic.npm_commands] == [["ci"], ["run", "build"]]
-    assert result["status"]["reason"] is None
-    assert "update" not in result["status"]["github_source"]
-
-
-@pytest.mark.parametrize(
-    "refusal_reason",
-    [
-        "runtime_github_source_dirty",
-        "runtime_github_source_revision_changed",
-        "runtime_github_source_revision_unverified",
-    ],
-)
-@pytest.mark.parametrize("automatic", [False, True], ids=["forced", "automatic"])
-def test_checkout_refusal_preserves_checkout_and_applies_mode_remedy(
-    tmp_path: Path,
-    refusal_reason: str,
-    automatic: bool,
-) -> None:
-    upstream = make_upstream(tmp_path)
-    installed = Harness(tmp_path, upstream)
-    assert installed.manager.prepare()["ok"] is True
-    source_dir = installed.manager._github_source_dir()
-
-    if refusal_reason == "runtime_github_source_dirty":
-        (source_dir / "local.txt").write_text("uncommitted work\n", encoding="utf-8")
-    elif refusal_reason == "runtime_github_source_revision_changed":
-        (source_dir / "local.txt").write_text("committed work\n", encoding="utf-8")
-        git("add", "local.txt", cwd=source_dir)
-        git("commit", "-m", "local work", cwd=source_dir)
-    else:
-        installed.manager._github_checkout_marker_path(source_dir).unlink()
-        installed.manager._github_build_marker_path(source_dir).unlink()
-
-    current_revision = git("rev-parse", "HEAD", cwd=source_dir)
-    (upstream / "package.json").write_text('{"name": "runtime", "version": "2"}\n', encoding="utf-8")
-    git("commit", "-am", "upstream update", cwd=upstream)
-    attempt = Harness(tmp_path, upstream)
-
-    result = attempt.manager.prepare(automatic=True) if automatic else attempt.manager.prepare(force=True)
-
-    assert git("rev-parse", "HEAD", cwd=source_dir) == current_revision
-    assert "update" not in result["status"]["github_source"]
-    if automatic:
-        assert result["ok"] is True
-        assert [command[1:] for command in attempt.npm_commands] == [["ci"], ["run", "build"]]
-        assert attempt.manager._read_github_build_marker(source_dir) is None
-    else:
-        assert result["ok"] is False
-        assert result["reason"] == refusal_reason
-        assert result["status"]["install"]["state"] == "installed"
-        assert attempt.npm_commands == []
-
-
-def test_checkout_update_writes_pending_before_moving_head_and_heals_forward(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    upstream = make_upstream(tmp_path)
-    harness = Harness(tmp_path, upstream)
-    installed = harness.manager.prepare()
-    source_dir = harness.manager._github_source_dir()
-    original_revision = checkout_record(harness.manager, source_dir).revision
-    (upstream / "package.json").write_text('{"name": "runtime", "version": "2"}\n', encoding="utf-8")
-    git("commit", "-am", "upstream update", cwd=upstream)
-    target_revision = git("rev-parse", "HEAD", cwd=upstream)
-    updater = Harness(tmp_path, upstream)
-    original_write = updater.manager._write_github_checkout_record
-    writes: list[show_runtime._GitHubCheckoutRecord] = []
-
-    def fail_normalization(source: Path, record: show_runtime._GitHubCheckoutRecord) -> bool:
-        writes.append(record)
-        if record.revision == target_revision and record.pending is None:
-            return False
-        return original_write(source, record)
-
-    monkeypatch.setattr(updater.manager, "_write_github_checkout_record", fail_normalization)
-
-    result = updater.manager.prepare()
-
-    assert result["ok"] is True
-    assert result["command"] == installed["command"]
-    assert git("rev-parse", "HEAD", cwd=source_dir) == target_revision
-    pending = checkout_record(updater.manager, source_dir)
-    assert pending == show_runtime._GitHubCheckoutRecord(original_revision, pending=target_revision)
-    assert writes[:2] == [
-        show_runtime._GitHubCheckoutRecord(original_revision, pending=target_revision),
-        show_runtime._GitHubCheckoutRecord(target_revision),
-    ]
-
-    fresh = Harness(tmp_path, upstream)
-    healed = fresh.manager.prepare()
-
-    assert healed["ok"] is True
-    assert checkout_record(fresh.manager, source_dir) == show_runtime._GitHubCheckoutRecord(target_revision)
-    assert fresh.npm_commands == []
-
-
-def test_checkout_update_refuses_before_moving_head_when_pending_record_cannot_be_written(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    upstream = make_upstream(tmp_path)
-    harness = Harness(tmp_path, upstream)
-    installed = harness.manager.prepare()
-    source_dir = harness.manager._github_source_dir()
-    original_revision = git("rev-parse", "HEAD", cwd=source_dir)
-    original_cli = Path(installed["command"][1]).read_text(encoding="utf-8")
-    (upstream / "package.json").write_text('{"name": "runtime", "version": "2"}\n', encoding="utf-8")
-    git("commit", "-am", "upstream update", cwd=upstream)
-    original_write = harness.manager._write_github_checkout_record
-
-    def fail_pending(source: Path, record: show_runtime._GitHubCheckoutRecord) -> bool:
-        if record.pending:
-            return False
-        return original_write(source, record)
-
-    monkeypatch.setattr(harness.manager, "_write_github_checkout_record", fail_pending)
-    harness.npm_commands.clear()
-
-    result = harness.manager.prepare(force=True)
-
-    assert result["ok"] is False
-    assert result["reason"] == "runtime_github_source_update_failed"
-    assert result["install"]["state"] == "installed"
-    assert result["install"]["reason"] is None
-    assert result["status"]["reason"] is None
-    assert "update" not in result["status"]["github_source"]
-    assert git("rev-parse", "HEAD", cwd=source_dir) == original_revision
-    assert checkout_record(harness.manager, source_dir) == show_runtime._GitHubCheckoutRecord(original_revision)
-    assert Path(installed["command"][1]).read_text(encoding="utf-8") == original_cli
-    assert harness.npm_commands == []
-
-
-@pytest.mark.parametrize("automatic", [False, True], ids=["forced", "automatic"])
-def test_missing_head_revision_is_a_structured_update_failure_before_evidence_comparison(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    automatic: bool,
-) -> None:
-    upstream = make_upstream(tmp_path)
-    installed = Harness(tmp_path, upstream)
-    assert installed.manager.prepare()["ok"] is True
-    source_dir = installed.manager._github_source_dir()
-    original_record = checkout_record(installed.manager, source_dir)
-    (upstream / "package.json").write_text('{"name": "runtime", "version": "2"}\n', encoding="utf-8")
-    git("commit", "-am", "upstream update", cwd=upstream)
-    attempt = Harness(tmp_path, upstream)
-    real_revision = attempt.manager._git_revision
-
-    def missing_head(git_command: list[str], checkout: Path, ref: str) -> str | None:
-        if ref == "HEAD":
-            return None
-        return real_revision(git_command, checkout, ref)
-
-    monkeypatch.setattr(attempt.manager, "_git_revision", missing_head)
-
-    result = attempt.manager.prepare(automatic=True) if automatic else attempt.manager.prepare(force=True)
-
-    assert result["ok"] is automatic
-    if not automatic:
-        assert result["reason"] == "runtime_github_source_update_failed"
-    assert "update" not in result["status"]["github_source"]
-    assert checkout_record(attempt.manager, source_dir) == original_record
-    assert attempt.npm_commands == []
-
-
-def test_force_install_adopts_a_proven_legacy_checkout_revision(tmp_path: Path) -> None:
-    upstream = make_upstream(tmp_path)
-    harness = Harness(tmp_path, upstream)
-    installed = harness.manager.prepare()
-    assert installed["ok"] is True
-    source_dir = harness.manager._github_source_dir()
-    harness.manager._github_checkout_marker_path(source_dir).unlink()
-    expected_revision = harness.manager._read_github_build_marker(source_dir)
-    harness.npm_commands.clear()
-
-    result = harness.manager.prepare(force=True)
-
-    assert result["ok"] is True
-    assert expected_revision
-    assert checkout_record(harness.manager, source_dir).revision == expected_revision
-    assert [command[1:] for command in harness.npm_commands] == [["ci"], ["run", "build"]]
-
-
-def test_force_install_refuses_an_unverified_legacy_checkout_without_touching_the_runtime(tmp_path: Path) -> None:
-    upstream = make_upstream(tmp_path)
-    harness = Harness(tmp_path, upstream)
-    installed = harness.manager.prepare()
-    assert installed["ok"] is True
-    source_dir = harness.manager._github_source_dir()
-    cli_path = Path(installed["command"][1])
-    original_cli = cli_path.read_text(encoding="utf-8")
-    harness.manager._github_checkout_marker_path(source_dir).unlink()
-    harness.manager._github_build_marker_path(source_dir).unlink()
-    original_revision = git("rev-parse", "HEAD", cwd=source_dir)
-    harness.npm_commands.clear()
-
-    result = harness.manager.prepare(force=True)
-
-    assert result["ok"] is False
-    assert result["reason"] == "runtime_github_source_revision_unverified"
-    assert result["status"]["install"]["state"] == "installed"
-    assert git("rev-parse", "HEAD", cwd=source_dir) == original_revision
-    assert cli_path.read_text(encoding="utf-8") == original_cli
-    assert harness.npm_commands == []
-
-    explicit = Harness(tmp_path, upstream)
-    prepared = explicit.manager.prepare()
-    assert prepared["ok"] is True
-    assert explicit.manager._read_github_checkout_record(source_dir) is None
-    assert prepared["status"]["reason"] is None
-    assert "update" not in prepared["status"]["github_source"]
-
-    still_unverified = Harness(tmp_path, upstream).manager.prepare(force=True)
-    assert still_unverified["ok"] is False
-    assert still_unverified["reason"] == "runtime_github_source_revision_unverified"
-
-    shutil.rmtree(source_dir)
-    recreated = Harness(tmp_path, upstream).manager.prepare()
-    assert recreated["ok"] is True
-    assert checkout_record(Harness(tmp_path, upstream).manager, source_dir).revision == original_revision
-
-    repaired = Harness(tmp_path, upstream).manager.prepare(force=True)
-    assert repaired["ok"] is True
-    assert "update" not in repaired["status"]["github_source"]
 
 
 def test_force_install_fails_before_build_when_old_output_remains(
@@ -523,7 +180,7 @@ def test_forced_update_failure_reports_failed_operation_and_installed_state(tmp_
     assert result["status"]["command"] == installed["command"]
 
 
-def test_failed_local_build_does_not_publish_checkout_revision_as_artifact_provenance(
+def test_failed_github_build_does_not_publish_checkout_revision_as_artifact_provenance(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -535,12 +192,9 @@ def test_failed_local_build_does_not_publish_checkout_revision_as_artifact_prove
     first = installed.manager.prepare()
     source_dir = installed.manager._github_source_dir()
     old_command = first["command"]
-    (source_dir / "local.txt").write_text("local commit\n", encoding="utf-8")
-    git("add", "local.txt", cwd=source_dir)
-    git("commit", "-m", "local work", cwd=source_dir)
-    local_revision = git("rev-parse", "HEAD", cwd=source_dir)
     (upstream / "package.json").write_text('{"name": "runtime", "version": "2"}\n', encoding="utf-8")
     git("commit", "-am", "upstream update", cwd=upstream)
+    target_revision = git("rev-parse", "HEAD", cwd=upstream)
     attempt = Harness(tmp_path, upstream)
     real_run = attempt._run
 
@@ -560,7 +214,7 @@ def test_failed_local_build_does_not_publish_checkout_revision_as_artifact_prove
     monkeypatch.setattr(cli, "_configured_cli_language", lambda: "en")
     cli._print_runtime_status(result["status"])
     output = capsys.readouterr().out
-    assert local_revision not in output
+    assert target_revision not in output
     assert "prepared from" not in output
     assert "serving local revision" not in output
 

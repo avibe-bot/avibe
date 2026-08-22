@@ -759,12 +759,11 @@ determine" is never reported as `runtime_start_failed`; it carries
 failure nobody observed is the same lie as claiming a replacement nobody
 performed.
 
-**The destructive transition is itself a boundary, and it owns three things.**
-Making replacement structural moved real destruction into the install path, and the
-code around it still assumed nothing is ever removed. Three findings landed on the
-same seam — a stale cache, unverified build inputs, and delegate failures escaping —
-so the boundary that performs the destruction owns all three rather than each
-provider handling its own.
+**The destructive transition is itself a boundary.** Making replacement structural
+moved real destruction into the install path, and the code around it still assumed
+nothing is ever removed. The shipped boundary owns cache invalidation and delegate
+failures; authorization to move a developer-visible checkout leaves for the successor
+section below.
 
 *Invalidate before destroying.* `_managed_command` is a manager-level cache read at
 seven sites as proof that installed bytes exist, including `ensure()`'s spawn fast
@@ -777,6 +776,17 @@ same insight one level up, which is where every fix in this section has ended up
 **A cached path is not evidence of bytes: any state that stands in for the artifact
 is invalidated before the artifact is destroyed, not after the replacement is
 judged.**
+
+#### Successor: protect the managed GitHub checkout
+
+The baseline this successor must replace is deliberately named rather than implied.
+Once the cheap build-marker short-circuit stops matching, master runs
+`git checkout FETCH_HEAD` without authorization. A developer with local commits in the
+managed checkout can therefore have them displaced by any `/show/` request. Removing
+checkout ownership from 2b′ does not introduce that hazard because none of this work
+has merged, but it does leave the known pre-existing behavior unfixed. Protecting the
+managed checkout is the successor's headline; a three-valued decision type is the
+means, not the project.
 
 *Refuse rather than coerce.* Deleting the build output proves the build wrote output;
 it says nothing about what the build was fed. `git checkout FETCH_HEAD` keeps local
@@ -1019,6 +1029,50 @@ may work, so every rule about it has to infer which role it is in. An eighth inp
 would be another inference. If the predicate needs narrowing again, the answer is to
 stop conflating the two roles, not to add a term.
 
+The seventh findings-bearing head fired that boundary, but on a different axis than
+the artifact and owner boundaries above. One two-valued type repeatedly carried a
+three-valued reality, and every consumer promoted "cannot determine" to one of the two
+definite answers:
+
+| Type | Two represented values | The third value it could not represent |
+| --- | --- | --- |
+| `ok: bool` | available / unavailable | the requested operation did not run |
+| raw `revision` / `pending` comparison | equal / different | neither revision is known |
+| update `state = "skipped"` | skipped / absent | fetch never produced a target |
+| takeover `allowed: bool` | permitted / refused | ownership could not be determined |
+| `install_dir` beside `installed` | present / absent | intended, not achieved |
+| `current_revision` used as provenance | a revision / none | checked out but never built |
+
+The governance boundary named the wrong axis twice. Head five bounded the update
+record when the property covered every piece of checkout evidence; head six bounded
+owners when the recurring risk lived in the two-valued type those owners shared. The
+seventh finding made the consequence concrete: a failed legacy ownership-record write
+returned `allowed = false`; the automatic consumer treated that as developer-owned,
+skipped the checkout, cleared the released build marker, and used the same boolean to
+decide not to restore it. One boolean gated both moving the checkout and destroying
+build evidence even though those actions have different safety conditions.
+
+That gate and its ownership-record subgraph leave 2b′. The finding disappears with
+the gate: the retained path returns to master's unconditional build-marker restoration,
+so there is no site-level branch to patch. The successor takes the takeover decision,
+its consumers, and ownership-record transactionality. It starts with a named outcome
+of **proven / refused / undetermined** and structurally separates "may move this
+checkout" from "may destroy build evidence". Undetermined answers no to both. A write
+failure while adopting legacy evidence therefore returns the existing command
+untouched, preserves the marker, and recovers when permissions recover. Departing from
+that shape requires a stated reason.
+
+2b′ keeps the install dimension, build-marker provenance, the operation outcome
+contract, provider replacement evidence, destructive cache invalidation and delegate
+failure normalization, and Doctor's first-install/reinstall copy split. These owners
+have drawn no finding for two heads, and 2c depends on the operation contract rather
+than checkout ownership. The successor may consume the shipped `_github_install_attempt`,
+generic update-failure reason, `_git_revision`, and `_read_github_build_marker`; those
+are one-way dependencies on retained contracts, not checkout ownership leaking back
+into 2b′.
+
+#### Shipped in 2b′
+
 *One execution boundary for delegated work.* The shared install-command helper
 already passed a five-minute timeout and let `TimeoutExpired` escape — someone
 decided a hung subprocess must not block forever and never decided what that means
@@ -1254,7 +1308,8 @@ exposure predates these PRs and shipping the truthful row strictly reduces it.
 | 1 | W2 | avibe | Small, surgical, unit-testable. Start here. |
 | 2a | W4 admission outcome | avibe | The policy/install/runtime contract and every consumer projecting from it. |
 | 2b | W5 readiness proof | avibe | `ensure()` health-probes a fresh start; `doctor` inherits it. Independent of 2a. Bounded retry plus Doctor's three-state startability; claims nothing about replacement. |
-| 2b′ | W4 replacement operation contract | avibe | What `prepare()` claims, what a provider must prove, and the destructive boundary. Split out of 2b after six findings-bearing heads. |
+| 2b′ | W4 replacement operation contract | avibe | What `prepare()` claims, what a provider must prove, install-state ownership, build provenance, and destructive cache/delegate boundaries. Split out of 2b after six findings-bearing heads; checkout ownership is not shipped here. |
+| 2b″ | Protect the managed GitHub checkout | avibe | Replace master's unconditional checkout takeover with a three-valued decision that keeps undetermined ownership away from both checkout movement and build-evidence destruction. |
 | 2c | W4 retry + W5 page | avibe | Retry classification and the recovery page/poll, on top of 2a's reason. |
 | 3 | W1 | vibe-show-runtime | Independent; effect appears at the next runtime release. |
 | 4 | W3.1 | avibe | Source ladder. Valuable on its own — removes the single point of failure using only tiers that exist today. |

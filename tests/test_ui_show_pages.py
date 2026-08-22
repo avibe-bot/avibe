@@ -8173,12 +8173,13 @@ def test_show_runtime_manager_installs_from_github_source(monkeypatch, tmp_path)
     monkeypatch.setattr(manager, "_run_install_command", fake_run)
     monkeypatch.setattr(manager, "_git_revision", lambda *_args: "0123456789abcdef")
 
-    assert manager._install_managed_runtime_locked(force=False, offline=False).command == [
+    attempt = manager._install_managed_runtime_locked(force=False, offline=False)
+
+    assert attempt.command == [
         "/bin/node",
         str(source_dir / "packages" / "runtime" / "dist" / "cli.js"),
     ]
     clone_command, clone_cwd = commands[0]
-    staged_source_dir = Path(clone_command[-1])
     assert clone_command[:-1] == [
         "/bin/git",
         "clone",
@@ -8189,12 +8190,12 @@ def test_show_runtime_manager_installs_from_github_source(monkeypatch, tmp_path)
         "https://github.com/avibe-bot/vibe-show-runtime.git",
     ]
     assert clone_cwd is None
-    assert staged_source_dir.parent == source_dir.parent
-    assert staged_source_dir.name.startswith(".main.clone-")
+    assert Path(clone_command[-1]) == source_dir
     assert commands[1:] == [
         (["/bin/npm", "ci"], source_dir),
         (["/bin/npm", "run", "build"], source_dir),
     ]
+    assert manager.status()["github_source"] == {"built_revision": "0123456789abcdef"}
 
 
 def test_show_runtime_manager_reuses_installed_github_runtime_when_update_fails(monkeypatch, tmp_path):

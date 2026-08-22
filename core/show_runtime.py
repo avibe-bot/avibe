@@ -42,7 +42,6 @@ from storage.lock import (
 )
 
 from config import paths
-from config.atomic_io import write_atomic
 from core.dependency_network import dependency_error_details, fetch_bytes, fetch_to_path, probe_url, redact_url
 from core.show_pages import SHOW_RUNTIME_RECOVERY_LOADING_DELAY_SECONDS
 from core.process_isolation import KILL_SIGNAL, isolated_subprocess_kwargs, signal_process_tree
@@ -223,37 +222,6 @@ class _ManagedInstallAttempt:
             raise ValueError("successful install attempt cannot carry an operation failure")
         if not self.command and not self.operation_reason:
             raise ValueError("failed install attempt requires an operation reason")
-
-
-@dataclass(frozen=True)
-class _GitHubCheckoutRecord:
-    revision: str
-    pending: str | None = None
-
-    def __post_init__(self) -> None:
-        if not self.revision:
-            raise ValueError("checkout record requires a revision")
-        if self.pending == "":
-            raise ValueError("pending checkout revision cannot be empty")
-
-    def authorizes(self, revision: str) -> bool:
-        return revision == self.revision or self.authorizes_pending(revision)
-
-    def authorizes_pending(self, revision: str) -> bool:
-        return self.pending is not None and revision == self.pending
-
-
-@dataclass(frozen=True)
-class _GitHubCheckoutTakeoverDecision:
-    allowed: bool
-    current_revision: str | None
-    reason: str | None = None
-
-    def __post_init__(self) -> None:
-        if self.allowed and (not self.current_revision or self.reason):
-            raise ValueError("allowed checkout takeover requires a revision and no refusal reason")
-        if not self.allowed and not self.reason:
-            raise ValueError("refused checkout takeover requires a reason")
 
 
 @dataclass(frozen=True)
@@ -2983,7 +2951,6 @@ class ShowRuntimeManager:
         force: bool | None = None,
     ) -> _ManagedInstallAttempt:
         replacement_required = self.force_install if force is None else force
-        checkout_takeover_skipped = False
         node = _resolve_node_command()
         if not node:
             self._install_reason = "runtime_node_missing"
@@ -3006,7 +2973,10 @@ class ShowRuntimeManager:
                 replacement_required=replacement_required,
             )
         if not source_dir.exists():
-            if not self._clone_github_source_checkout(git, source_dir):
+            source_dir.parent.mkdir(parents=True, exist_ok=True)
+            if not self._run_install_command(
+                [*git, "clone", "--depth", "1", "--branch", self.github_ref, self.github_repo, str(source_dir)]
+            ):
                 return self._github_install_attempt(
                     None,
                     replacement_required=replacement_required,
@@ -3021,19 +2991,12 @@ class ShowRuntimeManager:
                     operation_reason=update_failure_reason,
                 )
             fetched = self._git_revision(git, source_dir, "FETCH_HEAD")
-            current_revision = self._git_revision(git, source_dir, "HEAD")
-            if not fetched or not current_revision:
+            if not fetched:
                 update_failure_reason = "runtime_github_source_update_failed"
                 return self._github_install_attempt(
                     existing_command,
                     replacement_required=replacement_required,
                     operation_reason=update_failure_reason,
-                )
-            checkout_record = self._read_github_checkout_record(source_dir)
-            if checkout_record and checkout_record.authorizes_pending(current_revision):
-                self._write_github_checkout_record(
-                    source_dir,
-                    _GitHubCheckoutRecord(current_revision),
                 )
             if (
                 not replacement_required
@@ -3048,59 +3011,13 @@ class ShowRuntimeManager:
                     existing_command,
                     replacement_required=False,
                 )
-            takeover = self._github_checkout_takeover_decision(git, source_dir)
-            if not takeover.allowed:
-                if replacement_required:
-                    return self._github_install_attempt(
-                        existing_command,
-                        replacement_required=True,
-                        operation_reason=takeover.reason,
-                    )
-                checkout_takeover_skipped = True
-            else:
-                update_failure_reason = "runtime_github_source_update_failed"
-                if not fetched or not self._write_github_checkout_record(
-                    source_dir,
-                    _GitHubCheckoutRecord(takeover.current_revision or "", pending=fetched),
-                ):
-                    if replacement_required:
-                        return self._github_install_attempt(
-                            existing_command,
-                            replacement_required=True,
-                            operation_reason=update_failure_reason,
-                        )
-                    return self._github_install_attempt(
-                        existing_command,
-                        replacement_required=False,
-                        operation_reason=update_failure_reason,
-                    )
-                elif not self._run_install_command([*git, "-C", str(source_dir), "checkout", "FETCH_HEAD"]):
-                    self._install_reason = None
-                    if replacement_required:
-                        return self._github_install_attempt(
-                            existing_command,
-                            replacement_required=True,
-                            operation_reason=update_failure_reason,
-                        )
-                    return self._github_install_attempt(
-                        existing_command,
-                        replacement_required=False,
-                        operation_reason=update_failure_reason,
-                    )
-                else:
-                    checked_out = self._git_revision(git, source_dir, "HEAD")
-                    if checked_out != fetched:
-                        return self._github_install_attempt(
-                            existing_command,
-                            replacement_required=replacement_required,
-                            operation_reason=update_failure_reason,
-                        )
-                    # The pending record already authorizes this HEAD. A failed
-                    # normalization leaves a state the next run can heal.
-                    self._write_github_checkout_record(
-                        source_dir,
-                        _GitHubCheckoutRecord(fetched),
-                    )
+            if not self._run_install_command([*git, "-C", str(source_dir), "checkout", "FETCH_HEAD"]):
+                self._install_reason = None
+                return self._github_install_attempt(
+                    existing_command,
+                    replacement_required=replacement_required,
+                    operation_reason="runtime_github_source_update_failed",
+                )
         # From here on the artifact the marker describes is being replaced:
         # ``npm ci`` empties node_modules and the build writes into dist. Drop
         # the marker first so a failure anywhere below leaves "unknown" rather
@@ -3131,9 +3048,7 @@ class ShowRuntimeManager:
                 None,
                 replacement_required=replacement_required,
             )
-        built_revision = self._git_revision(git, source_dir, "HEAD")
-        if not checkout_takeover_skipped:
-            self._write_github_build_marker(source_dir, built_revision)
+        self._write_github_build_marker(source_dir, self._git_revision(git, source_dir, "HEAD"))
         # A forced build starts with no dist tree, so resolving this command proves replacement.
         return self._github_install_attempt(
             command,
@@ -3143,59 +3058,6 @@ class ShowRuntimeManager:
 
     def _github_build_marker_path(self, source_dir: Path) -> Path:
         return source_dir / ".avibe-runtime-build"
-
-    def _github_checkout_marker_path(self, source_dir: Path) -> Path:
-        return source_dir / ".git" / "avibe-checkout-revision.json"
-
-    def _clone_github_source_checkout(self, git: list[str], source_dir: Path) -> bool:
-        try:
-            source_dir.parent.mkdir(parents=True, exist_ok=True)
-            staged_source_dir = Path(
-                tempfile.mkdtemp(
-                    prefix=f".{source_dir.name}.clone-",
-                    dir=source_dir.parent,
-                )
-            )
-        except OSError:
-            logger.warning("Failed to stage the managed GitHub Show Runtime checkout", exc_info=True)
-            self._install_reason = "runtime_github_source_update_failed"
-            return False
-        published = False
-        try:
-            if not self._run_install_command(
-                [
-                    *git,
-                    "clone",
-                    "--depth",
-                    "1",
-                    "--branch",
-                    self.github_ref,
-                    self.github_repo,
-                    str(staged_source_dir),
-                ]
-            ):
-                return False
-            checked_out = self._git_revision(git, staged_source_dir, "HEAD")
-            if not checked_out or not self._write_github_checkout_record(
-                staged_source_dir,
-                _GitHubCheckoutRecord(checked_out),
-            ):
-                self._install_reason = "runtime_github_source_update_failed"
-                return False
-            try:
-                staged_source_dir.rename(source_dir)
-            except OSError:
-                logger.warning("Failed to publish the managed GitHub Show Runtime checkout", exc_info=True)
-                self._install_reason = "runtime_github_source_update_failed"
-                return False
-            published = True
-            return True
-        finally:
-            if not published and staged_source_dir.exists():
-                try:
-                    shutil.rmtree(staged_source_dir)
-                except OSError:
-                    logger.warning("Failed to remove a staged GitHub Show Runtime checkout", exc_info=True)
 
     def _read_github_build_marker(self, source_dir: Path) -> str | None:
         """The commit that produced the runtime build currently on disk.
@@ -3223,49 +3085,8 @@ class ShowRuntimeManager:
         except OSError:
             pass
 
-    def _read_github_checkout_record(self, source_dir: Path) -> _GitHubCheckoutRecord | None:
-        try:
-            payload = json.loads(self._github_checkout_marker_path(source_dir).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return None
-        if not isinstance(payload, dict) or payload.get("schema_version") != 1:
-            return None
-        revision = payload.get("revision")
-        pending = payload.get("pending")
-        if not isinstance(revision, str) or not revision:
-            return None
-        if pending is not None and (not isinstance(pending, str) or not pending):
-            return None
-        return _GitHubCheckoutRecord(revision, pending)
-
-    def _write_github_checkout_record(
-        self,
-        source_dir: Path,
-        record: _GitHubCheckoutRecord,
-    ) -> bool:
-        payload = {
-            "schema_version": 1,
-            "revision": record.revision,
-            "pending": record.pending,
-        }
-        try:
-            write_atomic(
-                self._github_checkout_marker_path(source_dir),
-                json.dumps(payload, sort_keys=True) + "\n",
-            )
-        except OSError:
-            logger.warning("Failed to record the GitHub Show Runtime checkout revision", exc_info=True)
-            return False
-        return True
-
     def _github_source_status(self, source_dir: Path) -> dict[str, Any]:
-        git = _resolve_command("git")
-        checkout = self._read_github_checkout_record(source_dir)
-        return {
-            "managed_revision": checkout.revision if checkout else None,
-            "current_revision": self._git_revision(git, source_dir, "HEAD") if git and source_dir.exists() else None,
-            "built_revision": self._read_github_build_marker(source_dir),
-        }
+        return {"built_revision": self._read_github_build_marker(source_dir)}
 
     def _git_revision(self, git: list[str], source_dir: Path, ref: str) -> str | None:
         try:
@@ -3282,66 +3103,6 @@ class ShowRuntimeManager:
         if result.returncode != 0:
             return None
         return result.stdout.strip() or None
-
-    def _github_checkout_takeover_decision(
-        self,
-        git: list[str],
-        source_dir: Path,
-    ) -> _GitHubCheckoutTakeoverDecision:
-        """Decide whether Avibe may move the existing checkout to the fetched revision."""
-        try:
-            result = subprocess.run(
-                [*git, "-C", str(source_dir), "status", "--porcelain", "--untracked-files=all"],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
-                **isolated_subprocess_kwargs(),
-            )
-        except (OSError, subprocess.SubprocessError):
-            logger.warning("Failed to inspect the GitHub Show Runtime source tree", exc_info=True)
-            return _GitHubCheckoutTakeoverDecision(False, None, "runtime_github_source_update_failed")
-        if result.returncode != 0:
-            return _GitHubCheckoutTakeoverDecision(False, None, "runtime_github_source_update_failed")
-        current_revision = self._git_revision(git, source_dir, "HEAD")
-        if not current_revision:
-            return _GitHubCheckoutTakeoverDecision(False, None, "runtime_github_source_update_failed")
-        dirty_entries = [line for line in result.stdout.splitlines() if line != "?? .avibe-runtime-build"]
-        if dirty_entries:
-            logger.warning("Refusing to move the GitHub Show Runtime checkout because it has local changes")
-            return _GitHubCheckoutTakeoverDecision(False, current_revision, "runtime_github_source_dirty")
-        checkout_record = self._read_github_checkout_record(source_dir)
-        if not checkout_record:
-            built_revision = self._read_github_build_marker(source_dir)
-            if built_revision != current_revision:
-                logger.warning(
-                    "Refusing to move the GitHub Show Runtime checkout because its revision is unverified"
-                )
-                return _GitHubCheckoutTakeoverDecision(
-                    False,
-                    current_revision,
-                    "runtime_github_source_revision_unverified",
-                )
-            checkout_record = _GitHubCheckoutRecord(current_revision)
-            if not self._write_github_checkout_record(source_dir, checkout_record):
-                return _GitHubCheckoutTakeoverDecision(
-                    False,
-                    current_revision,
-                    "runtime_github_source_update_failed",
-                )
-        if not checkout_record.authorizes(current_revision):
-            logger.warning("Refusing to move the GitHub Show Runtime checkout because it has local commits")
-            return _GitHubCheckoutTakeoverDecision(
-                False,
-                current_revision,
-                "runtime_github_source_revision_changed",
-            )
-        if checkout_record.authorizes_pending(current_revision):
-            self._write_github_checkout_record(
-                source_dir,
-                _GitHubCheckoutRecord(current_revision),
-            )
-        return _GitHubCheckoutTakeoverDecision(True, current_revision)
 
     def _github_runtime_command(self, source_dir: Path, node: list[str]) -> list[str] | None:
         cli_path = source_dir / "packages" / "runtime" / "dist" / "cli.js"

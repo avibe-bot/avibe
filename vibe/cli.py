@@ -12490,11 +12490,7 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
             detail = f"{detail}: {download_error['url']}"
     else:
         detail = reason
-    github_source = status.get("github_source") if isinstance(status.get("github_source"), dict) else {}
     github_refusal_messages = {
-        "runtime_github_source_dirty": "runtime.doctor.repairGitHubSourceDirty",
-        "runtime_github_source_revision_changed": "runtime.doctor.repairGitHubSourceRevisionChanged",
-        "runtime_github_source_revision_unverified": "runtime.doctor.repairGitHubSourceRevisionUnverified",
         "runtime_github_source_update_failed": "runtime.doctor.repairGitHubSourceUpdateFailed",
     }
     refusal_message = github_refusal_messages.get(reason)
@@ -12503,7 +12499,6 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
             refusal_message,
             language,
             path=install_dir,
-            revision=github_source.get("managed_revision") or "unknown",
         )
         if refusal_message and install_dir
         else i18n_t("runtime.doctor.repairPrepareFailed", language, detail=detail)

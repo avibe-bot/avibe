@@ -2686,114 +2686,21 @@ def test_repair_show_runtime_reports_failed_replacement_while_old_runtime_remain
 @pytest.mark.parametrize(
     ("language", "expected_cause", "expected_action"),
     [
-        ("en", "source directory has local changes", "Stash them, including untracked files"),
-        ("zh", "\u6e90\u4ee3\u7801\u76ee\u5f55\u5305\u542b\u672c\u5730\u66f4\u6539", "\u5305\u62ec\u672a\u8ddf\u8e2a\u6587\u4ef6"),
-    ],
-)
-def test_repair_show_runtime_names_dirty_github_source_and_remediation(
-    monkeypatch,
-    tmp_path,
-    language,
-    expected_cause,
-    expected_action,
-):
-    source_dir = tmp_path / "github-source"
-    prepared = []
-
-    def prepare(force=False):
-        prepared.append(force)
-        return {
-            "ok": False,
-            "reason": "runtime_github_source_dirty",
-            "provider": "github-source",
-            "platform": "linux-x64",
-            "command": None,
-            "status": {
-                "install": {"state": "installed", "install_dir": str(source_dir)},
-            },
-        }
-
-    manager = SimpleNamespace(
-        status=lambda: {
-            "provider": "github-source",
-            "platform": "linux-x64",
-            "install": {"state": "installed", "install_dir": str(source_dir)},
-            "command": [str(tmp_path / "node"), str(source_dir / "cli.js")],
-        },
-        prepare=prepare,
-    )
-
-    def manager_factory(**kwargs):
-        if not kwargs:
-            return manager
-        return SimpleNamespace(
-            ensure=lambda: asyncio.sleep(
-                0,
-                result=SimpleNamespace(available=False, reason="runtime_start_health_timeout"),
-            ),
-            stop=lambda: None,
-        )
-
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
-    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", manager_factory)
-
-    result = cli._repair_show_runtime()
-
-    assert result["status"] == "failed"
-    assert result["reason"] == "runtime_github_source_dirty"
-    assert result["installed"] is True
-    assert result["install_dir"] == str(source_dir)
-    assert str(source_dir) in result["message"]
-    assert expected_cause in result["message"]
-    assert expected_action in result["message"]
-    assert prepared == [True]
-
-
-@pytest.mark.parametrize(
-    ("reason", "language", "expected_cause", "expected_action"),
-    [
         (
-            "runtime_github_source_revision_changed",
-            "en",
-            "different commit from the revision Avibe recorded",
-            "recorded revision `0123456789abcdef`",
-        ),
-        (
-            "runtime_github_source_revision_changed",
-            "zh",
-            "\u5f53\u524d\u7684\u63d0\u4ea4\u4e0e Avibe \u8bb0\u5f55\u7684\u7248\u672c\u4e0d\u540c",
-            "\u8bb0\u5f55\u7684\u7248\u672c `0123456789abcdef`",
-        ),
-        (
-            "runtime_github_source_revision_unverified",
-            "en",
-            "no verified checkout revision",
-            "remove this unverified source directory",
-        ),
-        (
-            "runtime_github_source_revision_unverified",
-            "zh",
-            "\u6ca1\u6709\u6b64\u6e90\u4ee3\u7801\u76ee\u5f55\u7684\u5df2\u9a8c\u8bc1 checkout \u7248\u672c\u8bb0\u5f55",
-            "\u5220\u9664\u8fd9\u4e2a\u672a\u9a8c\u8bc1\u7684\u6e90\u4ee3\u7801\u76ee\u5f55",
-        ),
-        (
-            "runtime_github_source_update_failed",
             "en",
             "could not complete the managed source update",
             "Check directory permissions and the Avibe log",
         ),
         (
-            "runtime_github_source_update_failed",
             "zh",
             "\u65e0\u6cd5\u5728",
             "\u68c0\u67e5\u76ee\u5f55\u6743\u9650\u548c Avibe \u65e5\u5fd7",
         ),
     ],
 )
-def test_repair_show_runtime_names_github_revision_refusal_and_remediation(
+def test_repair_show_runtime_names_github_update_failure_and_remediation(
     monkeypatch,
     tmp_path,
-    reason,
     language,
     expected_cause,
     expected_action,
@@ -2805,13 +2712,12 @@ def test_repair_show_runtime_names_github_revision_refusal_and_remediation(
         prepared.append(force)
         return {
             "ok": False,
-            "reason": reason,
+            "reason": "runtime_github_source_update_failed",
             "provider": "github-source",
             "platform": "linux-x64",
             "command": None,
             "status": {
                 "install": {"state": "installed", "install_dir": str(source_dir)},
-                "github_source": {"managed_revision": "0123456789abcdef"},
             },
         }
 
@@ -2842,7 +2748,7 @@ def test_repair_show_runtime_names_github_revision_refusal_and_remediation(
     result = cli._repair_show_runtime()
 
     assert result["status"] == "failed"
-    assert result["reason"] == reason
+    assert result["reason"] == "runtime_github_source_update_failed"
     assert result["installed"] is True
     assert result["install_dir"] == str(source_dir)
     assert str(source_dir) in result["message"]
