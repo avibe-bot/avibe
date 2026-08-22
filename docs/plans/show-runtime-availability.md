@@ -571,6 +571,19 @@ run again. A healthy installed command bypasses the install gate entirely, which
 already provides recovery after an out-of-process repair or pointer switch
 without making product state part of the backoff identity.
 
+The provider owns the precondition set. Each selected provider declares its
+source inputs and tools as named precondition entries, with an explicit marker
+for whether Avibe writes the value; the retry identity is a fold over that
+declaration, retaining only entries that are both provider-dependent and not
+written by Avibe. An uninvoked tool therefore cannot enter another provider's
+identity, and a managed output cannot become an input by omission. Command
+fingerprints stat every argv element, not only values that look like paths, so
+an interpreted script changes the identity when its file changes while flags
+remain stable. Malformed user-owned command values remain declared invalid
+preconditions and continue to publish configured evidence. A predicate over a
+set is implemented as a fold over that set, never as a hand-written list of
+members that happened to satisfy it.
+
 **Classification vocabulary is shared; retry ownership is not.** Install and
 startup have independent retry records because they answer different questions.
 A failed install is not evidence about runtime startability. Every manager
@@ -713,13 +726,21 @@ Two censuses are merge evidence for the retained property:
    transport owner. It becomes incomplete if a new header, dataset key, gate
    input, exception route, or direct HTTP client appears without extending the
    census. No request retry record or automatic-poll header may appear in PR 2c.
-2. Enumerate every retry-identity input and apply the write-set predicate above.
-   The executable census fixes the complete set of manager attributes and helper
-   inputs, proves that the manager assigns those attributes only during
-   construction, and pairs two consuming tests: changing managed install output
-   does not change identity, while replacing a user-configured executable does.
-   It becomes incomplete if a helper begins reading a new fact or an Avibe
-   operation begins writing an included path without extending the write-set.
+2. Enumerate every retry-identity input through the selected provider's
+   declaration and fold it with the write-set predicate above. The executable
+   census fixes the provider declaration set, proves that an uninvoked tool is
+   absent and an Avibe-written output is excluded, and pairs consuming tests:
+   changing managed install output does not change identity, replacing a
+   user-configured executable or interpreted script does, and every argv
+   element is stat-fingerprinted. It becomes incomplete if a provider begins
+   reading or invoking a new fact without declaring it, if a declaration loses
+   its write marker, or if the fold is replaced by a literal member list.
+3. Enumerate the provider-install call graph. Every provider implementation is
+   called only by the serialized `_install_managed_runtime_locked` dispatcher,
+   and that dispatcher is called only by `_attempt_managed_install`; public
+   preparation and resolution entry points may call the admission owner but
+   never a provider directly. The census becomes incomplete if a new provider
+   method or entry point appears without extending the call-graph assertion.
 
 The fifth findings-bearing head fired the pre-committed boundary. Its three
 findings all landed inside properties PR #1640 claimed to own: the browser made

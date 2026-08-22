@@ -306,6 +306,13 @@ class _ShowRuntimeRetryPreconditions:
 
 
 @dataclass(frozen=True)
+class _ShowRuntimeRetryPreconditionDeclaration:
+    name: str
+    value: Any
+    written_by_avibe: bool = False
+
+
+@dataclass(frozen=True)
 class ShowRuntimeAvailability:
     policy: ShowRuntimePolicyState = ShowRuntimePolicyState.ALLOWED
     install: ShowRuntimeInstallState = ShowRuntimeInstallState.ABSENT
@@ -1450,59 +1457,193 @@ class ShowRuntimeManager:
     ) -> _ShowRuntimeRetryPreconditions:
         """Snapshot local preconditions once for a retry-owning admission."""
         explicit_command: list[str] | None = None
-        explicit_fingerprint: tuple[Any, ...] | None = None
-        failure_reason: str | None = None
         if self._command_explicit:
             try:
                 explicit_command = _resolve_command(self.command)
             except ValueError:
-                explicit_fingerprint = ("invalid", self.command)
-                failure_reason = _STARTUP_COMMAND_INVALID_REASON
+                declarations = self._retry_common_precondition_declarations(offline=offline)
+                declarations.append(
+                    _ShowRuntimeRetryPreconditionDeclaration(
+                        "explicit_command",
+                        ("invalid", self.command),
+                    )
+                )
+                return _ShowRuntimeRetryPreconditions(
+                    identity=_fold_retry_precondition_identity(declarations),
+                    explicit_command=None,
+                    failure_reason=_STARTUP_COMMAND_INVALID_REASON,
+                )
             else:
-                explicit_fingerprint = _command_fingerprint(explicit_command)
-        node_fingerprint: tuple[Any, ...] | None = None
-        if not self._command_explicit:
-            configured_node = os.environ.get("VIBE_SHOW_RUNTIME_NODE_BIN")
-            try:
-                node_command = _resolve_node_command()
-            except ValueError:
-                node_fingerprint = ("invalid", configured_node)
-                failure_reason = failure_reason or _STARTUP_NODE_COMMAND_INVALID_REASON
-            else:
-                node_fingerprint = _command_fingerprint(node_command)
-        manifest_pin = (
-            _path_fingerprint(self.manifest_path)
-            if self.manifest_path is not None
-            else None if self.manifest_url else _packaged_runtime_manifest_pin()
-        )
-        identity = (
-            self.runtime_source,
-            (
-                self.command,
-                explicit_fingerprint,
-            )
-            if self._command_explicit
-            else None,
-            self.package_spec,
-            str(self.archive_path) if self.archive_path else None,
-            _path_fingerprint(self.archive_path) if self.archive_path else None,
-            self.archive_url,
-            str(self.manifest_path) if self.manifest_path else None,
-            self.manifest_url,
-            manifest_pin,
-            self.github_repo,
-            self.github_ref,
-            self.auto_install,
-            self.offline if offline is None else offline,
-            _env_flag_enabled("VIBE_INSTALL_SKIP_SHOW_RUNTIME", default=False),
-            node_fingerprint,
-            _command_fingerprint(_resolve_command("git")),
-            _command_fingerprint(_resolve_command("npm")),
-        )
+                declarations = self._retry_common_precondition_declarations(offline=offline)
+                declarations.append(
+                    _ShowRuntimeRetryPreconditionDeclaration(
+                        "explicit_command",
+                        (self.command, _command_fingerprint(explicit_command)),
+                    )
+                )
+                return _ShowRuntimeRetryPreconditions(
+                    identity=_fold_retry_precondition_identity(declarations),
+                    explicit_command=explicit_command,
+                )
+
+        declarations, failure_reason = self._retry_provider_precondition_declarations(offline=offline)
         return _ShowRuntimeRetryPreconditions(
-            identity=identity,
+            identity=_fold_retry_precondition_identity(declarations),
             explicit_command=explicit_command,
             failure_reason=failure_reason,
+        )
+
+    def _retry_common_precondition_declarations(
+        self,
+        *,
+        offline: bool | None,
+    ) -> list[_ShowRuntimeRetryPreconditionDeclaration]:
+        return [
+            _ShowRuntimeRetryPreconditionDeclaration("runtime_source", self.runtime_source),
+            _ShowRuntimeRetryPreconditionDeclaration("auto_install", self.auto_install),
+            _ShowRuntimeRetryPreconditionDeclaration(
+                "offline",
+                self.offline if offline is None else offline,
+            ),
+            _ShowRuntimeRetryPreconditionDeclaration(
+                "VIBE_INSTALL_SKIP_SHOW_RUNTIME",
+                _env_flag_enabled("VIBE_INSTALL_SKIP_SHOW_RUNTIME", default=False),
+            ),
+        ]
+
+    def _retry_provider_precondition_declarations(
+        self,
+        *,
+        offline: bool | None,
+    ) -> tuple[list[_ShowRuntimeRetryPreconditionDeclaration], str | None]:
+        declarations = self._retry_common_precondition_declarations(offline=offline)
+        if self.runtime_source == _RUNTIME_SOURCE_MANIFEST:
+            provider_declarations, failure_reason = self._retry_manifest_preconditions()
+        elif self.runtime_source == _RUNTIME_SOURCE_ARCHIVE:
+            provider_declarations, failure_reason = self._retry_archive_preconditions()
+        elif self.runtime_source == _RUNTIME_SOURCE_GITHUB:
+            provider_declarations, failure_reason = self._retry_github_preconditions()
+        elif self.runtime_source == _RUNTIME_SOURCE_NPM:
+            provider_declarations, failure_reason = self._retry_npm_preconditions()
+        else:
+            provider_declarations, failure_reason = [], None
+        declarations.extend(provider_declarations)
+        return declarations, failure_reason
+
+    def _retry_manifest_preconditions(
+        self,
+    ) -> tuple[list[_ShowRuntimeRetryPreconditionDeclaration], str | None]:
+        declarations: list[_ShowRuntimeRetryPreconditionDeclaration] = []
+        if self.manifest_path is not None:
+            declarations.append(
+                _ShowRuntimeRetryPreconditionDeclaration(
+                    "manifest_path",
+                    (str(self.manifest_path), _path_fingerprint(self.manifest_path)),
+                )
+            )
+        elif self.manifest_url:
+            declarations.append(_ShowRuntimeRetryPreconditionDeclaration("manifest_url", self.manifest_url))
+        else:
+            declarations.append(
+                _ShowRuntimeRetryPreconditionDeclaration(
+                    "manifest_pin",
+                    _packaged_runtime_manifest_pin(),
+                )
+            )
+        node, node_declaration, failure_reason = self._retry_tool_precondition(
+            name="node",
+            resolver=_resolve_node_command,
+            invalid_value=os.environ.get("VIBE_SHOW_RUNTIME_NODE_BIN"),
+            invalid_reason=_STARTUP_NODE_COMMAND_INVALID_REASON,
+        )
+        del node
+        declarations.append(node_declaration)
+        return declarations, failure_reason
+
+    def _retry_archive_preconditions(
+        self,
+    ) -> tuple[list[_ShowRuntimeRetryPreconditionDeclaration], str | None]:
+        declarations: list[_ShowRuntimeRetryPreconditionDeclaration] = []
+        if self.archive_path is not None:
+            declarations.append(
+                _ShowRuntimeRetryPreconditionDeclaration(
+                    "archive_path",
+                    (str(self.archive_path), _path_fingerprint(self.archive_path)),
+                )
+            )
+        elif self.archive_url:
+            declarations.append(_ShowRuntimeRetryPreconditionDeclaration("archive_url", self.archive_url))
+        node, node_declaration, failure_reason = self._retry_tool_precondition(
+            name="node",
+            resolver=_resolve_node_command,
+            invalid_value=os.environ.get("VIBE_SHOW_RUNTIME_NODE_BIN"),
+            invalid_reason=_STARTUP_NODE_COMMAND_INVALID_REASON,
+        )
+        del node
+        declarations.append(node_declaration)
+        return declarations, failure_reason
+
+    def _retry_github_preconditions(
+        self,
+    ) -> tuple[list[_ShowRuntimeRetryPreconditionDeclaration], str | None]:
+        declarations = [
+            _ShowRuntimeRetryPreconditionDeclaration("github_repo", self.github_repo),
+            _ShowRuntimeRetryPreconditionDeclaration("github_ref", self.github_ref),
+        ]
+        failure_reason: str | None = None
+        for name, resolver, invalid_value, invalid_reason in (
+            (
+                "node",
+                _resolve_node_command,
+                os.environ.get("VIBE_SHOW_RUNTIME_NODE_BIN"),
+                _STARTUP_NODE_COMMAND_INVALID_REASON,
+            ),
+            ("git", lambda: _resolve_command("git"), None, None),
+            ("npm", lambda: _resolve_command("npm"), None, None),
+        ):
+            _command, declaration, tool_failure = self._retry_tool_precondition(
+                name=name,
+                resolver=resolver,
+                invalid_value=invalid_value,
+                invalid_reason=invalid_reason,
+            )
+            declarations.append(declaration)
+            failure_reason = failure_reason or tool_failure
+        return declarations, failure_reason
+
+    def _retry_npm_preconditions(
+        self,
+    ) -> tuple[list[_ShowRuntimeRetryPreconditionDeclaration], str | None]:
+        declarations = [_ShowRuntimeRetryPreconditionDeclaration("package_spec", self.package_spec)]
+        _command, npm_declaration, failure_reason = self._retry_tool_precondition(
+            name="npm",
+            resolver=lambda: _resolve_command("npm"),
+            invalid_value=None,
+            invalid_reason=None,
+        )
+        declarations.append(npm_declaration)
+        return declarations, failure_reason
+
+    def _retry_tool_precondition(
+        self,
+        *,
+        name: str,
+        resolver: Any,
+        invalid_value: str | None,
+        invalid_reason: str | None,
+    ) -> tuple[list[str] | None, _ShowRuntimeRetryPreconditionDeclaration, str | None]:
+        try:
+            command = resolver()
+        except ValueError:
+            return (
+                None,
+                _ShowRuntimeRetryPreconditionDeclaration(name, ("invalid", invalid_value)),
+                invalid_reason,
+            )
+        return (
+            command,
+            _ShowRuntimeRetryPreconditionDeclaration(name, _command_fingerprint(command)),
+            None,
         )
 
     def _active_retry(
@@ -4117,7 +4258,17 @@ def _path_fingerprint(path: Path | None) -> tuple[Any, ...] | None:
 def _command_fingerprint(command: list[str] | None) -> tuple[Any, ...] | None:
     if not command:
         return None
-    return (tuple(command), _path_fingerprint(Path(command[0])))
+    return tuple((argument, _path_fingerprint(Path(argument))) for argument in command)
+
+
+def _fold_retry_precondition_identity(
+    declarations: Iterable[_ShowRuntimeRetryPreconditionDeclaration],
+) -> tuple[Any, ...]:
+    identity: list[tuple[str, Any]] = []
+    for declaration in declarations:
+        if not declaration.written_by_avibe:
+            identity.append((declaration.name, declaration.value))
+    return tuple(identity)
 
 
 def _packaged_runtime_manifest_pin() -> str | None:

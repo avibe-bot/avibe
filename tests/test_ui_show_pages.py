@@ -25,6 +25,7 @@ from unittest.mock import patch
 
 import httpx
 import pytest
+import core.show_runtime as show_runtime
 from starlette.websockets import WebSocketDisconnect
 
 from config import paths
@@ -7435,80 +7436,128 @@ def test_runtime_http_transport_census_closes_every_direct_client_path():
 
 
 def test_retry_identity_census_contains_only_operation_preconditions():
-    identity_tree = ast.parse(
+    preconditions_tree = ast.parse(
         textwrap.dedent(inspect.getsource(ShowRuntimeManager._retry_preconditions))
     )
-    identity_inputs = {
-        node.attr
-        for node in ast.walk(identity_tree)
-        if isinstance(node, ast.Attribute)
-        and isinstance(node.value, ast.Name)
-        and node.value.id == "self"
+    calls = {
+        node.func.attr
+        for node in ast.walk(preconditions_tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "self"
     }
-    assert identity_inputs == {
-        "_command_explicit",
-        "archive_path",
-        "archive_url",
-        "auto_install",
-        "command",
-        "github_ref",
-        "github_repo",
-        "manifest_path",
-        "manifest_url",
-        "offline",
-        "package_spec",
-        "runtime_source",
-    }
-    assert "runtime_dir" not in identity_inputs
-    helper_inputs = {
+    assert "_retry_provider_precondition_declarations" in calls
+    assert "_fold_retry_precondition_identity" in {
         node.func.id
-        for node in ast.walk(identity_tree)
+        for node in ast.walk(preconditions_tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
-    assert helper_inputs == {
-        "_ShowRuntimeRetryPreconditions",
-        "_command_fingerprint",
-        "_env_flag_enabled",
-        "_packaged_runtime_manifest_pin",
-        "_path_fingerprint",
-        "_resolve_command",
-        "_resolve_node_command",
-        "str",
-    }
+    assert not any(
+        isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "identity" for target in node.targets)
+        for node in ast.walk(preconditions_tree)
+    )
 
-    manager_tree = ast.parse(textwrap.dedent(inspect.getsource(ShowRuntimeManager)))
-    writers = {name: set() for name in identity_inputs}
-    for function in (
-        node
-        for node in manager_tree.body[0].body
+    fold_tree = ast.parse(
+        textwrap.dedent(inspect.getsource(show_runtime._fold_retry_precondition_identity))
+    )
+    assert any(isinstance(node, ast.For) for node in ast.walk(fold_tree))
+
+
+@pytest.mark.parametrize(
+    ("runtime_source", "expected", "absent"),
+    (
+        ("manifest", {"manifest_pin", "node"}, {"git", "npm", "package_spec"}),
+        ("archive", {"node"}, {"git", "npm", "package_spec"}),
+        ("github", {"github_repo", "github_ref", "node", "git", "npm"}, {"package_spec"}),
+        ("npm", {"package_spec", "npm"}, {"node", "git"}),
+    ),
+)
+def test_retry_identity_folds_only_selected_provider_preconditions(
+    monkeypatch,
+    tmp_path,
+    runtime_source,
+    expected,
+    absent,
+):
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        runtime_source=runtime_source,
+    )
+    monkeypatch.setattr("core.show_runtime._resolve_node_command", lambda: ["/bin/node"])
+    monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: [f"/bin/{command}"])
+    names = {name for name, _value in manager._retry_preconditions().identity}
+    assert expected <= names
+    assert names.isdisjoint(absent)
+
+
+def test_retry_identity_fingerprints_every_explicit_command_argument(tmp_path):
+    script = tmp_path / "cli.js"
+    script.write_text("first", encoding="utf-8")
+    script.chmod(0o755)
+    manager = ShowRuntimeManager(
+        command=f"node {script}",
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+    before = manager._retry_preconditions().identity
+    replacement = tmp_path / "replacement-cli.js"
+    replacement.write_text("second", encoding="utf-8")
+    replacement.chmod(0o755)
+    replacement.replace(script)
+
+    assert manager._retry_preconditions().identity != before
+
+
+def test_provider_install_entrypoints_converge_on_single_admission_owner():
+    manager_tree = ast.parse(textwrap.dedent(inspect.getsource(ShowRuntimeManager))).body[0]
+    functions = {
+        node.name: node
+        for node in manager_tree.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    ):
-        for assignment in (
-            node
+    }
+    provider_methods = {
+        "_install_manifest_runtime_locked",
+        "_install_archive_runtime",
+        "_install_github_runtime",
+        "_install_npm_runtime",
+    }
+    direct_provider_callers = {
+        function.name
+        for function in functions.values()
+        if any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in provider_methods
             for node in ast.walk(function)
-            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign))
-        ):
-            targets = assignment.targets if isinstance(assignment, ast.Assign) else [assignment.target]
-            for target in targets:
-                if (
-                    isinstance(target, ast.Attribute)
-                    and isinstance(target.value, ast.Name)
-                    and target.value.id == "self"
-                    and target.attr in writers
-                ):
-                    writers[target.attr].add(function.name)
-        for call in (node for node in ast.walk(function) if isinstance(node, ast.Call)):
-            if (
-                isinstance(call.func, ast.Name)
-                and call.func.id == "setattr"
-                and len(call.args) >= 2
-                and isinstance(call.args[0], ast.Name)
-                and call.args[0].id == "self"
-                and isinstance(call.args[1], ast.Constant)
-                and call.args[1].value in writers
-            ):
-                writers[call.args[1].value].add(function.name)
-    assert all(functions == {"__init__"} for functions in writers.values())
+        )
+    }
+    assert direct_provider_callers == {"_install_managed_runtime_locked"}
+
+    owner_callers = {
+        function.name
+        for function in functions.values()
+        if any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_install_managed_runtime_locked"
+            for node in ast.walk(function)
+        )
+    }
+    assert owner_callers == {"_attempt_managed_install"}
+
+    admission_callers = {
+        function.name
+        for function in functions.values()
+        if any(
+            isinstance(node, ast.Attribute)
+            and node.attr == "_attempt_managed_install"
+            for node in ast.walk(function)
+        )
+    }
+    assert admission_callers == {"_resolve_managed_availability", "prepare"}
 
 
 def test_show_runtime_manager_retries_transient_install_after_deadline(monkeypatch, tmp_path):
@@ -7636,7 +7685,7 @@ def test_show_runtime_manager_configured_failure_waits_for_evidence_or_explicit_
     assert attempts == ["attempt", "attempt"]
 
 
-def test_show_runtime_manager_retries_after_node_becomes_available(monkeypatch, tmp_path):
+def test_show_runtime_manager_retries_after_npm_becomes_available(monkeypatch, tmp_path):
     clock = [100.0]
     attempts = []
     command = [str(tmp_path / "runtime-cli")]
@@ -7646,22 +7695,25 @@ def test_show_runtime_manager_retries_after_node_becomes_available(monkeypatch, 
         runtime_source="npm",
     )
 
-    node = [None]
+    npm = [None]
 
     def install(*, force=None):
         attempts.append(clock[0])
         if len(attempts) == 1:
-            manager._install_reason = "runtime_node_missing"
+            manager._install_reason = "runtime_npm_missing"
             return None
         return command
 
     monkeypatch.setattr("core.show_runtime.time.monotonic", lambda: clock[0])
     monkeypatch.setattr("core.show_runtime.random.random", lambda: 1.0)
     monkeypatch.setattr(manager, "_install_npm_runtime", install)
-    monkeypatch.setattr("core.show_runtime._resolve_node_command", lambda: node[0])
+    monkeypatch.setattr(
+        "core.show_runtime._resolve_command",
+        lambda name: npm[0] if name == "npm" else [name],
+    )
 
     assert asyncio.run(manager._resolve_managed_command()) is None
-    node[0] = ["/new/node"]
+    npm[0] = ["/new/npm"]
     clock[0] = 100.1
     assert asyncio.run(manager._resolve_managed_command()) == command
     assert attempts == [100.0, 100.1]
