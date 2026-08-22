@@ -15,6 +15,7 @@ from core.show_runtime import (
     ShowRuntimeProtocolEnvelope,
     ShowRuntimeRequestTimeoutError,
     ShowRuntimeResult,
+    ShowRuntimeUnavailableError,
 )
 
 
@@ -108,7 +109,7 @@ def test_show_live_015_transient_probe_keeps_shared_request_live_and_retries(
         ]
     )
 
-    async def ensure():
+    async def ensure(*, automatic=True):
         return ShowRuntimeResult(True, manager._base_url)
 
     async def probe(base_url):
@@ -171,7 +172,7 @@ def test_show_runtime_request_accepts_per_call_timeout_without_changing_connect_
     captured_deadlines = []
     original_wait_for = asyncio.wait_for
 
-    async def ensure():
+    async def ensure(*, automatic=True):
         return ShowRuntimeResult(True, manager._base_url)
 
     async def negotiate(_base_url):
@@ -212,7 +213,10 @@ def test_show_runtime_request_accepts_per_call_timeout_without_changing_connect_
     assert captured_deadlines == ([] if timeout_seconds is None else [timeout_seconds])
 
 
-def test_show_runtime_default_read_timeout_is_not_converted(monkeypatch, tmp_path):
+def test_show_runtime_default_read_timeout_is_owner_published_not_request_deadline(
+    monkeypatch,
+    tmp_path,
+):
     manager = _manager(tmp_path)
     manager._base_url = "http://127.0.0.1:4173"
     read_timeout = httpx.ReadTimeout(
@@ -220,7 +224,7 @@ def test_show_runtime_default_read_timeout_is_not_converted(monkeypatch, tmp_pat
         request=httpx.Request("GET", manager._base_url),
     )
 
-    async def ensure():
+    async def ensure(*, automatic=True):
         return ShowRuntimeResult(True, manager._base_url)
 
     async def negotiate(_base_url):
@@ -245,10 +249,13 @@ def test_show_runtime_default_read_timeout_is_not_converted(monkeypatch, tmp_pat
     monkeypatch.setattr(show_runtime.asyncio, "wait_for", unexpected_wait_for)
     envelope = ShowRuntimeProtocolEnvelope(ShowRuntimeContext.PRIVATE)
 
-    with pytest.raises(httpx.ReadTimeout) as raised:
+    with pytest.raises(ShowRuntimeUnavailableError) as raised:
         asyncio.run(manager.request("GET", "/sessions/ses/app/src/main.tsx", envelope=envelope))
 
-    assert raised.value is read_timeout
+    assert raised.value.reason == "runtime_proxy_failed"
+    assert raised.value.failure_class.value == "unclassified"
+    assert raised.value.__cause__ is read_timeout
+    assert manager._base_url is None
 
 
 def test_show_runtime_explicit_read_timeout_is_converted(monkeypatch, tmp_path):
@@ -259,7 +266,7 @@ def test_show_runtime_explicit_read_timeout_is_converted(monkeypatch, tmp_path):
         request=httpx.Request("GET", manager._base_url),
     )
 
-    async def ensure():
+    async def ensure(*, automatic=True):
         return ShowRuntimeResult(True, manager._base_url)
 
     async def negotiate(_base_url):
@@ -291,13 +298,14 @@ def test_show_runtime_explicit_read_timeout_is_converted(monkeypatch, tmp_path):
         )
 
     assert raised.value.__cause__ is read_timeout
+    assert manager._base_url is None
 
 
 def test_show_runtime_request_enforces_timeout_as_total_deadline(monkeypatch, tmp_path):
     manager = _manager(tmp_path)
     manager._base_url = "http://127.0.0.1:4173"
 
-    async def ensure():
+    async def ensure(*, automatic=True):
         return ShowRuntimeResult(True, manager._base_url)
 
     async def negotiate(_base_url):
@@ -327,6 +335,7 @@ def test_show_runtime_request_enforces_timeout_as_total_deadline(monkeypatch, tm
                 timeout_seconds=0.01,
             )
         )
+    assert manager._base_url is None
 
 
 def test_show_live_014_capability_cache_resets_with_process_base_and_manager_lifetime(
@@ -347,7 +356,7 @@ def test_show_live_014_capability_cache_resets_with_process_base_and_manager_lif
         ]
     )
 
-    async def ensure():
+    async def ensure(*, automatic=True):
         return ShowRuntimeResult(True, manager._base_url)
 
     async def probe(base_url):
