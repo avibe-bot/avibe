@@ -57,7 +57,6 @@ from vibe.model_hub_runtime.state import (
 )
 from vibe.model_hub_runtime.supervisor import (
     MODEL_HUB_STARTUP_TIMEOUT_SECONDS,
-    _BoundedStartupOutput,
     EngineSupervisor,
     EngineUnavailableError,
 )
@@ -1336,14 +1335,14 @@ def _write_mock_engine(
     path: Path,
     *,
     startup_delay: float = 0.0,
-    startup_output: str = "",
+    startup_output: bytes = b"",
+    startup_output_repeat: int = 1,
     echo_runtime_secrets: bool = False,
-    split_runtime_secret_after_ready: bool = False,
+    exit_before_ready: int | None = None,
 ) -> None:
     script = f"""#!{sys.executable}
 import json
 import sys
-import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -1354,19 +1353,30 @@ with open(config_path, encoding='utf-8') as handle:
     config = yaml.safe_load(handle)
 gateway = config['api-keys'][0]
 management = config['remote-management']['secret-key']
-startup_output = {startup_output!r}
+startup_output = {startup_output!r} * {startup_output_repeat!r}
 if startup_output:
-    print(startup_output, file=sys.stderr, flush=True)
+    sys.stdout.buffer.write(startup_output)
+    sys.stdout.buffer.flush()
+    sys.stderr.buffer.write(startup_output)
+    sys.stderr.buffer.flush()
 if {echo_runtime_secrets!r}:
-    print(f'management-key={{management}} gateway-token={{gateway}}', file=sys.stderr, flush=True)
-split_runtime_secret_after_ready = {split_runtime_secret_after_ready!r}
-if split_runtime_secret_after_ready:
-    secret_midpoint = len(management) // 2
-    print(management[:secret_midpoint], end='', file=sys.stderr, flush=True)
-    time.sleep(0.1)
+    sys.stderr.buffer.write(
+        f'management-key={{management}} gateway-token={{gateway}}'.encode()
+    )
+    sys.stderr.buffer.flush()
+with open('startup-output-complete', 'w', encoding='utf-8') as handle:
+    handle.write(str(len(startup_output) * 2))
+exit_before_ready = {exit_before_ready!r}
+if exit_before_ready is not None:
+    raise SystemExit(exit_before_ready)
 time.sleep({startup_delay!r})
 health_surfaces = set()
-health_complete = threading.Event()
+
+def mark_health_surface(surface):
+    health_surfaces.add(surface)
+    if len(health_surfaces) == 2:
+        with open('health-surfaces-complete', 'w', encoding='utf-8') as handle:
+            handle.write(','.join(sorted(health_surfaces)))
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
@@ -1382,15 +1392,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == '/v1/models' and self.headers.get('Authorization') == f'Bearer {{gateway}}':
-            health_surfaces.add('gateway')
-            if len(health_surfaces) == 2:
-                health_complete.set()
+            mark_health_surface('gateway')
             self._json(200, {{'object': 'list', 'data': []}})
             return
         if self.path == '/v0/management/config' and self.headers.get('X-Management-Key') == management:
-            health_surfaces.add('management')
-            if len(health_surfaces) == 2:
-                health_complete.set()
+            mark_health_surface('management')
             self._json(200, {{'host': config['host']}})
             return
         if self.path.startswith('/v0/management/auth-files/models'):
@@ -1471,17 +1477,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json(200, {{'id': 'response-1', 'model': payload['model']}})
 
-server = HTTPServer((config['host'], config['port']), Handler)
-if split_runtime_secret_after_ready:
-    def finish_secret_output():
-        health_complete.wait()
-        time.sleep(0.75)
-        print(management[secret_midpoint:], file=sys.stderr, flush=True)
-        with open('split-secret-output-complete', 'w', encoding='utf-8') as handle:
-            handle.write('complete')
-
-    threading.Thread(target=finish_secret_output, daemon=True).start()
-server.serve_forever()
+HTTPServer((config['host'], config['port']), Handler).serve_forever()
 """
     path.write_text(script, encoding="utf-8")
     path.chmod(0o755)
@@ -1529,9 +1525,10 @@ def _fixture_supervisor(
     process_factory=subprocess.Popen,
     startup_timeout: float = 5,
     startup_delay: float = 0.0,
-    startup_output: str = "",
+    startup_output: bytes = b"",
+    startup_output_repeat: int = 1,
     echo_runtime_secrets: bool = False,
-    split_runtime_secret_after_ready: bool = False,
+    exit_before_ready: int | None = None,
 ) -> tuple[EngineSupervisor, EngineStateStore]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     binary = tmp_path / "mock-engine"
@@ -1539,8 +1536,9 @@ def _fixture_supervisor(
         binary,
         startup_delay=startup_delay,
         startup_output=startup_output,
+        startup_output_repeat=startup_output_repeat,
         echo_runtime_secrets=echo_runtime_secrets,
-        split_runtime_secret_after_ready=split_runtime_secret_after_ready,
+        exit_before_ready=exit_before_ready,
     )
     installer = _FixtureInstaller(binary, tmp_path / "versions" / "install-1")
     store = EngineStateStore(tmp_path / "state")
@@ -1647,9 +1645,11 @@ def test_supervisor_starts_checks_health_and_stops_mock_engine(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured_env: dict[str, str] = {}
+    captured_stdio: dict[str, int] = {}
 
     def spawn(*args, **kwargs):
         captured_env.update(kwargs["env"])
+        captured_stdio.update(stdout=kwargs["stdout"], stderr=kwargs["stderr"])
         return subprocess.Popen(*args, **kwargs)
 
     monkeypatch.setenv("MANAGEMENT_PASSWORD", "untrusted-management-secret")
@@ -1668,6 +1668,10 @@ def test_supervisor_starts_checks_health_and_stops_mock_engine(
     assert "GITHUB_TOKEN" not in captured_env
     assert "HTTP_PROXY" not in captured_env
     assert captured_env == engine_subprocess_environment()
+    assert captured_stdio == {
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
     assert supervisor.status()["status"]["health"] == "ok"
     config_path = store.root / "instances" / "install-1" / "config.yaml"
     first_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -1682,6 +1686,58 @@ def test_supervisor_starts_checks_health_and_stops_mock_engine(
     supervisor.stop()
 
 
+def _assert_supervisor_owned_startup_log(
+    message: str,
+    *,
+    outcome: str,
+    exit_code: int | None = None,
+    readiness_budget: float | None = None,
+) -> None:
+    prefix = "Model Hub engine startup "
+    assert message.startswith(prefix)
+    tokens = message.removeprefix(prefix).split()
+    assert all("=" in token for token in tokens)
+    fields = dict(token.split("=", 1) for token in tokens)
+    assert len(fields) == len(tokens)
+
+    expected_fields = {
+        "outcome",
+        "managed_version",
+        "elapsed_seconds",
+        "child_output_retained",
+    }
+    if readiness_budget is not None:
+        expected_fields.update({"exit_code", "readiness_budget_seconds"})
+    assert set(fields) == expected_fields
+    assert fields["outcome"] == outcome
+    assert fields["managed_version"] == "v7.2.95"
+    assert float(fields["elapsed_seconds"]) >= 0
+    assert fields["child_output_retained"] == "false"
+    if readiness_budget is not None:
+        assert fields["exit_code"] == str(exit_code)
+        assert float(fields["readiness_budget_seconds"]) == readiness_budget
+    assert len(message.encode("utf-8")) < 512
+
+
+def _assert_child_payload_absent(log_text: str, payload: bytes) -> None:
+    printable_run = bytearray()
+    candidates: list[bytes] = []
+    for byte in payload + b"\x00":
+        if 32 <= byte <= 126:
+            printable_run.append(byte)
+            continue
+        if len(printable_run) >= 8:
+            if len(printable_run) <= 128:
+                candidates.append(bytes(printable_run))
+            else:
+                candidates.extend((bytes(printable_run[:64]), bytes(printable_run[-64:])))
+        printable_run.clear()
+
+    assert candidates
+    assert all(candidate.decode("ascii") not in log_text for candidate in candidates)
+    assert "\ufffd" not in log_text
+
+
 def test_mh_runtime_005_first_cold_start_waits_for_readiness_within_bounded_budget(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
@@ -1690,21 +1746,28 @@ def test_mh_runtime_005_first_cold_start_waits_for_readiness_within_bounded_budg
 
     assert MODEL_HUB_STARTUP_TIMEOUT_SECONDS == 30.0
     caplog.set_level(logging.INFO, logger="vibe.model_hub_runtime.supervisor")
-    safe_diagnostic = "cold-start phase=loading-runtime " + "safe-context " * 12
+    child_payload = b"\n".join(
+        (
+            b"cold-start-safe-diagnostic-marker",
+            b'id_token="opaque-id-token-value"',
+            b'private_key="opaque-private-key-value"',
+            b'future_unknown_auth_material="opaque-unknown-value"',
+            b"binary-boundary-before-\xff\xfe-binary-boundary-after",
+        )
+    )
     supervisor, store = _fixture_supervisor(
         tmp_path,
         startup_timeout=3.0,
         startup_delay=0.25,
-        startup_output=safe_diagnostic,
-        split_runtime_secret_after_ready=True,
+        startup_output=child_payload,
+        echo_runtime_secrets=True,
     )
 
     started_at = time.monotonic()
     connection = supervisor.ensure_running()
     elapsed = time.monotonic() - started_at
     runtime_secrets = store.prepare_instance("install-1", rotate=False)[1]
-    secret_midpoint = len(runtime_secrets.management_key) // 2
-    split_output_marker = store.root / "instances" / "install-1" / "split-secret-output-complete"
+    instance_dir = store.root / "instances" / "install-1"
     ready_log = next(
         record.getMessage()
         for record in caplog.records
@@ -1713,136 +1776,129 @@ def test_mh_runtime_005_first_cold_start_waits_for_readiness_within_bounded_budg
 
     assert connection.base_url.startswith("http://127.0.0.1:")
     assert 0.2 <= elapsed < 3.0
-    assert "cold-start phase=loading-runtime" in ready_log
-    assert runtime_secrets.management_key[:secret_midpoint] not in ready_log
-    assert runtime_secrets.management_key[secret_midpoint:] not in ready_log
-    assert not split_output_marker.exists()
-    marker_deadline = time.monotonic() + 2.0
-    while not split_output_marker.exists() and time.monotonic() < marker_deadline:
-        time.sleep(0.01)
-    assert split_output_marker.read_text(encoding="utf-8") == "complete"
+    _assert_supervisor_owned_startup_log(ready_log, outcome="ready")
+    _assert_child_payload_absent(caplog.text, child_payload)
+    for secret in (runtime_secrets.management_key, runtime_secrets.gateway_token):
+        midpoint = len(secret) // 2
+        assert secret[:midpoint] not in caplog.text
+        assert secret[midpoint:] not in caplog.text
+    assert (instance_dir / "startup-output-complete").read_text(encoding="utf-8") == str(
+        len(child_payload) * 2
+    )
+    assert (instance_dir / "health-surfaces-complete").read_text(encoding="utf-8") == (
+        "gateway,management"
+    )
     supervisor.stop()
 
 
-def test_terminal_snapshot_without_observed_eof_discards_unproven_secret_prefix() -> None:
-    """A stopped or joined reader cannot authorize a final flush without pipe EOF."""
-
-    exact_secret = "arbitrary-property-secret-with-two-distinct-halves-0123456789"
-    prefix = exact_secret[: len(exact_secret) // 2].encode()
-    reader_blocked = threading.Event()
-    release_reader = threading.Event()
-
-    class BlockingStream:
-        reads = 0
-
-        def read(self, _size: int) -> bytes:
-            self.reads += 1
-            if self.reads == 1:
-                return prefix
-            reader_blocked.set()
-            release_reader.wait(timeout=2)
-            return b""
-
-    output = _BoundedStartupOutput(
-        BlockingStream(),
-        exact_values=(exact_secret,),
-    )
-    try:
-        assert reader_blocked.wait(timeout=1)
-        output.join(timeout=0.01)
-        tail, _truncated, _partial_line = output.snapshot_terminal()
-    finally:
-        release_reader.set()
-        output.join(timeout=1)
-
-    assert prefix not in tail
-    assert tail == b""
-
-
-def test_mh_runtime_006_timeout_stops_engine_with_bounded_redacted_diagnostics(
+def test_supervisor_process_exit_discards_all_child_output(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """MH-RUNTIME-006: readiness timeout is terminal, bounded, and safely diagnosable."""
-
+    child_payload = b"\n".join(
+        (
+            b"process-exit-safe-diagnostic-marker",
+            b'id_token="process-exit-oauth-secret"',
+            b'private_key="process-exit-private-key"',
+            b'unknown_field="process-exit-opaque-value"',
+            b"process-exit-binary-before-\xff-process-exit-binary-after",
+        )
+    )
     caplog.set_level(logging.WARNING, logger="vibe.model_hub_runtime.supervisor")
-    boundary_secret = "boundary-secret-" + "z" * 9_000
-    visible_secret = "visible-upstream-test-secret"
-    json_secret = "unprefixed-json-secret"
     supervisor, store = _fixture_supervisor(
         tmp_path,
         startup_timeout=2.0,
-        startup_delay=60.0,
-        startup_output=(
-            f"raw-value={boundary_secret}\n"
-            + "discarded-prefix "
-            + "x" * 12_000
-            + "\n"
-            + f"Authorization: Bearer {visible_secret} api-key={visible_secret}"
-            + f' raw-value={visible_secret} {{"token":"{json_secret}"}} tail-marker'
-        ),
+        startup_output=child_payload,
         echo_runtime_secrets=True,
+        exit_before_ready=23,
     )
-    credential_ref = store.store_api_key(
-        boundary_secret,
-        vendor="custom",
-        protocol="openai_chat",
-        base_url="https://timeout.example.test/v1",
+
+    with pytest.raises(EngineUnavailableError, match="models.engine.health_failed") as exc_info:
+        supervisor.ensure_running()
+
+    runtime_secrets = store.prepare_instance("install-1", rotate=False)[1]
+    instance_dir = store.root / "instances" / "install-1"
+    warning = next(
+        record.getMessage()
+        for record in caplog.records
+        if "startup outcome=process_exit" in record.getMessage()
     )
-    visible_credential_ref = store.store_api_key(
-        visible_secret,
-        vendor="custom",
-        protocol="openai_chat",
-        base_url="https://timeout.example.test/v1",
+    assert exc_info.value.error_key == "models.engine.health_failed"
+    assert supervisor.status()["status"]["health"] == "down"
+    _assert_supervisor_owned_startup_log(
+        warning,
+        outcome="process_exit",
+        exit_code=23,
+        readiness_budget=2.0,
     )
-    store.replace_sources(
-        [
-            SourceRecord(
-                source_id="src_timeout01",
-                vendor="custom",
-                protocol="openai_chat",
-                base_url="https://timeout.example.test/v1",
-                credential_ref=credential_ref,
-                allowed_origins=("codex",),
-                model_ids=("model-a",),
-                prefix="timeout",
-            ),
-            SourceRecord(
-                source_id="src_timeout02",
-                vendor="custom",
-                protocol="openai_chat",
-                base_url="https://timeout.example.test/v1",
-                credential_ref=visible_credential_ref,
-                allowed_origins=("codex",),
-                model_ids=("model-a",),
-                prefix="timeout2",
-            ),
-        ]
+    _assert_child_payload_absent(caplog.text, child_payload)
+    for secret in (runtime_secrets.management_key, runtime_secrets.gateway_token):
+        midpoint = len(secret) // 2
+        assert secret[:midpoint] not in caplog.text
+        assert secret[midpoint:] not in caplog.text
+    assert (instance_dir / "startup-output-complete").read_text(encoding="utf-8") == str(
+        len(child_payload) * 2
+    )
+    assert not (instance_dir / "health-surfaces-complete").exists()
+
+
+def test_mh_runtime_006_timeout_stops_engine_with_bounded_structured_diagnostics(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """MH-RUNTIME-006: readiness timeout is terminal with bounded diagnostics."""
+
+    caplog.set_level(logging.WARNING, logger="vibe.model_hub_runtime.supervisor")
+    child_payload = b"\n".join(
+        (
+            b"timeout-safe-diagnostic-marker",
+            b'id_token="timeout-oauth-secret"',
+            b'private_key="timeout-private-key"',
+            b'future_unknown_field="timeout-opaque-value"',
+            b"oversized-child-output-" + b"x" * 4_096,
+            b"timeout-binary-before-\xff\xfe-timeout-binary-after",
+        )
+    )
+    output_repeat = 256
+    supervisor, store = _fixture_supervisor(
+        tmp_path,
+        startup_timeout=1.0,
+        startup_delay=60.0,
+        startup_output=child_payload,
+        startup_output_repeat=output_repeat,
+        echo_runtime_secrets=True,
     )
 
     started_at = time.monotonic()
-    with pytest.raises(EngineUnavailableError, match="models.engine.health_failed"):
+    with pytest.raises(EngineUnavailableError, match="models.engine.health_failed") as exc_info:
         supervisor.ensure_running()
     elapsed = time.monotonic() - started_at
     runtime_secrets = store.prepare_instance("install-1", rotate=False)[1]
+    instance_dir = store.root / "instances" / "install-1"
     warning = next(
         record.getMessage()
         for record in caplog.records
         if "startup outcome=timeout" in record.getMessage()
     )
 
-    assert elapsed < 3.5
+    assert exc_info.value.error_key == "models.engine.health_failed"
+    assert elapsed < 2.5
     assert supervisor.status()["status"]["health"] == "down"
-    assert "startup_output_truncated=true" in warning
-    assert "tail-marker" in warning
-    assert "[REDACTED]" in warning
-    assert "z" * 64 not in warning
-    assert visible_secret not in warning
-    assert json_secret not in warning
-    assert runtime_secrets.management_key not in warning
-    assert runtime_secrets.gateway_token not in warning
-    assert "discarded-prefix" not in warning
-    assert len(warning.encode("utf-8")) < 5 * 1024
+    _assert_supervisor_owned_startup_log(
+        warning,
+        outcome="timeout",
+        readiness_budget=1.0,
+    )
+    _assert_child_payload_absent(caplog.text, child_payload)
+    for secret in (runtime_secrets.management_key, runtime_secrets.gateway_token):
+        midpoint = len(secret) // 2
+        assert secret[:midpoint] not in caplog.text
+        assert secret[midpoint:] not in caplog.text
+    observed_output_bytes = int(
+        (instance_dir / "startup-output-complete").read_text(encoding="utf-8")
+    )
+    assert observed_output_bytes == len(child_payload) * output_repeat * 2
+    assert observed_output_bytes > 512 * 1024
 
 
 def test_mh_runtime_001_service_restart_reports_installed_engine_as_not_started(

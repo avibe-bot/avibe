@@ -1565,12 +1565,13 @@ both health surfaces in 7.4 seconds. It adds bounded cold-start margin without
 claiming an unobserved internal engine phase or introducing a retry loop. If
 readiness is not established, Avibe terminates the child and preserves the
 existing runtime failure contract.
-During that window Avibe continuously drains combined child output to prevent a
-full pipe from blocking startup. It exact-redacts known runtime and upstream
-secrets before bounded tail retention, discards any partial leading line created
-at the remaining pattern-redaction boundary, and emits only a compact, bounded,
-redacted diagnostic to the service log. Raw child output is never persisted by
-the supervisor.
+CLIProxyAPI stdout and stderr are directed to the operating system's null sink
+when the process is created. Child bytes therefore never enter Avibe's Python
+memory or service logs and cannot create pipe backpressure. Startup diagnostics
+contain only bounded supervisor-owned structured fields: outcome, managed
+version, exit code when applicable, elapsed time, readiness budget, and the
+existing error contract. Avibe does not retain, inspect, redact, or publish child
+output.
 
 **v3 routing requires no new engine policy.** Failover is ours, not the engine's: the engine
 runs as a single global instance with its own cooling and request-retry disabled

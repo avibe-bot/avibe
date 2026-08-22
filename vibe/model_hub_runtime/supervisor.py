@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import atexit
 import logging
-import re
 import signal
 import socket
 import subprocess
@@ -25,196 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 MODEL_HUB_STARTUP_TIMEOUT_SECONDS = 30.0
-_STARTUP_OUTPUT_TAIL_BYTES = 8 * 1024
-_STARTUP_LOG_BYTES = 4 * 1024
 _STARTUP_POLL_INTERVAL_SECONDS = 0.05
-_REDACTED = "[REDACTED]"
-_STARTUP_SECRET_RE = re.compile(
-    r"(?i)([\"']?\b(?:api[-_ ]?keys?|access[-_ ]?token|auth[-_ ]?token|refresh[-_ ]?token|"
-    r"gateway[-_ ]?token|management[-_ ]?(?:key|secret)|authorization|password|"
-    r"secret(?:[-_ ]?key)?|token)\b[\"']?\s*[:=]\s*)"
-    r"(?:bearer\s+)?(?:\[[^\]\r\n]*\]|\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;]+)"
-)
-_STARTUP_BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
-_STARTUP_QUERY_SECRET_RE = re.compile(
-    r"(?i)([?&](?:api[-_]?key|access[-_]?token|refresh[-_]?token|password|secret|token)=)[^&\s]+"
-)
-_STARTUP_PREFIXED_KEY_RE = re.compile(
-    r"(?<![A-Za-z0-9])(?:sk|rk|pk|api)-[A-Za-z0-9_-]{8,}"
-)
-_REDACTED_BYTES = _REDACTED.encode("ascii")
-
-
-def _redact_exact_prefix(
-    data: bytes,
-    safe_length: int,
-    exact_values: tuple[bytes, ...],
-) -> tuple[bytes, bytes]:
-    if not exact_values:
-        return data[:safe_length], data[safe_length:]
-    spans: list[tuple[int, int]] = []
-    for value in exact_values:
-        search_from = 0
-        while True:
-            position = data.find(value, search_from)
-            if position < 0 or position >= safe_length:
-                break
-            spans.append((position, position + len(value)))
-            search_from = position + 1
-    if not spans:
-        return data[:safe_length], data[safe_length:]
-    spans.sort()
-    merged_spans: list[tuple[int, int]] = []
-    for start, end in spans:
-        if merged_spans and start <= merged_spans[-1][1]:
-            previous_start, previous_end = merged_spans[-1]
-            merged_spans[-1] = (previous_start, max(previous_end, end))
-        else:
-            merged_spans.append((start, end))
-    redacted = bytearray()
-    cursor = 0
-    for start, end in merged_spans:
-        redacted.extend(data[cursor:start])
-        redacted.extend(_REDACTED_BYTES)
-        cursor = end
-    if cursor < safe_length:
-        redacted.extend(data[cursor:safe_length])
-        cursor = safe_length
-    return bytes(redacted), data[cursor:]
-
-
-class _BoundedStartupOutput:
-    """Drain a child pipe while retaining an exact-redacted startup tail."""
-
-    def __init__(
-        self,
-        stream: Any,
-        *,
-        exact_values: tuple[str, ...],
-        limit: int = _STARTUP_OUTPUT_TAIL_BYTES,
-    ) -> None:
-        self._stream = stream
-        self._limit = limit
-        self._exact_values = tuple(
-            sorted(
-                {value.encode("utf-8") for value in exact_values if value},
-                key=len,
-                reverse=True,
-            )
-        )
-        self._overlap = max((len(value) for value in self._exact_values), default=1) - 1
-        self._pending = bytearray()
-        self._tail = bytearray()
-        self._observed_bytes = 0
-        self._source_exceeded_limit = False
-        self._tail_truncated = False
-        self._retaining = True
-        self._eof_observed = False
-        self._lock = threading.Lock()
-        self._thread = threading.Thread(
-            target=self._drain,
-            name="model-hub-startup-output",
-            daemon=True,
-        )
-        self._thread.start()
-
-    def _drain(self) -> None:
-        try:
-            reader = getattr(self._stream, "read1", self._stream.read)
-            while True:
-                chunk = reader(4096)
-                if not chunk:
-                    with self._lock:
-                        self._eof_observed = True
-                        if self._retaining:
-                            self._flush_pending_locked(final=True)
-                    return
-                if not isinstance(chunk, bytes):
-                    chunk = str(chunk).encode("utf-8", "replace")
-                with self._lock:
-                    if not self._retaining:
-                        continue
-                    self._observed_bytes += len(chunk)
-                    self._source_exceeded_limit = self._observed_bytes > self._limit
-                    self._pending.extend(chunk)
-                    self._flush_pending_locked(final=False)
-        except Exception:
-            logger.debug("Model Hub startup output drain stopped")
-
-    def _flush_pending_locked(self, *, final: bool) -> None:
-        safe_length = (
-            len(self._pending)
-            if final
-            else max(0, len(self._pending) - self._overlap)
-        )
-        if safe_length == 0:
-            return
-        redacted, pending = _redact_exact_prefix(
-            bytes(self._pending),
-            safe_length,
-            self._exact_values,
-        )
-        self._pending = bytearray(pending)
-        overflow = len(self._tail) + len(redacted) - self._limit
-        if overflow > 0:
-            del self._tail[:overflow]
-            self._tail_truncated = True
-        self._tail.extend(redacted)
-
-    def snapshot_live(self) -> tuple[bytes, bool, bool]:
-        """Freeze a live stream without publishing unproven overlap bytes."""
-
-        with self._lock:
-            self._pending.clear()
-            self._retaining = False
-            return self._snapshot_locked()
-
-    def snapshot_terminal(self) -> tuple[bytes, bool, bool]:
-        """Freeze a stopped stream; only the drain may commit bytes at EOF."""
-
-        with self._lock:
-            if not self._eof_observed:
-                self._pending.clear()
-            self._retaining = False
-            return self._snapshot_locked()
-
-    def _snapshot_locked(self) -> tuple[bytes, bool, bool]:
-        return (
-            bytes(self._tail),
-            self._source_exceeded_limit or self._tail_truncated,
-            self._tail_truncated,
-        )
-
-    def join(self, timeout: float = 1.0) -> None:
-        self._thread.join(timeout=timeout)
-
-
-def _sanitize_startup_output(
-    raw: bytes,
-    *,
-    exact_values: tuple[str, ...],
-    truncated: bool,
-    partial_line: bool,
-) -> tuple[str, bool]:
-    if partial_line:
-        _partial_line, separator, raw = raw.partition(b"\n")
-        if not separator:
-            raw = b""
-    text = raw.decode("utf-8", "replace")
-    text = "".join(character if character.isprintable() or character.isspace() else " " for character in text)
-    for value in sorted((item for item in exact_values if item), key=len, reverse=True):
-        text = text.replace(value, _REDACTED)
-    text = _STARTUP_SECRET_RE.sub(lambda match: match.group(1) + _REDACTED, text)
-    text = _STARTUP_BEARER_RE.sub("Bearer " + _REDACTED, text)
-    text = _STARTUP_QUERY_SECRET_RE.sub(lambda match: match.group(1) + _REDACTED, text)
-    text = _STARTUP_PREFIXED_KEY_RE.sub(_REDACTED, text)
-    compact = " ".join(text.split())
-    encoded = compact.encode("utf-8")
-    if len(encoded) > _STARTUP_LOG_BYTES:
-        encoded = encoded[-_STARTUP_LOG_BYTES:]
-        compact = encoded.decode("utf-8", "ignore")
-        truncated = True
-    return compact or "<none>", truncated
 
 
 class EngineUnavailableError(RuntimeError):
@@ -247,7 +57,6 @@ class EngineSupervisor:
         self._lock = threading.RLock()
         self._process: subprocess.Popen[bytes] | None = None
         self._connection: EngineConnection | None = None
-        self._startup_output: _BoundedStartupOutput | None = None
         self._last_check: str | None = None
         self._start_attempted = False
 
@@ -361,29 +170,14 @@ class EngineSupervisor:
         )
         port = self._port_allocator()
         config_path = instance_dir / "config.yaml"
-        sources = self.state_store.list_sources()
-        upstream_api_keys = tuple(
-            value
-            for source in sources
-            for value in (self.state_store.credential_metadata(source.credential_ref).get("value"),)
-            if isinstance(value, str) and value
-        )
         write_engine_config(
             config_path,
             host="127.0.0.1",
             port=port,
             auth_dir=self.state_store.auth_dir,
             runtime_secrets=runtime_secrets,
-            sources=sources,
+            sources=self.state_store.list_sources(),
             state_store=self.state_store,
-        )
-        startup_redaction_values = (
-            runtime_secrets.management_key,
-            runtime_secrets.gateway_token,
-            *upstream_api_keys,
-            str(binary),
-            str(instance_dir),
-            str(config_path),
         )
         connection = EngineConnection(
             base_url=f"http://127.0.0.1:{port}",
@@ -396,8 +190,8 @@ class EngineSupervisor:
                 cwd=instance_dir,
                 env=engine_subprocess_environment(),
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 umask=0o077,
                 **isolated_subprocess_kwargs(),
             )
@@ -405,14 +199,6 @@ class EngineSupervisor:
             raise EngineUnavailableError("models.engine.start_failed") from exc
         self._process = process
         self._connection = connection
-        if process.stdout is None:
-            self._stop_locked()
-            raise EngineUnavailableError("models.engine.start_failed")
-        output = _BoundedStartupOutput(
-            process.stdout,
-            exact_values=startup_redaction_values,
-        )
-        self._startup_output = output
         started_at = time.monotonic()
         deadline = started_at + self.startup_timeout
         exit_code: int | None = None
@@ -431,42 +217,24 @@ class EngineSupervisor:
                     self._stop_locked()
                     raise EngineUnavailableError("models.engine.unsafe_permissions") from exc
                 self._last_check = _utc_now()
-                raw_output, output_truncated, partial_line = output.snapshot_live()
-                diagnostic, output_truncated = _sanitize_startup_output(
-                    raw_output,
-                    exact_values=startup_redaction_values,
-                    truncated=output_truncated,
-                    partial_line=partial_line,
-                )
                 logger.info(
                     "Model Hub engine startup outcome=ready managed_version=%s "
-                    "elapsed_seconds=%.3f startup_output_truncated=%s startup_output=%s",
+                    "elapsed_seconds=%.3f child_output_retained=false",
                     managed.get("version"),
                     time.monotonic() - started_at,
-                    str(output_truncated).lower(),
-                    diagnostic,
                 )
                 return connection
             time.sleep(min(_STARTUP_POLL_INTERVAL_SECONDS, max(0.0, deadline - time.monotonic())))
         self._stop_locked()
-        raw_output, output_truncated, partial_line = output.snapshot_terminal()
-        diagnostic, output_truncated = _sanitize_startup_output(
-            raw_output,
-            exact_values=startup_redaction_values,
-            truncated=output_truncated,
-            partial_line=partial_line,
-        )
         logger.warning(
             "Model Hub engine startup outcome=%s managed_version=%s exit_code=%s "
             "elapsed_seconds=%.3f readiness_budget_seconds=%.3f "
-            "startup_output_truncated=%s startup_output=%s",
+            "child_output_retained=false",
             "process_exit" if exit_code is not None else "timeout",
             managed.get("version"),
             exit_code,
             time.monotonic() - started_at,
             self.startup_timeout,
-            str(output_truncated).lower(),
-            diagnostic,
         )
         raise EngineUnavailableError("models.engine.health_failed")
 
@@ -482,24 +250,16 @@ class EngineSupervisor:
 
     def _stop_locked(self) -> None:
         process = self._process
-        output = self._startup_output
         self._process = None
         self._connection = None
-        self._startup_output = None
         if process is None or process.poll() is not None:
-            if output is not None:
-                output.join()
             return
+        signal_process_tree(process, signal.SIGTERM, logger, "Model Hub engine")
         try:
-            signal_process_tree(process, signal.SIGTERM, logger, "Model Hub engine")
-            try:
-                process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                signal_process_tree(process, KILL_SIGNAL, logger, "Model Hub engine")
-                process.wait(timeout=3)
-        finally:
-            if output is not None:
-                output.join()
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            signal_process_tree(process, KILL_SIGNAL, logger, "Model Hub engine")
+            process.wait(timeout=3)
 
 
 def _allocate_loopback_port() -> int:
