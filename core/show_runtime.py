@@ -1234,7 +1234,7 @@ class ShowRuntimeManager:
                 install_state=(ShowRuntimeInstallState.INSTALLED if disk_install else ShowRuntimeInstallState.ABSENT),
                 policy_reason=reason,
             )
-        command = self._installed_managed_runtime_command(offline=True)
+        command = self._safe_installed_managed_runtime_command(offline=True)
         return self._publish_install_availability(command=command, policy_reason=reason)
 
     def _publish_install_availability(
