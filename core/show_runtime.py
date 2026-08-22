@@ -348,6 +348,7 @@ class ShowRuntimeAvailability:
         install: ShowRuntimeInstallState | None = None,
         policy_reason: str | None = None,
         install_reason: str | None = None,
+        install_evidence: ShowRuntimeFailureEvidence | None = None,
         install_failure_class: ShowRuntimeFailureClass | None = None,
         install_recovery_action: ShowRuntimeRecoveryAction | None = None,
         install_dir: Path | str | None = None,
@@ -365,10 +366,16 @@ class ShowRuntimeAvailability:
             ShowRuntimeFailureDimension.POLICY,
             policy_reason,
         )
-        install_evidence = ShowRuntimeFailureEvidence(
-            ShowRuntimeFailureDimension.INSTALL,
-            install_reason,
-        )
+        if install_evidence is None:
+            install_evidence = ShowRuntimeFailureEvidence(
+                ShowRuntimeFailureDimension.INSTALL,
+                install_reason,
+            )
+        elif (
+            install_evidence.dimension is not ShowRuntimeFailureDimension.INSTALL
+            or install_evidence.reason != install_reason
+        ):
+            raise ValueError("install evidence must describe the published install reason")
         resolved_install_failure_class = install_failure_class or (
             classify_show_runtime_failure(install_evidence) if install is ShowRuntimeInstallState.FAILED else None
         )
@@ -478,7 +485,7 @@ class ShowRuntimeManager:
         self.stderr_path = self.runtime_dir / "stderr.log"
         self.install_log_path = self.runtime_dir / "install.log"
         self.cache_root = self.runtime_dir / "vite-cache"
-        self._install_reason: str | None = None
+        self._install_evidence: ShowRuntimeFailureEvidence | None = None
         self._download_error: dict[str, Any] | None = None
         self._managed_command: list[str] | None = None
         self._availability = ShowRuntimeAvailability()
@@ -500,6 +507,25 @@ class ShowRuntimeManager:
         self._capability_retry_deadline = 0.0
         self._capability_retry_attempt = 0
         self._capability_generation = 0
+
+    @property
+    def _install_reason(self) -> str | None:
+        return self._install_evidence.reason if self._install_evidence else None
+
+    @_install_reason.setter
+    def _install_reason(self, reason: str | None) -> None:
+        self._install_evidence = (
+            ShowRuntimeFailureEvidence(ShowRuntimeFailureDimension.INSTALL, reason)
+            if reason
+            else None
+        )
+
+    def _record_install_failure(self, reason: str, *, provenance: str | None = None) -> None:
+        self._install_evidence = ShowRuntimeFailureEvidence(
+            ShowRuntimeFailureDimension.INSTALL,
+            reason,
+            provenance,
+        )
 
     async def ensure(self, *, automatic: bool = True) -> ShowRuntimeAvailability:
         async with self._lock:
@@ -666,11 +692,13 @@ class ShowRuntimeManager:
         automatic: bool = True,
     ) -> httpx.Response:
         base_url = self._base_url
+        process = self._process
         if base_url is None:
             ready = await self.ensure(automatic=automatic)
             if not ready.available or not ready.base_url:
                 raise self._unavailable_error(ready)
             base_url = ready.base_url
+            process = self._process
         await self._negotiate_context_key_capability(base_url)
         request_headers = {
             key: value for key, value in envelope.headers(headers).items() if key.lower() != SHOW_RUNTIME_BASE_HEADER
@@ -682,6 +710,7 @@ class ShowRuntimeManager:
             method,
             base_url,
             path,
+            process=process,
             headers=request_headers,
             body=body,
             phase_timeout_seconds=phase_timeout_seconds,
@@ -698,11 +727,13 @@ class ShowRuntimeManager:
     ) -> httpx.Response:
         """Request a capability-independent Runtime resource without an app context."""
         base_url = self._base_url
+        process = self._process
         if base_url is None:
             ready = await self.ensure()
             if not ready.available or not ready.base_url:
                 raise self._unavailable_error(ready)
             base_url = ready.base_url
+            process = self._process
         blocked = {
             SHOW_RUNTIME_PROTOCOL_HEADER.lower(),
             SHOW_RUNTIME_CONTEXT_HEADER.lower(),
@@ -713,6 +744,7 @@ class ShowRuntimeManager:
             method,
             base_url,
             path,
+            process=process,
             headers=forwarded,
             body=body,
             phase_timeout_seconds=30.0,
@@ -724,6 +756,7 @@ class ShowRuntimeManager:
         base_url: str,
         path: str,
         *,
+        process: subprocess.Popen[str] | None,
         headers: dict[str, str],
         body: bytes | None,
         phase_timeout_seconds: float,
@@ -743,7 +776,7 @@ class ShowRuntimeManager:
                     ) from exc
         except (ShowRuntimeRequestTimeoutError, httpx.RequestError) as exc:
             async with self._lock:
-                if self._base_url == base_url:
+                if self._base_url == base_url and self._process is process:
                     self._base_url = None
                     self._clear_capability_state()
             if isinstance(exc, ShowRuntimeRequestTimeoutError):
@@ -1045,6 +1078,8 @@ class ShowRuntimeManager:
         pending_exception: BaseException | None = None
         stack: contextlib.ExitStack | None = None
         try:
+            self._install_evidence = None
+            self._download_error = None
             stack = contextlib.ExitStack()
             admission = self._availability
             operation = _ShowRuntimeOperationOutcome(
@@ -1246,16 +1281,25 @@ class ShowRuntimeManager:
         install_reason: str | None = None,
         install_failure_class: ShowRuntimeFailureClass | None = None,
     ) -> ShowRuntimeAvailability:
+        install_evidence = (
+            self._install_evidence
+            if install_reason is not None and self._install_reason == install_reason
+            else None
+        )
         if command:
             self._managed_command = command
-            self._install_reason = None
-        else:
+            self._install_evidence = None
+        elif install_reason is not None and install_evidence is None:
             self._install_reason = install_reason
+            install_evidence = self._install_evidence
+        elif install_reason is None:
+            self._install_evidence = None
         availability = ShowRuntimeAvailability.from_install(
             command=command,
             install=install_state,
             policy_reason=policy_reason,
             install_reason=install_reason,
+            install_evidence=install_evidence,
             install_failure_class=install_failure_class,
         )
         self._availability = availability
@@ -2724,15 +2768,16 @@ class ShowRuntimeManager:
     def _load_runtime_manifest(self, *, offline: bool | None = None) -> ShowRuntimeManifest | None:
         payload: bytes | None = None
         source = ""
+        provenance = "configured" if self.manifest_path or self.manifest_url else "packaged"
         if self.manifest_path:
             try:
                 exists = self.manifest_path.exists()
                 payload = self.manifest_path.read_bytes() if exists else None
             except OSError:
-                self._install_reason = "runtime_manifest_invalid"
+                self._record_install_failure("runtime_manifest_invalid", provenance=provenance)
                 return None
             if payload is None:
-                self._install_reason = "runtime_manifest_missing"
+                self._record_install_failure("runtime_manifest_missing", provenance=provenance)
                 return None
             source = str(self.manifest_path)
         elif self.manifest_url:
@@ -2761,7 +2806,7 @@ class ShowRuntimeManager:
             except OSError:
                 payload = None
             if payload is None:
-                self._install_reason = "runtime_manifest_missing"
+                self._record_install_failure("runtime_manifest_missing", provenance=provenance)
                 return None
             source = _PACKAGED_RUNTIME_MANIFEST_SOURCE
         digest = hashlib.sha256(payload).hexdigest()
@@ -2787,10 +2832,10 @@ class ShowRuntimeManager:
                 source=source,
             )
         except Exception:
-            self._install_reason = "runtime_manifest_invalid"
+            self._record_install_failure("runtime_manifest_invalid", provenance=provenance)
             return None
         if manifest.schema_version != 1 or not manifest.runtime_version or not manifest.archives:
-            self._install_reason = "runtime_manifest_invalid"
+            self._record_install_failure("runtime_manifest_invalid", provenance=provenance)
             return None
         return manifest
 

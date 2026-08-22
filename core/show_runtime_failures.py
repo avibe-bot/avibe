@@ -28,6 +28,7 @@ class ShowRuntimeRecoveryAction(str, Enum):
 class ShowRuntimeFailureEvidence:
     dimension: ShowRuntimeFailureDimension
     reason: str | None
+    provenance: str | None = None
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,7 @@ class ShowRuntimeFailureDeclaration:
     failure_class: ShowRuntimeFailureClass
     recovery_action: ShowRuntimeRecoveryAction
     user_owned: bool = False
+    provenance: str | None = None
 
 
 _FAILURE_DECLARATION_ROWS = (
@@ -195,16 +197,36 @@ _FAILURE_DECLARATION_ROWS = (
     ShowRuntimeFailureDeclaration(
         "runtime_manifest_missing",
         ShowRuntimeFailureDimension.INSTALL,
-        "manifest-provider",
+        "packaged-manifest",
         ShowRuntimeFailureClass.UNCLASSIFIED,
         ShowRuntimeRecoveryAction.REPAIR,
+        provenance="packaged",
+    ),
+    ShowRuntimeFailureDeclaration(
+        "runtime_manifest_missing",
+        ShowRuntimeFailureDimension.INSTALL,
+        "configured-manifest",
+        ShowRuntimeFailureClass.CONFIGURED,
+        ShowRuntimeRecoveryAction.CHANGE_SETTING,
+        user_owned=True,
+        provenance="configured",
     ),
     ShowRuntimeFailureDeclaration(
         "runtime_manifest_invalid",
         ShowRuntimeFailureDimension.INSTALL,
-        "manifest-provider",
+        "packaged-manifest",
         ShowRuntimeFailureClass.UNCLASSIFIED,
         ShowRuntimeRecoveryAction.REPAIR,
+        provenance="packaged",
+    ),
+    ShowRuntimeFailureDeclaration(
+        "runtime_manifest_invalid",
+        ShowRuntimeFailureDimension.INSTALL,
+        "configured-manifest",
+        ShowRuntimeFailureClass.CONFIGURED,
+        ShowRuntimeRecoveryAction.CHANGE_SETTING,
+        user_owned=True,
+        provenance="configured",
     ),
     ShowRuntimeFailureDeclaration(
         "runtime_manifest_download_failed",
@@ -303,14 +325,14 @@ _FAILURE_DECLARATION_ROWS = (
     ),
 )
 
-if len({row.reason for row in _FAILURE_DECLARATION_ROWS}) != len(_FAILURE_DECLARATION_ROWS):
-    raise RuntimeError("Show Runtime failure reasons must have one declaration")
+if len({(row.reason, row.provenance) for row in _FAILURE_DECLARATION_ROWS}) != len(_FAILURE_DECLARATION_ROWS):
+    raise RuntimeError("Show Runtime failure evidence must have one declaration")
 
-SHOW_RUNTIME_FAILURE_DECLARATIONS = {row.reason: row for row in _FAILURE_DECLARATION_ROWS}
+SHOW_RUNTIME_FAILURE_DECLARATIONS = {(row.reason, row.provenance): row for row in _FAILURE_DECLARATION_ROWS}
 
 
 def _failure_declaration(evidence: ShowRuntimeFailureEvidence) -> ShowRuntimeFailureDeclaration | None:
-    declaration = SHOW_RUNTIME_FAILURE_DECLARATIONS.get(evidence.reason or "")
+    declaration = SHOW_RUNTIME_FAILURE_DECLARATIONS.get((evidence.reason or "", evidence.provenance))
     if declaration is None or declaration.dimension is not evidence.dimension:
         return None
     return declaration

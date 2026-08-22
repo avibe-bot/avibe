@@ -515,33 +515,44 @@ The retained rules are normative:
 
 1. **No request-path health pre-probe.** If `_base_url` is set, `request()` uses
    that snapshot directly. A transport-level failure with no HTTP response is the
-   detector and invalidates that snapshot under the admission lock, so the next
-   request re-enters admission. An HTTP response, including a 5xx response from
-   the sidecar, proves transport succeeded and does not invalidate the runtime.
-   No await may occur between reading `_base_url` and selecting it for the request.
+   detector and invalidates that snapshot under the admission lock only while both
+   its URL and tracked process still match, so a delayed failure from an old process
+   cannot invalidate its replacement. The next request then re-enters admission.
+   An HTTP response, including a 5xx response from the sidecar, proves transport
+   succeeded and does not invalidate the runtime. No await may occur between
+   reading `_base_url` and selecting it for the request.
 2. **Owning operations normalize only operational I/O.** Every command-resolution
    and runtime-metadata path converts `OSError` subclasses into typed failure
    evidence before returning to the UI, and request transport catches the specific
    `httpx` network exceptions it owns. Programming defects such as `TypeError` and
    `AttributeError` propagate unchanged. A malformed user command is input
    evidence, so command parsing converts it at the command-resolution boundary.
-3. **Retry now renders its one response.** One click performs exactly one fetch
-   and renders that response into the current document from a private script scope,
-   so repeated recovery-page renders cannot collide on top-level bindings. It never
-   follows the fetch with `location.reload()` and therefore never spends a second
-   Runtime attempt.
+3. **Retry now renders its one expected page response.** One click performs exactly
+   one fetch. A direct 2xx HTML response is rendered into the current document from
+   a private script scope, so repeated recovery-page renders cannot collide on
+   top-level bindings. A redirect, non-2xx response, or non-HTML response is never
+   treated as page content and instead returns control to normal browser navigation;
+   in particular, expired credentials navigate to login rather than rendering a 401
+   JSON body. This corrects the earlier R7 rule, whose unconditional one-response
+   rendering made authentication responses indistinguishable from page responses.
 
 Install-lock contention remains `not_applicable`: another process owns progress,
 so this caller did not run a provider. Recovery remains request-driven; no
 background timer or automatic attempt budget exists in PR #1640.
 
 **Failure classification is declared data and published by the evidence owner.**
-Each reason has one declaration carrying its dimension, owning artifact, class,
-and user ownership. Classification and recovery action are total lookups over
-that declaration. A managed command that disappears is runtime evidence owned by
-the managed artifact and is not classified as a user configuration error; an
-explicit command failure remains configured. The page consumes the published
-class and action and never rebuilds either from a reason prefix or nearby state.
+Each `(reason, provenance)` pair has one declaration carrying its dimension,
+owning artifact, class, and user ownership. Classification and recovery action are
+total lookups over that declaration. A configured manifest and the packaged
+manifest may publish the same failure reason, but their provenance keeps the
+user's change-setting obligation distinct from repair of packaged bytes. Install
+admission clears operation-local evidence before any provider runs, so a later I/O
+failure cannot inherit an earlier operation's reason, provenance, or download
+detail. A managed
+command that disappears is runtime evidence owned by the managed artifact and is
+not classified as a user configuration error; an explicit command failure remains
+configured. The page consumes the published class and action and never rebuilds
+either from a reason prefix or nearby state.
 
 **Runtime transport is exception-closed for evidence.** `request()` and
 `request_global()` share one manager-owned transport boundary. A transport

@@ -137,7 +137,7 @@ class _FakeShowRuntimeManager:
         self.stopped = False
 
     def _unavailable_error(self):
-        declaration = SHOW_RUNTIME_FAILURE_DECLARATIONS.get(self.failure_reason)
+        declaration = SHOW_RUNTIME_FAILURE_DECLARATIONS.get((self.failure_reason, None))
         evidence = ShowRuntimeFailureEvidence(
             declaration.dimension if declaration else ShowRuntimeFailureDimension.RUNTIME,
             self.failure_reason,
@@ -538,6 +538,26 @@ def test_private_show_page_requires_remote_login(monkeypatch, tmp_path):
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),
         headers={"Accept": "text/html"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    assert response.headers["Location"] == "/auth/login?next=%2Fshow%2Fses123%2F"
+
+
+def test_retry_now_html_request_preserves_remote_login_redirect(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+
+    response = app.test_client().get(
+        "/show/ses123/",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers={
+            "Accept": "text/html",
+            "X-Avibe-Show-Recovery-Retry": "1",
+        },
         follow_redirects=False,
     )
 
@@ -3074,6 +3094,10 @@ def test_private_show_page_falls_back_to_runtime_recovery(monkeypatch, tmp_path,
     assert b"document.write(html)" in response.content
     assert b"(() => {" in response.content
     assert b"})();" in response.content
+    assert b'"Accept": "text/html"' in response.content
+    assert b"response.redirected || !response.ok || !contentType.includes(\"text/html\")" in response.content
+    assert b"window.location.assign(response.url || window.location.href)" in response.content
+    assert response.content.index(b"response.redirected") < response.content.index(b"response.text()")
     assert b"window.location.reload" not in response.content
     assert b"X-Avibe-Show-Recovery-Retry" in response.content
     assert b"Math.min(30000, retryDelayMs * 2)" not in response.content
@@ -6587,6 +6611,28 @@ def test_show_runtime_failure_classification(dimension, reason, expected):
     assert classify_show_runtime_failure(ShowRuntimeFailureEvidence(dimension, reason)) is expected
 
 
+@pytest.mark.parametrize(
+    ("provenance", "expected_class", "expected_action"),
+    (
+        ("configured", ShowRuntimeFailureClass.CONFIGURED, ShowRuntimeRecoveryAction.CHANGE_SETTING),
+        ("packaged", ShowRuntimeFailureClass.UNCLASSIFIED, ShowRuntimeRecoveryAction.REPAIR),
+    ),
+)
+def test_manifest_failure_classification_uses_published_provenance(
+    provenance,
+    expected_class,
+    expected_action,
+):
+    evidence = ShowRuntimeFailureEvidence(
+        ShowRuntimeFailureDimension.INSTALL,
+        "runtime_manifest_invalid",
+        provenance,
+    )
+
+    assert classify_show_runtime_failure(evidence) is expected_class
+    assert show_runtime_recovery_action(evidence) is expected_action
+
+
 def test_show_runtime_failure_declarations_are_total_and_owner_safe():
     assert len(SHOW_RUNTIME_FAILURE_DECLARATIONS) == len(set(SHOW_RUNTIME_FAILURE_DECLARATIONS))
     assert all(
@@ -6600,14 +6646,14 @@ def test_show_runtime_failure_declarations_are_total_and_owner_safe():
     )
 
 
-def test_show_runtime_reason_literals_are_declared_once():
+def test_show_runtime_reason_literals_have_declared_evidence():
     source = inspect.getsource(show_runtime)
     reason_literals = {
         value
         for value in re.findall(r'(["\'])(runtime_[a-z0-9_]+)\1', source)
         if value[1] not in {"runtime_source", "runtime_version"}
     }
-    declared = set(SHOW_RUNTIME_FAILURE_DECLARATIONS)
+    declared = {reason for reason, _provenance in SHOW_RUNTIME_FAILURE_DECLARATIONS}
     assert {value for _quote, value in reason_literals} <= declared
 
 
@@ -6664,7 +6710,47 @@ def test_unreadable_manifest_is_typed_install_evidence(monkeypatch, tmp_path):
 
     assert payload["ok"] is False
     assert payload["install"]["reason"] == "runtime_manifest_invalid"
+    assert payload["install"]["failure_class"] == "configured"
+    assert payload["install"]["recovery_action"] == "change_setting"
+
+
+def test_invalid_packaged_manifest_remains_repairable(monkeypatch, tmp_path):
+    packaged_manifest = tmp_path / show_runtime._RUNTIME_MANIFEST_RESOURCE
+    packaged_manifest.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr("core.show_runtime.package_resources.files", lambda _package: tmp_path)
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        runtime_source="manifest",
+    )
+
+    payload = manager.prepare(automatic=True)
+
+    assert payload["install"]["reason"] == "runtime_manifest_invalid"
     assert payload["install"]["failure_class"] == "unclassified"
+    assert payload["install"]["recovery_action"] == "repair"
+
+
+def test_new_install_admission_does_not_reuse_stale_failure_evidence(monkeypatch, tmp_path):
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        runtime_source="npm",
+    )
+    manager._install_reason = "runtime_node_missing"
+    manager._download_error = {"kind": "network", "message": "stale download"}
+    monkeypatch.setattr(
+        manager,
+        "_install_managed_runtime_locked",
+        lambda **_kwargs: (_ for _ in ()).throw(PermissionError("runtime directory is not writable")),
+    )
+
+    payload = manager.prepare(automatic=True)
+
+    assert payload["install"]["reason"] == "runtime_install_failed"
+    assert payload["install"]["failure_class"] == "unclassified"
+    assert payload["install"]["recovery_action"] == "repair"
+    assert payload["status"]["download_error"] is None
 
 
 def test_show_runtime_install_io_exception_is_structured(monkeypatch, tmp_path):
@@ -6899,6 +6985,25 @@ def test_runtime_transport_response_does_not_invalidate_base_url(monkeypatch, tm
     response = asyncio.run(manager.request_global("GET", "/health"))
 
     assert response.status_code == 503
+    assert manager._base_url == base_url
+
+
+def test_delayed_transport_failure_does_not_invalidate_replacement_process(monkeypatch, tmp_path):
+    manager = _runtime_manager_with_failing_transport(monkeypatch, tmp_path)
+    base_url = manager._base_url
+    replacement_process = SimpleNamespace(pid=654, poll=lambda: None)
+
+    async def fail_after_replacement(_client, method, url, **_kwargs):
+        manager._process = replacement_process
+        manager._base_url = base_url
+        raise httpx.ConnectError("old runtime failed late", request=httpx.Request(method, url))
+
+    monkeypatch.setattr("core.show_runtime.httpx.AsyncClient.request", fail_after_replacement)
+
+    with pytest.raises(ShowRuntimeUnavailableError):
+        asyncio.run(manager.request_global("GET", "/health"))
+
+    assert manager._process is replacement_process
     assert manager._base_url == base_url
 
 

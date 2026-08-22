@@ -2520,8 +2520,16 @@ def _show_runtime_recovery_script(
           const response = await fetch(window.location.href, {
             cache: "no-store",
             credentials: "same-origin",
-            headers: { "X-Avibe-Show-Recovery-Retry": "1" },
+            headers: {
+              "Accept": "text/html",
+              "X-Avibe-Show-Recovery-Retry": "1",
+            },
           });
+          const contentType = (response.headers.get("content-type") || "").toLowerCase();
+          if (response.redirected || !response.ok || !contentType.includes("text/html")) {
+            window.location.assign(response.url || window.location.href);
+            return;
+          }
           const html = await response.text();
           document.open();
           document.write(html);
