@@ -11001,6 +11001,11 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
     return items
 
 
+def _show_runtime_install(payload: dict) -> dict:
+    install = payload.get("install")
+    return install if isinstance(install, dict) else {}
+
+
 def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
     from core.show_runtime import ShowRuntimeManager
 
@@ -11061,10 +11066,12 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
             code="show_runtime.archive_cache_clean",
         )
 
+    install = _show_runtime_install(status)
+    installed = install.get("state") == "installed"
     provider = str(status.get("provider") or "unknown")
     explicit_command = status.get("explicit_command")
     if explicit_command:
-        if status.get("installed"):
+        if installed:
             _add_doctor_item(items, "pass", f"Show Runtime explicit command is available: {explicit_command}")
         else:
             _add_doctor_item(
@@ -11150,7 +11157,7 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
             code="show_runtime.provider_unsupported",
         )
 
-    if status.get("installed"):
+    if installed:
         _add_doctor_item(
             items,
             "pass",
@@ -12338,6 +12345,9 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
 
     manager = ShowRuntimeManager()
     before = manager.status()
+    before_install = _show_runtime_install(before)
+    before_installed = before_install.get("state") == "installed"
+    before_install_dir = before_install.get("install_dir")
 
     def verify_startability(command_value: Any) -> _ShowRuntimeStartability:
         command = command_value if isinstance(command_value, list) else []
@@ -12364,7 +12374,7 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
         return _ShowRuntimeStartability.not_startable(result.reason or "runtime_start_failed")
 
     language = _configured_cli_language()
-    if before.get("installed"):
+    if before_installed:
         startability = verify_startability(before.get("command"))
         if startability.state is _ShowRuntimeStartabilityState.UNDETERMINED:
             return _doctor_repair_result(
@@ -12373,7 +12383,7 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
                 i18n_t("runtime.doctor.repairVerificationFailed", language, detail=startability.detail),
                 provider=before.get("provider"),
                 platform=before.get("platform"),
-                install_dir=before.get("install_dir"),
+                install_dir=before_install_dir,
                 installed=True,
                 reason="runtime_start_verification_failed",
                 start_error=startability.detail,
@@ -12385,7 +12395,7 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
                 i18n_t("runtime.doctor.repairHealthy", language),
                 provider=before.get("provider"),
                 platform=before.get("platform"),
-                install_dir=before.get("install_dir"),
+                install_dir=before_install_dir,
             )
         if startability.state is not _ShowRuntimeStartabilityState.NOT_STARTABLE:
             raise AssertionError(f"Unhandled Show Runtime startability: {startability.state}")
@@ -12397,7 +12407,7 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
                 i18n_t("runtime.doctor.repairExplicitCommandFailed", language, reason=reason),
                 provider=before.get("provider"),
                 platform=before.get("platform"),
-                install_dir=before.get("install_dir"),
+                install_dir=before_install_dir,
                 installed=True,
                 reason=reason,
                 explicit_command=before.get("explicit_command"),
@@ -12417,8 +12427,11 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
             archive_url=archive_url,
         )
 
-    result = manager.prepare(force=bool(before.get("installed")))
+    result = manager.prepare(force=before_installed)
     status = result.get("status") if isinstance(result.get("status"), dict) else {}
+    status_install = _show_runtime_install(status)
+    install_dir = status_install.get("install_dir")
+    status_installed = status_install.get("state") == "installed"
     if result.get("ok"):
         startability = verify_startability(result.get("command"))
         if startability.state is _ShowRuntimeStartabilityState.STARTABLE:
@@ -12428,14 +12441,14 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
                 i18n_t(
                     (
                         "runtime.doctor.repairReinstalled"
-                        if before.get("installed")
+                        if before_installed
                         else "runtime.doctor.repairInstalled"
                     ),
                     language,
                 ),
                 provider=result.get("provider"),
                 platform=result.get("platform"),
-                install_dir=status.get("install_dir"),
+                install_dir=install_dir,
             )
         if startability.state is _ShowRuntimeStartabilityState.NOT_STARTABLE:
             reason = startability.reason or "runtime_start_failed"
@@ -12445,7 +12458,7 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
                 i18n_t(
                     (
                         "runtime.doctor.repairReinstallStartFailed"
-                        if before.get("installed")
+                        if before_installed
                         else "runtime.doctor.repairInstallStartFailed"
                     ),
                     language,
@@ -12453,7 +12466,7 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
                 ),
                 provider=result.get("provider"),
                 platform=result.get("platform"),
-                install_dir=status.get("install_dir"),
+                install_dir=install_dir,
                 reason=reason,
             )
         if startability.state is _ShowRuntimeStartabilityState.UNDETERMINED:
@@ -12463,7 +12476,7 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
                 i18n_t("runtime.doctor.repairPostVerificationFailed", language, detail=startability.detail),
                 provider=result.get("provider"),
                 platform=result.get("platform"),
-                install_dir=status.get("install_dir"),
+                install_dir=install_dir,
                 reason="runtime_start_verification_failed",
                 start_error=startability.detail,
             )
@@ -12477,7 +12490,6 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
             detail = f"{detail}: {download_error['url']}"
     else:
         detail = reason
-    install_dir = status.get("install_dir")
     github_source = status.get("github_source") if isinstance(status.get("github_source"), dict) else {}
     github_refusal_messages = {
         "runtime_github_source_dirty": "runtime.doctor.repairGitHubSourceDirty",
@@ -12503,7 +12515,7 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
         provider=result.get("provider"),
         platform=result.get("platform"),
         install_dir=install_dir,
-        installed=bool(status.get("installed")),
+        installed=status_installed,
         reason=reason,
         download_error=download_error,
     )
@@ -14461,9 +14473,10 @@ def _print_runtime_status(payload: dict) -> None:
     if archive:
         print(f"  Archive: {archive.get('name')}")
         print(f"  Archive sha256: {archive.get('sha256')}")
-    print(f"  Installed: {'yes' if payload.get('installed') else 'no'}")
-    if payload.get("install_dir"):
-        print(f"  Install dir: {payload.get('install_dir')}")
+    install = _show_runtime_install(payload)
+    print(f"  Installed: {'yes' if install.get('state') == 'installed' else 'no'}")
+    if install.get("install_dir"):
+        print(f"  Install dir: {install.get('install_dir')}")
     source_update = _github_source_update(payload)
     if source_update:
         print(
@@ -14471,7 +14484,6 @@ def _print_runtime_status(payload: dict) -> None:
             + i18n_t(
                 "runtime.status.managedUpdateSkipped",
                 _configured_cli_language(),
-                current_revision=source_update.get("current_revision") or "unknown",
                 target_revision=source_update.get("target_revision") or "unknown",
             )
         )
@@ -14525,15 +14537,15 @@ def cmd_runtime(args) -> int:
             if runtime_prepared:
                 print(i18n_t("runtime.prepare.prepared", language))
                 status = payload.get("status") or {}
-                if status.get("install_dir"):
-                    print(f"Install dir: {status['install_dir']}")
+                status_install = _show_runtime_install(status)
+                if status_install.get("install_dir"):
+                    print(f"Install dir: {status_install['install_dir']}")
                 source_update = _github_source_update(status)
                 if source_update:
                     print(
                         i18n_t(
                             "runtime.prepare.managedUpdateSkipped",
                             language,
-                            current_revision=source_update.get("current_revision") or "unknown",
                             target_revision=source_update.get("target_revision") or "unknown",
                         )
                     )

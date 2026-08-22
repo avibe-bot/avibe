@@ -903,12 +903,12 @@
   "runtime": {
     "prepare": {
       "prepared": "Show Runtime 已准备完成。",
-      "managedUpdateSkipped": "Show Runtime 已从本地版本 {current_revision} 准备完成；Avibe 已跳过对 {target_revision} 的托管更新。",
+      "managedUpdateSkipped": "Avibe 已跳过对 Show Runtime 源代码版本 {target_revision} 的托管更新。",
       "skipped": "Show Runtime 准备已跳过：{reason}",
       "failed": "Show Runtime 准备失败：{reason}"
     },
     "status": {
-      "managedUpdateSkipped": "GitHub 源代码：当前正在使用本地版本 {current_revision}；Avibe 已跳过对 {target_revision} 的托管更新。"
+      "managedUpdateSkipped": "GitHub 源代码：Avibe 已跳过对 {target_revision} 的托管更新。"
     },
     "clean": {
       "dryRunHelp": "\u4ec5\u62a5\u544a\u53ef\u6e05\u7406\u7684\u5f52\u6863\u4e0e\u7f13\u5b58\u6761\u76ee\uff0c\u4e0d\u5220\u9664\u4efb\u4f55\u5185\u5bb9\u3002",

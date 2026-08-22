@@ -292,6 +292,7 @@ class ShowRuntimeAvailability:
     policy_reason: str | None = None
     install_reason: str | None = None
     install_failure_class: ShowRuntimeFailureClass | None = None
+    install_dir: str | None = None
     install_runtime_version: str | None = None
     install_matches_manifest: bool | None = None
     runtime_reason: str | None = None
@@ -316,6 +317,7 @@ class ShowRuntimeAvailability:
         install: ShowRuntimeInstallState | None = None,
         policy_reason: str | None = None,
         install_reason: str | None = None,
+        install_dir: Path | str | None = None,
         install_runtime_version: str | None = None,
         install_matches_manifest: bool | None = None,
     ) -> "ShowRuntimeAvailability":
@@ -335,6 +337,7 @@ class ShowRuntimeAvailability:
             install_failure_class=(
                 classify_show_runtime_failure(install_reason) if install is ShowRuntimeInstallState.FAILED else None
             ),
+            install_dir=str(install_dir) if install_dir is not None else None,
             install_runtime_version=install_runtime_version,
             install_matches_manifest=install_matches_manifest,
         )
@@ -348,6 +351,7 @@ class ShowRuntimeAvailability:
                 "reason": self.install_reason,
                 "failure_class": self.install_failure_class.value if self.install_failure_class else None,
                 "command": command,
+                "install_dir": self.install_dir,
                 "runtime_version": self.install_runtime_version,
                 "matches_manifest": self.install_matches_manifest,
             },
@@ -1283,6 +1287,7 @@ class ShowRuntimeManager:
         install_payload = ShowRuntimeAvailability.from_install(
             command=installed_command,
             install=(ShowRuntimeInstallState.INSTALLED if installed else ShowRuntimeInstallState.ABSENT),
+            install_dir=installed_dir if installed else None,
             install_runtime_version=installed_runtime_version,
             install_matches_manifest=installed_matches,
         ).as_payload()["install"]
@@ -1302,9 +1307,6 @@ class ShowRuntimeManager:
                 "reason": None,
                 "base_url": None,
             },
-            "installed": installed,
-            "installed_matches_manifest": install_payload["matches_manifest"],
-            "install_dir": str(installed_dir) if installed_dir else None,
             "command": installed_command,
             "reason": self._install_reason,
             "download_error": self._download_error,
@@ -3186,7 +3188,7 @@ class ShowRuntimeManager:
         return source_dir / ".git" / "avibe-checkout-revision.json"
 
     def _github_source_update_path(self, source_dir: Path) -> Path:
-        return source_dir.with_name(f".{source_dir.name}.avibe-source-update.json")
+        return source_dir / ".git" / "avibe-source-update.json"
 
     def _clone_github_source_checkout(self, git: list[str], source_dir: Path) -> bool:
         try:
@@ -3351,6 +3353,7 @@ class ShowRuntimeManager:
         return {
             "managed_revision": checkout.revision if checkout else None,
             "current_revision": self._git_revision(git, source_dir, "HEAD") if git and source_dir.exists() else None,
+            "built_revision": self._read_github_build_marker(source_dir),
             "update": self._read_github_source_update(source_dir),
         }
 

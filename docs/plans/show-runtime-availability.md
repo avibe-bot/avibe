@@ -953,6 +953,34 @@ boundary. If a fifth findings-bearing head produces another instance of this cla
 the two-valued record model itself must be reconsidered; another exit guard is not an
 acceptable remedy.
 
+The fifth head fired that tripwire, so the promise is discharged here: the
+two-valued record was reconsidered and the evidence exonerates it. No finding
+on any of five heads has been about `revision` / `pending` semantics. The
+tripwire fired on the wrong axis because it bounded an artifact — "the record"
+— when the property at risk was every piece of evidence about the checkout,
+wherever it is stored. A governance rule that names an artifact instead of a
+property is the same inadequate-proxy defect this document is about, one level
+up.
+
+What head five actually showed is cheaper to state: each of its three findings
+is a rule already written above, applied at the site a reviewer named rather
+than owned by a module. An unowned rule buys exactly one more review round, so
+three unowned rules bought this one. The closing rules therefore name owners.
+Checkout evidence lives inside the checkout it describes, so a successful
+publish retires it by rename and no deletion is a transaction boundary. A
+dimension of state has no flat mirror beside its structured payload, so a
+consumer cannot reach a location without holding the state that makes the
+location meaningful. Artifact provenance is published from the build marker and
+cited from nowhere else, so a revision claim cannot be satisfied by checkout
+identity. Each remedy removes a mechanism or publishes an owner that already
+existed; none adds a branch.
+
+New boundary, stated as a property rather than an artifact: a rule enters this
+document with the name of the module that makes violating it impossible. If a
+sixth head returns either a rule with no named owner or a payload field whose
+meaning depends on a sibling field, the update record and the status payload
+leave this PR and become their own change.
+
 The reason this one predicate absorbed seven probes is worth naming even though it is
 out of scope here: one directory is both Avibe's build input and a place a developer
 may work, so every rule about it has to infer which role it is in. An eighth input

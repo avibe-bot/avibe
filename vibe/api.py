@@ -8438,10 +8438,15 @@ def dependencies_status(*, offline: bool = False) -> dict:
         srt_manager = ShowRuntimeManager(offline=True) if offline else get_show_runtime_manager()
         srt = srt_manager.status()
     except Exception as exc:  # noqa: BLE001
-        srt = {"installed": False, "node_available": None, "node_version": None, "reason": str(exc)}
+        srt = {
+            "install": {"state": "absent", "runtime_version": None, "matches_manifest": None},
+            "node_available": None,
+            "node_version": None,
+            "reason": str(exc),
+        }
     manifest = srt.get("manifest") if isinstance(srt.get("manifest"), dict) else {}
     install = srt.get("install") if isinstance(srt.get("install"), dict) else {}
-    srt_installed = bool(srt.get("installed"))
+    srt_installed = install.get("state") == "installed"
     installed_matches_manifest = install.get("matches_manifest")
     deps.append(
         {

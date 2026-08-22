@@ -1173,8 +1173,7 @@ def test_dependencies_status_shape(monkeypatch):
     class _Mgr:
         def status(self):
             return {
-                "installed": True,
-                "install": {"runtime_version": "1.4.0", "matches_manifest": True},
+                "install": {"state": "installed", "runtime_version": "1.4.0", "matches_manifest": True},
                 "manifest": {"runtime_version": "1.4.0"},
                 "node_available": True,
                 "node_version": "20.11",
@@ -1225,8 +1224,7 @@ def test_dependencies_status_shape(monkeypatch):
         pytest.param(
             {
                 "provider": "manifest-cache",
-                "installed": True,
-                "install": {"runtime_version": "runtime-installed", "matches_manifest": False},
+                "install": {"state": "installed", "runtime_version": "runtime-installed", "matches_manifest": False},
                 "manifest": {"runtime_version": "runtime-selected"},
                 "node_available": True,
                 "node_supported": True,
@@ -1238,8 +1236,7 @@ def test_dependencies_status_shape(monkeypatch):
         pytest.param(
             {
                 "provider": "github-source",
-                "installed": True,
-                "install": {"runtime_version": None, "matches_manifest": None},
+                "install": {"state": "installed", "runtime_version": None, "matches_manifest": None},
                 "manifest": None,
                 "node_available": True,
                 "node_supported": True,

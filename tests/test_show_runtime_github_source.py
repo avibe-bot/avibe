@@ -200,7 +200,7 @@ def test_force_install_refuses_locally_modified_source_without_touching_the_runt
 
     assert result["ok"] is False
     assert result["reason"] == "runtime_github_source_dirty"
-    assert result["status"]["installed"] is True
+    assert result["status"]["install"]["state"] == "installed"
     assert (source_dir / "package.json").read_text(encoding="utf-8") == '{"name": "locally-edited"}\n'
     assert cli_path.read_text(encoding="utf-8") == original_cli
     assert harness.npm_commands == []
@@ -224,7 +224,7 @@ def test_force_install_refuses_local_commits_without_moving_the_checkout_or_runt
 
     assert result["ok"] is False
     assert result["reason"] == "runtime_github_source_revision_changed"
-    assert result["status"]["installed"] is True
+    assert result["status"]["install"]["state"] == "installed"
     assert git("rev-parse", "HEAD", cwd=source_dir) == local_revision
     assert (source_dir / "local.txt").read_text(encoding="utf-8") == "local commit\n"
     assert cli_path.read_text(encoding="utf-8") == original_cli
@@ -269,6 +269,36 @@ def test_automatic_update_builds_local_commit_without_moving_the_checkout(tmp_pa
     automatic.manager.status()
     Harness(tmp_path, upstream).manager._clear_github_source_update(source_dir)
     assert automatic.manager.status()["github_source"]["update"] is None
+
+
+def test_successful_update_retires_stale_record_when_checkout_parent_is_read_only(tmp_path: Path) -> None:
+    upstream = make_upstream(tmp_path)
+    installed = Harness(tmp_path, upstream)
+    assert installed.manager.prepare()["ok"] is True
+    source_dir = installed.manager._github_source_dir()
+    current_revision = git("rev-parse", "HEAD", cwd=source_dir)
+    installed.manager._record_github_source_update_skipped(
+        source_dir,
+        reason="runtime_github_source_update_failed",
+        current_revision=current_revision,
+        target_revision="stale-target",
+    )
+    (upstream / "package.json").write_text('{"name": "runtime", "version": "2"}\n', encoding="utf-8")
+    git("commit", "-am", "upstream update", cwd=upstream)
+    updater = Harness(tmp_path, upstream)
+
+    source_parent = source_dir.parent
+    original_mode = source_parent.stat().st_mode
+    source_parent.chmod(0o555)
+    try:
+        result = updater.manager.prepare()
+        fresh_status = updater.manager.status()
+    finally:
+        source_parent.chmod(original_mode)
+
+    assert result["ok"] is True
+    assert result["status"]["github_source"]["update"] is None
+    assert fresh_status["github_source"]["update"] is None
 
 
 @pytest.mark.parametrize(
@@ -490,7 +520,7 @@ def test_force_install_refuses_an_unverified_legacy_checkout_without_touching_th
 
     assert result["ok"] is False
     assert result["reason"] == "runtime_github_source_revision_unverified"
-    assert result["status"]["installed"] is True
+    assert result["status"]["install"]["state"] == "installed"
     assert git("rev-parse", "HEAD", cwd=source_dir) == original_revision
     assert cli_path.read_text(encoding="utf-8") == original_cli
     assert harness.npm_commands == []
@@ -555,10 +585,52 @@ def test_forced_update_failure_reports_failed_operation_and_installed_state(tmp_
     assert result["command"] == installed["command"]
     assert result["install"]["state"] == "installed"
     assert result["install"]["reason"] is None
-    assert result["status"]["installed"] is True
+    assert result["status"]["install"]["state"] == "installed"
     assert result["status"]["reason"] is None
     assert result["status"]["github_source"]["update"]["reason"] == "runtime_github_source_update_failed"
     assert result["status"]["command"] == installed["command"]
+
+
+def test_failed_local_build_does_not_publish_checkout_revision_as_artifact_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from vibe import cli
+
+    upstream = make_upstream(tmp_path)
+    installed = Harness(tmp_path, upstream)
+    first = installed.manager.prepare()
+    source_dir = installed.manager._github_source_dir()
+    old_command = first["command"]
+    (source_dir / "local.txt").write_text("local commit\n", encoding="utf-8")
+    git("add", "local.txt", cwd=source_dir)
+    git("commit", "-m", "local work", cwd=source_dir)
+    local_revision = git("rev-parse", "HEAD", cwd=source_dir)
+    (upstream / "package.json").write_text('{"name": "runtime", "version": "2"}\n', encoding="utf-8")
+    git("commit", "-am", "upstream update", cwd=upstream)
+    attempt = Harness(tmp_path, upstream)
+    real_run = attempt._run
+
+    def fail_npm_ci(command: list[str], *, cwd: Path | None = None) -> bool:
+        if Path(command[0]).name == "npm" and command[1:] == ["ci"]:
+            attempt.npm_commands.append(command)
+            return False
+        return real_run(command, cwd=cwd)
+
+    attempt.manager._run_install_command = fail_npm_ci  # type: ignore[method-assign]
+    result = attempt.manager.prepare(automatic=True)
+
+    assert result["ok"] is True
+    assert result["command"] == old_command
+    assert attempt.manager._read_github_build_marker(source_dir) is None
+    assert result["status"]["github_source"]["built_revision"] is None
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "en")
+    cli._print_runtime_status(result["status"])
+    output = capsys.readouterr().out
+    assert local_revision not in output
+    assert "prepared from" not in output
+    assert "serving local revision" not in output
 
 
 def test_failed_forced_build_invalidates_the_cached_command_before_retry(tmp_path: Path) -> None:
@@ -582,7 +654,7 @@ def test_failed_forced_build_invalidates_the_cached_command_before_retry(tmp_pat
     retried = harness.manager.prepare()
 
     assert forced["ok"] is False
-    assert forced["status"]["installed"] is False
+    assert forced["status"]["install"]["state"] == "absent"
     assert retried["ok"] is False
     assert retried["reason"] == "runtime_install_failed"
     assert harness.manager._managed_command is None

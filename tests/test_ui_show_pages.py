@@ -6759,7 +6759,7 @@ def test_show_runtime_manager_forced_archive_fallback_reports_failed_operation_a
     assert result["command"] == ["/bin/node", str(cli_path)]
     assert result["install"]["state"] == "installed"
     assert result["install"]["reason"] is None
-    assert result["status"]["installed"] is True
+    assert result["status"]["install"]["state"] == "installed"
     assert result["status"]["command"] == ["/bin/node", str(cli_path)]
     assert result["status"]["reason"] is None
 
@@ -6861,8 +6861,8 @@ def test_show_runtime_manager_installs_from_manifest_cache(monkeypatch, tmp_path
     assert metadata["manifest_sha256"] == manifest.digest
     assert metadata["archive_sha256"] == _sha256(archive_path)
     status = manager.status()
-    assert status["installed"] is True
-    assert status["installed_matches_manifest"] is True
+    assert status["install"]["state"] == "installed"
+    assert status["install"]["matches_manifest"] is True
 
 
 def test_show_runtime_manager_forced_manifest_fallback_reports_failed_operation_and_installed_state(
@@ -6896,7 +6896,7 @@ def test_show_runtime_manager_forced_manifest_fallback_reports_failed_operation_
     assert result["command"] == installed["command"]
     assert result["install"]["state"] == "installed"
     assert result["install"]["reason"] is None
-    assert result["status"]["installed"] is True
+    assert result["status"]["install"]["state"] == "installed"
     assert result["status"]["command"] == installed["command"]
     assert result["status"]["reason"] is None
 
@@ -7104,7 +7104,7 @@ def test_show_runtime_manager_manifest_install_dir_includes_runtime_and_archive_
     assert new_cli != old_cli
     assert new_cli.read_text(encoding="utf-8") == "new runtime\n"
     assert old_cli.read_text(encoding="utf-8") == "old runtime\n"
-    assert new_manager.status()["installed_matches_manifest"] is True
+    assert new_manager.status()["install"]["matches_manifest"] is True
 
 
 def test_show_runtime_manager_manifest_install_identity_ignores_other_platform_edits(monkeypatch, tmp_path):
@@ -7148,7 +7148,7 @@ def test_show_runtime_manager_manifest_install_identity_ignores_other_platform_e
 
     assert edited_result["ok"] is True
     assert edited_result["command"] == initial_result["command"]
-    assert edited_result["status"]["installed_matches_manifest"] is True
+    assert edited_result["status"]["install"]["matches_manifest"] is True
 
 
 def test_show_runtime_manager_adopts_previous_fingerprint_and_preserves_gc_protection(monkeypatch, tmp_path):
@@ -7557,7 +7557,7 @@ def test_show_runtime_forced_prepare_refuses_explicit_command_replacement(monkey
     }
     assert result["install"]["state"] == "installed"
     assert result["install"]["command"] == [str(local_bin)]
-    assert result["status"]["installed"] is True
+    assert result["status"]["install"]["state"] == "installed"
 
 
 def test_show_runtime_failed_prepare_does_not_clean_managed_installs(monkeypatch, tmp_path):
@@ -7839,8 +7839,8 @@ def test_show_runtime_remote_manifest_install_remains_installed_when_source_is_u
     assert skipped["install"]["state"] == "installed"
     assert skipped["runtime"]["state"] == "unchecked"
     assert skipped["command"] == command
-    assert skipped["status"]["installed"] is True
-    assert skipped["status"]["install_dir"] == str(install_dir)
+    assert skipped["status"]["install"]["state"] == "installed"
+    assert skipped["status"]["install"]["install_dir"] == str(install_dir)
 
     def fail_manifest_fetch(*_args, **_kwargs):
         raise OSError("manifest host unavailable")
@@ -7848,12 +7848,11 @@ def test_show_runtime_remote_manifest_install_remains_installed_when_source_is_u
     monkeypatch.setattr("core.show_runtime.fetch_bytes", fail_manifest_fetch)
     status = manager.status()
 
-    assert status["installed"] is True
     assert status["install"]["state"] == "installed"
     assert status["runtime"]["state"] == "unchecked"
     assert status["install"]["runtime_version"] == "runtime-test-ref"
     assert status["install"]["matches_manifest"] is None
-    assert status["installed_matches_manifest"] is None
+    assert status["install"]["matches_manifest"] is None
     assert status["command"] == command
     assert status["manifest"]["source"] == manifest_url
     assert status["reason"] == "runtime_manifest_download_failed"
@@ -7883,18 +7882,19 @@ def test_show_runtime_status_keeps_installed_identity_separate_from_selected_man
 
     status = manager.status()
 
-    assert status["installed"] is True
     assert status["install"] == {
         "state": "installed",
         "reason": None,
         "failure_class": None,
         "command": command,
+        "install_dir": str(install_dir),
         "runtime_version": "runtime-test-ref",
         "matches_manifest": False,
     }
-    assert status["installed_matches_manifest"] is False
     assert status["manifest"]["runtime_version"] == "runtime-selected-ref"
-    assert status["install_dir"] == str(install_dir)
+    assert "installed" not in status
+    assert "installed_matches_manifest" not in status
+    assert "install_dir" not in status
 
 
 def test_show_runtime_disk_install_fact_does_not_require_node(monkeypatch, tmp_path):
@@ -8013,6 +8013,7 @@ def test_show_runtime_availability_classifies_install_failure(
         "reason": reason,
         "failure_class": expected_class,
         "command": None,
+        "install_dir": None,
         "runtime_version": None,
         "matches_manifest": None,
     }
@@ -8364,7 +8365,7 @@ def test_show_runtime_manager_forced_npm_replacement_fails_when_old_tree_remains
 
     assert result["ok"] is False
     assert result["reason"] == "runtime_install_failed"
-    assert result["status"]["installed"] is True
+    assert result["status"]["install"]["state"] == "installed"
     assert managed_bin.read_text(encoding="utf-8") == "old runtime\n"
     assert install_calls == []
 
@@ -8444,7 +8445,7 @@ def test_show_runtime_manager_forced_npm_replacement_reports_delegate_exception(
     assert result["ok"] is False
     assert result["reason"] == "runtime_install_failed"
     assert result["install"]["state"] == "failed"
-    assert result["status"]["installed"] is False
+    assert result["status"]["install"]["state"] == "absent"
     assert retried["ok"] is False
     assert retried["reason"] == "runtime_install_failed"
     assert manager._managed_command is None
