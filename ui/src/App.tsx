@@ -21,7 +21,6 @@ import { VaultsPage } from './components/workbench/VaultsPage';
 import { SettingsMemoryPage } from './components/settings/SettingsMemoryPage';
 import { ChatPage } from './components/workbench/ChatPage';
 import { ProjectsPage } from './components/workbench/ProjectsPage';
-import { Dashboard } from './components/Dashboard';
 import { ChannelList } from './components/steps/ChannelList';
 import { UserList } from './components/steps/UserList';
 import { RemoteAccessPage } from './components/RemoteAccessPage';
@@ -35,6 +34,7 @@ import { SettingsLogsPage } from './components/settings/SettingsLogsPage';
 import { SettingsMessagingPage } from './components/settings/SettingsMessagingPage';
 import { SettingsPlatformsPage } from './components/settings/SettingsPlatformsPage';
 import { SettingsServicePage } from './components/settings/SettingsServicePage';
+import { SettingsLayout } from './components/settings/SettingsLayout';
 import { StatusProvider } from './context/StatusProvider';
 import { ApiProvider, useApi, ApiError } from './context/ApiContext';
 import type { SessionInfo } from './context/ApiContext';
@@ -89,10 +89,7 @@ const ShowPageRoute = lazy(() =>
 const SettingsModelsPage = lazy(() =>
   import('./components/settings/models/SettingsModelsPage').then((m) => ({ default: m.SettingsModelsPage })),
 );
-import {
-  LegacyModelHubRoute,
-  ModelHubCapabilityGate,
-} from './components/settings/models/ModelHubCapabilityGate';
+import { ModelHubCapabilityGate } from './components/settings/models/ModelHubCapabilityGate';
 import { hasConfiguredPlatformCredentials } from './lib/platforms';
 import { isIosDevice, isStandalonePwa } from './lib/platform';
 import {
@@ -107,6 +104,12 @@ import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
 import { Button } from './components/ui/button';
 import { PermissionsPage } from './features/permissions/PermissionsPage';
+import { legacySettingsRedirectTarget, LEGACY_SETTINGS_REDIRECTS } from './lib/settingsRoutes';
+
+const LegacySettingsRedirectRoute = ({ to }: { to: string }) => {
+  const { hash } = useLocation();
+  return <Navigate to={legacySettingsRedirectTarget(to, hash)} replace />;
+};
 
 const RemoteLoginGate = ({ target }: { target: string }) => {
     const { t } = useTranslation();
@@ -741,70 +744,44 @@ const router = createBrowserRouter(
         />
         <Route path="/chat/:sessionId" element={<ChatPage />} />
 
-        {/* Control Panel mode — existing pages moved under /admin/* */}
-        <Route path="/admin" element={<Navigate to="/admin/dashboard" replace />} />
-        <Route path="/admin/dashboard" element={<Dashboard />} />
-        <Route path="/admin/permissions" element={<PermissionsPage />} />
-        <Route path="/admin/remote-access" element={<RemoteAccessPage />} />
-        <Route path="/admin/groups" element={<ChannelList isPage />} />
-        <Route path="/admin/users" element={<UserList />} />
-        {/* Show Pages moved into the App Library (workbench). Redirect the old
-            control-panel page (?view=pages so it lands on the Show Pages tab the
-            bookmark asked for) so bookmarks + external links keep working. */}
-        <Route path="/admin/show-pages" element={<Navigate to="/apps/library?view=pages" replace />} />
-        <Route path="/admin/logs" element={<SettingsLogsPage standalone />} />
-        {/* No client-side route at /admin/settings: Flask owns GET /settings as
-            a JSON API. The Flask handler redirects browser-Accept hits to
-            /admin/settings/service. */}
-        <Route path="/admin/settings/service" element={<SettingsServicePage />} />
-        <Route path="/admin/settings/platforms" element={<SettingsPlatformsPage />} />
-        <Route path="/admin/settings/backends" element={<SettingsBackendsPage />} />
-        <Route path="/admin/settings/backends/opencode" element={<SettingsOpencodeProviderPage />} />
-        <Route path="/admin/settings/backends/claude" element={<SettingsClaudeProviderPage />} />
-        <Route path="/admin/settings/backends/codex" element={<SettingsCodexProviderPage />} />
-        <Route
-          path="/admin/settings/models"
-          element={
-            <ModelHubCapabilityGate>
-              <Suspense fallback={<AppsRouteFallback />}>
-                <SettingsModelsPage />
-              </Suspense>
-            </ModelHubCapabilityGate>
-          }
-        />
-        <Route path="/admin/settings/dependencies" element={<SettingsDependenciesPage />} />
-        <Route path="/admin/settings/memory" element={<SettingsMemoryPage />} />
-        <Route path="/admin/settings/messaging" element={<SettingsMessagingPage />} />
-        <Route path="/admin/settings/diagnostics" element={<SettingsDiagnosticsPage />} />
-        <Route path="/admin/settings/logs" element={<SettingsLogsPage />} />
+        {/* Settings stays inside the Workbench shell. The section rail is the
+            only second-level navigation; provider/platform routes remain
+            inline detail screens beneath their owning section. */}
+        <Route path="/settings" element={<SettingsLayout />}>
+          <Route index element={null} />
+          <Route path="appearance" element={<Navigate to="/settings/replies" replace />} />
+          <Route path="account" element={<Navigate to="/settings/replies" replace />} />
+          <Route path="service" element={<SettingsServicePage />} />
+          <Route path="platforms" element={<SettingsPlatformsPage />} />
+          <Route path="platforms/groups" element={<ChannelList isPage />} />
+          <Route path="platforms/users" element={<UserList />} />
+          <Route path="remote-access" element={<RemoteAccessPage />} />
+          <Route path="backends" element={<SettingsBackendsPage />} />
+          <Route path="backends/opencode" element={<SettingsOpencodeProviderPage />} />
+          <Route path="backends/claude" element={<SettingsClaudeProviderPage />} />
+          <Route path="backends/codex" element={<SettingsCodexProviderPage />} />
+          <Route
+            path="models"
+            element={
+              <ModelHubCapabilityGate>
+                <Suspense fallback={<AppsRouteFallback />}>
+                  <SettingsModelsPage />
+                </Suspense>
+              </ModelHubCapabilityGate>
+            }
+          />
+          <Route path="dependencies" element={<SettingsDependenciesPage />} />
+          <Route path="memory" element={<SettingsMemoryPage />} />
+          <Route path="replies" element={<SettingsMessagingPage />} />
+          <Route path="diagnostics" element={<SettingsDiagnosticsPage />} />
+          <Route path="diagnostics/logs" element={<SettingsLogsPage />} />
+          <Route path="access" element={<PermissionsPage />} />
+        </Route>
 
-        {/* Legacy redirects: old top-level paths → /admin/* equivalents.
-            Bookmarked URLs and external links keep working without a server
-            round-trip. */}
-        <Route path="/dashboard" element={<Navigate to="/admin/dashboard" replace />} />
-        <Route path="/groups" element={<Navigate to="/admin/groups" replace />} />
-        <Route path="/channels" element={<Navigate to="/admin/groups" replace />} />
-        <Route path="/users" element={<Navigate to="/admin/users" replace />} />
-        <Route path="/logs" element={<Navigate to="/admin/logs" replace />} />
-        {/* Exact /settings — the server used to redirect browser hits here
-            to the settings UI, but that handler moved to /api/settings in
-            the route migration. Keep the bookmark working client-side. */}
-        <Route path="/settings" element={<Navigate to="/admin/settings/service" replace />} />
-        <Route path="/settings/service" element={<Navigate to="/admin/settings/service" replace />} />
-        <Route path="/settings/platforms" element={<Navigate to="/admin/settings/platforms" replace />} />
-        <Route path="/settings/backends" element={<Navigate to="/admin/settings/backends" replace />} />
-        <Route path="/settings/backends/opencode" element={<Navigate to="/admin/settings/backends/opencode" replace />} />
-        <Route path="/settings/backends/claude" element={<Navigate to="/admin/settings/backends/claude" replace />} />
-        <Route path="/settings/backends/codex" element={<Navigate to="/admin/settings/backends/codex" replace />} />
-        <Route path="/settings/models" element={<LegacyModelHubRoute />} />
-        <Route path="/settings/dependencies" element={<Navigate to="/admin/settings/dependencies" replace />} />
-        <Route path="/settings/memory" element={<Navigate to="/admin/settings/memory" replace />} />
-        <Route path="/settings/messaging" element={<Navigate to="/admin/settings/messaging" replace />} />
-        <Route path="/settings/diagnostics" element={<Navigate to="/admin/settings/diagnostics" replace />} />
-        <Route path="/settings/logs" element={<Navigate to="/admin/settings/logs" replace />} />
-        <Route path="/remote-access" element={<Navigate to="/admin/remote-access" replace />} />
-        <Route path="/doctor" element={<Navigate to="/admin/settings/diagnostics" replace />} />
-        <Route path="/doctor/logs" element={<Navigate to="/admin/logs" replace />} />
+        {/* Retired admin and top-level routes only translate old deep links. */}
+        {LEGACY_SETTINGS_REDIRECTS.map(({ from, to }) => (
+          <Route key={from} path={from} element={<LegacySettingsRedirectRoute to={to} />} />
+        ))}
         {/* The server intentionally serves the SPA shell for every extensionless
             path. Keep stale bookmarks and retired push targets inside AuthGuard,
             then recover authenticated/local clients to the workbench root. */}

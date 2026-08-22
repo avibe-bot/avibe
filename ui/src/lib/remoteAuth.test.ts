@@ -54,7 +54,12 @@ describe('remote auth navigation', () => {
     },
   );
 
-  it.each(['/admin/logs', '/admin/settings/diagnostics'])(
+  it.each([
+    '/settings/diagnostics',
+    '/settings/diagnostics/logs',
+    '/admin/logs',
+    '/admin/settings/diagnostics',
+  ])(
     'keeps remote session authentication enabled while bypassing setup checks for %s',
     async (path) => {
       const getSession = vi.fn(async () => ({ remote: true, authenticated: false }));

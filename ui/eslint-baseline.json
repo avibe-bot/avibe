@@ -11,10 +11,7 @@
   "violations": {
     "src/components/AppShell.tsx": {
       "@typescript-eslint/no-explicit-any": 2,
-      "react-hooks/set-state-in-effect": 2
-    },
-    "src/components/Dashboard.tsx": {
-      "@typescript-eslint/no-explicit-any": 9
+      "react-hooks/set-state-in-effect": 1
     },
     "src/components/InstallHint.tsx": {
       "react-hooks/set-state-in-effect": 1

@@ -179,7 +179,7 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
           }
           headerRight={
             <Link
-              to="/admin/settings/models"
+              to="/settings/models"
               onClick={(e) => e.stopPropagation()}
               className="model-hub-action-mint inline-flex shrink-0 items-center gap-1 text-[13px] font-medium transition-colors"
             >

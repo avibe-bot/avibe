@@ -278,7 +278,7 @@ function ShowPageRow({
                     <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
                       <TriangleAlert size={13} className="text-gold-ink" />
                       <span className="text-muted">{t('showPages.cloudOff')}</span>
-                      <a href="/admin/remote-access" className="font-semibold text-gold-ink hover:underline">
+                      <a href="/settings/remote-access" className="font-semibold text-gold-ink hover:underline">
                         {t('showPages.connectCloud')} →
                       </a>
                     </div>
