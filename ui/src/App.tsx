@@ -108,7 +108,12 @@ import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
 import { Button } from './components/ui/button';
 import { PermissionsPage } from './features/permissions/PermissionsPage';
-import { LEGACY_SETTINGS_REDIRECTS } from './lib/settingsRoutes';
+import { legacySettingsRedirectTarget, LEGACY_SETTINGS_REDIRECTS } from './lib/settingsRoutes';
+
+const LegacySettingsRedirectRoute = ({ to }: { to: string }) => {
+  const { hash } = useLocation();
+  return <Navigate to={legacySettingsRedirectTarget(to, hash)} replace />;
+};
 
 const RemoteLoginGate = ({ target }: { target: string }) => {
     const { t } = useTranslation();
@@ -779,7 +784,7 @@ const router = createBrowserRouter(
 
         {/* Retired admin and top-level routes only translate old deep links. */}
         {LEGACY_SETTINGS_REDIRECTS.map(({ from, to }) => (
-          <Route key={from} path={from} element={<Navigate to={to} replace />} />
+          <Route key={from} path={from} element={<LegacySettingsRedirectRoute to={to} />} />
         ))}
         {/* The server intentionally serves the SPA shell for every extensionless
             path. Keep stale bookmarks and retired push targets inside AuthGuard,

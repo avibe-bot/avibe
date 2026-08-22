@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { APPLICATION_ROUTE_PATHS } from './applicationRoutes';
-import { LEGACY_SETTINGS_REDIRECTS } from './settingsRoutes';
+import { legacySettingsRedirectTarget, LEGACY_SETTINGS_REDIRECTS } from './settingsRoutes';
 
 describe('legacy Settings redirects', () => {
   it('translates every retired admin route exactly once', () => {
@@ -19,5 +19,11 @@ describe('legacy Settings redirects', () => {
     expect(
       LEGACY_SETTINGS_REDIRECTS.every(({ to }) => applicationRoutes.has(to.split(/[?#]/, 1)[0]!)),
     ).toBe(true);
+  });
+
+  it('preserves retired anchors for destination-level compatibility handling', () => {
+    expect(legacySettingsRedirectTarget('/settings/service', '#remote-access')).toBe(
+      '/settings/service#remote-access',
+    );
   });
 });

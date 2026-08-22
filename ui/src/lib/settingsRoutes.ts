@@ -3,6 +3,9 @@ export type LegacySettingsRedirect = {
   to: string;
 };
 
+export const legacySettingsRedirectTarget = (to: string, hash: string): string =>
+  hash && !to.includes('#') ? `${to}${hash}` : to;
+
 // Keep every retired route as a client-side redirect so bookmarks, PWA state,
 // and links from older releases all arrive at the canonical Settings surface.
 export const LEGACY_SETTINGS_REDIRECTS: LegacySettingsRedirect[] = [
