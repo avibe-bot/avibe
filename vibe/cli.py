@@ -21,7 +21,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from pathlib import Path
 from textwrap import dedent
 from typing import Any, Callable, Mapping, NamedTuple, Optional
@@ -11998,6 +12000,39 @@ def _doctor_repair_result(target: str, status: str, message: str, **details) -> 
     return payload
 
 
+class _ShowRuntimeStartabilityState(str, Enum):
+    STARTABLE = "startable"
+    NOT_STARTABLE = "not_startable"
+    UNDETERMINED = "undetermined"
+
+
+@dataclass(frozen=True)
+class _ShowRuntimeStartability:
+    state: _ShowRuntimeStartabilityState
+    reason: str | None = None
+    detail: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.state is _ShowRuntimeStartabilityState.STARTABLE and (self.reason or self.detail):
+            raise ValueError("startable outcome cannot carry failure evidence")
+        if self.state is _ShowRuntimeStartabilityState.NOT_STARTABLE and (not self.reason or self.detail):
+            raise ValueError("not-startable outcome requires only a reason")
+        if self.state is _ShowRuntimeStartabilityState.UNDETERMINED and (self.reason or not self.detail):
+            raise ValueError("undetermined outcome requires only a detail")
+
+    @classmethod
+    def startable(cls) -> "_ShowRuntimeStartability":
+        return cls(_ShowRuntimeStartabilityState.STARTABLE)
+
+    @classmethod
+    def not_startable(cls, reason: str) -> "_ShowRuntimeStartability":
+        return cls(_ShowRuntimeStartabilityState.NOT_STARTABLE, reason=reason)
+
+    @classmethod
+    def undetermined(cls, detail: str) -> "_ShowRuntimeStartability":
+        return cls(_ShowRuntimeStartabilityState.UNDETERMINED, detail=detail)
+
+
 def _write_refreshed_runtime_status() -> None:
     # Asked, not re-derived. A repair that wrote its own idea of the state word
     # would be the second place deciding one fact -- and the one that persists
@@ -12303,8 +12338,70 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
 
     manager = ShowRuntimeManager()
     before = manager.status()
+
+    def verify_startability(command_value: Any) -> _ShowRuntimeStartability:
+        command = command_value if isinstance(command_value, list) else []
+        if not command:
+            return _ShowRuntimeStartability.not_startable("runtime_command_missing")
+        try:
+            with tempfile.TemporaryDirectory(prefix="avibe-show-runtime-doctor-") as verification_root_value:
+                verification_root = Path(verification_root_value)
+                verifier = ShowRuntimeManager(
+                    command=shlex.join(str(part) for part in command),
+                    workspace_root=verification_root / "show",
+                    runtime_dir=verification_root / "runtime",
+                    auto_install=False,
+                )
+                try:
+                    result = asyncio.run(verifier.ensure())
+                finally:
+                    verifier.stop()
+        except Exception as exc:  # noqa: BLE001
+            detail = str(exc).strip() or type(exc).__name__
+            return _ShowRuntimeStartability.undetermined(detail)
+        if result.available:
+            return _ShowRuntimeStartability.startable()
+        return _ShowRuntimeStartability.not_startable(result.reason or "runtime_start_failed")
+
+    language = _configured_cli_language()
     if before.get("installed"):
-        return _doctor_repair_result(target, "skipped", "Show Runtime is already ready.")
+        startability = verify_startability(before.get("command"))
+        if startability.state is _ShowRuntimeStartabilityState.UNDETERMINED:
+            return _doctor_repair_result(
+                target,
+                "failed",
+                i18n_t("runtime.doctor.repairVerificationFailed", language, detail=startability.detail),
+                provider=before.get("provider"),
+                platform=before.get("platform"),
+                install_dir=before.get("install_dir"),
+                installed=True,
+                reason="runtime_start_verification_failed",
+                start_error=startability.detail,
+            )
+        if startability.state is _ShowRuntimeStartabilityState.STARTABLE:
+            return _doctor_repair_result(
+                target,
+                "skipped",
+                i18n_t("runtime.doctor.repairHealthy", language),
+                provider=before.get("provider"),
+                platform=before.get("platform"),
+                install_dir=before.get("install_dir"),
+            )
+        if startability.state is not _ShowRuntimeStartabilityState.NOT_STARTABLE:
+            raise AssertionError(f"Unhandled Show Runtime startability: {startability.state}")
+        if before.get("explicit_command"):
+            reason = startability.reason or "runtime_start_failed"
+            return _doctor_repair_result(
+                target,
+                "failed",
+                i18n_t("runtime.doctor.repairExplicitCommandFailed", language, reason=reason),
+                provider=before.get("provider"),
+                platform=before.get("platform"),
+                install_dir=before.get("install_dir"),
+                installed=True,
+                reason=reason,
+                explicit_command=before.get("explicit_command"),
+            )
 
     archive = before.get("archive") if isinstance(before.get("archive"), dict) else {}
     archive_url = str(archive.get("url") or "")
@@ -12315,23 +12412,47 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
         return _doctor_repair_result(
             target,
             "failed",
-            "The packaged Show Runtime manifest is unavailable and the legacy upstream archive URL has no release asset. "
-            "Upgrade or reinstall the official Avibe package, or remove stale runtime source overrides.",
+            i18n_t("runtime.doctor.repairLegacyArchiveUnavailable", language),
             provider=before.get("provider"),
             archive_url=archive_url,
         )
 
-    result = manager.prepare(force=False)
+    result = manager.prepare(force=bool(before.get("installed")))
     status = result.get("status") if isinstance(result.get("status"), dict) else {}
     if result.get("ok"):
-        return _doctor_repair_result(
-            target,
-            "repaired",
-            "Prepared the manifest-selected Show Runtime.",
-            provider=result.get("provider"),
-            platform=result.get("platform"),
-            install_dir=status.get("install_dir"),
-        )
+        startability = verify_startability(result.get("command"))
+        if startability.state is _ShowRuntimeStartabilityState.STARTABLE:
+            return _doctor_repair_result(
+                target,
+                "repaired",
+                i18n_t("runtime.doctor.repairStarted", language),
+                provider=result.get("provider"),
+                platform=result.get("platform"),
+                install_dir=status.get("install_dir"),
+            )
+        if startability.state is _ShowRuntimeStartabilityState.NOT_STARTABLE:
+            reason = startability.reason or "runtime_start_failed"
+            return _doctor_repair_result(
+                target,
+                "failed",
+                i18n_t("runtime.doctor.repairStartFailed", language, reason=reason),
+                provider=result.get("provider"),
+                platform=result.get("platform"),
+                install_dir=status.get("install_dir"),
+                reason=reason,
+            )
+        if startability.state is _ShowRuntimeStartabilityState.UNDETERMINED:
+            return _doctor_repair_result(
+                target,
+                "failed",
+                i18n_t("runtime.doctor.repairPostVerificationFailed", language, detail=startability.detail),
+                provider=result.get("provider"),
+                platform=result.get("platform"),
+                install_dir=status.get("install_dir"),
+                reason="runtime_start_verification_failed",
+                start_error=startability.detail,
+            )
+        raise AssertionError(f"Unhandled Show Runtime startability: {startability.state}")
 
     reason = str(result.get("reason") or "runtime_prepare_failed")
     download_error = status.get("download_error") if isinstance(status.get("download_error"), dict) else None
@@ -12344,7 +12465,7 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
     return _doctor_repair_result(
         target,
         "failed",
-        f"Show Runtime preparation failed: {detail}",
+        i18n_t("runtime.doctor.repairPrepareFailed", language, detail=detail),
         provider=result.get("provider"),
         platform=result.get("platform"),
         reason=reason,

@@ -6211,7 +6211,8 @@ def test_show_runtime_manager_passes_runtime_options(monkeypatch, tmp_path):
         captured["command"] = command
         return FakeProcess()
 
-    async def fake_startup_url():
+    async def fake_startup_url(*, deadline):
+        captured["startup_deadline"] = deadline
         return "http://127.0.0.1:12345"
 
     manager = ShowRuntimeManager(
@@ -6222,6 +6223,7 @@ def test_show_runtime_manager_passes_runtime_options(monkeypatch, tmp_path):
     monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: [command])
     monkeypatch.setattr("core.show_runtime.subprocess.Popen", fake_popen)
     monkeypatch.setattr(manager, "_read_startup_url", fake_startup_url)
+    monkeypatch.setattr(manager, "_healthy", lambda _base_url: asyncio.sleep(0, result=True))
 
     result = asyncio.run(manager.ensure())
 
@@ -6230,6 +6232,245 @@ def test_show_runtime_manager_passes_runtime_options(monkeypatch, tmp_path):
     assert captured["command"][cache_index + 1] == str(tmp_path / "runtime" / "vite-cache")
     index = captured["command"].index("--fallback-delay-seconds")
     assert captured["command"][index + 1] == str(SHOW_RUNTIME_RECOVERY_LOADING_DELAY_SECONDS)
+    assert captured["startup_deadline"] > 0
+
+
+def test_show_runtime_manager_retries_health_until_ready(monkeypatch, tmp_path):
+    class FakeProcess:
+        def poll(self):
+            return None
+
+    health_results = iter([False, True])
+    manager = ShowRuntimeManager(
+        command="/bin/runtime-cli",
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+
+    monkeypatch.setattr("core.show_runtime._STARTUP_READY_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr("core.show_runtime._STARTUP_POLL_INTERVAL_SECONDS", 0.001)
+    monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: [command])
+    monkeypatch.setattr("core.show_runtime.subprocess.Popen", lambda *_args, **_kwargs: FakeProcess())
+    monkeypatch.setattr(
+        manager,
+        "_read_startup_url",
+        lambda *, deadline: asyncio.sleep(0, result="http://127.0.0.1:12345"),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_healthy",
+        lambda _base_url: asyncio.sleep(0, result=next(health_results)),
+    )
+
+    result = asyncio.run(manager.ensure())
+
+    assert result.available is True
+    assert result.base_url == "http://127.0.0.1:12345"
+
+
+def test_show_runtime_manager_accepts_slow_health_within_shared_startup_budget(monkeypatch, tmp_path):
+    class FakeProcess:
+        def poll(self):
+            return None
+
+    manager = ShowRuntimeManager(
+        command="/bin/runtime-cli",
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+    stopped_live_processes = []
+    health_attempts = []
+
+    def fake_stop():
+        stopped_live_processes.append(manager._process is not None)
+        manager._process = None
+        manager._base_url = None
+
+    async def slow_startup_url(*, deadline):
+        await asyncio.sleep(0.02)
+        return "http://127.0.0.1:12345"
+
+    async def slow_health(_base_url):
+        health_attempts.append(True)
+        await asyncio.sleep(0.02)
+        return len(health_attempts) > 1
+
+    monkeypatch.setattr("core.show_runtime._STARTUP_READY_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr("core.show_runtime._STARTUP_POLL_INTERVAL_SECONDS", 0.001)
+    monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: [command])
+    monkeypatch.setattr("core.show_runtime.subprocess.Popen", lambda *_args, **_kwargs: FakeProcess())
+    monkeypatch.setattr(manager, "_read_startup_url", slow_startup_url)
+    monkeypatch.setattr(manager, "_healthy", slow_health)
+    monkeypatch.setattr(manager, "stop", fake_stop)
+
+    result = asyncio.run(manager.ensure())
+
+    assert result.available is True
+    assert len(health_attempts) == 2
+    assert stopped_live_processes == [False]
+
+
+def test_show_runtime_manager_reports_health_timeout_after_retrying(monkeypatch, tmp_path):
+    class FakeProcess:
+        def poll(self):
+            return None
+
+    manager = ShowRuntimeManager(
+        command="/bin/runtime-cli",
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+    health_attempts = []
+    stopped_live_processes = []
+
+    def fake_stop():
+        stopped_live_processes.append(manager._process is not None)
+        manager._process = None
+        manager._base_url = None
+
+    monkeypatch.setattr("core.show_runtime._STARTUP_READY_TIMEOUT_SECONDS", 0.03)
+    monkeypatch.setattr("core.show_runtime._STARTUP_POLL_INTERVAL_SECONDS", 0.001)
+    monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: [command])
+    monkeypatch.setattr("core.show_runtime.subprocess.Popen", lambda *_args, **_kwargs: FakeProcess())
+    monkeypatch.setattr(
+        manager,
+        "_read_startup_url",
+        lambda *, deadline: asyncio.sleep(0, result="http://127.0.0.1:12345"),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_healthy",
+        lambda _base_url: health_attempts.append(True) or asyncio.sleep(0, result=False),
+    )
+    monkeypatch.setattr(manager, "stop", fake_stop)
+
+    result = asyncio.run(manager.ensure())
+
+    assert result.available is False
+    assert result.reason == "runtime_start_health_timeout"
+    assert len(health_attempts) > 1
+    assert stopped_live_processes == [False, True]
+
+
+def test_show_runtime_manager_bounds_in_flight_health_probe_by_shared_deadline(monkeypatch, tmp_path):
+    class FakeProcess:
+        def poll(self):
+            return None
+
+    manager = ShowRuntimeManager(
+        command="/bin/runtime-cli",
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+
+    monkeypatch.setattr("core.show_runtime._STARTUP_READY_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: [command])
+    monkeypatch.setattr("core.show_runtime.subprocess.Popen", lambda *_args, **_kwargs: FakeProcess())
+    monkeypatch.setattr(
+        manager,
+        "_read_startup_url",
+        lambda *, deadline: asyncio.sleep(0, result="http://127.0.0.1:12345"),
+    )
+    monkeypatch.setattr(manager, "_healthy", lambda _base_url: asyncio.sleep(1, result=True))
+    monkeypatch.setattr(manager, "stop", lambda: setattr(manager, "_process", None))
+
+    result = asyncio.run(manager.ensure())
+
+    assert result.available is False
+    assert result.reason == "runtime_start_health_timeout"
+
+
+def test_show_runtime_manager_reports_url_timeout_separately(monkeypatch, tmp_path):
+    class FakeProcess:
+        def poll(self):
+            return None
+
+    manager = ShowRuntimeManager(
+        command="/bin/runtime-cli",
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+
+    def fake_stop():
+        manager._process = None
+        manager._base_url = None
+
+    monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: [command])
+    monkeypatch.setattr("core.show_runtime.subprocess.Popen", lambda *_args, **_kwargs: FakeProcess())
+    monkeypatch.setattr(manager, "_read_startup_url", lambda *, deadline: asyncio.sleep(0, result=None))
+    monkeypatch.setattr(manager, "stop", fake_stop)
+
+    result = asyncio.run(manager.ensure())
+
+    assert result.available is False
+    assert result.reason == "runtime_start_url_timeout"
+
+
+def test_show_runtime_manager_rejects_process_that_exits_before_health(monkeypatch, tmp_path):
+    health_checks = []
+
+    class ExitedProcess:
+        def poll(self):
+            return 1
+
+    manager = ShowRuntimeManager(
+        command="/bin/runtime-cli",
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+    monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: [command])
+    monkeypatch.setattr("core.show_runtime.subprocess.Popen", lambda *_args, **_kwargs: ExitedProcess())
+    monkeypatch.setattr(
+        manager,
+        "_read_startup_url",
+        lambda *, deadline: asyncio.sleep(0, result="http://127.0.0.1:12345"),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_healthy",
+        lambda base_url: health_checks.append(base_url) or asyncio.sleep(0, result=True),
+    )
+
+    result = asyncio.run(manager.ensure())
+
+    assert result.available is False
+    assert result.reason == "runtime_start_process_unavailable"
+    assert health_checks == []
+    assert manager._process is None
+
+
+def test_show_runtime_manager_rejects_process_that_exits_after_health(monkeypatch, tmp_path):
+    class ExitsAfterHealthProcess:
+        health_completed = False
+
+        def poll(self):
+            return 1 if self.health_completed else None
+
+    process = ExitsAfterHealthProcess()
+    manager = ShowRuntimeManager(
+        command="/bin/runtime-cli",
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+
+    async def healthy_then_exit(_base_url):
+        process.health_completed = True
+        return True
+
+    monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: [command])
+    monkeypatch.setattr("core.show_runtime.subprocess.Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(
+        manager,
+        "_read_startup_url",
+        lambda *, deadline: asyncio.sleep(0, result="http://127.0.0.1:12345"),
+    )
+    monkeypatch.setattr(manager, "_healthy", healthy_then_exit)
+
+    result = asyncio.run(manager.ensure())
+
+    assert result.available is False
+    assert result.reason == "runtime_start_process_unavailable"
+    assert manager._process is None
 
 
 def test_show_runtime_manager_prewarm_loads_entry_module(monkeypatch, tmp_path):
