@@ -134,18 +134,17 @@ These values are not durability promises or user settings.
 
 Admission performs no EverOS I/O and no unbounded wait:
 
-1. Run existing authorization, size, scope, duplicate, and request overflow checks.
-2. Atomically reserve one writer permit or return `CaptureSkipped`. The permit
-   covers attachment pinning, identity admission, queue residence, provider I/O,
-   and terminal cleanup, so concurrent preparation cannot exceed the bound.
+1. Run existing authorization, size, scope, and request overflow checks.
+2. Under one process-local lock, reserve a permit and claim the source digest in
+   the 256-entry dedupe LRU; existing digests return `CaptureDuplicate`, and failed claims are removed.
 3. Pin optional attachments under that permit. On any pin failure, attempt cleanup
    once and admit a non-empty caption as text-only under the same reservation;
    attachment-only input drops.
 4. In one short admission critical section and bounded SQLite transaction, compute
    candidate catalog and timestamp state. Reject a 17th project or a value above
    `MAX_PROVIDER_TIMESTAMP_MS` before mutating either durable field.
-5. Convert the reservation to a queue item before leaving the critical section;
-   reserved capacity prevents a concurrent queue-full failure.
+5. Convert the reservation to a queue item and the digest to admitted before
+   leaving the critical section; reserved capacity prevents queue-full failure.
 
 Any admission failure without a text fallback releases the permit. A cancelled
 generation returns immediately, but an underlying pin/provider job keeps its shared
@@ -158,7 +157,8 @@ operation is terminal; attachment cleanup follows the bounded rule below.
 
 ### Ordered worker and retries
 
-One worker performs provider operations serially and preserves queue order.
+One worker preserves ready-queue order. Concurrent attachment preparation may
+reorder caller arrival; arrival-order FIFO is not a contract.
 
 Each add or flush may use at most three total attempts, and only when the previous
 failure is proven to precede provider execution. A possibly submitted timeout,
@@ -178,6 +178,10 @@ write failure never creates a retry or blocks later capture.
 `PendingFlush` stores only a provider-session reference, raw session reference,
 timestamps, count, and at most 100 message ids. It is bounded to 256 provider
 sessions and disappears on extraction, runtime replacement, or process exit.
+
+A single process-local scheduler, with no per-session tasks, wakes at the next
+idle/age deadline; the 100th acknowledgement also invokes it. Each trigger makes
+one permit-backed queue offer. Failure defers five minutes; success extracts it.
 
 If the tracker is full, keep the successful add but leave its session untracked.
 `/new` and archive make one non-blocking attempt to enqueue a session barrier and
@@ -308,19 +312,15 @@ the same time merely to split the diff.
 
 | Scenario | Contract |
 |---|---|
-| `MEMORY-INDEP-001` | retain non-blocking chat, `/new`, and archive |
-| `MEMORY-INDEP-002` | retain permitted stale-capture loss at session transition |
-| `MEMORY-INDEP-003` | rewrite shutdown to drop instead of drain |
-| `MEMORY-INDEP-008` | rewrite shutdown to avoid capture/flush settlement waits |
-| `MEMORY-INDEP-010` | retain lifecycle boundary without a delivery guarantee |
-| `MEMORY-INDEP-012` | retain content-free service logging and no IM alert |
-| `MEMORY-SEARCH-006` | rewrite final flush as a best-effort bounded barrier |
-| `MEMORY-SEARCH-013` | rewrite terminal flush to allow missed captured scopes |
+| `MEMORY-INDEP-001`, `-002`, `-010`, `-012` | retain non-blocking lifecycle, accepted loss, and content-free logs |
+| `MEMORY-INDEP-003`, `-008` | rewrite shutdown to drop without settlement waits |
+| `MEMORY-SEARCH-006`, `-012`, `-013` | remove reopen recovery; rewrite flush as a bounded barrier |
+| `MEMORY-CLEAR-201` | remove `manual_required`; Clear still discards volatile work |
+| `MEMORY-REPAIR-006` | rewrite Repair to use the authority transition barrier |
 | `MEMORY-FACTORY-003`, `-004`, `-201` | retain exclusion; include pin jobs in the barrier |
 | `MEMORY-IM-ATTACH-004`, `-009`, `-011` | retain normal cleanup/fallback; bound cleanup failure |
 
-Remove or rewrite scenarios that require replay, `manual_required`, exact
-Processing Record history, or shutdown drain.
+Remove scenarios that require replay, exact Processing Record history, or drain.
 
 ### Validation
 
@@ -332,8 +332,8 @@ Processing Record history, or shutdown drain.
   writes.
 - The 256 permits bound preparation plus queued/in-flight work; rejected project or
   timestamp candidates leave catalog and watermark unchanged.
-- Healthy admitted captures reach a fake provider in FIFO order; queue and flush
-  trackers stay within bounds.
+- Ready queue items reach a fake provider in queue order; concurrent preparation
+  may reorder arrivals, and queue and flush trackers stay within bounds.
 - Offers, barriers, replacement, and shutdown never wait for delivery; transitions
   intentionally discard volatile state.
 - Adds and flushes stop after three attempts; pin failures and the sole provider
