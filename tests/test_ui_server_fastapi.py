@@ -1786,6 +1786,29 @@ def test_config_get_on_fresh_install_returns_default_needing_setup(monkeypatch, 
     assert not paths.get_config_path().exists(), "GET must not persist a config file"
 
 
+def test_show_page_api_timeout_round_trips_through_config_routes(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import api
+
+    api.save_config(_full_config_payload())
+    client = app.test_client()
+
+    initial = client.get("/api/config")
+    updated = client.post(
+        "/api/config",
+        json={"runtime": {"show_page_api_timeout_seconds": 12.5}},
+        headers=csrf_headers(client),
+    )
+    fetched = client.get("/api/config")
+
+    assert initial.status_code == 200
+    assert initial.get_json()["runtime"]["show_page_api_timeout_seconds"] == 90.0
+    assert updated.status_code == 200
+    assert updated.get_json()["runtime"]["show_page_api_timeout_seconds"] == 12.5
+    assert fetched.status_code == 200
+    assert fetched.get_json()["runtime"]["show_page_api_timeout_seconds"] == 12.5
+
+
 def test_first_config_post_starts_remote_access_monitoring(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setattr(ui_server, "_UI_RUNTIME_ACTIVE", True)
