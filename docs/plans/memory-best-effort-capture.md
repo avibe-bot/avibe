@@ -101,8 +101,11 @@ provider root.
 - Ambiguous add/flush results may leave a rare duplicate if EverOS
   committed and Avibe could not observe the ack. They are not retried.
 - Session-boundary flush is best-effort. Admission saturation can reject a
-  barrier, and a process crash can drop volatile boundary candidates, leaving
-  old and new conversation content in the same EverOS accumulation boundary.
+  barrier. Process crash/restart, disable, graceful shutdown, runtime-affecting
+  configuration replacement, and Clear/Reset generation invalidation all drop
+  volatile boundary candidates; when the provider buffer survives the
+  transition, old and new conversation content may share one accumulation
+  boundary.
 - Duplicate source-message suppression is process-local. A restart may
   recapture the same IM or remember payload if the caller submits it
   again.
@@ -176,8 +179,10 @@ Suggested starting constants, fixed rather than user settings:
   the request did not commit (UDS refused before send, sidecar not ready,
   provider error classified uncommitted)
 - max total flush attempts: 3 (`MAX_FLUSH_ATTEMPTS`), but only before the
-  provider coroutine may have executed; a submitted flush is never retried
-  regardless of its response
+  provider coroutine may have executed **after** a durable observation gap has
+  opened. Observer-SQLite preflight failure is not a provider attempt and does
+  not consume this bound; a submitted flush is never retried regardless of its
+  response
 - do not retry timeout, truncated response, malformed success, or any
   result that may have committed
 - idle flush: 5 minutes (`SessionFlushCoordinator.IDLE_FLUSH_TIMEOUT`)
@@ -234,16 +239,20 @@ gap at that lifecycle bound, replace the sidecar, and submit this incomplete
 flush before later work. A returned but semantically unknown response with a
 valid request id can enqueue the same due flush immediately without sidecar
 replacement. `/new` and archive still return without waiting. A process crash
-may lose this volatile boundary action, but its durable guard remains
-incomplete. Failure of any required pre-submission guard/gap write skips the add
-without calling EverOS.
+or any generation-invalidating transition may lose this volatile boundary
+action, but its durable guard remains incomplete unless Clear/Reset deliberately
+deletes observer identity with the provider root. Failure of any required
+pre-submission guard/gap write skips the add without calling EverOS.
 
 When an entry becomes due, the worker snapshots it for one flush attempt. A
-failure proven to occur before the provider coroutine can execute may retain
-that same entry for at most three total attempts. At the exact submission edge
-where the provider coroutine may execute, remove the entry from the map and
-carry its bounded message-id snapshot and completeness bit only in the in-flight
-slot. Mark its durable guard incomplete before submission. Success,
+failure to commit its observer preflight does not increment `attempts`: retain
+the same due entry, schedule one delayed process-local retry, and create no
+additional slot or task. Only after the durable gap opens can a failure proven
+to occur before the provider coroutine executes consume one of at most three
+total attempts. At the exact submission edge where the provider coroutine may
+execute, remove the entry from the map and carry its bounded message-id snapshot
+and completeness bit only in the in-flight slot. Mark its durable guard
+incomplete before submission. Success,
 rejection, timeout, malformed response, cancellation, and any other ambiguous
 submitted outcome all consume that snapshot permanently; none reinsert or
 reschedule it. An acknowledged flush or natural `extracted` add deletes that
@@ -504,8 +513,9 @@ observer state into delivery state:
    volatile provisional boundary reservation above happens first and is rolled
    back if preflight fails. A gap never closes or replaces another attempt's
    gap. If preflight fails, the provider is not called: an add is skipped, while
-   a due flush retains its snapshot only for the bounded pre-submission retry
-   policy above.
+   a due flush retains the same snapshot and retries after a process-local delay
+   without incrementing its provider-attempt counter. It cannot be dropped as an
+   exhausted operation because no durable anomaly/gap authority exists yet.
 2. If a result contains a valid request id, one transaction inserts every
    provenance row for that call with the preflight provider-start time, inserts
    its source-expiring sanitized anomaly only when the logical capture/flush is
@@ -523,11 +533,11 @@ observer state into delivery state:
    ambiguously submitted provider call.
 3. If an add result proves no request left Avibe, or a flush attempt fails before
    its provider coroutine can execute, restore the add's prior boundary snapshot
-   and delete only that gap before any permitted retry. On the final bounded
-   failure, insert the queue-backed sanitized anomaly with its 90-day expiry in
-   the same transaction. If that transaction fails, drop the item and leave the
-   gap open with both source flags fail-closed. A retry opens a new independent
-   gap.
+   and delete only that already-durable gap before any permitted retry. On the
+   final bounded failure, insert the queue-backed sanitized anomaly with its
+   90-day expiry in the same transaction. If that settlement transaction fails,
+   the preflight gap remains durable with both source flags, so dropping the item
+   is fail-closed. A retry opens a new independent gap.
 4. A timeout, truncated or malformed response, cancellation, or other submitted
    result without a trustworthy request id inserts a settlement-backed
    `result_unknown` anomaly when possible and atomically clears only that gap's
@@ -567,13 +577,18 @@ most 256 ranges. When the bound would be exceeded, coalesce the oldest closed
 ranges, OR their source flags, and widen their time coverage rather than
 dropping a hole. Never merge away the exact token for an open provider attempt;
 if no closed range can make capacity, fail preflight or retention pruning before
-the provider call or provenance deletion. A closed correlation flag may retire
-only when its range is wholly older than the Provider Call Log cutoff; an open
-flag never age-deletes. Delete the row only after both source flags retire. This
-may hide a good observation conservatively, but cannot authorize or display an
-incomplete source as complete. Clear's `reset_for_clear` deletes provenance
-rows, anomalies, correlation guards, and observation gaps with the catalog and
-watermark reset; Factory Reset deletes them with `state/memory`.
+the provider call or provenance deletion. Every Processing Record call query
+applies the same `started_at_ms >= retention_cutoff_ms` predicate before joins or
+availability checks, regardless of whether background maintenance deleted older
+physical rows. A closed correlation flag may retire only when that read cutoff
+excludes its entire range **and** a read-only Call Log query proves no physical
+`provider_call` row overlaps the range. An unavailable/busy source or remaining
+stale row delays retirement but never writer admission. An open flag never
+age-deletes. Delete the row only after both source flags retire. This may hide a
+good observation conservatively, but cannot authorize or display an incomplete
+source as complete. Clear's `reset_for_clear` deletes provenance rows, anomalies,
+correlation guards, and observation gaps with the catalog and watermark reset;
+Factory Reset deletes them with `state/memory`.
 
 The independently maintained Provider Call Log is not an input to identity
 migration or writer admission. Historical migration copies every valid bounded
@@ -919,7 +934,11 @@ and correlation behavior through `memory_call_provenance` and
 and request-id joins move to those tables; they do not silently omit request-id
 call branches merely because the delivery tables are gone or a volatile
 message-id set was lost. Count-pruned provenance inside the Call Log horizon is
-covered by a correlation-only gap before deletion.
+covered by a correlation-only gap before deletion. Every Processing Record
+provider-call list/detail query also applies the recorder's current 14-day
+`started_at_ms` cutoff itself. Delayed/failed maintenance may leave older rows
+physically readable, but those rows cannot outlive provenance/gap coverage in
+the projection.
 
 Processing Record's durable anomaly source moves independently to
 `memory_processing_anomaly`. `MemoryStore.failure_log()` keeps its current
@@ -1091,8 +1110,10 @@ Do not ship those doc edits in this planning PR.
 - `extracted` removes pending flush.
 - Every submitted flush consumes its pending entry and bounded message-id
   snapshot after success, rejection, timeout, malformed response, cancellation,
-  or other ambiguity. Only a proven pre-submission failure retains it, and the
-  third failed attempt drops it without a provider call.
+  or other ambiguity. Observer preflight write failure retains it without
+  consuming an attempt. After a durable gap opens, the third proven
+  provider-preexecution failure drops it only after the final anomaly/gap
+  settlement commits or leaves that existing gap open fail-closed.
 - High-cardinality accumulated traffic retains at most 256 pending sessions and
   25,600 message ids. A capture for a 257th distinct session is skipped before
   any EverOS RPC, never evicts or mutates an existing scope, records only
@@ -1113,10 +1134,18 @@ Do not ship those doc edits in this planning PR.
   incomplete flush runs before later work; a `/new` barrier admitted meanwhile
   returns immediately, and the candidate stays barrier-visible until the
   recovery flush reaches its submission edge. If that flush cannot prove a
-  boundary, its durable guard remains incomplete. A process crash may drop the
-  volatile flush action but cannot make later correlation complete.
+  boundary, its durable guard remains incomplete. A crash/restart, disable,
+  graceful shutdown, runtime-affecting config replacement, or Clear/Reset
+  generation invalidation may drop the volatile flush action; no ordinary
+  transition can make later correlation complete.
 - Shutdown, disable, config replacement, Clear, and Reset drop the queue
   without drain.
+- A parameterized ambiguous-candidate transition test covers process restart,
+  disable/re-enable, graceful shutdown/start, and runtime config replacement:
+  each drops the volatile candidate but preserves an old/incomplete guard, so a
+  recreated tracker cannot claim complete correlation. Clear/Reset may delete
+  the guard only in the same successful operation that replaces/deletes the
+  provider root; an interrupted operation keeps its existing fence closed.
 - Session barrier does not block `/new` or archive. At its ordered head it
   resolves and flushes every retained pending scope for the raw Workbench
   session, including project switches and scopes created by an earlier capture
@@ -1159,12 +1188,15 @@ Do not ship those doc edits in this planning PR.
   and cleanup entry charged until confined deletion succeeds.
 - Logs never include captured text, credentials, or absolute paths.
 - Every provider attempt durably opens a two-source observation gap before the
-  RPC. A failed preflight write skips an add or retains a due flush only within
-  its bounded pre-submission attempts, without calling EverOS;
-  timeout/unknown responses and an injected observer-commit failure leave both
-  correlation and anomaly unavailable after restart. A later successful attempt
-  settles only its own gap; the older ambiguous gap stays open until a paused
-  writer plus successful sidecar stop/reap proves its termination boundary.
+  RPC. A failed preflight write skips an add; a due flush retains its exact
+  snapshot, consumes no provider attempt, and has at most one delayed retry
+  scheduled, without calling EverOS. Three consecutive preflight failures still
+  retain one snapshot; after storage recovers, the gap commits before the first
+  counted provider attempt. Timeout/unknown responses and an injected
+  observer-commit failure leave both correlation and anomaly unavailable after
+  restart. A later successful attempt settles only its own gap; the older
+  ambiguous gap stays open until a paused writer plus successful sidecar
+  stop/reap proves its termination boundary.
 - Valid bounded request ids from acknowledged, rejected, and otherwise
   unclassifiable add/flush responses are recorded with their outcome and scope;
   only final logical non-success and exhausted proven-uncommitted operations
@@ -1183,9 +1215,17 @@ Do not ship those doc edits in this planning PR.
   retention. A failed stop or unproved boot admits no B provider submission.
 - Observation-gap compaction coalesces old ranges with the union of their source
   flags and without losing covered time. Correlation flags retire only outside
-  Call Log retention; anomaly flags retire only after 100 newer non-expiring
-  known anomalies make the interval irrelevant to every supported newest-N
-  result. Expiring newer rows may disappear and therefore never retire a gap.
+  the cutoff enforced by every Processing Record call query and after a
+  read-only Call Log probe proves no covered physical row remains; anomaly flags
+  retire only after 100 newer non-expiring known anomalies make the interval
+  irrelevant to every supported newest-N result. Expiring newer rows may
+  disappear and therefore never retire a gap.
+- With Call Log maintenance forced to fail while an older physical row remains,
+  every calls list/detail query excludes that row at the 14-day start cutoff;
+  the matching closed correlation gap does not retire until a later read-only
+  probe proves the row was deleted. A query that cannot enforce the cutoff
+  reports the calls source unavailable, while a failed retirement probe only
+  retains conservative coverage.
 - A closed anomaly gap followed by 100 newer expiring rows remains unavailable
   before and after those rows expire; 100 newer non-expiring settlement rows
   permit retirement and preserve the newest-100 projection.
@@ -1273,13 +1313,15 @@ implementation PR:
    may recapture the same payload.
 4. Attachment pins have no durable recovery after this cut. Leftover
    bundles are deleted. Original chat attachments are untouched.
-5. Session-boundary flush is a barrier enqueue, not a wait. A crash or
-   a full admission queue can leave consecutive conversations in one EverOS
-   accumulation boundary. A 257th distinct pending session is skipped before
-   EverOS, while an ambiguous submitted add retains a best-effort in-process due
-   boundary candidate; only a process crash may lose that candidate. Its durable
-   guard still keeps later flush correlation unavailable rather than silently
-   omitting older message ids.
+5. Session-boundary flush is a barrier enqueue, not a wait. A full admission
+   queue can reject it. A crash/restart, disable, graceful shutdown,
+   runtime-affecting configuration replacement, or Clear/Reset generation
+   invalidation drops volatile due candidates; when the provider buffer survives
+   the transition, consecutive conversations may share one EverOS accumulation
+   boundary. A 257th distinct pending session is skipped before EverOS. Durable
+   guards keep later correlation unavailable rather than silently omitting older
+   message ids; successful Clear/Reset instead replaces the provider root and
+   observer identity together.
 6. No JSON identity file is introduced. Identity stays in the existing
    SQLite file so Clear's `reset_for_clear(target_epoch=...)` and
    Factory Reset keep one authority.
