@@ -64,9 +64,9 @@ provider root.
 - `offer()` / `capture()` reserves or rejects one process-local slot without
   waiting on attachment pinning or EverOS.
 - One 256-slot admission window bounds every retained capture/barrier from
-  reservation through pinning, stale-generation reclamation, queueing, and the
-  one in-flight provider call. There is no second reservation chain outside
-  that process-wide bound.
+  reservation through pinning, current- or stale-generation bundle reclamation,
+  queueing, and the one in-flight provider call. There is no second reservation
+  or terminal-cleanup chain outside that process-wide bound.
 - Principal, project, epoch, `scope_key`, `provider_root_id`, and
   `last_success_at` are byte-identical across the upgrade.
 - Named-project catalog rows survive.
@@ -170,7 +170,8 @@ Suggested starting constants, fixed rather than user settings:
 
 - process-wide admission-window bound: 256 total permits across
   reserved/unready, pinning (including stale work from an older generation),
-  ready/queued, and the current in-flight add or barrier
+  ready/queued, the current in-flight add or barrier, and terminal bundle
+  cleanup whose confined deletion has not yet succeeded
 - max total add attempts: 3 (`MAX_ADD_ATTEMPTS`), only for outcomes that prove
   the request did not commit (UDS refused before send, sidecar not ready,
   provider error classified uncommitted)
@@ -254,7 +255,9 @@ runtime-affecting configuration replacement. The old worker is cancelled, the
 ordered queue and pending-flush map are invalidated immediately, and in-flight
 provider requests are not replayed. A synchronous pin that is already running
 becomes stale cleanup work under the process-wide admission bound described
-below; the generation transition does not wait for it.
+below; current-generation terminal release work is transferred to that same
+process-wide registry. Neither cleanup owner is generation-local, and the
+generation transition does not wait for it.
 
 ### Session boundary
 
@@ -280,11 +283,12 @@ complete ordered tuple of logical per-scope barriers.
 Use one fixed-capacity ordered admission window, not a queue plus an unbounded
 reservation chain. `offer()` synchronously and non-blockingly reserves the next
 sequence slot before any deferred attachment work. That permit remains charged
-while the slot is unready, pinning, ready, queued, or in flight. A normal slot
-releases it when consumed or skipped; a stale pin keeps the permit and source
-lease until late-completion reclamation finishes. At most 256 slot payloads,
-attachment leases, and owned or stale pin tasks therefore exist process-wide,
-including across generation replacement.
+while the slot is unready, pinning, ready, queued, in flight, or reclaiming a
+terminal bundle. A slot with no bundle releases it when consumed or skipped; any
+successful pin keeps the same permit and source lease until confined deletion
+succeeds. At most 256 slot payloads, attachment leases, pin tasks, and terminal
+cleanup owners therefore exist process-wide, including across generation
+replacement.
 
 A barrier reserves the same kind of slot and is ready immediately. The worker
 consumes only from the head, so an accepted barrier cannot overtake any earlier
@@ -293,14 +297,18 @@ and lets the worker advance. When all 256 permits are charged, captures and
 barriers are rejected with the existing queue-full outcome before starting a
 pin, retaining a payload, advancing the watermark/catalog, or creating another
 task. `/new` and archive return without waiting. Generation drop marks pinning
-slots skipped for ordering and releases every non-pinning permit immediately;
-it does not cancel the underlying synchronous pin, release its source lease, or
-return its permit before the late-pin reaper settles it.
+slots skipped for ordering and releases queue permits that own neither a pin nor
+terminal bundle cleanup; it does not cancel the underlying synchronous pin,
+release a bundle's source lease, or return its permit before the reaper proves
+confined deletion.
 
 ### Shutdown
 
-Stop intake, increment generation, cancel the worker, drop volatile
-state, then continue the existing sidecar stop. No queue drain.
+Stop intake, increment generation, cancel the worker, and drop volatile queue /
+pending-flush state, then continue the existing sidecar stop. The process-wide
+pin/release registry retains its charged cleanup owners until deletion succeeds
+or the process exits; a later v4 boot scrubs leftovers before intake. No queue
+drain.
 
 ## Persistent identity and display provenance
 
@@ -325,6 +333,7 @@ memory_meta
   last_success_at
   last_error
   last_error_at
+  next_anomaly_sequence # checked monotonic observer-order allocator
   updated_at
 
 memory_projects
@@ -343,6 +352,7 @@ memory_call_provenance
   session_id
   message_ids_json     # exact EverOS message ids, at most 100
   correlation_complete # true for adds; flush snapshot completeness
+  provider_started_at_ms # preflight time at the provider-submission edge
   recorded_at_ms
 
 memory_processing_anomaly
@@ -357,6 +367,7 @@ memory_processing_anomaly
   worker_generation
   principal_id
   project_id
+  order_sequence       # local, order-preserving tie breaker; never displayed
   expires_at_ms        # queue-backed abandonment + 90 days; null for settlement evidence
 
 memory_flush_correlation_guard
@@ -385,14 +396,18 @@ that Processing Record currently reads from `memory_capture_queue` and
   response whose id can still be validated
 - an add row carries its one exact `m_<session>_<provider timestamp>_000`
   message id and `correlation_complete=true`; a flush row carries the bounded
-  message-id list from that session's `PendingFlush` plus its completeness bit
+  message-id list from that session's `PendingFlush` plus its completeness bit.
+  Both carry the operation's preflight `provider_started_at_ms`, captured before
+  the provider coroutine can execute
 - retain at most 5,000 provenance rows and at most 14 days, matching Provider
   Call Log retention, but prune only complete request-id groups. Before
   row-count pruning any group that can still overlap retained Call Log rows,
   create or widen a closed correlation-only `retention_pruned` observation gap
-  over the deleted groups' full observation-time range in the same transaction.
-  A group wholly older than the Call Log cutoff needs no new coverage; then
-  delete oldest whole groups until the row count is at most 5,000
+  from the minimum deleted `provider_started_at_ms` through the maximum
+  `recorded_at_ms` in the same transaction. This covers Call Log rows timestamped
+  at request start rather than response observation. A group wholly older than
+  the Call Log cutoff needs no new coverage; then delete oldest whole groups
+  until the row count is at most 5,000
 - never retain a subset of a request-id group. If one reused group alone exceeds
   the row limit, delete that whole group; missing provenance remains fail-closed
 - enforce both bounds after each provenance write and at boot with the same
@@ -442,9 +457,12 @@ count, deadline, attempt, or work item:
 `memory_capture_queue` rows and `memory_flush_settlements`. It is observer state,
 not a retry or delivery ledger:
 
-- write one row for each terminal rejected or ambiguous add/flush and each
-  proven-uncommitted operation that exhausts its bounded attempts; successful
-  calls never create anomaly rows
+- write one row only when a logical capture or flush terminates rejected or
+  ambiguous, or when a proven-uncommitted logical operation exhausts its bounded
+  attempts. A positively classified attachment rejection that enters the one
+  allowed text-only fallback is nonterminal: record its call provenance and
+  settle its observation gap, but create no anomaly unless the fallback itself
+  terminates unsuccessfully
 - preserve the current `MemoryFailureLogEntry` fields and closed values: stable
   id, kind, occurrence time, closed error code, bounded request id, attempts,
   state, operation, and worker generation. New ids are an HMAC of `scope_key`
@@ -459,13 +477,19 @@ not a retry or delivery ledger:
   removes, and null for settlement-backed rejected/ambiguous evidence that the
   current immutable settlement table retains. Migration derives this from the
   source side of the released `failure_log()` union, not from `kind` alone
-- delete expired rows first, then retain the deterministically newest 100,000
-  unexpired rows. This preserves every source-specific age contract and every
-  immutable-settlement anomaly that can still appear among the newest 50;
-  return that newest 50 through the unchanged `failure_log()` / Processing
-  Record projection
-- order and prune deterministically by `(occurred_at_ms, anomaly_id)`, so
-  deleting only oldest overflow cannot change the current newest-50 projection
+- delete expired rows first, then apply independent caps: retain the newest
+  100,000 expiring rows and the newest 100,000 non-expiring rows. Newer expiring
+  evidence can never evict permanent settlement evidence that must reappear
+  after those temporary rows expire; within the expiring class, an older row
+  also expires no later than every newer row that displaced it. The table is
+  therefore bounded to 200,000 rows total
+- allocate `order_sequence` monotonically in the anomaly insert transaction and
+  order/prune by `(occurred_at_ms, order_sequence)`. Migration assigns sequences
+  in the released projection's existing `(occurred_at, sort_key)` order, where
+  queue digests and zero-padded settlement ids are used only while reading the
+  old tables and are not copied. This preserves the exact newest-50 tie order
+  without retaining source digests; return that newest 50 through the unchanged
+  `failure_log()` / Processing Record projection
 - enforce expiry/count retention after each insert and at boot; an anomaly
   read/schema failure marks that Processing Record source unavailable rather
   than returning an empty successful list
@@ -483,16 +507,20 @@ observer state into delivery state:
    a due flush retains its snapshot only for the bounded pre-submission retry
    policy above.
 2. If a result contains a valid request id, one transaction inserts every
-   provenance row for that call, inserts its source-expiring sanitized anomaly
-   when the result is non-success, applies the guard and provisional-boundary
+   provenance row for that call with the preflight provider-start time, inserts
+   its source-expiring sanitized anomaly only when the logical capture/flush is
+   now terminal and unsuccessful, applies the guard and provisional-boundary
    transition, and deletes only that operation token's gap. An acknowledged add
    also advances `memory_meta.last_success_at` to the observation time in this
    transaction. This applies to acknowledged, rejected, and semantically unknown
-   classifications. A separately allowed add retry starts only after that
-   observer transaction commits; a submitted flush is terminal. Transaction
-   failure leaves the preflight gap carrying both source flags, keeps any
-   possible add boundary candidate incomplete and due, closes later provider
-   submission, and never retries the provider call.
+   classifications. A positive attachment rejection that starts text fallback
+   records provenance and deletes its gap without an anomaly; the fallback opens
+   a new gap and only its final logical outcome can create one. Any separately
+   allowed add retry starts only after that observer transaction commits; a
+   submitted flush is terminal. Transaction failure leaves the preflight gap
+   carrying both source flags, keeps any possible add boundary candidate
+   incomplete and due, closes later provider submission, and never retries an
+   ambiguously submitted provider call.
 3. If an add result proves no request left Avibe, or a flush attempt fails before
    its provider coroutine can execute, restore the add's prior boundary snapshot
    and delete only that gap before any permitted retry. On the final bounded
@@ -525,11 +553,13 @@ or row-count-pruned provenance group remains covered even if newer observations
 settle successfully.
 
 The anomaly projection is unavailable when an `anomaly_incomplete` gap is open,
-or when fewer than the maximum supported failure-log limit (100) of unexpired
-anomaly rows are strictly newer than a closed gap's `ended_at_ms`. Once 100
-newer known rows exist, no missing event in that older interval can affect any
-supported newest-N result, so the anomaly flag may be retired. Lifecycle close
-alone never turns a missing anomaly into a complete successful projection.
+or when fewer than the maximum supported failure-log limit (100) of
+**non-expiring** anomaly rows are strictly newer than a closed gap's
+`ended_at_ms`. Expiring queue-backed rows never retire a gap: they can disappear
+later and expose missing permanent evidence again. Once 100 newer permanent rows
+exist, no missing event in that older interval can affect any supported newest-N
+result, so the anomaly flag may be retired. Lifecycle close alone never turns a
+missing anomaly into a complete successful projection.
 
 An observation gap is global observer state rather than a principal/project
 authorization fact: no scoped reader may bypass an affected source. Keep at
@@ -549,9 +579,11 @@ The independently maintained Provider Call Log is not an input to identity
 migration or writer admission. Historical migration copies every valid bounded
 add/flush request id from the released Memory store, including rejected rows and
 every scope row for a reused id, then applies the same whole-group 5,000-row /
-14-day policy using capture/settlement observation times, including
-correlation-only coverage for count-pruned groups that can still overlap the
-Call Log window. It does not open or filter against the call-log database. Any
+14-day policy. Because released rows have only capture/settlement observation
+times, migration assigns the Call Log retention cutoff as their conservative
+provider start; count-pruned coverage therefore still reaches every retained
+call that could precede its response. It does not open or filter against the
+call-log database. Any
 observer source that cannot be translated safely creates or widens a
 `migration_unknown` observation gap with the affected source flags over the
 retained observation horizon instead of being silently skipped. An absent,
@@ -697,19 +729,25 @@ would accept captures:
    - copy `memory_meta` identity columns and `memory_projects`
    - before dropping delivery tables, copy every valid bounded add/flush request
      id into `memory_call_provenance`, including rejected operations and every
-     scope row for a reused id; prune only complete request-id groups to the
-     5,000-row / 14-day window, create correlation-only `retention_pruned`
-     coverage before count-pruning groups still inside the Call Log horizon,
-     and preserve ambiguity as fail-closed
+     scope row for a reused id. Released rows have no provider-start field, so
+     set their conservative `provider_started_at_ms` to the migration instant's
+     Call Log retention cutoff without opening that optional database. Prune
+     only complete request-id groups to the 5,000-row / 14-day window, create
+     correlation-only `retention_pruned` coverage from the earliest provider
+     start through latest observation before count-pruning groups still inside
+     the Call Log horizon, and preserve ambiguity as fail-closed
    - run the released-shape equivalent of the current `failure_log()` union and
      copy every projected queue/settlement anomaly into
      `memory_processing_anomaly` before its source tables are dropped. Preserve
      the stable id and every sanitized `MemoryFailureLogEntry` field, deduplicate
-     rejected adds exactly as the current projection does, map errors through the
-     same closed-code sanitizer, set 90-day expiry only for queue-backed
-     abandonment rows, keep settlement-backed expiry null, delete rows already
-     expired at migration time, and prune only the oldest overflow beyond the
-     newest 100,000 remaining rows
+     rejected adds exactly as the current projection does, and enumerate the
+     released union in ascending `(occurred_at, sort_key)` order to assign local
+     `order_sequence` values before discarding the old queue digest / settlement
+     id sort evidence. Map errors through the same closed-code sanitizer, set
+     90-day expiry only for queue-backed abandonment rows, keep
+     settlement-backed expiry null, delete rows already expired at migration
+     time, and prune each expiry class independently beyond its newest 100,000
+     rows. Set `next_anomaly_sequence` after the largest assigned value
    - for every old `memory_session_flush_state` row with an unflushed provider
      buffer, create an incomplete exact `memory_flush_correlation_guard` using
      only its bounded session-ref digest. If more than 256 distinct rows exist,
@@ -781,34 +819,48 @@ writing, same as today's unknown `user_version` rule.
 Keep `AttachmentPinStore` and IM/Workbench admission. `offer()` charges one
 ordered admission-window slot before pinning and starts at most one owned pin
 task inside that permit. The worker does not consume that slot until pinning
-marks it ready or skipped, and releases the bundle after a terminal in-process
-add (success, definite rejection, or drop). Marking a slot skipped lets the
-worker advance, so one failed pin cannot strand a later barrier.
+marks it ready or skipped. After a terminal in-process add (success, definite
+rejection, or drop), it transfers any bundle plus the same permit and source
+lease to the process-wide cleanup registry before advancing. Marking the ordered
+slot consumed or skipped does not release that ownership, so one failed release
+cannot become an unbounded orphan and one failed pin cannot strand a later
+barrier.
+
+Each charged permit has one owner with separate logical-slot-terminal and
+bundle-deleted completion bits. A positive attachment rejection may transfer the
+bundle to cleanup and continue its text fallback under that same permit; the
+permit and source lease return only after both bits are true. The registry holds
+at most one cleanup entry per permit and one shared reaper services those
+entries, so fallback does not create a second task/reservation chain.
 
 Do not cancel an asyncio wrapper and assume the synchronous
 `AttachmentPinStore.pin()` stopped. The writer keeps a strong reference to every
-pin task in a process-wide late-pin registry. A generation change atomically
-marks its slot stale and ordering-skipped, but leaves its admission permit and
-source lease charged without awaiting completion. When the blocking call
-settles, one completion path checks the captured generation before exposing the
-result:
+pin task and terminal-release entry in one process-wide cleanup registry. A
+generation change atomically marks its slot stale and ordering-skipped, but
+leaves its admission permit and source lease charged without awaiting completion.
+When the blocking call settles, one completion path checks the captured
+generation before exposing the result:
 
 - a current successful pin marks its original slot ready
 - a stale successful pin immediately calls the confined, idempotent
   `AttachmentPinStore.release(bundle_id)` and never enters a new generation
 - a stale failure is consumed as cleanup, without text-only resubmission
-- every branch releases the source lease and admission permit only after result
-  handling and confined reclamation finish
+- every current or stale terminal bundle enters the same idempotent confined
+  release loop; only successful deletion releases the source lease and admission
+  permit
 
-The reaper consumes task exceptions and stays bounded by those unreleased
-process-wide permits, so repeated configuration changes cannot accumulate more
-than 256 blocking pins. Clear/Reset cleanup and the late reaper serialize through
-the same `AttachmentPinStore` confinement/lock; a bundle published after logical
-generation invalidation is still reclaimed. If release cannot prove deletion,
-fail the replacement writer generation closed, keep that permit charged, and
-retry confined cleanup rather than losing ownership of the orphan. If the
-process exits before a callback runs, the mandatory empty-root scrub on the next
-v4 boot removes both published and staging leftovers before accepting captures.
+The reaper consumes task exceptions and retries every current- or
+stale-generation release while keeping its strong owner and original permit. It
+stays bounded by those unreleased process-wide permits, so repeated terminal
+release failures or configuration changes cannot accumulate more than 256 pins
+and cleanup tasks. Clear/Reset cleanup and the reaper serialize through the same
+`AttachmentPinStore` confinement/lock; a bundle published after logical
+generation invalidation is still reclaimed. If stale release cannot prove
+deletion, fail the replacement writer generation closed; every release failure
+keeps its permit charged and retries confined cleanup rather than losing
+ownership of the orphan. If the process exits before a callback runs, the
+mandatory empty-root scrub on the next v4 boot removes both published and
+staging leftovers before accepting captures.
 
 Retain the current single text-only degradation for a valid nonempty caption:
 
@@ -817,7 +869,8 @@ Retain the current single text-only degradation for a valid nonempty caption:
   pin and mark the same ordered slot ready once without attachments
 - if EverOS returns an attachment rejection for which
   `attachment_add_rejection_proves_no_write()` is true, release the pin and
-  retry the same in-flight slot once without attachments
+  retry the same in-flight slot once without attachments; the same permit owns
+  both the fallback and any still-pending confined release
 
 This is a modality fallback, not replay after ambiguity. It counts toward the
 same three-total-attempt bound, never reserves a second slot, and is forbidden
@@ -973,7 +1026,9 @@ Do not ship those doc edits in this planning PR.
   writer startup blocked without modifying the marker or SQLite identity.
 - Retained add/flush request ids migrate to bounded call provenance before
   delivery tables are dropped, including rejected calls and every scope row for
-  reused ids; ambiguous cross-scope request ids remain unauthorized.
+  reused ids; ambiguous cross-scope request ids remain unauthorized. Migrated
+  rows receive the Call Log cutoff as their conservative provider-start time,
+  while new rows retain the exact preflight start.
 - Released unflushed-session rows migrate to incomplete, content-free
   correlation guards without message ids or schedule state. At 256 distinct
   exact guards the next distinct row sets the global-incomplete sentinel; a
@@ -986,14 +1041,22 @@ Do not ship those doc edits in this planning PR.
   operation, state, generation, and bounded request ids), while the v4 file has
   no delivery tables. Queue-backed abandoned rows receive their exact 90-day
   expiry, settlement-backed rows remain unexpired, rows already expired at the
-  migration instant disappear, and count retention keeps only the
-  deterministically newest 100,000 remaining rows without payload or retry
-  state.
+  migration instant disappear, and count retention keeps the independently
+  newest 100,000 rows in each expiry class without payload or retry state. More
+  than 50 queue and settlement rows sharing one occurrence timestamp retain the
+  released digest / zero-padded-ID tie order through local sequences, without
+  copying either old sort key.
+- An old non-expiring settlement anomaly followed by 100,001 newer expiring
+  queue anomalies survives the independent permanent cap. After the clock moves
+  past every queue expiry, that settlement row re-enters the newest-50 result in
+  its original order.
 - Provenance age and row-count pruning deletes complete request-id groups only;
   it cannot turn a reused ambiguous id into a uniquely authorized id, including
   when one group alone exceeds the row bound. Count-pruning a group still inside
-  the Call Log horizon atomically creates correlation-only coverage first; an
-  overlapping retained call reports unavailable rather than disappearing.
+  the Call Log horizon atomically creates correlation-only coverage from the
+  earliest provider start, not merely the response observation; a retained call
+  that started earlier than `recorded_at_ms` still reports unavailable rather
+  than disappearing.
 - A malformed observer correlation or anomaly creates a bounded retained-horizon
   migration observation gap with the exact affected source flags; after
   restart, each overlapping/affected Processing Record source still reports
@@ -1012,8 +1075,9 @@ Do not ship those doc edits in this planning PR.
 
 - `offer()` does not await attachment pinning or provider I/O.
 - Total occupancy never exceeds 256 across unready reservations, current and
-  stale pin tasks, ready/queued slots, and the in-flight slot, even through
-  repeated generation changes; there is no out-of-window predecessor chain.
+  stale pin tasks, current/stale terminal cleanup entries, ready/queued slots,
+  and the in-flight slot, even through repeated generation changes; there is no
+  out-of-window predecessor or cleanup chain.
 - Saturation returns `memory_queue_full` / `CaptureSkipped`.
 - One worker preserves accepted-item order globally.
 - At most three total attempts per operation, and only for proven-uncommitted adds or
@@ -1069,9 +1133,11 @@ Do not ship those doc edits in this planning PR.
   marks the slot skipped without waiting, keeps its process-wide permit and
   source lease charged, reclaims the late bundle through confinement, and only
   then releases both. A replacement generation cannot exceed the same 256 cap.
-- An injected late-bundle release failure keeps the replacement generation
-  closed and its permit charged until confined cleanup succeeds; restart runs
-  the mandatory empty-root scrub before reopening intake.
+- An injected current-generation terminal bundle-release failure transfers to
+  the strong cleanup registry, keeps its original permit and source lease
+  charged, retries confined deletion, and cannot accumulate a 257th cleanup
+  owner. The same late-bundle failure keeps a replacement generation closed;
+  restart runs the mandatory empty-root scrub before reopening intake.
 - Watermark persists across writer restart and is monotonic.
 - Every acknowledged add advances durable `last_success_at` atomically with its
   provenance/observation-gap settlement. After all call-provenance groups age
@@ -1086,7 +1152,11 @@ Do not ship those doc edits in this planning PR.
   the limit without advancing rejected-capture state.
 - `MEMORY-IM-ATTACH-009` and `MEMORY-IM-ATTACH-011` still perform exactly one
   safe text-only degradation, while ambiguous or unclassified attachment
-  failures never resubmit the caption.
+  failures never resubmit the caption. The positively rejected attachment call
+  records provenance but no terminal anomaly when its text fallback succeeds;
+  only an unsuccessful final logical outcome enters `failure_log()`. An injected
+  bundle-release failure during that successful fallback leaves the same permit
+  and cleanup entry charged until confined deletion succeeds.
 - Logs never include captured text, credentials, or absolute paths.
 - Every provider attempt durably opens a two-source observation gap before the
   RPC. A failed preflight write skips an add or retains a due flush only within
@@ -1097,14 +1167,15 @@ Do not ship those doc edits in this planning PR.
   writer plus successful sidecar stop/reap proves its termination boundary.
 - Valid bounded request ids from acknowledged, rejected, and otherwise
   unclassifiable add/flush responses are recorded with their outcome and scope;
-  terminal non-success and exhausted proven-uncommitted operations also persist
-  the current sanitized `MemoryFailureLogEntry` fields and source-specific
-  expiry in the bounded anomaly table. Observer failure never causes a provider
-  retry; its preflight anomaly flag makes `failure_log()` unavailable even after
-  lifecycle close until enough newer known rows exclude the hole from every
-  supported newest-N result. A separately allowed add or pre-submission flush
-  retry settles only its own proven-unentered gap and opens a new one, while a
-  submitted flush remains terminal.
+  only final logical non-success and exhausted proven-uncommitted operations
+  also persist the current sanitized `MemoryFailureLogEntry` fields and
+  source-specific expiry in the bounded anomaly table. Observer failure never
+  causes an ambiguous provider retry; its preflight anomaly flag makes
+  `failure_log()` unavailable even after lifecycle close until 100 newer
+  non-expiring known rows exclude the hole from every supported newest-N result.
+  Expiring rows never retire that flag. A separately allowed add or
+  pre-submission flush retry settles only its own proven-unentered gap and opens
+  a new one, while a submitted flush remains terminal.
 - An ambiguous request A prevents request B from reaching the provider until a
   successful owned-sidecar stop/reap closes A's interval. The replacement then
   flushes A's incomplete candidate before B can submit and delete only B's gap;
@@ -1112,8 +1183,12 @@ Do not ship those doc edits in this planning PR.
   retention. A failed stop or unproved boot admits no B provider submission.
 - Observation-gap compaction coalesces old ranges with the union of their source
   flags and without losing covered time. Correlation flags retire only outside
-  Call Log retention; anomaly flags retire only after 100 newer unexpired known
-  anomalies make the interval irrelevant to every supported newest-N result.
+  Call Log retention; anomaly flags retire only after 100 newer non-expiring
+  known anomalies make the interval irrelevant to every supported newest-N
+  result. Expiring newer rows may disappear and therefore never retire a gap.
+- A closed anomaly gap followed by 100 newer expiring rows remains unavailable
+  before and after those rows expire; 100 newer non-expiring settlement rows
+  permit retirement and preserve the newest-100 projection.
 
 ### Compatibility with retained surfaces
 
@@ -1178,7 +1253,8 @@ after adding migrator and writer tests. Line count is not acceptance.
 - [ ] Replace claim quiescence with writer pause/quiesce around Rebuild/Repair.
 - [ ] Stop writing processing-fault ACK / `manual_required` / settlements.
 - [ ] Scrub the entire confined pin root before every v4 writer start and reap
-      stale-generation pin completions under the process-wide admission bound.
+      stale pin completions plus every current/stale terminal release under the
+      process-wide admission bound.
 - [ ] Keep `memory.cli.remembered` as queued; rewrite Memory user docs.
 - [ ] Shrink Clear's queue primitive to identity reset.
 - [ ] Remove coordinator, worker, and outbox-only tests.
