@@ -1047,12 +1047,12 @@ and 12 reuse 06 and 01 respectively as exhibit backgrounds; the 04 paste-back cr
 frame 13 are component exhibits. Specifying the shell once is not a shortcut: a shell
 copied into every section is one that will drift in all but one of them.
 
-**Two parts of the shell are conditional, and the frames disagree about them on
-purpose.** Frames 09 and 10 draw the header but **no tab strip and no `cols`
-track** — in the direct-only state there is no gateway module to put in the second
-column and no second section to tab to, so the chrome that organizes those things is
-absent rather than empty. Read the tab strip as a property of the gateway-adopted
-layout, not of the page. §1.8 states the condition.
+**The tabs belong to the overview shell, while the source detail replaces them with
+Back.** Usage and switch history both outlive the current Source inventory, so every
+overview landing keeps the three-tab strip even when the Sources & gateway body is
+frame 09's direct-only state. Frames 09 and 10 predate this section navigation and
+remain authoritative for their bodies, not for whether the shell exposes its other
+sections. §1.8 states the direct-only body condition.
 
 **Geometry** `[frame]`
 
@@ -1078,11 +1078,20 @@ layout, not of the page. §1.8 states the condition.
 | --- | --- | --- | --- | --- |
 | `title` + info icon | Page name | static | icon: hover, focus **and** activation `[derived]` | Tooltip: `shell.gatewayInfo.body`, which is the icon's accessible description; `shell.gatewayInfo.label` is its accessible name |
 | Run pill | Engine liveness | `runtime-dependency.schema.json` → `status.health` `[contract]` | see the mapping below | see the mapping below |
-| Tabs ×2 | Section switch | — | yes | 来源与网关 / 用量与额度; the active one gets the mint underline. **Which route these correspond to is not specified by these frames** (§0.1) |
+| Tabs ×3 | Section switch | — | yes | 来源与网关 / 用量 / 日志; the active one gets the mint underline |
 | Upstream module | Source inventory | `GET /api/models/sources` `[spec]` | rows: yes | Open 06 for that source |
 | Dispatch rail | That upstream feeds gateway | derived, decorative | no | — |
 | Gateway module | One group per backend, each with model rows | per-backend supply + chains `[spec]` | rows, collapse, 「来源顺序」, mode switch | Open 02 / expand / open 03 for **that backend** / open 10's confirm |
 | Legend | Colour → meaning | static; kept in bijection with the inks the page draws | no | — |
+
+**The Logs tab owns the switch-history feed** `[derived]`. It is absent from the
+Sources & gateway body and is read only when Logs is opened, so event history cannot
+delay the routing surface. Each activation refreshes the head through
+`GET /api/models/events?limit=20`; the card shows three rows initially, 查看全部 expands
+the held rows and follows the `before` cursor until exhausted, and 收起 returns to three.
+An unread feed keeps the card and its retry action distinct from the authoritative
+暂无切换记录 empty state. The removed 高级 placeholder has no surviving surface or copy:
+request logging and diagnostics must return as real capabilities, not as a dead row.
 
 **The info icon is a control, and its string is this file's** `[derived]`. Hover is not
 an affordance a keyboard or a touch user has, and this tooltip is the only place the page
@@ -1371,7 +1380,17 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | `install.fail.title` `[derived]` | 安装没有完成 | The install did not finish |
 | `install.retry` `[derived]` | 重试 | Try again |
 | `shell.tab.hub` | 来源与网关 | Sources & gateway |
-| `shell.tab.usage` | 用量与额度 | Usage & quota |
+| `shell.tab.usage` | 用量 | Usage |
+| `shell.tab.logs` | 日志 | Logs |
+| `recent.title` | 最近切换 | Recent switches |
+| `recent.viewAll` | 查看全部 | View all |
+| `recent.collapse` | 收起 | Collapse |
+| `recent.loadMore` | 加载更早的记录 | Load older entries |
+| `recent.loadingMore` | 加载中… | Loading… |
+| `recent.today` | 今天 | Today |
+| `recent.yesterday` | 昨天 | Yesterday |
+| `recent.empty` | 暂无切换记录 | No switches yet |
+| `recent.deletedSource` | 已删除 | deleted |
 | `upstream.heading` | 来源 | Sources |
 | `upstream.count_one` | {{count}} 个 | {{count}} source |
 | `upstream.count_other` | {{count}} 个 | {{count}} sources |
@@ -4523,11 +4542,12 @@ becomes 01」 describes a one-way trip, and this document specifies the return t
 elsewhere. A rule that reads correctly forward and silently drops a state on the way back
 is not caught by reading it forward again.
 
-**Two things about that switch are easy to get wrong, and the frames settle both.**
-First, the tab strip is *not* chrome that is always there with an empty second tab: 09
-draws no `KB3N9` / `ag5OQ` pair at all, because 用量与额度 has nothing to report when
-nothing has ever been supplied, and a tab that opens on an empty page is worse than a
-tab that does not exist. Second, this frame does not survive as a block inside 01 — but
+**Two things about that switch are easy to get wrong; the owner ruling of 2026-08-23
+settles the first, and the frames settle the second.** First, the tab strip is page
+chrome across every overview landing: the usage ledger and switch log outlive the
+Sources they name, so deleting the last Source cannot delete the only route to either
+history. Frame 09 predates those sections and supplies the Sources & gateway body under
+that strip. Second, this frame does not survive as a block inside 01 — but
 its *function* does, relocated. The three backend rows here each carry 切换到网关; on 01
 and 08 the same action rides on the still-direct backend's own group header (`g3Wh0P`
 on 01, `lcPvy` on 08, next to the 「直连」 subtitle). So partial adoption keeps every
@@ -4540,8 +4560,9 @@ things they would gain — not from whether they have ever adopted one. A user w
 reverted and deleted their sources sees it again, and it is still true when they do. That
 is the difference between an onboarding card and an empty state, and this is the second.
 
-**What the shell drops, and why** `[frame]`. Frame 09 renders the header but **no tab
-strip, no three-column `cols` track, no dispatch rail, no wire layer and no legend.**
+**What the Sources & gateway body drops, and why** `[frame]`. Frame 09 renders **no
+three-column `cols` track, no dispatch rail, no wire layer and no legend.** The overview
+shell still keeps the three-tab strip for the two independent history sections.
 There is no gateway module to occupy the second column, no supply relations to draw, and
 therefore no inks to explain. An empty gateway column with a placeholder would be worse
 than its absence: it would assert that a thing exists here and is currently broken,
@@ -4550,7 +4571,7 @@ which is the opposite of the truth.
 **The page and the module have different names, and neither is 「模型网关」** `[frame]`.
 Measured across the original full-page set: the page title is 「模型」 (`oPD53` here, `YkN0P` on 01,
 `VaXos` on 08, and so on), the first tab — the module this document specifies — is
-「来源与网关」, and the second is 「用量与额度」. The string 「模型网关」 is **not rendered
+「来源与网关」, the second is 「用量」, and the third is 「日志」. The string 「模型网关」 is **not rendered
 anywhere in the product surface**; it appears only in the design file's own frame names
 (「模型网关 09 — …」), which are canvas labels for the author, not copy. This is worth
 recording because the plan documents use 「模型网关」 as the project's name for the whole

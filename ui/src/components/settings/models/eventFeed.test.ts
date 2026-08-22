@@ -1,10 +1,8 @@
 // The feed merge, in both directions.
 //
-// The regression these pin: 最近切换 was fetched once at mount, so a write that
-// filed an event (a failing 试跑 cooling its own head down) changed the source row
-// while the line explaining that change stayed invisible until a full reload. The
-// post-write refresh now re-reads the head — which is only safe if it cannot throw
-// away the rows 加载更早 已经 paged in, and cannot splice a hole into the sequence.
+// The feed is loaded only while its Logs tab is visible. A fresh tab open re-reads
+// the head, which is only safe if it cannot throw away the rows 加载更早 已经
+// paged in, and cannot splice a hole into the sequence.
 //
 // And the follow-on: the rows and 「is there anything older」 are one fact. Moving
 // only the rows is how the replace branch left 加载更早 claiming an end it had just
@@ -203,10 +201,15 @@ describe('the page reads the feed through this owner', () => {
   const firstPaint = readFileSync(join(__dirname, 'firstPaintRegions.ts'), 'utf8');
   const mutationSettlement = readFileSync(join(__dirname, 'mutationSettlement.ts'), 'utf8');
 
-  it('re-reads events in the shared post-write refresh', () => {
-    // The whole point: the refresh every mutation site already calls is what has
-    // to move the feed, not a probe-only twin bolted onto one call site.
-    expect(page).toMatch(/const refresh = React\.useCallback[\s\S]*?void refreshEventHead\(\)[\s\S]*?refreshAuthority\.run/);
+  it('reads events only while the Logs tab is visible', () => {
+    // Hidden history is not part of the operational first-paint or source mutation
+    // barrier. Reopening Logs refreshes the head while preserving paged-in rows.
+    expect(page).toMatch(/React\.useEffect\(\(\) => \{\s*if \(tab !== 'logs'\) return;\s*void refreshEventHead\(\);\s*\}, \[refreshEventHead, tab\]\)/);
+    const sharedRefresh = page.slice(
+      page.indexOf('const refresh = React.useCallback'),
+      page.indexOf('\n\n  const trackSourceMutation'),
+    );
+    expect(sharedRefresh).not.toMatch(/refreshEventHead/);
     expect(page).toMatch(/eventReadAuthority\.run[\s\S]*?modelsApi\.listEvents\(EVENT_PAGE\)/);
     expect(page).toMatch(/setEventsRead[\s\S]*?foldRegionRead<ResolutionEvent\[\],[\s\S]*?\(incoming,[\s\S]*?feedAfterHeadRead\(previousFeed, freshEvents\)/);
     expect(page).toMatch(/feedAfterTailRead\(emptyFeed, freshEvents, EVENT_PAGE, null\)/);

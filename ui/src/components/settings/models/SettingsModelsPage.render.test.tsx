@@ -193,7 +193,7 @@ describe('SettingsModelsPage surface branches', () => {
     // Frame 09 is what the `sources` tab shows here — not what the Hub shows
     // instead of its tabs. It is still Frame 09's body: none of the gateway
     // overview leaks in beside it.
-    expect(screen.getAllByRole('tab')).toHaveLength(2);
+    expect(screen.getAllByRole('tab')).toHaveLength(3);
     expect(screen.queryByText(/^Recent switches$|^最近切换$/i)).toBeNull();
   });
 
@@ -269,8 +269,24 @@ describe('SettingsModelsPage surface branches', () => {
     renderPage([retainedSource]);
 
     expect(await screen.findByText('Retained source')).toBeTruthy();
-    expect(screen.getAllByRole('tab')).toHaveLength(2);
+    expect(screen.getAllByRole('tab')).toHaveLength(3);
     expect(screen.queryByText(/^Switch to the gateway and you gain three things$|^切换到网关，你会多出三件事$/i)).toBeNull();
+  });
+
+  it('moves recent switches into the Logs tab and removes the Advanced placeholder', async () => {
+    renderPage([retainedSource]);
+
+    await screen.findByText('Retained source');
+    const events = vi.mocked(modelsApi.listEvents);
+    expect(events).not.toHaveBeenCalled();
+    expect(screen.queryByText(/^Recent switches$|^最近切换$/i)).toBeNull();
+    expect(screen.queryByText(/Cross-vendor auto-substitution|跨厂商自动顶替/i)).toBeNull();
+
+    await userEvent.click(await screen.findByRole('tab', { name: /^Logs$|^日志$/i }));
+
+    expect(await screen.findByText(/^Recent switches$|^最近切换$/i)).toBeTruthy();
+    expect(screen.queryByText('Retained source')).toBeNull();
+    await waitFor(() => expect(events).toHaveBeenCalledTimes(1));
   });
 
   it('opens the subscription vendor picker and OAuth flow from the Sources card', async () => {
@@ -454,8 +470,7 @@ describe('SettingsModelsPage surface branches', () => {
     await waitFor(() => expect(reauth).toHaveBeenCalledTimes(2));
   });
 
-  it('lands the operational overview without waiting for event history', async () => {
-    const pendingEvents = deferred<[]>();
+  it('lands the operational overview without reading hidden event history', async () => {
     vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
     vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([
       directAgent('claude'),
@@ -463,7 +478,7 @@ describe('SettingsModelsPage surface branches', () => {
       directAgent('opencode'),
     ]);
     vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
-    vi.spyOn(modelsApi, 'listEvents').mockReturnValue(pendingEvents.promise);
+    const events = vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
 
     render(
       <ToastProvider>
@@ -475,10 +490,7 @@ describe('SettingsModelsPage surface branches', () => {
 
     expect(await screen.findByText(/^Currently: direct$|^当前:直连$/i)).toBeTruthy();
     expect(screen.getAllByRole('button', { name: /^Switch to Gateway$|^切换到网关$/i })).toHaveLength(3);
-    await act(async () => {
-      pendingEvents.resolve([]);
-      await pendingEvents.promise;
-    });
+    expect(events).not.toHaveBeenCalled();
   });
 
   it('counts a recoverable reroute once per backend in Frame 08', async () => {
@@ -528,6 +540,7 @@ describe('SettingsModelsPage surface branches', () => {
       </ToastProvider>,
     );
 
+    await userEvent.click(await screen.findByRole('tab', { name: /^Logs$|^日志$/i }));
     expect((await screen.findAllByText(/Couldn't refresh, please retry|刷新失败，请重试/i)).length).toBeGreaterThan(0);
     expect(screen.queryByText(/^No switches yet$|^暂无切换记录$/i)).toBeNull();
     await userEvent.click(screen.getByRole('button', { name: /^Retry$|^重试$/i }));
@@ -951,7 +964,7 @@ describe('SettingsModelsPage usage region', () => {
       vi.restoreAllMocks();
       renderPage(sources);
 
-      await waitFor(() => expect(screen.getAllByRole('tab'), landing).toHaveLength(2));
+      await waitFor(() => expect(screen.getAllByRole('tab'), landing).toHaveLength(3));
       await openUsage();
       await waitFor(() => expect(vi.mocked(modelsApi.getUsageSummary), landing).toHaveBeenCalledWith(30));
     }

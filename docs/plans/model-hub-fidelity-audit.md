@@ -55,7 +55,7 @@ Recorded so a later pass does not "fix" a conforming value:
 | A1 | Source detail replaces the tabs strip instead of rendering below it | frame 06 keeps the tabs strip at y=96 and puts the source bar at y=160; back button in the header at y=41 | `.model-hub-source-detail` starts at y=96, no tabs strip, back button at y=33 — the whole detail view sits ~64px high |
 | A2 | Per-row overflow action missing on discovered models | frame 06 draws `···` on **every** table row, including `自动拉取` ones | `SourceDetailPanel.tsx:804` renders `ManualModelMenu` only when `model.origin === 'manual'`; the 230px action column is empty (`230×0`) on discovered rows |
 | A3 | 添加一跳 selector is hand-rolled instead of the product's standard anchored selection surface | spec §1.2: "添加一跳 opens the product's standard anchored selection surface without assigning new frame geometry" — that surface is `ui/components/ui/combobox.tsx` (`Popover` + `Command` + `CommandInput` + `CommandGroup`), itself already design-anchored | `RouteChainDialog.tsx:964-1055` builds its own `Popover` + `section`/`p`/`button` list. See A3a–A3e below |
-| A4 | Undesigned overview surfaces | frame 01 ends at the body; neither `最近切换` nor `高级` appears in the frame, and neither is registered anywhere in the spec | `RecentSwitchesCard` (h=195) and `AdvancedRow` (h=55) render after the body (`SettingsModelsPage.tsx:1122-1123`) |
+| A4 | Undesigned overview surfaces — resolved 2026-08-23 | frame 01 correctly ends after its graph body and legend | `高级` was deleted; `最近切换` moved out of the overview and into the registered `日志` tab, whose read is lazy and independent of first paint |
 
 A3 consequences, all observed:
 
@@ -180,9 +180,12 @@ these two disagree about presence.
 | ID | Conflict | Options |
 | --- | --- | --- |
 | H1 | `.model-hub-model-mode-chip` (28×24, currently rendering `—`). Frame 01's model row does not draw it; spec §1.1 registers "a chain chip" in `Exx0a`'s inventory. | Drop the chip and correct §1.1, or draw it into the frame. |
-| H2 | A4's `最近切换` and `高级`: rendered, drawn nowhere, registered nowhere. | Draw them into frame 01 and register them, or remove them. |
 
 ## I — Checked and cleared
+
+- **A4 is closed.** The dead 高级 placeholder no longer ships. Switch history is
+  registered as the Logs-tab surface instead of extending frame 01 below its designed
+  boundary.
 
 - ~~**Route-selector scrolling already works.**~~ **Wrong — withdrawn.** The
   cited evidence was real (`modelHubSurface.css:724-733` bounds the panel and
