@@ -35,10 +35,7 @@ import { SettingsMessagingPage } from './components/settings/SettingsMessagingPa
 import { SettingsPlatformsPage } from './components/settings/SettingsPlatformsPage';
 import { SettingsServicePage } from './components/settings/SettingsServicePage';
 import { SettingsLayout } from './components/settings/SettingsLayout';
-import {
-  SettingsAccountPage,
-  SettingsAppearancePage,
-} from './components/settings/SettingsPreferencesPages';
+import { SettingsAccountPage } from './components/settings/SettingsAccountPage';
 import { StatusProvider } from './context/StatusProvider';
 import { ApiProvider, useApi, ApiError } from './context/ApiContext';
 import type { SessionInfo } from './context/ApiContext';
@@ -753,7 +750,7 @@ const router = createBrowserRouter(
             inline detail screens beneath their owning section. */}
         <Route path="/settings" element={<SettingsLayout />}>
           <Route index element={null} />
-          <Route path="appearance" element={<SettingsAppearancePage />} />
+          <Route path="appearance" element={<Navigate to="/settings/account" replace />} />
           <Route path="account" element={<SettingsAccountPage />} />
           <Route path="service" element={<SettingsServicePage />} />
           <Route path="platforms" element={<SettingsPlatformsPage />} />

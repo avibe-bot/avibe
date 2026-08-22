@@ -6,7 +6,6 @@ import {
   ChevronLeft,
   Cpu,
   Globe,
-  Languages,
   MessageSquare,
   Package,
   PlugZap,
@@ -44,7 +43,6 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
   {
     labelKey: 'settings.groups.preferences',
     items: [
-      { path: '/settings/appearance', labelKey: 'settings.sections.appearance', icon: Languages },
       { path: '/settings/account', labelKey: 'settings.sections.account', icon: User },
     ],
   },

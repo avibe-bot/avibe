@@ -275,7 +275,6 @@
       "system": "系统"
     },
     "sections": {
-      "appearance": "外观与语言",
       "account": "账户",
       "backends": "后端",
       "models": "模型",
@@ -291,14 +290,6 @@
     "navigationLabel": "设置分区",
     "backToSections": "全部设置",
     "close": "关闭设置",
-    "appearanceTitle": "外观与语言",
-    "appearanceSubtitle": "选择 Avibe 的显示主题和界面语言。",
-    "themeTitle": "外观",
-    "themeMode": "主题",
-    "themeModeHint": "使用浅色、深色主题，或跟随系统设置。",
-    "languageTitle": "语言",
-    "interfaceLanguage": "界面语言",
-    "interfaceLanguageHint": "立即应用，并保存到当前实例。",
     "accountTitle": "账户",
     "accountSubtitle": "查看当前浏览器的登录身份与会话。",
     "identityTitle": "登录身份",

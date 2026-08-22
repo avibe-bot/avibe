@@ -275,7 +275,6 @@
       "system": "System"
     },
     "sections": {
-      "appearance": "Appearance & Language",
       "account": "Account",
       "backends": "Backends",
       "models": "Models",
@@ -291,14 +290,6 @@
     "navigationLabel": "Settings sections",
     "backToSections": "All settings",
     "close": "Close Settings",
-    "appearanceTitle": "Appearance & Language",
-    "appearanceSubtitle": "Choose how Avibe looks and which language the interface uses.",
-    "themeTitle": "Appearance",
-    "themeMode": "Theme",
-    "themeModeHint": "Use a light or dark theme, or follow your system setting.",
-    "languageTitle": "Language",
-    "interfaceLanguage": "Interface language",
-    "interfaceLanguageHint": "Applied immediately and saved for this instance.",
     "accountTitle": "Account",
     "accountSubtitle": "Review the current browser identity and session.",
     "identityTitle": "Signed-in identity",
