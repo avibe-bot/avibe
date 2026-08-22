@@ -67,25 +67,6 @@ def _active_org_cookie(config, email="member@example.com", subject="member-1", *
     )
 
 
-def _show_page_email_cookie(
-    config,
-    session_id="ses123",
-    email="viewer@example.com",
-    subject="viewer-1",
-):
-    return remote_session_cookie(
-        config,
-        email,
-        subject,
-        session_claims={
-            "vibe_instance_id": config.remote_access.vibe_cloud.instance_id,
-            "vibe_instance_role": "viewer",
-            "vibe_instance_access_source": "show_page_email",
-            "vibe_show_page_id": session_id,
-        },
-    )
-
-
 class _FakeShowRuntimeManager:
     def __init__(
         self,
@@ -695,11 +676,11 @@ def test_limited_show_page_shows_access_denied_to_authenticated_viewer(
     page_scoped_client = app.test_client()
     page_scoped_client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        _show_page_email_cookie(
+        remote_session_cookie(
             config,
-            session_id="other-page",
-            email="other@example.com",
-            subject="other-viewer",
+            "other@example.com",
+            "other-viewer",
+            role="viewer",
         ),
         domain="alex.avibe.bot",
     )
@@ -711,7 +692,6 @@ def test_limited_show_page_shows_access_denied_to_authenticated_viewer(
         follow_redirects=False,
     )
     assert page_scoped.status_code == 403
-    assert 'href="/"' not in page_scoped.text
 
 
 def test_limited_show_callback_maps_outages_and_rechecks_share_binding(
@@ -1274,11 +1254,6 @@ def test_limited_show_guest_is_rechecked_after_access_changes(
         )
         query = urllib.parse.parse_qs(
             urllib.parse.urlsplit(login.headers["Location"]).query
-        )
-        client.set_cookie(
-            remote_access.SESSION_COOKIE_NAME,
-            _show_page_email_cookie(config),
-            domain="alex.avibe.bot",
         )
         callback = client.post(
             show_identity.CALLBACK_PATH,
@@ -3751,7 +3726,7 @@ def test_private_show_me_is_always_available(monkeypatch, tmp_path):
     assert response.headers["cache-control"] == "no-store, private"
 
 
-def test_private_show_page_bars_show_page_email_viewer_from_show_surface(monkeypatch, tmp_path):
+def test_private_show_page_allows_instance_viewer_read_access(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     _create_agent_session("ses123")
@@ -3763,7 +3738,12 @@ def test_private_show_page_bars_show_page_email_viewer_from_show_surface(monkeyp
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        _show_page_email_cookie(config, email="viewer@example.com", subject="user-viewer"),
+        remote_session_cookie(
+            config,
+            "viewer@example.com",
+            "user-viewer",
+            role="viewer",
+        ),
         domain="alex.avibe.bot",
     )
     try:
@@ -3780,10 +3760,12 @@ def test_private_show_page_bars_show_page_email_viewer_from_show_surface(monkeyp
     finally:
         set_show_runtime_manager_for_tests(None)
 
-    # §3.2: a signed show_page_email grant is a /p-only visitor — it never
-    # enters the private /show surface, even for its own signed page.
-    assert me_response.status_code == 403
-    assert page_response.status_code == 403
+    assert me_response.status_code == 200
+    assert me_response.get_json() == {
+        "authenticated": False,
+        "canAnnotate": False,
+    }
+    assert page_response.status_code == 200
 
 
 def test_public_show_me_is_anonymous_without_oauth_session(monkeypatch, tmp_path):

@@ -692,11 +692,7 @@ def require_show_page_access_management(
 
 
 def _instance_editor_or_owner(context: Any) -> bool:
-    """The /show Workbench management capability is the Instance Editor role.
-
-    ``show_page_email`` sessions are Viewer-only, so they can never satisfy an
-    Editor check. Instance Owner passes as the top of the role ladder.
-    """
+    """The /show Workbench management capability is the Instance Editor role."""
 
     return bool(context is not None and context.has_role("editor"))
 
@@ -1014,8 +1010,7 @@ class ShowPageStore:
         """Return a Show Page only to an Instance Viewer (owner/editor/viewer).
 
         ``/show`` admission is the Instance role alone, independent of the
-        sharing list and of Resource ACL (§3.2): any Viewer enters the Workbench,
-        while a signed ``show_page_email`` session never does.
+        sharing list and of Resource ACL (§3.2): any Viewer enters the Workbench.
         """
 
         session_id = validate_session_id(session_id)
@@ -1096,11 +1091,7 @@ class ShowPageStore:
 
     @staticmethod
     def _require_resource_access(user_context: Any) -> None:
-        if not (
-            user_context is not None
-            and user_context.has_role("viewer")
-            and user_context.instance_access_source != "show_page_email"
-        ):
+        if not (user_context is not None and user_context.has_role("viewer")):
             raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
 
     @staticmethod
