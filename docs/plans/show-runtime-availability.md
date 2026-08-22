@@ -527,6 +527,12 @@ The retained rules are normative:
    `httpx` network exceptions it owns. Programming defects such as `TypeError` and
    `AttributeError` propagate unchanged. A malformed user command is input
    evidence, so command parsing converts it at the command-resolution boundary.
+   Explicit-command resolution has one owner shared by startup admission, install
+   preflight, and status. It returns an existing `ShowRuntimeAvailability` carrying
+   either the resolved command or complete reason/class/action evidence. Only the
+   explicit-configuration flag may mean "no override"; a parse failure may never be
+   collapsed to `None`, because that would let status fall through to an unrelated
+   managed provider and report a runtime that startup will refuse.
 3. **Retry now renders its one expected page response.** One click performs exactly
    one fetch. A direct 2xx HTML response is rendered into the current document from
    a private script scope, so repeated recovery-page renders cannot collide on
@@ -539,6 +545,19 @@ The retained rules are normative:
 Install-lock contention remains `not_applicable`: another process owns progress,
 so this caller did not run a provider. Recovery remains request-driven; no
 background timer or automatic attempt budget exists in PR #1640.
+
+**Installed runtimes are resolved before mutation when installed evidence proves
+the selected input.** Startup admission first projects the shared explicit-command
+owner when an override exists. Otherwise it reuses the in-memory managed command,
+then performs one offline, read-only lookup for manifest, GitHub source, and npm.
+A hit never enters provider installation. An absent runtime,
+`force_install=True`, or a remote manifest enters mutating admission. Archive is
+intentionally different: a configured local archive is new input, so the provider
+attempts publication first and falls back to the installed archive only when that
+attempt fails. The master regression test that replaces an old installed archive
+with a changed local archive is the contract guard. Archive URL downloads after a
+process restart are existing behavior tracked separately in issue #1657. This
+boundary is independent of the deleted retry machinery.
 
 **Failure classification is declared data and published by the evidence owner.**
 Each `(reason, provenance)` pair has one declaration carrying its dimension,
@@ -575,6 +594,11 @@ shared admission functions. Re-extracting the retained subset from master would
 rewrite the same regions that produced the findings while discarding the review
 history. Deleting the enumerated retry symbols is mechanically verifiable and
 introduces no replacement state machine, class, or module-level table.
+One late review finding was blamed to that deletion commit: its total status
+boundary converted a malformed explicit command to `None` and discarded the
+evidence needed to distinguish "not configured" from "configured incorrectly."
+The forward stop condition was not violated by that stock finding, but the record
+must not claim the deletion commit introduced zero defects.
 
 **Through one admission path.** This requirement was missing from the first
 version of this spec, and its absence produced four review findings across two

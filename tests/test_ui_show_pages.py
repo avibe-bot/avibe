@@ -6866,6 +6866,157 @@ def test_start_admission_publishes_malformed_configured_commands(
     assert result.runtime_recovery_action is ShowRuntimeRecoveryAction.CHANGE_SETTING
 
 
+def test_malformed_explicit_command_evidence_is_shared_by_status_prepare_and_start(
+    monkeypatch,
+    tmp_path,
+):
+    manager = ShowRuntimeManager(
+        command="'unterminated",
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        runtime_source="npm",
+    )
+    monkeypatch.setattr(
+        manager,
+        "_managed_bin_path",
+        lambda: pytest.fail("an explicit command must not inspect a managed provider"),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_install_managed_runtime_locked",
+        lambda **_kwargs: pytest.fail("an explicit command must not enter managed installation"),
+    )
+
+    status = manager.status()
+    prepared = manager.prepare()
+    started = asyncio.run(manager.ensure())
+
+    for runtime in (status["runtime"], prepared["runtime"], started.as_payload()["runtime"]):
+        assert runtime == {
+            "state": "start_failed",
+            "reason": "runtime_start_command_invalid",
+            "failure_class": "configured",
+            "recovery_action": "change_setting",
+            "base_url": None,
+        }
+    assert status["install"]["state"] == "absent"
+    assert status["command"] is None
+    assert status["reason"] == "runtime_start_command_invalid"
+    assert prepared["ok"] is False
+    assert prepared["reason"] == "runtime_start_command_invalid"
+
+
+@pytest.mark.parametrize(
+    ("provider", "resolver_name"),
+    (
+        ("manifest-cache", "_installed_manifest_runtime_command"),
+        ("github-source", "_installed_github_runtime_command"),
+        ("npm", None),
+    ),
+)
+def test_installed_managed_provider_is_resolved_before_mutation(
+    monkeypatch,
+    tmp_path,
+    provider,
+    resolver_name,
+):
+    command = [str(tmp_path / f"{provider}-runtime")]
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        runtime_source=provider,
+    )
+    if resolver_name == "_installed_manifest_runtime_command":
+        monkeypatch.setattr(manager, resolver_name, lambda *, offline: command)
+    elif resolver_name is not None:
+        monkeypatch.setattr(manager, resolver_name, lambda: command)
+    else:
+        monkeypatch.setattr(manager, "_managed_bin_path", lambda: Path(command[0]))
+        monkeypatch.setattr("core.show_runtime._resolve_executable_path", lambda _path: command[0])
+    monkeypatch.setattr(
+        manager,
+        "_attempt_managed_install",
+        lambda **_kwargs: pytest.fail("an installed runtime must not enter a mutating provider"),
+    )
+
+    availability = asyncio.run(manager._resolve_managed_availability())
+
+    assert availability.command == command
+    assert availability.install.value == "installed"
+
+
+@pytest.mark.parametrize(
+    ("installed", "force"),
+    ((False, False), (True, True)),
+    ids=("absent", "forced"),
+)
+def test_managed_resolution_mutates_when_install_is_owed(monkeypatch, tmp_path, installed, force):
+    existing_command = [str(tmp_path / "existing-runtime")]
+    installed_command = [str(tmp_path / "installed-runtime")]
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        runtime_source="npm",
+        force_install=force,
+    )
+    disk_reads = []
+    attempts = []
+
+    def read_installed(*, offline):
+        disk_reads.append(offline)
+        return existing_command if installed else None
+
+    def install(**kwargs):
+        attempts.append(kwargs)
+        availability = manager._publish_install_availability(command=installed_command)
+        operation = show_runtime._ShowRuntimeOperationOutcome(
+            show_runtime._ShowRuntimeOperationState.COMPLETED,
+            None,
+        )
+        return availability, operation
+
+    monkeypatch.setattr(manager, "_safe_installed_managed_runtime_command", read_installed)
+    monkeypatch.setattr(manager, "_attempt_managed_install", install)
+
+    availability = asyncio.run(manager._resolve_managed_availability())
+
+    assert disk_reads == ([] if force else [True])
+    assert attempts == [{"force": force, "offline": False, "automatic": True}]
+    assert availability.command == installed_command
+
+
+def test_remote_manifest_bypasses_disk_resolution_until_admission(monkeypatch, tmp_path):
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        runtime_source="manifest-cache",
+        manifest_url="https://example.test/show-runtime-manifest.json",
+    )
+    command = [str(tmp_path / "installed-runtime")]
+    attempts = []
+    monkeypatch.setattr(
+        manager,
+        "_safe_installed_managed_runtime_command",
+        lambda **_kwargs: pytest.fail("a remote manifest must be admitted before disk reuse"),
+    )
+
+    def install(**kwargs):
+        attempts.append(kwargs)
+        availability = manager._publish_install_availability(command=command)
+        operation = show_runtime._ShowRuntimeOperationOutcome(
+            show_runtime._ShowRuntimeOperationState.COMPLETED,
+            None,
+        )
+        return availability, operation
+
+    monkeypatch.setattr(manager, "_attempt_managed_install", install)
+
+    availability = asyncio.run(manager._resolve_managed_availability())
+
+    assert attempts == [{"force": False, "offline": False, "automatic": True}]
+    assert availability.command == command
+
+
 def test_explicit_runtime_ignores_unrelated_malformed_node_override(monkeypatch, tmp_path):
     monkeypatch.setenv("VIBE_SHOW_RUNTIME_NODE_BIN", "'unterminated")
     manager = ShowRuntimeManager(
@@ -7132,6 +7283,46 @@ def test_provider_install_entrypoints_converge_on_single_admission_owner():
         )
     }
     assert admission_callers == {"_resolve_managed_availability", "prepare"}
+
+
+def test_explicit_command_resolution_has_one_owner_and_four_consumers():
+    manager_tree = ast.parse(textwrap.dedent(inspect.getsource(ShowRuntimeManager))).body[0]
+    functions = {
+        node.name: node for node in manager_tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    direct_resolvers = {
+        function.name
+        for function in functions.values()
+        if any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_resolve_command"
+            and node.args
+            and isinstance(node.args[0], ast.Attribute)
+            and isinstance(node.args[0].value, ast.Name)
+            and node.args[0].value.id == "self"
+            and node.args[0].attr == "command"
+            for node in ast.walk(function)
+        )
+    }
+    assert direct_resolvers == {"_resolve_explicit_command_availability"}
+
+    consumers = {
+        function.name
+        for function in functions.values()
+        if any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_resolve_explicit_command_availability"
+            for node in ast.walk(function)
+        )
+    }
+    assert consumers == {
+        "_admit_runtime_start",
+        "_managed_install_preflight",
+        "_resolve_managed_availability",
+        "status",
+    }
 
 
 @pytest.mark.parametrize(
@@ -9267,7 +9458,10 @@ def test_show_runtime_manager_installs_without_blocking_event_loop(monkeypatch, 
     monkeypatch.setattr("core.show_runtime.asyncio.to_thread", fake_to_thread)
 
     assert asyncio.run(manager._resolve_managed_command()) == [str(manager._managed_bin_path())]
-    assert [call.__name__ for call in calls] == ["_attempt_managed_install"]
+    assert [call.__name__ for call in calls] == [
+        "_safe_installed_managed_runtime_command",
+        "_attempt_managed_install",
+    ]
 
 
 def test_show_runtime_manager_fails_closed_when_manifest_is_absent(tmp_path):
