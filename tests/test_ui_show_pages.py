@@ -7,6 +7,7 @@ import inspect
 import io
 import json
 import os
+import re
 import shutil
 import socket
 import ssl
@@ -45,6 +46,7 @@ from core.show_pages import (
 from core.show_runtime import (
     SHOW_RUNTIME_CLI_FALLBACK_DELAY_SECONDS,
     ShowRuntimeContext,
+    ShowRuntimeAttemptTrigger,
     ShowRuntimeManager,
     ShowRuntimeProtocolEnvelope,
     ShowRuntimeRequestTimeoutError,
@@ -59,6 +61,7 @@ from core.show_runtime import (
     set_show_runtime_manager_for_tests,
 )
 from core.show_runtime_failures import (
+    SHOW_RUNTIME_FAILURE_DECLARATIONS,
     ShowRuntimeFailureClass,
     ShowRuntimeFailureDimension,
     ShowRuntimeFailureEvidence,
@@ -138,8 +141,9 @@ class _FakeShowRuntimeManager:
         self.stopped = False
 
     def _unavailable_error(self):
+        declaration = SHOW_RUNTIME_FAILURE_DECLARATIONS.get(self.failure_reason)
         evidence = ShowRuntimeFailureEvidence(
-            ShowRuntimeFailureDimension.RUNTIME,
+            declaration.dimension if declaration else ShowRuntimeFailureDimension.RUNTIME,
             self.failure_reason,
         )
         failure_class = classify_show_runtime_failure(evidence)
@@ -485,7 +489,7 @@ def _install_remote_manifest_runtime(monkeypatch, tmp_path: Path):
         runtime_dir=runtime_dir,
         manifest_url=manifest_url,
     )
-    result = manager.prepare()
+    result = manager.prepare(automatic=True)
     assert result["install"]["state"] == "installed"
     install_dir = Path(result["command"][1]).parents[4]
     return runtime_dir, manifest_url, install_dir, result["command"]
@@ -6653,6 +6657,40 @@ def test_show_runtime_failure_classification(dimension, reason, expected):
     assert classify_show_runtime_failure(ShowRuntimeFailureEvidence(dimension, reason)) is expected
 
 
+def test_show_runtime_failure_declarations_are_total_and_owner_safe():
+    assert len(SHOW_RUNTIME_FAILURE_DECLARATIONS) == len(set(SHOW_RUNTIME_FAILURE_DECLARATIONS))
+    assert all(
+        declaration.owning_artifact and declaration.dimension
+        for declaration in SHOW_RUNTIME_FAILURE_DECLARATIONS.values()
+    )
+    assert all(
+        declaration.user_owned
+        for declaration in SHOW_RUNTIME_FAILURE_DECLARATIONS.values()
+        if declaration.failure_class is ShowRuntimeFailureClass.CONFIGURED
+    )
+
+
+def test_show_runtime_reason_literals_are_declared_once():
+    source = inspect.getsource(show_runtime)
+    reason_literals = {
+        value
+        for value in re.findall(r'(["\'])(runtime_[a-z0-9_]+)\1', source)
+        if value[1] not in {"runtime_source", "runtime_version"}
+    }
+    declared = set(SHOW_RUNTIME_FAILURE_DECLARATIONS)
+    assert {value for _quote, value in reason_literals} <= declared
+
+
+def test_show_runtime_attempt_policy_is_total_over_triggers():
+    assert set(show_runtime._SHOW_RUNTIME_ATTEMPT_POLICIES) == set(ShowRuntimeAttemptTrigger)
+    assert show_runtime._show_runtime_attempt_policy(
+        ShowRuntimeAttemptTrigger.AUTOMATIC
+    ).consumes_retry_budget
+    assert not show_runtime._show_runtime_attempt_policy(
+        ShowRuntimeAttemptTrigger.USER_INITIATED
+    ).consumes_retry_budget
+
+
 def test_show_runtime_install_retry_delay_is_bounded(monkeypatch):
     monkeypatch.setattr("core.show_runtime.random.random", lambda: 1.0)
 
@@ -6744,7 +6782,7 @@ def test_cancelled_install_waiter_cannot_escape_thread_accounting(monkeypatch, t
                 manager._attempt_managed_install,
                 force=False,
                 offline=False,
-                automatic=True,
+                trigger=ShowRuntimeAttemptTrigger.AUTOMATIC,
             )
         )
         assert await asyncio.to_thread(started.wait, 5)
@@ -6753,7 +6791,7 @@ def test_cancelled_install_waiter_cannot_escape_thread_accounting(monkeypatch, t
                 manager._attempt_managed_install,
                 force=False,
                 offline=False,
-                automatic=True,
+                trigger=ShowRuntimeAttemptTrigger.AUTOMATIC,
             )
         )
         task.cancel()
@@ -6999,7 +7037,7 @@ def test_failed_forced_replacement_does_not_block_installed_runtime(monkeypatch,
 
     assert payload["ok"] is False
     assert payload["install"]["state"] == "installed"
-    assert manager._install_retry is not None
+    assert manager._install_retry is None
     assert manager._start_retry is None
     assert asyncio.run(manager._resolve_managed_command()) == command
 
@@ -7192,7 +7230,7 @@ def test_install_admission_uses_one_precondition_snapshot_for_gate_and_publicati
     _admission, operation = manager._attempt_managed_install(
         force=False,
         offline=False,
-        automatic=True,
+        trigger=ShowRuntimeAttemptTrigger.AUTOMATIC,
     )
 
     assert operation.ok is False
@@ -7297,8 +7335,8 @@ def test_archive_explicit_attempt_does_not_fall_through_to_generic_install(monke
     )
     attempts = []
 
-    def failed_archive(*, force, offline, automatic):
-        attempts.append((force, offline, automatic))
+    def failed_archive(*, force, offline, trigger):
+        attempts.append((force, offline, trigger))
         admission = manager._publish_install_availability(install_reason="runtime_archive_download_failed")
         return admission, srt._ShowRuntimeOperationOutcome(
             srt._ShowRuntimeOperationState.FAILED,
@@ -7310,7 +7348,7 @@ def test_archive_explicit_attempt_does_not_fall_through_to_generic_install(monke
     result = asyncio.run(manager._resolve_managed_availability(automatic=False))
 
     assert result.install_reason == "runtime_archive_download_failed"
-    assert attempts == [(False, False, False)]
+    assert attempts == [(False, False, ShowRuntimeAttemptTrigger.USER_INITIATED)]
 
 
 @pytest.mark.parametrize("entrypoint", ("request", "request_global"))
@@ -7596,7 +7634,7 @@ def test_show_runtime_manager_retries_transient_install_after_deadline(monkeypat
     assert manager._install_retry is None
 
 
-def test_show_runtime_prepare_seeds_install_retry_backoff(monkeypatch, tmp_path):
+def test_user_initiated_prepare_does_not_seed_install_retry_backoff(monkeypatch, tmp_path):
     clock = [100.0]
     attempts = []
     command = [str(tmp_path / "runtime-cli")]
@@ -7620,14 +7658,38 @@ def test_show_runtime_prepare_seeds_install_retry_backoff(monkeypatch, tmp_path)
     prepared = manager.prepare()
     assert prepared["ok"] is False
     assert prepared["reason"] == "runtime_install_failed"
+    assert manager._install_retry is None
 
-    clock[0] = 104.9
-    assert asyncio.run(manager._resolve_managed_command()) is None
-    assert attempts == [100.0]
-
-    clock[0] = 105.0
+    clock[0] = 100.1
     assert asyncio.run(manager._resolve_managed_command()) == command
-    assert attempts == [100.0, 105.0]
+    assert attempts == [100.0, 100.1]
+
+
+def test_failed_user_install_preserves_automatic_retry_record(monkeypatch, tmp_path):
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        runtime_source="npm",
+    )
+    identity = manager._retry_preconditions().identity
+    manager._install_retry = manager._next_retry_backoff(
+        None,
+        identity=identity,
+        reason="runtime_install_failed",
+        dimension=ShowRuntimeFailureDimension.INSTALL,
+        base_seconds=5.0,
+        max_seconds=300.0,
+    )
+    before = manager._install_retry
+
+    def fail_install(*, force=None):
+        manager._install_reason = "runtime_install_failed"
+        return None
+
+    monkeypatch.setattr(manager, "_install_npm_runtime", fail_install)
+    manager.prepare(automatic=False)
+
+    assert manager._install_retry == before
 
 
 @pytest.mark.parametrize(
@@ -7818,6 +7880,29 @@ def test_start_admission_normalizes_spawn_exceptions(
     assert spawn_calls == [True]
 
 
+def test_managed_spawn_command_loss_is_repairable_evidence(monkeypatch, tmp_path):
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        runtime_source="npm",
+    )
+
+    async def managed_command(*, trigger):
+        return manager._publish_install_availability(command=["managed-runtime"])
+
+    monkeypatch.setattr(manager, "_resolve_managed_availability", managed_command)
+    monkeypatch.setattr(
+        "core.show_runtime.subprocess.Popen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(FileNotFoundError(errno.ENOENT, "gone")),
+    )
+
+    result = asyncio.run(manager.ensure())
+
+    assert result.runtime_reason == "runtime_start_managed_command_unavailable"
+    assert result.runtime_failure_class is ShowRuntimeFailureClass.UNCLASSIFIED
+    assert result.runtime_recovery_action is ShowRuntimeRecoveryAction.REPAIR
+
+
 @pytest.mark.parametrize("failure_phase", ("establish", "readiness"))
 def test_start_admission_closes_establishment_and_readiness_exceptions(
     monkeypatch,
@@ -7912,7 +7997,7 @@ def test_start_owner_does_not_claim_pre_gate_install_failure(monkeypatch, tmp_pa
         runtime_source="npm",
     )
 
-    async def fail_install_resolution(*, automatic):
+    async def fail_install_resolution(*, trigger):
         raise OSError("install owner escaped unexpectedly")
 
     monkeypatch.setattr(manager, "_resolve_managed_availability", fail_install_resolution)
@@ -9546,7 +9631,7 @@ def test_show_runtime_prepare_policy_truth_table(
     monkeypatch.setattr(
         manager,
         "_install_managed_runtime_locked",
-        lambda *, force, offline, automatic: calls.append((force, offline, automatic)) or command,
+        lambda *, force, offline: calls.append((force, offline)) or command,
     )
     monkeypatch.setattr(manager, "status", lambda **_kwargs: {})
 
@@ -9563,7 +9648,7 @@ def test_show_runtime_prepare_policy_truth_table(
     assert result["install"]["state"] == ("absent" if expected_skip else "installed")
     assert result["runtime"]["state"] == "unchecked"
     assert result["ok"] is (not expected_skip)
-    assert calls == ([] if expected_skip else [(force, False, automatic)])
+    assert calls == ([] if expected_skip else [(force, False)])
 
 
 def test_show_runtime_automatic_opt_out_does_not_fetch_remote_manifest(monkeypatch, tmp_path):
@@ -9774,13 +9859,13 @@ def test_show_runtime_availability_classifies_install_failure(
         runtime_source="npm",
     )
 
-    def fail_install(*, force, offline, automatic):
+    def fail_install(*, force, offline):
         manager._install_reason = reason
         return None
 
     monkeypatch.setattr(manager, "_install_managed_runtime_locked", fail_install)
 
-    result = manager.prepare()
+    result = manager.prepare(automatic=True)
 
     assert result["policy"]["state"] == "allowed"
     assert result["install"] == {
@@ -9809,13 +9894,13 @@ def test_show_runtime_prepare_options_do_not_mutate_shared_manager_state(monkeyp
     monkeypatch.setattr(
         manager,
         "_install_managed_runtime_locked",
-        lambda *, force, offline, automatic: calls.append((force, offline, automatic)) or ["/tmp/runtime"],
+        lambda *, force, offline: calls.append((force, offline)) or ["/tmp/runtime"],
     )
 
     result = manager.prepare(force=True, offline=True)
 
     assert result["install"]["state"] == "installed"
-    assert calls == [(True, True, False)]
+    assert calls == [(True, True)]
     assert manager.force_install is False
     assert manager.offline is False
 
@@ -9831,8 +9916,8 @@ def test_show_runtime_prepare_and_request_share_one_install_admission(monkeypatc
     command = [str(tmp_path / "runtime" / "avibe-show-runtime")]
     calls = []
 
-    def install(*, force, offline, automatic):
-        calls.append((force, offline, automatic))
+    def install(*, force, offline):
+        calls.append((force, offline))
         entered.set()
         assert release.wait(timeout=5)
         return command
@@ -9852,7 +9937,7 @@ def test_show_runtime_prepare_and_request_share_one_install_admission(monkeypatc
     resolved = asyncio.run(resolve_during_prepare())
     prepare_thread.join(timeout=5)
 
-    assert calls == [(False, False, False)]
+    assert calls == [(False, False)]
     assert prepared[0]["install"]["state"] == "installed"
     assert resolved.install.value == "installed"
     assert resolved.command == command
@@ -9874,7 +9959,7 @@ def test_show_runtime_manager_installs_without_blocking_event_loop(monkeypatch, 
     monkeypatch.setattr(
         manager,
         "_install_managed_runtime_locked",
-        lambda *, force, offline, automatic: fake_install(),
+        lambda *, force, offline: fake_install(),
     )
     calls = []
 

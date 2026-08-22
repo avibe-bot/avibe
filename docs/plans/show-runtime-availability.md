@@ -626,6 +626,26 @@ own `configured` class and `manual_only` disposition for both automatic-install
 opt-outs. The page projects published values and never derives behavior from a
 failure class, reason prefix, or transport header.
 
+The failure vocabulary is declared data, not several membership sets. Each
+reason has one declaration carrying its dimension, owning artifact, class, and
+user ownership; classification and recovery action are total lookups over that
+declaration. A managed command that disappears is runtime evidence owned by the
+managed artifact and is not classified as a user configuration error; an
+explicit command failure remains configured. Every reason emitted by the
+runtime module is covered by the declaration census, and no reason may acquire
+a second classification path.
+
+The trigger is also data rather than a defaulted boolean. Automatic and
+user-initiated triggers each declare whether they gate on, or consume, the
+automatic retry budget. The budget selection is total over the trigger set.
+Automatic attempts may be bounded; a user-initiated attempt is exactly one
+attempt and neither consults nor changes the automatic retry record. The two
+halves are independent: an automatic bound never gates user work, and user work
+never consumes the automatic budget. If a ninth findings-bearing commit lands
+inside identity, budget, or classification after these folds and exhaustiveness
+tests, the data model is presumed inadequate and the property is redesigned
+before another patch is attempted.
+
 **Admission accounting is atomic with admission.** The provider result,
 exception normalization, and retry-record write converge while the serialized
 install guard is still held. A second admission cannot pass the retry gate or

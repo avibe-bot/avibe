@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from core.show_runtime import ShowRuntimeManager
+from core.show_runtime import ShowRuntimeAttemptTrigger, ShowRuntimeManager
 
 
 def _make_manager(tmp_path: Path) -> ShowRuntimeManager:
@@ -535,7 +535,11 @@ def test_install_guard_unavailable_falls_back_to_verified_install(tmp_path: Path
     real_open = os.open
     monkeypatch.setattr(os, "open", _unwritable_open)
 
-    availability, operation = manager._attempt_managed_install(force=False, offline=True)
+    availability, operation = manager._attempt_managed_install(
+        force=False,
+        offline=True,
+        trigger=ShowRuntimeAttemptTrigger.USER_INITIATED,
+    )
     command = availability.command
 
     assert command is not None and command[-1].endswith("cli.js")
@@ -672,7 +676,11 @@ def test_forced_prepare_fails_structured_when_guard_unavailable(tmp_path: Path, 
 
     monkeypatch.setattr("os.open", _unwritable_open)
 
-    availability, operation = manager._attempt_managed_install(force=True, offline=True)
+    availability, operation = manager._attempt_managed_install(
+        force=True,
+        offline=True,
+        trigger=ShowRuntimeAttemptTrigger.USER_INITIATED,
+    )
     command = availability.command
 
     assert command is None

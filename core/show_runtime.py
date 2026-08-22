@@ -135,6 +135,7 @@ _STARTUP_URL_TIMEOUT_REASON = "runtime_start_url_timeout"
 _STARTUP_PROCESS_UNAVAILABLE_REASON = "runtime_start_process_unavailable"
 _STARTUP_HEALTH_TIMEOUT_REASON = "runtime_start_health_timeout"
 _STARTUP_COMMAND_UNAVAILABLE_REASON = "runtime_start_command_unavailable"
+_STARTUP_MANAGED_COMMAND_UNAVAILABLE_REASON = "runtime_start_managed_command_unavailable"
 _STARTUP_COMMAND_INVALID_REASON = "runtime_start_command_invalid"
 _STARTUP_NODE_COMMAND_INVALID_REASON = "runtime_start_node_command_invalid"
 _STARTUP_ATTEMPT_FAILED_REASON = "runtime_start_attempt_failed"
@@ -225,6 +226,42 @@ class _ShowRuntimeOperationState(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     NOT_APPLICABLE = "not_applicable"
+
+
+class ShowRuntimeAttemptTrigger(str, Enum):
+    AUTOMATIC = "automatic"
+    USER_INITIATED = "user_initiated"
+
+
+@dataclass(frozen=True)
+class _ShowRuntimeAttemptPolicy:
+    gates_retry: bool
+    consumes_retry_budget: bool
+
+
+_SHOW_RUNTIME_ATTEMPT_POLICIES = {
+    ShowRuntimeAttemptTrigger.AUTOMATIC: _ShowRuntimeAttemptPolicy(True, True),
+    ShowRuntimeAttemptTrigger.USER_INITIATED: _ShowRuntimeAttemptPolicy(False, False),
+}
+
+
+def _show_runtime_attempt_policy(trigger: ShowRuntimeAttemptTrigger) -> _ShowRuntimeAttemptPolicy:
+    try:
+        return _SHOW_RUNTIME_ATTEMPT_POLICIES[trigger]
+    except KeyError as exc:  # pragma: no cover - enum exhaustiveness is tested at import time
+        raise ValueError(f"unmapped Show Runtime attempt trigger: {trigger!r}") from exc
+
+
+def _show_runtime_attempt_trigger(automatic: bool) -> ShowRuntimeAttemptTrigger:
+    return (
+        ShowRuntimeAttemptTrigger.AUTOMATIC
+        if automatic
+        else ShowRuntimeAttemptTrigger.USER_INITIATED
+    )
+
+
+if set(_SHOW_RUNTIME_ATTEMPT_POLICIES) != set(ShowRuntimeAttemptTrigger):
+    raise RuntimeError("Show Runtime attempt triggers must have a total retry policy")
 
 
 @dataclass(frozen=True)
@@ -582,9 +619,11 @@ class ShowRuntimeManager:
                 base_url=self._base_url,
             )
         async with self._lock:
-            return await self._admit_runtime_start(automatic=automatic)
+            return await self._admit_runtime_start(
+                trigger=_show_runtime_attempt_trigger(automatic),
+            )
 
-    async def _admit_runtime_start(self, *, automatic: bool) -> ShowRuntimeAvailability:
+    async def _admit_runtime_start(self, *, trigger: ShowRuntimeAttemptTrigger) -> ShowRuntimeAvailability:
         """Own one start admission from retry gate through readiness publication."""
         availability: ShowRuntimeAvailability | None = None
         identity: tuple[Any, ...] | None = None
@@ -625,14 +664,14 @@ class ShowRuntimeManager:
                         )
                 elif not preconditions.failure_reason:
                     start_phase = "install"
-                    availability = await self._resolve_managed_availability(automatic=automatic)
+                    availability = await self._resolve_managed_availability(trigger=trigger)
                     command = availability.command
                 if command:
                     start_phase = "gate"
                     blocked_retry = self._active_retry(
                         "_start_retry",
                         identity=identity,
-                        automatic=automatic,
+                        trigger=trigger,
                     )
                     if blocked_retry is None:
                         start_phase = "establish"
@@ -719,7 +758,11 @@ class ShowRuntimeManager:
                     and isinstance(exc, OSError)
                     and exc.errno in {errno.EACCES, errno.ENOENT, errno.ENOEXEC}
                 ):
-                    reason = _STARTUP_COMMAND_UNAVAILABLE_REASON
+                    reason = (
+                        _STARTUP_COMMAND_UNAVAILABLE_REASON
+                        if self._command_explicit
+                        else _STARTUP_MANAGED_COMMAND_UNAVAILABLE_REASON
+                    )
                 operation = _ShowRuntimeOperationOutcome(
                     _ShowRuntimeOperationState.FAILED,
                     reason,
@@ -741,6 +784,7 @@ class ShowRuntimeManager:
                 identity=identity,
                 base_url=base_url,
                 blocked_retry=blocked_retry,
+                trigger=trigger,
             )
         if pending_exception is not None:
             raise pending_exception
@@ -1115,7 +1159,13 @@ class ShowRuntimeManager:
         except Exception:  # pragma: no cover - defensive; sweeping must never block spawn
             logger.debug("Orphan show runtime sweep skipped", exc_info=True)
 
-    async def _resolve_managed_availability(self, *, automatic: bool = True) -> ShowRuntimeAvailability:
+    async def _resolve_managed_availability(
+        self,
+        *,
+        trigger: ShowRuntimeAttemptTrigger | None = None,
+        automatic: bool = True,
+    ) -> ShowRuntimeAvailability:
+        trigger = trigger or _show_runtime_attempt_trigger(automatic)
         if self._command_explicit and self.command != _RUNTIME_BIN:
             command = _resolve_command(self.command)
             return self._publish_install_availability(
@@ -1136,7 +1186,7 @@ class ShowRuntimeManager:
                 self._attempt_managed_install,
                 force=self.force_install,
                 offline=self.offline,
-                automatic=automatic,
+                trigger=trigger,
             )
             if admission.command:
                 return admission
@@ -1158,7 +1208,7 @@ class ShowRuntimeManager:
                 self._attempt_managed_install,
                 force=self.force_install,
                 offline=self.offline,
-                automatic=automatic,
+                trigger=trigger,
             )
             if admission.command:
                 return admission
@@ -1189,7 +1239,7 @@ class ShowRuntimeManager:
             self._attempt_managed_install,
             force=self.force_install,
             offline=self.offline,
-            automatic=automatic,
+            trigger=trigger,
         )
         return admission
 
@@ -1202,7 +1252,7 @@ class ShowRuntimeManager:
         *,
         force: bool,
         offline: bool,
-        automatic: bool = False,
+        trigger: ShowRuntimeAttemptTrigger,
     ) -> tuple[ShowRuntimeAvailability, _ShowRuntimeOperationOutcome]:
         identity: tuple[Any, ...] | None = None
         admission: ShowRuntimeAvailability | None = None
@@ -1221,7 +1271,7 @@ class ShowRuntimeManager:
             identity = preconditions.identity
             preflight = self._managed_install_preflight(
                 force=force,
-                automatic=automatic,
+                trigger=trigger,
                 preconditions=preconditions,
             )
             if preflight is not None:
@@ -1253,7 +1303,7 @@ class ShowRuntimeManager:
                 else:
                     preflight = self._managed_install_preflight(
                         force=force,
-                        automatic=automatic,
+                        trigger=trigger,
                         preconditions=preconditions,
                     )
                     if preflight is not None:
@@ -1262,7 +1312,7 @@ class ShowRuntimeManager:
                         blocked = self._active_retry(
                             "_install_retry",
                             identity=identity,
-                            automatic=automatic,
+                            trigger=trigger,
                         )
                         if blocked is not None:
                             installed_command = self._installed_managed_runtime_command(
@@ -1286,7 +1336,6 @@ class ShowRuntimeManager:
                             raw_attempt = self._install_managed_runtime_locked(
                                 force=force,
                                 offline=offline,
-                                automatic=automatic,
                             )
                             attempt = (
                                 raw_attempt
@@ -1350,6 +1399,7 @@ class ShowRuntimeManager:
                 operation,
                 identity=identity,
                 attempt_owed=attempt_owed,
+                trigger=trigger,
             )
             if stack is not None:
                 stack.close()
@@ -1361,7 +1411,7 @@ class ShowRuntimeManager:
         self,
         *,
         force: bool,
-        automatic: bool = False,
+        trigger: ShowRuntimeAttemptTrigger,
         preconditions: _ShowRuntimeRetryPreconditions,
     ) -> tuple[ShowRuntimeAvailability, _ShowRuntimeOperationOutcome] | None:
         if self._command_explicit:
@@ -1399,7 +1449,7 @@ class ShowRuntimeManager:
                     reason or "runtime_command_missing",
                 )
             return availability, operation
-        skipped_reason = self._managed_install_opt_out_reason(automatic=automatic)
+        skipped_reason = self._managed_install_opt_out_reason(trigger=trigger)
         if skipped_reason:
             return self._publish_policy_skip(skipped_reason), _ShowRuntimeOperationOutcome(
                 _ShowRuntimeOperationState.NOT_APPLICABLE,
@@ -1418,11 +1468,17 @@ class ShowRuntimeManager:
         *,
         identity: tuple[Any, ...] | None,
         attempt_owed: bool,
+        trigger: ShowRuntimeAttemptTrigger,
     ) -> tuple[ShowRuntimeAvailability, _ShowRuntimeOperationOutcome]:
         """Publish exactly one install outcome before releasing admission."""
-        if operation.state is _ShowRuntimeOperationState.COMPLETED:
+        policy = _show_runtime_attempt_policy(trigger)
+        if operation.state is _ShowRuntimeOperationState.COMPLETED and policy.consumes_retry_budget:
             self._install_retry = None
-        elif operation.state is _ShowRuntimeOperationState.FAILED and attempt_owed:
+        elif (
+            operation.state is _ShowRuntimeOperationState.FAILED
+            and attempt_owed
+            and policy.consumes_retry_budget
+        ):
             if identity is None:
                 raise AssertionError("failed Show Runtime install admission requires preconditions")
             retry = self._next_retry_backoff(
@@ -1443,10 +1499,13 @@ class ShowRuntimeManager:
                 self._availability = admission
         return admission, operation
 
-    def _managed_install_opt_out_reason(self, *, automatic: bool) -> str | None:
-        if automatic and _env_flag_enabled("VIBE_INSTALL_SKIP_SHOW_RUNTIME", default=False):
+    def _managed_install_opt_out_reason(self, *, trigger: ShowRuntimeAttemptTrigger) -> str | None:
+        if trigger is ShowRuntimeAttemptTrigger.AUTOMATIC and _env_flag_enabled(
+            "VIBE_INSTALL_SKIP_SHOW_RUNTIME",
+            default=False,
+        ):
             return "VIBE_INSTALL_SKIP_SHOW_RUNTIME"
-        if automatic and not self.auto_install:
+        if trigger is ShowRuntimeAttemptTrigger.AUTOMATIC and not self.auto_install:
             return "VIBE_SHOW_RUNTIME_AUTO_INSTALL"
         return None
 
@@ -1651,9 +1710,9 @@ class ShowRuntimeManager:
         owner: str,
         *,
         identity: tuple[Any, ...],
-        automatic: bool,
+        trigger: ShowRuntimeAttemptTrigger,
     ) -> _ShowRuntimeRetryBackoff | None:
-        if not automatic:
+        if not _show_runtime_attempt_policy(trigger).gates_retry:
             return None
         retry = getattr(self, owner)
         if retry is not None and retry.identity != identity:
@@ -1703,6 +1762,7 @@ class ShowRuntimeManager:
         identity: tuple[Any, ...] | None,
         base_url: str | None,
         blocked_retry: _ShowRuntimeRetryBackoff | None,
+        trigger: ShowRuntimeAttemptTrigger,
     ) -> ShowRuntimeAvailability:
         """Publish exactly one start outcome before an admission can leave."""
         published = availability
@@ -1710,7 +1770,7 @@ class ShowRuntimeManager:
             if not base_url:
                 raise AssertionError("completed Show Runtime start admission requires a base URL")
             self._base_url = base_url
-            self._complete_runtime_retry_outcome(operation, identity=identity)
+            self._complete_runtime_retry_outcome(operation, identity=identity, trigger=trigger)
             published = self._publish_runtime_availability(
                 ShowRuntimeServingState.SERVING,
                 base_url,
@@ -1722,10 +1782,10 @@ class ShowRuntimeManager:
                 self.stop()
             except Exception:  # pragma: no cover - process cleanup must not hide the outcome
                 logger.warning("Show Runtime start cleanup failed", exc_info=True)
-            retry = self._complete_runtime_retry_outcome(operation, identity=identity)
+            retry = self._complete_runtime_retry_outcome(operation, identity=identity, trigger=trigger)
             published = self._publish_runtime_availability(
                 ShowRuntimeServingState.START_FAILED,
-                runtime_reason=retry.reason,
+                runtime_reason=operation.reason,
                 retry=retry,
             )
         elif blocked_retry is not None:
@@ -1741,12 +1801,17 @@ class ShowRuntimeManager:
         operation: _ShowRuntimeOperationOutcome,
         *,
         identity: tuple[Any, ...] | None,
+        trigger: ShowRuntimeAttemptTrigger,
     ) -> _ShowRuntimeRetryBackoff | None:
         """Own every write to the Runtime retry record."""
+        policy = _show_runtime_attempt_policy(trigger)
         if operation.state is _ShowRuntimeOperationState.COMPLETED:
-            self._start_retry = None
+            if policy.consumes_retry_budget:
+                self._start_retry = None
             return None
         if operation.state is not _ShowRuntimeOperationState.FAILED:
+            return None
+        if not policy.consumes_retry_budget:
             return None
         if identity is None:
             raise AssertionError("failed Show Runtime start admission requires preconditions")
@@ -1901,7 +1966,6 @@ class ShowRuntimeManager:
         *,
         force: bool,
         offline: bool,
-        automatic: bool = False,
     ) -> _ManagedInstallAttempt:
         command: list[str] | None
         if self.runtime_source == _RUNTIME_SOURCE_MANIFEST:
@@ -2936,7 +3000,7 @@ class ShowRuntimeManager:
         admission, operation = self._attempt_managed_install(
             force=effective_force,
             offline=effective_offline,
-            automatic=automatic,
+            trigger=_show_runtime_attempt_trigger(automatic),
         )
         payload = admission.as_payload()
         payload["ok"] = operation.ok
