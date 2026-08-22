@@ -160,10 +160,10 @@ operation is terminal; attachment cleanup follows the bounded rule below.
 One worker preserves ready-queue order. Concurrent attachment preparation may
 reorder caller arrival; arrival-order FIFO is not a contract.
 
-Each add or flush may use at most three total attempts, and only when the previous
-failure is proven to precede provider execution. A possibly submitted timeout,
-cancellation, malformed response, transport failure, or unclassified rejection is
-terminal. Restart drops the queue and all retry knowledge.
+Each add or flush has at most three attempts, only after proven pre-execution failure.
+A possibly submitted timeout, cancellation, or transport loss is not retried; it
+holds its permit and blocks the worker until proven stopped or the sidecar is reaped.
+Completed malformed/unclassified responses end the item; restart drops volatile knowledge.
 
 The sole post-call modality fallback is an attachment rejection for which existing
 `attachment_add_rejection_proves_no_write()` positively proves no write. Under the
@@ -253,9 +253,9 @@ Keep artifact installation, sidecar ownership, root confinement,
 `MemoryOperationLease`, Restart Engine, Rebuild (`cascade rebuild --yes`), Repair
 (`cascade sync`), Clear authority, Factory Reset, and root recreation.
 
-All listed authority-changing operations use the single transition barrier above;
-none drains queued capture or introduces per-operation delivery state. Clear resets
-identity, catalog, watermark, and summaries only after that barrier succeeds.
+All authority-changing operations use the barrier; none drains or adds delivery
+state. Clear retains four confined deletion surfaces: identity/catalog/watermark/summary state,
+provider root, call log, and attachments; it completes only after all four succeed.
 
 ### Diagnostics
 
@@ -316,7 +316,7 @@ the same time merely to split the diff.
 | `MEMORY-INDEP-003`, `-008` | rewrite shutdown to drop without settlement waits |
 | `MEMORY-SEARCH-005`, `-006`, `-012`, `-013`, `-014` | rewrite v4 migration/diagnostics; remove reopen recovery; bound flush |
 | `MEMORY-CLEAR-201` | remove `manual_required`; Clear still discards volatile work |
-| `MEMORY-REPAIR-006` | rewrite Repair to use the authority transition barrier |
+| `MEMORY-REBUILD-202`, `MEMORY-REPAIR-006` | rewrite claim/sidecar assertions around the transition barrier |
 | `MEMORY-FACTORY-003`, `-004`, `-201` | retain exclusion; include pin jobs in the barrier |
 | `MEMORY-IM-ATTACH-004`, `-009`, `-011` | retain normal cleanup/fallback; bound cleanup failure |
 
