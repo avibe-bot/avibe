@@ -15631,7 +15631,9 @@ async def _reconcile_startup_dependencies_task() -> None:
 
         result = await asyncio.to_thread(api.reconcile_startup_dependencies)
         show_runtime = result.get("show_runtime") if isinstance(result.get("show_runtime"), dict) else {}
-        if show_runtime.get("ok"):
+        policy = show_runtime.get("policy") if isinstance(show_runtime.get("policy"), dict) else {}
+        install = show_runtime.get("install") if isinstance(show_runtime.get("install"), dict) else {}
+        if policy.get("state") == "allowed" and install.get("state") == "installed":
             from core.show_runtime import (
                 ShowRuntimeContext,
                 prewarm_show_page_session,

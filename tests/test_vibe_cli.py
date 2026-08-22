@@ -2273,6 +2273,40 @@ def test_repair_show_runtime_prepares_missing_runtime(monkeypatch, tmp_path):
     assert result["install_dir"] == str(tmp_path / "runtime")
 
 
+def test_runtime_prepare_strict_does_not_report_policy_skip_as_ready(monkeypatch, capsys):
+    manager = SimpleNamespace(
+        prepare=lambda **_kwargs: {
+            "policy": {
+                "state": "skipped",
+                "reason": "VIBE_INSTALL_SKIP_SHOW_RUNTIME",
+            },
+            "install": {"state": "absent", "reason": None},
+            "runtime": {"state": "unchecked", "reason": None},
+            "status": {},
+        }
+    )
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: manager)
+    monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_git_during_prepare", lambda **_kwargs: {"ok": True, "mode": "system"})
+    monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda **_kwargs: {"ok": True})
+
+    exit_code = cli.cmd_runtime(
+        SimpleNamespace(
+            runtime_command="prepare",
+            offline=False,
+            force=False,
+            json=False,
+            strict=True,
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Show Runtime ready" not in captured.out
+    assert "VIBE_INSTALL_SKIP_SHOW_RUNTIME" in captured.err
+
+
 def test_doctor_repair_refreshes_diagnostics_after_repair(monkeypatch):
     paths.ensure_data_dirs()
     restart_path = runtime.get_restart_status_path()

@@ -24,7 +24,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from sysconfig import get_platform
@@ -45,6 +45,7 @@ from config import paths
 from core.dependency_network import dependency_error_details, fetch_bytes, fetch_to_path, probe_url, redact_url
 from core.show_pages import SHOW_RUNTIME_RECOVERY_LOADING_DELAY_SECONDS
 from core.process_isolation import KILL_SIGNAL, isolated_subprocess_kwargs, signal_process_tree
+from core.show_runtime_failures import ShowRuntimeFailureClass, classify_show_runtime_failure
 
 
 logger = logging.getLogger(__name__)
@@ -167,6 +168,23 @@ class ShowRuntimeRequestTimeoutError(TimeoutError):
     """A proxied Runtime request exceeded its total request deadline."""
 
 
+class ShowRuntimePolicyState(str, Enum):
+    ALLOWED = "allowed"
+    SKIPPED = "skipped"
+
+
+class ShowRuntimeInstallState(str, Enum):
+    INSTALLED = "installed"
+    ABSENT = "absent"
+    FAILED = "failed"
+
+
+class ShowRuntimeServingState(str, Enum):
+    SERVING = "serving"
+    UNCHECKED = "unchecked"
+    START_FAILED = "start_failed"
+
+
 @dataclass(frozen=True)
 class ShowRuntimeArchive:
     platform: str
@@ -184,6 +202,94 @@ class ShowRuntimeManifest:
     archives: dict[str, ShowRuntimeArchive]
     digest: str
     source: str
+
+
+@dataclass(frozen=True)
+class _ShowRuntimeDiskInstall:
+    install_dir: Path
+    command: list[str] | None
+    metadata: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class ShowRuntimeAvailability:
+    policy: ShowRuntimePolicyState = ShowRuntimePolicyState.ALLOWED
+    install: ShowRuntimeInstallState = ShowRuntimeInstallState.ABSENT
+    runtime: ShowRuntimeServingState = ShowRuntimeServingState.UNCHECKED
+    command: list[str] | None = None
+    base_url: str | None = None
+    policy_reason: str | None = None
+    install_reason: str | None = None
+    install_failure_class: ShowRuntimeFailureClass | None = None
+    install_runtime_version: str | None = None
+    install_matches_manifest: bool | None = None
+    runtime_reason: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.install is ShowRuntimeInstallState.INSTALLED
+
+    @property
+    def available(self) -> bool:
+        return self.runtime is ShowRuntimeServingState.SERVING and self.base_url is not None
+
+    @property
+    def reason(self) -> str | None:
+        return self.runtime_reason or self.install_reason or self.policy_reason
+
+    @classmethod
+    def from_install(
+        cls,
+        *,
+        command: list[str] | None = None,
+        install: ShowRuntimeInstallState | None = None,
+        policy_reason: str | None = None,
+        install_reason: str | None = None,
+        install_runtime_version: str | None = None,
+        install_matches_manifest: bool | None = None,
+    ) -> "ShowRuntimeAvailability":
+        if install is None:
+            if command:
+                install = ShowRuntimeInstallState.INSTALLED
+            elif install_reason:
+                install = ShowRuntimeInstallState.FAILED
+            else:
+                install = ShowRuntimeInstallState.ABSENT
+        return cls(
+            policy=(ShowRuntimePolicyState.SKIPPED if policy_reason else ShowRuntimePolicyState.ALLOWED),
+            install=install,
+            command=command,
+            policy_reason=policy_reason,
+            install_reason=install_reason,
+            install_failure_class=(
+                classify_show_runtime_failure(install_reason) if install is ShowRuntimeInstallState.FAILED else None
+            ),
+            install_runtime_version=install_runtime_version,
+            install_matches_manifest=install_matches_manifest,
+        )
+
+    def as_payload(self) -> dict[str, Any]:
+        command = list(self.command) if self.command else None
+        return {
+            "policy": {"state": self.policy.value, "reason": self.policy_reason},
+            "install": {
+                "state": self.install.value,
+                "reason": self.install_reason,
+                "failure_class": self.install_failure_class.value if self.install_failure_class else None,
+                "command": command,
+                "runtime_version": self.install_runtime_version,
+                "matches_manifest": self.install_matches_manifest,
+            },
+            "runtime": {
+                "state": self.runtime.value,
+                "reason": self.runtime_reason,
+                "base_url": self.base_url,
+            },
+            # Compatibility fields remain projections of the three dimensions.
+            "ok": self.ok,
+            "command": command,
+            "reason": self.reason,
+        }
 
 
 class ShowRuntimeManager:
@@ -246,6 +352,7 @@ class ShowRuntimeManager:
         self._install_reason: str | None = None
         self._download_error: dict[str, Any] | None = None
         self._managed_command: list[str] | None = None
+        self._availability = ShowRuntimeAvailability()
         self._process: subprocess.Popen[str] | None = None
         self._base_url: str | None = None
         self._lock = asyncio.Lock()
@@ -265,18 +372,24 @@ class ShowRuntimeManager:
         self._capability_retry_attempt = 0
         self._capability_generation = 0
 
-    async def ensure(self) -> ShowRuntimeResult:
+    async def ensure(self) -> ShowRuntimeAvailability:
         if self._base_url and await self._healthy(self._base_url):
-            return ShowRuntimeResult(True, self._base_url)
+            return self._publish_runtime_availability(ShowRuntimeServingState.SERVING, self._base_url)
         async with self._lock:
             if self._base_url and await self._healthy(self._base_url):
-                return ShowRuntimeResult(True, self._base_url)
+                return self._publish_runtime_availability(ShowRuntimeServingState.SERVING, self._base_url)
             self.stop()
-            command = _resolve_command(self.command) if self._command_explicit else None
+            if self._command_explicit:
+                command = _resolve_command(self.command)
+                availability = self._publish_install_availability(
+                    command=command,
+                    install_reason=None if command else "runtime_command_missing",
+                )
+            else:
+                availability = await self._resolve_managed_availability()
+                command = availability.command
             if not command:
-                command = await self._resolve_managed_command()
-            if not command:
-                return ShowRuntimeResult(False, reason=self._install_reason or "runtime_command_missing")
+                return availability
             self.runtime_dir.mkdir(parents=True, exist_ok=True)
             self.workspace_root.mkdir(parents=True, exist_ok=True)
             self.cache_root.mkdir(parents=True, exist_ok=True)
@@ -311,9 +424,12 @@ class ShowRuntimeManager:
             base_url = await self._read_startup_url()
             if not base_url:
                 self.stop()
-                return ShowRuntimeResult(False, reason="runtime_start_failed")
+                return self._publish_runtime_availability(
+                    ShowRuntimeServingState.START_FAILED,
+                    runtime_reason="runtime_start_failed",
+                )
             self._base_url = base_url
-            return ShowRuntimeResult(True, base_url)
+            return self._publish_runtime_availability(ShowRuntimeServingState.SERVING, base_url)
 
     async def request(
         self,
@@ -605,72 +721,208 @@ class ShowRuntimeManager:
         except Exception:  # pragma: no cover - defensive; sweeping must never block spawn
             logger.debug("Orphan show runtime sweep skipped", exc_info=True)
 
-    async def _resolve_managed_command(self) -> list[str] | None:
+    async def _resolve_managed_availability(self) -> ShowRuntimeAvailability:
         if self._command_explicit and self.command != _RUNTIME_BIN:
-            self._install_reason = "runtime_command_missing"
-            return None
+            command = _resolve_command(self.command)
+            return self._publish_install_availability(
+                command=command,
+                install_reason=None if command else "runtime_command_missing",
+            )
         if self.runtime_source == _RUNTIME_SOURCE_MANIFEST:
-            command = None if self.force_install else self._installed_manifest_runtime_command()
+            if self._managed_command and not self.force_install:
+                return self._publish_install_availability(command=self._managed_command)
+            command = (
+                None
+                if self.force_install or self.manifest_url
+                else self._installed_manifest_runtime_command(offline=self.offline)
+            )
             if command:
-                self._managed_command = command
-                return command
-            if self.auto_install and not self._install_attempted:
-                self._install_attempted = True
-                command = await asyncio.to_thread(self._install_managed_runtime)
+                return self._publish_install_availability(command=command)
+            admission = await asyncio.to_thread(
+                self._attempt_managed_install,
+                force=self.force_install,
+                offline=self.offline,
+                automatic=True,
+            )
+            if admission.command:
+                return admission
+            if self.manifest_url and not self.force_install:
+                command = self._installed_manifest_runtime_command(offline=self.offline)
                 if command:
-                    self._managed_command = command
-                    return command
-            command = self._installed_manifest_runtime_command()
-            if command:
-                self._managed_command = command
-                return command
+                    return self._publish_install_availability(
+                        command=command,
+                        policy_reason=admission.policy_reason,
+                    )
             if self._managed_command:
-                return self._managed_command
-            return None
+                return self._publish_install_availability(
+                    command=self._managed_command,
+                    policy_reason=admission.policy_reason,
+                )
+            return admission
         if self.runtime_source == _RUNTIME_SOURCE_ARCHIVE:
-            if self.auto_install and not self._install_attempted:
-                self._install_attempted = True
-                command = await asyncio.to_thread(self._install_managed_runtime)
-                if command:
-                    self._managed_command = command
-                    return command
+            admission = await asyncio.to_thread(
+                self._attempt_managed_install,
+                force=self.force_install,
+                offline=self.offline,
+                automatic=True,
+            )
+            if admission.command:
+                return admission
             command = self._installed_archive_runtime_command()
             if command:
-                self._managed_command = command
-                return command
+                return self._publish_install_availability(
+                    command=command,
+                    policy_reason=admission.policy_reason,
+                )
             if self._managed_command:
-                return self._managed_command
+                return self._publish_install_availability(
+                    command=self._managed_command,
+                    policy_reason=admission.policy_reason,
+                )
         else:
             managed = self._managed_bin_path()
             resolved = _resolve_executable_path(managed)
             if resolved:
-                return [resolved]
+                return self._publish_install_availability(command=[resolved])
             if self._managed_command:
-                return self._managed_command
+                return self._publish_install_availability(command=self._managed_command)
         if self.runtime_source == _RUNTIME_SOURCE_GITHUB:
             command = self._installed_github_runtime_command()
             if command:
-                self._managed_command = command
-                return command
-        if not self.auto_install:
-            self._install_reason = "runtime_command_missing"
-            return None
-        if self._install_attempted:
-            return None
-        self._install_attempted = True
-        command = await asyncio.to_thread(self._install_managed_runtime)
+                return self._publish_install_availability(command=command)
+        admission = await asyncio.to_thread(
+            self._attempt_managed_install,
+            force=self.force_install,
+            offline=self.offline,
+            automatic=True,
+        )
+        return admission
+
+    async def _resolve_managed_command(self) -> list[str] | None:
+        availability = await self._resolve_managed_availability()
+        return availability.command
+
+    def _attempt_managed_install(
+        self,
+        *,
+        force: bool,
+        offline: bool,
+        automatic: bool = False,
+    ) -> ShowRuntimeAvailability:
+        if self._command_explicit:
+            command = _resolve_command(self.command)
+            return self._publish_install_availability(
+                command=command,
+                install_reason=None if command else "runtime_command_missing",
+            )
+        skipped_reason = self._managed_install_opt_out_reason(automatic=automatic)
+        if skipped_reason:
+            return self._publish_policy_skip(skipped_reason)
+        if self._managed_command and not force:
+            return self._publish_install_availability(command=self._managed_command)
+        if automatic and not force and self._install_attempted:
+            return self._publish_install_availability(
+                install_reason=self._install_reason or "runtime_install_failed"
+            )
+
+        with self._install_guard_locked() as (acquired, guard_reason):
+            if not acquired:
+                command = None if force else self._installed_managed_runtime_command(offline=offline)
+                if command:
+                    return self._publish_install_availability(command=command)
+                return self._publish_install_availability(install_reason=guard_reason)
+
+            skipped_reason = self._managed_install_opt_out_reason(automatic=automatic)
+            if skipped_reason:
+                return self._publish_policy_skip(skipped_reason)
+            if self._managed_command and not force:
+                return self._publish_install_availability(command=self._managed_command)
+            if automatic and not force and self._install_attempted:
+                return self._publish_install_availability(
+                    install_reason=self._install_reason or "runtime_install_failed"
+                )
+
+            if automatic:
+                self._install_attempted = True
+            command = self._install_managed_runtime_locked(force=force, offline=offline)
+            if command:
+                return self._publish_install_availability(command=command)
+            return self._publish_install_availability(
+                install_reason=self._install_reason or "runtime_install_failed"
+            )
+
+    def _managed_install_opt_out_reason(self, *, automatic: bool) -> str | None:
+        if automatic and _env_flag_enabled("VIBE_INSTALL_SKIP_SHOW_RUNTIME", default=False):
+            return "VIBE_INSTALL_SKIP_SHOW_RUNTIME"
+        if automatic and not self.auto_install:
+            return "VIBE_SHOW_RUNTIME_AUTO_INSTALL"
+        return None
+
+    def _publish_policy_skip(self, reason: str) -> ShowRuntimeAvailability:
+        if self._managed_command:
+            return self._publish_install_availability(command=self._managed_command, policy_reason=reason)
+        if self.runtime_source == _RUNTIME_SOURCE_MANIFEST:
+            disk_install = self._persisted_manifest_disk_install()
+            return self._publish_install_availability(
+                command=disk_install.command if disk_install else None,
+                install_state=(ShowRuntimeInstallState.INSTALLED if disk_install else ShowRuntimeInstallState.ABSENT),
+                policy_reason=reason,
+            )
+        command = self._installed_managed_runtime_command(offline=True)
+        return self._publish_install_availability(command=command, policy_reason=reason)
+
+    def _publish_install_availability(
+        self,
+        *,
+        command: list[str] | None = None,
+        install_state: ShowRuntimeInstallState | None = None,
+        policy_reason: str | None = None,
+        install_reason: str | None = None,
+    ) -> ShowRuntimeAvailability:
         if command:
             self._managed_command = command
-        return command
+            self._install_reason = None
+        else:
+            self._install_reason = install_reason
+        availability = ShowRuntimeAvailability.from_install(
+            command=command,
+            install=install_state,
+            policy_reason=policy_reason,
+            install_reason=install_reason,
+        )
+        self._availability = availability
+        return availability
 
-    def _install_managed_runtime(self) -> list[str] | None:
+    def _publish_runtime_availability(
+        self,
+        runtime: ShowRuntimeServingState,
+        base_url: str | None = None,
+        *,
+        runtime_reason: str | None = None,
+    ) -> ShowRuntimeAvailability:
+        command = self._availability.command or self._managed_command
+        install = self._availability.install
+        if command:
+            install = ShowRuntimeInstallState.INSTALLED
+        availability = replace(
+            self._availability,
+            install=install,
+            command=command,
+            runtime=runtime,
+            base_url=base_url,
+            runtime_reason=runtime_reason,
+        )
+        self._availability = availability
+        return availability
+
+    def _install_managed_runtime_locked(self, *, force: bool, offline: bool) -> list[str] | None:
         command: list[str] | None
         if self.runtime_source == _RUNTIME_SOURCE_MANIFEST:
-            command = self._install_manifest_runtime()
+            command = self._install_manifest_runtime_locked(force=force, offline=offline)
         elif self.runtime_source == _RUNTIME_SOURCE_ARCHIVE:
-            command = self._install_archive_runtime()
+            command = self._install_archive_runtime(offline=offline)
         elif self.runtime_source == _RUNTIME_SOURCE_GITHUB:
-            command = self._install_github_runtime()
+            command = self._install_github_runtime(force=force)
         elif self.runtime_source == _RUNTIME_SOURCE_NPM:
             command = self._install_npm_runtime()
         else:
@@ -680,6 +932,18 @@ class ShowRuntimeManager:
             self._download_error = None
             self._clean_after_managed_install(command)
         return command
+
+    def _installed_managed_runtime_command(self, *, offline: bool) -> list[str] | None:
+        if self.runtime_source == _RUNTIME_SOURCE_MANIFEST:
+            return self._installed_manifest_runtime_command(offline=offline)
+        if self.runtime_source == _RUNTIME_SOURCE_ARCHIVE:
+            return self._installed_archive_runtime_command()
+        if self.runtime_source == _RUNTIME_SOURCE_GITHUB:
+            return self._installed_github_runtime_command()
+        if self.runtime_source == _RUNTIME_SOURCE_NPM:
+            resolved = _resolve_executable_path(self._managed_bin_path())
+            return [resolved] if resolved else None
+        return None
 
     def _clean_after_managed_install(self, command: list[str]) -> None:
         try:
@@ -706,9 +970,18 @@ class ShowRuntimeManager:
             # Cache cleanup must never turn a usable runtime install into a failed prepare.
             logger.warning("Failed to clean stale managed Show Runtime installs", exc_info=True)
 
-    def status(self) -> dict[str, Any]:
+    def status(self, *, offline: bool | None = None) -> dict[str, Any]:
         configured_command = _resolve_command(self.command) if self._command_explicit else None
-        manifest = self._load_runtime_manifest() if self.runtime_source == _RUNTIME_SOURCE_MANIFEST else None
+        disk_install = (
+            self._persisted_manifest_disk_install()
+            if not configured_command and self.runtime_source == _RUNTIME_SOURCE_MANIFEST
+            else None
+        )
+        manifest = (
+            self._load_runtime_manifest(offline=offline)
+            if self.runtime_source == _RUNTIME_SOURCE_MANIFEST
+            else None
+        )
         platform_tag = _runtime_platform_tag()
         node = _resolve_node_command()
         node_version = _node_version(node) if node else None
@@ -717,15 +990,28 @@ class ShowRuntimeManager:
         installed_dir: Path | None = None
         archive: ShowRuntimeArchive | None = None
         archive_status: dict[str, Any] | None = None
-        installed_matches = False
-        if not configured_command and manifest:
-            archive = manifest.archives.get(platform_tag)
+        installed_runtime_version: str | None = None
+        installed_matches: bool | None = None
+        installed = configured_command is not None
+        manifest_status = _manifest_status_payload(manifest)
+        if not configured_command and self.runtime_source == _RUNTIME_SOURCE_MANIFEST:
+            if disk_install:
+                installed = True
+                installed_dir = disk_install.install_dir
+                installed_command = disk_install.command
+                installed_runtime_version = _persisted_manifest_runtime_version(disk_install.metadata)
+                if manifest_status is None:
+                    manifest_status = _persisted_manifest_status_payload(disk_install.metadata)
+                    archive_status = _persisted_archive_status_payload(disk_install.metadata)
+            if manifest:
+                archive = manifest.archives.get(platform_tag)
             if archive:
-                installed_dir = self._manifest_install_dir(manifest, archive)
                 for candidate in self._manifest_install_candidates(manifest, archive):
                     if not self._manifest_install_matches(candidate, manifest, archive):
                         continue
+                    installed = True
                     installed_dir = candidate
+                    installed_runtime_version = manifest.runtime_version
                     installed_matches = True
                     if node and node_supported is not False:
                         installed_command = self._manifest_runtime_command(candidate, node)
@@ -734,6 +1020,7 @@ class ShowRuntimeManager:
         elif not configured_command and self.runtime_source == _RUNTIME_SOURCE_ARCHIVE:
             installed_dir = self._archive_install_dir()
             installed_command = self._archive_runtime_command(installed_dir, node or ["node"])
+            installed = installed_command is not None
             archive_status = {
                 "platform": platform_tag,
                 "name": _runtime_archive_name(),
@@ -745,9 +1032,19 @@ class ShowRuntimeManager:
         elif not configured_command and self.runtime_source == _RUNTIME_SOURCE_GITHUB:
             installed_dir = self._github_source_dir()
             installed_command = self._github_runtime_command(installed_dir, node or ["node"])
+            installed = installed_command is not None
         elif not configured_command and self.runtime_source == _RUNTIME_SOURCE_NPM:
             managed = _resolve_executable_path(self._managed_bin_path())
             installed_command = [managed] if managed else None
+            installed = installed_command is not None
+        if installed and manifest is not None and archive is not None and installed_matches is not True:
+            installed_matches = False
+        install_payload = ShowRuntimeAvailability.from_install(
+            command=installed_command,
+            install=(ShowRuntimeInstallState.INSTALLED if installed else ShowRuntimeInstallState.ABSENT),
+            install_runtime_version=installed_runtime_version,
+            install_matches_manifest=installed_matches,
+        ).as_payload()["install"]
         return {
             "provider": self.runtime_source,
             "platform": platform_tag,
@@ -755,10 +1052,16 @@ class ShowRuntimeManager:
             "node_available": node is not None,
             "node_version": _format_semver(node_version),
             "node_supported": node_supported,
-            "manifest": _manifest_status_payload(manifest),
+            "manifest": manifest_status,
             "archive": archive_status or _archive_status_payload(archive),
-            "installed": installed_command is not None,
-            "installed_matches_manifest": installed_matches,
+            "install": install_payload,
+            "runtime": {
+                "state": ShowRuntimeServingState.UNCHECKED.value,
+                "reason": None,
+                "base_url": None,
+            },
+            "installed": installed,
+            "installed_matches_manifest": install_payload["matches_manifest"],
             "install_dir": str(installed_dir) if installed_dir else None,
             "command": installed_command,
             "reason": self._install_reason,
@@ -1628,38 +1931,141 @@ class ShowRuntimeManager:
             if path.is_dir() and not any(path.iterdir()):
                 path.rmdir()
 
-    def prepare(self, *, force: bool | None = None, offline: bool | None = None) -> dict[str, Any]:
-        previous_force = self.force_install
-        previous_offline = self.offline
-        if force is not None:
-            self.force_install = force
-        if offline is not None:
-            self.offline = offline
-        try:
-            if self._command_explicit:
-                command = _resolve_command(self.command)
-                self._install_reason = None if command else "runtime_command_missing"
-            else:
-                command = self._install_managed_runtime()
-            return {
-                "ok": command is not None,
+    def prepare(
+        self,
+        *,
+        force: bool | None = None,
+        offline: bool | None = None,
+        automatic: bool = False,
+    ) -> dict[str, Any]:
+        effective_force = self.force_install if force is None else force
+        effective_offline = self.offline if offline is None else offline
+        admission = self._attempt_managed_install(
+            force=effective_force,
+            offline=effective_offline,
+            automatic=automatic,
+        )
+        payload = admission.as_payload()
+        status_offline = True if admission.policy is ShowRuntimePolicyState.SKIPPED else effective_offline
+        payload.update(
+            {
                 "provider": self.runtime_source,
                 "platform": _runtime_platform_tag(),
-                "command": command,
-                "reason": None if command else self._install_reason,
-                "status": self.status(),
+                "status": self.status(offline=status_offline),
             }
-        finally:
-            self.force_install = previous_force
-            self.offline = previous_offline
+        )
+        return payload
 
-    def _installed_manifest_runtime_command(self) -> list[str] | None:
+    def _configured_manifest_source(self) -> str:
+        if self.manifest_path is not None:
+            return str(self.manifest_path)
+        if self.manifest_url is not None:
+            return self.manifest_url
+        return _PACKAGED_RUNTIME_MANIFEST_SOURCE
+
+    def _persisted_manifest_disk_install(self) -> _ShowRuntimeDiskInstall | None:
+        """Resolve the current manifest install without consulting the manifest source."""
+        try:
+            pointer = json.loads((self.runtime_dir / "current.json").read_text(encoding="utf-8"))
+            if not isinstance(pointer, dict) or pointer.get("provider") != _RUNTIME_SOURCE_MANIFEST:
+                return None
+
+            versions_dir = self.runtime_dir / "versions"
+            versions_stat = versions_dir.lstat()
+            if _is_reparse_point(versions_stat) or not stat.S_ISDIR(versions_stat.st_mode):
+                return None
+            versions_resolved = versions_dir.resolve(strict=True)
+
+            pointer_install_dir = pointer.get("install_dir")
+            if not isinstance(pointer_install_dir, str) or not pointer_install_dir:
+                return None
+            install_dir = Path(pointer_install_dir).resolve(strict=True)
+            if versions_resolved not in install_dir.parents:
+                return None
+            install_stat = install_dir.lstat()
+            if _is_reparse_point(install_stat) or not stat.S_ISDIR(install_stat.st_mode):
+                return None
+
+            metadata_path = self._manifest_metadata_path(install_dir)
+            metadata_stat = metadata_path.lstat()
+            if _is_reparse_point(metadata_stat) or not stat.S_ISREG(metadata_stat.st_mode):
+                return None
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if not isinstance(metadata, dict) or metadata.get("provider") != _RUNTIME_SOURCE_MANIFEST:
+                return None
+
+            runtime_version = metadata.get("runtime_version")
+            platform_tag = metadata.get("platform")
+            manifest_sha256 = metadata.get("manifest_sha256")
+            archive_sha256 = metadata.get("archive_sha256")
+            archive_name = metadata.get("archive_name")
+            if not all(
+                isinstance(value, str) and value
+                for value in (runtime_version, platform_tag, manifest_sha256, archive_sha256, archive_name)
+            ):
+                return None
+            if platform_tag != _runtime_platform_tag():
+                return None
+            if metadata.get("manifest_source") != self._configured_manifest_source():
+                return None
+            if not _CONTENT_ADDRESSED_ARCHIVE_RE.fullmatch(f"{manifest_sha256}.tgz"):
+                return None
+            if not _CONTENT_ADDRESSED_ARCHIVE_RE.fullmatch(f"{archive_sha256}.tgz"):
+                return None
+            pointer_manifest_sha256 = pointer.get("manifest_sha256")
+            if not isinstance(pointer_manifest_sha256, str) or not _CONTENT_ADDRESSED_ARCHIVE_RE.fullmatch(
+                f"{pointer_manifest_sha256}.tgz"
+            ):
+                return None
+            # The pointer may name a newer manifest that adopted an old-layout
+            # install after only another platform changed. The serving identity
+            # deliberately excludes the whole-manifest digest, so agreement is
+            # required only for the fields that identify this platform's bytes.
+            for field in ("runtime_version", "platform", "archive_sha256"):
+                if pointer.get(field) != metadata.get(field):
+                    return None
+
+            relative_parts = install_dir.relative_to(versions_resolved).parts
+            expected_prefix = (_safe_path_part(runtime_version), _safe_path_part(platform_tag))
+            if relative_parts[:2] != expected_prefix:
+                return None
+            if len(relative_parts) == 2:
+                pass
+            elif len(relative_parts) == 3:
+                current_fingerprint = hashlib.sha256(
+                    f"{runtime_version}:{platform_tag}:{archive_sha256}".encode("utf-8")
+                ).hexdigest()[:16]
+                previous_fingerprint = hashlib.sha256(
+                    f"{manifest_sha256}:{archive_sha256}".encode("utf-8")
+                ).hexdigest()[:16]
+                if relative_parts[2] not in {current_fingerprint, previous_fingerprint}:
+                    return None
+            else:
+                return None
+
+            cli_path = install_dir / "node_modules" / "@avibe" / "show-runtime" / "dist" / "cli.js"
+            cli_stat = cli_path.lstat()
+            if _is_reparse_point(cli_stat) or not stat.S_ISREG(cli_stat.st_mode):
+                return None
+            cli_resolved = cli_path.resolve(strict=True)
+            if install_dir not in cli_resolved.parents:
+                return None
+            node = _resolve_node_command()
+            command = [*node, str(cli_resolved)] if node else None
+            status_metadata = dict(metadata)
+            status_metadata["manifest_sha256"] = pointer_manifest_sha256
+            return _ShowRuntimeDiskInstall(install_dir=install_dir, command=command, metadata=status_metadata)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return None
+
+    def _installed_manifest_runtime_command(self, *, offline: bool | None = None) -> list[str] | None:
         node = _resolve_node_command()
         if not node:
             return None
-        manifest = self._load_runtime_manifest()
+        disk_install = self._persisted_manifest_disk_install()
+        manifest = self._load_runtime_manifest(offline=offline)
         if not manifest:
-            return None
+            return disk_install.command if disk_install else None
         if not self._manifest_node_supported(node, manifest):
             return None
         archive = self._manifest_archive_for_platform(manifest)
@@ -1796,24 +2202,11 @@ class ShowRuntimeManager:
                 except Exception:
                     logger.warning("Failed to release Show Runtime install guard", exc_info=True)
 
-    def _install_manifest_runtime(self) -> list[str] | None:
-        with self._install_guard_locked() as (acquired, reason):
-            if not acquired:
-                self._install_reason = reason
-                # An untakeable lock (busy or unavailable) must not break a
-                # non-forced prepare that already has a verified install to
-                # reuse. A forced reinstall that cannot run is a failure —
-                # reporting success would hide that the repair never happened.
-                if self.force_install:
-                    return None
-                return self._reuse_verified_manifest_command()
-            return self._install_manifest_runtime_locked()
-
-    def _reuse_verified_manifest_command(self) -> list[str] | None:
+    def _reuse_verified_manifest_command(self, *, offline: bool | None = None) -> list[str] | None:
         """Best-effort read-only fallback: reuse a verified installed runtime."""
         try:
             node = _resolve_node_command()
-            manifest = self._load_runtime_manifest()
+            manifest = self._load_runtime_manifest(offline=offline)
             if not node or not manifest:
                 return None
             # Mirror the normal install path: an unsupported Node version must
@@ -1828,12 +2221,12 @@ class ShowRuntimeManager:
         except Exception:
             return None
 
-    def _install_manifest_runtime_locked(self) -> list[str] | None:
+    def _install_manifest_runtime_locked(self, *, force: bool, offline: bool) -> list[str] | None:
         node = _resolve_node_command()
         if not node:
             self._install_reason = "runtime_node_missing"
             return None
-        manifest = self._load_runtime_manifest()
+        manifest = self._load_runtime_manifest(offline=offline)
         if not manifest:
             return None
         if not self._manifest_node_supported(node, manifest):
@@ -1847,18 +2240,18 @@ class ShowRuntimeManager:
             archive,
             node,
         )
-        if verified_existing_command and not self.force_install:
-            verified_install_dir = next(
-                iter(self._manifest_install_dirs_for_command(verified_existing_command)),
-                None,
-            )
+        if verified_existing_command and not force:
+            install_dirs = self._manifest_install_dirs_for_command(verified_existing_command)
+            verified_install_dir = min(install_dirs, key=lambda path: str(path)) if install_dirs else None
             if verified_install_dir is None:
-                self._install_reason = "runtime_install_failed"
-                return None
-            self._write_current_manifest_pointer(manifest, archive, verified_install_dir)
+                logger.warning(
+                    "Verified Show Runtime command has no discoverable install directory; skipping current pointer update"
+                )
+            else:
+                self._write_current_manifest_pointer(manifest, archive, verified_install_dir)
             self._install_reason = None
             return verified_existing_command
-        archive_path = self._resolve_manifest_archive(archive)
+        archive_path = self._resolve_manifest_archive(archive, offline=offline)
         if not archive_path:
             return self._reuse_existing_archive_runtime(verified_existing_command)
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -1886,7 +2279,7 @@ class ShowRuntimeManager:
             if tmp_dir.exists():
                 shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    def _load_runtime_manifest(self) -> ShowRuntimeManifest | None:
+    def _load_runtime_manifest(self, *, offline: bool | None = None) -> ShowRuntimeManifest | None:
         payload: bytes | None = None
         source = ""
         if self.manifest_path:
@@ -1896,7 +2289,7 @@ class ShowRuntimeManager:
             payload = self.manifest_path.read_bytes()
             source = str(self.manifest_path)
         elif self.manifest_url:
-            if self.offline:
+            if self.offline if offline is None else offline:
                 self._install_reason = "runtime_manifest_unavailable_offline"
                 return None
             try:
@@ -1968,12 +2361,12 @@ class ShowRuntimeManager:
             return None
         return archive
 
-    def _resolve_manifest_archive(self, archive: ShowRuntimeArchive) -> Path | None:
+    def _resolve_manifest_archive(self, archive: ShowRuntimeArchive, *, offline: bool | None = None) -> Path | None:
         cached = self.runtime_dir / "downloads" / f"{archive.sha256}.tgz"
         if cached.exists() and self._downloaded_archive_matches(cached, archive):
             self._download_error = None
             return cached
-        if self.offline:
+        if self.offline if offline is None else offline:
             self._install_reason = "runtime_archive_unavailable_offline"
             return None
         parsed = urllib.parse.urlparse(archive.url)
@@ -2145,7 +2538,7 @@ class ShowRuntimeManager:
             return None
         return self._archive_runtime_command(self._archive_install_dir(), node)
 
-    def _install_archive_runtime(self) -> list[str] | None:
+    def _install_archive_runtime(self, *, offline: bool | None = None) -> list[str] | None:
         node = _resolve_node_command()
         if not node:
             self._install_reason = "runtime_node_missing"
@@ -2153,7 +2546,7 @@ class ShowRuntimeManager:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         install_dir = self._archive_install_dir()
         existing_command = self._archive_runtime_command(install_dir, node)
-        archive = self._resolve_prebuilt_archive()
+        archive = self._resolve_prebuilt_archive(offline=offline)
         if not archive:
             return self._reuse_existing_archive_runtime(existing_command)
         archive_digest = _file_sha256(archive)
@@ -2183,7 +2576,7 @@ class ShowRuntimeManager:
             if tmp_dir.exists():
                 shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    def _resolve_prebuilt_archive(self) -> Path | None:
+    def _resolve_prebuilt_archive(self, *, offline: bool | None = None) -> Path | None:
         if self.archive_path:
             if self.archive_path.exists():
                 return self.archive_path
@@ -2195,7 +2588,7 @@ class ShowRuntimeManager:
         if not self.archive_url:
             self._install_reason = "runtime_archive_missing"
             return None
-        if self.offline:
+        if self.offline if offline is None else offline:
             self._install_reason = "runtime_archive_unavailable_offline"
             return None
         return self._download_runtime_archive(self.archive_url)
@@ -2275,7 +2668,7 @@ class ShowRuntimeManager:
             return None
         return self._github_runtime_command(self._github_source_dir(), node)
 
-    def _install_github_runtime(self) -> list[str] | None:
+    def _install_github_runtime(self, *, force: bool | None = None) -> list[str] | None:
         node = _resolve_node_command()
         if not node:
             self._install_reason = "runtime_node_missing"
@@ -2306,7 +2699,7 @@ class ShowRuntimeManager:
                 return self._reuse_existing_github_runtime(existing_command)
             fetched = self._git_revision(git, source_dir, "FETCH_HEAD")
             if (
-                not self.force_install
+                not (self.force_install if force is None else force)
                 and existing_command
                 and fetched
                 and self._read_github_build_marker(source_dir) == fetched
@@ -2556,7 +2949,7 @@ def sweep_orphan_show_runtime_servers(
     return swept
 
 
-async def prewarm_show_runtime() -> ShowRuntimeResult:
+async def prewarm_show_runtime() -> ShowRuntimeAvailability:
     return await get_show_runtime_manager().ensure()
 
 
@@ -2726,6 +3119,32 @@ def _manifest_status_payload(manifest: ShowRuntimeManifest | None) -> dict[str, 
         "sha256": manifest.digest,
         "source": manifest.source,
         "platforms": sorted(manifest.archives),
+    }
+
+
+def _persisted_manifest_status_payload(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": None,
+        "runtime_version": metadata.get("runtime_version"),
+        "minimum_node": None,
+        "sha256": metadata.get("manifest_sha256"),
+        "source": metadata.get("manifest_source"),
+        "platforms": [metadata.get("platform")],
+    }
+
+
+def _persisted_manifest_runtime_version(metadata: Mapping[str, Any]) -> str | None:
+    runtime_version = metadata.get("runtime_version")
+    return runtime_version if isinstance(runtime_version, str) and runtime_version else None
+
+
+def _persisted_archive_status_payload(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "platform": metadata.get("platform"),
+        "name": metadata.get("archive_name"),
+        "url": None,
+        "sha256": metadata.get("archive_sha256"),
+        "size": None,
     }
 
 

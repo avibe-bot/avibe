@@ -14337,17 +14337,36 @@ def cmd_runtime(args) -> int:
         payload["avault"] = avault
         payload["tmux"] = tmux
         payload["git"] = git
+        install = payload.get("install") if isinstance(payload.get("install"), dict) else {}
+        policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else {}
+        runtime_prepared = install.get("state") == "installed"
         if getattr(args, "json", False):
             print(json.dumps(payload, indent=2))
         else:
-            if payload.get("ok"):
-                print("Show Runtime ready.")
+            language = _configured_cli_language()
+            if runtime_prepared:
+                print(i18n_t("runtime.prepare.prepared", language))
                 status = payload.get("status") or {}
                 if status.get("install_dir"):
                     print(f"Install dir: {status['install_dir']}")
+            elif policy.get("state") == "skipped":
+                print(
+                    i18n_t(
+                        "runtime.prepare.skipped",
+                        language,
+                        reason=policy.get("reason") or "unknown",
+                    ),
+                    file=sys.stderr,
+                )
             else:
-                reason = payload.get("reason") or "unknown"
-                print(f"Show Runtime prepare failed: {reason}", file=sys.stderr)
+                print(
+                    i18n_t(
+                        "runtime.prepare.failed",
+                        language,
+                        reason=install.get("reason") or "unknown",
+                    ),
+                    file=sys.stderr,
+                )
             if askill.get("skipped"):
                 print(f"askill: skipped ({askill.get('reason') or 'skipped'}).")
             elif askill.get("ok"):
@@ -14375,7 +14394,7 @@ def cmd_runtime(args) -> int:
                     f"git runtime not ready: {git.get('message') or git.get('reason') or 'install failed'}",
                     file=sys.stderr,
                 )
-        strict_ok = bool(payload.get("ok")) and _git_prepare_satisfies_strict(git)
+        strict_ok = runtime_prepared and _git_prepare_satisfies_strict(git)
         return 1 if getattr(args, "strict", False) and not strict_ok else 0
     if command == "clean":
         dry_run = bool(getattr(args, "dry_run", False))

@@ -901,6 +901,11 @@
     }
   },
   "runtime": {
+    "prepare": {
+      "prepared": "Show Runtime prepared.",
+      "skipped": "Show Runtime preparation skipped: {reason}",
+      "failed": "Show Runtime preparation failed: {reason}"
+    },
     "clean": {
       "dryRunHelp": "Report stale archives and cache entries without removing anything.",
       "wouldRemoveItems": "Would remove {count} Show Runtime cache item(s).",

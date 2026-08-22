@@ -901,6 +901,11 @@
     }
   },
   "runtime": {
+    "prepare": {
+      "prepared": "Show Runtime 已准备完成。",
+      "skipped": "Show Runtime 准备已跳过：{reason}",
+      "failed": "Show Runtime 准备失败：{reason}"
+    },
     "clean": {
       "dryRunHelp": "\u4ec5\u62a5\u544a\u53ef\u6e05\u7406\u7684\u5f52\u6863\u4e0e\u7f13\u5b58\u6761\u76ee\uff0c\u4e0d\u5220\u9664\u4efb\u4f55\u5185\u5bb9\u3002",
       "wouldRemoveItems": "\u5c06\u6e05\u7406 {count} \u9879 Show Runtime \u7f13\u5b58\u3002",
