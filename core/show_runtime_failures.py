@@ -20,7 +20,6 @@ class ShowRuntimeFailureDimension(str, Enum):
 
 class ShowRuntimeRetryDisposition(str, Enum):
     CONTINUOUS = "continuous"
-    CONFIRMATION_PENDING = "confirmation_pending"
     MANUAL_ONLY = "manual_only"
 
 
@@ -109,14 +108,6 @@ _FAILURE_DECLARATION_ROWS = (
     ),
     ShowRuntimeFailureDeclaration(
         "runtime_start_command_unavailable",
-        ShowRuntimeFailureDimension.RUNTIME,
-        "explicit-runtime-command",
-        ShowRuntimeFailureClass.CONFIGURED,
-        ShowRuntimeRecoveryAction.CHANGE_SETTING,
-        True,
-    ),
-    ShowRuntimeFailureDeclaration(
-        "runtime_start_managed_command_unavailable",
         ShowRuntimeFailureDimension.RUNTIME,
         "managed-runtime-command",
         ShowRuntimeFailureClass.UNCLASSIFIED,

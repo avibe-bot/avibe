@@ -57,7 +57,6 @@
       "viewerActionMessage": "Automatic checking has stopped. Reload this page to try the request again. If it still fails, ask the Avibe instance owner to repair the Show Runtime.",
       "statusHeading": "Recovery status",
       "retrying": "This failure can be tried again. Reload the page or choose Retry now when that action is available.",
-      "confirming": "One confirmation attempt remains. Reload the page or choose Retry now when that action is available.",
       "manualOnly": "Automatic retries have stopped. The reason and available next step are shown on this page.",
       "reasonLabel": "Reason",
       "sessionLabel": "Session",

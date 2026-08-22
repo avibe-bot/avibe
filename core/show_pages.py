@@ -90,7 +90,6 @@ SHOW_PAGE_RUNTIME_RECOVERY_LOADING_DELAY_SECONDS = 30
 
 _SHOW_RUNTIME_RECOVERY_STATUS_KEY = {
     ShowRuntimeRetryDisposition.CONTINUOUS: "retrying",
-    ShowRuntimeRetryDisposition.CONFIRMATION_PENDING: "confirming",
     ShowRuntimeRetryDisposition.MANUAL_ONLY: "manualOnly",
 }
 # Only the head of index.html is scanned for the icon <link> (it lives in <head>,
@@ -2526,13 +2525,18 @@ def _show_runtime_recovery_script(
         const button = document.getElementById("show-runtime-retry-now");
         if (button) button.disabled = true;
         try {
-          await fetch(window.location.href, {
+          const response = await fetch(window.location.href, {
             cache: "no-store",
             credentials: "same-origin",
             headers: { "X-Avibe-Show-Recovery-Retry": "1" },
           });
-        } catch (_error) {}
-        window.location.reload();
+          const html = await response.text();
+          document.open();
+          document.write(html);
+          document.close();
+        } catch (_error) {
+          if (button) button.disabled = false;
+        }
       };
       document.getElementById("show-runtime-retry-now")?.addEventListener("click", retryNow);
     """

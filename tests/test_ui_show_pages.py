@@ -22,7 +22,7 @@ import zlib
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -46,7 +46,6 @@ from core.show_pages import (
 from core.show_runtime import (
     SHOW_RUNTIME_CLI_FALLBACK_DELAY_SECONDS,
     ShowRuntimeContext,
-    ShowRuntimeAttemptTrigger,
     ShowRuntimeManager,
     ShowRuntimeProtocolEnvelope,
     ShowRuntimeRequestTimeoutError,
@@ -147,12 +146,13 @@ class _FakeShowRuntimeManager:
             self.failure_reason,
         )
         failure_class = classify_show_runtime_failure(evidence)
-        if failure_class is ShowRuntimeFailureClass.TRANSIENT:
-            disposition = ShowRuntimeRetryDisposition.CONTINUOUS
-        elif failure_class is ShowRuntimeFailureClass.UNCLASSIFIED:
-            disposition = ShowRuntimeRetryDisposition.CONFIRMATION_PENDING
-        else:
+        if failure_class in {
+            ShowRuntimeFailureClass.CONFIGURED,
+            ShowRuntimeFailureClass.PERMANENT,
+        }:
             disposition = ShowRuntimeRetryDisposition.MANUAL_ONLY
+        else:
+            disposition = ShowRuntimeRetryDisposition.CONTINUOUS
         return ShowRuntimeUnavailableError(
             self.failure_reason,
             failure_class,
@@ -179,11 +179,15 @@ class _FakeShowRuntimeManager:
             raise self.error
         if self.fail:
             raise self._unavailable_error()
-        headers = {
+        headers = (
+            {
             "content-type": "text/html; charset=utf-8",
             "set-cookie": "__Host-vibe_remote_session=attacker",
             "x-runtime-private-header": "secret",
-        } | self.extra_headers | self.headers_by_path.get(path, {})
+            }
+            | self.extra_headers
+            | self.headers_by_path.get(path, {})
+        )
         return httpx.Response(
             self.status_by_path.get(path, self.status_code),
             content=self.bodies_by_path.get(path, self.body),
@@ -196,11 +200,15 @@ class _FakeShowRuntimeManager:
         self.calls.append((method, path, headers or {}, body))
         if self.fail:
             raise self._unavailable_error()
-        response_headers = {
+        response_headers = (
+            {
             "content-type": "text/html; charset=utf-8",
             "set-cookie": "__Host-vibe_remote_session=attacker",
             "x-runtime-private-header": "secret",
-        } | self.extra_headers | self.headers_by_path.get(path, {})
+            }
+            | self.extra_headers
+            | self.headers_by_path.get(path, {})
+        )
         return httpx.Response(
             self.status_by_path.get(path, self.status_code),
             content=self.bodies_by_path.get(path, self.body),
@@ -3073,7 +3081,9 @@ def test_private_show_page_falls_back_to_runtime_recovery(monkeypatch, tmp_path,
     assert b"X-Avibe-Show-Recovery-Poll" not in response.content
     assert b"window.setInterval" not in response.content
     assert b"window.setTimeout" not in response.content
-    assert b"document.write" not in response.content
+    assert response.content.count(b"fetch(window.location.href") == 1
+    assert b"document.write(html)" in response.content
+    assert b"window.location.reload" not in response.content
     assert b"X-Avibe-Show-Recovery-Retry" in response.content
     assert b"Math.min(30000, retryDelayMs * 2)" not in response.content
     assert b"checksRemaining" not in response.content
@@ -3102,7 +3112,7 @@ def test_show_recovery_retry_now_is_explicit_intent(monkeypatch, tmp_path):
 
     assert response.status_code == 200
     assert manager.automatic_calls == [False]
-    assert b"One confirmation attempt remains" in response.content
+    assert b"This failure can be tried again" in response.content
     assert b"vibe doctor repair show-runtime" in response.content
 
 
@@ -6637,10 +6647,18 @@ def test_show_runtime_manager_reports_missing_command(tmp_path):
         (ShowRuntimeFailureDimension.INSTALL, "runtime_install_failed", ShowRuntimeFailureClass.UNCLASSIFIED),
         (ShowRuntimeFailureDimension.INSTALL, "runtime_node_missing", ShowRuntimeFailureClass.CONFIGURED),
         (ShowRuntimeFailureDimension.RUNTIME, "runtime_start_url_timeout", ShowRuntimeFailureClass.UNCLASSIFIED),
-        (ShowRuntimeFailureDimension.RUNTIME, "runtime_start_process_unavailable", ShowRuntimeFailureClass.UNCLASSIFIED),
+        (
+            ShowRuntimeFailureDimension.RUNTIME,
+            "runtime_start_process_unavailable",
+            ShowRuntimeFailureClass.UNCLASSIFIED,
+        ),
         (ShowRuntimeFailureDimension.RUNTIME, "runtime_start_health_timeout", ShowRuntimeFailureClass.UNCLASSIFIED),
         (ShowRuntimeFailureDimension.RUNTIME, "runtime_start_attempt_failed", ShowRuntimeFailureClass.UNCLASSIFIED),
-        (ShowRuntimeFailureDimension.RUNTIME, "runtime_start_command_unavailable", ShowRuntimeFailureClass.CONFIGURED),
+        (
+            ShowRuntimeFailureDimension.RUNTIME,
+            "runtime_start_command_unavailable",
+            ShowRuntimeFailureClass.UNCLASSIFIED,
+        ),
         (ShowRuntimeFailureDimension.RUNTIME, "runtime_start_command_invalid", ShowRuntimeFailureClass.CONFIGURED),
         (ShowRuntimeFailureDimension.RUNTIME, "runtime_start_node_command_invalid", ShowRuntimeFailureClass.CONFIGURED),
         (ShowRuntimeFailureDimension.RUNTIME, "runtime_proxy_failed", ShowRuntimeFailureClass.UNCLASSIFIED),
@@ -6649,8 +6667,16 @@ def test_show_runtime_manager_reports_missing_command(tmp_path):
         (ShowRuntimeFailureDimension.INSTALL, "runtime_node_unsupported", ShowRuntimeFailureClass.CONFIGURED),
         (ShowRuntimeFailureDimension.INSTALL, "runtime_source_unsupported", ShowRuntimeFailureClass.PERMANENT),
         (ShowRuntimeFailureDimension.INSTALL, "runtime_archive_url_unsupported", ShowRuntimeFailureClass.PERMANENT),
-        (ShowRuntimeFailureDimension.INSTALL, "runtime_archive_unavailable_offline", ShowRuntimeFailureClass.CONFIGURED),
-        (ShowRuntimeFailureDimension.INSTALL, "runtime_manifest_unavailable_offline", ShowRuntimeFailureClass.CONFIGURED),
+        (
+            ShowRuntimeFailureDimension.INSTALL,
+            "runtime_archive_unavailable_offline",
+            ShowRuntimeFailureClass.CONFIGURED,
+        ),
+        (
+            ShowRuntimeFailureDimension.INSTALL,
+            "runtime_manifest_unavailable_offline",
+            ShowRuntimeFailureClass.CONFIGURED,
+        ),
     ],
 )
 def test_show_runtime_failure_classification(dimension, reason, expected):
@@ -6681,16 +6707,6 @@ def test_show_runtime_reason_literals_are_declared_once():
     assert {value for _quote, value in reason_literals} <= declared
 
 
-def test_show_runtime_attempt_policy_is_total_over_triggers():
-    assert set(show_runtime._SHOW_RUNTIME_ATTEMPT_POLICIES) == set(ShowRuntimeAttemptTrigger)
-    assert show_runtime._show_runtime_attempt_policy(
-        ShowRuntimeAttemptTrigger.AUTOMATIC
-    ).consumes_retry_budget
-    assert not show_runtime._show_runtime_attempt_policy(
-        ShowRuntimeAttemptTrigger.USER_INITIATED
-    ).consumes_retry_budget
-
-
 def test_show_runtime_install_retry_delay_is_bounded(monkeypatch):
     monkeypatch.setattr("core.show_runtime.random.random", lambda: 1.0)
 
@@ -6700,7 +6716,63 @@ def test_show_runtime_install_retry_delay_is_bounded(monkeypatch):
     assert _show_runtime_start_retry_delay(20) == 30.0
 
 
-def test_show_runtime_unclassified_install_gets_one_confirmation_per_identity(monkeypatch, tmp_path):
+def test_runtime_request_uses_existing_base_without_health_preprobe(monkeypatch, tmp_path):
+    manager = ShowRuntimeManager(
+        command="/bin/runtime-cli",
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+    manager._base_url = "http://127.0.0.1:4173"
+    manager._availability = manager._publish_runtime_availability(
+        ShowRuntimeServingState.SERVING,
+        manager._base_url,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_healthy",
+        lambda _base_url: (_ for _ in ()).throw(AssertionError("request path must not pre-probe")),
+    )
+    monkeypatch.setattr(manager, "_negotiate_context_key_capability", AsyncMock())
+    transport = AsyncMock(return_value=SimpleNamespace(status_code=200))
+    monkeypatch.setattr(manager, "_request_runtime_transport", transport)
+
+    asyncio.run(
+        manager.request(
+            "GET",
+            "/sessions/ses123/app/",
+            envelope=ShowRuntimeProtocolEnvelope(ShowRuntimeContext.PRIVATE),
+        )
+    )
+
+    assert transport.await_count == 1
+
+
+def test_unreadable_manifest_is_typed_install_evidence(monkeypatch, tmp_path):
+    manifest_path = tmp_path / "runtime-manifest.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        runtime_source="manifest",
+        manifest_path=manifest_path,
+    )
+    real_read_bytes = Path.read_bytes
+
+    def unreadable(path):
+        if path == manifest_path:
+            raise PermissionError("manifest is unreadable")
+        return real_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", unreadable)
+
+    payload = manager.prepare(automatic=True)
+
+    assert payload["ok"] is False
+    assert payload["install"]["reason"] == "runtime_manifest_invalid"
+    assert payload["install"]["failure_class"] == "unclassified"
+
+
+def test_show_runtime_unclassified_install_uses_bounded_time_backoff(monkeypatch, tmp_path):
     clock = [100.0]
     attempts = []
     manager = ShowRuntimeManager(
@@ -6719,23 +6791,23 @@ def test_show_runtime_unclassified_install_gets_one_confirmation_per_identity(mo
     monkeypatch.setattr(manager, "_install_npm_runtime", install)
 
     assert asyncio.run(manager._resolve_managed_command()) is None
-    assert manager._availability.install_retry_disposition is ShowRuntimeRetryDisposition.CONFIRMATION_PENDING
+    assert manager._availability.install_retry_disposition is ShowRuntimeRetryDisposition.CONTINUOUS
     assert "retry_disposition" not in manager._availability.as_payload()
     clock[0] = 104.9
     assert asyncio.run(manager._resolve_managed_command()) is None
-    assert manager._availability.install_retry_disposition is ShowRuntimeRetryDisposition.CONFIRMATION_PENDING
+    assert manager._availability.install_retry_disposition is ShowRuntimeRetryDisposition.CONTINUOUS
     clock[0] = 105.0
     assert asyncio.run(manager._resolve_managed_command()) is None
-    assert manager._availability.install_retry_disposition is ShowRuntimeRetryDisposition.MANUAL_ONLY
+    assert manager._availability.install_retry_disposition is ShowRuntimeRetryDisposition.CONTINUOUS
     clock[0] = 10_000.0
     assert asyncio.run(manager._resolve_managed_command()) is None
-    assert attempts == [100.0, 105.0]
+    assert attempts == [100.0, 105.0, 10_000.0]
     assert manager._install_retry is not None
     assert manager._install_retry.failure_class is ShowRuntimeFailureClass.UNCLASSIFIED
-    assert manager._install_retry.deadline == float("inf")
+    assert manager._install_retry.deadline == 10_020.0
 
     manager.prepare(automatic=False)
-    assert attempts == [100.0, 105.0, 10_000.0]
+    assert attempts == [100.0, 105.0, 10_000.0, 10_000.0]
 
 
 def test_show_runtime_install_exception_is_structured_and_recorded(monkeypatch, tmp_path):
@@ -6782,7 +6854,7 @@ def test_cancelled_install_waiter_cannot_escape_thread_accounting(monkeypatch, t
                 manager._attempt_managed_install,
                 force=False,
                 offline=False,
-                trigger=ShowRuntimeAttemptTrigger.AUTOMATIC,
+                automatic=True,
             )
         )
         assert await asyncio.to_thread(started.wait, 5)
@@ -6791,7 +6863,7 @@ def test_cancelled_install_waiter_cannot_escape_thread_accounting(monkeypatch, t
                 manager._attempt_managed_install,
                 force=False,
                 offline=False,
-                trigger=ShowRuntimeAttemptTrigger.AUTOMATIC,
+                automatic=True,
             )
         )
         task.cancel()
@@ -6799,7 +6871,7 @@ def test_cancelled_install_waiter_cannot_escape_thread_accounting(monkeypatch, t
             await task
         release.set()
         admission, operation = await asyncio.wait_for(follower, timeout=5)
-        assert admission.install_retry_disposition is ShowRuntimeRetryDisposition.CONFIRMATION_PENDING
+        assert admission.install_retry_disposition is ShowRuntimeRetryDisposition.CONTINUOUS
         assert operation.ok is False
 
     asyncio.run(cancel_waiter())
@@ -6854,18 +6926,13 @@ def test_retry_admission_owner_exit_inventory_is_single_publication(
     publication_calls = [
         node
         for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == publisher
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == publisher
     ]
     boundaries = [
         node
         for node in ast.walk(tree)
         if isinstance(node, ast.Try)
-        if any(
-            isinstance(handler.type, ast.Name) and handler.type.id == "BaseException"
-            for handler in node.handlers
-        )
+        if any(isinstance(handler.type, ast.Name) and handler.type.id == "BaseException" for handler in node.handlers)
     ]
 
     assert len(publication_calls) == 1
@@ -6874,9 +6941,7 @@ def test_retry_admission_owner_exit_inventory_is_single_publication(
     assert len(boundaries) == 1
     boundary = boundaries[0]
     has_gate = any(
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "_active_retry"
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "_active_retry"
         for node in ast.walk(boundary)
     )
     assert has_gate is uses_gate
@@ -6903,11 +6968,7 @@ def test_retry_gate_inventory_covers_every_backoff_gated_owner():
         visit_AsyncFunctionDef = visit_FunctionDef
 
         def visit_Call(self, node):
-            if (
-                isinstance(node.func, ast.Attribute)
-                and node.func.attr == "_active_retry"
-                and self.owner is not None
-            ):
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "_active_retry" and self.owner is not None:
                 owners.add(self.owner)
             self.generic_visit(node)
 
@@ -6918,11 +6979,7 @@ def test_retry_gate_inventory_covers_every_backoff_gated_owner():
 
 def test_retry_records_discover_one_writer_per_operation():
     manager_tree = ast.parse(textwrap.dedent(inspect.getsource(ShowRuntimeManager))).body[0]
-    init = next(
-        node
-        for node in manager_tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == "__init__"
-    )
+    init = next(node for node in manager_tree.body if isinstance(node, ast.FunctionDef) and node.name == "__init__")
     retry_records = {
         node.target.attr
         for node in ast.walk(init)
@@ -6933,17 +6990,11 @@ def test_retry_records_discover_one_writer_per_operation():
         and node.target.attr.endswith("_retry")
     }
     writers = {record: set() for record in retry_records}
-    for function in (
-        node
-        for node in manager_tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    ):
+    for function in (node for node in manager_tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))):
         if function.name == "__init__":
             continue
         for assignment in (
-            node
-            for node in ast.walk(function)
-            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign))
+            node for node in ast.walk(function) if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign))
         ):
             targets = assignment.targets if isinstance(assignment, ast.Assign) else [assignment.target]
             for target in targets:
@@ -6970,9 +7021,7 @@ def test_retry_records_discover_one_writer_per_operation():
 )
 def test_retry_owner_exception_boundary_has_no_effectful_prologue(owner):
     function = ast.parse(textwrap.dedent(inspect.getsource(owner))).body[0]
-    boundary_index = next(
-        index for index, statement in enumerate(function.body) if isinstance(statement, ast.Try)
-    )
+    boundary_index = next(index for index, statement in enumerate(function.body) if isinstance(statement, ast.Try))
     prologue = function.body[1:boundary_index]
 
     assert prologue
@@ -6984,38 +7033,6 @@ def test_retry_owner_exception_boundary_has_no_effectful_prologue(owner):
             False,
             "admission",
         }
-
-
-def test_retry_preconditions_are_acquired_once_by_each_retry_owner():
-    manager = ast.parse(textwrap.dedent(inspect.getsource(ShowRuntimeManager))).body[0]
-    owners = {
-        function.name: function
-        for function in manager.body
-        if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-    consumers = {
-        name: sum(
-            1
-            for node in ast.walk(function)
-            if isinstance(node, ast.Attribute) and node.attr == "_retry_preconditions"
-        )
-        for name, function in owners.items()
-    }
-    assert {name: count for name, count in consumers.items() if count} == {
-        "_admit_runtime_start": 1,
-        "_attempt_managed_install": 1,
-    }
-    start_thread_hops = [
-        node
-        for node in ast.walk(owners["_admit_runtime_start"])
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "to_thread"
-        and node.args
-        and isinstance(node.args[0], ast.Attribute)
-        and node.args[0].attr == "_retry_preconditions"
-    ]
-    assert len(start_thread_hops) == 1
 
 
 def test_failed_forced_replacement_does_not_block_installed_runtime(monkeypatch, tmp_path):
@@ -7042,142 +7059,6 @@ def test_failed_forced_replacement_does_not_block_installed_runtime(monkeypatch,
     assert asyncio.run(manager._resolve_managed_command()) == command
 
 
-def test_retry_identity_ignores_install_outputs_but_tracks_prerequisites(monkeypatch, tmp_path):
-    node = [["/bin/node-a"]]
-    manager = ShowRuntimeManager(
-        workspace_root=tmp_path / "show",
-        runtime_dir=tmp_path / "runtime",
-        runtime_source="manifest",
-    )
-    monkeypatch.setattr("core.show_runtime._resolve_node_command", lambda: node[0])
-    before = manager._retry_preconditions().identity
-    manager.runtime_dir.mkdir(parents=True)
-    (manager.runtime_dir / "current.json").write_text('{"install_dir":"changed"}', encoding="utf-8")
-    (manager.runtime_dir / "runtime-cli").write_text("changed", encoding="utf-8")
-
-    assert manager._retry_preconditions().identity == before
-
-    node[0] = ["/bin/node-b"]
-    assert manager._retry_preconditions().identity != before
-
-
-def test_retry_identity_fingerprints_user_configured_runtime(tmp_path):
-    command = tmp_path / "runtime-cli"
-    command.write_text("first", encoding="utf-8")
-    command.chmod(0o755)
-    manager = ShowRuntimeManager(
-        command=str(command),
-        workspace_root=tmp_path / "show",
-        runtime_dir=tmp_path / "runtime",
-    )
-    before = manager._retry_preconditions().identity
-    replacement = tmp_path / "replacement-runtime-cli"
-    replacement.write_text("second", encoding="utf-8")
-    replacement.chmod(0o755)
-    replacement.replace(command)
-
-    assert manager._retry_preconditions().identity != before
-
-
-def test_start_admission_snapshots_preconditions_once_off_event_loop(monkeypatch, tmp_path):
-    command = shutil.which("python3") or shutil.which("python")
-    assert command is not None
-    manager = ShowRuntimeManager(
-        command=command,
-        workspace_root=tmp_path / "show",
-        runtime_dir=tmp_path / "runtime",
-    )
-    main_thread = threading.get_ident()
-    snapshots = []
-    real_preconditions = manager._retry_preconditions
-
-    def snapshot():
-        preconditions = real_preconditions()
-        snapshots.append((threading.get_ident(), preconditions.identity))
-        return preconditions
-
-    class FakeProcess:
-        def poll(self):
-            return None
-
-    def fake_stop():
-        manager._process = None
-        manager._base_url = None
-
-    async def missing_startup_url(*, deadline):
-        return None
-
-    monkeypatch.setattr(manager, "_retry_preconditions", snapshot)
-    monkeypatch.setattr("core.show_runtime.subprocess.Popen", lambda *_args, **_kwargs: FakeProcess())
-    monkeypatch.setattr(manager, "_read_startup_url", missing_startup_url)
-    monkeypatch.setattr(manager, "stop", fake_stop)
-
-    result = asyncio.run(manager.ensure())
-
-    assert result.reason == "runtime_start_url_timeout"
-    assert len(snapshots) == 1
-    assert snapshots[0][0] != main_thread
-    assert manager._start_retry is not None
-    assert manager._start_retry.identity == snapshots[0][1]
-
-
-def test_healthy_runtime_does_not_fingerprint_preconditions_per_request(monkeypatch, tmp_path):
-    manager = ShowRuntimeManager(
-        workspace_root=tmp_path / "show",
-        runtime_dir=tmp_path / "runtime",
-    )
-    manager._base_url = "http://127.0.0.1:4173"
-
-    async def healthy(_base_url):
-        return True
-
-    monkeypatch.setattr(manager, "_healthy", healthy)
-    monkeypatch.setattr(
-        manager,
-        "_retry_preconditions",
-        lambda: pytest.fail("healthy requests must not fingerprint retry preconditions"),
-    )
-
-    assert asyncio.run(manager.ensure()).available is True
-
-
-def test_healthy_runtime_fast_path_does_not_serialize_health_probes(tmp_path):
-    manager = ShowRuntimeManager(
-        workspace_root=tmp_path / "show",
-        runtime_dir=tmp_path / "runtime",
-    )
-    manager._base_url = "http://127.0.0.1:4173"
-    manager._availability = manager._publish_runtime_availability(
-        ShowRuntimeServingState.SERVING,
-        manager._base_url,
-    )
-    active = 0
-    peak = 0
-    release = asyncio.Event()
-
-    async def healthy(_base_url):
-        nonlocal active, peak
-        active += 1
-        peak = max(peak, active)
-        if peak == 2:
-            release.set()
-        await release.wait()
-        active -= 1
-        return True
-
-    manager._healthy = healthy
-
-    async def run():
-        results = await asyncio.wait_for(
-            asyncio.gather(manager.ensure(), manager.ensure()),
-            timeout=1,
-        )
-        assert all(result.available for result in results)
-
-    asyncio.run(run())
-    assert peak == 2
-
-
 def test_start_admission_stays_serialized(monkeypatch, tmp_path):
     manager = ShowRuntimeManager(
         command="/bin/runtime-cli",
@@ -7185,66 +7066,28 @@ def test_start_admission_stays_serialized(monkeypatch, tmp_path):
         runtime_dir=tmp_path / "runtime",
     )
     observed = []
-    real_preconditions = manager._retry_preconditions
+    real_admission = manager._admit_runtime_start
 
-    def snapshot():
+    async def observe_admission(*, automatic):
         observed.append(manager._lock.locked())
-        return real_preconditions()
+        return await real_admission(automatic=automatic)
 
-    monkeypatch.setattr(manager, "_retry_preconditions", snapshot)
-    monkeypatch.setattr(manager, "_healthy", lambda _base_url: asyncio.sleep(0, result=False))
+    monkeypatch.setattr(manager, "_admit_runtime_start", observe_admission)
     monkeypatch.setattr(manager, "stop", lambda: None)
     monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: [command])
     monkeypatch.setattr(manager, "_read_startup_url", lambda *, deadline: asyncio.sleep(0, result=None))
-    monkeypatch.setattr("core.show_runtime.subprocess.Popen", lambda *_args, **_kwargs: SimpleNamespace(poll=lambda: None))
+    monkeypatch.setattr(
+        "core.show_runtime.subprocess.Popen", lambda *_args, **_kwargs: SimpleNamespace(poll=lambda: None)
+    )
 
     asyncio.run(manager.ensure())
 
     assert observed == [True]
 
 
-def test_install_admission_uses_one_precondition_snapshot_for_gate_and_publication(
-    monkeypatch,
-    tmp_path,
-):
-    manager = ShowRuntimeManager(
-        workspace_root=tmp_path / "show",
-        runtime_dir=tmp_path / "runtime",
-        runtime_source="npm",
-    )
-    snapshots = []
-    real_preconditions = manager._retry_preconditions
-
-    def snapshot(*, offline=None):
-        preconditions = real_preconditions(offline=offline)
-        snapshots.append(preconditions.identity)
-        return preconditions
-
-    def failed_install(*, force=None):
-        manager._install_reason = "runtime_install_failed"
-        return None
-
-    monkeypatch.setattr(manager, "_retry_preconditions", snapshot)
-    monkeypatch.setattr(manager, "_install_npm_runtime", failed_install)
-
-    _admission, operation = manager._attempt_managed_install(
-        force=False,
-        offline=False,
-        trigger=ShowRuntimeAttemptTrigger.AUTOMATIC,
-    )
-
-    assert operation.ok is False
-    assert len(snapshots) == 1
-    assert manager._install_retry is not None
-    assert manager._install_retry.identity == snapshots[0]
-
-
 @pytest.mark.parametrize(
     ("configured_env", "command", "expected_reason"),
-    (
-        (None, "'unterminated", "runtime_start_command_invalid"),
-        ("'unterminated", None, "runtime_start_node_command_invalid"),
-    ),
+    ((None, "'unterminated", "runtime_start_command_invalid"),),
 )
 def test_start_admission_publishes_malformed_configured_commands(
     monkeypatch,
@@ -7281,7 +7124,9 @@ def test_explicit_runtime_ignores_unrelated_malformed_node_override(monkeypatch,
     monkeypatch.setattr(manager, "_healthy", lambda _base_url: asyncio.sleep(0, result=False))
     monkeypatch.setattr(manager, "stop", lambda: None)
     monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: [command])
-    monkeypatch.setattr("core.show_runtime.subprocess.Popen", lambda *_args, **_kwargs: SimpleNamespace(poll=lambda: None))
+    monkeypatch.setattr(
+        "core.show_runtime.subprocess.Popen", lambda *_args, **_kwargs: SimpleNamespace(poll=lambda: None)
+    )
     monkeypatch.setattr(
         manager,
         "_read_startup_url",
@@ -7294,37 +7139,6 @@ def test_explicit_runtime_ignores_unrelated_malformed_node_override(monkeypatch,
     assert result.runtime_reason != "runtime_start_node_command_invalid"
 
 
-def test_cancelled_start_preconditions_propagate_without_publication(monkeypatch, tmp_path):
-    manager = ShowRuntimeManager(
-        command="/bin/runtime-cli",
-        workspace_root=tmp_path / "show",
-        runtime_dir=tmp_path / "runtime",
-    )
-    started = threading.Event()
-    release = threading.Event()
-    real_preconditions = manager._retry_preconditions
-
-    def blocked_preconditions():
-        started.set()
-        assert release.wait(timeout=5)
-        return real_preconditions()
-
-    monkeypatch.setattr(manager, "_retry_preconditions", blocked_preconditions)
-    monkeypatch.setattr(manager, "stop", lambda: None)
-
-    async def cancel():
-        task = asyncio.create_task(manager.ensure())
-        assert await asyncio.to_thread(started.wait, 5)
-        task.cancel()
-        release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-    asyncio.run(cancel())
-    assert manager._start_retry is None
-    assert manager._availability.runtime_retry_disposition is None
-
-
 def test_archive_explicit_attempt_does_not_fall_through_to_generic_install(monkeypatch, tmp_path):
     from core import show_runtime as srt
 
@@ -7335,8 +7149,8 @@ def test_archive_explicit_attempt_does_not_fall_through_to_generic_install(monke
     )
     attempts = []
 
-    def failed_archive(*, force, offline, trigger):
-        attempts.append((force, offline, trigger))
+    def failed_archive(*, force, offline, automatic):
+        attempts.append((force, offline, automatic))
         admission = manager._publish_install_availability(install_reason="runtime_archive_download_failed")
         return admission, srt._ShowRuntimeOperationOutcome(
             srt._ShowRuntimeOperationState.FAILED,
@@ -7348,7 +7162,7 @@ def test_archive_explicit_attempt_does_not_fall_through_to_generic_install(monke
     result = asyncio.run(manager._resolve_managed_availability(automatic=False))
 
     assert result.install_reason == "runtime_archive_download_failed"
-    assert attempts == [(False, False, ShowRuntimeAttemptTrigger.USER_INITIATED)]
+    assert attempts == [(False, False, False)]
 
 
 @pytest.mark.parametrize("entrypoint", ("request", "request_global"))
@@ -7389,30 +7203,20 @@ def test_runtime_request_transport_boundary_publishes_recovery_evidence(
 
 def test_recovery_fact_consumption_census_has_no_default_producer():
     facts = ("reason", "failure_class", "retry_disposition", "recovery_action")
-    projection = ast.parse(
-        textwrap.dedent(inspect.getsource(ui_server._show_page_runtime_failure_evidence))
-    )
+    projection = ast.parse(textwrap.dedent(inspect.getsource(ui_server._show_page_runtime_failure_evidence)))
     assert not any(isinstance(node, (ast.If, ast.IfExp)) for node in ast.walk(projection))
     returns = [node for node in ast.walk(projection) if isinstance(node, ast.Return)]
     assert len(returns) == 1
     assert isinstance(returns[0].value, ast.Tuple)
-    assert tuple(
-        element.attr
-        for element in returns[0].value.elts
-        if isinstance(element, ast.Attribute)
-    ) == facts
+    assert tuple(element.attr for element in returns[0].value.elts if isinstance(element, ast.Attribute)) == facts
 
-    exception_owner = ast.parse(
-        textwrap.dedent(inspect.getsource(ShowRuntimeUnavailableError.__init__))
-    )
+    exception_owner = ast.parse(textwrap.dedent(inspect.getsource(ShowRuntimeUnavailableError.__init__)))
     assignments = {
         target.attr
         for node in ast.walk(exception_owner)
         if isinstance(node, ast.Assign)
         for target in node.targets
-        if isinstance(target, ast.Attribute)
-        and isinstance(target.value, ast.Name)
-        and target.value.id == "self"
+        if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name) and target.value.id == "self"
     }
     assert assignments == set(facts)
 
@@ -7450,10 +7254,7 @@ def test_runtime_http_transport_census_closes_every_direct_client_path():
     direct_clients = {
         name
         for name, function in functions.items()
-        if any(
-            isinstance(node, ast.Attribute) and node.attr == "AsyncClient"
-            for node in ast.walk(function)
-        )
+        if any(isinstance(node, ast.Attribute) and node.attr == "AsyncClient" for node in ast.walk(function))
     }
     assert direct_clients == {
         "_healthy",
@@ -7473,88 +7274,10 @@ def test_runtime_http_transport_census_closes_every_direct_client_path():
         assert any(isinstance(node, ast.Try) and node.handlers for node in ast.walk(functions[internal_probe]))
 
 
-def test_retry_identity_census_contains_only_operation_preconditions():
-    preconditions_tree = ast.parse(
-        textwrap.dedent(inspect.getsource(ShowRuntimeManager._retry_preconditions))
-    )
-    calls = {
-        node.func.attr
-        for node in ast.walk(preconditions_tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and isinstance(node.func.value, ast.Name)
-        and node.func.value.id == "self"
-    }
-    assert "_retry_provider_precondition_declarations" in calls
-    assert "_fold_retry_precondition_identity" in {
-        node.func.id
-        for node in ast.walk(preconditions_tree)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-    }
-    assert not any(
-        isinstance(node, ast.Assign)
-        and any(isinstance(target, ast.Name) and target.id == "identity" for target in node.targets)
-        for node in ast.walk(preconditions_tree)
-    )
-
-    fold_tree = ast.parse(
-        textwrap.dedent(inspect.getsource(show_runtime._fold_retry_precondition_identity))
-    )
-    assert any(isinstance(node, ast.For) for node in ast.walk(fold_tree))
-
-
-@pytest.mark.parametrize(
-    ("runtime_source", "expected", "absent"),
-    (
-        ("manifest", {"manifest_pin", "node"}, {"git", "npm", "package_spec"}),
-        ("archive", {"node"}, {"git", "npm", "package_spec"}),
-        ("github", {"github_repo", "github_ref", "node", "git", "npm"}, {"package_spec"}),
-        ("npm", {"package_spec", "npm"}, {"node", "git"}),
-    ),
-)
-def test_retry_identity_folds_only_selected_provider_preconditions(
-    monkeypatch,
-    tmp_path,
-    runtime_source,
-    expected,
-    absent,
-):
-    manager = ShowRuntimeManager(
-        workspace_root=tmp_path / "show",
-        runtime_dir=tmp_path / "runtime",
-        runtime_source=runtime_source,
-    )
-    monkeypatch.setattr("core.show_runtime._resolve_node_command", lambda: ["/bin/node"])
-    monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: [f"/bin/{command}"])
-    names = {name for name, _value in manager._retry_preconditions().identity}
-    assert expected <= names
-    assert names.isdisjoint(absent)
-
-
-def test_retry_identity_fingerprints_every_explicit_command_argument(tmp_path):
-    script = tmp_path / "cli.js"
-    script.write_text("first", encoding="utf-8")
-    script.chmod(0o755)
-    manager = ShowRuntimeManager(
-        command=f"node {script}",
-        workspace_root=tmp_path / "show",
-        runtime_dir=tmp_path / "runtime",
-    )
-    before = manager._retry_preconditions().identity
-    replacement = tmp_path / "replacement-cli.js"
-    replacement.write_text("second", encoding="utf-8")
-    replacement.chmod(0o755)
-    replacement.replace(script)
-
-    assert manager._retry_preconditions().identity != before
-
-
 def test_provider_install_entrypoints_converge_on_single_admission_owner():
     manager_tree = ast.parse(textwrap.dedent(inspect.getsource(ShowRuntimeManager))).body[0]
     functions = {
-        node.name: node
-        for node in manager_tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        node.name: node for node in manager_tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
     provider_methods = {
         "_install_manifest_runtime_locked",
@@ -7566,9 +7289,7 @@ def test_provider_install_entrypoints_converge_on_single_admission_owner():
         function.name
         for function in functions.values()
         if any(
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr in provider_methods
+            isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in provider_methods
             for node in ast.walk(function)
         )
     }
@@ -7590,9 +7311,7 @@ def test_provider_install_entrypoints_converge_on_single_admission_owner():
         function.name
         for function in functions.values()
         if any(
-            isinstance(node, ast.Attribute)
-            and node.attr == "_attempt_managed_install"
-            for node in ast.walk(function)
+            isinstance(node, ast.Attribute) and node.attr == "_attempt_managed_install" for node in ast.walk(function)
         )
     }
     assert admission_callers == {"_resolve_managed_availability", "prepare"}
@@ -7660,9 +7379,9 @@ def test_user_initiated_prepare_does_not_seed_install_retry_backoff(monkeypatch,
     assert prepared["reason"] == "runtime_install_failed"
     assert manager._install_retry is None
 
-    clock[0] = 100.1
+    clock[0] = 105.0
     assert asyncio.run(manager._resolve_managed_command()) == command
-    assert attempts == [100.0, 100.1]
+    assert attempts == [100.0, 105.0]
 
 
 def test_failed_user_install_preserves_automatic_retry_record(monkeypatch, tmp_path):
@@ -7671,10 +7390,8 @@ def test_failed_user_install_preserves_automatic_retry_record(monkeypatch, tmp_p
         runtime_dir=tmp_path / "runtime",
         runtime_source="npm",
     )
-    identity = manager._retry_preconditions().identity
     manager._install_retry = manager._next_retry_backoff(
         None,
-        identity=identity,
         reason="runtime_install_failed",
         dimension=ShowRuntimeFailureDimension.INSTALL,
         base_seconds=5.0,
@@ -7687,16 +7404,14 @@ def test_failed_user_install_preserves_automatic_retry_record(monkeypatch, tmp_p
         return None
 
     monkeypatch.setattr(manager, "_install_npm_runtime", fail_install)
-    manager.prepare(automatic=False)
+    payload = manager.prepare(automatic=False)
 
     assert manager._install_retry == before
+    assert payload["install"]["failure_class"] == before.failure_class.value
+    assert payload["install"]["retry_disposition"] == before.disposition.value
 
 
-@pytest.mark.parametrize(
-    "reason",
-    ("runtime_archive_checksum_mismatch", "runtime_platform_unsupported"),
-)
-def test_show_runtime_manager_latches_terminal_install_failure(monkeypatch, tmp_path, reason):
+def test_show_runtime_manager_latches_terminal_install_failure(monkeypatch, tmp_path):
     clock = [100.0]
     attempts = []
     manager = ShowRuntimeManager(
@@ -7707,7 +7422,7 @@ def test_show_runtime_manager_latches_terminal_install_failure(monkeypatch, tmp_
 
     def install(*, force=None):
         attempts.append(clock[0])
-        manager._install_reason = reason
+        manager._install_reason = "runtime_platform_unsupported"
         return None
 
     monkeypatch.setattr("core.show_runtime.time.monotonic", lambda: clock[0])
@@ -7747,7 +7462,7 @@ def test_show_runtime_manager_configured_failure_waits_for_evidence_or_explicit_
     assert attempts == ["attempt", "attempt"]
 
 
-def test_show_runtime_manager_retries_after_npm_becomes_available(monkeypatch, tmp_path):
+def test_show_runtime_explicit_attempt_retries_after_npm_becomes_available(monkeypatch, tmp_path):
     clock = [100.0]
     attempts = []
     command = [str(tmp_path / "runtime-cli")]
@@ -7776,9 +7491,9 @@ def test_show_runtime_manager_retries_after_npm_becomes_available(monkeypatch, t
 
     assert asyncio.run(manager._resolve_managed_command()) is None
     npm[0] = ["/new/npm"]
-    clock[0] = 100.1
-    assert asyncio.run(manager._resolve_managed_command()) == command
-    assert attempts == [100.0, 100.1]
+    clock[0] = 105.0
+    assert asyncio.run(manager._resolve_managed_command(automatic=False)) == command
+    assert attempts == [100.0, 105.0]
 
 
 def test_show_runtime_manager_backs_off_failed_starts(monkeypatch, tmp_path):
@@ -7819,15 +7534,15 @@ def test_show_runtime_manager_backs_off_failed_starts(monkeypatch, tmp_path):
     retried = asyncio.run(manager.ensure())
 
     assert first.reason == "runtime_start_url_timeout"
-    assert first.runtime_retry_disposition is ShowRuntimeRetryDisposition.CONFIRMATION_PENDING
+    assert first.runtime_retry_disposition is ShowRuntimeRetryDisposition.CONTINUOUS
     assert backed_off.reason == "runtime_start_url_timeout"
-    assert backed_off.runtime_retry_disposition is ShowRuntimeRetryDisposition.CONFIRMATION_PENDING
+    assert backed_off.runtime_retry_disposition is ShowRuntimeRetryDisposition.CONTINUOUS
     assert retried.reason == "runtime_start_url_timeout"
-    assert retried.runtime_retry_disposition is ShowRuntimeRetryDisposition.MANUAL_ONLY
+    assert retried.runtime_retry_disposition is ShowRuntimeRetryDisposition.CONTINUOUS
     assert len(starts) == 2
     assert manager._start_retry is not None
     assert manager._start_retry.attempt == 2
-    assert manager._start_retry.deadline == float("inf")
+    assert manager._start_retry.deadline == 103.0
 
 
 @pytest.mark.parametrize(
@@ -7836,14 +7551,14 @@ def test_show_runtime_manager_backs_off_failed_starts(monkeypatch, tmp_path):
         (
             FileNotFoundError(errno.ENOENT, "command disappeared"),
             "runtime_start_command_unavailable",
-            ShowRuntimeFailureClass.CONFIGURED,
-            ShowRuntimeRetryDisposition.MANUAL_ONLY,
+            ShowRuntimeFailureClass.UNCLASSIFIED,
+            ShowRuntimeRetryDisposition.CONTINUOUS,
         ),
         (
             OSError(errno.EMFILE, "process table unavailable"),
             "runtime_start_attempt_failed",
             ShowRuntimeFailureClass.UNCLASSIFIED,
-            ShowRuntimeRetryDisposition.CONFIRMATION_PENDING,
+            ShowRuntimeRetryDisposition.CONTINUOUS,
         ),
     ),
 )
@@ -7887,7 +7602,7 @@ def test_managed_spawn_command_loss_is_repairable_evidence(monkeypatch, tmp_path
         runtime_source="npm",
     )
 
-    async def managed_command(*, trigger):
+    async def managed_command(*, automatic):
         return manager._publish_install_availability(command=["managed-runtime"])
 
     monkeypatch.setattr(manager, "_resolve_managed_availability", managed_command)
@@ -7898,7 +7613,7 @@ def test_managed_spawn_command_loss_is_repairable_evidence(monkeypatch, tmp_path
 
     result = asyncio.run(manager.ensure())
 
-    assert result.runtime_reason == "runtime_start_managed_command_unavailable"
+    assert result.runtime_reason == "runtime_start_command_unavailable"
     assert result.runtime_failure_class is ShowRuntimeFailureClass.UNCLASSIFIED
     assert result.runtime_recovery_action is ShowRuntimeRecoveryAction.REPAIR
 
@@ -7947,9 +7662,9 @@ def test_start_admission_closes_establishment_and_readiness_exceptions(
 
     assert first.reason == "runtime_start_attempt_failed"
     assert first.runtime_failure_class is ShowRuntimeFailureClass.UNCLASSIFIED
-    assert first.runtime_retry_disposition is ShowRuntimeRetryDisposition.CONFIRMATION_PENDING
+    assert first.runtime_retry_disposition is ShowRuntimeRetryDisposition.CONTINUOUS
     assert blocked.reason == "runtime_start_attempt_failed"
-    assert blocked.runtime_retry_disposition is ShowRuntimeRetryDisposition.CONFIRMATION_PENDING
+    assert blocked.runtime_retry_disposition is ShowRuntimeRetryDisposition.CONTINUOUS
     assert attempts == [failure_phase]
 
 
@@ -7985,28 +7700,26 @@ def test_cancelled_start_admission_publishes_before_propagating(monkeypatch, tmp
 
     asyncio.run(cancel_start())
 
-    assert manager._start_retry is not None
-    assert manager._start_retry.reason == "runtime_start_attempt_failed"
-    assert manager._start_retry.disposition is ShowRuntimeRetryDisposition.CONFIRMATION_PENDING
+    assert manager._start_retry is None
 
 
-def test_start_owner_does_not_claim_pre_gate_install_failure(monkeypatch, tmp_path):
+def test_start_owner_normalizes_install_resolution_io_failure(monkeypatch, tmp_path):
     manager = ShowRuntimeManager(
         workspace_root=tmp_path / "show",
         runtime_dir=tmp_path / "runtime",
         runtime_source="npm",
     )
 
-    async def fail_install_resolution(*, trigger):
+    async def fail_install_resolution(*, automatic):
         raise OSError("install owner escaped unexpectedly")
 
     monkeypatch.setattr(manager, "_resolve_managed_availability", fail_install_resolution)
 
-    with pytest.raises(OSError, match="install owner escaped unexpectedly"):
-        asyncio.run(manager.ensure())
+    result = asyncio.run(manager.ensure())
 
-    assert manager._start_retry is None
-    assert manager._availability.runtime_retry_disposition is None
+    assert result.runtime_reason == "runtime_start_attempt_failed"
+    assert result.runtime_failure_class is ShowRuntimeFailureClass.UNCLASSIFIED
+    assert result.runtime_retry_disposition is ShowRuntimeRetryDisposition.CONTINUOUS
 
 
 def test_explicit_start_retry_bypasses_live_backoff(monkeypatch, tmp_path):
@@ -9842,7 +9555,7 @@ def test_show_runtime_policy_skip_preserves_independent_installed_state(tmp_path
         ("runtime_archive_download_failed", "transient", "continuous", "repair"),
         ("runtime_platform_unsupported", "permanent", "manual_only", "no_local_action"),
         ("runtime_archive_unavailable_offline", "configured", "manual_only", "change_setting"),
-        ("runtime_archive_checksum_mismatch", "checksum", "manual_only", "repair"),
+        ("runtime_archive_checksum_mismatch", "checksum", "continuous", "repair"),
     ),
 )
 def test_show_runtime_availability_classifies_install_failure(
@@ -10139,10 +9852,8 @@ def test_show_runtime_manager_reuses_github_runtime_during_install_backoff(monke
         "core.show_runtime._resolve_command",
         lambda command: ["/bin/node"] if command == "node" else None,
     )
-    identity = manager._retry_preconditions().identity
     manager._install_retry = manager._next_retry_backoff(
         None,
-        identity=identity,
         reason="runtime_platform_unsupported",
         dimension=ShowRuntimeFailureDimension.INSTALL,
         base_seconds=5.0,
@@ -10161,10 +9872,8 @@ def test_show_runtime_manager_reuses_cached_managed_command_during_install_backo
     )
     manager._managed_command = ["/bin/node", "/tmp/runtime/cli.js"]
     monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: None)
-    identity = manager._retry_preconditions().identity
     manager._install_retry = manager._next_retry_backoff(
         None,
-        identity=identity,
         reason="runtime_platform_unsupported",
         dimension=ShowRuntimeFailureDimension.INSTALL,
         base_seconds=5.0,

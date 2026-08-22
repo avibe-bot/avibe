@@ -57,7 +57,6 @@
       "viewerActionMessage": "自动检查已停止。请重新加载此页面，再次尝试请求；若仍然失败，请联系 Avibe 实例所有者修复 Show Runtime。",
       "statusHeading": "恢复状态",
       "retrying": "此故障可以重试。请重新加载页面，或在有该操作时点击“立即重试”。",
-      "confirming": "还剩一次确认机会。请重新加载页面，或在有该操作时点击“立即重试”。",
       "manualOnly": "自动重试已停止。此页面显示了原因和可用的下一步。",
       "reasonLabel": "原因",
       "sessionLabel": "会话",

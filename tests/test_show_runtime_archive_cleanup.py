@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from core.show_runtime import ShowRuntimeAttemptTrigger, ShowRuntimeManager
+from core.show_runtime import ShowRuntimeManager
 
 
 def _make_manager(tmp_path: Path) -> ShowRuntimeManager:
@@ -538,7 +538,7 @@ def test_install_guard_unavailable_falls_back_to_verified_install(tmp_path: Path
     availability, operation = manager._attempt_managed_install(
         force=False,
         offline=True,
-        trigger=ShowRuntimeAttemptTrigger.USER_INITIATED,
+        automatic=False,
     )
     command = availability.command
 
@@ -679,7 +679,7 @@ def test_forced_prepare_fails_structured_when_guard_unavailable(tmp_path: Path, 
     availability, operation = manager._attempt_managed_install(
         force=True,
         offline=True,
-        trigger=ShowRuntimeAttemptTrigger.USER_INITIATED,
+        automatic=False,
     )
     command = availability.command
 
