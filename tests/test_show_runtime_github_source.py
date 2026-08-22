@@ -102,6 +102,47 @@ def test_first_install_builds_and_records_the_commit_it_built(tmp_path: Path) ->
     expected_revision = git("rev-parse", "HEAD", cwd=upstream)
     assert harness.manager._read_github_build_marker(source_dir) == expected_revision
     assert checkout_record(harness.manager, source_dir).revision == expected_revision
+    assert harness.manager._github_checkout_marker_path(source_dir).is_relative_to(source_dir)
+
+
+@pytest.mark.parametrize("failure_phase", ["staging", "record", "publish"])
+def test_first_install_does_not_publish_a_checkout_without_ownership_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure_phase: str,
+) -> None:
+    upstream = make_upstream(tmp_path)
+    failed = Harness(tmp_path, upstream)
+    source_dir = failed.manager._github_source_dir()
+
+    with monkeypatch.context() as scoped:
+        if failure_phase == "staging":
+            def fail_staging(**_kwargs: object) -> str:
+                raise OSError
+
+            scoped.setattr(show_runtime.tempfile, "mkdtemp", fail_staging)
+        elif failure_phase == "record":
+            scoped.setattr(failed.manager, "_write_github_checkout_record", lambda *_args: False)
+        else:
+            real_rename = Path.rename
+
+            def fail_publish(path: Path, target: Path) -> Path:
+                if path.name.startswith(".main.clone-"):
+                    raise OSError
+                return real_rename(path, target)
+
+            scoped.setattr(Path, "rename", fail_publish)
+        result = failed.manager.prepare()
+
+    assert result["ok"] is False
+    assert result["reason"] == "runtime_github_source_update_failed"
+    assert not source_dir.exists()
+
+    retried_manager = Harness(tmp_path, upstream).manager
+    retried = retried_manager.prepare()
+
+    assert retried["ok"] is True
+    assert checkout_record(retried_manager, source_dir).revision == git("rev-parse", "HEAD", cwd=upstream)
 
 
 def test_unchanged_upstream_reuses_the_build_instead_of_repeating_it(tmp_path: Path) -> None:
@@ -373,6 +414,45 @@ def test_checkout_update_refuses_before_moving_head_when_pending_record_cannot_b
     assert checkout_record(harness.manager, source_dir) == show_runtime._GitHubCheckoutRecord(original_revision)
     assert Path(installed["command"][1]).read_text(encoding="utf-8") == original_cli
     assert harness.npm_commands == []
+
+
+@pytest.mark.parametrize("automatic", [False, True], ids=["forced", "automatic"])
+def test_missing_head_revision_is_a_structured_update_failure_before_evidence_comparison(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    automatic: bool,
+) -> None:
+    upstream = make_upstream(tmp_path)
+    installed = Harness(tmp_path, upstream)
+    assert installed.manager.prepare()["ok"] is True
+    source_dir = installed.manager._github_source_dir()
+    original_record = checkout_record(installed.manager, source_dir)
+    (upstream / "package.json").write_text('{"name": "runtime", "version": "2"}\n', encoding="utf-8")
+    git("commit", "-am", "upstream update", cwd=upstream)
+    target_revision = git("rev-parse", "HEAD", cwd=upstream)
+    attempt = Harness(tmp_path, upstream)
+    real_revision = attempt.manager._git_revision
+
+    def missing_head(git_command: list[str], checkout: Path, ref: str) -> str | None:
+        if ref == "HEAD":
+            return None
+        return real_revision(git_command, checkout, ref)
+
+    monkeypatch.setattr(attempt.manager, "_git_revision", missing_head)
+
+    result = attempt.manager.prepare(automatic=True) if automatic else attempt.manager.prepare(force=True)
+
+    assert result["ok"] is automatic
+    if not automatic:
+        assert result["reason"] == "runtime_github_source_update_failed"
+    assert result["status"]["github_source"]["update"] == {
+        "state": "skipped",
+        "reason": "runtime_github_source_update_failed",
+        "current_revision": None,
+        "target_revision": target_revision,
+    }
+    assert checkout_record(attempt.manager, source_dir) == original_record
+    assert attempt.npm_commands == []
 
 
 def test_force_install_adopts_a_proven_legacy_checkout_revision(tmp_path: Path) -> None:

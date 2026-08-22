@@ -929,6 +929,30 @@ a stale record and a clean directory would let a loose assertion pass on the bro
 code. If a fourth head lands another exit-invariant violation, the remedy stops being a
 move and becomes one update-outcome owner that cannot be bypassed.
 
+The fourth findings-bearing head exposed two remaining boundaries and closes this
+class with two rules whose enforcement is structural rather than conventional.
+First, an unknown revision is absence of evidence, not a value that may compare
+equal to another unknown. `_git_revision` failure becomes a structured source-update
+failure before any checkout-record comparison. Revision comparisons live only on the
+checkout-record type, whose authorization methods accept a proven string revision;
+callers do not compare `revision` or `pending` fields directly. This makes a normal
+stable record with `pending = null` incapable of authorizing an unreadable `HEAD`.
+
+Second, checkout creation and ownership publication are one transition. Avibe clones
+into a same-parent staging directory, writes the schema-versioned ownership record
+inside that checkout, and only then renames the complete directory to `source_dir`.
+Therefore an Avibe-published `source_dir` is never externally reachable without its
+ownership evidence. Best-effort staging cleanup is hygiene rather than correctness:
+if cloning, revision inspection, record persistence, or publication fails, the final
+path was never exposed and the next attempt can retry without adopting or deleting an
+unverified checkout. Existing unverified directories remain user-owned evidence and
+are not mutated by a healing shortcut.
+
+This is the final in-PR consolidation for checkout evidence and the destructive
+boundary. If a fifth findings-bearing head produces another instance of this class,
+the two-valued record model itself must be reconsidered; another exit guard is not an
+acceptable remedy.
+
 The reason this one predicate absorbed seven probes is worth naming even though it is
 out of scope here: one directory is both Avibe's build input and a place a developer
 may work, so every rule about it has to infer which role it is in. An eighth input

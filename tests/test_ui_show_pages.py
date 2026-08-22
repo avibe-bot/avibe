@@ -8176,20 +8176,21 @@ def test_show_runtime_manager_installs_from_github_source(monkeypatch, tmp_path)
         "/bin/node",
         str(source_dir / "packages" / "runtime" / "dist" / "cli.js"),
     ]
-    assert commands == [
-        (
-            [
-                "/bin/git",
-                "clone",
-                "--depth",
-                "1",
-                "--branch",
-                "main",
-                "https://github.com/avibe-bot/vibe-show-runtime.git",
-                str(source_dir),
-            ],
-            None,
-        ),
+    clone_command, clone_cwd = commands[0]
+    staged_source_dir = Path(clone_command[-1])
+    assert clone_command[:-1] == [
+        "/bin/git",
+        "clone",
+        "--depth",
+        "1",
+        "--branch",
+        "main",
+        "https://github.com/avibe-bot/vibe-show-runtime.git",
+    ]
+    assert clone_cwd is None
+    assert staged_source_dir.parent == source_dir.parent
+    assert staged_source_dir.name.startswith(".main.clone-")
+    assert commands[1:] == [
         (["/bin/npm", "ci"], source_dir),
         (["/bin/npm", "run", "build"], source_dir),
     ]

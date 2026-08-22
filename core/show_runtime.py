@@ -237,7 +237,10 @@ class _GitHubCheckoutRecord:
             raise ValueError("pending checkout revision cannot be empty")
 
     def authorizes(self, revision: str) -> bool:
-        return revision == self.revision or revision == self.pending
+        return revision == self.revision or self.authorizes_pending(revision)
+
+    def authorizes_pending(self, revision: str) -> bool:
+        return self.pending is not None and revision == self.pending
 
 
 @dataclass(frozen=True)
@@ -3001,21 +3004,10 @@ class ShowRuntimeManager:
                 replacement_required=replacement_required,
             )
         if not source_dir.exists():
-            source_dir.parent.mkdir(parents=True, exist_ok=True)
-            if not self._run_install_command([*git, "clone", "--depth", "1", "--branch", self.github_ref, self.github_repo, str(source_dir)]):
+            if not self._clone_github_source_checkout(git, source_dir):
                 return self._github_install_attempt(
                     None,
                     replacement_required=replacement_required,
-                )
-            checked_out = self._git_revision(git, source_dir, "HEAD")
-            if not checked_out or not self._write_github_checkout_record(
-                source_dir,
-                _GitHubCheckoutRecord(checked_out),
-            ):
-                return self._github_install_attempt(
-                    None,
-                    replacement_required=replacement_required,
-                    operation_reason="runtime_github_source_update_failed",
                 )
             self._clear_github_source_update(source_dir)
         else:
@@ -3035,8 +3027,21 @@ class ShowRuntimeManager:
                 )
             fetched = self._git_revision(git, source_dir, "FETCH_HEAD")
             current_revision = self._git_revision(git, source_dir, "HEAD")
+            if not fetched or not current_revision:
+                update_failure_reason = "runtime_github_source_update_failed"
+                self._record_github_source_update_skipped(
+                    source_dir,
+                    reason=update_failure_reason,
+                    current_revision=current_revision,
+                    target_revision=fetched,
+                )
+                return self._github_install_attempt(
+                    existing_command,
+                    replacement_required=replacement_required,
+                    operation_reason=update_failure_reason,
+                )
             checkout_record = self._read_github_checkout_record(source_dir)
-            if checkout_record and current_revision == checkout_record.pending:
+            if checkout_record and checkout_record.authorizes_pending(current_revision):
                 self._write_github_checkout_record(
                     source_dir,
                     _GitHubCheckoutRecord(current_revision),
@@ -3178,10 +3183,60 @@ class ShowRuntimeManager:
         return source_dir / ".avibe-runtime-build"
 
     def _github_checkout_marker_path(self, source_dir: Path) -> Path:
-        return source_dir.with_name(f".{source_dir.name}.avibe-checkout-revision.json")
+        return source_dir / ".git" / "avibe-checkout-revision.json"
 
     def _github_source_update_path(self, source_dir: Path) -> Path:
         return source_dir.with_name(f".{source_dir.name}.avibe-source-update.json")
+
+    def _clone_github_source_checkout(self, git: list[str], source_dir: Path) -> bool:
+        try:
+            source_dir.parent.mkdir(parents=True, exist_ok=True)
+            staged_source_dir = Path(
+                tempfile.mkdtemp(
+                    prefix=f".{source_dir.name}.clone-",
+                    dir=source_dir.parent,
+                )
+            )
+        except OSError:
+            logger.warning("Failed to stage the managed GitHub Show Runtime checkout", exc_info=True)
+            self._install_reason = "runtime_github_source_update_failed"
+            return False
+        published = False
+        try:
+            if not self._run_install_command(
+                [
+                    *git,
+                    "clone",
+                    "--depth",
+                    "1",
+                    "--branch",
+                    self.github_ref,
+                    self.github_repo,
+                    str(staged_source_dir),
+                ]
+            ):
+                return False
+            checked_out = self._git_revision(git, staged_source_dir, "HEAD")
+            if not checked_out or not self._write_github_checkout_record(
+                staged_source_dir,
+                _GitHubCheckoutRecord(checked_out),
+            ):
+                self._install_reason = "runtime_github_source_update_failed"
+                return False
+            try:
+                staged_source_dir.rename(source_dir)
+            except OSError:
+                logger.warning("Failed to publish the managed GitHub Show Runtime checkout", exc_info=True)
+                self._install_reason = "runtime_github_source_update_failed"
+                return False
+            published = True
+            return True
+        finally:
+            if not published and staged_source_dir.exists():
+                try:
+                    shutil.rmtree(staged_source_dir)
+                except OSError:
+                    logger.warning("Failed to remove a staged GitHub Show Runtime checkout", exc_info=True)
 
     def _read_github_build_marker(self, source_dir: Path) -> str | None:
         """The commit that produced the runtime build currently on disk.
@@ -3368,7 +3423,7 @@ class ShowRuntimeManager:
                 current_revision,
                 "runtime_github_source_revision_changed",
             )
-        if checkout_record.pending == current_revision:
+        if checkout_record.authorizes_pending(current_revision):
             self._write_github_checkout_record(
                 source_dir,
                 _GitHubCheckoutRecord(current_revision),
