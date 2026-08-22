@@ -64,8 +64,9 @@ provider root.
 - `offer()` / `capture()` reserves or rejects one process-local slot without
   waiting on attachment pinning or EverOS.
 - One 256-slot admission window bounds every retained capture/barrier from
-  reservation through pinning, queueing, and the one in-flight provider call.
-  There is no second reservation chain outside that bound.
+  reservation through pinning, stale-generation reclamation, queueing, and the
+  one in-flight provider call. There is no second reservation chain outside
+  that process-wide bound.
 - Principal, project, epoch, `scope_key`, and `provider_root_id` are
   byte-identical across the upgrade.
 - Named-project catalog rows survive.
@@ -98,9 +99,9 @@ provider root.
   recovers.
 - Ambiguous add/flush results may leave a rare duplicate if EverOS
   committed and Avibe could not observe the ack. They are not retried.
-- Session-boundary flush is best-effort. Queue saturation or a crash may
-  leave old and new conversation content in the same EverOS accumulation
-  boundary.
+- Session-boundary flush is best-effort. Queue saturation, a crash, or dropping
+  a 257th pending-session tracker may leave old and new conversation content in
+  the same EverOS accumulation boundary.
 - Duplicate source-message suppression is process-local. A restart may
   recapture the same IM or remember payload if the caller submits it
   again.
@@ -163,16 +164,23 @@ record every valid request id and close that gap atomically
 
 Suggested starting constants, fixed rather than user settings:
 
-- admission-window bound: 256 total slots across reserved/unready, pinning,
+- process-wide admission-window bound: 256 total permits across
+  reserved/unready, pinning (including stale work from an older generation),
   ready/queued, and the current in-flight add or barrier
-- max total add attempts: 3, only for outcomes that prove the request
-  did not commit (UDS refused before send, sidecar not ready, provider
-  error classified uncommitted)
+- max total add attempts: 3 (`MAX_ADD_ATTEMPTS`), only for outcomes that prove
+  the request did not commit (UDS refused before send, sidecar not ready,
+  provider error classified uncommitted)
+- max total flush attempts: 3 (`MAX_FLUSH_ATTEMPTS`), but only before the
+  provider coroutine may have executed; a submitted flush is never retried
+  regardless of its response
 - do not retry timeout, truncated response, malformed success, or any
   result that may have committed
 - idle flush: 5 minutes (`SessionFlushCoordinator.IDLE_FLUSH_TIMEOUT`)
 - max unflushed age: 30 minutes (`MAX_UNFLUSHED_AGE`)
 - message-count flush: 100 (`MAX_UNFLUSHED_MESSAGES`)
+- pending-flush bound: 256 provider sessions
+  (`MAX_PENDING_FLUSH_SESSIONS`) / 25,600 retained message ids
+  (`MAX_PENDING_FLUSH_MESSAGE_IDS`)
 - process-local duplicate LRU: 256 source-message digests
 
 These flush timers are recall-freshness, not durability. An `accumulated`
@@ -181,32 +189,69 @@ required for this cut.
 
 `extracted` drops pending flush state for that provider session.
 `accumulated` refreshes one in-memory `PendingFlush(session_ref,
-first_accumulated_at, last_accumulated_at, message_ids)`. `message_ids` is
-bounded by the 100-message flush limit and exists only to correlate a
-successful flush with the retained Provider Call Log. Its length is the
-volatile `unflushed_count`: every `accumulated` acknowledgement appends exactly
-one message id, and reaching 100 makes that provider session immediately due
-without waiting for either timer. The pending table does not survive process
-restart; EverOS still holds the buffer until a later same-session add, Repair,
-or provider extraction.
+raw_session_id, first_accumulated_at, last_accumulated_at, message_ids,
+attempts)`. `message_ids` is bounded by the 100-message flush limit and exists
+only to correlate any submitted flush outcome with the retained Provider Call
+Log. `raw_session_id` is the already-validated bounded capture identifier; it
+stays volatile and is never logged. The message-id list length is the volatile
+`unflushed_count`: every `accumulated`
+acknowledgement appends exactly one message id, and reaching 100 makes that
+provider session immediately due before another add for the same session can be
+submitted.
+
+The map retains at most 256 provider sessions, so its 100-id per-entry limit
+also bounds total retained ids at 25,600. If an `accumulated` result would create
+a 257th entry, do not evict or mutate an existing scope: drop the new volatile
+tracking entry, increment a content-free capacity-drop counter, and leave the
+EverOS buffer untouched. A later same-session add may recreate tracking after
+capacity is available, and Repair or provider extraction may process the older
+buffer. The pending map does not survive process restart.
+
+When an entry becomes due, the worker snapshots it for one flush attempt. A
+failure proven to occur before the provider coroutine can execute may retain
+that same entry for at most three total attempts. At the exact submission edge
+where the provider coroutine may execute, remove the entry from the map and
+carry its bounded message-id snapshot only in the in-flight slot. Success,
+rejection, timeout, malformed response, cancellation, and any other ambiguous
+submitted outcome all consume that snapshot permanently; none reinsert or
+reschedule it. Only a later `accumulated` add can create fresh pending state.
 
 Worker generation increments on disable, shutdown, Reset/Clear, and
-runtime-affecting configuration replacement. The old worker is cancelled,
-the queue and flush table are discarded, and in-flight requests are not
-replayed.
+runtime-affecting configuration replacement. The old worker is cancelled, the
+ordered queue and pending-flush map are invalidated immediately, and in-flight
+provider requests are not replayed. A synchronous pin that is already running
+becomes stale cleanup work under the process-wide admission bound described
+below; the generation transition does not wait for it.
 
 ### Session boundary
 
-`/new` and archive enqueue an ordered flush-barrier item and return.
-They never call `final_flush` with a deadline. Existing internal routes
+`/new` and archive enqueue one ordered `SessionBarrier(raw_session_id)` slot and
+return. They never call `final_flush` with a deadline. Existing internal routes
 may remain as adapters that enqueue the barrier; they must not wait.
+
+The worker resolves the barrier only when it reaches the head, after every
+earlier admitted capture has either updated or skipped pending state. It selects
+every `PendingFlush` whose `raw_session_id` matches, including all principal /
+project scopes accumulated by one Workbench session after project switches,
+sorts their provider-session refs deterministically, and executes one logical
+flush barrier for each inside the same charged admission slot. Later captures
+cannot pass the batch. A scope with no retained pending entry needs no flush;
+the explicit pending-capacity and restart non-guarantees still apply.
+
+This head-time expansion is the barrier adapter's multi-scope replacement for
+`resolve_current_session_scopes()`: resolving at adapter-call time would miss an
+earlier admitted capture whose pin has not completed yet. The single batch slot
+therefore carries only the trusted raw session id until it can produce the
+complete ordered tuple of logical per-scope barriers.
 
 Use one fixed-capacity ordered admission window, not a queue plus an unbounded
 reservation chain. `offer()` synchronously and non-blockingly reserves the next
 sequence slot before any deferred attachment work. That permit remains charged
-while the slot is unready, pinning, ready, queued, or in flight, and is released
-only when the worker consumes or skips the slot. At most 256 slot payloads,
-attachment leases, and owned pin tasks therefore exist in one generation.
+while the slot is unready, pinning, ready, queued, or in flight. A normal slot
+releases it when consumed or skipped; a stale pin keeps the permit and source
+lease until late-completion reclamation finishes. At most 256 slot payloads,
+attachment leases, and owned or stale pin tasks therefore exist process-wide,
+including across generation replacement.
 
 A barrier reserves the same kind of slot and is ready immediately. The worker
 consumes only from the head, so an accepted barrier cannot overtake any earlier
@@ -214,8 +259,10 @@ admitted capture even if its pin is slow; a failed pin marks its slot skipped
 and lets the worker advance. When all 256 permits are charged, captures and
 barriers are rejected with the existing queue-full outcome before starting a
 pin, retaining a payload, advancing the watermark/catalog, or creating another
-task. `/new` and archive return without waiting. Generation drop cancels the
-bounded pin tasks, releases their leases, and clears every charged permit.
+task. `/new` and archive return without waiting. Generation drop marks pinning
+slots skipped for ordering and releases every non-pinning permit immediately;
+it does not cancel the underlying synchronous pin, release its source lease, or
+return its permit before the late-pin reaper settles it.
 
 ### Shutdown
 
@@ -306,18 +353,20 @@ observer state into delivery state:
 1. Before every EverOS add or flush attempt, the worker durably inserts one open
    `memory_call_provenance_gap` row. It also closes any stale open row at this
    attempt's start time. If this preflight identity transaction fails, the
-   best-effort item is skipped and EverOS is not called.
+   provider is not called: an add is skipped, while a due flush retains its
+   snapshot only for the bounded pre-submission retry policy above.
 2. If the result contains a valid request id, one transaction inserts every
    provenance row for that call and deletes its open gap. This applies to
-   acknowledged, rejected, and unknown classifications; any separately allowed
-   uncommitted retry starts only after that observer transaction commits. A
-   provenance transaction failure leaves the already-committed gap open and
-   never causes a provider retry.
-3. If a result has no valid request id and proves no request left Avibe, close
-   the gap before any permitted retry; if closing fails, drop the item. The retry
+   acknowledged, rejected, and unknown classifications. A separately allowed
+   add retry starts only after that observer transaction commits; a submitted
+   flush is terminal. A provenance transaction failure leaves the
+   already-committed gap open and never causes a provider retry.
+3. If an add result has no valid request id and proves no request left Avibe, or
+   a flush attempt fails before its provider coroutine can execute, close the
+   gap before any permitted retry; if closing fails, drop the item. The retry
    opens a new gap. A timeout, truncated or malformed response, or other result
-   without a trustworthy request id leaves the gap open because the provider may
-   have observed the call.
+   without a trustworthy request id after submission leaves the gap open because
+   the provider may have observed the call, and a submitted flush stays terminal.
 4. At boot, close a stale open gap at boot time. Until then an open gap covers
    `[started_at_ms, infinity)`. A Processing Record call whose observation time
    overlaps any gap reports the correlation source unavailable instead of
@@ -462,7 +511,8 @@ would accept captures:
    the detected v0 file was empty):
    - count nonterminal queue rows (`pending`, `processing`,
      `manual_required`) and terminal rows, without logging payload text
-   - collect `attachment_bundle` ids
+   - count `memory_attachment_bundle` rows for content-free discard diagnostics;
+     do not treat that table as a complete filesystem inventory
    - copy `memory_meta` identity columns and `memory_projects`
    - before dropping delivery tables, copy every valid bounded add/flush request
      id into `memory_call_provenance`, including rejected operations and every
@@ -482,14 +532,22 @@ would accept captures:
    admitting the writer. A concurrent read-only Processing Record connection
    may keep the checkpoint busy; that is safe because committed pages remain in
    SQLite's WAL and are recovered on reopen. Never unlink `-wal`, `-shm`, or
-   `-journal` directly. Reopen normally and verify v4, then confined-delete the
-   collected leftover pin bundles.
-7. Emit one content-free structured log: discarded nonterminal count,
-   discarded terminal count, discarded bundle count. Never log text,
+   `-journal` directly. Reopen normally and verify v4.
+7. Before writer admission on this migration boot and every later v4 boot, run
+   `AttachmentPinStore.clear_all()` (extended to return a content-free removed
+   entry count) against the confined pin root. After the outbox table is gone,
+   the authoritative reference set is empty, so inventory and remove every
+   staging and bundle entry, including valid published bundles with no old table
+   row and safely confined entries with unrecognized names.
+   If the scrub cannot prove the root empty, keep the writer closed and retry the
+   same scrub on the next boot; never follow or manually unlink an unsafe entry.
+8. Emit one content-free structured log: discarded nonterminal count,
+   discarded terminal count, discarded bundle-row count, and scrubbed confined
+   entry count. Never log text,
    paths, or digests that can recover a message. Also count provenance rows
    covered by a migration gap and a busy post-commit checkpoint without treating
    either as a capture-startup failure.
-8. Start `BestEffortMemoryWriter` against the preserved watermark and
+9. Start `BestEffortMemoryWriter` against the preserved watermark and
    catalog.
 
 Crash windows:
@@ -499,8 +557,8 @@ Crash windows:
 - Failure after commit, before checkpoint/close: SQLite recovers the committed
   v4 transaction from its WAL. No cleanup code removes those pages.
 - Failure after commit, before bundle delete: the store is v4; leftover
-  files under `memory/attachments/` are unreferenced and deleted on the
-  next boot by "no bundle table ⇒ delete pin root if empty-orphan".
+  files under `memory/attachments/` are unreferenced and the mandatory empty-root
+  scrub runs again before writer admission on the next boot.
 - Failure during Clear/Reset: existing markers remain authoritative.
   The capture migrator does not clear those markers and does not treat
   a pending Clear as a successful identity upgrade.
@@ -528,6 +586,31 @@ marks it ready or skipped, and releases the bundle after a terminal in-process
 add (success, definite rejection, or drop). Marking a slot skipped lets the
 worker advance, so one failed pin cannot strand a later barrier.
 
+Do not cancel an asyncio wrapper and assume the synchronous
+`AttachmentPinStore.pin()` stopped. The writer keeps a strong reference to every
+pin task in a process-wide late-pin registry. A generation change atomically
+marks its slot stale and ordering-skipped, but leaves its admission permit and
+source lease charged without awaiting completion. When the blocking call
+settles, one completion path checks the captured generation before exposing the
+result:
+
+- a current successful pin marks its original slot ready
+- a stale successful pin immediately calls the confined, idempotent
+  `AttachmentPinStore.release(bundle_id)` and never enters a new generation
+- a stale failure is consumed as cleanup, without text-only resubmission
+- every branch releases the source lease and admission permit only after result
+  handling and confined reclamation finish
+
+The reaper consumes task exceptions and stays bounded by those unreleased
+process-wide permits, so repeated configuration changes cannot accumulate more
+than 256 blocking pins. Clear/Reset cleanup and the late reaper serialize through
+the same `AttachmentPinStore` confinement/lock; a bundle published after logical
+generation invalidation is still reclaimed. If release cannot prove deletion,
+fail the replacement writer generation closed, keep that permit charged, and
+retry confined cleanup rather than losing ownership of the orphan. If the
+process exits before a callback runs, the mandatory empty-root scrub on the next
+v4 boot removes both published and staging leftovers before accepting captures.
+
 Retain the current single text-only degradation for a valid nonempty caption:
 
 - if pinned-attachment verification fails before provider submission with the
@@ -550,7 +633,8 @@ Remove only:
 - snapshot/restore handling that exists solely for durable delivery
 - any assumption that a bundle outlives the process
 
-After migration or crash, unreferenced pin directories are deleted.
+After migration or crash, every confined staging/bundle entry is deleted before
+the v4 writer starts, whether or not the old table recorded it.
 That is data loss of files Avibe copied for retry, not of the user's
 original chat attachments.
 
@@ -681,6 +765,11 @@ Do not ship those doc edits in this planning PR.
 - A malformed observer correlation creates a bounded retained-horizon migration
   gap; after restart, overlapping Processing Record observations still report
   correlation unavailable rather than silently disappearing.
+- Migration and later-v4-boot tests seed represented bundles, an unrepresented
+  valid published bundle, staging leftovers, and safely confined unrecognized
+  entries, then prove the empty-reference scrub removes all of them before
+  writer admission. An injected scrub failure keeps the writer closed and the
+  next boot retries without relying on the removed table.
 - Interrupted strip (kill before commit) retries and still preserves
   identity.
 - v4 file is refused by a v3-only opener without writes (contract test
@@ -689,12 +778,13 @@ Do not ship those doc edits in this planning PR.
 ### Writer
 
 - `offer()` does not await attachment pinning or provider I/O.
-- Total occupancy never exceeds 256 across unready reservations, pinning tasks,
-  ready/queued slots, and the in-flight slot; there is no out-of-window
-  predecessor chain.
+- Total occupancy never exceeds 256 across unready reservations, current and
+  stale pin tasks, ready/queued slots, and the in-flight slot, even through
+  repeated generation changes; there is no out-of-window predecessor chain.
 - Saturation returns `memory_queue_full` / `CaptureSkipped`.
 - One worker preserves accepted-item order globally.
-- At most three total attempts, and only for uncommitted failures.
+- At most three total attempts per operation, and only for proven-uncommitted adds or
+  pre-submission flush failures.
 - Timeout / unknown / truncated success is not retried.
 - `accumulated` schedules idle (5m), max-age (30m), and
   message-count (100) flush in memory, matching today's coordinator.
@@ -702,15 +792,34 @@ Do not ship those doc edits in this planning PR.
   100th makes the session immediately due, and extraction/generation drop
   clears both the bounded message-id list and its count.
 - `extracted` removes pending flush.
+- Every submitted flush consumes its pending entry and bounded message-id
+  snapshot after success, rejection, timeout, malformed response, cancellation,
+  or other ambiguity. Only a proven pre-submission failure retains it, and the
+  third failed attempt drops it without a provider call.
+- High-cardinality accumulated traffic retains at most 256 pending sessions and
+  25,600 message ids. A 257th new session drops only its new volatile tracking,
+  never evicts or mutates an existing scope, and records content-free accounting.
 - Shutdown, disable, config replacement, Clear, and Reset drop the queue
   without drain.
-- Session barrier does not block `/new` or archive, and a capture delayed in
-  attachment pinning after reserving admission is still offered before the
-  later barrier.
+- Session barrier does not block `/new` or archive. At its ordered head it
+  resolves and flushes every retained pending scope for the raw Workbench
+  session, including project switches and scopes created by an earlier capture
+  whose pin completed after barrier admission.
+- A Workbench project-switch archive test accumulates at least two scopes for
+  one raw session and observes one ordered submitted flush per retained scope;
+  the same assertion holds when the first scope's pin finishes after barrier
+  admission.
 - With the head pin stalled, filling all 256 permits creates at most 256 slot
   payloads/tasks/leases; the next capture and barrier are rejected before pin
   or identity mutation. An already accepted barrier remains ordered after all
   earlier slots and before every later accepted slot.
+- Generation cancellation after bundle publication but before `pin()` returns
+  marks the slot skipped without waiting, keeps its process-wide permit and
+  source lease charged, reclaims the late bundle through confinement, and only
+  then releases both. A replacement generation cannot exceed the same 256 cap.
+- An injected late-bundle release failure keeps the replacement generation
+  closed and its permit charged until confined cleanup succeeds; restart runs
+  the mandatory empty-root scrub before reopening intake.
 - Watermark persists across writer restart and is monotonic.
 - With the watermark already at `MAX_PROVIDER_TIMESTAMP_MS`, the next otherwise
   valid capture returns `timestamp_invalid` without changing the watermark or
@@ -723,14 +832,15 @@ Do not ship those doc edits in this planning PR.
   failures never resubmit the caption.
 - Logs never include captured text, credentials, or absolute paths.
 - Every provider attempt durably opens a gap before the RPC. A failed preflight
-  write skips the item without calling EverOS; timeout/unknown responses and an
-  injected provenance-commit failure leave a gap that remains fail-closed after
-  restart and is closed at the next attempt or boot.
+  write skips an add or retains a due flush only within its bounded
+  pre-submission attempts, without calling EverOS; timeout/unknown responses and
+  an injected provenance-commit failure leave a gap that remains fail-closed
+  after restart and is closed at the next attempt or boot.
 - Valid bounded request ids from acknowledged, rejected, and otherwise
   unclassifiable add/flush responses are recorded with their outcome and scope.
-  Provenance failure never causes a provider retry, while a separately allowed
-  proven-uncommitted retry first settles the old observer gap and opens a new
-  one.
+  Provenance failure never causes a provider retry; a separately allowed add or
+  pre-submission flush retry first settles the old observer gap and opens a new
+  one, while a submitted flush remains terminal.
 - Gap compaction coalesces old ranges without losing covered time, and age
   deletion removes only closed ranges wholly outside Call Log retention.
 
@@ -778,10 +888,12 @@ after adding migrator and writer tests. Line count is not acceptance.
 - [ ] Replace capture-table Processing Record joins with bounded call
       provenance plus durable gaps, and migrate retained correlations before
       dropping the tables.
-- [ ] Replace session final-flush waits with a best-effort barrier.
+- [ ] Replace session final-flush waits with a best-effort multi-scope session
+      barrier over the bounded volatile pending-flush map.
 - [ ] Replace claim quiescence with writer pause/quiesce around Rebuild/Repair.
 - [ ] Stop writing processing-fault ACK / `manual_required` / settlements.
-- [ ] Delete leftover pin bundles after migration; keep in-process pins.
+- [ ] Scrub the entire confined pin root before every v4 writer start and reap
+      stale-generation pin completions under the process-wide admission bound.
 - [ ] Keep `memory.cli.remembered` as queued; rewrite Memory user docs.
 - [ ] Shrink Clear's queue primitive to identity reset.
 - [ ] Remove coordinator, worker, and outbox-only tests.
@@ -801,8 +913,10 @@ implementation PR:
 4. Attachment pins have no durable recovery after this cut. Leftover
    bundles are deleted. Original chat attachments are untouched.
 5. Session-boundary flush is a barrier enqueue, not a wait. A crash or
-   a full queue can leave consecutive conversations in one EverOS
-   accumulation boundary.
+   a full queue can leave consecutive conversations in one EverOS accumulation
+   boundary. A 257th concurrently tracked provider session also drops its new
+   volatile flush trigger; a later same-session add, Repair, or provider
+   extraction may process that buffer.
 6. No JSON identity file is introduced. Identity stays in the existing
    SQLite file so Clear's `reset_for_clear(target_epoch=...)` and
    Factory Reset keep one authority.
