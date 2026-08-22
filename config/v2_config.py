@@ -2562,6 +2562,15 @@ class RuntimeConfig:
     agent_events_trace_retention_days: int = 30
 
     def __post_init__(self) -> None:
+        self.show_page_api_timeout_seconds = _named_value(
+            "runtime.show_page_api_timeout_seconds",
+            float,
+            self.show_page_api_timeout_seconds,
+        )
+        if self.show_page_api_timeout_seconds <= 0:
+            raise ValueError(
+                "Config 'runtime.show_page_api_timeout_seconds' must be greater than zero"
+            )
         # These values control irreversible deletion.  Dataclass annotations do
         # not validate JSON payloads, and coercing a string/bool here could turn
         # a malformed config into a shorter retention window.
@@ -2573,17 +2582,6 @@ class RuntimeConfig:
             self.agent_events_trace_retention_days,
             field="Config 'runtime.agent_events_trace_retention_days'",
         )
-
-    def __post_init__(self) -> None:
-        self.show_page_api_timeout_seconds = _named_value(
-            "runtime.show_page_api_timeout_seconds",
-            float,
-            self.show_page_api_timeout_seconds,
-        )
-        if self.show_page_api_timeout_seconds <= 0:
-            raise ValueError(
-                "Config 'runtime.show_page_api_timeout_seconds' must be greater than zero"
-            )
 
 
 @dataclass
