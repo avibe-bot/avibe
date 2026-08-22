@@ -193,9 +193,17 @@ def ensure_config():
 
     guard_source_checkout_default_state_bootstrap()
     config_path = paths.get_config_path()
-    if not config_path.exists():
-        default = default_config()
-        default.save(config_path)
+    from config.v2_config import config_file_lock
+
+    # Create-if-absent under the cross-process file lock (#1458 stage
+    # ③): the existence check and the seeding save are one atomic step,
+    # so a first-run default snapshot cannot overwrite an initial
+    # settings save another process completed between a lock-free check
+    # and the write.
+    with config_file_lock(config_path):
+        if not config_path.exists():
+            default = default_config()
+            default.save(config_path)
     return V2Config.load(config_path)
 
 

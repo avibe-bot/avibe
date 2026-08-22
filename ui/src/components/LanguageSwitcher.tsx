@@ -3,10 +3,11 @@ import { useTranslation } from 'react-i18next';
 import { Check } from 'lucide-react';
 import clsx from 'clsx';
 import { useApi } from '../context/ApiContext';
+import { setConfigField } from '../lib/configMutations';
 
 export const LanguageSwitcher: React.FC<{ openUpward?: boolean }> = ({ openUpward = false }) => {
   const { i18n, t } = useTranslation();
-  const { getConfig, saveConfig } = useApi();
+  const { getConfig, mutateConfig } = useApi();
   const [isOpen, setIsOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
 
@@ -54,7 +55,7 @@ export const LanguageSwitcher: React.FC<{ openUpward?: boolean }> = ({ openUpwar
     if (code === i18n.language) return;
     i18n.changeLanguage(code);
     try {
-      await saveConfig({ language: code });
+      await mutateConfig([setConfigField(['language'], code)]);
     } catch {
       // Ignore save errors - language change already applied locally
     }

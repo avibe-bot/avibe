@@ -115,7 +115,7 @@ def config_write_transaction(config_path: Optional[Path] = None) -> Iterator["V2
     from config import paths as _paths
 
     path = config_path or _paths.get_config_path()
-    with _memory_config_transaction(path):
+    with config_file_lock(path):
         try:
             config = V2Config.load(path)
         except FileNotFoundError:
@@ -4125,7 +4125,7 @@ class V2Config:
             )
         paths.ensure_data_dirs()
         path = config_path or paths.get_config_path()
-        with _memory_config_transaction(path):
+        with config_file_lock(path):
             try:
                 memory = type(self).load(path).memory
             except FileNotFoundError:
@@ -4241,7 +4241,7 @@ def atomic_update_memory(
 
     paths.ensure_data_dirs()
     path = config_path or paths.get_config_path()
-    with _memory_config_transaction(path):
+    with config_file_lock(path):
         config = V2Config.load(path)
         memory = mutator(deepcopy(config.memory))
         if not isinstance(memory, MemoryConfig):
