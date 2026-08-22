@@ -135,16 +135,16 @@ These values are not durability promises or user settings.
 Admission performs no EverOS I/O and no unbounded wait:
 
 1. Run existing authorization, size, scope, and request overflow checks.
-2. Under one process-local lock, reserve a permit and claim the source digest in
-   the 256-entry dedupe LRU; existing digests return `CaptureDuplicate`, and failed claims are removed.
+2. Under one process-local lock, reserve a permit and claim the source digest as a
+   non-evictable pending entry; existing digests return `CaptureDuplicate`.
 3. Pin optional attachments under that permit. On any pin failure, attempt cleanup
    once and admit a non-empty caption as text-only under the same reservation;
    attachment-only input drops.
 4. In one short admission critical section and bounded SQLite transaction, compute
    candidate catalog and timestamp state. Reject a 17th project or a value above
    `MAX_PROVIDER_TIMESTAMP_MS` before mutating either durable field.
-5. Convert the reservation to a queue item and the digest to admitted before
-   leaving the critical section; reserved capacity prevents queue-full failure.
+5. Remove a failed pending entry. Otherwise convert the reservation to a queue item
+   and mark it admitted/evictable in the 256-entry LRU under the same lock.
 
 Any admission failure without a text fallback releases the permit. A cancelled
 generation returns immediately, but an underlying pin/provider job keeps its shared
@@ -314,7 +314,7 @@ the same time merely to split the diff.
 |---|---|
 | `MEMORY-INDEP-001`, `-002`, `-010`, `-012` | retain non-blocking lifecycle, accepted loss, and content-free logs |
 | `MEMORY-INDEP-003`, `-008` | rewrite shutdown to drop without settlement waits |
-| `MEMORY-SEARCH-006`, `-012`, `-013` | remove reopen recovery; rewrite flush as a bounded barrier |
+| `MEMORY-SEARCH-005`, `-006`, `-012`, `-013`, `-014` | rewrite v4 migration/diagnostics; remove reopen recovery; bound flush |
 | `MEMORY-CLEAR-201` | remove `manual_required`; Clear still discards volatile work |
 | `MEMORY-REPAIR-006` | rewrite Repair to use the authority transition barrier |
 | `MEMORY-FACTORY-003`, `-004`, `-201` | retain exclusion; include pin jobs in the barrier |
