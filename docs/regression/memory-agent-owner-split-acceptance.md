@@ -101,24 +101,42 @@ Why this is safe to defer:
   `master` regression environment and no accumulated product state; deferring
   leaves nothing stale.
 
-When the owner chooses to run the deferred pass, §5 (memory-only, needs only real
-`ANTHROPIC_API_KEY` + `OPENAI_API_KEY` in `.env.regression`) and §6 (four-platform,
-needs real bound platform tokens) are the validated, safe runbook. Per project
-policy those credentials are supplied by the owner in `.env.regression` and are
-never requested in plaintext or committed.
+When the owner chooses to run the deferred pass, §5 and §6 are the validated, safe
+runbook. Two runner facts shape the prerequisites and are called out there:
+
+- **`up` requires all seven seed variables to be *present* before it creates any
+  Incus object.** `cmd_up()` calls `require_runtime_seed_env()`, which demands
+  `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `REGRESSION_SLACK_BOT_TOKEN`,
+  `REGRESSION_SLACK_APP_TOKEN`, `REGRESSION_DISCORD_BOT_TOKEN`,
+  `REGRESSION_FEISHU_APP_ID`, and `REGRESSION_FEISHU_APP_SECRET`; `up --help`
+  exposes no memory-only or skip-seed option. The two LLM keys must be genuine
+  (distillation calls a real model); the platform tokens gate the §6 four-platform
+  checks. All seven must be set in `.env.regression` for `up` to proceed.
+- **The stock regression config ships Memory disabled.**
+  `prepare_regression.py::_build_config_payload()` writes only `platforms` and
+  `agents`; `MemoryConfig.enabled` defaults to `False`, and Memory additionally
+  requires its own `processing.llm` and `processing.embedding` endpoints ("Both
+  Memory processing endpoints must be complete before enabling Memory") — these are
+  separate from the agent-backend LLM keys above. So the owner must explicitly
+  enable and configure Memory after `up` (§5, step 0b) before the health gate; the
+  runner's service-health check can pass while Memory itself is still unconfigured.
+
+Per project policy these credentials are supplied by the owner in `.env.regression`
+and are never requested in plaintext or committed.
 
 ## 5. Live Incus runbook (owner-deferred; safe to run post-merge, ~10 minutes after `up`)
 
 This is the validated, safe runbook for the deferred live pass (§4). Run every
-command with the `INCUS_CMD` prefix. It is validated against
-`up --target master --dry-run`; the only input the owner supplies is real seed
-credentials in `.env.regression`.
+command with the `INCUS_CMD` prefix. The `up` invocation is validated against
+`up --target master --dry-run`; the inputs the owner supplies are the seven seed
+variables in `.env.regression` (§4) plus the Memory enablement in step 0b.
 
-**Step 0 — prerequisites (one-time).**
+**Step 0a — bring up the environment (one-time).**
 
 ```bash
 export INCUS_CMD="limactl shell avibe-incus-regression -- sudo incus"
-# Provide real LLM keys in .env.regression at the repo root, then:
+# Provide all seven seed variables in .env.regression at the repo root (§4);
+# ANTHROPIC_API_KEY and OPENAI_API_KEY must be genuine. Then:
 python3 scripts/incus_regression.py doctor
 python3 scripts/incus_regression.py build-base        # alias avibe-regression-base-current
 python3 scripts/incus_regression.py up --target master
@@ -130,9 +148,20 @@ project `avr-master`, instance `avibe-master`, runs `vibe runtime prepare
 agent drives it, manage it with a Harness Watch on the runner command — never a
 detached `&`/`nohup`.
 
-**Health gate.** In the Web UI, open **Memory → Processing Record** and confirm
-**Engine status: Healthy** and **Call log: Recording normally** before sending any
-capture. If either is not true, record `INCONCLUSIVE` and stop.
+**Step 0b — enable and configure Memory (required; the stock config ships it
+disabled).** The regression config writes no `memory` section, so `up` alone leaves
+Memory disabled (§4). In the Web UI **Settings → Memory**, enable Memory and
+configure both processing endpoints — the distillation **LLM** endpoint and the
+**embedding** endpoint — with real, reachable credentials (these are distinct from
+the agent-backend keys). Save and let the config API reconcile the live controller.
+Without this step, `remember` cannot distil and the search/profile steps below have
+nothing to return.
+
+**Health gate.** Only after step 0b, in the Web UI open **Memory → Processing
+Record** and confirm **Engine status: Healthy** and **Call log: Recording normally**
+before sending any capture. If Memory is not enabled/configured, or either signal is
+not true, record `INCONCLUSIVE` and stop — the runner's service-health check can pass
+while Memory itself is still unconfigured.
 
 The rest of the runbook exercises the split. Each step names the acceptance
 invariant it covers and the visible pass condition. Use a unique, non-sensitive run
@@ -142,7 +171,9 @@ tag such as `MAOS-YYYYMMDD-NN` in every seeded value.
    an empty environment).** From an ordinary human DM in any bound platform (or the
    Web chat), send a plain user turn containing a unique fact, e.g.
    `<run-tag> control the user's favorite lake is Placid`. Wait for it to appear in
-   **Processing Record** under one principal. This is the user-owner baseline.
+   **Processing Record** under one principal. This is the user-owner baseline. Also
+   capture the user's current **Memory → Profile** block now, before any agent
+   capture, as the before-image for the step-4 pollution comparison.
 
 2. **Agent capture via the trusted internal path (invariant 1, 6).** Through a real
    agent session for the same principal, have the agent run
@@ -152,9 +183,13 @@ tag such as `MAOS-YYYYMMDD-NN` in every seeded value.
    boundary for that session (end the session normally) so the terminal flush
    fan-out distills the assistant-owner buffer.
 
-3. **Dual-owner search with origin labels (invariant 4, 9).** Run
-   `vibe memory search "<run-tag> release"` (human output, no `--json`). Pass
-   conditions:
+3. **Dual-owner search with origin labels (invariant 4, 9).** Run the search
+   **from an admitted agent session for the same principal** — start or resume that
+   session and have the agent run `vibe memory search "<run-tag> release"` (human
+   output, no `--json`). A bare operator shell will fail with `memory_access_denied`:
+   `cmd_memory()` reads the caller session only from the injected caller-context
+   environment, and `/internal/memory/search` rejects a request whose caller-session
+   header cannot be resolved. Pass conditions:
    - the agent-recorded fact is returned, prefixed **`[Agent memory]`**;
    - the step-1 user fact, when it matches, is prefixed **`[User memory]`**;
    - an exact-duplicate across both owners collapses to a single
@@ -163,17 +198,33 @@ tag such as `MAOS-YYYYMMDD-NN` in every seeded value.
      `User memory` / `Agent memory` / `User + Agent` labels.
 
 4. **Profile stays split, never interleaved (invariant 4).** Open **Memory →
-   Profile** (or `vibe memory profile`). Pass condition: the real user's profile
-   and the agent's profile render as two separately labeled blocks; the user block
-   shows no content derived from the step-2 agent capture.
+   Profile** (or `vibe memory profile`, run from the same admitted agent session as
+   step 3). A single remembered fact may produce an Episode with **no** agent
+   Profile — `EverOSPort.profile()` legitimately returns zero items for an owner
+   with no profile — so an empty agent block is **not** a failure. Pass conditions:
+   - whichever profile blocks render carry the correct owner label and are never
+     interleaved (agent-derived content never appears inside the user block);
+   - the real user's profile is unchanged by the step-2 agent capture — compare it
+     against the user profile captured before step 2 (capture that baseline in
+     step 1) to prove no pollution.
+   Mark `FAIL` only on interleaving or on user-profile pollution, not on an empty
+   agent profile.
 
 5. **Processing diagnostics retain the assistant-owner record (invariant 7).** In
-   **Memory → Processing Record**, under the same caller's scoped view, find a
-   processing entry for the step-2 capture. Pass condition: the assistant-owned
-   capture is visible in the caller's scoped diagnostics (and in the admin view);
-   it is not silently absent. No `AgentCase` is expected for a single fact — an
-   assistant-owner cell with no assistant sender is the accepted design (§ plan
-   4/5).
+   **Memory → Processing Record**, find a processing entry for the step-2 capture.
+   Scope caveat: this Web panel proves **admin** visibility only — its route supplies
+   a verified UI user key, and `_memory_log_access()` maps every such request to
+   `memory_admin_log_access`; only a caller-session header reaches
+   `log_entries_payload()` with a principal/project scope. So the UI observation
+   confirms the assistant-owned capture is not silently dropped from admin
+   diagnostics. The **caller-scoped** half of invariant 7 is covered by the
+   automated scenario `MEMORY-SEARCH-014`
+   (`test_assistant_owned_capture_is_visible_in_scoped_and_admin_diagnostics`, §7),
+   not by this panel; to reproduce scoped visibility live requires a
+   caller-context IPC/harness check, which is out of scope for this manual runbook.
+   Pass condition: the capture appears in the admin Processing Record. No `AgentCase`
+   is expected for a single fact — an assistant-owner cell with no assistant sender
+   is the accepted design (§ plan 4/5).
 
 6. **Cross-user isolation (invariant 8).** From a second distinct principal, repeat
    step 2 with a different run tag, then run step-3 search as the first principal.
