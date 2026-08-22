@@ -5,6 +5,9 @@ capability:
   canonical_tests:
     - tests/test_memory_admission.py
     - tests/test_memory_store.py
+    - tests/test_memory_module.py
+    - tests/test_memory_everos.py
+    - tests/test_memory_insight.py
     - tests/test_internal_server.py
     - tests/test_memory_cli.py
 status_legend:
@@ -71,3 +74,39 @@ scenarios:
     kind: budget
     layer: contract
     test: tests/test_memory_module.py::test_agentic_recall_interleaves_per_leg_rank_with_only_one_agentic_leg
+  - id: MEMORY-SEARCH-011
+    name: Capture provenance routes writes to disjoint user and Agent owners
+    status: covered
+    kind: happy_path
+    layer: contract
+    test: tests/test_memory_everos.py::test_add_payload_owner_matches_provenance_routed_session
+  - id: MEMORY-SEARCH-012
+    name: Recovery revalidates every persisted owner session back to its trusted caller scope
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_memory_store.py::test_owner_scoped_session_recovery_returns_trusted_caller_scope_after_reopen
+  - id: MEMORY-SEARCH-013
+    name: Terminal flush concurrently closes every captured owner session
+    status: covered
+    kind: lifecycle
+    layer: contract
+    test: tests/test_memory_module.py::test_terminal_flush_closes_user_and_agent_sessions_under_one_deadline
+  - id: MEMORY-SEARCH-014
+    name: Processing diagnostics retain Assistant-owned captures in scoped and admin views
+    status: covered
+    kind: diagnostics
+    layer: contract
+    test: tests/test_memory_insight.py::test_assistant_owned_capture_is_visible_in_scoped_and_admin_diagnostics
+  - id: MEMORY-SEARCH-015
+    name: Agent write ownership stays isolated across callers
+    status: covered
+    kind: authorization
+    layer: contract
+    test: tests/test_memory_store.py::test_capture_provenance_routes_provider_owner_without_changing_caller_audit_scope
+  - id: MEMORY-SEARCH-016
+    name: Agent remember is returned by dual-owner search with Agent provenance
+    status: covered
+    kind: happy_path
+    layer: scenario
+    test: tests/test_memory_module.py::test_agent_remember_round_trips_through_dual_owner_search

@@ -14,6 +14,31 @@ Avibe Memory distills eligible Workbench and private-IM messages into a
 per-user profile, episodes, and facts. Open **Settings > Memory** to inspect its
 Processing Record, current profile, search results, and settings.
 
+## User and Agent memory ownership
+
+Automatic capture of a user's messages continues to write to that user's Memory
+owner. A successful `vibe memory remember` records the fact under a separate,
+Avibe-derived Agent owner for the same caller. The derived owner ends in
+`-agent`; callers cannot choose it or use another user's owner. User and Agent
+captures use disjoint provider sessions, so their episodes, facts, and profiles
+cannot be distilled into the same Memory cell.
+
+Search reads both owners. Results are labeled **User**, **Agent**, or **Both**;
+an exact text match held by both owners is returned once with the **Both** label.
+Profile reads show separate labeled blocks rather than combining the two
+profiles. Processed episode listing remains user-owner-only, so use Search or
+Profile to inspect Agent-owned memory.
+
+Existing Memory data is not moved. Agent-recorded facts written before this
+split remain under the user owner and are still searchable there. A newer
+installation preserves the released four-field provider-session shape and
+delivers pre-split queued rows under the owner stored when they were enqueued.
+On rollback, already-delivered Agent-owner memories remain stored but are hidden
+from an older reader until Avibe is upgraded again. Pending Agent-owner rows at
+the instant of rollback are not compatible with the older sidecar owner guard
+and may be rejected and discarded; drain the queue before downgrading when those
+records must be retained.
+
 ## IM attachment capture
 
 Memory can extract supported attachments from bound one-to-one conversations on
@@ -86,16 +111,21 @@ count. They are not sent as direct messages to administrators on Slack,
 Discord, Telegram, Lark, WeChat, or other IM transports.
 
 The timeline is the installation operator's view across every valid project and
-user. Each row and its detail view visibly includes the full **Project ID** and
-**User ID**, followed by the path from message capture through memcell creation,
-processing strategies, profile triggers, and current indexing state. The UI
-routes grant this broad read scope to an authenticated local or Avibe Cloud
-Memory session; profile and search reads remain user-scoped.
+Memory owner. Each row and its detail view visibly includes the full **Project
+ID** and **User ID**; a derived `-agent` value identifies the caller's Agent
+owner. The timeline then follows the path from message capture through memcell
+creation, processing strategies, profile triggers, and current indexing state.
+The UI routes grant this broad read scope to an authenticated local or Avibe
+Cloud Memory session; profile and search reads remain caller-scoped while
+covering that caller's user and Agent owners.
 
 Provider calls are attached only when Avibe can prove their exact provenance to
-the displayed project and user. The broad UI view does not weaken those joins:
-foreign, malformed, or multi-user memcells are omitted and a detail request
-derives the row's real scope before reading runs, capture, or calls.
+the displayed project and Memory owner. The durable capture queue remains keyed
+by the authenticated caller, so Agent-owner correlation translates that trusted
+caller to the derived owner rather than comparing the two IDs directly. The
+broad UI view does not weaken those joins: foreign, malformed, or multi-owner
+memcells are omitted and a detail request derives the row's real scope before
+reading runs, capture, or calls.
 
 ## Provider payload logging
 
@@ -228,6 +258,11 @@ Each captured row stores the canonical provider session reference
 queue state. Duplicate source identities remain idempotent within the active
 epoch, and a claimed row is either settled successfully or retained with its
 payload for recovery.
+
+Within that four-field provider reference, `principal_id` is the Memory owner:
+the caller principal for user input and the caller's derived `-agent` owner for
+Agent capture. The queue's separate `principal_id` column remains the caller
+principal for admission, audit, recovery, and cross-user isolation.
 
 The outbox owns add delivery only. A session-scoped coordinator separately owns
 generations, idle/max-age/message-count flush thresholds, exact fences, and
