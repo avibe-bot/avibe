@@ -24,7 +24,6 @@ from core.avibe_cloud import avibe_cloud_connect_guidance, base_public_url
 from core.show_runtime_failures import (
     ShowRuntimeFailureClass,
     ShowRuntimeRecoveryAction,
-    ShowRuntimeRetryDisposition,
 )
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
@@ -88,10 +87,6 @@ SHOW_CLI_EVENT_TOKEN_HEADER = "X-Vibe-Show-Cli-Token"
 SHOW_PAGE_RUNTIME_RECOVERY_LOADING_DELAY_SECONDS = 30
 
 
-_SHOW_RUNTIME_RECOVERY_STATUS_KEY = {
-    ShowRuntimeRetryDisposition.CONTINUOUS: "retrying",
-    ShowRuntimeRetryDisposition.MANUAL_ONLY: "manualOnly",
-}
 # Only the head of index.html is scanned for the icon <link> (it lives in <head>,
 # at the top). Bounds the per-page read so a huge inline page can't stall
 # /api/show-pages or allocate a large string (§7.1f review).
@@ -2283,7 +2278,6 @@ def show_page_runtime_recovery_html(
     *,
     reason: str,
     failure_class: ShowRuntimeFailureClass,
-    retry_disposition: ShowRuntimeRetryDisposition,
     recovery_action: ShowRuntimeRecoveryAction,
     retry_authorized: bool,
     language: str = "en",
@@ -2295,7 +2289,6 @@ def show_page_runtime_recovery_html(
     loading_delay = "0s"
     translate = lambda key: _escape_html(t(f"show.runtimeRecovery.{key}", language))
     message_key = _show_runtime_recovery_message_key(reason, failure_class=failure_class)
-    status_key = _SHOW_RUNTIME_RECOVERY_STATUS_KEY[retry_disposition]
     surface_action = recovery_action if retry_authorized else ShowRuntimeRecoveryAction.NO_LOCAL_ACTION
     if surface_action is ShowRuntimeRecoveryAction.REPAIR:
         action_card = f"""<div class="show-recovery-card">
@@ -2319,9 +2312,6 @@ def show_page_runtime_recovery_html(
         if recovery_action is ShowRuntimeRecoveryAction.NO_LOCAL_ACTION:
             no_action_heading = "unsupportedHeading"
             no_action_message = "unsupportedMessage"
-        elif retry_disposition is ShowRuntimeRetryDisposition.MANUAL_ONLY:
-            no_action_heading = "viewerActionHeading"
-            no_action_message = "viewerActionMessage"
         else:
             no_action_heading = "ownerActionHeading"
             no_action_message = "ownerActionMessage"
@@ -2333,7 +2323,7 @@ def show_page_runtime_recovery_html(
         retry_authorized=retry_authorized and surface_action is not ShowRuntimeRecoveryAction.NO_LOCAL_ACTION,
     )
     return f"""<!doctype html>
-<html lang="{_escape_html(language)}" data-show-runtime-reason="{escaped_reason}" data-show-runtime-class="{failure_class.value}" data-show-runtime-retry-disposition="{retry_disposition.value}">
+<html lang="{_escape_html(language)}" data-show-runtime-reason="{escaped_reason}" data-show-runtime-class="{failure_class.value}">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -2502,9 +2492,8 @@ def show_page_runtime_recovery_html(
         <div class="show-recovery-grid">
           {action_card}
           <div class="show-recovery-card">
-            <h2>{translate("statusHeading")}</h2>
-            <p>{translate(status_key)}</p>
-            <p>{translate("reasonLabel")}: <code>{escaped_reason}</code></p>
+            <h2>{translate("reasonLabel")}</h2>
+            <p><code>{escaped_reason}</code></p>
           </div>
         </div>
         <p>{translate("sessionLabel")}: <code>{escaped}</code></p>

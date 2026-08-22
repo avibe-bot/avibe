@@ -500,16 +500,18 @@ serves a verified archive.
   stay undocumented until then, because `@avibe/show-runtime` is not on the
   public registry today.
 
-### W4 — Bounded retry instead of a lifetime latch (repo: `avibe`)
+### W4 — Truthful recovery evidence; bounded retry deferred (repo: `avibe`)
 
-Replace `_install_attempted` with a deliberately reduced retry design. Nine
-reviewed implementation heads produced 28 findings and no clean pass. The final
-heads repeatedly found a new race or projection gap inside machinery introduced
-by the preceding fix. The identity, trigger-policy, confirmation-budget, and
-lock-free pre-probe mechanisms were generating more defects than the automatic
-precision they protected, so they are removed rather than refined.
+PR #1640 attempted to replace a lifetime latch with bounded automatic retry.
+Nine reviewed implementation heads produced 28 findings and no clean pass. The
+retry identity, trigger policy, budget, record, disposition, and pre-probe
+mechanisms repeatedly generated fresh races and projection gaps. The review
+breaker therefore froze that design. PR #1640 deletes the retry machinery without
+replacement and keeps only the parts that converged: declared failure data,
+structured evidence, typed transport errors, and truthful manual recovery. Issue
+#1637 remains open for a separately designed bounded-retry change.
 
-The following rules are normative for PR 2c:
+The retained rules are normative:
 
 1. **No request-path health pre-probe.** If `_base_url` is set, `request()` uses
    that snapshot directly. A transport-level failure with no HTTP response is the
@@ -517,299 +519,51 @@ The following rules are normative for PR 2c:
    request re-enters admission. An HTTP response, including a 5xx response from
    the sidecar, proves transport succeeded and does not invalidate the runtime.
    No await may occur between reading `_base_url` and selecting it for the request.
-2. **One admission lock.** Runtime install, start, and stop transitions are
-   serialized by the owning admission boundary. Read-only request transport does
-   not add a second probe or transition owner. Waiters observe the first owner's
-   published record; they do not each run a provider.
-3. **One time-only retry record per owner.** Install and start each store attempt
-   count, next-attempt monotonic deadline, last failure class, and last reason.
-   No retry identity, fingerprint, provider-precondition declaration, or other
-   invalidation key exists. Any successful install or start clears its owner's
-   record; because records live only in memory, a process restart starts fresh.
-4. **Two dispositions.** Backoff is bounded exponential time with a documented
-   ceiling: five minutes for install admission and 30 seconds for start admission.
-   `configured` and `permanent` publish `manual_only`; every other class publishes
-   `continuous` with a deadline. The disposition vocabulary is exactly `continuous`
-   and `manual_only`.
-5. **Explicit work bypasses but does not corrupt automatic retry state.** Explicit
-   attempts are always admitted and never consult a deadline. Explicit failure
-   neither advances nor clears the record and projects its existing class and
-   disposition when one exists; explicit success clears the repaired owner's
-   stale record.
-6. **Owning operations normalize only operational I/O.** Every command-resolution
+2. **Owning operations normalize only operational I/O.** Every command-resolution
    and runtime-metadata path converts `OSError` subclasses into typed failure
    evidence before returning to the UI, and request transport catches the specific
-   `httpx` network exceptions it owns. Programming defects such as `TypeError`,
-   `ValueError`, and `AttributeError` propagate unchanged rather than acquiring
-   fabricated recovery evidence.
-7. **Retry now renders its one response.** One click performs exactly one fetch
+   `httpx` network exceptions it owns. Programming defects such as `TypeError` and
+   `AttributeError` propagate unchanged. A malformed user command is input
+   evidence, so command parsing converts it at the command-resolution boundary.
+3. **Retry now renders its one response.** One click performs exactly one fetch
    and renders that response into the current document from a private script scope,
    so repeated recovery-page renders cannot collide on top-level bindings. It never
    follows the fetch with `location.reload()` and therefore never spends a second
    Runtime attempt.
 
 Install-lock contention remains `not_applicable`: another process owns progress,
-so this caller did not run a provider and records no failure. Retries remain
-request-driven; no background timer is introduced in PR 2c.
+so this caller did not run a provider. Recovery remains request-driven; no
+background timer or automatic attempt budget exists in PR #1640.
 
-**Failure classification is published by the failure owner.** The install
-dimension publishes its class together with the install reason; the runtime
-dimension does the same for startup and proxy failures. The page consumes that
-class and never rebuilds it from a reason string. Existing startup evidence can
-prove whether the URL appeared, whether the child stayed alive, and whether
-health answered, but it cannot prove whether the same observation will
-self-heal; those reasons are therefore unclassified. `runtime_proxy_failed` has
-the same limitation. Missing or too-old Node and missing git/npm are configured
-because a local prerequisite change is the recovery event. Unsupported
-platform/source/URL is permanent. Evidence-poor manifest and archive failures
-remain unclassified rather than acquiring confidence they do not carry.
+**Failure classification is declared data and published by the evidence owner.**
+Each reason has one declaration carrying its dimension, owning artifact, class,
+and user ownership. Classification and recovery action are total lookups over
+that declaration. A managed command that disappears is runtime evidence owned by
+the managed artifact and is not classified as a user configuration error; an
+explicit command failure remains configured. The page consumes the published
+class and action and never rebuilds either from a reason prefix or nearby state.
 
-**Classification vocabulary is shared; retry ownership is not.** Install and
-startup have independent retry records because they answer different questions.
-A failed install is not evidence about runtime startability. Every manager
-admission decision receives intent explicitly: automatic callers pass
-`automatic=True`, while explicit user actions pass false and bypass a live
-install or startup gate unconditionally. Runtime transport failures remain a
-separate dimension and publish typed evidence, but PR 2c deliberately carries no
-request-level retry record or automatic browser poller; those move together to
-the successor described below.
+**Runtime transport is exception-closed for evidence.** `request()` and
+`request_global()` share one manager-owned transport boundary. A transport
+exception publishes reason, class, and recovery action through
+`ShowRuntimeUnavailableError`; an explicit total deadline remains the distinct
+`ShowRuntimeRequestTimeoutError`. The UI catches only those typed outcomes. Its
+former fallback, which fabricated recovery facts for arbitrary exceptions, is
+deleted. Unknown programming errors stay loud instead of acquiring evidence no
+owner published.
 
-A forced replacement is accounted from the operation outcome (`ok`) only. If
-replacement reports `ok=false` while a healthy existing command remains on disk,
-only the replacement-operation backoff is recorded; no startup/use backoff is
-installed, and `ensure()` continues serving the existing runtime. Replacement
-failure and runtime unusability are independent facts.
+**Manual recovery is truthful and authorized.** There are exactly three user
+obligations the page can present: run a repair, change a setting or prerequisite
+the owner controls, or accept that no local action can help. The recovery header
+requests an explicit action; it never grants authority. Only the authenticated
+instance owner is shown Retry now, while public and limited viewers receive a
+manual reload action they can perform themselves.
 
-**Retry behavior is published by the retry owner, not derived from failure
-class.** The review breaker on PR #1640 found five instances of one property
-failure in the retry work: a consumer manufactured an answer that an owner
-should publish. A request header stood in for authorization; a retry write after
-lock release stood in for the serialized admission outcome; failure class stood
-in for retry eligibility; the spelling of a reason token stood in for the
-dimension that owned it; and install-lock contention was promoted from "did not
-run" to "ran and failed." The third instance was explicitly approved in an
-earlier ruling: the page-side class-to-retry-mode table was praised as stronger
-than the requested owner-published classification. It was the same forbidden
-derivation one step later. Classification describes the evidence's cause;
-retry disposition describes what the owner will do next. Neither is a proxy for
-the other.
-
-The install retry owner therefore publishes its disposition inside the install
-dimension, and the start retry owner publishes independently inside the runtime
-dimension. The request transport boundary publishes the four facts carried by
-its typed unavailable error and never overwrites install or startup state. On
-this branch a transport failure is non-terminal and the recovery page offers a
-manual reload; it is structurally unable to publish `manual_only` for the request
-dimension. The closed disposition vocabulary is `continuous` and `manual_only`.
-The policy dimension publishes its
-own `configured` class and `manual_only` disposition for both automatic-install
-opt-outs. The page projects published values and never derives behavior from a
-failure class, reason prefix, or transport header.
-
-The failure vocabulary is declared data, not several membership sets. Each
-reason has one declaration carrying its dimension, owning artifact, class, and
-user ownership; classification and recovery action are total lookups over that
-declaration. A managed command that disappears is runtime evidence owned by the
-managed artifact and is not classified as a user configuration error; an
-explicit command failure remains configured. Every reason emitted by the
-runtime module is covered by the declaration census, and no reason may acquire
-a second classification path.
-
-Automatic attempts consult and update their owner's time-only record. An
-explicit user attempt is exactly one attempt: it bypasses the deadline and leaves
-the record unchanged field for field. This rule is represented by the caller's
-explicit `automatic` choice, not by a trigger-policy table or a second budget
-object.
-
-**Admission accounting is atomic with admission.** The provider result,
-exception normalization, and retry-record write converge while the serialized
-install guard is still held. A second admission cannot pass the retry gate or
-acquire the guard without seeing the first outcome. A failed guard acquisition
-is published as `not_applicable`, because no provider ran; only an operation that
-actually ran and failed may create a backoff. Writing retry state after releasing
-the guard, or checking the gate once before and again after acquisition, gives
-the property two owners and reopens the race.
-
-The next reviewed head exposed the same missing property in startup admission:
-`Popen` and every earlier or later startup exception could escape after the gate
-without publishing a retry outcome. The prior ruling had quantified atomic
-admission over install only, even though it named start as a retry owner in the
-next paragraph. This is the third governance error of the same form in this
-workstream: head five bounded an artifact when a property was at risk; head six
-bounded owners when the risk lived in their shared type; this ruling bounded one
-dimension when the property covered every retry-owning dimension. Enumerating
-visible sites is not a substitute for stating a property with its universal
-quantifier.
-
-The terminal rule is therefore independent of operation and dimension: for every
-retry owner, one exception-closed span covers **evidence acquisition -> gate (when
-one exists) -> attempt -> publication**, and every exit publishes exactly one
-outcome through the same owner. Install publishes before releasing its serialized
-guard; startup covers local precondition acquisition, workspace/cache
-establishment, orphan cleanup, log creation, process spawn, startup URL discovery,
-and health confirmation. Ordinary exceptions become structured failures.
-Cancellation and other `BaseException` exits publish first and then propagate.
-Success, failure, gate refusal, and exception paths all converge at one completion
-publisher; no return or exception site writes retry state itself.
-
-`not_applicable` means an attempt was not owed. Install-guard contention is the
-canonical case because another holder is already making progress. `failed`
-means an attempt was owed and did not succeed. A managed command that resolved
-and then became missing or non-executable is manager-owned, unclassified startup
-evidence. Other establishment/readiness exceptions also remain honestly
-unclassified and continue under bounded time backoff.
-
-The exit inventory is executable evidence rather than a review assertion. An AST
-test discovers every manager retry-record attribute and requires exactly one
-writer for each; this owner set contains install and start, so a newly introduced
-record makes the assertion fail. A separate gate census discovers every
-`_active_retry` caller and proves that those same two owners are the only gated
-dimensions. For each owner, the exit inventory requires one completion-publisher
-call in a `finally`, one normal return after publication, one propagated
-`BaseException` raise after publication, and a `BaseException` handler around the
-attempt span. The proof becomes incomplete if retry storage no longer follows the
-discovered attribute shape, a completion publisher gains fallible I/O, or an
-operation gains another exit path; such a change must extend the inventory and
-move the boundary rather than relying on the old assertion.
-
-The fourth findings-bearing head exposed a deeper failure in how the prior proof
-obligations were chosen. Each ruling named the right principle and then allowed
-an example list, a type check, or an unnamed second path to stand in for the
-principle's extent. The request path kept a second, unclosed exception route; the
-precondition predicate was recorded as an extensional exclusion list and thereby
-excluded a user-owned executable that Avibe never writes; and the page introduced
-its own confirmation counter even though no earlier example had named that kind
-of derived decision. Each proof obligation had been derived from the preceding
-round's findings, so it was rigorous over exactly the domain that the prior round
-had taught us to inspect and could not fail on the next round's defects. The AST
-admission inventory is the concrete example: correct over `_active_retry`
-callers, and provably blind to transport exception closure, explicit-command
-fingerprints, and a browser-owned retry budget. Evidence that cannot fail outside
-the last finding's domain is not evidence. This is the fourth governance
-admission for PR #1640.
-
-The runtime request span is exception-closed for evidence even though it owns no
-retry record on this branch. `request()` and `request_global()` share one
-manager-owned transport boundary. An ordinary transport exception publishes
-reason, class, non-terminal disposition, and recovery action through
-`ShowRuntimeUnavailableError` before reaching the UI. Reusing the start record is
-forbidden: successful startup is not evidence that a request can be served. When
-`_base_url` already exists, the request uses it without a health pre-probe and
-lets the transport owner publish operational network failures and invalidate the
-stale snapshot; programming exceptions remain loud.
-
-The API's explicit total-deadline error remains a distinct
-`ShowRuntimeRequestTimeoutError` response. A raw default `httpx` transport timeout
-now becomes the structured unavailable error instead of escaping; this is a
-deliberate caller-visible contract change, and tests assert its reason, class,
-disposition, action, and original cause. Internal capability and health probes
-close their own transport exceptions into their narrower capability/health
-results. The UI catches only the two typed outcomes and projects the unavailable
-error's four fields. Its former fallback, which fabricated all four values for an
-arbitrary exception and could permanently stop a public page, is deleted. An
-unknown programming exception remains loud rather than acquiring recovery
-evidence no owner published.
-
-Two censuses are merge evidence for the retained property:
-
-1. Enumerate every recovery fact consumed by the page or an admission gate — the
-   unavailable exception's reason/class/disposition/action, the corresponding
-   response headers and document dataset, authorization plus explicit retry, and
-   install/start retry deadline. For every value, name exactly one producer; every
-   other site is a projection, and defaulting branches are deleted rather than
-   repaired. The executable census also enumerates every direct `AsyncClient`
-   path in the manager and requires external requests to converge through the
-   transport owner. It becomes incomplete if a new header, dataset key, gate
-   input, exception route, or direct HTTP client appears without extending the
-   census. No request retry record or automatic-poll header may appear in PR 2c.
-2. Enumerate the provider-install call graph. Every provider implementation is
-   called only by the serialized `_install_managed_runtime_locked` dispatcher,
-   and that dispatcher is called only by `_attempt_managed_install`; public
-   preparation and resolution entry points may call the admission owner but
-   never a provider directly. The census becomes incomplete if a new provider
-   method or entry point appears without extending the call-graph assertion.
-
-The fifth findings-bearing head fired the pre-committed boundary. Its three
-findings all landed inside properties PR #1640 claimed to own: the browser made
-one more automatic request after the request owner published `manual_only`, local
-fingerprint I/O ran synchronously on the ASGI path, and malformed user commands
-escaped before admission ownership began. Master has no automatic poller, only a
-manual Retry button. Therefore automatic request-level recovery — the browser
-poll loop and the request retry record that exists only to bound it — leaves PR
-2c as one property. Removing both restores master's manual behavior exactly;
-retaining only one would either leave an unbounded loop or make a bound apply to
-user-initiated work.
-
-Subsequent identity findings showed that the identity mechanism itself had no
-stable owner: each head corrected another tuple member, provider dependency, or
-fingerprint rule. The reduced design removes that mechanism entirely. Install
-and start now gate only on their monotonic deadlines; command and metadata I/O
-remain inside the owning operation so failures still publish typed evidence.
-
-This exposed the fifth governance error in the boundary method. The previous rule
-started ownership at the gate because gate, attempt, and publication were the
-artifacts in view. It omitted the evidence that decides the gate. An owner's
-exception boundary begins at the first read of state outside the owner, not at the
-first action. Anything read before the `try` is unowned evidence on which the
-published outcome may depend.
-
-The corresponding proof is an AST-derived prologue inventory for every retry
-owner. It enumerates every attribute read, method call, and free-function call
-between the function's first statement and its `try`, with a reason why each
-cannot fail or affect the outcome. The expected runtime-effectful prologue is
-empty: only local variables initialized from literals may precede the boundary.
-This proof would fail if a future owner resolved a command, read manager state, or
-called a helper before entering `try`; it becomes incomplete if ownership moves
-to a callable the inventory no longer discovers.
-
-**Successor scope: automatic request-level recovery.** The successor is the only
-PR that may reintroduce the automatic loop. It stacks on PR 2c and carries the
-request retry owner with the loop because they are one property. It inherits the
-following constraints in full:
-
-1. One request owner spans transport attempt and publication, is
-   exception-closed, and has one publication point. Any future automatic bound
-   is time-only; it does not introduce a retry identity. Start success cannot
-   clear request evidence; only a successful request can.
-2. The owner publishes `continuous` or `manual_only`. The browser owns pacing
-   only and never eligibility. It has no `checksRemaining` or other attempt
-   counter: a rejected poll did not reach manager admission and cannot consume
-   an owner's budget.
-3. A bound on automatic attempts never gates user-initiated work. Ordinary page
-   loads, assets, and an authorized Retry-now request always attempt transport.
-   When automatic polling stops, public-viewer copy must name an action that
-   viewer can perform: reload the page, then contact the owner if it still fails.
-4. Polling state is isolated from document replacement. A classic script may not
-   redeclare top-level lexical bindings after `document.open()`; use a private
-   scope or a real navigation, and test a non-terminal-to-non-terminal transition.
-5. A terminal response is rendered without another Runtime request. Reloading an
-   ordinary Show Page GET after `manual_only` would manufacture the automatic
-   attempt the owner just refused. Header absence may reload because it proves the
-   Runtime is serving; a changed terminal disposition may not re-enter transport.
-
-The successor must preserve the retained transport evidence closure: the UI has
-no fallback that fabricates reason, class, disposition, or action. It must also
-preserve owner authorization: only the authenticated instance owner may request
-an explicit bypass, and a public or limited viewer is never shown an owner-only
-action.
-
-**Explicit retry is authorized by the control-plane owner.** The recovery header
-expresses a request; it never grants authority. Avibe is a personal, single-user
-control plane, so only the authenticated instance owner — the same subject that
-could run `vibe runtime prepare` — may bypass automatic bounds and spend local
-compute on an install or spawn. Public and limited share-link viewers always
-remain automatic, even when they send the header, and the page does not render a
-Retry now action they cannot use. This is authorization rather than rate
-limiting: an owner pressing the button is the intended unconditional bypass.
-
-Recovery action is another owner-published value, separate from disposition.
-There are exactly three user obligations the page can truthfully present: run a
-repair, change a setting or prerequisite the owner controls, or accept that no
-local action can help. Policy reasons retain the exact setting token and select
-the second obligation; unsupported platform selects the third. Every other
-failure selects repair unless its owning evidence says otherwise. Adding a case
-extends this closed data domain instead of adding a page branch that reinterprets
-the nearest reason or class.
+The freeze chose deletion over extraction because the seam crosses fields inside
+shared admission functions. Re-extracting the retained subset from master would
+rewrite the same regions that produced the findings while discarding the review
+history. Deleting the enumerated retry symbols is mechanically verifiable and
+introduces no replacement state machine, class, or module-level table.
 
 **Through one admission path.** This requirement was missing from the first
 version of this spec, and its absence produced four review findings across two
@@ -821,7 +575,7 @@ method admits an install, and it owns all four of:
    `VIBE_INSTALL_SKIP_SHOW_RUNTIME`);
 2. serialization — one lock covering every provider, not just the manifest
    provider's `_install_guard_locked`;
-3. the retry classification above;
+3. the failure classification and recovery evidence above;
 4. writing the resulting command into shared manager state, so a later caller
    reuses it instead of installing again.
 
@@ -1376,7 +1130,7 @@ Note for expectation-setting: this fixes transient failures only. It would not
 have helped a user who cannot reach `github.com` at all; that is W3.
 
 **Acceptance:** after a simulated download failure, a later `/show/` request
-retries once the backoff expires and succeeds, with no service restart. A forced
+can try again and succeed, with no service restart. A forced
 repair whose replacement package fails reports the repair as failed with its real
 reason, reports the old runtime as still installed, and leaves it on disk; a
 startability check that cannot reach a verdict refuses the reinstall instead of
@@ -1411,13 +1165,13 @@ adopted as the managed baseline.
 - Defer automatic polling to PR 2c′; PR 2c keeps a truthful manual recovery
   surface and an authenticated Retry-now action.
 
-Recovery copy projects the user's obligation separately from the retry
-disposition. A repair command is shown only when local repair can address the
+Recovery copy projects the user's obligation from published evidence. A repair
+command is shown only when local repair can address the
 failure; a deliberate policy opt-out names the setting to change; and an
 unsupported platform states that no local repair or retry changes the fact. The
 page never maps failure class to retry behavior. Install, runtime, and policy
-publish their disposition and recovery action inside their own dimensions, with
-no flat top-level mirror for a consumer to mispair.
+publish their recovery action inside their own dimensions, with no flat
+top-level mirror for a consumer to mispair.
 
 All user-visible strings go through `vibe/i18n/`.
 
@@ -1435,8 +1189,8 @@ as a rule because the reduced signal looked adequate each time.
   counts as serving.
 - Automatic recovery is deferred to PR 2c′. Until then the recovery page offers a
   manual reload plus an authenticated owner-only Retry-now action. PR 2c′ may poll
-  only from manager-owned disposition, never from a browser counter, and a failed
-  poll consumes no retry attempt because manager admission never happened.
+  only from a manager-owned admission signal, never from a browser counter. Its
+  design remains open in #1637 rather than being implied by PR #1640.
 
 **A probe proves only the state it was calibrated for.** The first attempt at the
 fix above reused `_healthy()` exactly as the already-running path calls it: one
@@ -1607,8 +1361,8 @@ exposure predates these PRs and shipping the truthful row strictly reduces it.
 | 2b | W5 readiness proof | avibe | `ensure()` health-probes a fresh start; `doctor` inherits it. Independent of 2a. Bounded retry plus Doctor's three-state startability; claims nothing about replacement. |
 | 2b′ | W4 replacement operation contract | avibe | What `prepare()` claims, what a provider must prove, install-state ownership, build provenance, and destructive cache/delegate boundaries. Split out of 2b after six findings-bearing heads; checkout ownership is not shipped here. |
 | 2b″ | Protect the managed GitHub checkout | avibe | Replace master's unconditional checkout takeover with a three-valued decision that keeps undetermined ownership away from both checkout movement and build-evidence destruction. |
-| 2c | W4 install/start retry + W5 page | avibe | Independent install/start retry ownership, atomic admission, typed transport evidence, and an honest manual recovery page. Automatic request recovery is explicitly absent. |
-| 2c′ | Automatic request-level recovery | avibe | Reintroduce the browser poll loop together with the request retry owner that bounds it, preserving user-initiated requests and the inherited browser constraints. |
+| 2c | W4 evidence + W5 page | avibe | Declared failure classification, typed transport evidence, operational-I/O normalization, and an honest manual recovery page. Retry ownership was frozen and deleted. |
+| 2c′ | Bounded automatic recovery | avibe | Open issue #1637. Design the bound separately before reintroducing any automatic poller or retry state. |
 | 3 | W1 | vibe-show-runtime | Independent; effect appears at the next runtime release. |
 | 4 | W3.1 | avibe | Source ladder. Valuable on its own — removes the single point of failure using only tiers that exist today. |
 | 5 | W3.0 | vibe-show-runtime | Version scheme. Prerequisite for 6 and 7. Gate on owner confirmation. |
@@ -1680,10 +1434,10 @@ real `~/.avibe`.
 - W3.3: the npm tarball's outer sha256 is *not* used for verification; the inner
   archive is verified after extraction; the mirror base URL is used when the
   primary registry is unreachable.
-- W4: owner-published failure classification; independent time-only install/start
-  backoff schedules; explicit attempts bypass and preserve automatic records;
-  failed replacement remains independent from runtime usability; local I/O is
-  normalized into typed evidence.
+- W4: owner-published failure classification; typed transport evidence; one-fetch
+  explicit recovery; failed replacement remains independent from runtime
+  usability; local I/O is normalized into typed evidence. Bounded retry remains
+  open in #1637.
 - W5: reason-specific copy; terminal failures render immediately; i18n coverage.
 
 **Pipeline tests**: extend `tests/test_show_runtime_manifest_packaging.py` with

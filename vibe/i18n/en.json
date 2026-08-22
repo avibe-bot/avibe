@@ -53,11 +53,6 @@
       "unsupportedMessage": "The reason is recorded below. No action on this machine can change it.",
       "ownerActionHeading": "Instance owner action required",
       "ownerActionMessage": "Reload this page to try the request again. If it still fails, ask the Avibe instance owner to run the available recovery action.",
-      "viewerActionHeading": "Try this page again",
-      "viewerActionMessage": "Automatic checking has stopped. Reload this page to try the request again. If it still fails, ask the Avibe instance owner to repair the Show Runtime.",
-      "statusHeading": "Recovery status",
-      "retrying": "This failure can be tried again. Reload the page or choose Retry now when that action is available.",
-      "manualOnly": "Automatic retries have stopped. The reason and available next step are shown on this page.",
       "reasonLabel": "Reason",
       "sessionLabel": "Session",
       "retryNow": "Retry now"

@@ -2327,7 +2327,6 @@ def test_repair_show_runtime_first_github_install_failure_does_not_claim_preserv
         "state": "absent",
         "reason": None,
         "failure_class": None,
-        "retry_disposition": None,
         "recovery_action": None,
         "command": None,
         "install_dir": None,

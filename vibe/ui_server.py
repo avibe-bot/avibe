@@ -13106,7 +13106,6 @@ def _show_page_runtime_failure_evidence(exc: "ShowRuntimeUnavailableError"):
     return (
         exc.reason,
         exc.failure_class,
-        exc.retry_disposition,
         exc.recovery_action,
     )
 
@@ -13125,7 +13124,6 @@ def _show_page_recovery_response(
     *,
     reason: str,
     failure_class,
-    retry_disposition,
     recovery_action,
     retry_authorized: bool,
 ):
@@ -13136,7 +13134,6 @@ def _show_page_recovery_response(
             session_id,
             reason=reason,
             failure_class=failure_class,
-            retry_disposition=retry_disposition,
             recovery_action=recovery_action,
             retry_authorized=retry_authorized,
             language=_request_ui_language(),
@@ -13148,7 +13145,6 @@ def _show_page_recovery_response(
     response.headers["X-Avibe-Show-Recovery"] = "1"
     response.headers["X-Avibe-Show-Recovery-Reason"] = reason
     response.headers["X-Avibe-Show-Recovery-Class"] = failure_class.value
-    response.headers["X-Avibe-Show-Recovery-Disposition"] = retry_disposition.value
     return response
 
 
@@ -13183,7 +13179,6 @@ def _show_page_runtime_failure_response(
     *,
     reason: str,
     failure_class,
-    retry_disposition,
     recovery_action,
     retry_authorized: bool,
 ):
@@ -13197,7 +13192,6 @@ def _show_page_runtime_failure_response(
         session_id,
         reason=reason,
         failure_class=failure_class,
-        retry_disposition=retry_disposition,
         recovery_action=recovery_action,
         retry_authorized=retry_authorized,
     )
@@ -15033,9 +15027,7 @@ async def serve_private_show_page(session_id, asset_path):
             except (ShowRuntimeUnavailableError, ShowRuntimeRequestTimeoutError) as exc:
                 if isinstance(exc, ShowRuntimeRequestTimeoutError):
                     return _show_page_runtime_error_response(asset_path, exc)
-                reason, failure_class, retry_disposition, recovery_action = (
-                    _show_page_runtime_failure_evidence(exc)
-                )
+                reason, failure_class, recovery_action = _show_page_runtime_failure_evidence(exc)
                 if _is_show_api_asset(asset_path) or _is_show_annotation_asset(asset_path):
                     return _show_page_runtime_error_response(asset_path, exc)
                 response = _show_page_runtime_failure_response(
@@ -15045,7 +15037,6 @@ async def serve_private_show_page(session_id, asset_path):
                     request._request,
                     reason=reason,
                     failure_class=failure_class,
-                    retry_disposition=retry_disposition,
                     recovery_action=recovery_action,
                     retry_authorized=runtime_retry_authorized,
                 )
@@ -15547,9 +15538,7 @@ async def serve_public_show_page(share_id, asset_path):
             except (ShowRuntimeUnavailableError, ShowRuntimeRequestTimeoutError) as exc:
                 if isinstance(exc, ShowRuntimeRequestTimeoutError):
                     return _show_page_runtime_error_response(asset_path, exc)
-                reason, failure_class, retry_disposition, recovery_action = (
-                    _show_page_runtime_failure_evidence(exc)
-                )
+                reason, failure_class, recovery_action = _show_page_runtime_failure_evidence(exc)
                 if _is_show_api_asset(asset_path) or _is_show_annotation_asset(asset_path):
                     return _show_page_runtime_error_response(asset_path, exc)
                 response = _show_page_runtime_failure_response(
@@ -15559,7 +15548,6 @@ async def serve_public_show_page(share_id, asset_path):
                     request._request,
                     reason=reason,
                     failure_class=failure_class,
-                    retry_disposition=retry_disposition,
                     recovery_action=recovery_action,
                     retry_authorized=False,
                 )

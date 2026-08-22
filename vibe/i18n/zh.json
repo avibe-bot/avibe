@@ -53,11 +53,6 @@
       "unsupportedMessage": "原因记录如下；这台机器上的任何操作都无法改变这一结果。",
       "ownerActionHeading": "需要实例所有者处理",
       "ownerActionMessage": "请重新加载此页面，再次尝试请求；若仍然失败，请联系 Avibe 实例所有者执行可用的恢复操作。",
-      "viewerActionHeading": "重新尝试此页面",
-      "viewerActionMessage": "自动检查已停止。请重新加载此页面，再次尝试请求；若仍然失败，请联系 Avibe 实例所有者修复 Show Runtime。",
-      "statusHeading": "恢复状态",
-      "retrying": "此故障可以重试。请重新加载页面，或在有该操作时点击“立即重试”。",
-      "manualOnly": "自动重试已停止。此页面显示了原因和可用的下一步。",
       "reasonLabel": "原因",
       "sessionLabel": "会话",
       "retryNow": "立即重试"

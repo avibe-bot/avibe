@@ -18,11 +18,6 @@ class ShowRuntimeFailureDimension(str, Enum):
     RUNTIME = "runtime"
 
 
-class ShowRuntimeRetryDisposition(str, Enum):
-    CONTINUOUS = "continuous"
-    MANUAL_ONLY = "manual_only"
-
-
 class ShowRuntimeRecoveryAction(str, Enum):
     REPAIR = "repair"
     CHANGE_SETTING = "change_setting"
