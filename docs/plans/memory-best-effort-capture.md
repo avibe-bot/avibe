@@ -57,7 +57,7 @@ EverOS stored or processed the content.
 An accepted item may be lost when the process exits, the runtime is replaced, the
 writer is full, EverOS fails or returns an ambiguous result, attachment handling
 fails, a session barrier is missed, or an upgrade discards old outbox work.
-Processing history may also be incomplete or absent.
+Diagnostics may also omit calls, failures, and correlations.
 
 Record bounded content-free counters or logs when practical, but never make that
 record a prerequisite for dropping work or accepting later captures. Do not add a
@@ -254,21 +254,21 @@ Keep artifact installation, sidecar ownership, root confinement,
 (`cascade sync`), Clear authority, Factory Reset, and root recreation.
 
 All authority-changing operations use the barrier; none drains or adds delivery
-state. For backward cleanup, Clear retains four confined deletion surfaces:
-identity/catalog/watermark/summary state, provider root, any legacy call log, and
-attachments. It completes only after all four succeed; the runtime creates no new
-call log.
+state. Clear retains four confined deletion surfaces: identity/catalog/watermark/summary state,
+provider root, call log, and attachments; it completes only after all four succeed.
 
-### Processing Record
+### Diagnostics
 
-Keep one authorized, read-only Processing Record built directly from EverOS: bounded
-original message text (not only a preview), run/strategy steps and errors, and
-generated Episode, Fact, and Profile content and identifiers. Do not duplicate it in Avibe.
+- Provider Call Log records what its independent recorder observes.
+- Processing Record shows only data safely derived from EverOS and retained call
+  logs. Missing authorization evidence omits the call or marks the source
+  unavailable; it never broadens scope.
+- Migration, restart, pruning, and ambiguous results may leave history incomplete.
+- Diagnostic read/write failure never blocks writer startup or provider calls.
 
-Delete Provider Call Log, its recorder, request/response bodies, model/token/timing
-metadata, correlations, and unlinked-call UI/API. Missing or pruned EverOS data is
-`unavailable`, not empty, and never broadens access. Diagnostic failure never blocks
-capture or provider calls.
+Remove delivery-table joins rather than replacing them with durable gap, guard, or
+anomaly ledgers. UI/API responses must distinguish an unavailable source from a
+complete empty result.
 
 ### Attachments
 
@@ -300,7 +300,7 @@ Implementation order:
 1. Add identity-only v4 migration.
 2. Add the bounded writer, one worker, and volatile flush tracker.
 3. Switch capture and session lifecycle callers to non-blocking offers/barriers.
-4. Keep the authorized EverOS Processing Record and delete Provider Call Log.
+4. Simplify diagnostics without weakening authorization.
 5. Delete the durable delivery/observer protocol and obsolete tests.
 6. Update scenario catalogs, focused tests, and `docs/MEMORY.md` /
    `docs/MEMORY_ZH.md` with the accepted-loss contract.
@@ -320,7 +320,7 @@ the same time merely to split the diff.
 | `MEMORY-FACTORY-003`, `-004`, `-201` | retain exclusion; include pin jobs in the barrier |
 | `MEMORY-IM-ATTACH-004`, `-009`, `-011` | retain normal cleanup/fallback; bound cleanup failure |
 
-Remove scenarios that require replay, complete Processing Record retention, or drain.
+Remove scenarios that require replay, exact Processing Record history, or drain.
 
 ### Validation
 
@@ -338,8 +338,8 @@ Remove scenarios that require replay, complete Processing Record retention, or d
   intentionally discard volatile state.
 - Adds and flushes stop after three attempts; pin failures and the sole provider
   rejection proven unwritten preserve non-empty captions under the same permit.
-- Processing Record exposes authorized EverOS inputs, steps, and semantic results
-  when available; missing sources report unavailable and cannot reject capture.
+- Diagnostics failure cannot reject capture, missing evidence never widens access,
+  and unavailable sources are reported truthfully.
 - Authority replacement, maintenance, Clear, and Factory Reset quiesce old RPC and
   pin work without draining capture; cleanup failure disables further pinning.
 - Logs, summaries, and receipts remain content-free.
