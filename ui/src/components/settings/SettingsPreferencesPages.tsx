@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
 import { useApi } from '@/context/ApiContext';
+import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { useTheme } from '@/context/ThemeContext';
 import type { ThemeMode } from '@/context/ThemeContext';
 import { setConfigField } from '@/lib/configMutations';
@@ -21,6 +22,7 @@ const THEME_OPTIONS: Array<{ mode: ThemeMode; icon: React.ComponentType<{ classN
 export const SettingsAppearancePage: React.FC = () => {
   const { t, i18n } = useTranslation();
   const api = useApi();
+  const { capabilities } = useInstanceAuthorization();
   const { mode, setMode } = useTheme();
   const [savingLanguage, setSavingLanguage] = useState(false);
   const languageCodes = useMemo(() => {
@@ -29,6 +31,7 @@ export const SettingsAppearancePage: React.FC = () => {
   }, [i18n.options.resources]);
 
   useEffect(() => {
+    if (!capabilities.can_manage_instance) return;
     void api.getConfig()
       .then((config) => {
         if (config.language && config.language !== i18n.language) {
@@ -36,17 +39,20 @@ export const SettingsAppearancePage: React.FC = () => {
         }
       })
       .catch(() => {});
-  }, [api, i18n]);
+  }, [api, capabilities.can_manage_instance, i18n]);
 
   const selectLanguage = async (language: string) => {
     if (language === i18n.language) return;
     setSavingLanguage(true);
     await i18n.changeLanguage(language);
+    if (!capabilities.can_manage_instance) {
+      setSavingLanguage(false);
+      return;
+    }
     try {
       await api.mutateConfig([setConfigField(['language'], language)]);
     } catch {
-      // i18next persists the browser preference even when this role cannot
-      // update the instance-wide default language.
+      // The browser preference is already applied; the instance save can retry later.
     } finally {
       setSavingLanguage(false);
     }
