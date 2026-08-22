@@ -246,9 +246,19 @@ _FAILURE_DECLARATION_ROWS = (
     ShowRuntimeFailureDeclaration(
         "runtime_archive_missing",
         ShowRuntimeFailureDimension.INSTALL,
-        "archive-provider",
+        "packaged-archive",
         ShowRuntimeFailureClass.UNCLASSIFIED,
         ShowRuntimeRecoveryAction.REPAIR,
+        provenance="packaged",
+    ),
+    ShowRuntimeFailureDeclaration(
+        "runtime_archive_missing",
+        ShowRuntimeFailureDimension.INSTALL,
+        "configured-archive",
+        ShowRuntimeFailureClass.CONFIGURED,
+        ShowRuntimeRecoveryAction.CHANGE_SETTING,
+        user_owned=True,
+        provenance="configured",
     ),
     ShowRuntimeFailureDeclaration(
         "runtime_archive_probe_not_applicable",

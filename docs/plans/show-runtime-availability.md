@@ -564,14 +564,27 @@ Each `(reason, provenance)` pair has one declaration carrying its dimension,
 owning artifact, class, and user ownership. Classification and recovery action are
 total lookups over that declaration. A configured manifest and the packaged
 manifest may publish the same failure reason, but their provenance keeps the
-user's change-setting obligation distinct from repair of packaged bytes. Install
-admission clears operation-local evidence before any provider runs, so a later I/O
-failure cannot inherit an earlier operation's reason, provenance, or download
-detail. A managed
+user's change-setting obligation distinct from repair of packaged bytes. The same
+rule applies to archives: a missing configured path is a user-owned setting error,
+while absent packaged bytes remain repairable. An AST census derives this set from
+every archive reason emitted under a positive `self.archive_path` guard and requires
+configured and packaged declarations for each one; declaration coverage is not a
+hand-written sibling list. Install admission clears operation-local evidence before
+any provider runs, so a later I/O failure cannot inherit an earlier operation's
+reason, provenance, or download detail. A managed
 command that disappears is runtime evidence owned by the managed artifact and is
 not classified as a user configuration error; an explicit command failure remains
 configured. The page consumes the published class and action and never rebuilds
 either from a reason prefix or nearby state.
+
+Every policy, install, and runtime payload is serialized by
+`ShowRuntimeAvailability`. Status may select which availability it reports, but it
+may not hand-build a partial dimension for one provider path. A module-wide AST
+census rejects any dimension-shaped dictionary outside the serializer, so improving
+one branch cannot leave its managed sibling on an older schema. Review attribution
+uses behavior rather than line blame: a hoist or extraction may re-blame unchanged
+bytes, so a head counts as introducing a finding only when the cited value or
+behavior differs from its predecessor.
 
 **Runtime transport is exception-closed for evidence.** `request()` and
 `request_global()` share one manager-owned transport boundary. A transport

@@ -6633,6 +6633,28 @@ def test_manifest_failure_classification_uses_published_provenance(
     assert show_runtime_recovery_action(evidence) is expected_action
 
 
+@pytest.mark.parametrize(
+    ("provenance", "expected_class", "expected_action"),
+    (
+        ("configured", ShowRuntimeFailureClass.CONFIGURED, ShowRuntimeRecoveryAction.CHANGE_SETTING),
+        ("packaged", ShowRuntimeFailureClass.UNCLASSIFIED, ShowRuntimeRecoveryAction.REPAIR),
+    ),
+)
+def test_archive_failure_classification_uses_published_provenance(
+    provenance,
+    expected_class,
+    expected_action,
+):
+    evidence = ShowRuntimeFailureEvidence(
+        ShowRuntimeFailureDimension.INSTALL,
+        "runtime_archive_missing",
+        provenance,
+    )
+
+    assert classify_show_runtime_failure(evidence) is expected_class
+    assert show_runtime_recovery_action(evidence) is expected_action
+
+
 def test_show_runtime_failure_declarations_are_total_and_owner_safe():
     assert len(SHOW_RUNTIME_FAILURE_DECLARATIONS) == len(set(SHOW_RUNTIME_FAILURE_DECLARATIONS))
     assert all(
@@ -6646,6 +6668,79 @@ def test_show_runtime_failure_declarations_are_total_and_owner_safe():
     )
 
 
+def test_archive_failure_provenance_census_matches_archive_path_emissions():
+    manager_tree = ast.parse(textwrap.dedent(inspect.getsource(ShowRuntimeManager))).body[0]
+    configured_archive_reasons: set[str] = set()
+
+    def archive_path_guard(test: ast.expr) -> bool | None:
+        if (
+            isinstance(test, ast.Attribute)
+            and isinstance(test.value, ast.Name)
+            and test.value.id == "self"
+            and test.attr == "archive_path"
+        ):
+            return True
+        if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+            nested = archive_path_guard(test.operand)
+            return None if nested is None else not nested
+        if (
+            isinstance(test, ast.Compare)
+            and len(test.ops) == 1
+            and len(test.comparators) == 1
+            and isinstance(test.comparators[0], ast.Constant)
+            and test.comparators[0].value is None
+        ):
+            nested = archive_path_guard(test.left)
+            if nested is None:
+                return None
+            if isinstance(test.ops[0], (ast.IsNot, ast.NotEq)):
+                return True
+            if isinstance(test.ops[0], (ast.Is, ast.Eq)):
+                return False
+        return None
+
+    class ArchivePathEmissionVisitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.archive_path_is_set = False
+
+        def visit_If(self, node: ast.If) -> None:
+            previous = self.archive_path_is_set
+            guard = archive_path_guard(node.test)
+            self.archive_path_is_set = previous or guard is True
+            for child in node.body:
+                self.visit(child)
+            self.archive_path_is_set = previous or guard is False
+            for child in node.orelse:
+                self.visit(child)
+            self.archive_path_is_set = previous
+
+        def visit_Constant(self, node: ast.Constant) -> None:
+            if (
+                self.archive_path_is_set
+                and isinstance(node.value, str)
+                and node.value.startswith("runtime_archive_")
+            ):
+                configured_archive_reasons.add(node.value)
+
+    ArchivePathEmissionVisitor().visit(manager_tree)
+    declared_provenance = {
+        reason: {
+            provenance
+            for (declared_reason, provenance), declaration in SHOW_RUNTIME_FAILURE_DECLARATIONS.items()
+            if declared_reason == reason and "archive" in declaration.owning_artifact
+        }
+        for reason in configured_archive_reasons
+    }
+    assert declared_provenance == {
+        reason: {"configured", "packaged"} for reason in configured_archive_reasons
+    }
+    assert {
+        declaration.reason
+        for declaration in SHOW_RUNTIME_FAILURE_DECLARATIONS.values()
+        if declaration.provenance == "configured" and "archive" in declaration.owning_artifact
+    } == configured_archive_reasons
+
+
 def test_show_runtime_reason_literals_have_declared_evidence():
     source = inspect.getsource(show_runtime)
     reason_literals = {
@@ -6655,6 +6750,43 @@ def test_show_runtime_reason_literals_have_declared_evidence():
     }
     declared = {reason for reason, _provenance in SHOW_RUNTIME_FAILURE_DECLARATIONS}
     assert {value for _quote, value in reason_literals} <= declared
+
+
+def test_show_runtime_dimensions_are_serialized_only_by_availability_owner():
+    module_tree = ast.parse(inspect.getsource(show_runtime))
+    offenders: list[tuple[int, tuple[str, ...], tuple[str, ...]]] = []
+
+    class DimensionPayloadVisitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.scope: list[str] = []
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            self.scope.append(node.name)
+            self.generic_visit(node)
+            self.scope.pop()
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            self.scope.append(node.name)
+            self.generic_visit(node)
+            self.scope.pop()
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Dict(self, node: ast.Dict) -> None:
+            keys = {
+                key.value
+                for key in node.keys
+                if isinstance(key, ast.Constant) and isinstance(key.value, str)
+            }
+            dimension_shape = "state" in keys and "reason" in keys and bool(
+                keys & {"failure_class", "recovery_action", "base_url", "command", "install_dir"}
+            )
+            if dimension_shape and self.scope[-2:] != ["ShowRuntimeAvailability", "as_payload"]:
+                offenders.append((node.lineno, tuple(self.scope), tuple(sorted(keys))))
+            self.generic_visit(node)
+
+    DimensionPayloadVisitor().visit(module_tree)
+    assert offenders == []
 
 
 def test_runtime_request_uses_existing_base_without_health_preprobe(monkeypatch, tmp_path):
@@ -6904,6 +7036,23 @@ def test_malformed_explicit_command_evidence_is_shared_by_status_prepare_and_sta
     assert status["reason"] == "runtime_start_command_invalid"
     assert prepared["ok"] is False
     assert prepared["reason"] == "runtime_start_command_invalid"
+
+
+def test_managed_status_runtime_dimension_uses_availability_schema(monkeypatch, tmp_path):
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        runtime_source="npm",
+    )
+    monkeypatch.setattr("core.show_runtime._resolve_command", lambda _command: None)
+
+    assert manager.status()["runtime"] == {
+        "state": "unchecked",
+        "reason": None,
+        "failure_class": None,
+        "recovery_action": None,
+        "base_url": None,
+    }
 
 
 @pytest.mark.parametrize(
@@ -8063,6 +8212,40 @@ def test_show_runtime_manager_reuses_installed_prebuilt_runtime_without_archive(
 
     assert manager._install_managed_runtime_locked(force=False, offline=False).command == ["/bin/node", str(cli_path)]
     assert manager._install_reason is None
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected_class", "expected_action"),
+    (
+        (True, "configured", "change_setting"),
+        (False, "unclassified", "repair"),
+    ),
+)
+def test_missing_archive_publishes_source_owned_recovery_evidence(
+    monkeypatch,
+    tmp_path,
+    configured,
+    expected_class,
+    expected_action,
+):
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        runtime_source="archive",
+        archive_path=tmp_path / "missing.tgz" if configured else None,
+        archive_url=None if configured else "",
+    )
+    monkeypatch.setattr(
+        "core.show_runtime._resolve_command",
+        lambda command: ["/bin/node"] if command == "node" else None,
+    )
+    monkeypatch.setattr(manager, "_copy_packaged_runtime_archive", lambda: None)
+
+    result = manager.prepare()
+
+    assert result["reason"] == "runtime_archive_missing"
+    assert result["install"]["failure_class"] == expected_class
+    assert result["install"]["recovery_action"] == expected_action
 
 
 def test_show_runtime_manager_forced_archive_fallback_reports_failed_operation_and_installed_state(

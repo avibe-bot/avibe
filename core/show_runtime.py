@@ -1564,22 +1564,18 @@ class ShowRuntimeManager:
         if installed and manifest is not None and archive is not None and installed_matches is not True:
             installed_matches = False
         if explicit_availability is not None:
-            explicit_payload = explicit_availability.as_payload()
-            install_payload = explicit_payload["install"]
-            runtime_payload = explicit_payload["runtime"]
+            status_availability = explicit_availability
         else:
-            install_payload = ShowRuntimeAvailability.from_install(
+            status_availability = ShowRuntimeAvailability.from_install(
                 command=installed_command,
                 install=(ShowRuntimeInstallState.INSTALLED if installed else ShowRuntimeInstallState.ABSENT),
                 install_dir=installed_dir if installed else None,
                 install_runtime_version=installed_runtime_version,
                 install_matches_manifest=installed_matches,
-            ).as_payload()["install"]
-            runtime_payload = {
-                "state": ShowRuntimeServingState.UNCHECKED.value,
-                "reason": None,
-                "base_url": None,
-            }
+            )
+        status_payload = status_availability.as_payload()
+        install_payload = status_payload["install"]
+        runtime_payload = status_payload["runtime"]
         return {
             "provider": self.runtime_source,
             "platform": platform_tag,
@@ -3148,13 +3144,13 @@ class ShowRuntimeManager:
         if self.archive_path:
             if self.archive_path.exists():
                 return self.archive_path
-            self._install_reason = "runtime_archive_missing"
+            self._record_install_failure("runtime_archive_missing", provenance="configured")
             return None
         packaged = self._copy_packaged_runtime_archive()
         if packaged:
             return packaged
         if not self.archive_url:
-            self._install_reason = "runtime_archive_missing"
+            self._record_install_failure("runtime_archive_missing", provenance="packaged")
             return None
         if self.offline if offline is None else offline:
             self._install_reason = "runtime_archive_unavailable_offline"
