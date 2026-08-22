@@ -1722,10 +1722,7 @@ def _show_page_mutation_response(
     from storage import resource_access_service
 
     context = resource_access_service.resolve_resource_access_context(user_context)
-    can_use = (
-        context.has_role("viewer")
-        and context.instance_access_source != "show_page_email"
-    )
+    can_use = context.has_role("viewer")
     if not can_use:
         # Access managers may take a page offline without page-use access. Do
         # not return page paths, URLs, share IDs, audience, or session metadata.
@@ -1832,10 +1829,7 @@ def get_show_page_access(session_id: str, *, user_context: Any = None) -> dict:
         if page is None:
             raise ShowPageError("This session has no Show Page.", code="show_page_not_found")
         reconciliation = store.reconcile_resource_policy(page.session_id)
-        can_use = (
-            context.has_role("viewer")
-            and context.instance_access_source != "show_page_email"
-        )
+        can_use = context.has_role("viewer")
         can_manage = context.has_role("editor")
         can_publish_public = context.has_role("editor")
         if not (can_use or can_manage):
