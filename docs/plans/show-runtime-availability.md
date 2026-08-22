@@ -764,6 +764,14 @@ PR that may reintroduce the automatic loop. It stacks on PR 2c and carries the
 request retry owner with the loop because they are one property. It inherits the
 following constraints in full:
 
+The delivery record moves three resolved PR #1640 threads with that scope:
+[polling state must survive document replacement](https://github.com/avibe-bot/avibe/pull/1640#discussion_r3833946834),
+[a failed browser fetch cannot consume manager-owned confirmation](https://github.com/avibe-bot/avibe/pull/1640#discussion_r3835632885),
+and [a terminal response cannot trigger another automatic Runtime request](https://github.com/avibe-bot/avibe/pull/1640#discussion_r3835792302).
+Their resolution on PR #1640 records the split, not discharge of the behavior:
+the successor owns their consuming tests and exact-head close-out together with
+the request-owner ruling below.
+
 1. One request owner spans precondition acquisition, transport attempt, and
    publication, is exception-closed, and has one publication point. It uses the
    write-set predicate for identity: source configuration, manifest pin, and
