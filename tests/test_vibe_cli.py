@@ -2329,6 +2329,58 @@ def test_repair_show_runtime_does_not_reinstall_startable_runtime(monkeypatch, t
     assert verification_call["workspace_root"].parent == verification_call["runtime_dir"].parent
 
 
+@pytest.mark.parametrize(
+    ("language", "message_fragment"),
+    [("en", "Fix or remove the override"), ("zh", "\u4fee\u590d\u6216\u79fb\u9664\u8be5\u8986\u76d6")],
+)
+def test_repair_show_runtime_refuses_explicit_command_before_hypothetical_recovery(
+    monkeypatch, tmp_path, language, message_fragment
+):
+    prepared = []
+    verification_calls = []
+    verification_results = [
+        SimpleNamespace(available=False, reason="runtime_start_health_timeout"),
+        SimpleNamespace(available=True, reason=None),
+    ]
+    explicit_command = str(tmp_path / "explicit-runtime")
+
+    manager = SimpleNamespace(
+        status=lambda: {
+            "provider": "command",
+            "platform": "linux-x64",
+            "install_dir": None,
+            "installed": True,
+            "command": [explicit_command],
+            "explicit_command": explicit_command,
+        },
+        prepare=lambda force=False: prepared.append(force),
+    )
+
+    def manager_factory(**kwargs):
+        if not kwargs:
+            return manager
+
+        async def ensure():
+            index = len(verification_calls)
+            verification_calls.append(index)
+            return verification_results[index]
+
+        return SimpleNamespace(ensure=ensure, stop=lambda: None)
+
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", manager_factory)
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
+
+    result = cli._repair_show_runtime()
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "runtime_start_health_timeout"
+    assert result["explicit_command"] == explicit_command
+    assert "VIBE_SHOW_RUNTIME_BIN" in result["message"]
+    assert message_fragment in result["message"]
+    assert prepared == []
+    assert verification_calls == [0]
+
+
 def test_repair_show_runtime_reinstalls_unstartable_runtime_and_verifies_recovery(monkeypatch, tmp_path):
     prepared = []
     verifier_results = iter(

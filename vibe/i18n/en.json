@@ -933,6 +933,7 @@
       "repairStartFailed": "Show Runtime was reinstalled but could not start: {reason}",
       "repairVerificationFailed": "Show Runtime startability could not be verified, so no reinstall was attempted: {detail}",
       "repairPostVerificationFailed": "Show Runtime preparation completed, but startability could not be verified: {detail}",
+      "repairExplicitCommandFailed": "The Show Runtime command from VIBE_SHOW_RUNTIME_BIN could not start: {reason}. Fix or remove the override, then rerun Doctor.",
       "repairPrepareFailed": "Show Runtime preparation failed: {detail}",
       "repairLegacyArchiveUnavailable": "The packaged Show Runtime manifest is unavailable and the legacy upstream archive URL has no release asset. Upgrade or reinstall the official Avibe package, or remove stale runtime source overrides."
     }
