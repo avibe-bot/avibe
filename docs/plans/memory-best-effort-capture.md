@@ -1,596 +1,353 @@
 # Memory best-effort capture (Phase 1)
 
-> Status: simplified implementation contract
+> Status: implementation contract
 >
-> Scope: replace Avibe's durable Memory outbox with a process-local writer.
-> The implementation deliberately accepts capture loss. It optimizes for the
-> healthy, unsaturated common case instead of preserving every capture across
-> failures and restarts.
+> Scope: replace Avibe's durable Memory outbox with a bounded process-local writer.
+> Capture loss is intentional; the design optimizes for healthy, unsaturated use
+> instead of preserving every item across failures and restarts.
 >
-> The change that lands this file is docs-only. "This PR" / "implementation"
-> below means the follow-up product-code PR.
-
-Base: `origin/dev` after #1635. Rebase onto current `origin/dev` before coding.
-
-This revision replaces the over-specified contract originally merged in #1635.
-In particular, it does not rebuild the removed outbox as a durable observer
-protocol. Memory diagnostics are allowed to be incomplete when capture delivery
-is incomplete.
+> This change is docs-only. "Implementation" below means the follow-up code PR.
 
 ## Decision
 
 > **Reliable control plane, best-effort capture data plane.**
 
-Avibe keeps the EverOS process, provider root, identity, authorization, and
-destructive-operation fencing reliable. Capture payloads, retries, flush
-schedules, per-call provenance, and failure history are disposable.
+Keep EverOS supervision, provider-root confinement, identity, authorization, and
+destructive-operation fencing reliable. Treat capture payloads, retries, flush
+schedules, per-call provenance, and failure history as disposable.
 
-The product accepts data loss when any of the following would otherwise require
-a second durable delivery or observation system:
-
-- the Avibe process exits or its Memory runtime is replaced
-- the bounded process-local queue is full
-- EverOS is unavailable, slow, or returns an ambiguous result
-- an attachment cannot be pinned or released
-- a session-boundary flush is missed
-- diagnostics cannot correlate or retain a provider call
-- an upgrade discards old outbox work
-
-This is intentional, not a temporary correctness gap. The target is that most
-captures succeed while Avibe and EverOS are healthy and the queue is not
-saturated. There is no zero-loss guarantee, delivery SLO, cross-restart replay,
-or exact diagnostic completeness contract in this phase.
-
-## Background
-
-Avibe currently persists every eligible capture in
-`state/memory/memory.sqlite` and delivers it through claims, leases, generation
-fences, flush settlements, tombstones, and `manual_required`. That protocol is
-a second reliability system around EverOS.
-
-Ordinary chat does not wait for Memory, and processing failures no longer notify
-IM administrators. EverOS already keeps accepted markdown and
-`unprocessed_buffer` in its provider root. Replaying Avibe's queue after an
-ambiguous add can also duplicate content.
-
-The simpler design removes Avibe's durable delivery guarantee while preserving
-the identity required to reach already-released provider roots.
-
-## Goals
-
-1. Automatic capture and `vibe memory remember` never wait on EverOS.
-2. Healthy, unsaturated captures are attempted in order and normally reach
-   EverOS.
-3. Capture payloads, retry state, and flush schedules never survive an Avibe
-   process restart or Memory runtime replacement.
-4. Ambiguous EverOS add or flush outcomes are never retried.
-5. `/new`, archive, disable, configuration replacement, Clear, Reset, and
-   shutdown never wait for Memory delivery to drain.
-6. Every released Memory SQLite shape loads. Stable identity, the provider root,
-   catalog, and timestamp watermark survive; old delivery rows are discarded.
-7. Sidecar supervision, Rebuild, Repair, Clear, Factory Reset, Processing
-   Record, Provider Call Log, and attachment capture remain available with the
-   degraded diagnostic guarantees stated below.
-8. The implementation deletes substantially more delivery machinery than it
-   adds.
-
-## Non-goals
-
-- No EverOS source, API, or data-format change.
-- No exactly-once, at-least-once, or durable replay guarantee.
-- No durable per-call provenance, anomaly, correlation guard, observation gap,
-  pending-flush, retry, or attachment-cleanup ledger.
-- No promise that Processing Record reproduces every pre-upgrade call or
-  failure.
-- No ephemeral attachment-lease redesign.
-- No Repair/Rebuild rename, Clear/Factory-Reset collapse, Settings Test, or
-  `cascade sync` removal.
-- No principal, project, epoch, or provider-session derivation change.
-- No automatic rebuild, repair, clear, or reset.
-- No user-configurable queue, retry, or flush tuning in this phase.
+Most eligible captures should reach EverOS while Avibe and EverOS are healthy and
+the writer is not saturated. There is no zero-loss guarantee, delivery SLO,
+cross-restart replay, or complete diagnostic history.
 
 ## Product contract
 
-### Common-case behavior
+### Optimized path
 
-Inside the normal operating envelope:
+When the Memory runtime and identity store are ready, the request is authorized,
+the writer has capacity, and EverOS is reachable:
 
-- the Memory runtime is enabled and ready
-- the identity store is writable
-- the process-local admission queue has capacity
-- the EverOS sidecar is reachable
-- the request passed existing authorization, size, and scope checks
+1. Avibe reserves bounded process-local capacity.
+2. It performs bounded local admission work and enqueues the item.
+3. One ordered worker calls EverOS.
+4. An acknowledgement updates volatile flush state and small summary fields on a
+   best-effort basis.
 
-`capture()` accepts the item with bounded local work, one ordered worker calls
-EverOS, and an acknowledged result updates the process-local flush tracker. This
-path is covered by automated tests and is the behavior the product optimizes.
+`CaptureAccepted` means only that Avibe accepted volatile work. It does not mean
+EverOS stored or processed the content.
 
-`CaptureAccepted` means only that Avibe accepted process-local work. It never
-means EverOS stored or processed the item.
+### Required guarantees
 
-### Hard guarantees
-
-- Chat, `/new`, archive, and shutdown do not await EverOS capture delivery.
-- The capture queue and every process-local tracker have explicit bounds.
-- A submitted ambiguous provider operation is not replayed.
-- Existing authorization and provider-root confinement never fail open.
-- `scope_key`, `provider_root_id`, `epoch`, named-project rows,
-  `last_provider_timestamp_ms`, and `last_success_at` survive a recognized
-  upgrade unchanged.
-- Clear and Factory Reset retain their existing durable authority and cannot be
-  inferred from missing or malformed markers.
-- Credentials, provider URLs, captured text, attachment paths, and identity
-  digests stay out of logs.
+- Chat, `/new`, archive, configuration replacement, and shutdown never wait for
+  queued Memory delivery.
+- Attachment preparation, queued items, and in-flight items share an explicit
+  process-wide bound.
+- A provider operation that may have executed is not replayed.
+- Existing authorization, project limits, and path confinement remain fail closed.
+- Stable identity and catalog data survive every recognized store upgrade.
+- Clear and Factory Reset retain durable authority; malformed or missing markers
+  never grant destructive permission.
+- Destructive and maintenance operations never race an old provider owner against
+  a replaced provider root.
+- Logs never contain credentials, provider URLs, captured text, attachment paths,
+  or identity digests.
 
 ### Accepted loss
 
-An accepted capture may be lost before, during, or after its provider call. In
-particular, loss is accepted at process/runtime transitions, queue saturation,
-provider failures, attachment failures, and flush-boundary failures. The writer
-records bounded content-free counters or logs when practical, but recording a
-loss must never become a prerequisite for dropping the item or continuing later
-capture.
+An accepted item may be lost when the process exits, the runtime is replaced, the
+writer is full, EverOS fails or returns an ambiguous result, attachment handling
+fails, a session barrier is missed, or an upgrade discards old outbox work.
+Diagnostics may also omit calls, failures, and correlations.
 
-The implementation must not add a persistent state machine to distinguish every
-possible loss window. When it cannot prove a provider result, it drops the
-operation and continues.
+Record bounded content-free counters or logs when practical, but never make that
+record a prerequisite for dropping work or accepting later captures. Do not add a
+persistent state machine to distinguish every loss window.
 
-Review rule: a finding whose only consequence is that a crash, restart,
-saturation event, provider ambiguity, or diagnostic gap can lose one capture is
-covered by this accepted-loss contract. Fix it only when it also violates the
-healthy common path, a resource bound, authorization/confinement, stable
-identity, or control-plane exclusion. Do not add durable state merely to close a
-loss window.
+Review guardrail: a finding that only exposes one of these loss windows is covered
+by this contract. Fix it only if it also breaks the healthy path, a resource bound,
+authorization/confinement, stable identity, or control-plane exclusion.
+
+### Out of scope
+
+- EverOS source, API, data format, or identity derivation changes
+- exactly-once, at-least-once, durable replay, or complete diagnostics
+- durable per-call provenance, anomaly, gap, correlation, retry, pending-flush, or
+  attachment-cleanup state
+- a new attachment lease design
+- automatic Rebuild, Repair, Clear, or Factory Reset
+- user-configurable queue, retry, or flush tuning
 
 ### `vibe memory remember`
 
-Keep the existing copy:
+Keep `memory.cli.remembered` (`Memory queued.` in English and existing localized
+values) and JSON `ok: true` with `result.status` in `{accepted, duplicate}`. This
+copy describes volatile admission, not storage.
 
-- i18n key: `memory.cli.remembered`
-- English value remains `Memory queued.`; keep the existing localized values
-- JSON: `ok: true` with `result.status` in `{accepted, duplicate}`
+## Writer design
 
-The copy describes queue admission, not storage. Do not change it to say the
-fact was saved. A later product-copy change may make the loss disclaimer more
-explicit without changing the writer state model.
+### Remove durable delivery state
 
-## Current machinery removed
+Delete durable enqueue, claim, lease, retry, settlement, flush FSM,
+`manual_required`, tombstone, bundle-ownership, recovery, and drain behavior from:
 
-Delete delivery behavior concentrated in:
+- `core/memory/store.py`
+- `core/memory/coordinator.py` / `SessionFlushCoordinator`
+- `core/memory/worker.py` / `MemoryWorker`
+- `memory_capture_queue`, `memory_session_flush_state`,
+  `memory_flush_settlements`, and `memory_attachment_bundle`
+- `MemoryRuntime` recovery loops and `MemoryModule.final_flush` waits
 
-- `core/memory/store.py`: enqueue, claim, lease, settlement, durable flush FSM,
-  `manual_required`, tombstone compaction, and processing-fault ACK surfaces
-- `core/memory/coordinator.py` (`SessionFlushCoordinator`)
-- `core/memory/worker.py` (`MemoryWorker`)
-- `memory_capture_queue`
-- `memory_session_flush_state`
-- `memory_flush_settlements`
-- `memory_attachment_bundle`
-- `MemoryRuntime` outbox recovery and drain loops
-- `MemoryModule.final_flush` waits
-
-Do not replace them with semantically equivalent tables under observer names.
-
-## Target writer
+### One bounded path
 
 ```text
 CaptureAdmission
-  existing identity / authorization / size / scope checks
+  validate + authorize + reject duplicates
         |
         v
-optional existing attachment pinning
+BestEffortMemoryWriter.try_reserve()
+  one of 256 process-local permits
         |
         v
-BestEffortMemoryWriter.offer()
-  bounded local identity update + put_nowait
+optional attachment pin + short identity transaction
         |
         v
-bounded asyncio.Queue + one ordered worker
+offer_reserved() -> asyncio.Queue -> one ordered worker
         |
         v
-EverOSPort.add / flush
-        |
-        v
-best-effort summary/log update; no durable settlement
+EverOSPort.add / flush -> best-effort summary
 ```
 
-Suggested fixed constants:
+Fixed implementation defaults:
 
-- queue bound: 256 items
-- process-local duplicate LRU: 256 source-message digests
-- maximum total add attempts: 3, only for outcomes proven not to have entered
-  provider execution
-- idle flush: 5 minutes
-- maximum unflushed age: 30 minutes
-- message-count flush: 100 accumulated acknowledgements
-- pending-flush tracker: 256 provider sessions, with at most 100 message ids per
-  tracked session
+| Bound | Value |
+|---|---:|
+| writer permits across preparation, queue, and in-flight work | 256 |
+| duplicate source-message LRU | 256 |
+| total add attempts | 3 |
+| pending provider sessions | 256 |
+| retained message ids per pending session | 100 |
+| flush thresholds | 5 min idle / 30 min age / 100 acknowledgements |
 
-The constants are implementation defaults, not user settings or durability
-promises.
+These values are not durability promises or user settings.
 
 ### Admission
 
-`offer()` performs no EverOS I/O and no unbounded wait:
+Admission performs no EverOS I/O and no unbounded wait:
 
-1. Reuse existing capture authorization and validation.
-2. Reject immediately if the queue is full or the writer is not ready.
-3. In one short identity transaction, enforce the named-project limit and
-   allocate the next provider timestamp.
-4. Put the request into the queue in the same event-loop turn.
+1. Run existing authorization, size, scope, duplicate, and static overflow checks.
+2. Atomically reserve one writer permit or return `CaptureSkipped`. The permit
+   covers attachment pinning, identity admission, queue residence, provider I/O,
+   and terminal cleanup, so concurrent preparation cannot exceed the bound.
+3. Pin optional attachments under that permit. Pin failure skips the multimodal
+   item and releases the permit after one confined cleanup attempt.
+4. In one short admission critical section and bounded SQLite transaction,
+   enforce the 16-project limit and allocate
+   `max(occurred_at_ms, last_provider_timestamp_ms + 1)`.
+5. Convert the reservation to a queue item before leaving that critical section.
+   Reserved capacity guarantees this cannot fail because another offer filled the
+   queue.
 
-The identity transaction uses the existing bounded SQLite policy. A busy or
-failed identity write skips the capture; it does not wait indefinitely and does
-not create a recovery item.
+Validation, pin, or identity failure releases the permit. A cancelled generation
+returns immediately to its caller, but an underlying pin/provider job keeps its
+shared permit until it actually terminates or its sidecar is reaped; replacement
+therefore cannot exceed the process-wide bound. No catalog or watermark mutation
+occurs without a reservation, and an identity failure creates no recovery item.
+Reusing a project is allowed at the 16-project limit; creating a 17th is not.
 
-Timestamp allocation remains
-`max(occurred_at_ms, last_provider_timestamp_ms + 1)`. Reject overflow before
-catalog, watermark, attachment, or queue mutation. Reusing an existing named
-project remains allowed at the 16-project limit; creating a 17th is rejected.
+Every queue entry, including a session barrier, owns one permit until its local
+operation is actually terminal. Then one bundle-release attempt returns the permit;
+cleanup failure may leak a confined file but never writer capacity.
 
 ### Ordered worker and retries
 
-One worker preserves the order of items that reach the queue. It handles one
-provider operation at a time.
+One worker performs provider operations serially and preserves queue order.
 
-An add may have up to three total attempts only when the implementation can
-prove the earlier attempt did not reach provider execution. Once an operation
-may have executed, success, rejection, timeout, cancellation, malformed output,
-or transport ambiguity is terminal for that item.
+An add may use at most three total attempts, and only when the previous failure is
+proven to precede provider execution. A possibly submitted timeout, cancellation,
+malformed response, transport failure, or unclassified rejection is terminal.
+Restart drops the queue and all retry knowledge.
 
-There is no durable attempt count. Restart resets all retry knowledge by
-dropping the queue.
+The sole post-call modality fallback is an attachment rejection for which existing
+`attachment_add_rejection_proves_no_write()` positively proves no write. Under the
+same permit, the worker may make exactly one caption-only call, still within the
+three-attempt total. Empty captions and ambiguous or unclassified outcomes drop.
 
-An acknowledged add updates `last_success_at` and the in-memory flush tracker on
-a best-effort basis. Failure to persist a summary after provider success does
-not convert the provider result into a retry and does not block later capture.
+An acknowledged add updates `last_success_at` and volatile flush state. Summary
+write failure never creates a retry or blocks later capture.
 
 ### Session flush
 
-Keep the existing recall-freshness thresholds: 5 minutes idle, 30 minutes
-maximum age, or 100 accumulated acknowledgements. These are process-local
-timers, not durability boundaries.
+`PendingFlush` stores only a provider-session reference, raw session reference,
+timestamps, count, and at most 100 message ids. It is bounded to 256 provider
+sessions and disappears on extraction, runtime replacement, or process exit.
 
-`PendingFlush` retains only the bounded information needed to attempt a flush:
-provider-session reference, raw session reference, timestamps, count, and up to
-100 message ids when the current adapter requires them. The tracker is discarded
-on extraction, generation replacement, or process exit.
+If the tracker is full, keep the successful add but leave its session untracked.
+`/new` and archive make one non-blocking attempt to enqueue a session barrier and
+return. At queue head, the barrier flushes currently tracked scopes for that raw
+session. It may miss an untracked scope, a capture still preparing attachments, or
+state lost during a transition.
 
-If a 257th provider session would exceed the tracker bound, do not block or undo
-an otherwise valid add. Leave that session untracked, increment a content-free
-counter, and accept that its accumulated buffer may not be flushed by Avibe.
+A flush retries only a failure proven to precede provider execution. Once
+submitted, it is consumed regardless of result and never restored to the tracker.
 
-`/new` and archive enqueue one best-effort session barrier and return. At queue
-head, the barrier attempts to flush currently tracked provider sessions matching
-that raw session. It may miss an untracked scope, a capture still in attachment
-preparation, or any state lost during a transition. It never waits for a proof
-that every scope crossed a boundary.
+### Runtime transitions
 
-A flush may retry only failures proven to occur before provider execution. A
-submitted flush is consumed regardless of result and is never restored to the
-tracker.
+Disable, shutdown, and runtime-affecting configuration replacement stop intake,
+cancel the generation, and discard queued and tracked work without draining it.
+In-flight calls are not replayed; cancellation is not proof that no write occurred.
 
-### Runtime replacement and shutdown
+Clear and Factory Reset also discard volatile work, but before changing identity or
+the provider root they must prove that no old-generation provider RPC can still
+execute. Stop and reap the sidecar, or use an equivalent existing bounded
+quiescence proof. Cancellation alone is insufficient. If exclusion cannot be
+proved, fail the destructive operation closed and leave identity/root untouched.
 
-Disable, shutdown, Clear, Reset, and runtime-affecting configuration replacement
-stop intake, cancel the worker, and discard queued and tracked state. They do not
-drain the queue.
+## Persistent state and migration
 
-In-flight provider calls are not replayed. Cancellation is not treated as proof
-that the provider did no work.
+After migration, `state/memory/memory.sqlite` contains only:
 
-## Persistent identity only
+- `memory_meta`: epoch, Clear fence, scope/root identity, timestamp watermark,
+  bounded summary fields, and timestamps
+- `memory_projects`: caller principal, project id, and catalog timestamps
 
-After migration, `state/memory/memory.sqlite` contains only stable identity,
-catalog, and small summary fields already owned by `memory_meta`:
+Summary fields are not an event log and never gate startup, submission, or later
+capture. Stop writing processing-fault/alert/recovery fields. Do not add
+`memory_call_provenance`, `memory_processing_anomaly`,
+`memory_flush_correlation_guard`, `memory_observation_gap`, or equivalents.
 
-```text
-memory_meta
-  singleton
-  epoch
-  clear_in_progress
-  scope_key
-  provider_root_id
-  last_provider_timestamp_ms
-  missed_count
-  last_success_at
-  last_error
-  last_error_at
-  updated_at
-
-memory_projects
-  principal_id
-  project_id
-  created_at
-  last_written_at
-```
-
-Summary columns are not an event log. Updates are best-effort and may be stale.
-They never gate provider submission, later capture, or runtime startup.
-
-Do not add:
-
-- `memory_call_provenance`
-- `memory_processing_anomaly`
-- `memory_flush_correlation_guard`
-- `memory_observation_gap`
-- any replacement per-call, per-attempt, or per-session durable table
-
-`processing_fault_*`, `processing_alert_*`, and `processing_recovery_*` stop
-being written and are not inputs to retry, Repair, or IM notification.
-
-Provider-session derivation stays the `origin/dev` formula:
+Keep current provider-session derivation:
 
 ```text
 src--<hmac-sha256(scope_key, "{memory_owner_id}:{project_ref}:{session_id}")>--e{epoch}
 ```
 
-For capture writes, `memory_owner_id` keeps the current #1642 split: user input
-uses the 34-character caller principal and agent-provenance capture uses that
-caller's derived `-agent` owner. `memory_projects.principal_id` remains keyed by
-the caller principal. Do not change either derivation in this phase; changing it
-requires a separate migration contract.
+Keep #1642 ownership: user input uses the 34-character caller principal; agent
+provenance uses that caller's derived `-agent` owner; project rows stay keyed by
+the caller principal.
 
-## Processing Record and Provider Call Log
+Recognize every released v0-v3 shape accepted by the current migrator. Migration:
 
-These capabilities remain, but their capture-derived views are explicitly
-best-effort:
+1. Reconcile readable Factory Reset/Clear intent. An unreadable marker or orphaned
+   Clear fence stays blocked until an explicit Clear supplies fresh authority.
+2. Recognize the confined SQLite shape without writing.
+3. In one transaction, preserve stable identity, project rows, watermark, and
+   `last_success_at`; discard delivery, retry, settlement, provenance, failure,
+   flush, and attachment-bundle state; install identity-only v4.
+4. Commit, then checkpoint, close owned connections, and reopen through SQLite's
+   normal WAL lifecycle. Never unlink WAL, SHM, or journal files directly.
+5. Best-effort scrub the confined attachment root, then enable text capture.
 
-- Provider Call Log continues recording whatever its independent recorder can
-  observe.
-- Processing Record continues showing data that can be safely derived from
-  EverOS and Provider Call Log.
-- A call that cannot be authorized from retained evidence is omitted or its
-  source is reported unavailable. Missing correlation must never broaden scope.
-- Unlinked-call history may be incomplete or unavailable after migration,
-  restart, pruning, or an ambiguous provider result.
-- Recent capture failures may be shown from process-local state or the existing
-  summary fields. They are lost on restart and need not reproduce the old
-  newest-50 ordering.
-- Diagnostics storage/read failure never blocks writer startup or provider
-  submission.
+Any failure before commit rolls back and leaves the prior logical store intact.
+Commit is the migration completion point: a later checkpoint, close, or reopen
+problem does not roll back v4. A busy checkpoint is not a migration failure; keep
+the committed store and retry normal open/startup handling. Unknown nonempty stores
+remain untouched and Memory stays unavailable. Downgrade is unsupported.
 
-The implementation should simplify the reader when it removes joins against
-delivery tables. It must not introduce durable gaps, guards, anomaly ledgers, or
-retention protocols to make a partial diagnostic view appear complete.
+## Retained surfaces
 
-This deliberately changes the old diagnostic contract. The UI/API must label an
-unavailable source truthfully rather than present an incomplete result as a
+### Control plane
+
+Keep artifact installation, sidecar ownership, root confinement,
+`MemoryOperationLease`, Restart Engine, Rebuild (`cascade rebuild --yes`), Repair
+(`cascade sync`), Clear authority, Factory Reset, and root recreation.
+
+Before Rebuild or Repair launches a maintenance child, close writer intake and
+cancel its generation. Wait only for the existing bounded provider-RPC quiescence
+proof; never drain queued capture. Fail closed if a second provider owner cannot be
+excluded. Clear resets identity, catalog, watermark, and summaries only after the
+stronger destructive quiescence rule above succeeds.
+
+### Diagnostics
+
+- Provider Call Log records what its independent recorder observes.
+- Processing Record shows only data safely derived from EverOS and retained call
+  logs. Missing authorization evidence omits the call or marks the source
+  unavailable; it never broadens scope.
+- Migration, restart, pruning, and ambiguous results may leave history incomplete.
+- Diagnostic read/write failure never blocks writer startup or provider calls.
+
+Remove delivery-table joins rather than replacing them with durable gap, guard, or
+anomaly ledgers. UI/API responses must distinguish an unavailable source from a
 complete empty result.
 
-## Attachments
+### Attachments
 
-Keep current attachment admission, pinning, and the existing single text-only
-fallback. Do not redesign attachment ownership around the writer in this phase.
+Use the shared writer permit before pinning. On admission failure or terminal
+provider outcome, attempt confined bundle release once, then release the permit
+even if file cleanup fails. Log without paths; boot cleanup may reclaim the orphan.
 
-When queue admission or a provider attempt terminates, attempt confined bundle
-release once. A failed release is logged without paths and may leave an orphan
-for the next boot cleanup. It does not retain the queue item, create a retry
-registry, hold writer capacity indefinitely, or stop text-only capture.
+Run existing confined cleanup before enabling attachment capture. If confinement
+or cleanup safety cannot be proved, disable attachment capture for that runtime and
+continue text capture. Never reconstruct delivery from leftover bundles or touch
+original chat attachments.
 
-At v4 boot, run the existing confined attachment cleanup before attachment
-capture is enabled. If cleanup or confinement cannot be proven, disable
-attachment capture for that runtime while allowing text capture to continue.
-Never follow unsafe paths or reconstruct delivery from leftover bundles.
-
-Original chat attachments are untouched. Avibe-owned pinned copies may be
-deleted or leaked until later cleanup. A later attachment PR may introduce a
-narrow source-lease design if real measurements justify it.
-
-## Migration
-
-On-disk Memory SQLite is a shipped surface. Recognize every released v0, v1,
-v2, and v3 shape already accepted by the current migrator.
-
-Migration properties:
-
-- recognized stores upgrade atomically to identity-only v4
-- stable identity, catalog rows, timestamp watermark, and `last_success_at` are
-  preserved byte-for-byte
-- every delivery, retry, settlement, provenance, failure, and attachment-bundle
-  row is discarded and never replayed
-- unrecognized nonempty stores remain untouched and Memory stays unavailable
-- Clear and Factory Reset markers remain authoritative
-- a failed migration leaves the prior logical schema and rows intact
-
-Migration outline:
-
-1. Let the existing Factory Reset or readable Clear intent reconcile first.
-2. Treat an unreadable Clear marker or an orphaned `clear_in_progress` fence as
-   blocked; only an explicit Clear may supply fresh destructive authority.
-3. Open the confined SQLite file and recognize its released shape without
-   writing.
-4. In one owned transaction, run required released-shape transforms, copy the
-   stable identity/catalog fields, count discarded rows for content-free logs,
-   drop all delivery tables and triggers, and install identity-only v4.
-5. Commit, request a SQLite checkpoint, close every owned connection, and reopen
-   normally. Never unlink SQLite WAL, SHM, or journal files directly.
-6. Best-effort scrub the confined attachment pin root, then start text capture.
-
-The migration does not copy request IDs, settlements, failure projections,
-flush guards, or observation gaps. Losing that diagnostic history is accepted.
-
-Downgrade is unsupported. An older Avibe must refuse an unknown v4 schema
-without writing.
-
-## Control plane retained
-
-Keep:
-
-- artifact installation and sidecar ownership
-- provider-root confinement
-- `MemoryOperationLease`
-- Restart Engine
-- Rebuild (`cascade rebuild --yes`)
-- Repair (`cascade sync`)
-- Clear durable intent and Factory Reset
-- provider-root recreation on Clear/Reset
-
-Before Rebuild or Repair starts a maintenance child, close writer intake and
-cancel its process-local generation. Wait only for the current provider RPC to
-reach the existing bounded cancellation/quiescence limit; never drain queued
-captures. If safe exclusion cannot be proved, fail the maintenance operation
-without launching a second provider owner.
-
-Clear resets identity, catalog, watermark, and summaries through the existing
-authority path. There are no observer tables to clear.
-
-## Callers and receipts
-
-Keep `CaptureRequest` and `CaptureReceipt`:
+### Receipts and callers
 
 | Writer outcome | Receipt |
 |---|---|
-| admitted to process-local queue | `CaptureAccepted` |
-| duplicate in process-local LRU | `CaptureDuplicate` |
-| disabled, not ready, invalid, project limit, identity busy, or queue full | `CaptureSkipped` with the existing closed error code |
+| admitted to volatile writer | `CaptureAccepted` |
+| duplicate in local LRU | `CaptureDuplicate` |
+| disabled, invalid, busy, over limit, not ready, or full | `CaptureSkipped` with existing closed code |
 
-Automatic capture keeps ignoring the receipt after a content-free log.
-`/internal/memory/remember` keeps returning `receipt.status`.
+Automatic capture logs the receipt without content. `/internal/memory/remember`
+continues returning `receipt.status`; callers never see delivery-state primitives.
 
-## Module shape
+## Delivery plan
 
-Likely result:
+Implementation order:
 
-```text
-core/memory/ingest.py          # BestEffortMemoryWriter
-core/memory/identity.py        # meta + projects + summary fields
-core/memory/migrate_store.py   # released-shape recognition + v4 strip
-```
+1. Add identity-only v4 migration.
+2. Add the bounded writer, one worker, and volatile flush tracker.
+3. Switch capture and session lifecycle callers to non-blocking offers/barriers.
+4. Simplify diagnostics without weakening authorization.
+5. Delete the durable delivery/observer protocol and obsolete tests.
+6. Update scenario catalogs, focused tests, and `docs/MEMORY.md` /
+   `docs/MEMORY_ZH.md` with the accepted-loss contract.
 
-`coordinator.py` and `worker.py` go away. `store.py` may shrink in place instead
-of being renamed when that produces a smaller diff.
+Prefer one implementation PR. Never ship durable and volatile delivery active at
+the same time merely to split the diff.
 
-`MemoryRuntime` / `MemoryModule` retain the public read and maintenance facade.
-Controller and handlers must not see delivery-state primitives.
+### Scenario changes
 
-## User documentation
+| Scenario | Contract |
+|---|---|
+| `MEMORY-INDEP-001` | retain non-blocking chat, `/new`, and archive |
+| `MEMORY-INDEP-002` | retain permitted stale-capture loss at session transition |
+| `MEMORY-INDEP-003` | rewrite shutdown to drop instead of drain |
+| `MEMORY-INDEP-008` | rewrite shutdown to avoid capture/flush settlement waits |
+| `MEMORY-INDEP-010` | retain lifecycle boundary without a delivery guarantee |
+| `MEMORY-INDEP-012` | retain content-free service logging and no IM alert |
+| `MEMORY-SEARCH-006` | rewrite final flush as a best-effort bounded barrier |
+| `MEMORY-SEARCH-013` | rewrite terminal flush to allow missed captured scopes |
+| `MEMORY-IM-ATTACH-009`, `-011` | retain one proven-safe text fallback |
 
-The implementation updates `docs/MEMORY.md` and `docs/MEMORY_ZH.md` to say:
+Remove or rewrite scenarios that require replay, `manual_required`, exact
+Processing Record history, or shutdown drain.
 
-- capture is best-effort and may be lost
-- queue admission is not storage confirmation
-- restart, saturation, provider failure, and upgrade can discard captures
-- most healthy, unsaturated captures are still attempted normally
-- Processing Record and Provider Call Log may be incomplete
-- Rebuild, Repair, Clear, and Factory Reset retain their control-plane meaning
+### Validation
 
-Do not ship those user-doc edits in this planning PR.
+- Every released fixture preserves stable identity/catalog data and removes all
+  delivery-shaped rows without provider I/O.
+- Injected pre-commit migration failures leave the old logical store unchanged;
+  post-commit checkpoint/reopen failures retain committed v4 for normal recovery.
+- Unknown schemas, unsafe paths, and ambiguous Clear authority fail closed without
+  writes.
+- The 256 permits bound attachment preparation plus queued and in-flight work; no
+  catalog/watermark mutation occurs without a reservation.
+- Healthy admitted captures reach a fake provider in FIFO order; queue and flush
+  trackers stay within bounds.
+- Offers, barriers, replacement, and shutdown never wait for delivery; transitions
+  intentionally discard volatile state.
+- Only proven-unsubmitted failures retry. The sole attachment caption fallback is
+  single-shot, proven unwritten, and included in the three-attempt maximum.
+- Diagnostics failure cannot reject capture, missing evidence never widens access,
+  and unavailable sources are reported truthfully.
+- Rebuild, Repair, Clear, and Factory Reset retain bounded provider exclusion
+  without draining capture.
+- Logs, summaries, and receipts remain content-free.
 
-## Affected scenario contracts
+Tests must prove the healthy path, bounds, non-blocking behavior, security, and
+intentional drops. They must not assert that every capture survives.
 
-Use existing capability catalogs rather than creating an isolated test matrix.
-
-- `MEMORY-INDEP-001`: retain; hung Memory never blocks the next turn, `/new`,
-  or archive.
-- `MEMORY-INDEP-002`: retain the permitted stale-capture discard across a
-  session transition.
-- `MEMORY-INDEP-003`: rewrite the shutdown half; closing the runtime drops
-  accepted volatile captures instead of draining them.
-- `MEMORY-INDEP-008`: rewrite from "shutdown settles flush tasks" to "shutdown
-  does not wait for capture or flush delivery".
-- `MEMORY-INDEP-010`: retain the dispatch/lifecycle boundary, but do not turn it
-  into a Memory delivery guarantee.
-- `MEMORY-INDEP-012`: retain; processing health events stay in service logs and
-  out of IM delivery.
-- `MEMORY-IM-ATTACH-009` and `MEMORY-IM-ATTACH-011`: retain the one safe
-  text-only fallback without adding durable pin recovery.
-
-The implementation PR updates the matching catalogs, observations, and tests in
-the same change. Any scenario that currently asserts durable replay,
-manual-required recovery, exact Processing Record history, or shutdown drain is
-removed or rewritten to the best-effort property.
-
-## Validation
-
-### Identity and migration
-
-- Property-test every recognized released fixture: stable identity/catalog
-  fields survive and every delivery-shaped row disappears without provider I/O.
-- Inject migration failure at transaction boundaries and prove the old logical
-  store remains loadable and unchanged.
-- Prove unknown schemas and unsafe Clear authority fail closed without writes.
-- Prove committed v4 reopens through SQLite's own WAL lifecycle without manual
-  sidecar deletion.
-
-### Writer
-
-- In the normal operating envelope, an admitted text capture reaches the fake
-  provider in FIFO order and an acknowledgement updates volatile flush state.
-- Queue and pending-flush structures never exceed their configured bounds.
-- `offer()` never awaits provider I/O; `/new`, archive, and shutdown complete
-  without waiting for queued or in-flight delivery.
-- Only proven-unsubmitted failures retry, within the fixed total-attempt bound;
-  every possibly submitted outcome is terminal.
-- Runtime replacement and restart discard all volatile capture and flush state.
-- No writer path requires a durable observer write before calling EverOS.
-- Diagnostics failure cannot reject an otherwise admissible capture.
-- Logs and summaries remain content-free.
-
-### Retained surfaces
-
-- Authorization remains fail closed when Processing Record correlation is
-  missing; no other principal/project data becomes visible.
-- Processing Record reports unavailable/incomplete sources truthfully without
-  blocking capture.
-- Rebuild, Repair, Clear, and Factory Reset retain provider exclusion and marker
-  authority without draining the capture queue.
-- Attachment fallback remains single-shot and ambiguous provider outcomes never
-  resubmit the caption.
-- Updated scenario catalogs express these properties with the IDs above.
-
-No test should assert that every capture survives. Tests should prove the common
-case, explicit bounds, non-blocking behavior, security isolation, and intentional
-drop behavior.
-
-## Implementation sequence
-
-1. Reduce v4 to identity-only schema and an atomic released-shape migrator.
-2. Add `BestEffortMemoryWriter` with bounded admission, one worker, and volatile
-   flush tracking.
-3. Switch capture callers and session lifecycle to non-blocking offer/barrier
-   calls.
-4. Simplify Processing Record and Provider Call Log projections to tolerate
-   missing capture correlation without broadening authorization.
-5. Delete coordinator, durable worker, outbox APIs, observer protocol, and their
-   state-machine tests.
-6. Update scenario catalogs, focused tests, and user documentation.
-
-Prefer one implementation PR if the resulting diff remains reviewable. If it
-does not, split by a committed contract boundary, never by leaving both durable
-and volatile delivery active in production.
-
-## Todo
-
-- [ ] Implement identity-only v4 migration.
-- [ ] Implement the bounded process-local writer and flush tracker.
-- [ ] Remove delivery and observer state from SQLite.
-- [ ] Remove coordinator, worker, and outbox-only APIs/tests.
-- [ ] Degrade diagnostics without weakening authorization.
-- [ ] Keep attachment fallback without durable cleanup ownership.
-- [ ] Update scenario catalogs and user documentation.
-
-## Known-by-design
-
-These are accepted product consequences, not defects to repair by adding durable
-state:
-
-1. Upgrade discards every undelivered outbox row and old capture-derived
-   diagnostic row. EverOS data already accepted by the provider remains.
-2. `CaptureAccepted` means entered process memory, not stored.
-3. Restart, shutdown, disable, configuration replacement, Clear, and Reset may
-   drop accepted captures, retries, and flush boundaries.
-4. Queue or tracker saturation may drop captures or leave EverOS accumulation
-   buffers unflushed.
-5. Provider timeouts and ambiguous results are dropped without retry and may
-   produce either missing data or rare duplicates.
-6. Duplicate suppression resets on restart.
-7. Processing Record and Provider Call Log may omit calls, failures, or
-   correlations. Missing evidence never expands authorization.
-8. Attachment pin/release failure may drop multimodal capture or leave an
-   Avibe-owned temporary copy for later cleanup. Original chat attachments are
-   untouched.
-
-If a future product requirement needs stronger delivery or diagnostic
-guarantees, design it as a separately approved capability with measured value.
-Do not silently grow this writer back into a durable outbox.
+If stronger delivery or diagnostic guarantees become necessary, approve them as a
+separate measured capability. Do not silently grow this writer back into an outbox.
