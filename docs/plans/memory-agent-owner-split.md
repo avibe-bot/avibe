@@ -430,8 +430,12 @@ changes recall output, since its CLI examples are live contract surface.
 - Scenario: extend `tests/scenarios/memory_search/catalog.yaml` with
   agent-owner scenarios (write isolation, dual-owner recall with labels,
   cross-user isolation) and wire IDs into the tests and PR descriptions.
-- Residual manual: one Incus regression pass exercising `vibe memory
-  remember` plus Settings search, verifying labels and profile blocks.
+- Residual manual (owner-deferred 2026-08-22): one Incus regression pass
+  exercising `vibe memory remember` plus Settings search, verifying labels and
+  profile blocks, and the four-platform surfacing checks. Deferred for this
+  delivery as a post-merge confirmation — not a merge blocker. Safe runbook in
+  [`docs/regression/memory-agent-owner-split-acceptance.md`](../regression/memory-agent-owner-split-acceptance.md)
+  §5–§6.
 
 ## Delivery plan
 
@@ -441,7 +445,8 @@ recall, search, and profile; shipping the reader first is a safe no-op (the
 assistant owner is empty until the writer lands, and the empty leg returns
 nothing).
 
-1. **PR A — read fan-out + labeled surfaces.** Owner-ID derivation and the
+1. **PR A — read fan-out + labeled surfaces.** ✅ **Merged to `dev` as
+   [#1633](https://github.com/avibe-bot/avibe/pull/1633).** Owner-ID derivation and the
    owner-aware shape predicate, plus read-side owner-aware session-ref
    support (`_provider_session_ref` owner parameter and a
    `provider_session_ref` entry point that accepts the derived owner —
@@ -457,7 +462,8 @@ nothing).
    system-prompt guidance update, scenario catalog entries. Deploys dark by
    data (assistant owner empty) but complete by capability — no user-visible
    surface renders dual-owner data unlabeled.
-2. **PR B — write path.** Write routing to the assistant owner:
+2. **PR B — write path.** ✅ **Merged to `dev` as
+   [#1642](https://github.com/avibe-bot/avibe/pull/1642).** Write routing to the assistant owner:
    `store.enqueue_request` owner-aware minting, remaining re-derivation
    sites (`resolve_current_session_scopes`, `_legacy_provider_ref`),
    terminal-flush fan-out beneath the caller-keyed fence (§3),
@@ -467,8 +473,17 @@ nothing).
    searchable and labeled through PR A's reader.
    User documentation for the changed Memory semantics ships in this PR,
    since this is the PR that activates the user-visible behavior.
-3. **PR C — regression close-out.** The Incus regression checklist and any
-   residual scenario catalog updates.
+3. **PR C — regression close-out.** The acceptance record
+   ([`docs/regression/memory-agent-owner-split-acceptance.md`](../regression/memory-agent-owner-split-acceptance.md))
+   plus this plan update. Scope agreed with the owner (2026-08-22): record the
+   already-completed automated evidence (9/9 scenario `MEMORY-SEARCH-008..016`
+   + the 638-test canonical memory suite on the merged head), a safe live-pass
+   runbook, and known limitations. **The live Incus end-to-end pass and the
+   four-platform manual surfacing checks are explicitly owner-deferred for this
+   delivery — a residual manual acceptance item, not a merge/release blocker and
+   not a completed test.** PR C makes no product code, test, catalog, fixture,
+   UI, or configuration changes; the scenario catalog entries
+   `MEMORY-SEARCH-008..016` already shipped with PRs A/B.
 
 This document is the plan of record; material scope changes update it in the
 same PR that implements them.
