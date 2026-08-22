@@ -134,25 +134,24 @@ These values are not durability promises or user settings.
 
 Admission performs no EverOS I/O and no unbounded wait:
 
-1. Run existing authorization, size, scope, duplicate, and static overflow checks.
+1. Run existing authorization, size, scope, duplicate, and request overflow checks.
 2. Atomically reserve one writer permit or return `CaptureSkipped`. The permit
    covers attachment pinning, identity admission, queue residence, provider I/O,
    and terminal cleanup, so concurrent preparation cannot exceed the bound.
-3. Pin optional attachments under that permit. Pin failure skips the multimodal
-   item and releases the permit after one confined cleanup attempt.
-4. In one short admission critical section and bounded SQLite transaction,
-   enforce the 16-project limit and allocate
-   `max(occurred_at_ms, last_provider_timestamp_ms + 1)`.
-5. Convert the reservation to a queue item before leaving that critical section.
-   Reserved capacity guarantees this cannot fail because another offer filled the
-   queue.
+3. Pin optional attachments under that permit. On any pin failure, attempt cleanup
+   once and admit a non-empty caption as text-only under the same reservation;
+   attachment-only input drops.
+4. In one short admission critical section and bounded SQLite transaction, compute
+   candidate catalog and timestamp state. Reject a 17th project or a value above
+   `MAX_PROVIDER_TIMESTAMP_MS` before mutating either durable field.
+5. Convert the reservation to a queue item before leaving the critical section;
+   reserved capacity prevents a concurrent queue-full failure.
 
-Validation, pin, or identity failure releases the permit. A cancelled generation
-returns immediately to its caller, but an underlying pin/provider job keeps its
-shared permit until it actually terminates or its sidecar is reaped; replacement
-therefore cannot exceed the process-wide bound. No catalog or watermark mutation
-occurs without a reservation, and an identity failure creates no recovery item.
-Reusing a project is allowed at the 16-project limit; creating a 17th is not.
+Any admission failure without a text fallback releases the permit. A cancelled
+generation returns immediately, but an underlying pin/provider job keeps its shared
+permit until it terminates or its sidecar is reaped, so replacement cannot exceed
+the process-wide bound. Rejection leaves catalog and watermark unchanged; identity
+failure creates no recovery item. Existing projects remain usable at the limit.
 
 Every queue entry, including a session barrier, owns one permit until its local
 operation is terminal; attachment cleanup follows the bounded rule below.
@@ -331,14 +330,14 @@ Processing Record history, or shutdown drain.
   post-commit checkpoint/reopen failures retain v4 for normal recovery.
 - Unknown schemas, unsafe paths, and ambiguous Clear authority fail closed without
   writes.
-- The 256 permits bound attachment preparation plus queued and in-flight work; no
-  catalog/watermark mutation occurs without a reservation.
+- The 256 permits bound preparation plus queued/in-flight work; rejected project or
+  timestamp candidates leave catalog and watermark unchanged.
 - Healthy admitted captures reach a fake provider in FIFO order; queue and flush
   trackers stay within bounds.
 - Offers, barriers, replacement, and shutdown never wait for delivery; transitions
   intentionally discard volatile state.
-- Adds and flushes stop after three attempts; the sole attachment caption fallback
-  is single-shot, proven unwritten, and included in that maximum.
+- Adds and flushes stop after three attempts; pin failures and the sole provider
+  rejection proven unwritten preserve non-empty captions under the same permit.
 - Diagnostics failure cannot reject capture, missing evidence never widens access,
   and unavailable sources are reported truthfully.
 - Authority replacement, maintenance, Clear, and Factory Reset quiesce old RPC and
