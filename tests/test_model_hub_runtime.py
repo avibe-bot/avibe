@@ -55,7 +55,11 @@ from vibe.model_hub_runtime.state import (
     EngineStateStore,
     SourceRecord,
 )
-from vibe.model_hub_runtime.supervisor import EngineSupervisor, EngineUnavailableError
+from vibe.model_hub_runtime.supervisor import (
+    MODEL_HUB_STARTUP_TIMEOUT_SECONDS,
+    EngineSupervisor,
+    EngineUnavailableError,
+)
 
 
 MODEL_HUB_FIXTURES = Path(__file__).parent / "fixtures" / "model_hub"
@@ -1327,7 +1331,13 @@ def test_adapter_provisions_probes_and_revokes_credential(tmp_path: Path) -> Non
         asyncio.run(run(base_url, handler))
 
 
-def _write_mock_engine(path: Path) -> None:
+def _write_mock_engine(
+    path: Path,
+    *,
+    startup_delay: float = 0.0,
+    startup_output: str = "",
+    echo_runtime_secrets: bool = False,
+) -> None:
     script = f"""#!{sys.executable}
 import json
 import sys
@@ -1341,6 +1351,12 @@ with open(config_path, encoding='utf-8') as handle:
     config = yaml.safe_load(handle)
 gateway = config['api-keys'][0]
 management = config['remote-management']['secret-key']
+startup_output = {startup_output!r}
+if startup_output:
+    print(startup_output, file=sys.stderr, flush=True)
+if {echo_runtime_secrets!r}:
+    print(f'management-key={{management}} gateway-token={{gateway}}', file=sys.stderr, flush=True)
+time.sleep({startup_delay!r})
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
@@ -1485,17 +1501,26 @@ def _fixture_supervisor(
     tmp_path: Path,
     *,
     process_factory=subprocess.Popen,
+    startup_timeout: float = 5,
+    startup_delay: float = 0.0,
+    startup_output: str = "",
+    echo_runtime_secrets: bool = False,
 ) -> tuple[EngineSupervisor, EngineStateStore]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     binary = tmp_path / "mock-engine"
-    _write_mock_engine(binary)
+    _write_mock_engine(
+        binary,
+        startup_delay=startup_delay,
+        startup_output=startup_output,
+        echo_runtime_secrets=echo_runtime_secrets,
+    )
     installer = _FixtureInstaller(binary, tmp_path / "versions" / "install-1")
     store = EngineStateStore(tmp_path / "state")
     return (
         EngineSupervisor(
             installer=installer,
             state_store=store,
-            startup_timeout=5,
+            startup_timeout=startup_timeout,
             process_factory=process_factory,
         ),
         store,
@@ -1627,6 +1652,98 @@ def test_supervisor_starts_checks_health_and_stops_mock_engine(
     assert second.gateway_token == first.gateway_token
     assert second.management_key == first.management_key
     supervisor.stop()
+
+
+def test_mh_runtime_005_first_cold_start_waits_for_readiness_within_bounded_budget(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """MH-RUNTIME-005: first cold start waits past an early probe and becomes ready."""
+
+    assert MODEL_HUB_STARTUP_TIMEOUT_SECONDS == 30.0
+    caplog.set_level(logging.INFO, logger="vibe.model_hub_runtime.supervisor")
+    supervisor, _ = _fixture_supervisor(
+        tmp_path,
+        startup_timeout=3.0,
+        startup_delay=0.25,
+        startup_output="cold-start phase=loading-runtime",
+    )
+
+    started_at = time.monotonic()
+    connection = supervisor.ensure_running()
+    elapsed = time.monotonic() - started_at
+
+    assert connection.base_url.startswith("http://127.0.0.1:")
+    assert 0.2 <= elapsed < 3.0
+    assert "startup outcome=ready" in caplog.text
+    assert "cold-start phase=loading-runtime" in caplog.text
+    supervisor.stop()
+
+
+def test_mh_runtime_006_timeout_stops_engine_with_bounded_redacted_diagnostics(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """MH-RUNTIME-006: readiness timeout is terminal, bounded, and safely diagnosable."""
+
+    caplog.set_level(logging.WARNING, logger="vibe.model_hub_runtime.supervisor")
+    visible_secret = "visible-upstream-test-secret"
+    json_secret = "unprefixed-json-secret"
+    supervisor, store = _fixture_supervisor(
+        tmp_path,
+        startup_timeout=2.0,
+        startup_delay=60.0,
+        startup_output=(
+            "discarded-prefix "
+            + "x" * 12_000
+            + f" Authorization: Bearer {visible_secret} api-key={visible_secret}"
+            + f' raw-value={visible_secret} {{"token":"{json_secret}"}} tail-marker'
+        ),
+        echo_runtime_secrets=True,
+    )
+    credential_ref = store.store_api_key(
+        visible_secret,
+        vendor="custom",
+        protocol="openai_chat",
+        base_url="https://timeout.example.test/v1",
+    )
+    store.replace_sources(
+        [
+            SourceRecord(
+                source_id="src_timeout01",
+                vendor="custom",
+                protocol="openai_chat",
+                base_url="https://timeout.example.test/v1",
+                credential_ref=credential_ref,
+                allowed_origins=("codex",),
+                model_ids=("model-a",),
+                prefix="timeout",
+            )
+        ]
+    )
+
+    started_at = time.monotonic()
+    with pytest.raises(EngineUnavailableError, match="models.engine.health_failed"):
+        supervisor.ensure_running()
+    elapsed = time.monotonic() - started_at
+    runtime_secrets = store.prepare_instance("install-1", rotate=False)[1]
+    warning = next(
+        record.getMessage()
+        for record in caplog.records
+        if "startup outcome=timeout" in record.getMessage()
+    )
+
+    assert elapsed < 3.5
+    assert supervisor.status()["status"]["health"] == "down"
+    assert "startup_output_truncated=true" in warning
+    assert "tail-marker" in warning
+    assert "[REDACTED]" in warning
+    assert visible_secret not in warning
+    assert json_secret not in warning
+    assert runtime_secrets.management_key not in warning
+    assert runtime_secrets.gateway_token not in warning
+    assert "discarded-prefix" not in warning
+    assert len(warning.encode("utf-8")) < 5 * 1024
 
 
 def test_mh_runtime_001_service_restart_reports_installed_engine_as_not_started(

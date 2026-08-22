@@ -1557,6 +1557,19 @@ binary): pinned version + SHA256, 127.0.0.1-only listener, random management
 key and gateway token, lifecycle owned by Avibe. Its YAML/auth files/manage
 UI are **not** product surface.
 
+An explicit start has one bounded 30-second readiness budget; it succeeds only
+after both the gateway model endpoint and management config endpoint respond.
+The operational budget is based on local live evidence: the first process was
+still alive when the former 10-second window ended, while the next start reached
+both health surfaces in 7.4 seconds. It adds bounded cold-start margin without
+claiming an unobserved internal engine phase or introducing a retry loop. If
+readiness is not established, Avibe terminates the child and preserves the
+existing runtime failure contract.
+During that window Avibe continuously drains combined child output to prevent a
+full pipe from blocking startup, retains only a bounded tail in memory, and emits
+only a compact, bounded, redacted diagnostic to the service log. Raw child output
+is never persisted by the supervisor.
+
 **v3 routing requires no new engine policy.** Failover is ours, not the engine's: the engine
 runs as a single global instance with its own cooling and request-retry disabled
 (`vibe/model_hub_runtime/config.py`), model prefixes pin the source, and Python

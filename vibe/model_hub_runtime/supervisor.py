@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import logging
+import re
 import signal
 import socket
 import subprocess
@@ -23,6 +24,95 @@ from vibe.model_hub_runtime.state import EngineStateStore
 logger = logging.getLogger(__name__)
 
 
+MODEL_HUB_STARTUP_TIMEOUT_SECONDS = 30.0
+_STARTUP_OUTPUT_TAIL_BYTES = 8 * 1024
+_STARTUP_LOG_BYTES = 4 * 1024
+_STARTUP_POLL_INTERVAL_SECONDS = 0.05
+_REDACTED = "[REDACTED]"
+_STARTUP_SECRET_RE = re.compile(
+    r"(?i)([\"']?\b(?:api[-_ ]?keys?|access[-_ ]?token|auth[-_ ]?token|refresh[-_ ]?token|"
+    r"gateway[-_ ]?token|management[-_ ]?(?:key|secret)|authorization|password|"
+    r"secret(?:[-_ ]?key)?|token)\b[\"']?\s*[:=]\s*)"
+    r"(?:bearer\s+)?(?:\[[^\]\r\n]*\]|\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;]+)"
+)
+_STARTUP_BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
+_STARTUP_QUERY_SECRET_RE = re.compile(
+    r"(?i)([?&](?:api[-_]?key|access[-_]?token|refresh[-_]?token|password|secret|token)=)[^&\s]+"
+)
+_STARTUP_PREFIXED_KEY_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:sk|rk|pk|api)-[A-Za-z0-9_-]{8,}"
+)
+
+
+class _BoundedStartupOutput:
+    """Drain a child pipe continuously while retaining only its startup tail."""
+
+    def __init__(self, stream: Any, *, limit: int = _STARTUP_OUTPUT_TAIL_BYTES) -> None:
+        self._stream = stream
+        self._limit = limit
+        self._tail = bytearray()
+        self._truncated = False
+        self._retaining = True
+        self._lock = threading.Lock()
+        self._thread = threading.Thread(
+            target=self._drain,
+            name="model-hub-startup-output",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _drain(self) -> None:
+        try:
+            reader = getattr(self._stream, "read1", self._stream.read)
+            while True:
+                chunk = reader(4096)
+                if not chunk:
+                    return
+                if not isinstance(chunk, bytes):
+                    chunk = str(chunk).encode("utf-8", "replace")
+                with self._lock:
+                    if not self._retaining:
+                        continue
+                    overflow = len(self._tail) + len(chunk) - self._limit
+                    if overflow > 0:
+                        del self._tail[:overflow]
+                        self._truncated = True
+                    self._tail.extend(chunk)
+        except Exception:
+            logger.debug("Model Hub startup output drain stopped")
+
+    def snapshot(self) -> tuple[bytes, bool]:
+        with self._lock:
+            self._retaining = False
+            return bytes(self._tail), self._truncated
+
+    def join(self, timeout: float = 1.0) -> None:
+        self._thread.join(timeout=timeout)
+
+
+def _sanitize_startup_output(
+    raw: bytes,
+    *,
+    exact_values: tuple[str, ...],
+    truncated: bool,
+) -> tuple[str, bool]:
+    text = raw.decode("utf-8", "replace")
+    text = "".join(character if character.isprintable() or character.isspace() else " " for character in text)
+    for value in sorted((item for item in exact_values if item), key=len, reverse=True):
+        text = text.replace(value, _REDACTED)
+    text = _STARTUP_SECRET_RE.sub(lambda match: match.group(1) + _REDACTED, text)
+    text = _STARTUP_BEARER_RE.sub("Bearer " + _REDACTED, text)
+    text = _STARTUP_QUERY_SECRET_RE.sub(lambda match: match.group(1) + _REDACTED, text)
+    text = _STARTUP_PREFIXED_KEY_RE.sub(_REDACTED, text)
+    compact = " ".join(text.split())
+    encoded = compact.encode("utf-8")
+    if len(encoded) > _STARTUP_LOG_BYTES:
+        encoded = encoded[-_STARTUP_LOG_BYTES:]
+        compact = encoded.decode("utf-8", "ignore")
+        truncated = True
+    return compact or "<none>", truncated
+
+
 class EngineUnavailableError(RuntimeError):
     """The Hub path is unavailable; callers may use explicitly configured Direct mode."""
 
@@ -41,7 +131,7 @@ class EngineSupervisor:
         *,
         installer: EngineRuntimeManager | Any | None = None,
         state_store: EngineStateStore | None = None,
-        startup_timeout: float = 10.0,
+        startup_timeout: float = MODEL_HUB_STARTUP_TIMEOUT_SECONDS,
         process_factory: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
         port_allocator: Callable[[], int] | None = None,
     ) -> None:
@@ -53,6 +143,7 @@ class EngineSupervisor:
         self._lock = threading.RLock()
         self._process: subprocess.Popen[bytes] | None = None
         self._connection: EngineConnection | None = None
+        self._startup_output: _BoundedStartupOutput | None = None
         self._last_check: str | None = None
         self._start_attempted = False
 
@@ -166,14 +257,29 @@ class EngineSupervisor:
         )
         port = self._port_allocator()
         config_path = instance_dir / "config.yaml"
+        sources = self.state_store.list_sources()
+        upstream_api_keys = tuple(
+            value
+            for source in sources
+            for value in (self.state_store.credential_metadata(source.credential_ref).get("value"),)
+            if isinstance(value, str) and value
+        )
         write_engine_config(
             config_path,
             host="127.0.0.1",
             port=port,
             auth_dir=self.state_store.auth_dir,
             runtime_secrets=runtime_secrets,
-            sources=self.state_store.list_sources(),
+            sources=sources,
             state_store=self.state_store,
+        )
+        startup_redaction_values = (
+            runtime_secrets.management_key,
+            runtime_secrets.gateway_token,
+            *upstream_api_keys,
+            str(binary),
+            str(instance_dir),
+            str(config_path),
         )
         connection = EngineConnection(
             base_url=f"http://127.0.0.1:{port}",
@@ -186,8 +292,8 @@ class EngineSupervisor:
                 cwd=instance_dir,
                 env=engine_subprocess_environment(),
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 umask=0o077,
                 **isolated_subprocess_kwargs(),
             )
@@ -195,11 +301,22 @@ class EngineSupervisor:
             raise EngineUnavailableError("models.engine.start_failed") from exc
         self._process = process
         self._connection = connection
-        deadline = time.monotonic() + self.startup_timeout
-        client = EngineClient(connection, timeout=1.0)
-        while time.monotonic() < deadline:
-            if process.poll() is not None:
+        if process.stdout is None:
+            self._stop_locked()
+            raise EngineUnavailableError("models.engine.start_failed")
+        output = _BoundedStartupOutput(process.stdout)
+        self._startup_output = output
+        started_at = time.monotonic()
+        deadline = started_at + self.startup_timeout
+        exit_code: int | None = None
+        while True:
+            exit_code = process.poll()
+            if exit_code is not None:
                 break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            client = EngineClient(connection, timeout=min(1.0, remaining / 2))
             if client.health():
                 try:
                     self.state_store.audit_auth_permissions()
@@ -207,13 +324,41 @@ class EngineSupervisor:
                     self._stop_locked()
                     raise EngineUnavailableError("models.engine.unsafe_permissions") from exc
                 self._last_check = _utc_now()
+                raw_output, output_truncated = output.snapshot()
+                diagnostic, output_truncated = _sanitize_startup_output(
+                    raw_output,
+                    exact_values=startup_redaction_values,
+                    truncated=output_truncated,
+                )
                 logger.info(
-                    "Model Hub engine started on 127.0.0.1 with managed version %s",
+                    "Model Hub engine startup outcome=ready managed_version=%s "
+                    "elapsed_seconds=%.3f startup_output_truncated=%s startup_output=%s",
                     managed.get("version"),
+                    time.monotonic() - started_at,
+                    str(output_truncated).lower(),
+                    diagnostic,
                 )
                 return connection
-            time.sleep(0.05)
+            time.sleep(min(_STARTUP_POLL_INTERVAL_SECONDS, max(0.0, deadline - time.monotonic())))
         self._stop_locked()
+        raw_output, output_truncated = output.snapshot()
+        diagnostic, output_truncated = _sanitize_startup_output(
+            raw_output,
+            exact_values=startup_redaction_values,
+            truncated=output_truncated,
+        )
+        logger.warning(
+            "Model Hub engine startup outcome=%s managed_version=%s exit_code=%s "
+            "elapsed_seconds=%.3f readiness_budget_seconds=%.3f "
+            "startup_output_truncated=%s startup_output=%s",
+            "process_exit" if exit_code is not None else "timeout",
+            managed.get("version"),
+            exit_code,
+            time.monotonic() - started_at,
+            self.startup_timeout,
+            str(output_truncated).lower(),
+            diagnostic,
+        )
         raise EngineUnavailableError("models.engine.health_failed")
 
     def _healthy_locked(self) -> bool:
@@ -228,16 +373,24 @@ class EngineSupervisor:
 
     def _stop_locked(self) -> None:
         process = self._process
+        output = self._startup_output
         self._process = None
         self._connection = None
+        self._startup_output = None
         if process is None or process.poll() is not None:
+            if output is not None:
+                output.join()
             return
-        signal_process_tree(process, signal.SIGTERM, logger, "Model Hub engine")
         try:
-            process.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            signal_process_tree(process, KILL_SIGNAL, logger, "Model Hub engine")
-            process.wait(timeout=3)
+            signal_process_tree(process, signal.SIGTERM, logger, "Model Hub engine")
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                signal_process_tree(process, KILL_SIGNAL, logger, "Model Hub engine")
+                process.wait(timeout=3)
+        finally:
+            if output is not None:
+                output.join()
 
 
 def _allocate_loopback_port() -> int:
