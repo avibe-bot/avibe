@@ -7129,7 +7129,10 @@ def test_healthy_runtime_fast_path_does_not_serialize_health_probes(tmp_path):
     manager._healthy = healthy
 
     async def run():
-        results = await asyncio.gather(manager.ensure(), manager.ensure())
+        results = await asyncio.wait_for(
+            asyncio.gather(manager.ensure(), manager.ensure()),
+            timeout=1,
+        )
         assert all(result.available for result in results)
 
     asyncio.run(run())
