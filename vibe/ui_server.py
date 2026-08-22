@@ -12899,15 +12899,37 @@ def _show_page_runtime_unavailable_response():
     return jsonify({"error": "show_runtime_unavailable"}), 503
 
 
+def _show_page_runtime_timeout_response():
+    return jsonify({"error": "show_runtime_request_timeout"}), 504
+
+
+def _is_show_page_api_handler_path(asset_path: str) -> bool:
+    relative = (asset_path or "").strip("/")
+    return relative == "api" or relative.startswith("api/")
+
+
 def _is_show_api_asset(asset_path: str) -> bool:
     relative = (asset_path or "").strip("/")
+    if _is_show_page_api_handler_path(asset_path):
+        return True
     if relative == "__show/annotation.js":
         return False
-    return relative == "api" or relative.startswith("api/") or relative == "__show" or relative.startswith("__show/")
+    return relative == "__show" or relative.startswith("__show/")
 
 
 def _is_show_annotation_asset(asset_path: str) -> bool:
     return (asset_path or "").strip("/") == "__show/annotation.js"
+
+
+def _show_page_runtime_error_response(asset_path: str, exc: Exception):
+    from core.show_runtime import ShowRuntimeRequestTimeoutError
+
+    if _is_show_page_api_handler_path(asset_path) and isinstance(
+        exc,
+        ShowRuntimeRequestTimeoutError,
+    ):
+        return _show_page_runtime_timeout_response()
+    return _show_page_runtime_unavailable_response()
 
 
 def _is_show_page_entry_asset(asset_path: str) -> bool:
@@ -14279,12 +14301,19 @@ async def _show_page_runtime_response(
     body = await starlette_request.body()
     request_started = time.monotonic()
     manager = get_show_runtime_manager()
+    request_options: dict[str, float] = {}
+    if _is_show_page_api_handler_path(asset_path):
+        from core.services import settings as settings_service
+
+        config = await asyncio.to_thread(settings_service.load_config_or_default)
+        request_options["timeout_seconds"] = config.runtime.show_page_api_timeout_seconds
     proxied = await manager.request(
         starlette_request.method,
         runtime_path,
         envelope=envelope,
         headers=forwarded_headers,
         body=body or None,
+        **request_options,
     )
     proxy_duration_ms = int((time.monotonic() - request_started) * 1000)
     if (
@@ -14926,9 +14955,9 @@ async def serve_private_show_page(session_id, asset_path):
                     inject_show_config=request.method == "GET" and not _is_show_api_asset(asset_path),
                     show_authenticated=can_annotate,
                 )
-            except Exception:
+            except Exception as exc:
                 if _is_show_api_asset(asset_path) or _is_show_annotation_asset(asset_path):
-                    return _show_page_runtime_unavailable_response()
+                    return _show_page_runtime_error_response(asset_path, exc)
                 response = _show_page_runtime_failure_response(
                     page_dir,
                     page.session_id,
@@ -15427,9 +15456,9 @@ async def serve_public_show_page(share_id, asset_path):
                     show_config_session_id=share_id,
                     include_annotation_bootstrap=not limited_guest,
                 )
-            except Exception:
+            except Exception as exc:
                 if _is_show_api_asset(asset_path) or _is_show_annotation_asset(asset_path):
-                    return _show_page_runtime_unavailable_response()
+                    return _show_page_runtime_error_response(asset_path, exc)
                 response = _show_page_runtime_failure_response(
                     page_dir,
                     page.session_id,

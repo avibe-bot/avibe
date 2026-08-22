@@ -16,6 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import httpx
 import pytest
 from starlette.websockets import WebSocketDisconnect
 
@@ -35,6 +36,7 @@ from core.show_pages import (
 from core.show_runtime import (
     ShowRuntimeContext,
     ShowRuntimeManager,
+    ShowRuntimeRequestTimeoutError,
     ShowRuntimeWebSocketTarget,
     _runtime_download_error,
     _runtime_platform_tag,
@@ -88,6 +90,7 @@ class _FakeShowRuntimeManager:
         *,
         body: bytes = b"Runtime Show Page",
         fail: bool = False,
+        error: Exception | None = None,
         status_code: int = 200,
         extra_headers: dict[str, str] | None = None,
         headers_by_path: dict[str, dict[str, str]] | None = None,
@@ -96,6 +99,7 @@ class _FakeShowRuntimeManager:
     ):
         self.body = body
         self.fail = fail
+        self.error = error
         self.status_code = status_code
         self.extra_headers = extra_headers or {}
         self.headers_by_path = headers_by_path or {}
@@ -106,10 +110,21 @@ class _FakeShowRuntimeManager:
         self.websocket_headers = []
         self.stopped = False
 
-    async def request(self, method, path, *, envelope, headers=None, body=None):
+    async def request(
+        self,
+        method,
+        path,
+        *,
+        envelope,
+        headers=None,
+        body=None,
+        timeout_seconds=None,
+    ):
         import httpx
 
-        self.calls.append((method, path, envelope.headers(headers), body))
+        self.calls.append((method, path, envelope.headers(headers), body, timeout_seconds))
+        if self.error is not None:
+            raise self.error
         if self.fail:
             raise RuntimeError("runtime unavailable")
         headers = {
@@ -2635,6 +2650,36 @@ def test_show_annotation_bootstrap_asset_proxies_to_runtime(monkeypatch, tmp_pat
     assert manager.calls[0][1] == "/sessions/ses123/app/__show/annotation.js"
 
 
+@pytest.mark.parametrize("surface", ["private", "public"])
+@pytest.mark.parametrize("runtime_path", ["__show/annotation.js", "__show/runtime-probe"])
+def test_show_protocol_timeout_remains_runtime_unavailable(
+    monkeypatch,
+    tmp_path,
+    surface,
+    runtime_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    if surface == "private":
+        _create_show_page("ses123", "private")
+        path = f"/show/ses123/{runtime_path}"
+    else:
+        share_id = _create_show_page("ses123", "public")
+        path = f"/p/{share_id}/{runtime_path}"
+    manager = _FakeShowRuntimeManager(
+        error=ShowRuntimeRequestTimeoutError("Show Runtime request exceeded 30 seconds")
+    )
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(path, base_url="http://127.0.0.1:5123")
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 503
+    assert response.get_json() == {"error": "show_runtime_unavailable"}
+    assert manager.calls[0][4] is None
+
+
 def test_private_show_page_does_not_inject_runtime_event_config_into_attachment_html(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
@@ -3536,6 +3581,83 @@ def test_private_show_page_proxies_runtime_api_methods(monkeypatch, tmp_path):
     assert manager.calls[0][2]["X-Avibe-Show-Context"] == "private"
     assert "cookie" not in manager.calls[0][2]
     assert manager.calls[0][3] == b'{"ping":true}'
+    assert manager.calls[0][4] == 90.0
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert "x-runtime-private-header" not in response.headers
+    assert "__Host-vibe_remote_session=attacker" not in response.headers.get("set-cookie", "")
+
+
+def test_private_show_page_api_uses_live_v2_config_timeout(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    config.runtime.show_page_api_timeout_seconds = 12.5
+    config.save()
+    _create_show_page("ses123", "private")
+    manager = _FakeShowRuntimeManager(body=b'{"ok":true}')
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            "/show/ses123/api/slow",
+            base_url="http://127.0.0.1:5123",
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    assert manager.calls[0][4] == 12.5
+
+
+@pytest.mark.parametrize("public", [False, True])
+def test_show_page_api_timeout_is_distinct_from_runtime_unavailable(
+    monkeypatch,
+    tmp_path,
+    public,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    share_id = _create_show_page("ses123", "public" if public else "private")
+    timeout = ShowRuntimeRequestTimeoutError("Show Runtime request exceeded 90 seconds")
+    manager = _FakeShowRuntimeManager(error=timeout)
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        if public:
+            response = app.test_client().get(
+                f"/p/{share_id}/api/slow",
+                base_url="https://alex.avibe.bot",
+                environ_base=_remote_peer(),
+            )
+        else:
+            response = app.test_client().get(
+                "/show/ses123/api/slow",
+                base_url="http://127.0.0.1:5123",
+            )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 504
+    assert response.get_json() == {"error": "show_runtime_request_timeout"}
+
+
+def test_show_page_api_connect_timeout_remains_runtime_unavailable(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    timeout = httpx.ConnectTimeout(
+        "Show Runtime connection timed out",
+        request=httpx.Request("GET", "http://127.0.0.1/api/slow"),
+    )
+    manager = _FakeShowRuntimeManager(error=timeout)
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            "/show/ses123/api/slow",
+            base_url="http://127.0.0.1:5123",
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 503
+    assert response.get_json() == {"error": "show_runtime_unavailable"}
 
 
 def test_private_show_page_records_show_event(monkeypatch, tmp_path):
@@ -8212,6 +8334,10 @@ def test_public_show_page_proxies_runtime_api_methods(monkeypatch, tmp_path):
     assert manager.calls[0][2]["X-Avibe-Show-Context"] == "shared"
     assert "cookie" not in manager.calls[0][2]
     assert manager.calls[0][3] == b'{"ping":true}'
+    assert manager.calls[0][4] == 90.0
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert "x-runtime-private-header" not in response.headers
+    assert "__Host-vibe_remote_session=attacker" not in response.headers.get("set-cookie", "")
 
 
 def test_public_show_page_api_mutation_rejects_cross_origin(monkeypatch, tmp_path):
