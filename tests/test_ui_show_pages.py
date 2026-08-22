@@ -6,7 +6,6 @@ import hashlib
 import inspect
 import io
 import json
-import logging
 import os
 import shutil
 import socket
@@ -1975,7 +1974,7 @@ def test_show_page_history_route_uses_recovery_when_runtime_unavailable(monkeypa
         assert b"vibe doctor repair show-runtime" in response.content
     else:
         assert b"vibe doctor repair show-runtime" not in response.content
-        assert b"Only the Avibe instance owner can run a recovery action" in response.content
+        assert b"Reload this page to try the request again" in response.content
     assert b"src/App.tsx" not in response.content
     assert [call[1] for call in manager.calls] == ["/sessions/ses123/app/"]
 
@@ -3062,13 +3061,12 @@ def test_private_show_page_falls_back_to_runtime_recovery(monkeypatch, tmp_path,
     assert b"The Show Runtime is unavailable" in response.content
     assert b"vibe doctor repair show-runtime" in response.content
     assert b"runtime_archive_download_failed" in response.content
-    assert b"X-Avibe-Show-Recovery-Poll" in response.content
-    assert b"X-Avibe-Show-Recovery-Reason" in response.content
+    assert b"X-Avibe-Show-Recovery-Poll" not in response.content
     assert b"window.setInterval" not in response.content
-    assert b"window.setTimeout" in response.content
+    assert b"window.setTimeout" not in response.content
     assert b"document.write" not in response.content
     assert b"X-Avibe-Show-Recovery-Retry" in response.content
-    assert b"Math.min(30000, retryDelayMs * 2)" in response.content
+    assert b"Math.min(30000, retryDelayMs * 2)" not in response.content
     assert b"checksRemaining" not in response.content
     assert b'|| "runtime_unavailable"' not in response.content
     assert b'|| "unclassified"' not in response.content
@@ -3076,30 +3074,6 @@ def test_private_show_page_falls_back_to_runtime_recovery(monkeypatch, tmp_path,
     assert b"src/App.tsx" not in response.content
     assert b'src="./src/main.tsx"' not in response.content
     assert "Show runtime unavailable (runtime_archive_download_failed)" in caplog.text
-
-
-def test_show_recovery_poll_logs_at_debug_without_traceback(monkeypatch, tmp_path, caplog):
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    _save_config(tmp_path)
-    _create_show_page("ses123", "private")
-    set_show_runtime_manager_for_tests(
-        _FakeShowRuntimeManager(fail=True, failure_reason="runtime_archive_download_failed")
-    )
-    try:
-        with caplog.at_level(logging.DEBUG, logger="vibe.ui_server"):
-            response = app.test_client().get(
-                "/show/ses123/",
-                base_url="http://127.0.0.1:5123",
-                headers={"X-Avibe-Show-Recovery-Poll": "1"},
-            )
-    finally:
-        set_show_runtime_manager_for_tests(None)
-
-    records = [record for record in caplog.records if "Show runtime unavailable" in record.message]
-    assert response.status_code == 200
-    assert len(records) == 1
-    assert records[0].levelno == logging.DEBUG
-    assert records[0].exc_info is None
 
 
 def test_show_recovery_retry_now_is_explicit_intent(monkeypatch, tmp_path):
@@ -3119,7 +3093,7 @@ def test_show_recovery_retry_now_is_explicit_intent(monkeypatch, tmp_path):
 
     assert response.status_code == 200
     assert manager.automatic_calls == [False]
-    assert b"automatic retries stop" in response.content
+    assert b"One confirmation attempt remains" in response.content
     assert b"vibe doctor repair show-runtime" in response.content
 
 
@@ -3155,33 +3129,8 @@ def test_show_recovery_retry_header_cannot_bypass_for_viewers(monkeypatch, tmp_p
     assert manager.automatic_calls == [True]
     assert b"show-runtime-retry-now" not in response.content
     assert b"vibe doctor repair show-runtime" not in response.content
-    assert b"X-Avibe-Show-Recovery-Poll" in response.content
-
-
-def test_show_recovery_reason_change_renders_terminal_state_and_stops_polling(monkeypatch, tmp_path):
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    _save_config(tmp_path)
-    _create_show_page("ses123", "private")
-    manager = _FakeShowRuntimeManager(fail=True, failure_reason="runtime_archive_download_failed")
-    set_show_runtime_manager_for_tests(manager)
-    try:
-        client = app.test_client()
-        transient = client.get("/show/ses123/", base_url="http://127.0.0.1:5123")
-        manager.failure_reason = "runtime_archive_checksum_mismatch"
-        terminal = client.get(
-            "/show/ses123/",
-            base_url="http://127.0.0.1:5123",
-            headers={"X-Avibe-Show-Recovery-Poll": "1"},
-        )
-    finally:
-        set_show_runtime_manager_for_tests(None)
-
-    assert transient.headers["X-Avibe-Show-Recovery-Reason"] == "runtime_archive_download_failed"
-    assert b"nextReason !== currentReason" in transient.content
-    assert terminal.headers["X-Avibe-Show-Recovery-Reason"] == "runtime_archive_checksum_mismatch"
-    assert b"did not pass integrity verification" in terminal.content
-    assert b"Automatic retries have stopped" in terminal.content
-    assert b"X-Avibe-Show-Recovery-Poll" not in terminal.content
+    assert b"X-Avibe-Show-Recovery-Poll" not in response.content
+    assert b"Reload this page to try the request again" in response.content
 
 
 def test_show_recovery_projects_exhausted_unclassified_disposition(monkeypatch, tmp_path):
@@ -3335,13 +3284,11 @@ def test_show_request_recovers_after_transient_install_backoff(monkeypatch, tmp_
         backed_off = app.test_client().get(
             "/show/ses123/",
             base_url="http://127.0.0.1:5123",
-            headers={"X-Avibe-Show-Recovery-Poll": "1"},
         )
         clock[0] = 105.0
         recovered = app.test_client().get(
             "/show/ses123/",
             base_url="http://127.0.0.1:5123",
-            headers={"X-Avibe-Show-Recovery-Poll": "1"},
         )
     finally:
         set_show_runtime_manager_for_tests(None)
@@ -4090,8 +4037,6 @@ def test_show_page_api_transport_failure_uses_manager_evidence(monkeypatch, tmp_
         "error": "show_runtime_unavailable",
         "reason": "runtime_proxy_failed",
     }
-    assert manager._request_retry is not None
-    assert manager._request_retry.disposition is ShowRuntimeRetryDisposition.CONFIRMATION_PENDING
     assert manager._start_retry is None
 
 
@@ -4102,7 +4047,7 @@ def test_show_page_api_transport_failure_uses_manager_evidence(monkeypatch, tmp_
         ("zh-CN,zh;q=0.9", "请重新加载此页面，再次尝试请求"),
     ),
 )
-def test_public_show_transport_failure_stops_with_viewer_action(
+def test_public_show_transport_failure_remains_manually_retryable(
     monkeypatch,
     tmp_path,
     accept_language,
@@ -4131,11 +4076,11 @@ def test_public_show_transport_failure_stops_with_viewer_action(
 
     body = response.content.decode("utf-8")
     first_body = first.content.decode("utf-8")
-    assert first.headers["X-Avibe-Show-Recovery-Disposition"] == "confirmation_pending"
-    assert "X-Avibe-Show-Recovery-Poll" in first_body
+    assert first.headers["X-Avibe-Show-Recovery-Disposition"] == "continuous"
+    assert "X-Avibe-Show-Recovery-Poll" not in first_body
     assert response.status_code == 200
     assert response.headers["X-Avibe-Show-Recovery-Class"] == "unclassified"
-    assert response.headers["X-Avibe-Show-Recovery-Disposition"] == "manual_only"
+    assert response.headers["X-Avibe-Show-Recovery-Disposition"] == "continuous"
     assert "X-Avibe-Show-Recovery-Poll" not in body
     assert "show-runtime-retry-now" not in body
     assert "vibe doctor repair show-runtime" not in body
@@ -6687,6 +6632,8 @@ def test_show_runtime_manager_reports_missing_command(tmp_path):
         (ShowRuntimeFailureDimension.RUNTIME, "runtime_start_health_timeout", ShowRuntimeFailureClass.UNCLASSIFIED),
         (ShowRuntimeFailureDimension.RUNTIME, "runtime_start_attempt_failed", ShowRuntimeFailureClass.UNCLASSIFIED),
         (ShowRuntimeFailureDimension.RUNTIME, "runtime_start_command_unavailable", ShowRuntimeFailureClass.CONFIGURED),
+        (ShowRuntimeFailureDimension.RUNTIME, "runtime_start_command_invalid", ShowRuntimeFailureClass.CONFIGURED),
+        (ShowRuntimeFailureDimension.RUNTIME, "runtime_start_node_command_invalid", ShowRuntimeFailureClass.CONFIGURED),
         (ShowRuntimeFailureDimension.RUNTIME, "runtime_proxy_failed", ShowRuntimeFailureClass.UNCLASSIFIED),
         (ShowRuntimeFailureDimension.INSTALL, "runtime_archive_checksum_mismatch", ShowRuntimeFailureClass.CHECKSUM),
         (ShowRuntimeFailureDimension.INSTALL, "runtime_platform_unsupported", ShowRuntimeFailureClass.PERMANENT),
@@ -6851,11 +6798,6 @@ def test_install_guard_contention_is_not_an_attempt_failure(monkeypatch, tmp_pat
             "_complete_runtime_start_admission",
             True,
         ),
-        (
-            ShowRuntimeManager._request_runtime_transport,
-            "_complete_request_retry_outcome",
-            False,
-        ),
     ),
 )
 def test_retry_admission_owner_exit_inventory_is_single_publication(
@@ -6972,9 +6914,65 @@ def test_retry_records_discover_one_writer_per_operation():
 
     assert writers == {
         "_install_retry": {"_complete_managed_install_admission"},
-        "_request_retry": {"_complete_request_retry_outcome"},
         "_start_retry": {"_complete_runtime_retry_outcome"},
     }
+
+
+@pytest.mark.parametrize(
+    "owner",
+    (
+        ShowRuntimeManager._attempt_managed_install,
+        ShowRuntimeManager._admit_runtime_start,
+    ),
+)
+def test_retry_owner_exception_boundary_has_no_effectful_prologue(owner):
+    function = ast.parse(textwrap.dedent(inspect.getsource(owner))).body[0]
+    boundary_index = next(
+        index for index, statement in enumerate(function.body) if isinstance(statement, ast.Try)
+    )
+    prologue = function.body[1:boundary_index]
+
+    assert prologue
+    for statement in prologue:
+        assert isinstance(statement, (ast.Assign, ast.AnnAssign))
+        value = statement.value
+        assert isinstance(value, ast.Constant) and value.value in {
+            None,
+            False,
+            "admission",
+        }
+
+
+def test_retry_preconditions_are_acquired_once_by_each_retry_owner():
+    manager = ast.parse(textwrap.dedent(inspect.getsource(ShowRuntimeManager))).body[0]
+    owners = {
+        function.name: function
+        for function in manager.body
+        if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    consumers = {
+        name: sum(
+            1
+            for node in ast.walk(function)
+            if isinstance(node, ast.Attribute) and node.attr == "_retry_preconditions"
+        )
+        for name, function in owners.items()
+    }
+    assert {name: count for name, count in consumers.items() if count} == {
+        "_admit_runtime_start": 1,
+        "_attempt_managed_install": 1,
+    }
+    start_thread_hops = [
+        node
+        for node in ast.walk(owners["_admit_runtime_start"])
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "to_thread"
+        and node.args
+        and isinstance(node.args[0], ast.Attribute)
+        and node.args[0].attr == "_retry_preconditions"
+    ]
+    assert len(start_thread_hops) == 1
 
 
 def test_failed_forced_replacement_does_not_block_installed_runtime(monkeypatch, tmp_path):
@@ -7009,15 +7007,15 @@ def test_retry_identity_ignores_install_outputs_but_tracks_prerequisites(monkeyp
         runtime_source="manifest",
     )
     monkeypatch.setattr("core.show_runtime._resolve_node_command", lambda: node[0])
-    before = manager._retry_precondition_identity()
+    before = manager._retry_preconditions().identity
     manager.runtime_dir.mkdir(parents=True)
     (manager.runtime_dir / "current.json").write_text('{"install_dir":"changed"}', encoding="utf-8")
     (manager.runtime_dir / "runtime-cli").write_text("changed", encoding="utf-8")
 
-    assert manager._retry_precondition_identity() == before
+    assert manager._retry_preconditions().identity == before
 
     node[0] = ["/bin/node-b"]
-    assert manager._retry_precondition_identity() != before
+    assert manager._retry_preconditions().identity != before
 
 
 def test_retry_identity_fingerprints_user_configured_runtime(tmp_path):
@@ -7029,13 +7027,143 @@ def test_retry_identity_fingerprints_user_configured_runtime(tmp_path):
         workspace_root=tmp_path / "show",
         runtime_dir=tmp_path / "runtime",
     )
-    before = manager._retry_precondition_identity()
+    before = manager._retry_preconditions().identity
     replacement = tmp_path / "replacement-runtime-cli"
     replacement.write_text("second", encoding="utf-8")
     replacement.chmod(0o755)
     replacement.replace(command)
 
-    assert manager._retry_precondition_identity() != before
+    assert manager._retry_preconditions().identity != before
+
+
+def test_start_admission_snapshots_preconditions_once_off_event_loop(monkeypatch, tmp_path):
+    command = shutil.which("python3") or shutil.which("python")
+    assert command is not None
+    manager = ShowRuntimeManager(
+        command=command,
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+    main_thread = threading.get_ident()
+    snapshots = []
+    real_preconditions = manager._retry_preconditions
+
+    def snapshot():
+        preconditions = real_preconditions()
+        snapshots.append((threading.get_ident(), preconditions.identity))
+        return preconditions
+
+    class FakeProcess:
+        def poll(self):
+            return None
+
+    def fake_stop():
+        manager._process = None
+        manager._base_url = None
+
+    async def missing_startup_url(*, deadline):
+        return None
+
+    monkeypatch.setattr(manager, "_retry_preconditions", snapshot)
+    monkeypatch.setattr("core.show_runtime.subprocess.Popen", lambda *_args, **_kwargs: FakeProcess())
+    monkeypatch.setattr(manager, "_read_startup_url", missing_startup_url)
+    monkeypatch.setattr(manager, "stop", fake_stop)
+
+    result = asyncio.run(manager.ensure())
+
+    assert result.reason == "runtime_start_url_timeout"
+    assert len(snapshots) == 1
+    assert snapshots[0][0] != main_thread
+    assert manager._start_retry is not None
+    assert manager._start_retry.identity == snapshots[0][1]
+
+
+def test_healthy_runtime_does_not_fingerprint_preconditions_per_request(monkeypatch, tmp_path):
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+    manager._base_url = "http://127.0.0.1:4173"
+
+    async def healthy(_base_url):
+        return True
+
+    monkeypatch.setattr(manager, "_healthy", healthy)
+    monkeypatch.setattr(
+        manager,
+        "_retry_preconditions",
+        lambda: pytest.fail("healthy requests must not fingerprint retry preconditions"),
+    )
+
+    assert asyncio.run(manager.ensure()).available is True
+
+
+def test_install_admission_uses_one_precondition_snapshot_for_gate_and_publication(
+    monkeypatch,
+    tmp_path,
+):
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        runtime_source="npm",
+    )
+    snapshots = []
+    real_preconditions = manager._retry_preconditions
+
+    def snapshot(*, offline=None):
+        preconditions = real_preconditions(offline=offline)
+        snapshots.append(preconditions.identity)
+        return preconditions
+
+    def failed_install(*, force=None):
+        manager._install_reason = "runtime_install_failed"
+        return None
+
+    monkeypatch.setattr(manager, "_retry_preconditions", snapshot)
+    monkeypatch.setattr(manager, "_install_npm_runtime", failed_install)
+
+    _admission, operation = manager._attempt_managed_install(
+        force=False,
+        offline=False,
+        automatic=True,
+    )
+
+    assert operation.ok is False
+    assert len(snapshots) == 1
+    assert manager._install_retry is not None
+    assert manager._install_retry.identity == snapshots[0]
+
+
+@pytest.mark.parametrize(
+    ("configured_env", "command", "expected_reason"),
+    (
+        (None, "'unterminated", "runtime_start_command_invalid"),
+        ("'unterminated", None, "runtime_start_node_command_invalid"),
+    ),
+)
+def test_start_admission_publishes_malformed_configured_commands(
+    monkeypatch,
+    tmp_path,
+    configured_env,
+    command,
+    expected_reason,
+):
+    if configured_env is None:
+        monkeypatch.delenv("VIBE_SHOW_RUNTIME_NODE_BIN", raising=False)
+    else:
+        monkeypatch.setenv("VIBE_SHOW_RUNTIME_NODE_BIN", configured_env)
+    manager = ShowRuntimeManager(
+        command=command,
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+
+    result = asyncio.run(manager.ensure())
+
+    assert result.runtime_reason == expected_reason
+    assert result.runtime_failure_class is ShowRuntimeFailureClass.CONFIGURED
+    assert result.runtime_retry_disposition is ShowRuntimeRetryDisposition.MANUAL_ONLY
+    assert manager._start_retry is not None
 
 
 @pytest.mark.parametrize("entrypoint", ("request", "request_global"))
@@ -7055,20 +7183,15 @@ def test_runtime_request_transport_boundary_publishes_recovery_evidence(
             )
         return await manager.request_global("GET", "/_show-runtime/vendor/hash/runtime.js")
 
-    for expected_disposition in (
-        ShowRuntimeRetryDisposition.CONFIRMATION_PENDING,
-        ShowRuntimeRetryDisposition.MANUAL_ONLY,
-    ):
+    for _attempt in range(2):
         with pytest.raises(ShowRuntimeUnavailableError) as raised:
             asyncio.run(request_runtime())
 
         assert raised.value.reason == "runtime_proxy_failed"
         assert raised.value.failure_class is ShowRuntimeFailureClass.UNCLASSIFIED
-        assert raised.value.retry_disposition is expected_disposition
+        assert raised.value.retry_disposition is ShowRuntimeRetryDisposition.CONTINUOUS
         assert raised.value.recovery_action is ShowRuntimeRecoveryAction.REPAIR
 
-    assert manager._request_retry is not None
-    assert manager._request_retry.attempt == 2
     assert manager._start_retry is None
     assert manager._availability.runtime is ShowRuntimeServingState.SERVING
 
@@ -7077,7 +7200,6 @@ def test_runtime_request_transport_boundary_publishes_recovery_evidence(
 
     monkeypatch.setattr("core.show_runtime.httpx.AsyncClient.request", successful_request)
     assert asyncio.run(request_runtime()).status_code == 200
-    assert manager._request_retry is None
 
 
 def test_recovery_fact_consumption_census_has_no_default_producer():
@@ -7130,6 +7252,7 @@ def test_recovery_fact_consumption_census_has_no_default_producer():
     assert '|| "unclassified"' not in recovery_source
     assert '|| "manual_only"' not in recovery_source
     assert "checksRemaining" not in recovery_source
+    assert "X-Avibe-Show-Recovery-Poll" not in recovery_source
 
 
 def test_runtime_http_transport_census_closes_every_direct_client_path():
@@ -7167,7 +7290,7 @@ def test_runtime_http_transport_census_closes_every_direct_client_path():
 
 def test_retry_identity_census_contains_only_operation_preconditions():
     identity_tree = ast.parse(
-        textwrap.dedent(inspect.getsource(ShowRuntimeManager._retry_precondition_identity))
+        textwrap.dedent(inspect.getsource(ShowRuntimeManager._retry_preconditions))
     )
     identity_inputs = {
         node.attr
@@ -7197,6 +7320,7 @@ def test_retry_identity_census_contains_only_operation_preconditions():
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
     assert helper_inputs == {
+        "_ShowRuntimeRetryPreconditions",
         "_command_fingerprint",
         "_env_flag_enabled",
         "_packaged_runtime_manifest_pin",
@@ -7277,7 +7401,7 @@ def test_show_runtime_manager_retries_transient_install_after_deadline(monkeypat
     assert manager._install_retry is None
 
 
-def test_show_runtime_prepare_seeds_request_retry_backoff(monkeypatch, tmp_path):
+def test_show_runtime_prepare_seeds_install_retry_backoff(monkeypatch, tmp_path):
     clock = [100.0]
     attempts = []
     command = [str(tmp_path / "runtime-cli")]
@@ -9732,7 +9856,7 @@ def test_show_runtime_manager_reuses_github_runtime_during_install_backoff(monke
         "core.show_runtime._resolve_command",
         lambda command: ["/bin/node"] if command == "node" else None,
     )
-    identity = manager._retry_precondition_identity()
+    identity = manager._retry_preconditions().identity
     manager._install_retry = manager._next_retry_backoff(
         None,
         identity=identity,
@@ -9754,7 +9878,7 @@ def test_show_runtime_manager_reuses_cached_managed_command_during_install_backo
     )
     manager._managed_command = ["/bin/node", "/tmp/runtime/cli.js"]
     monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: None)
-    identity = manager._retry_precondition_identity()
+    identity = manager._retry_preconditions().identity
     manager._install_retry = manager._next_retry_backoff(
         None,
         identity=identity,
@@ -10572,7 +10696,7 @@ def test_public_show_page_skips_remote_login_but_requires_public_host(monkeypatc
         assert b"Loading Show Page" in response.content
         assert b"The Show Runtime is unavailable" in response.content
         assert b"vibe doctor repair show-runtime" not in response.content
-        assert b"Only the Avibe instance owner can run a recovery action" in response.content
+        assert b"Reload this page to try the request again" in response.content
         assert b'src="./src/main.tsx"' not in response.content
 
         mismatch = app.test_client().get(

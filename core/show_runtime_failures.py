@@ -50,7 +50,9 @@ _CONFIGURED_FAILURES = frozenset(
         "runtime_node_missing",
         "runtime_node_unsupported",
         "runtime_npm_missing",
+        "runtime_start_command_invalid",
         "runtime_start_command_unavailable",
+        "runtime_start_node_command_invalid",
     }
 )
 

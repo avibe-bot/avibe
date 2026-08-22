@@ -2331,7 +2331,6 @@ def show_page_runtime_recovery_html(
             <p>{translate(no_action_message)}</p>
           </div>"""
     recovery_script = _show_runtime_recovery_script(
-        retry_disposition=retry_disposition,
         retry_authorized=retry_authorized and surface_action is not ShowRuntimeRecoveryAction.NO_LOCAL_ACTION,
     )
     return f"""<!doctype html>
@@ -2520,43 +2519,8 @@ def show_page_runtime_recovery_html(
 
 def _show_runtime_recovery_script(
     *,
-    retry_disposition: ShowRuntimeRetryDisposition,
     retry_authorized: bool,
 ) -> str:
-    automatic_script = "" if retry_disposition is ShowRuntimeRetryDisposition.MANUAL_ONLY else """
-      const currentReason = document.documentElement.dataset.showRuntimeReason;
-      const currentClass = document.documentElement.dataset.showRuntimeClass;
-      const currentDisposition = document.documentElement.dataset.showRuntimeRetryDisposition;
-      let retryDelayMs = __RETRY_DELAY__;
-      const checkRuntime = async () => {
-        await new Promise((resolve) => window.setTimeout(resolve, retryDelayMs));
-        try {
-          const response = await fetch(window.location.href, {
-            cache: "no-store",
-            credentials: "same-origin",
-            headers: { "X-Avibe-Show-Recovery-Poll": "1" },
-          });
-          if (!response.headers.get("X-Avibe-Show-Recovery")) {
-            window.location.reload();
-            return;
-          }
-          const nextReason = response.headers.get("X-Avibe-Show-Recovery-Reason");
-          const nextClass = response.headers.get("X-Avibe-Show-Recovery-Class");
-          const nextDisposition = response.headers.get("X-Avibe-Show-Recovery-Disposition");
-          if (nextReason !== currentReason || nextClass !== currentClass || nextDisposition !== currentDisposition) {
-            window.location.reload();
-            return;
-          }
-        } catch (_error) {}
-        retryDelayMs = Math.min(30000, retryDelayMs * 2);
-        void checkRuntime();
-      };
-      void checkRuntime();
-    """
-    automatic_script = automatic_script.replace(
-        "__RETRY_DELAY__",
-        "6000" if retry_disposition is ShowRuntimeRetryDisposition.CONFIRMATION_PENDING else "3000",
-    )
     explicit_script = "" if not retry_authorized else """
       const retryNow = async () => {
         const button = document.getElementById("show-runtime-retry-now");
@@ -2572,11 +2536,10 @@ def _show_runtime_recovery_script(
       };
       document.getElementById("show-runtime-retry-now")?.addEventListener("click", retryNow);
     """
-    if not automatic_script and not explicit_script:
+    if not explicit_script:
         return ""
     return f"""<script>
       {explicit_script}
-      {automatic_script}
     </script>"""
 
 

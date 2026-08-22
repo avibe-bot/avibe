@@ -571,18 +571,15 @@ run again. A healthy installed command bypasses the install gate entirely, which
 already provides recovery after an out-of-process repair or pointer switch
 without making product state part of the backoff identity.
 
-**Classification vocabulary is shared; retry ownership is not.** Install,
-startup, and Runtime request transport have independent retry records because
-they answer different questions. A failed install is not evidence about runtime
-startability, and a successful start is not evidence that a Runtime request can
-be served. Every manager admission decision receives intent explicitly:
-automatic callers pass `automatic=True`, while explicit user actions pass false
-and bypass a live install or startup gate unconditionally. The request owner does
-not gate ordinary requests at all: a bound on automatic confirmation must never
-become a bound on user-initiated work, or an earlier asset failure could refuse a
-request after the Runtime recovered. Request failures increment and successful
-requests clear their record regardless of who initiated them; the browser alone
-uses the published disposition to decide whether to continue automatic polling.
+**Classification vocabulary is shared; retry ownership is not.** Install and
+startup have independent retry records because they answer different questions.
+A failed install is not evidence about runtime startability. Every manager
+admission decision receives intent explicitly: automatic callers pass
+`automatic=True`, while explicit user actions pass false and bypass a live
+install or startup gate unconditionally. Runtime transport failures remain a
+separate dimension and publish typed evidence, but PR 2c deliberately carries no
+request-level retry record or automatic browser poller; those move together to
+the successor described below.
 
 A forced replacement is accounted from the operation outcome (`ok`) only. If
 replacement reports `ok=false` while a healthy existing command remains on disk,
@@ -606,15 +603,15 @@ the other.
 
 The install retry owner therefore publishes its disposition inside the install
 dimension, and the start retry owner publishes independently inside the runtime
-dimension. The request transport owner publishes its disposition through the
-typed unavailable error produced by that operation; it does not overwrite the
-runtime dimension, because a request failure is not evidence that startup
-failed. The closed vocabulary is `continuous`, `confirmation_pending`, and
-`manual_only`. The policy dimension publishes its own `configured` class and
-`manual_only` disposition for both automatic-install opt-outs. The recovery page
-projects these values and never consults failure class, reason prefixes, or a
-default branch to decide whether to poll. A new value without rendering support
-fails visibly instead of acquiring a confident false behavior.
+dimension. The request transport boundary publishes the four facts carried by
+its typed unavailable error and never overwrites install or startup state. On
+this branch a transport failure is non-terminal and the recovery page offers a
+manual reload; it is structurally unable to publish `manual_only` for the request
+dimension. The closed disposition vocabulary remains `continuous`,
+`confirmation_pending`, and `manual_only`. The policy dimension publishes its
+own `configured` class and `manual_only` disposition for both automatic-install
+opt-outs. The page projects published values and never derives behavior from a
+failure class, reason prefix, or transport header.
 
 **Admission accounting is atomic with admission.** The provider result,
 exception normalization, and retry-record write converge while the serialized
@@ -637,16 +634,15 @@ visible sites is not a substitute for stating a property with its universal
 quantifier.
 
 The terminal rule is therefore independent of operation and dimension: for every
-retry owner, one exception-closed span covers **gate (when one exists) -> attempt
--> publication**, and every exit publishes exactly one outcome through the same
-owner. Install publishes before releasing its serialized guard; startup covers
-workspace/cache establishment, orphan cleanup, log creation, process spawn,
-startup URL discovery, and health confirmation; request transport covers the
-shared `request()` / `request_global()` HTTP attempt. Ordinary exceptions become
-structured failures. Cancellation and other `BaseException` exits publish first
-and then propagate. Success, failure, gate refusal, and exception paths all
-converge at one completion publisher; no return or exception site writes retry
-state itself.
+retry owner, one exception-closed span covers **evidence acquisition -> gate (when
+one exists) -> attempt -> publication**, and every exit publishes exactly one
+outcome through the same owner. Install publishes before releasing its serialized
+guard; startup covers local precondition acquisition, workspace/cache
+establishment, orphan cleanup, log creation, process spawn, startup URL discovery,
+and health confirmation. Ordinary exceptions become structured failures.
+Cancellation and other `BaseException` exits publish first and then propagate.
+Success, failure, gate refusal, and exception paths all converge at one completion
+publisher; no return or exception site writes retry state itself.
 
 `not_applicable` means an attempt was not owed. Install-guard contention is the
 canonical case because another holder is already making progress. `failed`
@@ -657,17 +653,16 @@ confirmation, and then name the explicit recovery action.
 
 The exit inventory is executable evidence rather than a review assertion. An AST
 test discovers every manager retry-record attribute and requires exactly one
-writer for each; this owner set now contains install, start, and request transport,
-so adding a fourth record makes a stale two- or three-owner assertion fail. A
-separate gate census discovers every `_active_retry` caller and proves that only
-install and start are backoff-gated; request transport deliberately is not. For
-each owner, the exit inventory requires one completion-publisher call in a
-`finally`, one normal return after publication, one propagated `BaseException`
-raise after publication, and a `BaseException` handler around the attempt span.
-The proof becomes incomplete if retry storage no longer follows the discovered
-attribute shape, a completion publisher gains fallible I/O, or an operation gains
-another exit path; such a change must extend the inventory and move the boundary
-rather than relying on the old assertion.
+writer for each; this owner set contains install and start, so a newly introduced
+record makes the assertion fail. A separate gate census discovers every
+`_active_retry` caller and proves that those same two owners are the only gated
+dimensions. For each owner, the exit inventory requires one completion-publisher
+call in a `finally`, one normal return after publication, one propagated
+`BaseException` raise after publication, and a `BaseException` handler around the
+attempt span. The proof becomes incomplete if retry storage no longer follows the
+discovered attribute shape, a completion publisher gains fallible I/O, or an
+operation gains another exit path; such a change must extend the inventory and
+move the boundary rather than relying on the old assertion.
 
 The fourth findings-bearing head exposed a deeper failure in how the prior proof
 obligations were chosen. Each ruling named the right principle and then allowed
@@ -685,25 +680,14 @@ fingerprints, and a browser-owned retry budget. Evidence that cannot fail outsid
 the last finding's domain is not evidence. This is the fourth governance
 admission for PR #1640.
 
-The runtime request span is therefore exception-closed as well. `request()` and
-`request_global()` share one manager-owned transport boundary and one independent
-request retry record. Reusing the start record is structurally incapable of
-bounding this failure: every request calls `ensure()`, whose healthy fast path
-publishes successful startup immediately before transport and clears the start
-record. It is also a dimension crossing. The request record uses the same local
-precondition identity as install and startup: source configuration, manifest pin,
-and command fingerprints are included because Avibe does not write them; PID,
-`base_url`, and spawn paths are excluded because Avibe does. This is the
-write-set predicate deciding an input that the former exclusion list could not.
-
-An ordinary transport exception publishes runtime reason, class, retry
-disposition, and recovery action through `ShowRuntimeUnavailableError` before it
-reaches the UI. The first unchanged unclassified failure schedules one automatic
-confirmation; the second publishes `manual_only`. A successful request is the
-only operation that clears this record. For a public viewer, the terminal copy
-therefore names the action that viewer can perform: reload the page to try a real
-request again, then contact the instance owner if it still fails. Stopping polling
-without such an action would reproduce the original stuck-page defect.
+The runtime request span is exception-closed for evidence even though it owns no
+retry record on this branch. `request()` and `request_global()` share one
+manager-owned transport boundary. An ordinary transport exception publishes
+reason, class, non-terminal disposition, and recovery action through
+`ShowRuntimeUnavailableError` before reaching the UI. Reusing the start record is
+forbidden: every request calls `ensure()`, whose healthy fast path clears startup
+backoff immediately before transport, and successful startup is not evidence that
+a request can be served.
 
 The API's explicit total-deadline error remains a distinct
 `ShowRuntimeRequestTimeoutError` response. A raw default `httpx` transport timeout
@@ -717,26 +701,18 @@ arbitrary exception and could permanently stop a public page, is deleted. An
 unknown programming exception remains loud rather than acquiring recovery
 evidence no owner published.
 
-The browser owns pacing, never retry eligibility. It waits with bounded delay
-while the published disposition remains `continuous` or
-`confirmation_pending`, and reloads when the owner-published recovery facts
-change. It has no `checksRemaining` counter: a failed HTTP poll did not reach
-manager admission and therefore cannot consume the manager's one confirmation.
-Only the retry owner changes the disposition to `manual_only`.
-
-Two censuses are merge evidence for this property:
+Two censuses are merge evidence for the retained property:
 
 1. Enumerate every recovery fact consumed by the page or an admission gate — the
    unavailable exception's reason/class/disposition/action, the corresponding
-   response headers and document dataset, authorization plus the retry request,
-   and retry identity/deadline. For every value, name exactly one producer; every
+   response headers and document dataset, authorization plus explicit retry, and
+   install/start retry identity/deadline. For every value, name exactly one producer; every
    other site is a projection, and defaulting branches are deleted rather than
    repaired. The executable census also enumerates every direct `AsyncClient`
    path in the manager and requires external requests to converge through the
    transport owner. It becomes incomplete if a new header, dataset key, gate
    input, exception route, or direct HTTP client appears without extending the
-   census. The request retry record is discovered with the other owners; start
-   success cannot clear it, while a successful request must.
+   census. No request retry record or automatic-poll header may appear in PR 2c.
 2. Enumerate every retry-identity input and apply the write-set predicate above.
    The executable census fixes the complete set of manager attributes and helper
    inputs, proves that the manager assigns those attributes only during
@@ -745,10 +721,76 @@ Two censuses are merge evidence for this property:
    It becomes incomplete if a helper begins reading a new fact or an Avibe
    operation begins writing an included path without extending the write-set.
 
-The pre-committed boundary is now explicit: if a fifth findings-bearing head
-returns a finding inside a property PR #1640 already claims to own, split the PR
-at that property boundary instead of issuing a fourth site ruling. Green tests do
-not override that decision.
+The fifth findings-bearing head fired the pre-committed boundary. Its three
+findings all landed inside properties PR #1640 claimed to own: the browser made
+one more automatic request after the request owner published `manual_only`, local
+fingerprint I/O ran synchronously on the ASGI path, and malformed user commands
+escaped before admission ownership began. Master has no automatic poller, only a
+manual Retry button. Therefore automatic request-level recovery — the browser
+poll loop and the request retry record that exists only to bound it — leaves PR
+2c as one property. Removing both restores master's manual behavior exactly;
+retaining only one would either leave an unbounded loop or make a bound apply to
+user-initiated work.
+
+The identity findings stay and are fixed in PR 2c because install and startup are
+their remaining consumers. Before consolidation each admission acquired identity
+twice on opposite sides of its exception boundary. The gate could consult snapshot
+B while publication keyed the record to snapshot A; a changed executable or file
+between reads then made the bound silently fail. Each owner now acquires one
+snapshot inside its exception boundary, uses that same value for gate and
+publication, and startup performs blocking path resolution, stat, and hashing off
+the event loop only when a start admission is actually needed. A healthy asset
+request performs no retry fingerprinting. Malformed user-owned Runtime or Node
+commands publish configured, manual-only evidence rather than escaping as a 500.
+
+This exposed the fifth governance error in the boundary method. The previous rule
+started ownership at the gate because gate, attempt, and publication were the
+artifacts in view. It omitted the evidence that decides the gate. An owner's
+exception boundary begins at the first read of state outside the owner, not at the
+first action. Anything read before the `try` is unowned evidence on which the
+published outcome may depend.
+
+The corresponding proof is an AST-derived prologue inventory for every retry
+owner. It enumerates every attribute read, method call, and free-function call
+between the function's first statement and its `try`, with a reason why each
+cannot fail or affect the outcome. The expected runtime-effectful prologue is
+empty: only local variables initialized from literals may precede the boundary.
+This proof would fail if a future owner resolved a command, read manager state, or
+called a helper before entering `try`; it becomes incomplete if ownership moves
+to a callable the inventory no longer discovers.
+
+**Successor scope: automatic request-level recovery.** The successor is the only
+PR that may reintroduce the automatic loop. It stacks on PR 2c and carries the
+request retry owner with the loop because they are one property. It inherits the
+following constraints in full:
+
+1. One request owner spans precondition acquisition, transport attempt, and
+   publication, is exception-closed, and has one publication point. It uses the
+   write-set predicate for identity: source configuration, manifest pin, and
+   command fingerprints are included because Avibe does not write them; PID,
+   `base_url`, and spawn paths are excluded because Avibe does. Start success
+   cannot clear request evidence; only a successful request can.
+2. The owner publishes `continuous`, `confirmation_pending`, or `manual_only`.
+   The browser owns pacing only and never eligibility. It has no
+   `checksRemaining` or other confirmation counter: a rejected poll did not reach
+   manager admission and cannot consume the owner's confirmation budget.
+3. A bound on automatic attempts never gates user-initiated work. Ordinary page
+   loads, assets, and an authorized Retry-now request always attempt transport.
+   When automatic confirmation stops, public-viewer copy must name an action that
+   viewer can perform: reload the page, then contact the owner if it still fails.
+4. Polling state is isolated from document replacement. A classic script may not
+   redeclare top-level lexical bindings after `document.open()`; use a private
+   scope or a real navigation, and test a non-terminal-to-non-terminal transition.
+5. A terminal response is rendered without another Runtime request. Reloading an
+   ordinary Show Page GET after `manual_only` would manufacture the automatic
+   attempt the owner just refused. Header absence may reload because it proves the
+   Runtime is serving; a changed terminal disposition may not re-enter transport.
+
+The successor must preserve the retained transport evidence closure: the UI has
+no fallback that fabricates reason, class, disposition, or action. It must also
+preserve owner authorization: only the authenticated instance owner may request
+an explicit bypass, and a public or limited viewer is never shown an owner-only
+action.
 
 **Explicit retry is authorized by the control-plane owner.** The recovery header
 expresses a request; it never grants authority. Avibe is a personal, single-user
@@ -1390,12 +1432,10 @@ as a rule because the reduced signal looked adequate each time.
   inherits this, including `vibe doctor`'s repair verifier, which is what made it
   a finding here. A freshly started runtime must answer a request before it
   counts as serving.
-- The recovery page's poll decides whether to keep waiting from the manager-owned
-  disposition, not from a browser counter. It verifies that the response is still
-  the recovery page and compares the owner-published reason, class, and disposition
-  with the current document. Any change re-renders the page, including a move to a
-  terminal state where the owner stops polling. A failed poll consumes no
-  confirmation because manager admission never happened.
+- Automatic recovery is deferred to PR 2c′. Until then the recovery page offers a
+  manual reload plus an authenticated owner-only Retry-now action. PR 2c′ may poll
+  only from manager-owned disposition, never from a browser counter, and a failed
+  poll consumes no confirmation because manager admission never happened.
 
 **A probe proves only the state it was calibrated for.** The first attempt at the
 fix above reused `_healthy()` exactly as the already-running path calls it: one
@@ -1566,7 +1606,8 @@ exposure predates these PRs and shipping the truthful row strictly reduces it.
 | 2b | W5 readiness proof | avibe | `ensure()` health-probes a fresh start; `doctor` inherits it. Independent of 2a. Bounded retry plus Doctor's three-state startability; claims nothing about replacement. |
 | 2b′ | W4 replacement operation contract | avibe | What `prepare()` claims, what a provider must prove, install-state ownership, build provenance, and destructive cache/delegate boundaries. Split out of 2b after six findings-bearing heads; checkout ownership is not shipped here. |
 | 2b″ | Protect the managed GitHub checkout | avibe | Replace master's unconditional checkout takeover with a three-valued decision that keeps undetermined ownership away from both checkout movement and build-evidence destruction. |
-| 2c | W4 retry + W5 page | avibe | Retry classification and the recovery page/poll, on top of 2a's reason. |
+| 2c | W4 install/start retry + W5 page | avibe | Independent install/start retry ownership, atomic admission, typed transport evidence, and an honest manual recovery page. Automatic request recovery is explicitly absent. |
+| 2c′ | Automatic request-level recovery | avibe | Reintroduce the browser poll loop together with the request retry owner that bounds it, preserving user-initiated requests and the inherited browser constraints. |
 | 3 | W1 | vibe-show-runtime | Independent; effect appears at the next runtime release. |
 | 4 | W3.1 | avibe | Source ladder. Valuable on its own — removes the single point of failure using only tiers that exist today. |
 | 5 | W3.0 | vibe-show-runtime | Version scheme. Prerequisite for 6 and 7. Gate on owner confirmation. |

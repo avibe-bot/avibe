@@ -13117,9 +13117,6 @@ def _log_show_runtime_unavailable(reason: str, *, public: bool, fallback: bool) 
     else:
         target = "static public Show Page" if public else "static Show Page"
     message = f"Show runtime unavailable (%s); serving {target}"
-    if request.headers.get("X-Avibe-Show-Recovery-Poll") == "1":
-        logger.debug(message, reason)
-        return
     logger.warning(message, reason, exc_info=True)
 
 
