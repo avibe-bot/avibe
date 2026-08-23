@@ -126,6 +126,7 @@ class BestEffortMemoryWriter:
         self._closed = False
         self._unavailable = False
         self._attachments_disabled = False
+        self.dropped = 0
 
     @property
     def unavailable(self) -> bool:
@@ -134,6 +135,11 @@ class BestEffortMemoryWriter:
     @property
     def attachments_enabled(self) -> bool:
         return not self._attachments_disabled
+
+    def dropped_count(self) -> int:
+        """Return the process-local count of queue insertions discarded as full."""
+
+        return self.dropped
 
     def disable_attachment_intake(self) -> None:
         self._attachments_disabled = True
@@ -201,6 +207,7 @@ class BestEffortMemoryWriter:
         try:
             self._queue.put_nowait(item)
         except asyncio.QueueFull:
+            self.dropped += 1
             return False
         self._queued_items += 1
         self._ensure_worker()
@@ -228,6 +235,7 @@ class BestEffortMemoryWriter:
                 _BarrierItem(raw_session_id=raw_session_id, owns_permit=True)
             )
         except asyncio.QueueFull:
+            self.dropped += 1
             self._release_permit()
             return "full"
         self._queued_items += 1
@@ -549,6 +557,7 @@ class BestEffortMemoryWriter:
                             )
                             self._queued_items += 1
                         except asyncio.QueueFull:
+                            self.dropped += 1
                             self._release_permit()
                             pending.scheduled = False
                             pending.retry_after = now + IDLE_FLUSH_SECONDS

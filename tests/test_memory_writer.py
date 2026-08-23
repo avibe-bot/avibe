@@ -114,6 +114,54 @@ def test_completed_duplicate_entries_are_evictable_behind_pending_claims(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_full_queue_discards_increment_process_local_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current = datetime.now(timezone.utc)
+    writer = _writer(tmp_path, FakeMemoryProvider(), now=lambda: current)
+    writer._ensure_worker = lambda: None
+    writer._queue = asyncio.Queue(maxsize=1)
+    writer._queue.put_nowait(_BarrierItem())
+
+    reservation = writer.reserve("capture")
+    assert not isinstance(reservation, str)
+    assert not writer.offer_capture(
+        reservation,
+        _admission(0),
+        text="message",
+        attachments=(),
+        bundle=None,
+    )
+    reservation.release()
+    assert writer.offer_barrier("raw-session") == "full"
+
+    ref = _ref()
+    key = ref.serialize()
+    writer._pending[key] = _PendingSession(
+        ref,
+        "raw-session",
+        deque(["digest"]),
+        current.timestamp(),
+        current.timestamp() - IDLE_FLUSH_SECONDS,
+    )
+
+    sleeps = 0
+
+    async def one_scheduler_tick(_seconds: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps > 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr("core.memory.writer.asyncio.sleep", one_scheduler_tick)
+    await writer._schedule_due_flushes()
+
+    assert writer.dropped_count() == 3
+    assert writer._pending[key].retry_after == current.timestamp() + IDLE_FLUSH_SECONDS
+
+
+@pytest.mark.asyncio
 async def test_worker_delivers_captures_in_offer_order(tmp_path: Path) -> None:
     provider = FakeMemoryProvider()
     writer = _writer(tmp_path, provider)
