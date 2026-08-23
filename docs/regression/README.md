@@ -286,7 +286,7 @@ Incus regression environment is ready:
   Target: master
   Project: avr-master
   Instance: avibe-master
-  Show Runtime source: github-source
+  Show Runtime source: archive
 ```
 
 Default names:

@@ -148,7 +148,7 @@ State and lookup notes:
 - metadata lives under the primary checkout's `.runtime/incus-regression/`, even
   when the runner is invoked from a task worktree
 - `.env.regression` is read from the current worktree first, then the primary checkout
-- branch/master source checkouts default `REGRESSION_SHOW_RUNTIME_SOURCE=github-source`; packaged release installs should use the packaged manifest path
+- branch/master regression defaults to a locally built Show Runtime archive; packaged release installs use the packaged manifest path
 
 ## 4. Configuration and Routing Model
 

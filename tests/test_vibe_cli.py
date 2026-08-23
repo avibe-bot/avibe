@@ -1801,6 +1801,32 @@ def test_show_runtime_doctor_fast_mode_reports_local_state_without_network(monke
     assert next(item for item in items if item.get("code") == "show_runtime.archive_probe_skipped")["status"] == "pass"
 
 
+@pytest.mark.parametrize("language", ["en", "zh"])
+def test_show_runtime_doctor_retires_legacy_source_with_actionable_replacement(
+    monkeypatch,
+    language,
+):
+    manager = SimpleNamespace(
+        status=lambda: {
+            "provider": "github",
+            "platform": "linux-x64",
+            "explicit_command": None,
+            "node_available": True,
+            "node_supported": True,
+            "install": {"state": "absent", "install_dir": None},
+        },
+        archive_cache_status=lambda: {"candidate_count": 0, "candidate_bytes": 0, "skipped_reason": None},
+    )
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda **_kwargs: manager)
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
+
+    items = cli._show_runtime_doctor_items(deep=False)
+
+    failure = next(item for item in items if item.get("code") == "show_runtime.provider_unsupported")
+    assert failure["status"] == "fail"
+    assert failure["action"] == cli.i18n_t("runtime.doctor.providerUnsupportedAction", language)
+
+
 def test_show_runtime_doctor_reports_skipped_archive_inspection_as_warn(monkeypatch):
     status = {
         "provider": "manifest-cache",
@@ -2290,58 +2316,6 @@ def test_repair_show_runtime_prepares_missing_runtime(monkeypatch, tmp_path):
     assert stopped == [True]
 
 
-def test_repair_show_runtime_first_github_install_failure_does_not_claim_preserved_install(
-    monkeypatch,
-    tmp_path,
-):
-    from core.show_runtime import ShowRuntimeManager
-
-    real_manager = ShowRuntimeManager(
-        runtime_dir=tmp_path / "runtime",
-        runtime_source="github-source",
-        github_repo=str(tmp_path / "upstream"),
-        github_ref="main",
-    )
-    status = real_manager.status()
-    source_dir = real_manager._github_source_dir()
-    prepared = []
-
-    def prepare(force=False):
-        prepared.append(force)
-        return {
-            "ok": False,
-            "reason": "runtime_github_source_update_failed",
-            "provider": "github-source",
-            "platform": "linux-x64",
-            "command": None,
-            "status": status,
-        }
-
-    manager = SimpleNamespace(status=lambda: status, prepare=prepare)
-    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda **_kwargs: manager)
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "en")
-
-    result = cli._repair_show_runtime()
-
-    assert status["install"] == {
-        "state": "absent",
-        "reason": None,
-        "failure_class": None,
-        "recovery_action": None,
-        "command": None,
-        "install_dir": None,
-        "runtime_version": None,
-        "matches_manifest": None,
-    }
-    assert "installed" not in status
-    assert "installed_matches_manifest" not in status
-    assert "install_dir" not in status
-    assert str(source_dir) not in result["message"]
-    assert result["message"] == "Show Runtime preparation failed: runtime_github_source_update_failed"
-    assert result["installed"] is False
-    assert prepared == [False]
-
-
 def test_repair_show_runtime_does_not_reinstall_startable_runtime(monkeypatch, tmp_path):
     constructor_calls = []
     verifier_stops = []
@@ -2684,80 +2658,6 @@ def test_repair_show_runtime_reports_failed_replacement_while_old_runtime_remain
     assert prepared == [True]
 
 
-@pytest.mark.parametrize(
-    ("language", "expected_cause", "expected_action"),
-    [
-        (
-            "en",
-            "could not complete the managed source update",
-            "Check directory permissions and the Avibe log",
-        ),
-        (
-            "zh",
-            "\u65e0\u6cd5\u5728",
-            "\u68c0\u67e5\u76ee\u5f55\u6743\u9650\u548c Avibe \u65e5\u5fd7",
-        ),
-    ],
-)
-def test_repair_show_runtime_names_github_update_failure_and_remediation(
-    monkeypatch,
-    tmp_path,
-    language,
-    expected_cause,
-    expected_action,
-):
-    source_dir = tmp_path / "github-source"
-    prepared = []
-
-    def prepare(force=False):
-        prepared.append(force)
-        return {
-            "ok": False,
-            "reason": "runtime_github_source_update_failed",
-            "provider": "github-source",
-            "platform": "linux-x64",
-            "command": None,
-            "status": {
-                "install": {"state": "installed", "install_dir": str(source_dir)},
-            },
-        }
-
-    manager = SimpleNamespace(
-        status=lambda: {
-            "provider": "github-source",
-            "platform": "linux-x64",
-            "install": {"state": "installed", "install_dir": str(source_dir)},
-            "command": [str(tmp_path / "node"), str(source_dir / "cli.js")],
-        },
-        prepare=prepare,
-    )
-
-    def manager_factory(**kwargs):
-        if not kwargs:
-            return manager
-        return SimpleNamespace(
-            ensure=lambda: asyncio.sleep(
-                0,
-                result=SimpleNamespace(available=False, reason="runtime_start_health_timeout"),
-            ),
-            stop=lambda: None,
-        )
-
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
-    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", manager_factory)
-
-    result = cli._repair_show_runtime()
-
-    assert result["status"] == "failed"
-    assert result["reason"] == "runtime_github_source_update_failed"
-    assert result["installed"] is True
-    assert result["install_dir"] == str(source_dir)
-    assert str(source_dir) in result["message"]
-    assert expected_cause in result["message"]
-    assert expected_action in result["message"]
-    assert prepared == [True]
-
-
 def test_runtime_prepare_strict_does_not_report_policy_skip_as_ready(monkeypatch, capsys):
     manager = SimpleNamespace(
         prepare=lambda **_kwargs: {
@@ -2826,6 +2726,35 @@ def test_runtime_prepare_force_does_not_report_explicit_command_as_replaced(monk
     assert exit_code == 1
     assert "Show Runtime ready" not in captured.out
     assert "VIBE_SHOW_RUNTIME_BIN" in captured.err
+
+
+@pytest.mark.parametrize("legacy_source", ["github", "github-source", "GitHub-Source"])
+def test_runtime_manager_migrates_legacy_source_to_packaged_manifest(
+    monkeypatch,
+    caplog,
+    tmp_path,
+    legacy_source,
+):
+    from core import show_runtime
+
+    monkeypatch.setenv("VIBE_SHOW_RUNTIME_SOURCE", legacy_source)
+    monkeypatch.setattr(show_runtime, "_WARNED_RETIRED_RUNTIME_SOURCES", set())
+    with caplog.at_level("WARNING", logger="core.show_runtime"):
+        manager = show_runtime.ShowRuntimeManager(
+            workspace_root=tmp_path / "show",
+            runtime_dir=tmp_path / "runtime",
+        )
+        second_manager = show_runtime.ShowRuntimeManager(
+            workspace_root=tmp_path / "show-2",
+            runtime_dir=tmp_path / "runtime-2",
+        )
+
+    assert manager.runtime_source == "manifest-cache"
+    assert second_manager.runtime_source == "manifest-cache"
+    warnings = [record.message for record in caplog.records if "is retired" in record.message]
+    assert warnings == [
+        f"VIBE_SHOW_RUNTIME_SOURCE={legacy_source.lower()} is retired; using manifest-cache instead"
+    ]
 
 
 @pytest.mark.parametrize("failure_phase", ["temporary_directory", "verifier", "cleanup"])

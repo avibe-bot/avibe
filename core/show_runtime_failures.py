@@ -359,13 +359,6 @@ _FAILURE_DECLARATION_ROWS = (
         ShowRuntimeRecoveryAction.REPAIR,
     ),
     ShowRuntimeFailureDeclaration(
-        "runtime_github_source_update_failed",
-        ShowRuntimeFailureDimension.INSTALL,
-        "github-provider",
-        ShowRuntimeFailureClass.UNCLASSIFIED,
-        ShowRuntimeRecoveryAction.REPAIR,
-    ),
-    ShowRuntimeFailureDeclaration(
         "runtime_source_unsupported",
         ShowRuntimeFailureDimension.INSTALL,
         "runtime-source-configuration",

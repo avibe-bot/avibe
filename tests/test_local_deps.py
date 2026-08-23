@@ -1240,7 +1240,7 @@ def test_dependencies_status_shape(monkeypatch):
         ),
         pytest.param(
             {
-                "provider": "github-source",
+                "provider": "npm",
                 "install": {"state": "installed", "runtime_version": None, "matches_manifest": None},
                 "manifest": None,
                 "node_available": True,
@@ -1248,7 +1248,7 @@ def test_dependencies_status_shape(monkeypatch):
                 "node_version": "22.12.0",
             },
             {"version": None, "latest_version": None, "has_update": False},
-            id="github-source-not-comparable",
+            id="npm-not-comparable",
         ),
     ),
 )
