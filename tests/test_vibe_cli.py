@@ -2728,7 +2728,7 @@ def test_runtime_prepare_force_does_not_report_explicit_command_as_replaced(monk
     assert "VIBE_SHOW_RUNTIME_BIN" in captured.err
 
 
-@pytest.mark.parametrize("legacy_source", ["github", "github-source"])
+@pytest.mark.parametrize("legacy_source", ["github", "github-source", "GitHub-Source"])
 def test_runtime_manager_migrates_legacy_source_to_packaged_manifest(
     monkeypatch,
     caplog,
@@ -2753,7 +2753,7 @@ def test_runtime_manager_migrates_legacy_source_to_packaged_manifest(
     assert second_manager.runtime_source == "manifest-cache"
     warnings = [record.message for record in caplog.records if "is retired" in record.message]
     assert warnings == [
-        f"VIBE_SHOW_RUNTIME_SOURCE={legacy_source} is retired; using manifest-cache instead"
+        f"VIBE_SHOW_RUNTIME_SOURCE={legacy_source.lower()} is retired; using manifest-cache instead"
     ]
 
 

@@ -52,6 +52,7 @@ from core.show_runtime_failures import (
     classify_show_runtime_failure,
     show_runtime_recovery_action,
 )
+from core.show_runtime_source import retired_show_runtime_source
 
 
 logger = logging.getLogger(__name__)
@@ -3559,23 +3560,24 @@ def _packaged_runtime_manifest_exists() -> bool:
 
 
 def _normalize_runtime_source(value: str | None) -> str:
-    normalized = (value or _RUNTIME_SOURCE_MANIFEST).strip().lower()
+    retired_source = retired_show_runtime_source(value)
+    normalized = retired_source or (value or _RUNTIME_SOURCE_MANIFEST).strip().lower()
     aliases = {
         "manifest": _RUNTIME_SOURCE_MANIFEST,
         "manifest-cache": _RUNTIME_SOURCE_MANIFEST,
-        "github": _RUNTIME_SOURCE_MANIFEST,
-        "github-source": _RUNTIME_SOURCE_MANIFEST,
         "archive": _RUNTIME_SOURCE_ARCHIVE,
         "prebuilt": _RUNTIME_SOURCE_ARCHIVE,
         "npm": _RUNTIME_SOURCE_NPM,
     }
-    if normalized in {"github", "github-source"} and normalized not in _WARNED_RETIRED_RUNTIME_SOURCES:
-        _WARNED_RETIRED_RUNTIME_SOURCES.add(normalized)
+    if retired_source is not None and retired_source not in _WARNED_RETIRED_RUNTIME_SOURCES:
+        _WARNED_RETIRED_RUNTIME_SOURCES.add(retired_source)
         logger.warning(
             "VIBE_SHOW_RUNTIME_SOURCE=%s is retired; using %s instead",
-            normalized,
+            retired_source,
             _RUNTIME_SOURCE_MANIFEST,
         )
+    if retired_source is not None:
+        return _RUNTIME_SOURCE_MANIFEST
     return aliases.get(normalized, normalized or _RUNTIME_SOURCE_MANIFEST)
 
 

@@ -28,6 +28,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Container, Iterable, Iterator, Sequence
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from core.show_runtime_source import retired_show_runtime_source
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Incus runner is not used on Windows.
@@ -258,7 +264,7 @@ def regression_env(suffix: str, default: str = "") -> str:
 def regression_show_runtime_source(source: str | None = None) -> str:
     source = regression_env("SHOW_RUNTIME_SOURCE", "archive") if source is None else source.strip()
     source = source or "archive"
-    return "archive" if source in {"github", "github-source"} else source
+    return "archive" if retired_show_runtime_source(source) is not None else source
 
 
 def regression_show_runtime_env(

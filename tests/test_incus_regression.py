@@ -4592,10 +4592,15 @@ def test_prepare_show_runtime_retry_keeps_the_npm_cache() -> None:
     assert "npm cache clean" not in joined
 
 
-@pytest.mark.parametrize("legacy_source", ["github", "github-source"])
-def test_prepare_show_runtime_normalizes_preserved_legacy_source_without_rewriting_env(
+@pytest.mark.parametrize("legacy_source", ["github", "github-source", "GitHub-Source"])
+def test_retired_runtime_source_is_recognized_by_product_and_regression(
     legacy_source: str,
 ) -> None:
+    from core.show_runtime import _normalize_runtime_source
+
+    assert incus_regression.regression_show_runtime_source(legacy_source) == "archive"
+    assert _normalize_runtime_source(legacy_source) == "manifest-cache"
+
     commands = []
 
     class RecordingRunner:
