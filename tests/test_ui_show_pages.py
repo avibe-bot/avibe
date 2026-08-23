@@ -29,6 +29,7 @@ import pytest
 import core.dependency_network as dependency_network
 import core.show_runtime as show_runtime
 import core.show_runtime_failures as show_runtime_failures_module
+from aiohttp import ClientConnectionError, WSServerHandshakeError
 from starlette.websockets import WebSocketDisconnect
 
 from config import paths
@@ -7414,6 +7415,123 @@ def test_delayed_transport_failure_does_not_invalidate_replacement_process(monke
         asyncio.run(manager.request_global("GET", "/health"))
 
     assert manager._process is replacement_process
+    assert manager._base_url == base_url
+
+
+class _FailingWebSocketHandshake:
+    def __init__(self, error, *, before_failure=None):
+        self.error = error
+        self.before_failure = before_failure
+
+    async def _fail(self):
+        if self.before_failure is not None:
+            self.before_failure()
+        raise self.error
+
+    def __await__(self):
+        return self._fail().__await__()
+
+    async def __aenter__(self):
+        return await self
+
+    async def __aexit__(self, _exc_type, _exc, _traceback):
+        return False
+
+
+class _FailingWebSocketSession:
+    def __init__(self, handshake):
+        self.handshake = handshake
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, _exc_type, _exc, _traceback):
+        return False
+
+    def ws_connect(self, *_args, **_kwargs):
+        return self.handshake
+
+
+def test_websocket_transport_failure_invalidates_runtime_and_readmits(monkeypatch, tmp_path):
+    manager = _runtime_manager_with_failing_transport(monkeypatch, tmp_path)
+    set_show_runtime_manager_for_tests(manager)
+    handshake = _FailingWebSocketHandshake(ClientConnectionError("runtime connection refused"))
+    monkeypatch.setattr(ui_server, "ClientSession", lambda: _FailingWebSocketSession(handshake))
+    websocket = SimpleNamespace(url=SimpleNamespace(query=""))
+
+    with pytest.raises(ClientConnectionError):
+        asyncio.run(ui_server._proxy_show_runtime_websocket(websocket, "ses123"))
+
+    assert manager._base_url is None
+
+    admissions = []
+    replacement_process = SimpleNamespace(pid=654, poll=lambda: None)
+
+    async def admit(*, automatic=True):
+        admissions.append((automatic, manager._base_url))
+        manager._process = replacement_process
+        manager._base_url = "http://127.0.0.1:49322"
+        return manager._publish_runtime_availability(
+            ShowRuntimeServingState.SERVING,
+            manager._base_url,
+        )
+
+    monkeypatch.setattr(manager, "ensure", admit)
+
+    target = asyncio.run(
+        manager.websocket_target(
+            "/show/ses123/__vite_hmr",
+            envelope=ShowRuntimeProtocolEnvelope(ShowRuntimeContext.PRIVATE),
+        )
+    )
+
+    assert admissions == [(True, None)]
+    assert target.url == "ws://127.0.0.1:49322/show/ses123/__vite_hmr"
+
+
+def test_delayed_websocket_failure_does_not_invalidate_replacement_process(monkeypatch, tmp_path):
+    manager = _runtime_manager_with_failing_transport(monkeypatch, tmp_path)
+    set_show_runtime_manager_for_tests(manager)
+    base_url = manager._base_url
+    replacement_process = SimpleNamespace(pid=654, poll=lambda: None)
+
+    def replace_runtime():
+        manager._process = replacement_process
+        manager._base_url = base_url
+
+    handshake = _FailingWebSocketHandshake(
+        ClientConnectionError("old runtime failed late"),
+        before_failure=replace_runtime,
+    )
+    monkeypatch.setattr(ui_server, "ClientSession", lambda: _FailingWebSocketSession(handshake))
+    websocket = SimpleNamespace(url=SimpleNamespace(query=""))
+
+    with pytest.raises(ClientConnectionError):
+        asyncio.run(ui_server._proxy_show_runtime_websocket(websocket, "ses123"))
+
+    assert manager._process is replacement_process
+    assert manager._base_url == base_url
+
+
+def test_websocket_handshake_response_does_not_invalidate_runtime(monkeypatch, tmp_path):
+    manager = _runtime_manager_with_failing_transport(monkeypatch, tmp_path)
+    set_show_runtime_manager_for_tests(manager)
+    base_url = manager._base_url
+    handshake = _FailingWebSocketHandshake(
+        WSServerHandshakeError(
+            request_info=None,
+            history=(),
+            status=503,
+            message="runtime rejected websocket upgrade",
+            headers=None,
+        )
+    )
+    monkeypatch.setattr(ui_server, "ClientSession", lambda: _FailingWebSocketSession(handshake))
+    websocket = SimpleNamespace(url=SimpleNamespace(query=""))
+
+    with pytest.raises(WSServerHandshakeError):
+        asyncio.run(ui_server._proxy_show_runtime_websocket(websocket, "ses123"))
+
     assert manager._base_url == base_url
 
 
