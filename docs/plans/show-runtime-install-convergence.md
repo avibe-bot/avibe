@@ -172,6 +172,9 @@ Two mechanical rules gate Step 1:
    executable predicate or an explicitly approved behavior change; an
    unaccounted predicate disappearance fails the gate.
 
+A step gate is self-checked against its intent: an unchanged-result clause is
+valid only for behavior that the intent does not require changing.
+
 ## Migration Sequence And Gates
 
 The following mechanical gates apply to every step:
@@ -188,9 +191,10 @@ The following mechanical gates apply to every step:
 shared manager so later installer migrations inherit one concurrency owner.
 
 **Gate:** Shared consumers pass focused guard, preview, cleanup, and install
-tests with no installed-runtime regression; any lost path confinement,
-misclassified contention, or changed git/Memory/model-hub result stops the
-sequence before Show uses the guard.
+tests with no installed-runtime regression. Lost path confinement, retained
+misclassification, or a consumer result change outside the corrections measured
+in the `_release_preview_guard` and **Inspection versus absence** census rows
+stops the sequence before Show uses the guard.
 
 ### Step 3: Support Composite Artifacts
 
