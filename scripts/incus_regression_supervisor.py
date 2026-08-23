@@ -12,6 +12,7 @@ from pathlib import Path
 from config import paths
 from config.v2_config import V2Config
 from core.memory.ui_access import generate_ui_read_secret
+from scripts.incus_regression import regression_show_runtime_source
 from vibe import runtime
 
 
@@ -90,6 +91,12 @@ def _config() -> V2Config:
     return runtime.ensure_config()
 
 
+def _normalize_show_runtime_source_environment() -> None:
+    os.environ["VIBE_SHOW_RUNTIME_SOURCE"] = regression_show_runtime_source(
+        os.environ.get("VIBE_SHOW_RUNTIME_SOURCE")
+    )
+
+
 def main() -> int:
     stopping = False
 
@@ -100,6 +107,7 @@ def main() -> int:
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
 
+    _normalize_show_runtime_source_environment()
     config = _config()
     memory_ui_secret = generate_ui_read_secret()
     service_pid = runtime.start_service(

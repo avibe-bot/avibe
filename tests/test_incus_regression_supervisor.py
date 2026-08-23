@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,6 +25,30 @@ def _write_restart_status(status: dict) -> None:
     path = runtime.get_restart_status_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     runtime.write_json(path, status)
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        ("github", "archive"),
+        ("github-source", "archive"),
+        ("archive", "archive"),
+        ("manifest-cache", "manifest-cache"),
+        ("npm", "npm"),
+    ],
+)
+def test_supervisor_normalizes_preserved_runtime_source_without_touching_other_env(
+    monkeypatch,
+    configured,
+    expected,
+):
+    monkeypatch.setenv("VIBE_SHOW_RUNTIME_SOURCE", configured)
+    monkeypatch.setenv("REGRESSION_UNRELATED_SETTING", "preserved")
+
+    supervisor._normalize_show_runtime_source_environment()
+
+    assert os.environ["VIBE_SHOW_RUNTIME_SOURCE"] == expected
+    assert os.environ["REGRESSION_UNRELATED_SETTING"] == "preserved"
 
 
 def test_restart_in_progress_true_while_job_pid_alive(monkeypatch, tmp_path):

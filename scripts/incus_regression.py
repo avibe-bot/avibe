@@ -246,8 +246,9 @@ def regression_env(suffix: str, default: str = "") -> str:
     return value.strip()
 
 
-def regression_show_runtime_source() -> str:
-    source = regression_env("SHOW_RUNTIME_SOURCE", "archive")
+def regression_show_runtime_source(source: str | None = None) -> str:
+    source = regression_env("SHOW_RUNTIME_SOURCE", "archive") if source is None else source.strip()
+    source = source or "archive"
     return "archive" if source in {"github", "github-source"} else source
 
 
@@ -2326,12 +2327,19 @@ def restart_and_verify(runner: Runner, target: RegressionTarget, *, remote: str 
 
 
 def prepare_show_runtime(runner: Runner, target: RegressionTarget, *, remote: str | None) -> None:
+    source_result = runner.run(
+        tenant_exec(target, 'printf "%s" "${VIBE_SHOW_RUNTIME_SOURCE:-}"', remote=remote),
+        capture=True,
+    )
+    runtime_source = regression_show_runtime_source(source_result.stdout or "")
+    runtime_source_env = f"VIBE_SHOW_RUNTIME_SOURCE={shlex.quote(runtime_source)}"
     runner.run(
         tenant_exec(
             target,
-            """
+            f"""
 set -euo pipefail
-if [ "${VIBE_SHOW_RUNTIME_SOURCE:-}" = "archive" ]; then
+export {runtime_source_env}
+if [ "${{VIBE_SHOW_RUNTIME_SOURCE:-}}" = "archive" ]; then
   build_dir=$(mktemp -d)
   trap 'rm -rf "$build_dir"' EXIT
   git clone --depth 1 https://github.com/avibe-bot/vibe-show-runtime.git "$build_dir/runtime"
@@ -2349,11 +2357,14 @@ fi
             remote=remote,
         )
     )
-    result = runner.run(tenant_exec(target, f"{VENV_DIR}/bin/vibe runtime prepare --strict", remote=remote), check=False)
+    result = runner.run(
+        tenant_exec(target, f"{runtime_source_env} {VENV_DIR}/bin/vibe runtime prepare --strict", remote=remote),
+        check=False,
+    )
     if result.returncode != 0:
         runner.run(tenant_exec(target, "rm -rf ~/.avibe/runtime/show-runtime/prebuilt/current", remote=remote), check=False)
-        runner.run(tenant_exec(target, f"{VENV_DIR}/bin/vibe runtime prepare --strict", remote=remote))
-    runner.run(tenant_exec(target, f"{VENV_DIR}/bin/vibe runtime status --json", remote=remote))
+        runner.run(tenant_exec(target, f"{runtime_source_env} {VENV_DIR}/bin/vibe runtime prepare --strict", remote=remote))
+    runner.run(tenant_exec(target, f"{runtime_source_env} {VENV_DIR}/bin/vibe runtime status --json", remote=remote))
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:

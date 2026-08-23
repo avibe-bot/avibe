@@ -3562,10 +3562,18 @@ def _normalize_runtime_source(value: str | None) -> str:
     aliases = {
         "manifest": _RUNTIME_SOURCE_MANIFEST,
         "manifest-cache": _RUNTIME_SOURCE_MANIFEST,
+        "github": _RUNTIME_SOURCE_MANIFEST,
+        "github-source": _RUNTIME_SOURCE_MANIFEST,
         "archive": _RUNTIME_SOURCE_ARCHIVE,
         "prebuilt": _RUNTIME_SOURCE_ARCHIVE,
         "npm": _RUNTIME_SOURCE_NPM,
     }
+    if normalized in {"github", "github-source"}:
+        logger.warning(
+            "VIBE_SHOW_RUNTIME_SOURCE=%s is retired; using %s instead",
+            normalized,
+            _RUNTIME_SOURCE_MANIFEST,
+        )
     return aliases.get(normalized, normalized or _RUNTIME_SOURCE_MANIFEST)
 
 

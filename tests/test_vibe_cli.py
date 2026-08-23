@@ -2724,40 +2724,24 @@ def test_runtime_prepare_force_does_not_report_explicit_command_as_replaced(monk
 
 
 @pytest.mark.parametrize("legacy_source", ["github", "github-source"])
-def test_runtime_prepare_retires_legacy_source_with_actionable_replacement(
+def test_runtime_manager_migrates_legacy_source_to_packaged_manifest(
     monkeypatch,
-    capsys,
+    caplog,
     tmp_path,
     legacy_source,
 ):
     from core.show_runtime import ShowRuntimeManager
 
     monkeypatch.setenv("VIBE_SHOW_RUNTIME_SOURCE", legacy_source)
-    manager = ShowRuntimeManager(
-        workspace_root=tmp_path / "show",
-        runtime_dir=tmp_path / "runtime",
-        auto_install=True,
-    )
-    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: manager)
-    monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda **_kwargs: {"ok": True})
-    monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", lambda **_kwargs: {"ok": True})
-    monkeypatch.setattr(cli, "_ensure_git_during_prepare", lambda **_kwargs: {"ok": True, "mode": "system"})
-    monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda **_kwargs: {"ok": True})
-
-    exit_code = cli.cmd_runtime(
-        SimpleNamespace(
-            runtime_command="prepare",
-            offline=False,
-            force=False,
-            json=False,
-            strict=True,
+    with caplog.at_level("WARNING", logger="core.show_runtime"):
+        manager = ShowRuntimeManager(
+            workspace_root=tmp_path / "show",
+            runtime_dir=tmp_path / "runtime",
         )
-    )
 
-    captured = capsys.readouterr()
-    assert exit_code == 1
-    assert "runtime_source_unsupported" in captured.err
-    assert "VIBE_SHOW_RUNTIME_BIN" in captured.err
+    assert manager.runtime_source == "manifest-cache"
+    assert f"VIBE_SHOW_RUNTIME_SOURCE={legacy_source}" in caplog.text
+    assert "using manifest-cache instead" in caplog.text
 
 
 @pytest.mark.parametrize("failure_phase", ["temporary_directory", "verifier", "cleanup"])

@@ -4567,6 +4567,45 @@ def test_prepare_show_runtime_retry_keeps_the_npm_cache() -> None:
     assert "npm cache clean" not in joined
 
 
+@pytest.mark.parametrize("legacy_source", ["github", "github-source"])
+def test_prepare_show_runtime_normalizes_preserved_legacy_source_without_rewriting_env(
+    legacy_source: str,
+) -> None:
+    commands = []
+
+    class RecordingRunner:
+        def __init__(self) -> None:
+            self.prepare_attempts = 0
+
+        def run(self, command, **kwargs):
+            joined = " ".join(command)
+            commands.append(joined)
+            if 'printf "%s" "${VIBE_SHOW_RUNTIME_SOURCE:-}"' in joined:
+                return subprocess.CompletedProcess(command, 0, stdout=legacy_source)
+            if "vibe runtime prepare --strict" in joined:
+                self.prepare_attempts += 1
+                return subprocess.CompletedProcess(command, 1 if self.prepare_attempts == 1 else 0)
+            return subprocess.CompletedProcess(command, 0)
+
+    target = incus_regression.RegressionTarget(
+        target="master",
+        slug="master",
+        project="avr-master",
+        instance="avibe-master",
+        host_port=15130,
+        ui_host="127.0.0.1",
+        ui_port=5123,
+    )
+
+    incus_regression.prepare_show_runtime(RecordingRunner(), target, remote=None)
+
+    joined = "\n".join(commands)
+    assert "cat > /etc/avibe-regression.env" not in joined
+    assert "git clone --depth 1 https://github.com/avibe-bot/vibe-show-runtime.git" in joined
+    assert joined.count("VIBE_SHOW_RUNTIME_SOURCE=archive") == 4
+    assert f"VIBE_SHOW_RUNTIME_SOURCE={legacy_source}" not in joined
+
+
 def test_restart_waits_for_service_and_status_running() -> None:
     commands = []
 
