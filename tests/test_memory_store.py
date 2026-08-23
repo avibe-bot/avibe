@@ -331,7 +331,7 @@ def test_released_identity_shapes_migrate_without_provider_io(
                 "INSERT INTO memory_projects VALUES (?, ?, ?, ?)",
                 (
                     principal,
-                    project,
+                    "default",
                     "2026-02-01T00:00:00Z",
                     "2026-02-01T00:00:00Z",
                 ),
@@ -343,5 +343,11 @@ def test_released_identity_shapes_migrate_without_provider_io(
     assert meta.last_provider_timestamp_ms == 42
     assert meta.last_success_at == "2026-02-03T00:00:00Z"
     with sqlite3.connect(path) as conn:
-        assert conn.execute("SELECT project_id FROM memory_projects WHERE principal_id = ?", (principal,)).fetchone()[0] == project
+        assert {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT project_id FROM memory_projects WHERE principal_id = ?",
+                (principal,),
+            )
+        } == ({project, "default"} if version == 3 else {project})
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 4

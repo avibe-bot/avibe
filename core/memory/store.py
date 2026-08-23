@@ -652,7 +652,7 @@ def _legacy_projects(conn: sqlite3.Connection, tables: set[str]) -> list[tuple[s
                 f"SELECT principal_id, project_id, {created}, {written} FROM memory_projects"
             ):
                 rows.append((str(row[0]), str(row[1]), str(row[2]), str(row[3])))
-    if not rows and "memory_capture_queue" in tables:
+    if "memory_capture_queue" in tables:
         columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(memory_capture_queue)")}
         if {"principal_id", "project_ref"}.issubset(columns):
             created = "created_at" if "created_at" in columns else "NULL"
