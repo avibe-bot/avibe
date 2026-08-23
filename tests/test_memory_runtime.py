@@ -842,10 +842,9 @@ def test_released_memory_pointer_status_is_shallow_and_resolver_readmits(
         (MEMORY_FIXTURES / "released_active_pointer.json").read_text(encoding="utf-8")
     )
     pointer["platform"] = memory_artifact.runtime_platform_tag()
-    fingerprint = manager._legacy_artifact_fingerprint(
-        pointer["manifest_sha256"],
-        pointer["archive_sha256"],
-    )
+    fingerprint = hashlib.sha256(
+        f'{pointer["manifest_sha256"]}:{pointer["archive_sha256"]}'.encode("utf-8")
+    ).hexdigest()[:16]
     install_dir = (
         manager.runtime_dir
         / "versions"
@@ -1275,7 +1274,7 @@ async def test_memory_artifact_rollback_resolves_old_active_binary(
         / "versions"
         / memory_artifact.EVEROS_VERSION
         / platform_tag
-        / manager._legacy_artifact_fingerprint(manifest_sha256, archive_sha256)
+        / hashlib.sha256(f"{manifest_sha256}:{archive_sha256}".encode("utf-8")).hexdigest()[:16]
     )
     old_binary = old_install_dir / "bin" / "python"
     old_binary.parent.mkdir(parents=True)

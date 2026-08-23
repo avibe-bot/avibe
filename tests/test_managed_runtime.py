@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from core import managed_runtime
+from core import git_runtime
 from core.git_runtime import GitRuntimeManager
 from core.managed_runtime import (
     ManagedRuntimeArchive,
@@ -21,6 +22,7 @@ from core.managed_runtime import (
 from core.memory import artifact as memory_artifact
 from core.memory.artifact import MemoryArtifactManager, MemoryRuntimeActivationError
 from vibe.model_hub_runtime.installer import EngineRuntimeManager
+from vibe.model_hub_runtime import installer as model_hub_installer
 
 
 class FixtureRuntimeManager(ManagedRuntimeManager):
@@ -235,12 +237,6 @@ def test_installed_subclass_status_and_resolution_survive_unavailable_manifest(
     assert status["version"] == {"git": "2.55.0", "memory": "1.2.3", "model-hub": "v7.2.95"}[
         runtime_kind
     ]
-    assert status["installed_identity"] == {
-        "runtime_version": status["version"],
-        "platform": json.loads(pointer_before)["platform"],
-        "archive_sha256": json.loads(pointer_before)["archive_sha256"],
-    }
-    assert status["selected_identity"] is None
     assert status["selected_version"] is None
     assert status["matches_manifest"] is None
     assert status["path"] == str(installed_path)
@@ -323,7 +319,7 @@ def test_subclass_derives_released_missing_bin_path_from_safe_spec_default(
 
 
 @pytest.mark.parametrize("runtime_kind", ["git", "memory", "model-hub"])
-def test_subclass_status_projects_binary_hashing_failure_as_inspection_error(
+def test_subclass_status_rejects_an_unreadable_installed_binary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     runtime_kind: str,
@@ -337,18 +333,20 @@ def test_subclass_status_projects_binary_hashing_failure_as_inspection_error(
     def unreadable_binary(_path: Path) -> str:
         raise OSError("binary became unreadable")
 
-    monkeypatch.setattr(
-        memory_artifact if runtime_kind == "memory" else managed_runtime,
-        "file_sha256",
-        unreadable_binary,
-    )
+    module = {
+        "git": git_runtime,
+        "memory": memory_artifact,
+        "model-hub": managed_runtime,
+    }[runtime_kind]
+    monkeypatch.setattr(module, "file_sha256", unreadable_binary)
+    if runtime_kind == "model-hub":
+        monkeypatch.setattr(model_hub_installer.managed_runtime, "file_sha256", unreadable_binary)
 
     status = manager.status()
 
     assert status["installed"] is False
     assert status["status"] == "error"
-    assert status["installed_identity"] is not None
-    assert status["inspection_error"] == status["reason"]
+    assert status["reason"] is not None
     assert _resolve_subclass_runtime(manager, runtime_kind) is None
 
 
@@ -469,10 +467,10 @@ def test_existing_subclass_adopts_released_manifest_digest_layout_without_write_
     archive = manager._manifest_archive_for_platform(manifest)
     assert archive is not None
     install_dir = Path(installed["install_dir"])
-    released_install_dir = install_dir.parent / manager._legacy_artifact_fingerprint(
-        manifest.digest,
-        archive.sha256,
-    )
+    released_fingerprint = hashlib.sha256(
+        f"{manifest.digest}:{archive.sha256}".encode("utf-8")
+    ).hexdigest()[:16]
+    released_install_dir = install_dir.parent / released_fingerprint
     if released_install_dir != install_dir:
         install_dir.rename(released_install_dir)
     pointer_path = manager.runtime_dir / "current.json"

@@ -850,8 +850,8 @@ def test_released_linux_x64_pointer_and_claim_are_admitted_by_platform_alias(
     replayed = manager.ensure(expected_target=claim["target"])
 
     assert status["installed"] is True
-    assert status["installed_identity"]["platform"] == "linux-amd64"
-    assert status["selected_identity"]["platform"] == "linux-amd64"
+    assert status["version"] == "v7.2.95"
+    assert status["selected_version"] == "v7.2.95"
     assert status["matches_manifest"] is True
     assert status["path"] == str(alias_install_dir / "cli-proxy-api")
     assert manager.resolve_engine_path() == alias_install_dir / "cli-proxy-api"
@@ -1195,34 +1195,6 @@ def test_invalid_manifest_does_not_hide_disk_engine_but_blocks_repair(tmp_path: 
     assert manager.resolve_engine_path() == installed_path
     assert repair["ok"] is False
     assert repair["reason"] == "model_hub_engine_manifest_invalid"
-
-
-def test_engine_status_rehashes_binary_only_after_file_identity_changes(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    archive, binary = _write_fixture_archive(tmp_path / "fixture")
-    manifest = _write_fixture_manifest(tmp_path / "fixture", archive, binary)
-    manager = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest)
-    installed = manager.ensure()
-    binary_path = Path(installed["path"])
-    original_file_sha256 = managed_runtime.file_sha256
-    hashed_paths: list[Path] = []
-
-    def tracked_file_sha256(path: Path) -> str:
-        hashed_paths.append(path)
-        return original_file_sha256(path)
-
-    monkeypatch.setattr(managed_runtime, "file_sha256", tracked_file_sha256)
-
-    assert manager.status()["installed"] is True
-    assert manager.status()["installed"] is True
-    assert hashed_paths == [binary_path]
-
-    binary_path.write_bytes(binary_path.read_bytes() + b"\n# tampered\n")
-
-    assert manager.status()["installed"] is False
-    assert hashed_paths == [binary_path, binary_path]
 
 
 def test_engine_version_check_uses_minimal_environment(

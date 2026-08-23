@@ -16,7 +16,6 @@ from config import paths
 from core import managed_runtime
 from core.managed_runtime import (
     ManagedRuntimeArchive,
-    ManagedRuntimeArtifactIdentity,
     ManagedRuntimeManager,
     ManagedRuntimeManifest,
     ManagedRuntimeSpec,
@@ -364,96 +363,73 @@ class EngineRuntimeManager(ManagedRuntimeManager):
     def resolve_engine_path(self) -> Path | None:
         return self.resolve_binary()
 
-    def _artifact_identity_from_pointer(
-        self,
-        pointer: Mapping[str, Any],
-    ) -> ManagedRuntimeArtifactIdentity | None:
-        platform_tag = pointer.get("platform")
-        if not isinstance(platform_tag, str):
-            return None
-        normalized_platform = self._normalize_engine_platform(platform_tag)
-        if normalized_platform != self.host_platform():
-            return None
-        normalized_pointer = dict(pointer)
-        normalized_pointer["platform"] = managed_runtime.runtime_platform_tag()
-        identity = super()._artifact_identity_from_pointer(normalized_pointer)
-        if identity is None:
-            return None
-        return ManagedRuntimeArtifactIdentity(
-            runtime_version=identity.runtime_version,
-            platform=normalized_platform,
-            archive_sha256=identity.archive_sha256,
-        )
-
-    def _artifact_identity_from_install_metadata(
-        self,
-        metadata: Mapping[str, Any],
-    ) -> ManagedRuntimeArtifactIdentity | None:
-        return self._artifact_identity_from_pointer(metadata)
-
-    def _install_dir_matches_identity(
-        self,
-        install_dir: Path,
-        identity: ManagedRuntimeArtifactIdentity,
-        manifest_sha256: str,
-    ) -> bool:
+    def resolve_binary(self) -> Path | None:
         try:
+            pointer = json.loads((self.runtime_dir / "current.json").read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (OSError, UnicodeError, ValueError):
+            self._install_reason = self._reason("install_inspection_failed")
+            return None
+        self._install_reason = self._reason("install_inspection_failed")
+        try:
+            install_dir_value = pointer.get("install_dir")
+            bin_path = pointer.get("bin_path", self.spec.default_bin_path)
+            platform_tag = pointer.get("platform")
+            if (
+                pointer.get("provider") != "manifest"
+                or pointer.get("runtime_id") != self.spec.runtime_id
+                or not isinstance(pointer.get("runtime_version"), str)
+                or not isinstance(platform_tag, str)
+                or self._normalize_engine_platform(platform_tag) != self.host_platform()
+                or not isinstance(install_dir_value, str)
+                or not isinstance(bin_path, str)
+                or managed_runtime.archive_path_is_unsafe(bin_path)
+            ):
+                return None
+            configured_install_dir = Path(install_dir_value)
+            if not configured_install_dir.is_absolute():
+                return None
+            install_dir = configured_install_dir.resolve(strict=True)
             versions_dir = (self.runtime_dir / "versions").resolve(strict=True)
-            relative = install_dir.resolve(strict=True).relative_to(versions_dir)
-        except (OSError, RuntimeError, ValueError):
-            return False
-        if len(relative.parts) != 3:
-            return False
-        if relative.parts[0] != managed_runtime.safe_path_part(identity.runtime_version):
-            return False
-        if self._normalize_engine_platform(relative.parts[1]) != identity.platform:
-            return False
-        fingerprints = {
-            self._artifact_fingerprint(identity),
-            self._legacy_artifact_fingerprint(manifest_sha256, identity.archive_sha256),
-        }
-        return relative.parts[2] in fingerprints
-
-    def _inspect_admitted_installed_binary(
-        self,
-        pointer: Mapping[str, Any],
-        identity: ManagedRuntimeArtifactIdentity,
-        *,
-        install_dir: Path,
-        metadata: Mapping[str, Any],
-    ) -> Path | None:
-        install_dir_value = pointer.get("install_dir")
-        bin_path = self._installed_bin_path(pointer)
-        if not isinstance(install_dir_value, str) or not isinstance(bin_path, str):
-            self._verified_binary_cache = None
+            binary = (install_dir / bin_path).resolve(strict=True)
+            if versions_dir not in install_dir.parents or install_dir not in binary.parents:
+                return None
+            metadata = json.loads((install_dir / self.spec.metadata_filename).read_text(encoding="utf-8"))
+            binary_sha256 = metadata.get("binary_sha256") if isinstance(metadata, dict) else None
+            metadata_platform = metadata.get("platform") if isinstance(metadata, dict) else None
+            if not (
+                isinstance(metadata, dict)
+                and metadata.get("provider") == "manifest"
+                and metadata.get("runtime_id") == self.spec.runtime_id
+                and metadata.get("runtime_version") == pointer["runtime_version"]
+                and isinstance(metadata_platform, str)
+                and self._normalize_engine_platform(metadata_platform)
+                == self._normalize_engine_platform(platform_tag)
+                and metadata.get("manifest_sha256") == pointer.get("manifest_sha256")
+                and metadata.get("archive_sha256") == pointer.get("archive_sha256")
+                and metadata.get("bin_path", self.spec.default_bin_path) == bin_path
+                and isinstance(binary_sha256, str)
+                and re.fullmatch(r"[0-9a-f]{64}", binary_sha256)
+                and binary.is_file()
+                and os.access(binary, os.X_OK)
+                and managed_runtime.file_sha256(binary) == binary_sha256
+            ):
+                return None
+            manifest = self._load_manifest(allow_network=False)
+            if manifest is not None and self._manifest_installable(manifest):
+                archive = self._manifest_archive_for_platform(manifest)
+                selected_is_installed = archive is not None and (
+                    pointer.get("runtime_version"),
+                    self._normalize_engine_platform(platform_tag),
+                    pointer.get("archive_sha256"),
+                ) == (manifest.runtime_version, self._normalize_engine_platform(archive.platform), archive.sha256)
+                if selected_is_installed and self._verified_manifest_binary(install_dir, manifest, archive) != binary:
+                    return None
+            self._install_reason = None
+            return binary
+        except (OSError, RuntimeError, UnicodeError, ValueError):
             return None
-        binary = Path(install_dir_value) / bin_path
-        metadata_path = Path(install_dir_value) / self.spec.metadata_filename
-        cache_identity = (
-            pointer.get("manifest_sha256"),
-            pointer.get("runtime_version"),
-            pointer.get("platform"),
-            pointer.get("archive_sha256"),
-            pointer.get("binary_sha256"),
-            pointer.get("bin_path"),
-        )
-        cache_key = self._verification_cache_key(binary, metadata_path, cache_identity)
-        cached = self._verified_binary_cache
-        if cache_key is not None and cached is not None and cached[0] == cache_key:
-            return cached[1]
-
-        verified = super()._inspect_admitted_installed_binary(
-            pointer,
-            identity,
-            install_dir=install_dir,
-            metadata=metadata,
-        )
-        if verified is None:
-            self._verified_binary_cache = None
-            return None
-        cache_key = self._verification_cache_key(verified, metadata_path, cache_identity)
-        self._verified_binary_cache = (cache_key, verified) if cache_key is not None else None
-        return verified
 
     def _verified_manifest_binary(
         self,
@@ -463,33 +439,45 @@ class EngineRuntimeManager(ManagedRuntimeManager):
     ) -> Path | None:
         binary = install_dir / archive.bin_path
         metadata = install_dir / self.spec.metadata_filename
-        identity = (
-            manifest.digest,
-            manifest.runtime_version,
-            archive.platform,
-            archive.sha256,
-            archive.binary_sha256,
-            archive.bin_path,
-        )
-        cache_key = self._verification_cache_key(binary, metadata, identity)
+        cache_key = self._verification_cache_key(binary, metadata, manifest, archive)
         cached = self._verified_binary_cache
         if cache_key is not None and cached is not None and cached[0] == cache_key:
             return cached[1]
 
-        verified = super()._verified_manifest_binary(install_dir, manifest, archive)
-        if verified is None:
+        try:
+            payload = json.loads(metadata.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            self._verified_binary_cache = None
+            return None
+        bin_path = payload.get("bin_path", self.spec.default_bin_path)
+        binary_sha256 = payload.get("binary_sha256")
+        if not (
+            payload.get("provider") == "manifest"
+            and payload.get("runtime_id") == self.spec.runtime_id
+            and payload.get("runtime_version") == manifest.runtime_version
+            and isinstance(payload.get("platform"), str)
+            and self._normalize_engine_platform(payload["platform"])
+            == self._normalize_engine_platform(archive.platform)
+            and payload.get("archive_sha256") == archive.sha256
+            and bin_path == archive.bin_path
+            and binary_sha256 == archive.binary_sha256
+            and binary.is_file()
+            and os.access(binary, os.X_OK)
+            and managed_runtime.file_sha256(binary) == archive.binary_sha256
+        ):
             self._verified_binary_cache = None
             return None
 
-        cache_key = self._verification_cache_key(verified, metadata, identity)
-        self._verified_binary_cache = (cache_key, verified) if cache_key is not None else None
-        return verified
+        cache_key = self._verification_cache_key(binary, metadata, manifest, archive)
+        self._verified_binary_cache = (cache_key, binary) if cache_key is not None else None
+        return binary
 
     @staticmethod
     def _verification_cache_key(
         binary: Path,
         metadata: Path,
-        identity: tuple[object, ...],
+        manifest: ManagedRuntimeManifest,
+        archive: ManagedRuntimeArchive,
     ) -> tuple[object, ...] | None:
         try:
             binary_stat = binary.stat()
@@ -498,7 +486,12 @@ class EngineRuntimeManager(ManagedRuntimeManager):
             return None
 
         return (
-            *identity,
+            manifest.digest,
+            manifest.runtime_version,
+            archive.platform,
+            archive.sha256,
+            archive.binary_sha256,
+            archive.bin_path,
             binary_stat.st_dev,
             binary_stat.st_ino,
             binary_stat.st_mode,

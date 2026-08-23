@@ -22,7 +22,6 @@ from typing import Any, Protocol, runtime_checkable
 from config import paths
 from core.managed_runtime import (
     ManagedRuntimeArchive,
-    ManagedRuntimeArtifactIdentity,
     ManagedRuntimeManager,
     ManagedRuntimeManifest,
     ManagedRuntimeSpec,
@@ -180,26 +179,60 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             return None
 
     def status(self) -> dict[str, Any]:
-        """Keep the manifest's release-state reason visible to Dependencies."""
+        """Report the active pointer without running compatibility probes."""
 
         if self._dev_runtime_configured():
             return self._dev_runtime_status(self._dev_runtime_python())
-        payload = super().status()
-        if payload.get("inspection_error"):
-            payload["inspection_error"] = "memory_runtime_install_failed"
-            payload["reason"] = "memory_runtime_install_failed"
-        return payload
-
-    def _read_installed_pointer(self) -> tuple[dict[str, Any] | None, bool]:
-        return self._read_active_pointer()
+        self._install_reason = None
+        manifest = self._load_manifest(allow_network=False)
+        if manifest is not None:
+            self._manifest_installable(manifest)
+        archive = self._manifest_archive_for_platform(manifest) if manifest else None
+        pointer, invalid = self._read_active_pointer()
+        try:
+            binary = self._verified_active_pointer_binary(pointer) if pointer is not None else None
+        except OSError:
+            binary = None
+            invalid = True
+        if (
+            pointer is not None
+            and pointer.get("admission_revision") == ARTIFACT_ADMISSION_REVISION
+            and pointer.get("admission_ok") is not True
+        ):
+            binary = None
+            invalid = True
+        invalid = invalid or (pointer is not None and binary is None)
+        selected_version = manifest.runtime_version if manifest is not None else None
+        matches_manifest = None
+        if binary is not None and manifest is not None and archive is not None:
+            try:
+                matches_manifest = self._verified_manifest_binary(binary.parent.parent, manifest, archive) == binary
+            except OSError:
+                binary = None
+                invalid = True
+        installed_version = pointer.get("runtime_version") if binary is not None else None
+        return {
+            "id": self.spec.runtime_id,
+            "provider": "manifest",
+            "platform": runtime_platform_tag(),
+            "installed": binary is not None,
+            "version": installed_version,
+            "selected_version": selected_version,
+            "matches_manifest": matches_manifest,
+            "status": "ready" if binary is not None else ("error" if invalid else "missing"),
+            "path": str(binary) if binary is not None else None,
+            "install_dir": pointer.get("install_dir") if binary is not None else None,
+            "manifest": self._manifest_status_payload(manifest),
+            "archive": self._archive_status_payload(archive),
+            "reason": "memory_runtime_install_failed" if invalid else (self._install_reason if binary is None else None),
+            "download_error": self._download_error,
+        }
 
     def provider_root_format(self) -> str | None:
         if self._dev_runtime_configured():
             return _DEV_PROVIDER_ROOT_FORMAT if self._dev_runtime_python() is not None else None
         pointer = self._active_pointer()
-        if pointer is None or self.resolve_binary() is None:
-            return None
-        value = pointer.get("provider_root_format")
+        value = pointer.get("provider_root_format") if pointer is not None else None
         return value if _safe_metadata_value(value) else None
 
     def compatible_provider_root_formats(self) -> frozenset[str]:
@@ -208,23 +241,21 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         if self._dev_runtime_configured():
             return frozenset({_DEV_PROVIDER_ROOT_FORMAT}) if self._dev_runtime_python() is not None else frozenset()
         pointer = self._active_pointer()
-        if pointer is None or self.resolve_binary() is None:
+        if pointer is None:
             return frozenset()
-        value = pointer.get("provider_root_format")
-        compatible = pointer.get("compatible_provider_root_formats", [])
-        if not _safe_metadata_value(value) or not isinstance(compatible, list):
+        provider_root_format = pointer.get("provider_root_format")
+        values = pointer.get("compatible_provider_root_formats")
+        if not _safe_metadata_value(provider_root_format) or not isinstance(values, list):
             return frozenset()
-        values = {value}
-        values.update(item for item in compatible if _safe_metadata_value(item))
-        return frozenset(values)
+        compatible = {provider_root_format}
+        compatible.update(value for value in values if _safe_metadata_value(value))
+        return frozenset(compatible)
 
     def artifact_fingerprint(self) -> str | None:
         if self._dev_runtime_configured():
             return _DEV_ARTIFACT_FINGERPRINT if self._dev_runtime_python() is not None else None
         pointer = self._active_pointer()
-        if pointer is None or self.resolve_binary() is None:
-            return None
-        value = pointer.get("artifact_fingerprint")
+        value = pointer.get("artifact_fingerprint") if pointer is not None else None
         return value if _safe_metadata_value(value) else None
 
     def sync_capability(self) -> bool:
@@ -494,7 +525,10 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             root_state = None
         previous_pointer = self._active_pointer()
         metadata_path = install_dir / self.spec.metadata_filename
-        previous_metadata = self._read_install_metadata(install_dir)
+        try:
+            previous_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            previous_metadata = None
 
         def commit() -> None:
             self._write_manifest_install_metadata(
@@ -577,24 +611,6 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         except (UnicodeError, ValueError):
             return None, True
         return (pointer, False) if isinstance(pointer, dict) else (None, True)
-
-    def _inspect_admitted_installed_binary(
-        self,
-        pointer: Mapping[str, Any],
-        identity: ManagedRuntimeArtifactIdentity,
-        *,
-        install_dir: Path,
-        metadata: Mapping[str, Any],
-    ) -> Path | None:
-        del identity, install_dir, metadata
-        current = dict(pointer)
-        binary = self._verified_active_pointer_binary(current)
-        if binary is None:
-            return None
-        revision = current.get("admission_revision")
-        if type(revision) is int and revision == ARTIFACT_ADMISSION_REVISION:
-            return binary if current.get("admission_ok") is True else None
-        return binary
 
     def _verified_active_pointer_binary(self, pointer: dict[str, Any]) -> Path | None:
         """Verify the binary referenced by ``current.json`` without a manifest lookup."""

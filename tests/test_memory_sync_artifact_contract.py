@@ -117,7 +117,9 @@ def test_sync_capability_rejects_a_nonadmitted_active_pointer(
     manifest_sha256 = "a" * 64
     archive_sha256 = "b" * 64
     platform = runtime_platform_tag()
-    fingerprint = manager._legacy_artifact_fingerprint(manifest_sha256, archive_sha256)
+    fingerprint = hashlib.sha256(
+        f"{manifest_sha256}:{archive_sha256}".encode("utf-8")
+    ).hexdigest()[:16]
     install_dir = manager.runtime_dir / "versions" / EVEROS_VERSION / platform / fingerprint
     binary, contract = _runtime_contract(tmp_path, runtime_root=install_dir)
     binary.chmod(0o755)
@@ -143,7 +145,7 @@ def test_sync_capability_rejects_a_nonadmitted_active_pointer(
     )
     manager._restore_current_pointer(pointer)
 
-    assert manager.installed_artifact_snapshot().path is None
+    assert manager.resolve_binary() is None
     assert manager.sync_capability() is False
 
 
@@ -156,7 +158,9 @@ def test_sync_corruption_is_detected_by_capability_without_deep_status_probe(
     manifest_sha256 = "a" * 64
     archive_sha256 = "b" * 64
     platform = runtime_platform_tag()
-    fingerprint = manager._legacy_artifact_fingerprint(manifest_sha256, archive_sha256)
+    fingerprint = hashlib.sha256(
+        f"{manifest_sha256}:{archive_sha256}".encode("utf-8")
+    ).hexdigest()[:16]
     install_dir = manager.runtime_dir / "versions" / EVEROS_VERSION / platform / fingerprint
     binary, contract = _runtime_contract(tmp_path, runtime_root=install_dir)
     binary.chmod(0o755)
@@ -184,7 +188,7 @@ def test_sync_corruption_is_detected_by_capability_without_deep_status_probe(
         encoding="utf-8",
     )
     manager._restore_current_pointer(pointer)
-    assert manager.installed_artifact_snapshot().path == binary
+    assert manager._verified_active_pointer_binary(pointer) == binary
 
     scrubbers = (
         install_dir
@@ -195,7 +199,7 @@ def test_sync_corruption_is_detected_by_capability_without_deep_status_probe(
     )
     scrubbers.write_text("tampered", encoding="ascii")
 
-    assert manager.installed_artifact_snapshot().path == binary
+    assert manager._verified_active_pointer_binary(pointer) == binary
     assert manager.sync_capability() is False
 
 
