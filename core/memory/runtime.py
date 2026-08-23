@@ -2188,7 +2188,7 @@ class MemoryRuntime:
         surface: ClearSurface,
         target_epoch: int,
     ) -> None:
-        if surface.surface == "identity":
+        if surface.surface == "metadata":
             await run_blocking(
                 self._store.reset_for_clear,
                 target_epoch=target_epoch,

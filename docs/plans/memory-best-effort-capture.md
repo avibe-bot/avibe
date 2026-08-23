@@ -321,7 +321,7 @@ the same time merely to split the diff.
 | `MEMORY-SEARCH-016`, `MEMORY-IM-ATTACH-001`, `-003`, `-010` | retain healthy/fallback semantics; replace drain/final flush with test-only worker/barrier sync |
 | `MEMORY-REBUILD-202`, `MEMORY-REPAIR-006` | rewrite claim/sidecar assertions around the transition barrier |
 | `MEMORY-CLEAR-201`, `MEMORY-FACTORY-003`, `-004`, `-201` | barrier covers post-pin admission; Clear resets stable identity and drops volatile work without replay |
-| `MEMORY-IM-ATTACH-004`, `-009`, `-011` | retain cleanup/fallback; bound cleanup failure |
+| `MEMORY-IM-ATTACH-004`, `-009`, `-011`, `-013` | retain cleanup/fallback; bound cleanup failure |
 
 Remove only scenarios whose product contract requires replay, exact history, or drain.
 

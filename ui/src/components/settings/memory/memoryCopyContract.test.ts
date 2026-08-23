@@ -92,11 +92,15 @@ describe('Memory UI copy contracts', () => {
 
     expect(disclosure).toMatch(/5,000/);
     if (language === 'en') {
-      expect(disclosure).toContain('raw messages and attachment copies');
+      expect(disclosure).toContain('bounded and process-local');
+      expect(disclosure).toContain('not queued durably');
+      expect(disclosure).toMatch(/ambiguous provider outcomes are not replayed/i);
       expect(disclosure).toContain('Turning Memory off pauses it');
       expect(settings.cloudDisclosureAttachment).toContain('cloud model service');
     } else {
-      expect(disclosure).toContain('原始消息和附件副本');
+      expect(disclosure).toContain('有界且仅由当前进程管理');
+      expect(disclosure).toContain('不会进入持久队列');
+      expect(disclosure).toContain('不会重放');
       expect(disclosure).toContain('关闭记忆只是暂停记录');
       expect(settings.cloudDisclosureAttachment).toContain('云端模型服务');
     }
@@ -197,7 +201,8 @@ describe('Memory UI copy contracts', () => {
       expect(bundle.memory.processingRecord.runtime.noneDisabled).toBe('No separately disabled features reported.');
       expect(bundle.memory.processingRecord.anomalies.help).toContain("won't recover automatically");
       expect(bundle.memory.processingRecord.anomalies.help).toContain('Manual review required');
-      expect(disclosure).toContain('raw messages and attachment copies');
+      expect(disclosure).toContain('bounded and process-local');
+      expect(disclosure).not.toMatch(/local Memory queue|manual recovery|waiting to process/i);
       expect(disclosure).toContain('every user and project');
       expect(bundle.memory.clear.confirmDescription).toContain('every user and project');
       expect(bundle.memory.clear.removes[0]).toContain('every user and project');
@@ -206,7 +211,8 @@ describe('Memory UI copy contracts', () => {
       expect(bundle.memory.processingRecord.runtime.noneDisabled).toBe('未报告单独禁用的功能。');
       expect(bundle.memory.processingRecord.anomalies.help).toContain('不会自动恢复');
       expect(bundle.memory.processingRecord.anomalies.help).toContain('需要人工检查');
-      expect(disclosure).toContain('原始消息和附件副本');
+      expect(disclosure).toContain('有界且仅由当前进程管理');
+      expect(disclosure).not.toMatch(/Memory 队列|人工恢复|待处理的消息/);
       expect(disclosure).toContain('所有用户和项目');
       expect(bundle.memory.clear.confirmDescription).toContain('所有用户和项目');
       expect(bundle.memory.clear.removes[0]).toContain('所有用户和项目');

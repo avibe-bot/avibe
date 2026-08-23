@@ -104,3 +104,10 @@ scenarios:
     layer: scenario
     delivery_slice: 8
     test: tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_scenarios.py::test_office_attachment_requires_soffice_and_preserves_valid_siblings
+  - id: MEMORY-IM-ATTACH-013
+    name: Unproven cleanup during cancelled pinning disables only attachment intake
+    status: covered
+    kind: degradation
+    layer: scenario
+    delivery_slice: 9
+    test: tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_scenarios.py::test_cancelled_unproven_pin_cleanup_disables_only_attachment_intake

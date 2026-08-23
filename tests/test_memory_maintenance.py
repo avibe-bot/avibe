@@ -102,7 +102,7 @@ async def test_clear_writes_marker_and_repeats_four_surfaces(tmp_path: Path):
 
     assert result.status == "completed"
     assert [surface for surface, _epoch in port.deleted] == [
-        "identity",
+        "metadata",
         "provider",
         "call_log",
         "attachments",
