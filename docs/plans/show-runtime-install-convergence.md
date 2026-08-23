@@ -141,16 +141,18 @@ named revision, not a promise about a future implementation.
 
 ## Step 1 Executable Acceptance
 
-The Step 1 fixture universe is every data file recursively discovered under
-`tests/fixtures/managed_runtime_released/`. The entrypoint universe is generated
-from the public operation surface exported by the Step 1 manager and adapter
-code, with a reflection check that fails when that surface and its code-owned
-contract registry differ. The executable contract is the Cartesian coverage
-matrix for each fixture's owning adapter; adding a fixture or public operation
-creates an uncovered cell until its test exists. Each Step 1 adapter has a
-non-empty discovered fixture set, and every cell asserts the output and mutation
-predicates owned by its fixture rather than counting a smoke call. This document
-does not repeat fixture names, operation names, or expected scenario outcomes.
+Every fixture consumed by Step 1 acceptance records the released version and
+digest of the released bytes from which it was derived. Acceptance verifies that
+provenance against those bytes and fails when it is absent or mismatched; an
+implementation-authored fixture without released provenance cannot enter the
+corpus. Fixture location belongs to the implementation and is not named here.
+The entrypoint universe is generated from the public operation surface exported
+by the Step 1 manager and adapter code, with a reflection check that fails when
+that surface and its code-owned contract registry differ. The executable
+contract is the Cartesian coverage matrix for each fixture's owning adapter;
+adding a fixture or public operation creates an uncovered cell until its test
+exists. Each adapter has a non-empty fixture set, and every cell asserts its
+fixture's output and mutation predicates rather than counting a smoke call.
 
 Two mechanical rules gate Step 1:
 
@@ -165,14 +167,10 @@ Two mechanical rules gate Step 1:
 
 The following mechanical gates apply to every step:
 
-1. A step that moves behavior into the shared layer passes only if total source
-   lines across the shared layer and affected consumers decline from that
-   step's base revision. If the shared layer and every affected consumer all
-   grow, the step fails regardless of its findings count.
-2. A shared hook overridden by every on-layer consumer represents per-consumer
+1. A shared hook overridden by every on-layer consumer represents per-consumer
    semantics, not shared behavior. The step fails until at least one on-layer
    consumer inherits the hook unchanged.
-3. A new public shared-layer symbol with zero production call sites fails the
+2. A new public shared-layer symbol with zero production call sites fails the
    step. Test-only call sites do not count.
 
 ### Step 2: Converge The Mutation Guard
@@ -191,20 +189,21 @@ sequence before Show uses the guard.
 artifact and internal links while retaining the existing binary-artifact path;
 reuse capability detection for tar filtering without raising the Python floor.
 
-**Gate:** A released v3.0.13 Show archive installs through the shared path and
-its CLI/esbuild entrypoints work, hostile archive probes remain confined, and
-git/Memory/model-hub fixtures stay unchanged; failure breaks Show on macOS and
-Linux or weakens existing binary consumers, so the sequence stops before
-cutover.
+**Gate:** Every released v3.0.13 platform archive measured in the census installs
+through the shared path and exposes its expected CLI/esbuild entrypoints,
+hostile archive probes remain confined, and git/Memory/model-hub fixtures stay
+unchanged; failure breaks a supported platform or weakens existing binary
+consumers, so the sequence stops before cutover.
 
 ### Step 4: Add Shared Retention
 
 **Intent:** Give the shared manager one lifecycle for verified downloads,
 installed versions, protected rollback state, and cleanup reporting.
 
-**Gate:** Current and rollback installations survive focused dry-run and real
-cleanup tests, stale owned artifacts become reclaimable, manifest-cache facts
-remain usable offline, and cleanup failure does not overturn a committed
+**Gate:** For requested retention counts of zero, one, and more than one, dry-run
+and real cleanup preserve the current install plus exactly that many eligible
+previous installs. Stale owned artifacts become reclaimable, manifest-cache
+facts remain usable offline, and cleanup failure does not overturn a committed
 install; any git/Memory/model-hub loss stops rollout for that dependency.
 
 ### Step 5: Cut Over Show's Manifest Provider
