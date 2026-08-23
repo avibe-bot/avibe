@@ -289,15 +289,17 @@ class MemoryStore:
             if meta.clear_in_progress:
                 return VolatileAdmission("clear_in_progress")
             if is_named_memory_project_id(project_ref):
-                named = conn.execute(
-                    "SELECT COUNT(*) FROM memory_projects WHERE principal_id = ? AND project_id != ?",
-                    (principal_id, DEFAULT_MEMORY_PROJECT_ID),
-                ).fetchone()[0]
-                exists = conn.execute(
-                    "SELECT 1 FROM memory_projects WHERE principal_id = ? AND project_id = ?",
-                    (principal_id, project_ref),
-                ).fetchone()
-                if exists is None and int(named) >= MAX_NAMED_MEMORY_PROJECTS:
+                projects = tuple(
+                    str(row[0])
+                    for row in conn.execute(
+                        "SELECT project_id FROM memory_projects WHERE principal_id = ?",
+                        (principal_id,),
+                    )
+                )
+                named_count = sum(
+                    is_named_memory_project_id(project) for project in projects
+                )
+                if project_ref not in projects and named_count >= MAX_NAMED_MEMORY_PROJECTS:
                     self._record_skip(conn, "memory_invalid_input", now)
                     return VolatileAdmission("project_limit")
             provider_timestamp = max(int(occurred_at_ms), meta.last_provider_timestamp_ms + 1)

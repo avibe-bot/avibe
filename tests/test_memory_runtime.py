@@ -8,8 +8,9 @@ import pytest
 
 from config.v2_config import MemoryEndpointConfig, MemoryProcessingConfig
 from core.memory.artifact import FakeMemoryArtifactManager
-from core.memory.everos import FakeMemoryProvider
+from core.memory.everos import FakeMemoryProvider, ProviderHealthSnapshot
 from core.memory.process import FakeEverOSProcessFactory
+from core.memory.processing_record import RuntimeHealthProjection, SourceObservation
 from core.memory.runtime import MemoryConfig, MemoryRuntime
 from core.memory.store import MemoryStore
 from core.memory.types import CaptureAccepted, CaptureRequest
@@ -76,6 +77,56 @@ async def test_missing_provider_call_log_remains_unavailable(tmp_path: Path) -> 
     assert projection.source.status == "unavailable"
     assert projection.source.reason == "provider_call_log_unavailable"
     assert projection.items == ()
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_disabled_attachment_intake_is_unavailable_in_every_readiness_projection(
+    tmp_path: Path,
+) -> None:
+    processing = MemoryProcessingConfig(
+        llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
+        embedding=MemoryEndpointConfig(
+            "https://embed.example.test/v1",
+            "embed",
+            "embed-key",
+        ),
+        multimodal=MemoryEndpointConfig(
+            "https://vision.example.test/v1",
+            "vision",
+            "vision-key",
+        ),
+    )
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True, processing=processing),
+        store=MemoryStore(
+            tmp_path / "state" / "memory" / "memory.sqlite",
+            effective_home=tmp_path,
+        ),
+        effective_home=tmp_path,
+    )
+    runtime.module._writer.disable_attachment_intake()
+
+    async def healthy_status() -> RuntimeHealthProjection:
+        return RuntimeHealthProjection(
+            SourceObservation("available"),
+            ProviderHealthSnapshot(
+                status="ok",
+                version="test",
+                capabilities={"multimodal_llm": True, "parser": True},
+                disabled_features=(),
+                cascade={},
+                recorder={"state": "active", "reason": None},
+            ),
+        )
+
+    runtime._processing_record.read_status = healthy_status
+
+    assert (await runtime.status_payload())["attachment_capture"] == {
+        "status": "unavailable"
+    }
+    assert await runtime.attachment_capture_status() == "unavailable"
+    assert runtime.attachment_capture_config_generation() is None
     await runtime.close()
 
 
@@ -200,6 +251,95 @@ async def test_rejected_embedding_change_restores_previous_writer_authority(
     assert process_factory.supervised[1].running
     assert not runtime.module._writer.unavailable
     reservation = runtime.module._writer.reserve("after-rejection")
+    assert not isinstance(reservation, str)
+    reservation.release()
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_real_quiesce_timeout_restarts_previous_writer_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processing = MemoryProcessingConfig(
+        llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
+        embedding=MemoryEndpointConfig(
+            "https://embed.example.test/v1",
+            "embed",
+            "embed-key",
+        ),
+    )
+    current = MemoryConfig(enabled=True, processing=processing)
+    process_factory = FakeEverOSProcessFactory()
+    store = MemoryStore(
+        tmp_path / "state" / "memory" / "memory.sqlite",
+        effective_home=tmp_path,
+    )
+    runtime = MemoryRuntime(
+        current,
+        store=store,
+        artifact_manager=FakeMemoryArtifactManager(
+            python=Path(__file__),
+            root_format="everos-test",
+            fingerprint="test-artifact",
+        ),
+        process_factory=process_factory,
+        effective_home=tmp_path,
+    )
+
+    async def probe_processing(_python: Path, _config: MemoryConfig) -> bool:
+        return True
+
+    monkeypatch.setattr(runtime, "_probe_processing", probe_processing)
+    async with runtime.module.lifecycle():
+        assert await runtime._reconcile_locked(current) == {
+            "ok": True,
+            "state": "ready",
+        }
+
+    add_entered = asyncio.Event()
+
+    async def block_add(_capture) -> None:
+        add_entered.set()
+        await asyncio.Event().wait()
+
+    runtime.module.replace_provider(FakeMemoryProvider(add_hook=block_add))
+    principal = store.principal_for_user_key("slack:U123")
+    assert await runtime.module.capture(
+        CaptureRequest(
+            source_message_id="source-in-flight",
+            session_id="session-1",
+            principal_id=principal,
+            project_id="default",
+            provenance="user_input",
+            text="remember this",
+            occurred_at_ms=1_000,
+        )
+    ) == CaptureAccepted()
+    await add_entered.wait()
+
+    async def stop_then_settle() -> bool:
+        await runtime._sidecar.stop()
+        await asyncio.sleep(0.02)
+        return True
+
+    runtime.module._writer._ambiguous_stop_reap = stop_then_settle
+    original_quiesce = runtime.module.quiesce_claims
+
+    async def short_quiesce(*, timeout_seconds: float | None = None) -> bool:
+        del timeout_seconds
+        return await original_quiesce(timeout_seconds=0.001)
+
+    monkeypatch.setattr(runtime.module, "quiesce_claims", short_quiesce)
+    async with runtime.module.lifecycle():
+        result = await runtime._reconcile_locked(current)
+
+    assert result == {"ok": False, "error": "memory_clear_failed"}
+    assert len(process_factory.supervised) == 2
+    assert process_factory.supervised[0].stopped
+    assert process_factory.supervised[1].running
+    assert not runtime.module._writer.unavailable
+    reservation = runtime.module._writer.reserve("after-timeout")
     assert not isinstance(reservation, str)
     reservation.release()
     await runtime.close()

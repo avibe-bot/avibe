@@ -1080,23 +1080,22 @@ class MemoryRuntime:
                 "reason": self._runtime_error,
             }
 
+        previous_config = deepcopy(self._config)
         embedding_changed = (
             not skip_embedding_guard
             and _embedding_configuration_changed(self._config, config)
         )
-        previous_config = deepcopy(self._config) if embedding_changed else None
         claims_paused = claims_already_paused
         if embedding_changed:
             # Fence and join volatile writer work before inspecting provider
             # state, so no old-embedding call can cross this boundary.
             if not await self.module.quiesce_claims():
-                # ``pause_and_wait`` fences claims before waiting, so a timeout
-                # leaves them fenced. Releasing here is what keeps a failed
-                # settings save from silently pausing capture forever.
-                if resume_claims_on_failure:
-                    self.module.resume_claims()
-                self._runtime_error = "memory_clear_failed"
-                return {"ok": False, "error": self._runtime_error}
+                restored = resume_claims_on_failure and await self._restore_provisional_claims(
+                    previous_config
+                )
+                if not restored:
+                    self._runtime_error = "memory_clear_failed"
+                return {"ok": False, "error": "memory_clear_failed"}
             claims_paused = True
             if not await self._embedding_change_is_admissible(self._config, config):
                 restored = False
@@ -1141,12 +1140,12 @@ class MemoryRuntime:
         # model, and key changes belong exclusively in its allowlisted child
         # environment and must never leave an old sidecar running.
         if not claims_paused and not await self.module.quiesce_claims():
-            # Same fence release as the embedding guard above: a timed-out pause
-            # must not leave the writer permanently unable to admit captures.
-            if resume_claims_on_failure:
-                self.module.resume_claims()
-            self._runtime_error = "memory_clear_failed"
-            return {"ok": False, "error": self._runtime_error}
+            restored = resume_claims_on_failure and await self._restore_provisional_claims(
+                previous_config
+            )
+            if not restored:
+                self._runtime_error = "memory_clear_failed"
+            return {"ok": False, "error": "memory_clear_failed"}
         await self._close_writer()
         await self._sidecar.stop()
 
@@ -1354,6 +1353,7 @@ class MemoryRuntime:
                 self._config,
                 runtime.source.status,
                 payload.get("health"),
+                bool(self._module and self._module.attachment_intake_enabled),
             ),
         }
         return payload
@@ -1369,6 +1369,7 @@ class MemoryRuntime:
             self._config,
             runtime.source.status,
             payload.get("health"),
+            bool(self._module and self._module.attachment_intake_enabled),
         )
 
     def attachment_capture_config_generation(self) -> int | None:
@@ -1379,6 +1380,8 @@ class MemoryRuntime:
             snapshot.transition_active
             or not self._config.enabled
             or not self._config.effective_multimodal_available()
+            or self._module is None
+            or not self._module.attachment_intake_enabled
         ):
             return None
         return snapshot.generation
@@ -2775,18 +2778,16 @@ class MemoryRuntime:
             self.module.pause_claims()
             old_process = self._process
             try:
-                # The grace budget applies only to the current drain tick. A
-                # timeout leaves the current process/provider ownership intact.
-                if not await self.module.quiesce_claims(timeout_seconds=5.0):
-                    if old_process is not None and old_process.running:
-                        self.module.resume_claims()
-                        self._resume_writer()
-                    return {"ok": False, "error": "memory_restart_failed"}
-                await self._close_writer()
+                # The grace budget applies only to this attempt. Cancelling a
+                # provider call may reap the old sidecar, so timeout recovery
+                # reactivates the last settled configuration.
+                quiesced = await self.module.quiesce_claims(timeout_seconds=5.0)
+                if quiesced:
+                    await self._close_writer()
             except Exception:
-                if old_process is not None and old_process.running:
-                    self.module.resume_claims()
-                    self._resume_writer()
+                quiesced = False
+            if not quiesced:
+                await self._restore_provisional_claims(replay)
                 return {"ok": False, "error": "memory_restart_failed"}
 
             if old_process is not None:
@@ -3424,7 +3425,11 @@ class MemoryRuntime:
                     self.module.pause_claims()
                     raise MemoryRuntimeActivationError("memory clear recovery is required")
                 if not await self.module.quiesce_claims():
-                    self.module.resume_claims()
+                    restored = await self._restore_provisional_claims(
+                        deepcopy(self._config)
+                    )
+                    if not restored:
+                        self._runtime_error = "memory_runtime_install_failed"
                     raise MemoryRuntimeActivationError("memory writer could not pause")
                 async with self.module.provider_root_lifecycle():
                     meta = None
@@ -3559,13 +3564,10 @@ class MemoryRuntime:
 
     async def _restore_provisional_claims(
         self,
-        previous_config: MemoryConfig | None,
+        previous_config: MemoryConfig,
     ) -> bool:
-        """Restore old authority after a candidate fails before cutover."""
+        """Reactivate the last settled authority after a pre-cutover failure."""
 
-        if previous_config is None:
-            self.module.resume_claims()
-            return True
         result = await self._reconcile_locked(
             previous_config,
             claims_already_paused=True,
@@ -3691,6 +3693,7 @@ def _attachment_capture_status(
     config: MemoryConfig,
     source_status: object,
     health: object,
+    attachment_intake_enabled: bool,
 ) -> Literal["ready", "not_configured", "unavailable"]:
     """Project explicit IM attachment-capture readiness from config and health."""
 
@@ -3699,6 +3702,8 @@ def _attachment_capture_status(
     if not IM_ATTACHMENT_CAPTURE_PLATFORMS:
         return "unavailable"
     if not config.enabled:
+        return "unavailable"
+    if not attachment_intake_enabled:
         return "unavailable"
     if source_status != "available":
         return "unavailable"

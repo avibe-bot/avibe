@@ -7,6 +7,7 @@ import sqlite3
 
 import pytest
 
+from core.memory.project_ids import MAX_NAMED_MEMORY_PROJECTS
 from core.memory.store import (
     MEMORY_STORE_SCHEMA_VERSION,
     MemoryStore,
@@ -136,20 +137,23 @@ def test_released_v2_migration_discards_delivery_tables_and_derives_projects(tmp
         meta = conn.execute("SELECT * FROM memory_meta WHERE singleton = 1").fetchone()
         assert meta is not None
         principal = "u-" + "a" * 32
-        project = "p-" + "b" * 32
-        conn.execute(
-            """
-            INSERT INTO memory_capture_queue (
-                source_message_digest, epoch, session_id, provider_session_ref, generation,
-                principal_id, project_ref, provenance, payload_text, payload_attachments,
-                attachment_bundle_id, occurred_at_ms, provider_timestamp_ms, state, attempts,
-                next_retry_at, lease_owner, lease_at, lease_token, last_error, created_at, completed_at
-            ) VALUES ('digest', 0, 'session', 'ref', 1, ?, ?, 'user_input',
-                      'payload', NULL, NULL, 1, 1, 'pending', 0, NULL, NULL, NULL, 0, NULL,
-                      '2026-01-01T00:00:00Z', NULL)
-            """,
-            (principal, project),
+        legacy_projects = tuple(
+            f"p-{index:032x}" for index in range(MAX_NAMED_MEMORY_PROJECTS)
         )
+        for index, project in enumerate(legacy_projects):
+            conn.execute(
+                """
+                INSERT INTO memory_capture_queue (
+                    source_message_digest, epoch, session_id, provider_session_ref, generation,
+                    principal_id, project_ref, provenance, payload_text, payload_attachments,
+                    attachment_bundle_id, occurred_at_ms, provider_timestamp_ms, state, attempts,
+                    next_retry_at, lease_owner, lease_at, lease_token, last_error, created_at, completed_at
+                ) VALUES (?, 0, 'session', ?, 1, ?, ?, 'user_input',
+                          'payload', NULL, NULL, 1, 1, 'pending', 0, NULL, NULL, NULL, 0, NULL,
+                          '2026-01-01T00:00:00Z', NULL)
+                """,
+                (f"digest-{index}", f"ref-{index}", principal, project),
+            )
     store = MemoryStore(path, effective_home=tmp_path)
     meta = store.ensure_meta()
     assert meta.scope_key == b"k" * 32
@@ -157,10 +161,23 @@ def test_released_v2_migration_discards_delivery_tables_and_derives_projects(tmp
     assert meta.last_provider_timestamp_ms == 42
     assert meta.last_success_at == "2026-02-03T00:00:00Z"
     with sqlite3.connect(store.path) as conn:
-        assert conn.execute(
-            "SELECT project_id FROM memory_projects WHERE principal_id = ?",
-            (principal,),
-        ).fetchone()[0] == project
+        assert {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT project_id FROM memory_projects WHERE principal_id = ?",
+                (principal,),
+            )
+        } == set(legacy_projects)
+    admission = store.admit_volatile_capture(
+        source_message_id="new-named-project",
+        session_id="session",
+        principal_id=principal,
+        project_ref="notes",
+        provenance="user_input",
+        occurred_at_ms=43,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+    assert admission.outcome == "accepted"
     with sqlite3.connect(store.path) as conn:
         tables = {
             row[0]

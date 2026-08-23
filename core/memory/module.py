@@ -241,6 +241,12 @@ class MemoryModule:
         return self._clear_active
 
     @property
+    def attachment_intake_enabled(self) -> bool:
+        """Whether new attachment captures can enter the volatile writer."""
+
+        return self._writer.attachments_enabled
+
+    @property
     def retired(self) -> bool:
         """Whether this captured module has been permanently tombstoned."""
 
