@@ -518,7 +518,7 @@ def test_recorded_checkout_and_own_build_marker_are_safe_to_replace(tmp_path: Pa
     assert ownership.blocking_paths == ()
 
 
-def test_globally_ignored_untracked_path_still_blocks_deletion(
+def test_globally_ignored_untracked_path_never_changes_ownership_or_safety(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -536,9 +536,9 @@ def test_globally_ignored_untracked_path_still_blocks_deletion(
     ownership = owner.inspect_github_checkout(checkout, git=["git"], repo=repo, ref=ref)
 
     assert ownership.verdict is show_runtime._ManagedBytesVerdict.PROVEN_MANAGED
-    assert ownership.may_destroy is False
-    assert ownership.reason == "runtime_github_source_dirty"
-    assert ownership.blocking_paths == (".envrc",)
+    assert ownership.may_destroy is True
+    assert ownership.reason is None
+    assert ownership.blocking_paths == ()
 
 
 def test_git_url_rewrite_uses_one_observed_origin_representation(
@@ -635,34 +635,31 @@ def test_relative_local_repo_is_resolved_before_staging_changes_git_base(
 
 
 @pytest.mark.parametrize(
-    ("change", "expected_paths"),
+    "change",
     [
-        ("tracked", ("runtime.js",)),
-        ("untracked", (".DS_Store",)),
-        ("editor", (".vscode/settings.json",)),
+        "modified",
+        "staged",
+        "deleted",
     ],
 )
-def test_local_paths_make_recorded_checkout_unsafe_without_making_it_foreign(
+def test_tracked_content_changes_block_deletion_without_changing_ownership(
     tmp_path: Path,
     change: str,
-    expected_paths: tuple[str, ...],
 ) -> None:
     owner, checkout, repo, ref = _recorded_github_checkout(tmp_path)
-    if change == "tracked":
-        (checkout / "runtime.js").write_text("locally edited\n", encoding="utf-8")
-    elif change == "untracked":
-        (checkout / ".DS_Store").write_text("finder\n", encoding="utf-8")
+    if change == "deleted":
+        (checkout / "runtime.js").unlink()
     else:
-        settings = checkout / ".vscode" / "settings.json"
-        settings.parent.mkdir()
-        settings.write_text("{}\n", encoding="utf-8")
+        (checkout / "runtime.js").write_text("locally edited\n", encoding="utf-8")
+        if change == "staged":
+            _git("add", "runtime.js", cwd=checkout)
 
     ownership = owner.inspect_github_checkout(checkout, git=["git"], repo=repo, ref=ref)
 
     assert ownership.verdict is show_runtime._ManagedBytesVerdict.PROVEN_MANAGED
     assert ownership.may_destroy is False
     assert ownership.reason == "runtime_github_source_dirty"
-    assert ownership.blocking_paths == expected_paths
+    assert ownership.blocking_paths == ("runtime.js",)
 
 
 @pytest.mark.parametrize(
@@ -814,12 +811,12 @@ def test_unproven_abandoned_stage_is_published_to_status_with_its_path(
     assert github_status["reason"] == "runtime_github_source_ownership_unreadable"
 
 
-def test_publish_refusal_never_deletes_managed_checkout_with_local_paths(
+def test_publish_refusal_never_deletes_managed_checkout_with_tracked_changes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     owner, checkout, repo, ref = _recorded_github_checkout(tmp_path)
-    (checkout / ".DS_Store").write_text("finder\n", encoding="utf-8")
+    (checkout / "runtime.js").write_text("locally edited\n", encoding="utf-8")
     current = owner.inspect_github_checkout(checkout, git=["git"], repo=repo, ref=ref)
     staged = owner.create_staging(
         tmp_path / "replacement",
@@ -837,6 +834,39 @@ def test_publish_refusal_never_deletes_managed_checkout_with_local_paths(
     assert refusal == "runtime_github_source_dirty"
     assert checkout.exists()
     assert staged.path.exists()
+
+
+def test_publish_reports_but_does_not_gate_local_additions(
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    owner, checkout, repo, ref = _recorded_github_checkout(tmp_path)
+    _git("remote", "add", "backup", "https://example.invalid/backup.git", cwd=checkout)
+    custom_hook = checkout / ".git" / "hooks" / "pre-commit"
+    custom_hook.write_text("#!/bin/sh\n", encoding="utf-8")
+    (checkout / ".DS_Store").write_text("finder\n", encoding="utf-8")
+    sample_hooks = tuple((checkout / ".git" / "hooks").glob("*.sample"))
+    assert len(sample_hooks) == 14
+
+    current = owner.inspect_github_checkout(checkout, git=["git"], repo=repo, ref=ref)
+    staged = owner.create_staging(
+        tmp_path / "replacement",
+        repo=repo,
+        ref=ref,
+    )
+    (staged.path / "replacement").write_text("complete\n", encoding="utf-8")
+
+    with caplog.at_level("WARNING", logger=show_runtime.__name__):
+        refusal = owner.publish(staged, checkout, current)
+
+    assert current.verdict is show_runtime._ManagedBytesVerdict.PROVEN_MANAGED
+    assert current.may_destroy is True
+    assert current.blocking_paths == ()
+    assert refusal is None
+    assert (checkout / "replacement").read_text(encoding="utf-8") == "complete\n"
+    assert not (checkout / ".DS_Store").exists()
+    assert "local additions" in caplog.text
+    assert "checkout-local Git metadata" in caplog.text
 
 
 def test_failed_publish_window_leaves_absence_instead_of_partial_destination(

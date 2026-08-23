@@ -2764,14 +2764,14 @@ def test_repair_show_runtime_names_github_update_failure_and_remediation(
         (
             "en",
             "runtime_github_source_dirty",
-            [".DS_Store"],
-            (".DS_Store", "Back up or remove those paths"),
+            ["runtime.js"],
+            ("runtime.js", "Back up or remove those paths"),
         ),
         (
             "zh",
             "runtime_github_source_dirty",
-            [".DS_Store"],
-            (".DS_Store", "备份或删除这些路径"),
+            ["runtime.js"],
+            ("runtime.js", "备份或删除这些路径"),
         ),
         (
             "en",

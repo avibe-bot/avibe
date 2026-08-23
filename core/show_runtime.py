@@ -282,7 +282,6 @@ class _ManagedPublishedBytesOwner:
     """The only producer and consumer of managed-byte deletion capabilities."""
 
     _GITHUB_RECORD = "avibe-managed-checkout.json"
-    _GITHUB_BUILD_MARKER = ".avibe-runtime-build"
 
     def create_staging(
         self,
@@ -430,14 +429,7 @@ class _ManagedPublishedBytesOwner:
                 recorded_revision=revision,
             )
         if revision is None and not (path / ".git").is_dir():
-            blockers = self._staging_change_paths(path)
-            if blockers is None:
-                return self._refused(
-                    path,
-                    _ManagedBytesVerdict.UNDETERMINED,
-                    "runtime_github_source_inspection_failed",
-                )
-            return self._managed(path, identity, revision, blockers)
+            return self._managed(path, identity, revision, ())
         if revision is None and record["origin"] is None:
             return self._refused(
                 path,
@@ -446,8 +438,8 @@ class _ManagedPublishedBytesOwner:
             )
 
         origin = self._git_text(git, path, "remote", "get-url", "origin")
-        blockers = self._git_change_paths(git, path)
-        if origin is None or blockers is None:
+        tracked_changes = self._git_tracked_change_paths(git, path)
+        if origin is None or tracked_changes is None:
             return self._refused(
                 path,
                 _ManagedBytesVerdict.UNDETERMINED,
@@ -476,7 +468,7 @@ class _ManagedPublishedBytesOwner:
                 "runtime_github_source_inspection_failed",
                 recorded_revision=revision,
             )
-        return self._managed(path, identity, revision, blockers)
+        return self._managed(path, identity, revision, tracked_changes)
 
     def remove(self, ownership: _ManagedBytesOwnership) -> str | None:
         if not ownership.may_destroy:
@@ -504,6 +496,11 @@ class _ManagedPublishedBytesOwner:
             refusal = self.remove(current)
             if refusal:
                 return refusal
+            logger.warning(
+                "Replaced managed GitHub checkout at %s; local additions, including untracked files "
+                "and checkout-local Git metadata, were not preserved",
+                target,
+            )
         try:
             staged.path.rename(target)
         except OSError:
@@ -549,21 +546,12 @@ class _ManagedPublishedBytesOwner:
         value = result.stdout.strip()
         return value or None
 
-    @classmethod
-    def _git_change_paths(cls, git: list[str], path: Path) -> tuple[str, ...] | None:
+    @staticmethod
+    def _git_tracked_change_paths(git: list[str], path: Path) -> tuple[str, ...] | None:
         paths: set[str] = set()
         commands = (
             ("diff", "--name-only", "-z", "--no-ext-diff"),
             ("diff", "--cached", "--name-only", "-z", "--no-ext-diff"),
-            (
-                "ls-files",
-                "--others",
-                "-z",
-                f"--exclude=/{cls._GITHUB_RECORD}",
-                f"--exclude=/{cls._GITHUB_BUILD_MARKER}",
-                "--exclude=/node_modules/**",
-                "--exclude=/packages/runtime/dist/**",
-            ),
         )
         for command in commands:
             try:
@@ -585,32 +573,18 @@ class _ManagedPublishedBytesOwner:
                 paths.add(value)
         return tuple(sorted(paths))
 
-    @classmethod
-    def _staging_change_paths(cls, path: Path) -> tuple[str, ...] | None:
-        record_path = cls._github_record_path(path)
-        try:
-            return tuple(
-                sorted(
-                    str(candidate.relative_to(path))
-                    for candidate in path.rglob("*")
-                    if candidate != record_path
-                )
-            )
-        except OSError:
-            return None
-
     @staticmethod
     def _managed(
         path: Path,
         identity: tuple[int, int],
         revision: str | None,
-        blockers: tuple[str, ...],
+        tracked_changes: tuple[str, ...],
     ) -> _ManagedBytesOwnership:
         return _ManagedBytesOwnership(
             path,
             _ManagedBytesVerdict.PROVEN_MANAGED,
-            reason="runtime_github_source_dirty" if blockers else None,
-            blocking_paths=blockers,
+            reason="runtime_github_source_dirty" if tracked_changes else None,
+            blocking_paths=tracked_changes,
             recorded_revision=revision,
             _identity=identity,
         )

@@ -143,12 +143,12 @@ def test_force_install_rebuilds_even_when_the_commit_matches(tmp_path: Path) -> 
     assert [command[1:] for command in harness.npm_commands] == [["ci"], ["run", "build"]]
 
 
-def test_local_checkout_path_refuses_replacement_but_preserves_installed_runtime(tmp_path: Path) -> None:
+def test_tracked_checkout_change_refuses_replacement_but_preserves_installed_runtime(tmp_path: Path) -> None:
     upstream = make_upstream(tmp_path)
     harness = Harness(tmp_path, upstream)
     installed = harness.manager.prepare()
     source_dir = harness.manager._github_source_dir()
-    (source_dir / ".DS_Store").write_text("finder\n", encoding="utf-8")
+    (source_dir / "package.json").write_text('{"name":"locally-edited"}\n', encoding="utf-8")
 
     result = harness.manager.prepare(force=True)
 
@@ -158,7 +158,7 @@ def test_local_checkout_path_refuses_replacement_but_preserves_installed_runtime
     assert result["status"]["install"]["state"] == "installed"
     assert result["status"]["github_source"]["ownership"] == "proven_managed"
     assert result["status"]["github_source"]["destruction_safe"] is False
-    assert result["status"]["github_source"]["blocking_paths"] == [".DS_Store"]
+    assert result["status"]["github_source"]["blocking_paths"] == ["package.json"]
     assert Path(installed["command"][-1]).exists()
 
 

@@ -1210,17 +1210,16 @@ Ownership has exactly three verdicts:
 - `UNDETERMINED`: proof is missing or unreadable, Git inspection fails, or directory
   identity changes during inspection. It cannot reach deletion.
 
-Ownership and deletion safety answer different questions. Modified, staged, deleted,
-or untracked paths do not make a recorded checkout foreign; they make deleting proven
-managed bytes unsafe. The probe enumerates untracked paths even when repository or
-global Git configuration ignores them, so `.DS_Store`, `.envrc`, editor state, and
-other user bytes cannot disappear through an ignore rule. That refusal carries the
-exact relative paths so Doctor can ask the user to remove one file rather than move an
-entire checkout. The only exclusions are Avibe's ownership/build marker and the two
-measured build-output roots, `node_modules` and `packages/runtime/dist`. Those outputs
-were measured against a real shallow clone of `avibe-bot/vibe-show-runtime` after
-`npm ci` and the complete build. The owner implements these measured exceptions;
-callers do not repeat them or classify ignored bytes as foreign.
+Ownership and deletion safety answer different questions. The safety gate is limited
+to the complete predicate Git owns: modified, staged, or deleted tracked content blocks
+deletion without making a recorded checkout foreign. Untracked and ignored files,
+checkout-local Git metadata, and any future place local additions may hide do not gate
+replacement and never change ownership. A managed checkout update deliberately discards
+those additions. The publish owner emits a best-effort warning that they are not
+preserved, but reporting is not authorization and is explicitly allowed to be
+incomplete. This removes the unbounded enumeration introduced by the earlier
+`.DS_Store` ruling: an incomplete inventory is informative as a report and unsafe as a
+gate.
 
 Legacy GitHub-source checkouts have no creation record. They remain `UNDETERMINED` and
 are never silently adopted, because a developer's manual clone can have the same repo,
@@ -1240,9 +1239,10 @@ origin checks compare two values produced by the same Git representation rather 
 rewritten URL with raw configuration. A configured value that names an existing local
 path is resolved before staging changes Git's working-directory base; URL and SSH forms
 remain Git-owned. A valid abandoned stage is inspected and removed through the same owner
-on the next install. Missing, partial, conflicting, dirty, or unreadable staging evidence
-refuses deletion and is projected through status so Doctor names the exact path and manual
-remedy; there is no prefix-authorized cleanup, sweeper, timer, or background task.
+on the next install. Missing, partial, conflicting, tracked-dirty, or unreadable staging
+evidence refuses deletion and is projected through status so Doctor names the exact path
+and manual remedy; there is no prefix-authorized cleanup, sweeper, timer, or background
+task.
 
 The ownership record and build marker are written before publication. Publishing an
 update inspects the existing checkout, refuses `PROVEN_FOREIGN`, `UNDETERMINED`, or
@@ -1272,13 +1272,15 @@ callable passed out and invoked elsewhere, and arbitrary subprocess semantics be
 the recognized argv. Its red-before-green run on master exposed the unguarded GitHub
 clone/build/publish effects and the missing owner types before implementation.
 
-Two-sided acceptance is required. A recorded clean checkout and the sole Avibe marker
-permit replacement; tracked edits and arbitrary untracked files remain
-`PROVEN_MANAGED` but block deletion with exact paths; conflicting record/origin/HEAD
-facts are `PROVEN_FOREIGN`; missing and unreadable records are `UNDETERMINED`; no
-refusal invokes deletion; the record is written before publish; first-install record
-failure exposes no final checkout; failed staging leaves the old runtime; and Doctor's
-English and Chinese remedies name both the affected path and a recoverable action.
+Two-sided acceptance is required. A recorded checkout permits replacement when its
+tracked content is unchanged; modified, staged, or deleted tracked paths remain
+`PROVEN_MANAGED` but block deletion with exact paths. Untracked files and checkout-local
+Git metadata remain `PROVEN_MANAGED`, do not block replacement, and produce the
+non-gating replacement warning. Conflicting record/origin/HEAD facts are
+`PROVEN_FOREIGN`; missing and unreadable records are `UNDETERMINED`; no refusal invokes
+deletion; the record is written before publish; first-install record failure exposes no
+final checkout; failed staging leaves the old runtime; and Doctor's English and Chinese
+remedies name both the affected path and a recoverable action.
 
 #### Shipped in 2b′
 
