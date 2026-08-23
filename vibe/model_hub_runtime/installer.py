@@ -35,6 +35,7 @@ _ENGINE_PLATFORM_MAP = {
     "linux-x64": "linux-amd64",
     "linux-arm64": "linux-arm64",
 }
+_ENGINE_ASSET_PLATFORMS = frozenset(_ENGINE_PLATFORM_MAP.values())
 _INSTALL_STATE_SCHEMA_VERSION = 3
 _INSTALL_STATE_RELEASED_SCHEMA_VERSIONS = frozenset({1, 2})
 _INSTALL_STATE_SUPPORTED_SCHEMA_VERSIONS = frozenset(
@@ -60,7 +61,6 @@ _ENGINE_SPEC = ManagedRuntimeSpec(
     default_bin_path="cli-proxy-api",
     archives_field="assets",
     archive_size_field="size_bytes",
-    platform_aliases=tuple(_ENGINE_PLATFORM_MAP.items()),
 )
 
 
@@ -121,7 +121,11 @@ class EngineRuntimeManager(ManagedRuntimeManager):
         return self.runtime_dir / ".install-state.lock"
 
     def host_platform(self) -> str:
-        return self._host_platform_label()
+        return self._normalize_engine_platform(managed_runtime.runtime_platform_tag())
+
+    @staticmethod
+    def _normalize_engine_platform(platform_tag: str) -> str:
+        return _ENGINE_PLATFORM_MAP.get(platform_tag, platform_tag)
 
     def install_failure_reasons(self) -> frozenset[str]:
         """Return every admission failure emitted by the shared installer."""
@@ -336,6 +340,11 @@ class EngineRuntimeManager(ManagedRuntimeManager):
             target[field] = item
         return self._normalized_install_target(target)
 
+    def _normalized_install_target(self, target: Mapping[str, str]) -> dict[str, str]:
+        normalized = super()._normalized_install_target(target)
+        normalized["platform"] = self._normalize_engine_platform(normalized["platform"])
+        return normalized
+
     @staticmethod
     def _failed_install_state(
         *,
@@ -354,6 +363,56 @@ class EngineRuntimeManager(ManagedRuntimeManager):
 
     def resolve_engine_path(self) -> Path | None:
         return self.resolve_binary()
+
+    def _artifact_identity_from_pointer(
+        self,
+        pointer: Mapping[str, Any],
+    ) -> ManagedRuntimeArtifactIdentity | None:
+        platform_tag = pointer.get("platform")
+        if not isinstance(platform_tag, str):
+            return None
+        normalized_platform = self._normalize_engine_platform(platform_tag)
+        if normalized_platform != self.host_platform():
+            return None
+        normalized_pointer = dict(pointer)
+        normalized_pointer["platform"] = managed_runtime.runtime_platform_tag()
+        identity = super()._artifact_identity_from_pointer(normalized_pointer)
+        if identity is None:
+            return None
+        return ManagedRuntimeArtifactIdentity(
+            runtime_version=identity.runtime_version,
+            platform=normalized_platform,
+            archive_sha256=identity.archive_sha256,
+        )
+
+    def _artifact_identity_from_install_metadata(
+        self,
+        metadata: Mapping[str, Any],
+    ) -> ManagedRuntimeArtifactIdentity | None:
+        return self._artifact_identity_from_pointer(metadata)
+
+    def _install_dir_matches_identity(
+        self,
+        install_dir: Path,
+        identity: ManagedRuntimeArtifactIdentity,
+        manifest_sha256: str,
+    ) -> bool:
+        try:
+            versions_dir = (self.runtime_dir / "versions").resolve(strict=True)
+            relative = install_dir.resolve(strict=True).relative_to(versions_dir)
+        except (OSError, RuntimeError, ValueError):
+            return False
+        if len(relative.parts) != 3:
+            return False
+        if relative.parts[0] != managed_runtime.safe_path_part(identity.runtime_version):
+            return False
+        if self._normalize_engine_platform(relative.parts[1]) != identity.platform:
+            return False
+        fingerprints = {
+            self._artifact_fingerprint(identity),
+            self._legacy_artifact_fingerprint(manifest_sha256, identity.archive_sha256),
+        }
+        return relative.parts[2] in fingerprints
 
     def _inspect_admitted_installed_binary(
         self,
@@ -469,7 +528,6 @@ class EngineRuntimeManager(ManagedRuntimeManager):
                 "assets": [],
             }
         payload = manifest.payload
-        supported_platforms = self._declared_artifact_platforms()
         return {
             "name": str(payload.get("name") or ""),
             "resolution": resolution.value,
@@ -483,7 +541,7 @@ class EngineRuntimeManager(ManagedRuntimeManager):
                     "sha256": asset["sha256"],
                 }
                 for asset in payload.get("assets", [])
-                if asset.get("platform") in supported_platforms
+                if asset.get("platform") in _ENGINE_ASSET_PLATFORMS
             ],
         }
 
@@ -519,7 +577,8 @@ class EngineRuntimeManager(ManagedRuntimeManager):
             and re.fullmatch(r"[0-9a-f]{40}", str(payload.get("source_sha") or ""))
         ):
             return ManifestResolution.UNRESOLVED, None
-        archive = super()._manifest_archive_for_platform(manifest)
+        asset_platform = _ENGINE_PLATFORM_MAP.get(managed_runtime.runtime_platform_tag())
+        archive = manifest.archives.get(asset_platform) if asset_platform is not None else None
         if archive is None:
             return ManifestResolution.UNSUPPORTED, None
         return ManifestResolution.RESOLVED, archive

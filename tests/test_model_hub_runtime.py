@@ -852,7 +852,7 @@ def test_released_linux_x64_pointer_and_claim_are_admitted_by_platform_alias(
     assert status["installed"] is True
     assert status["installed_identity"]["platform"] == "linux-amd64"
     assert status["selected_identity"]["platform"] == "linux-amd64"
-    assert status["comparison"] == "matches"
+    assert status["matches_manifest"] is True
     assert status["path"] == str(alias_install_dir / "cli-proxy-api")
     assert manager.resolve_engine_path() == alias_install_dir / "cli-proxy-api"
     assert claim["target"] == installed["target"]
@@ -1139,12 +1139,10 @@ def test_engine_installer_selects_verified_packaged_asset(
     assert archive.binary_sha256 == binary_sha256
 
 
-def test_engine_platform_identity_is_declared_by_the_shared_spec() -> None:
-    assert dict(runtime_installer_module._ENGINE_SPEC.platform_aliases) == (
-        runtime_installer_module._ENGINE_PLATFORM_MAP
-    )
-    assert "_normalize_installed_artifact_platform" not in EngineRuntimeManager.__dict__
-    assert "_normalized_install_target" not in EngineRuntimeManager.__dict__
+def test_engine_platform_identity_is_normalized_locally() -> None:
+    assert runtime_installer_module._ENGINE_SPEC.platform_aliases == ()
+    assert EngineRuntimeManager._normalize_engine_platform("linux-x64") == "linux-amd64"
+    assert EngineRuntimeManager._normalize_engine_platform("linux-amd64") == "linux-amd64"
 
 
 def test_engine_installer_is_idempotent_and_rejects_tampered_archive(tmp_path: Path) -> None:
@@ -1174,6 +1172,28 @@ def test_engine_installer_is_idempotent_and_rejects_tampered_archive(tmp_path: P
     ).ensure()
     assert rejected["ok"] is False
     assert rejected["reason"] == "model_hub_engine_archive_checksum_mismatch"
+
+
+def test_invalid_manifest_does_not_hide_disk_engine_but_blocks_repair(tmp_path: Path) -> None:
+    archive, binary = _write_fixture_archive(tmp_path / "fixture")
+    manifest_path = _write_fixture_manifest(tmp_path / "fixture", archive, binary)
+    manager = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest_path)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+    installed_path = Path(installed["path"])
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["license"] = "invalid"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    status = manager.status()
+    repair = manager.ensure()
+
+    assert status["installed"] is True
+    assert status["path"] == str(installed_path)
+    assert manager.resolve_engine_path() == installed_path
+    assert repair["ok"] is False
+    assert repair["reason"] == "model_hub_engine_manifest_invalid"
 
 
 def test_engine_status_rehashes_binary_only_after_file_identity_changes(
@@ -1803,6 +1823,57 @@ def test_supervisor_missing_runtime_stays_installable_after_start(tmp_path: Path
         supervisor.ensure_running()
 
     assert supervisor.status()["status"]["health"] == "not_installed"
+
+
+def test_supervisor_starts_disk_engine_despite_released_failure_state_and_missing_manifest(
+    tmp_path: Path,
+) -> None:
+    source_binary = tmp_path / "fixture" / "mock-engine"
+    source_binary.parent.mkdir(parents=True)
+    _write_mock_engine(source_binary)
+    binary = source_binary.read_text(encoding="utf-8").replace(
+        "\nimport json\n",
+        "\nimport sys\n"
+        "if sys.argv[1:] == ['--help']:\n"
+        "    print('CLIProxyAPI Version: 7.2.95, Commit: fixture')\n"
+        "    raise SystemExit(0)\n"
+        "import json\n",
+        1,
+    ).encode()
+    archive = tmp_path / "fixture" / "CLIProxyAPI_fixture.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        member = tarfile.TarInfo("cli-proxy-api")
+        member.mode = 0o755
+        member.size = len(binary)
+        tar.addfile(member, io.BytesIO(binary))
+    manifest_path = _write_fixture_manifest(tmp_path / "fixture", archive, binary)
+    manager = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest_path)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+    assert manager.transition_install_claim(
+        InstallClaimTransition.CREATE,
+        generation=RUNTIME_INSTALL_GENERATION_A,
+        target=installed["target"],
+    )
+    assert manager.transition_install_claim(
+        InstallClaimTransition.SETTLE_FAILURE,
+        generation=RUNTIME_INSTALL_GENERATION_A,
+        reason="model_hub_engine_manifest_missing",
+    )
+    manifest_path.unlink()
+    manager.offline = True
+    supervisor = EngineSupervisor(
+        installer=manager,
+        state_store=EngineStateStore(tmp_path / "state"),
+        startup_timeout=5,
+    )
+
+    assert manager.status()["installed"] is True
+    assert supervisor.status()["status"]["health"] == "not_started"
+    connection = supervisor.ensure_running()
+    assert connection.base_url.startswith("http://127.0.0.1:")
+    assert supervisor.status()["status"]["health"] == "ok"
+    supervisor.stop()
 
 
 def test_supervisor_keeps_installing_state_unverified_until_settlement(

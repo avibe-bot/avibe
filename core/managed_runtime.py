@@ -8,7 +8,6 @@ import logging
 import os
 import platform
 import re
-import secrets
 import shutil
 import stat
 import sys
@@ -18,10 +17,10 @@ import threading
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from sysconfig import get_platform
-from typing import Any, Iterator, Literal
+from typing import Any, Iterator
 
 from config.atomic_io import write_atomic
 from core.dependency_network import (
@@ -31,15 +30,6 @@ from core.dependency_network import (
     fetch_to_path,
     probe_url,
     redact_url,
-)
-from core.memory.confined_filesystem import (
-    ConfinedFilesystemError,
-    create_confined_file,
-    ensure_private_directory,
-    open_confined_directory,
-    open_confined_regular_file,
-    remove_confined_path,
-    replace_confined,
 )
 from storage.lock import (
     MigrationFileLock,
@@ -53,9 +43,6 @@ from storage.lock import (
 logger = logging.getLogger(__name__)
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_ADMISSION_CACHE_SCHEMA_VERSION = 1
-_ADMISSION_CACHE_DIRECTORY = Path("derived") / "admission"
-_ADMISSION_CACHE_MAX_BYTES = 16 * 1024
 _INSTALL_LOCKS: dict[str, threading.Lock] = {}
 _INSTALL_LOCKS_GUARD = threading.Lock()
 _ENSURE_FAILURE_SUFFIXES = frozenset(
@@ -121,26 +108,9 @@ class ManagedRuntimeArtifactIdentity:
 @dataclass(frozen=True)
 class InstalledArtifactSnapshot:
     installed_identity: ManagedRuntimeArtifactIdentity | None
-    selected_identity: ManagedRuntimeArtifactIdentity | None
-    comparison: Literal["matches", "differs", "not_comparable", "unknown"]
-    admission: Literal["absent", "ok", "broken", "unknown"]
     path: Path | None
     install_dir: Path | None
-    manifest_extensions: Mapping[str, Any]
     inspection_error: str | None
-    admission_extensions: Mapping[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class InstalledArtifactAdmission:
-    state: Literal["ok", "broken", "unknown"]
-    path: Path | None
-    reason: str | None
-    extensions: Mapping[str, Any] = field(default_factory=dict)
-
-
-_ADMISSION_MEMORY_CACHE: set[tuple[str, str, str]] = set()
-_ADMISSION_MEMORY_CACHE_GUARD = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -153,15 +123,6 @@ class ManagedRuntimeSpec:
     archives_field: str = "archives"
     archive_size_field: str = "size"
     platform_aliases: tuple[tuple[str, str], ...] = ()
-    persisted_manifest_fields: tuple[str, ...] = ()
-
-    def __post_init__(self) -> None:
-        aliases = dict(self.platform_aliases)
-        if any(
-            aliases.get(canonical, canonical) != canonical
-            for _host, canonical in self.platform_aliases
-        ):
-            raise ValueError("platform aliases must map directly to canonical identities")
 
     @property
     def metadata_filename(self) -> str:
@@ -187,7 +148,6 @@ class ManagedRuntimeManager:
         self.offline = offline
         self._install_reason: str | None = None
         self._download_error: dict[str, Any] | None = None
-        self._admission_projection_cache: dict[tuple[str, str, str], InstalledArtifactAdmission] = {}
         self._install_lock = install_lock_for(spec.runtime_id)
         self._install_file_lock_path = self.runtime_dir / ".install.lock"
 
@@ -299,19 +259,6 @@ class ManagedRuntimeManager:
                         manifest=manifest,
                         archive=archive,
                     )
-                extension_admission = self._inspect_installed_artifact_extension(
-                    staged_binary,
-                    self._artifact_identity(manifest, archive),
-                    pointer=None,
-                    metadata=None,
-                    selected_manifest=manifest,
-                )
-                if extension_admission.state != "ok":
-                    return self._failure(
-                        extension_admission.reason or self._reason("binary_prepare_failed"),
-                        manifest=manifest,
-                        archive=archive,
-                    )
                 binary_sha256 = file_sha256(staged_binary)
                 if binary_sha256 != archive.binary_sha256:
                     return self._failure(
@@ -379,17 +326,19 @@ class ManagedRuntimeManager:
         if manifest is not None:
             self._manifest_installable(manifest)
         archive = self._manifest_archive_for_platform(manifest) if manifest else None
-        snapshot = self.installed_artifact_snapshot(
-            selected_manifest=manifest,
-            selected_archive=archive,
-        )
+        snapshot = self.installed_artifact_snapshot()
         binary = snapshot.path
         installed_identity = snapshot.installed_identity
-        selected_identity = snapshot.selected_identity
-        matches_manifest = {
-            "matches": True,
-            "differs": False,
-        }.get(snapshot.comparison)
+        selected_identity = (
+            self._artifact_identity(manifest, archive)
+            if manifest is not None and archive is not None
+            else None
+        )
+        matches_manifest = (
+            installed_identity == selected_identity
+            if installed_identity is not None and selected_identity is not None
+            else None
+        )
         return {
             "id": self.spec.runtime_id,
             "provider": "manifest",
@@ -400,65 +349,32 @@ class ManagedRuntimeManager:
             "installed_identity": self._artifact_identity_payload(installed_identity),
             "selected_identity": self._artifact_identity_payload(selected_identity),
             "matches_manifest": matches_manifest,
-            "comparison": snapshot.comparison,
-            "admission": snapshot.admission,
             "status": "ready" if binary else ("error" if snapshot.inspection_error else "missing"),
             "path": str(binary) if binary else None,
             "install_dir": str(snapshot.install_dir) if snapshot.install_dir else None,
             "manifest": self._manifest_status_payload(manifest),
             "archive": self._archive_status_payload(archive),
-            "installed_manifest": dict(snapshot.manifest_extensions),
-            "reason": snapshot.inspection_error or self._install_reason,
+            "reason": snapshot.inspection_error or (self._install_reason if binary is None else None),
             "inspection_error": snapshot.inspection_error,
             "download_error": self._download_error,
         }
 
-    def installed_artifact_snapshot(
-        self,
-        *,
-        selected_manifest: ManagedRuntimeManifest | None = None,
-        selected_archive: ManagedRuntimeArchive | None = None,
-        require_selected_extensions: bool = False,
-    ) -> InstalledArtifactSnapshot:
-        """Inspect the admitted local install without requiring a manifest."""
+    def installed_artifact_snapshot(self) -> InstalledArtifactSnapshot:
+        """Inspect the usable local install without requiring a manifest."""
 
-        selected_identity = (
-            self._artifact_identity(selected_manifest, selected_archive)
-            if selected_manifest is not None and selected_archive is not None
-            else None
-        )
         pointer, pointer_invalid = self._read_installed_pointer()
         if pointer_invalid:
             return InstalledArtifactSnapshot(
                 installed_identity=None,
-                selected_identity=selected_identity,
-                comparison="unknown",
-                admission="unknown",
                 path=None,
                 install_dir=None,
-                manifest_extensions={},
-                inspection_error=self._installed_artifact_error(),
+                inspection_error=self._reason("install_inspection_failed"),
             )
         if pointer is None:
-            if not self._runtime_state_is_proven_empty():
-                return InstalledArtifactSnapshot(
-                    installed_identity=None,
-                    selected_identity=selected_identity,
-                    comparison="unknown",
-                    admission="unknown",
-                    path=None,
-                    install_dir=None,
-                    manifest_extensions={},
-                    inspection_error=self._installed_artifact_error(),
-                )
             return InstalledArtifactSnapshot(
                 installed_identity=None,
-                selected_identity=selected_identity,
-                comparison="not_comparable" if selected_identity is not None else "unknown",
-                admission="absent",
                 path=None,
                 install_dir=None,
-                manifest_extensions={},
                 inspection_error=None,
             )
 
@@ -466,22 +382,10 @@ class ManagedRuntimeManager:
         if installed_identity is None:
             return InstalledArtifactSnapshot(
                 installed_identity=None,
-                selected_identity=selected_identity,
-                comparison="unknown",
-                admission="unknown",
                 path=None,
                 install_dir=None,
-                manifest_extensions={},
-                inspection_error=self._installed_artifact_error(),
+                inspection_error=self._reason("install_inspection_failed"),
             )
-
-        comparison: Literal["matches", "differs", "not_comparable", "unknown"]
-        if selected_identity is None:
-            comparison = "unknown"
-        elif installed_identity == selected_identity:
-            comparison = "matches"
-        else:
-            comparison = "differs"
         install_dir = self._installed_pointer_install_dir(pointer, installed_identity)
         metadata = self._read_install_metadata(install_dir) if install_dir is not None else None
         metadata_identity = (
@@ -494,23 +398,16 @@ class ManagedRuntimeManager:
         ):
             return InstalledArtifactSnapshot(
                 installed_identity=None,
-                selected_identity=selected_identity,
-                comparison="unknown",
-                admission="unknown",
                 path=None,
                 install_dir=install_dir,
-                manifest_extensions={},
-                inspection_error=self._installed_artifact_error(),
+                inspection_error=self._reason("install_inspection_failed"),
             )
         try:
-            admission = self._inspect_installed_artifact_admission(
+            binary = self._inspect_admitted_installed_binary(
                 pointer,
                 installed_identity,
                 install_dir=install_dir,
                 metadata=metadata,
-                selected_manifest=(
-                    selected_manifest if require_selected_extensions else None
-                ),
             )
         except Exception:  # noqa: BLE001
             logger.debug(
@@ -520,24 +417,15 @@ class ManagedRuntimeManager:
             )
             return InstalledArtifactSnapshot(
                 installed_identity=installed_identity,
-                selected_identity=selected_identity,
-                comparison=comparison,
-                admission="unknown",
                 path=None,
                 install_dir=install_dir,
-                manifest_extensions=self._persisted_manifest_extensions(metadata),
-                inspection_error=self._installed_artifact_error(),
+                inspection_error=self._reason("install_inspection_failed"),
             )
         return InstalledArtifactSnapshot(
-            installed_identity=installed_identity,
-            selected_identity=selected_identity,
-            comparison=comparison,
-            admission=admission.state,
-            path=admission.path,
+            installed_identity=installed_identity if binary is not None else None,
+            path=binary,
             install_dir=install_dir,
-            manifest_extensions=self._persisted_manifest_extensions(metadata),
-            inspection_error=admission.reason,
-            admission_extensions=admission.extensions,
+            inspection_error=None if binary is not None else self._reason("install_inspection_failed"),
         )
 
     def probe_archive_reachability(self, *, timeout: float = 10.0) -> dict[str, Any]:
@@ -972,10 +860,6 @@ class ManagedRuntimeManager:
                 archive_entries = ((item.get("platform"), item) for item in raw_archives if isinstance(item, dict))
             else:
                 raise ValueError("invalid archive collection")
-            for field in self.spec.persisted_manifest_fields:
-                value = data.get(field)
-                if not isinstance(value, str) or not value.strip():
-                    raise ValueError(f"invalid persisted manifest field: {field}")
             for platform_tag, item in archive_entries:
                 if not isinstance(platform_tag, str) or not isinstance(item, dict):
                     raise ValueError("invalid archive entry")
@@ -1028,8 +912,12 @@ class ManagedRuntimeManager:
         self,
         manifest: ManagedRuntimeManifest,
     ) -> ManagedRuntimeArchive | None:
-        platform_tag = self._host_artifact_platform()
-        archive = manifest.archives.get(platform_tag) if platform_tag is not None else None
+        platform_tag = runtime_platform_tag()
+        platform_aliases = dict(self.spec.platform_aliases)
+        archive = manifest.archives.get(platform_tag)
+        if archive is None:
+            alias = platform_aliases.get(platform_tag)
+            archive = manifest.archives.get(alias) if alias else None
         if archive is None:
             self._install_reason = self._reason("platform_unsupported")
         return archive
@@ -1152,24 +1040,19 @@ class ManagedRuntimeManager:
         runtime_version = pointer.get("runtime_version")
         platform_tag = pointer.get("platform")
         archive_sha256 = pointer.get("archive_sha256")
-        normalized_platform = (
-            self._normalize_installed_artifact_platform(platform_tag)
-            if isinstance(platform_tag, str)
-            else None
-        )
         if not (
             pointer.get("provider") == "manifest"
             and pointer.get("runtime_id") == self.spec.runtime_id
             and isinstance(runtime_version, str)
             and runtime_version
-            and normalized_platform is not None
+            and platform_tag == runtime_platform_tag()
             and isinstance(archive_sha256, str)
             and _SHA256_RE.fullmatch(archive_sha256)
         ):
             return None
         return ManagedRuntimeArtifactIdentity(
             runtime_version=runtime_version,
-            platform=normalized_platform,
+            platform=platform_tag,
             archive_sha256=archive_sha256,
         )
 
@@ -1200,24 +1083,6 @@ class ManagedRuntimeManager:
     def _legacy_artifact_fingerprint(manifest_sha256: str, archive_sha256: str) -> str:
         return hashlib.sha256(f"{manifest_sha256}:{archive_sha256}".encode("utf-8")).hexdigest()[:16]
 
-    def _canonical_platform_tag(self, platform_tag: str) -> str:
-        return dict(self.spec.platform_aliases).get(platform_tag, platform_tag)
-
-    def _declared_artifact_platforms(self) -> frozenset[str]:
-        return frozenset(artifact for _host, artifact in self.spec.platform_aliases)
-
-    def _host_artifact_platform(self) -> str | None:
-        normalized = self._canonical_platform_tag(runtime_platform_tag())
-        declared = self._declared_artifact_platforms()
-        return normalized if not declared or normalized in declared else None
-
-    def _host_platform_label(self) -> str:
-        return self._host_artifact_platform() or runtime_platform_tag()
-
-    def _normalize_installed_artifact_platform(self, platform_tag: str) -> str | None:
-        normalized = self._canonical_platform_tag(platform_tag)
-        return normalized if normalized == self._host_artifact_platform() else None
-
     def _installed_bin_path(self, payload: Mapping[str, Any]) -> str | None:
         value = payload.get("bin_path")
         if value is None:
@@ -1234,26 +1099,6 @@ class ManagedRuntimeManager:
         except (OSError, UnicodeError, ValueError):
             return None, True
         return (payload, False) if isinstance(payload, dict) else (None, True)
-
-    def _runtime_state_is_proven_empty(self) -> bool:
-        try:
-            runtime_state = self.runtime_dir.lstat()
-        except FileNotFoundError:
-            return True
-        except OSError:
-            return False
-        if not stat.S_ISDIR(runtime_state.st_mode):
-            return False
-        try:
-            next(self.runtime_dir.iterdir())
-        except StopIteration:
-            return True
-        except OSError:
-            return False
-        return False
-
-    def _installed_artifact_error(self) -> str:
-        return self._reason("install_inspection_failed")
 
     def _read_install_metadata(self, install_dir: Path) -> dict[str, Any] | None:
         try:
@@ -1300,8 +1145,7 @@ class ManagedRuntimeManager:
             return False
         if relative.parts[0] != safe_path_part(identity.runtime_version):
             return False
-        path_platform = self._normalize_installed_artifact_platform(relative.parts[1])
-        if path_platform != identity.platform:
+        if relative.parts[1] != safe_path_part(identity.platform):
             return False
         fingerprints = {
             self._artifact_fingerprint(identity),
@@ -1369,11 +1213,7 @@ class ManagedRuntimeManager:
         if not (
             metadata.get("provider") == "manifest"
             and metadata.get("runtime_id") == self.spec.runtime_id
-            and metadata.get("runtime_version") == identity.runtime_version
-            and isinstance(metadata.get("platform"), str)
-            and self._normalize_installed_artifact_platform(metadata["platform"])
-            == identity.platform
-            and metadata.get("archive_sha256") == identity.archive_sha256
+            and self._artifact_identity_from_install_metadata(metadata) == identity
             and self._installed_bin_path(metadata) == bin_path
             and metadata_manifest_sha256 == manifest_sha256
             and (
@@ -1391,168 +1231,6 @@ class ManagedRuntimeManager:
             return None
         return self._verified_binary_from_metadata(install_dir, metadata)
 
-    def _inspect_installed_artifact_admission(
-        self,
-        pointer: Mapping[str, Any],
-        identity: ManagedRuntimeArtifactIdentity,
-        *,
-        install_dir: Path,
-        metadata: Mapping[str, Any],
-        selected_manifest: ManagedRuntimeManifest | None,
-    ) -> InstalledArtifactAdmission:
-        binary = self._inspect_admitted_installed_binary(
-            pointer,
-            identity,
-            install_dir=install_dir,
-            metadata=metadata,
-        )
-        if binary is None:
-            return InstalledArtifactAdmission(
-                state="broken",
-                path=None,
-                reason=self._installed_artifact_error(),
-            )
-        extension = self._inspect_installed_artifact_extension(
-            binary,
-            identity,
-            pointer=pointer,
-            metadata=metadata,
-            selected_manifest=selected_manifest,
-        )
-        return InstalledArtifactAdmission(
-            state=extension.state,
-            path=binary if extension.state == "ok" else None,
-            reason=extension.reason,
-            extensions=extension.extensions,
-        )
-
-    def _inspect_installed_artifact_extension(
-        self,
-        binary: Path,
-        identity: ManagedRuntimeArtifactIdentity,
-        *,
-        pointer: Mapping[str, Any] | None,
-        metadata: Mapping[str, Any] | None,
-        selected_manifest: ManagedRuntimeManifest | None,
-    ) -> InstalledArtifactAdmission:
-        """Evaluate runtime-specific facts that are not implied by artifact identity."""
-
-        del identity, pointer, metadata, selected_manifest
-        return InstalledArtifactAdmission(state="ok", path=binary, reason=None)
-
-    def _cached_installed_artifact_admission(
-        self,
-        identity: ManagedRuntimeArtifactIdentity,
-        *,
-        context: str,
-        binary: Path,
-        probe: Callable[[], bool],
-        failure_reason: str,
-    ) -> InstalledArtifactAdmission:
-        identity_payload = self._artifact_identity_payload(identity)
-        assert identity_payload is not None
-        identity_key = json.dumps(identity_payload, sort_keys=True, separators=(",", ":"))
-        binary_key = str(binary)
-        cache_key = (identity_key, context, binary_key)
-        cached = self._admission_projection_cache.get(cache_key)
-        if cached is None:
-            cached = self._read_admission_projection_cache(identity_payload, context, binary)
-        if cached is not None:
-            self._admission_projection_cache[cache_key] = cached
-            return cached
-
-        try:
-            state: Literal["ok", "broken", "unknown"] = "ok" if probe() else "broken"
-        except Exception:  # noqa: BLE001
-            logger.debug(
-                "Failed to probe installed %s runtime admission",
-                self.spec.runtime_id,
-                exc_info=True,
-            )
-            state = "unknown"
-        admission = InstalledArtifactAdmission(
-            state=state,
-            path=binary if state == "ok" else None,
-            reason=None if state == "ok" else failure_reason,
-        )
-        if state != "ok":
-            return admission
-        self._admission_projection_cache[cache_key] = admission
-
-        memory_key = self._admission_memory_cache_key(identity_key, context)
-        with _ADMISSION_MEMORY_CACHE_GUARD:
-            _ADMISSION_MEMORY_CACHE.add(memory_key)
-        try:
-            cache_path = self._admission_projection_cache_path(identity_key, context)
-            write_json_confined_atomic(
-                self.runtime_dir,
-                cache_path,
-                {
-                    "schema_version": _ADMISSION_CACHE_SCHEMA_VERSION,
-                    "artifact_identity": identity_payload,
-                    "context": context,
-                },
-            )
-        except Exception:  # noqa: BLE001
-            logger.debug(
-                "Failed to cache installed %s runtime admission",
-                self.spec.runtime_id,
-                exc_info=True,
-            )
-        return admission
-
-    def _read_admission_projection_cache(
-        self,
-        identity: Mapping[str, str],
-        context: str,
-        binary: Path,
-    ) -> InstalledArtifactAdmission | None:
-        identity_key = json.dumps(identity, sort_keys=True, separators=(",", ":"))
-        memory_key = self._admission_memory_cache_key(identity_key, context)
-        with _ADMISSION_MEMORY_CACHE_GUARD:
-            memory_cached = memory_key in _ADMISSION_MEMORY_CACHE
-        if memory_cached:
-            return InstalledArtifactAdmission(state="ok", path=binary, reason=None)
-        descriptor: int | None = None
-        try:
-            descriptor = open_confined_regular_file(
-                self.runtime_dir,
-                self._admission_projection_cache_path(identity_key, context),
-            )
-            encoded = os.read(descriptor, _ADMISSION_CACHE_MAX_BYTES + 1)
-            if len(encoded) > _ADMISSION_CACHE_MAX_BYTES:
-                return None
-            payload = json.loads(encoded.decode("utf-8"))
-        except (ConfinedFilesystemError, OSError, UnicodeError, ValueError):
-            return None
-        finally:
-            if descriptor is not None:
-                os.close(descriptor)
-        if not (
-            isinstance(payload, dict)
-            and payload.get("schema_version") == _ADMISSION_CACHE_SCHEMA_VERSION
-            and payload.get("artifact_identity") == dict(identity)
-            and payload.get("context") == context
-        ):
-            return None
-        with _ADMISSION_MEMORY_CACHE_GUARD:
-            _ADMISSION_MEMORY_CACHE.add(memory_key)
-        return InstalledArtifactAdmission(state="ok", path=binary, reason=None)
-
-    def _admission_memory_cache_key(self, identity_key: str, context: str) -> tuple[str, str, str]:
-        return (str(self.runtime_dir.absolute()), identity_key, context)
-
-    def _admission_projection_cache_path(self, identity_key: str, context: str) -> Path:
-        cache_key = hashlib.sha256(f"{identity_key}:{context}".encode("utf-8")).hexdigest()
-        return self.runtime_dir / _ADMISSION_CACHE_DIRECTORY / f"{cache_key}.json"
-
-    def _persisted_manifest_extensions(self, metadata: Mapping[str, Any]) -> dict[str, str | None]:
-        extensions: dict[str, str | None] = {}
-        for field in self.spec.persisted_manifest_fields:
-            value = metadata.get(field)
-            extensions[field] = value if isinstance(value, str) and value.strip() else None
-        return extensions
-
     @staticmethod
     def _install_target_identity(
         manifest: ManagedRuntimeManifest,
@@ -1568,9 +1246,6 @@ class ManagedRuntimeManager:
     def _normalized_install_target(self, target: Mapping[str, str]) -> dict[str, str]:
         normalized = dict(target)
         normalized.pop("manifest_sha256", None)
-        platform_tag = normalized.get("platform")
-        if platform_tag is not None:
-            normalized["platform"] = self._canonical_platform_tag(platform_tag)
         return normalized
 
     def _verified_manifest_binary(
@@ -1588,9 +1263,7 @@ class ManagedRuntimeManager:
             metadata.get("provider") == "manifest"
             and metadata.get("runtime_id") == self.spec.runtime_id
             and metadata.get("runtime_version") == manifest.runtime_version
-            and isinstance(metadata.get("platform"), str)
-            and self._normalize_installed_artifact_platform(metadata["platform"])
-            == archive.platform
+            and self._artifact_identity_from_install_metadata(metadata) == identity
             and metadata.get("archive_sha256") == archive.sha256
             and self._installed_bin_path(metadata) == archive.bin_path
             and metadata.get("binary_sha256") == archive.binary_sha256
@@ -1609,10 +1282,6 @@ class ManagedRuntimeManager:
         *,
         binary_sha256: str,
     ) -> None:
-        persisted_manifest = {
-            field: manifest.payload[field]
-            for field in self.spec.persisted_manifest_fields
-        }
         write_json_atomic(
             install_dir / self.spec.metadata_filename,
             {
@@ -1627,7 +1296,6 @@ class ManagedRuntimeManager:
                 "bin_path": archive.bin_path,
                 "manifest_source": manifest.loaded_from,
                 "source": manifest.source,
-                **persisted_manifest,
             },
         )
 
@@ -1704,40 +1372,19 @@ class ManagedRuntimeManager:
         *,
         reason: str | None = None,
     ) -> dict[str, Any]:
+        snapshot = self.installed_artifact_snapshot()
         try:
-            admission_failure = self._existing_install_admission_failure(
-                binary,
-                manifest,
-                archive,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Failed to admit existing %s runtime install", self.spec.runtime_id)
-            return self._failure(
-                self._existing_install_admission_error(),
-                manifest=manifest,
-                archive=archive,
-                message=str(exc),
-            )
-        if admission_failure is not None:
-            return self._failure(
-                admission_failure,
-                manifest=manifest,
-                archive=archive,
-            )
-        extension_admission = self._inspect_installed_artifact_extension(
-            binary,
-            self._artifact_identity(manifest, archive),
-            pointer=None,
-            metadata=self._read_install_metadata(install_dir),
-            selected_manifest=manifest,
+            expected_install_dir = install_dir.resolve(strict=True)
+            expected_binary = binary.resolve(strict=True)
+        except (OSError, RuntimeError):
+            expected_install_dir = None
+            expected_binary = None
+        pointer_is_current = (
+            snapshot.installed_identity == self._artifact_identity(manifest, archive)
+            and snapshot.install_dir == expected_install_dir
+            and snapshot.path == expected_binary
         )
-        if extension_admission.state != "ok":
-            return self._failure(
-                extension_admission.reason or self._existing_install_admission_error(),
-                manifest=manifest,
-                archive=archive,
-            )
-        if not self._current_pointer_selects_install(install_dir, manifest, archive):
+        if not pointer_is_current:
             try:
                 self._write_current_pointer(install_dir, manifest, archive)
             except Exception as exc:  # noqa: BLE001
@@ -1752,41 +1399,6 @@ class ManagedRuntimeManager:
         if reason:
             payload["reason"] = reason
         return payload
-
-    def _existing_install_admission_failure(
-        self,
-        binary: Path,
-        manifest: ManagedRuntimeManifest,
-        archive: ManagedRuntimeArchive,
-    ) -> str | None:
-        del binary, manifest, archive
-        return None
-
-    def _existing_install_admission_error(self) -> str:
-        return self._reason("install_failed")
-
-    def _current_pointer_selects_install(
-        self,
-        install_dir: Path,
-        manifest: ManagedRuntimeManifest,
-        archive: ManagedRuntimeArchive,
-    ) -> bool:
-        snapshot = self.installed_artifact_snapshot(
-            selected_manifest=manifest,
-            selected_archive=archive,
-            require_selected_extensions=True,
-        )
-        if snapshot.admission != "ok" or snapshot.comparison != "matches":
-            return False
-        try:
-            expected_install_dir = install_dir.resolve(strict=True)
-            expected_binary = (expected_install_dir / archive.bin_path).resolve(strict=True)
-        except (OSError, RuntimeError):
-            return False
-        return (
-            snapshot.install_dir == expected_install_dir
-            and snapshot.path == expected_binary
-        )
 
     def _success_payload(
         self,
@@ -1949,40 +1561,3 @@ def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     # ``sort_keys`` keeps the manifest and install-state files diffable across
     # runs; the swap itself belongs to ``write_atomic``.
     write_atomic(path, json.dumps(payload, sort_keys=True) + "\n")
-
-
-def write_json_confined_atomic(
-    root: Path,
-    path: Path,
-    payload: Mapping[str, Any],
-) -> None:
-    """Atomically write JSON without following any path below the trusted root."""
-
-    temporary = path.parent / f".{path.name}.{secrets.token_hex(8)}.tmp"
-    descriptor: int | None = None
-    try:
-        ensure_private_directory(root, path.parent)
-        descriptor = create_confined_file(root, temporary)
-        encoded = (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
-        view = memoryview(encoded)
-        while view:
-            written = os.write(descriptor, view)
-            if written <= 0:
-                raise OSError("confined JSON write made no progress")
-            view = view[written:]
-        os.fsync(descriptor)
-        os.close(descriptor)
-        descriptor = None
-        replace_confined(root, temporary, path)
-        parent_descriptor = open_confined_directory(root, path.parent)
-        try:
-            os.fsync(parent_descriptor)
-        finally:
-            os.close(parent_descriptor)
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-        try:
-            remove_confined_path(root, temporary)
-        except (ConfinedFilesystemError, OSError):
-            pass

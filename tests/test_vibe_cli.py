@@ -1864,6 +1864,55 @@ def test_managed_dependencies_doctor_uses_one_status_contract(monkeypatch):
     assert next(item for item in items if item.get("code") == "dependencies.node.not_ready")["status"] == "fail"
 
 
+def test_memory_runtime_compatibility_probe_is_deep_doctor_only(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        cli.api,
+        "dependencies_status",
+        lambda **_kwargs: {
+            "deps": [
+                {
+                    "id": "memory-runtime",
+                    "required": False,
+                    "installed": True,
+                    "status": "ready",
+                },
+                {
+                    "id": "git-runtime",
+                    "required": False,
+                    "installed": True,
+                    "status": "ready",
+                },
+            ]
+        },
+    )
+    binary = tmp_path / "python"
+    calls: list[object] = []
+    manager = SimpleNamespace(
+        resolve_python=lambda: calls.append("resolve") or binary,
+        _prepare_binary=lambda candidate: calls.append(("prepare", candidate)) or {"ok": True},
+        sync_capability=lambda: calls.append("sync") or True,
+    )
+    monkeypatch.setattr("core.memory.artifact.get_memory_artifact_manager", lambda: manager)
+
+    fast_items = cli._managed_dependencies_doctor_items(deep=False)
+
+    assert calls == []
+    assert next(
+        item
+        for item in fast_items
+        if item.get("code") == "dependencies.memory-runtime.ready"
+    )["status"] == "pass"
+
+    deep_items = cli._managed_dependencies_doctor_items(deep=True)
+
+    assert calls == ["resolve", ("prepare", binary), "sync"]
+    assert next(
+        item
+        for item in deep_items
+        if item.get("code") == "dependencies.memory-runtime.ready"
+    )["status"] == "pass"
+
+
 def test_managed_dependencies_doctor_suppresses_unsupported_askill_repair(monkeypatch):
     monkeypatch.setattr(
         cli.api,

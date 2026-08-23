@@ -143,11 +143,11 @@ def test_sync_capability_rejects_a_nonadmitted_active_pointer(
     )
     manager._restore_current_pointer(pointer)
 
-    assert manager.installed_artifact_snapshot().admission == "broken"
+    assert manager.installed_artifact_snapshot().path is None
     assert manager.sync_capability() is False
 
 
-def test_sync_corruption_breaks_snapshot_even_when_core_admission_cache_hits(
+def test_sync_corruption_is_detected_by_capability_without_deep_status_probe(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -172,6 +172,8 @@ def test_sync_corruption_breaks_snapshot_even_when_core_admission_cache_hits(
         "provider_root_format": "everos-1.2.3",
         "compatible_provider_root_formats": [],
         "artifact_fingerprint": "released-artifact",
+        "admission_revision": ARTIFACT_ADMISSION_REVISION,
+        "admission_ok": True,
         "sync_bootstrap_revision": contract[0],
         "sync_argv": list(contract[1]),
         "sync_bootstrap_sha256": contract[2],
@@ -182,16 +184,7 @@ def test_sync_corruption_breaks_snapshot_even_when_core_admission_cache_hits(
         encoding="utf-8",
     )
     manager._restore_current_pointer(pointer)
-    probes: list[Path] = []
-
-    def admit(candidate: Path) -> dict[str, bool]:
-        probes.append(candidate)
-        return {"ok": True}
-
-    monkeypatch.setattr(manager, "_prepare_binary", admit)
-    assert manager.installed_artifact_snapshot().admission == "ok"
-    assert probes == [binary]
-    assert list((manager.runtime_dir / "derived" / "admission").glob("*.json"))
+    assert manager.installed_artifact_snapshot().path == binary
 
     scrubbers = (
         install_dir
@@ -202,10 +195,8 @@ def test_sync_corruption_breaks_snapshot_even_when_core_admission_cache_hits(
     )
     scrubbers.write_text("tampered", encoding="ascii")
 
-    snapshot = manager.installed_artifact_snapshot()
-    assert snapshot.admission == "broken"
+    assert manager.installed_artifact_snapshot().path == binary
     assert manager.sync_capability() is False
-    assert probes == [binary]
 
 
 def test_fresh_install_admits_the_manifest_sync_contract(
@@ -263,33 +254,27 @@ def test_fresh_install_admits_the_manifest_sync_contract(
         provider_root=tmp_path / "memory" / "everos-root",
         offline=True,
     )
-    prepared: list[Path] = []
-    admitted: list[tuple[int, tuple[str, ...], str, str] | None] = []
+    prepared: list[tuple[Path, tuple[int, tuple[str, ...], str, str] | None]] = []
 
     monkeypatch.setattr(manager, "_load_manifest", lambda *, allow_network: manifest)
     monkeypatch.setattr(manager, "_resolve_manifest_archive", lambda _archive: archive_path)
     monkeypatch.setattr(manager, "_binary_matches_manifest", lambda *_args: True)
     monkeypatch.setattr(manager, "_write_current_pointer", lambda *_args: None)
 
-    def prepare(binary: Path) -> dict[str, bool]:
-        assert binary.name == "python"
-        prepared.append(binary)
-        return {"ok": True}
-
-    def admit_sync(
+    def prepare(
         binary: Path,
-        contract: tuple[int, tuple[str, ...], str, str] | None,
-    ) -> bool:
+        *,
+        sync_contract: tuple[int, tuple[str, ...], str, str] | None = None,
+    ) -> dict[str, bool]:
         assert binary.name == "python"
-        admitted.append(contract)
-        return contract == expected_contract
+        prepared.append((binary, sync_contract))
+        return {"ok": sync_contract == expected_contract}
 
     monkeypatch.setattr(manager, "_prepare_binary", prepare)
-    monkeypatch.setattr(manager, "_admit_sync_contract", admit_sync)
 
     assert manager.ensure()["ok"] is True
     assert len(prepared) == 1
-    assert admitted == [expected_contract]
+    assert prepared[0][1] == expected_contract
 
 
 def test_release_guard_hashes_packaged_sync_modules(tmp_path: Path) -> None:

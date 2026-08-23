@@ -10820,12 +10820,14 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
         "avault": "avault",
         "tmux": "tmux runtime",
         "git-runtime": "Git Runtime",
+        "memory-runtime": "Memory runtime",
         "node": "Node.js",
     }
     repair_targets = {
         "askill": "askill",
         "avault": "avault",
         "git-runtime": "git-runtime",
+        "memory-runtime": None,
         "tmux": "tmux",
     }
     items: list[dict] = []
@@ -10868,6 +10870,25 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
         ready = bool(dependency.get("installed")) and status == "ready"
         version = dependency.get("version")
         if ready:
+            if deep and dependency_id == "memory-runtime":
+                from core.memory.artifact import get_memory_artifact_manager
+
+                manager = get_memory_artifact_manager()
+                python = manager.resolve_python()
+                compatible = (
+                    python is not None
+                    and manager._prepare_binary(python).get("ok") is True
+                    and manager.sync_capability()
+                )
+                if not compatible:
+                    _add_doctor_item(
+                        items,
+                        "warn",
+                        "Memory runtime failed the deep compatibility probe",
+                        "Repair Memory runtime from Settings > Dependencies, then rerun Doctor.",
+                        code="dependencies.memory-runtime.compatibility_failed",
+                    )
+                    continue
             suffix = f" {version}" if version else ""
             if dependency_id == "git-runtime" and dependency.get("source") == "system":
                 _add_doctor_item(

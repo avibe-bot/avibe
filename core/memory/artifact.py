@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 import stat
 import subprocess
 import tempfile
@@ -20,24 +21,27 @@ from typing import Any, Protocol, runtime_checkable
 
 from config import paths
 from core.managed_runtime import (
-    InstalledArtifactAdmission,
     ManagedRuntimeArchive,
     ManagedRuntimeArtifactIdentity,
     ManagedRuntimeManager,
     ManagedRuntimeManifest,
     ManagedRuntimeSpec,
+    archive_path_is_unsafe,
     env_flag_enabled,
     file_sha256,
     runtime_platform_tag,
-    write_json_confined_atomic,
+    write_json_atomic,
 )
 from core.process_isolation import isolated_subprocess_kwargs
 from core.memory.confined_filesystem import (
     ConfinedFilesystemError,
+    create_confined_file,
     ensure_private_directory,
+    fsync_directory,
     open_and_harden_confined_regular_file,
     open_confined_regular_file,
     remove_confined_path,
+    replace_confined,
 )
 from core.memory.provider_root import (
     PROVIDER_ROOT_CONTROL_FILES,
@@ -66,13 +70,6 @@ _SPEC = ManagedRuntimeSpec(
     manifest_resource=_MANIFEST_RESOURCE,
     version_field="everos_version",
     default_bin_path="bin/python",
-    persisted_manifest_fields=(
-        "release_state",
-        "python_version",
-        "lock_sha256",
-        "lock_id",
-        "uv_version",
-    ),
 )
 _SMOKE_SCRIPT = (
     "from importlib.metadata import version\n"
@@ -181,189 +178,22 @@ class MemoryArtifactManager(ManagedRuntimeManager):
 
         if self._dev_runtime_configured():
             return self._dev_runtime_status(self._dev_runtime_python())
-        return super().status()
+        payload = super().status()
+        if payload.get("inspection_error"):
+            payload["inspection_error"] = "memory_runtime_install_failed"
+            payload["reason"] = "memory_runtime_install_failed"
+        return payload
 
     def _read_installed_pointer(self) -> tuple[dict[str, Any] | None, bool]:
         return self._read_active_pointer()
 
-    def _inspect_installed_artifact_extension(
-        self,
-        binary: Path,
-        identity: ManagedRuntimeArtifactIdentity,
-        *,
-        pointer: Mapping[str, Any] | None,
-        metadata: Mapping[str, Any] | None,
-        selected_manifest: ManagedRuntimeManifest | None,
-    ) -> InstalledArtifactAdmission:
-        """Evaluate every Memory fact not implied by the shared artifact identity."""
-
-        del metadata
-        extensions: dict[str, Any] = {
-            "provider_root_format": None,
-            "compatible_provider_root_formats": frozenset(),
-            "artifact_fingerprint": None,
-            "sync_contract": None,
-        }
-        sync_contract: tuple[int, tuple[str, ...], str, str] | None
-        if pointer is None:
-            if selected_manifest is None:
-                return InstalledArtifactAdmission(
-                    state="unknown",
-                    path=None,
-                    reason="memory_runtime_install_failed",
-                    extensions=extensions,
-                )
-            try:
-                sync_contract = _sync_contract_from_payload(selected_manifest.payload)
-            except ValueError:
-                return InstalledArtifactAdmission(
-                    state="broken",
-                    path=None,
-                    reason="memory_runtime_install_failed",
-                    extensions=extensions,
-                )
-        else:
-            provider_root_format = pointer.get("provider_root_format")
-            compatible_values = pointer.get("compatible_provider_root_formats")
-            if (
-                "provider_root_format" in pointer
-                or "compatible_provider_root_formats" in pointer
-            ):
-                if not (
-                    _safe_metadata_value(provider_root_format)
-                    and isinstance(compatible_values, list)
-                    and all(_safe_metadata_value(value) for value in compatible_values)
-                ):
-                    return InstalledArtifactAdmission(
-                        state="broken",
-                        path=None,
-                        reason="memory_runtime_install_failed",
-                        extensions=extensions,
-                    )
-                extensions["provider_root_format"] = provider_root_format
-                extensions["compatible_provider_root_formats"] = frozenset(
-                    {provider_root_format, *compatible_values}
-                )
-            artifact_fingerprint = pointer.get("artifact_fingerprint")
-            if "artifact_fingerprint" in pointer:
-                if not _safe_metadata_value(artifact_fingerprint):
-                    return InstalledArtifactAdmission(
-                        state="broken",
-                        path=None,
-                        reason="memory_runtime_install_failed",
-                        extensions=extensions,
-                    )
-                extensions["artifact_fingerprint"] = artifact_fingerprint
-            try:
-                sync_contract = _sync_contract_from_payload(pointer)
-            except ValueError:
-                return InstalledArtifactAdmission(
-                    state="broken",
-                    path=None,
-                    reason="memory_runtime_install_failed",
-                    extensions=extensions,
-                )
-
-            revision = pointer.get("admission_revision")
-            if type(revision) is int and revision == ARTIFACT_ADMISSION_REVISION:
-                if pointer.get("admission_ok") is not True:
-                    return InstalledArtifactAdmission(
-                        state="broken",
-                        path=None,
-                        reason="memory_runtime_install_failed",
-                        extensions=extensions,
-                    )
-            else:
-                core_admission = self._cached_memory_core_admission(identity, binary)
-                if core_admission.state != "ok":
-                    return InstalledArtifactAdmission(
-                        state=core_admission.state,
-                        path=None,
-                        reason=core_admission.reason,
-                        extensions=extensions,
-                    )
-
-            if selected_manifest is not None:
-                try:
-                    candidate = self._candidate_from_manifest(selected_manifest)
-                    selected_sync_contract = _sync_contract_from_payload(
-                        selected_manifest.payload
-                    )
-                except (MemoryRuntimeActivationError, ValueError):
-                    return InstalledArtifactAdmission(
-                        state="broken",
-                        path=None,
-                        reason="memory_runtime_install_failed",
-                        extensions=extensions,
-                    )
-                if (
-                    extensions["provider_root_format"] != candidate.provider_root_format
-                    or extensions["compatible_provider_root_formats"]
-                    != candidate.compatible_provider_root_formats
-                    or sync_contract != selected_sync_contract
-                ):
-                    return InstalledArtifactAdmission(
-                        state="broken",
-                        path=None,
-                        reason="memory_runtime_install_failed",
-                        extensions=extensions,
-                    )
-
-        extensions["sync_contract"] = sync_contract
-        if sync_contract is not None and not self._admit_sync_contract(binary, sync_contract):
-            return InstalledArtifactAdmission(
-                state="broken",
-                path=None,
-                reason="memory_runtime_install_failed",
-                extensions=extensions,
-            )
-        return InstalledArtifactAdmission(
-            state="ok",
-            path=binary,
-            reason=None,
-            extensions=extensions,
-        )
-
-    def _cached_memory_core_admission(
-        self,
-        identity: ManagedRuntimeArtifactIdentity,
-        binary: Path,
-    ) -> InstalledArtifactAdmission:
-        context = json.dumps(
-            {
-                "admission_revision": ARTIFACT_ADMISSION_REVISION,
-                "everos_version": EVEROS_VERSION,
-                "python_version": EMBEDDED_PYTHON_VERSION,
-                "lock_sha256": PACKAGE_LOCK_SHA256,
-                "lock_id": f"uv-lock-sha256:{PACKAGE_LOCK_SHA256}",
-                "uv_version": RUNTIME_BUILDER_UV_VERSION,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-
-        def probe() -> bool:
-            return self._prepare_binary(binary).get("ok") is True
-
-        return self._cached_installed_artifact_admission(
-            identity,
-            context=context,
-            binary=binary,
-            probe=probe,
-            failure_reason="memory_runtime_install_failed",
-        )
-
-    @staticmethod
-    def _installed_artifact_error() -> str:
-        return "memory_runtime_install_failed"
-
     def provider_root_format(self) -> str | None:
         if self._dev_runtime_configured():
             return _DEV_PROVIDER_ROOT_FORMAT if self._dev_runtime_python() is not None else None
-        snapshot = self.installed_artifact_snapshot()
-        if snapshot.admission != "ok":
+        pointer = self._active_pointer()
+        if pointer is None or self.resolve_binary() is None:
             return None
-        value = snapshot.admission_extensions.get("provider_root_format")
+        value = pointer.get("provider_root_format")
         return value if _safe_metadata_value(value) else None
 
     def compatible_provider_root_formats(self) -> frozenset[str]:
@@ -371,19 +201,24 @@ class MemoryArtifactManager(ManagedRuntimeManager):
 
         if self._dev_runtime_configured():
             return frozenset({_DEV_PROVIDER_ROOT_FORMAT}) if self._dev_runtime_python() is not None else frozenset()
-        snapshot = self.installed_artifact_snapshot()
-        if snapshot.admission != "ok":
+        pointer = self._active_pointer()
+        if pointer is None or self.resolve_binary() is None:
             return frozenset()
-        values = snapshot.admission_extensions.get("compatible_provider_root_formats")
-        return values if isinstance(values, frozenset) else frozenset()
+        value = pointer.get("provider_root_format")
+        compatible = pointer.get("compatible_provider_root_formats", [])
+        if not _safe_metadata_value(value) or not isinstance(compatible, list):
+            return frozenset()
+        values = {value}
+        values.update(item for item in compatible if _safe_metadata_value(item))
+        return frozenset(values)
 
     def artifact_fingerprint(self) -> str | None:
         if self._dev_runtime_configured():
             return _DEV_ARTIFACT_FINGERPRINT if self._dev_runtime_python() is not None else None
-        snapshot = self.installed_artifact_snapshot()
-        if snapshot.admission != "ok":
+        pointer = self._active_pointer()
+        if pointer is None or self.resolve_binary() is None:
             return None
-        value = snapshot.admission_extensions.get("artifact_fingerprint")
+        value = pointer.get("artifact_fingerprint")
         return value if _safe_metadata_value(value) else None
 
     def sync_capability(self) -> bool:
@@ -391,11 +226,15 @@ class MemoryArtifactManager(ManagedRuntimeManager):
 
         if self._dev_runtime_configured():
             return False
-        snapshot = self.installed_artifact_snapshot()
-        return (
-            snapshot.admission == "ok"
-            and snapshot.admission_extensions.get("sync_contract") is not None
-        )
+        pointer = self._active_pointer()
+        if pointer is None:
+            return False
+        try:
+            contract = _sync_contract_from_payload(pointer)
+        except ValueError:
+            return False
+        binary = self._admitted_active_pointer_binary(pointer)
+        return contract is not None and binary is not None and self._admit_sync_contract(binary, contract)
 
     def ensure(self, *, force: bool = False) -> dict[str, Any]:
         """Use an explicitly configured development runtime without installing archives."""
@@ -477,7 +316,6 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             "platform": runtime_platform_tag(),
             "installed": python is not None,
             "version": EVEROS_VERSION,
-            "admission": "ok" if python is not None else "broken",
             "status": "ready" if python is not None else "error",
             "path": str(python) if python is not None else None,
             "install_dir": None,
@@ -531,23 +369,103 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             return False
         return True
 
-    def _existing_install_admission_failure(
+    def _prepare_binary_for_manifest(
         self,
         binary: Path,
         manifest: ManagedRuntimeManifest,
-        archive: ManagedRuntimeArchive,
-    ) -> str | None:
-        """Re-admit an existing install before activating it under this contract."""
-
-        admission = self._cached_memory_core_admission(
-            self._artifact_identity(manifest, archive),
+    ) -> dict[str, Any]:
+        return self._prepare_binary(
             binary,
+            sync_contract=_sync_contract_from_payload(manifest.payload),
         )
-        return None if admission.state == "ok" else "memory_runtime_install_failed"
 
-    @staticmethod
-    def _existing_install_admission_error() -> str:
-        return "memory_runtime_install_failed"
+    def _reuse_existing_install(
+        self,
+        binary: Path,
+        install_dir: Path,
+        manifest: ManagedRuntimeManifest,
+        archive: ManagedRuntimeArchive,
+        *,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Re-admit and atomically activate an existing Memory runtime contract."""
+
+        try:
+            sync_contract = _sync_contract_from_payload(manifest.payload)
+            preparation = self._prepare_binary(binary, sync_contract=sync_contract)
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to admit existing Memory runtime binary")
+            preparation = {"ok": False}
+        if preparation.get("ok") is not True:
+            try:
+                self._persist_active_pointer_admission(binary, admitted=False)
+            except Exception:  # noqa: BLE001
+                logger.exception("Failed to persist rejected Memory runtime admission")
+            return self._failure(
+                "memory_runtime_install_failed",
+                manifest=manifest,
+                archive=archive,
+            )
+
+        candidate = self._candidate_from_manifest(manifest)
+        current, invalid = self._read_active_pointer()
+        current_binary = (
+            self._verified_active_pointer_binary(current)
+            if not invalid and current is not None
+            else None
+        )
+        current_contract = None
+        if current is not None:
+            try:
+                current_contract = _sync_contract_from_payload(current)
+            except ValueError:
+                pass
+        pointer_is_current = (
+            current is not None
+            and current_binary == binary
+            and current.get("admission_revision") == ARTIFACT_ADMISSION_REVISION
+            and current.get("admission_ok") is True
+            and current.get("provider_root_format") == candidate.provider_root_format
+            and isinstance(current.get("compatible_provider_root_formats"), list)
+            and all(
+                _safe_metadata_value(value)
+                for value in current["compatible_provider_root_formats"]
+            )
+            and frozenset(
+                {
+                    current.get("provider_root_format"),
+                    *current["compatible_provider_root_formats"],
+                }
+            )
+            == candidate.compatible_provider_root_formats
+            and current_contract == sync_contract
+        )
+        if not pointer_is_current:
+            try:
+                self._write_current_pointer(install_dir, manifest, archive)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Failed to refresh Memory runtime pointer")
+                return self._failure(
+                    self._reason("pointer_write_failed"),
+                    manifest=manifest,
+                    archive=archive,
+                    message=str(exc),
+                )
+        payload = self._success_payload(binary, install_dir, manifest, archive, changed=False)
+        if reason:
+            payload["reason"] = reason
+        return payload
+
+    def _persist_active_pointer_admission(self, binary: Path, *, admitted: bool) -> None:
+        current, invalid = self._read_active_pointer()
+        if invalid or current is None:
+            return
+        if self._verified_active_pointer_binary(current) != binary:
+            return
+        admitted_pointer = dict(current)
+        admitted_pointer["admission_revision"] = ARTIFACT_ADMISSION_REVISION
+        admitted_pointer["admission_ok"] = admitted
+        self._restore_current_pointer(admitted_pointer)
 
     def _write_current_pointer(
         self,
@@ -569,11 +487,21 @@ class MemoryArtifactManager(ManagedRuntimeManager):
                 raise MemoryRuntimeActivationError(str(error)) from error
             root_state = None
         previous_pointer = self._active_pointer()
+        metadata_path = install_dir / self.spec.metadata_filename
+        previous_metadata = self._read_install_metadata(install_dir)
 
         def commit() -> None:
+            self._write_manifest_install_metadata(
+                install_dir,
+                manifest,
+                archive,
+                binary_sha256=archive.binary_sha256,
+            )
             self._write_memory_current_pointer(install_dir, manifest, archive, candidate)
 
         def rollback() -> None:
+            if previous_metadata is not None:
+                write_json_atomic(metadata_path, previous_metadata)
             self._restore_current_pointer(previous_pointer)
 
         coordinator = self._activation_coordinator
@@ -644,6 +572,139 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             return None, True
         return (pointer, False) if isinstance(pointer, dict) else (None, True)
 
+    def _inspect_admitted_installed_binary(
+        self,
+        pointer: Mapping[str, Any],
+        identity: ManagedRuntimeArtifactIdentity,
+        *,
+        install_dir: Path,
+        metadata: Mapping[str, Any],
+    ) -> Path | None:
+        del identity, install_dir, metadata
+        current = dict(pointer)
+        binary = self._verified_active_pointer_binary(current)
+        if binary is None:
+            return None
+        revision = current.get("admission_revision")
+        if type(revision) is int and revision == ARTIFACT_ADMISSION_REVISION:
+            return binary if current.get("admission_ok") is True else None
+        return binary
+
+    def _verified_active_pointer_binary(self, pointer: dict[str, Any]) -> Path | None:
+        """Verify the binary referenced by ``current.json`` without a manifest lookup."""
+
+        install_dir_value = pointer.get("install_dir")
+        bin_path = pointer.get("bin_path")
+        if (
+            pointer.get("provider") != "manifest"
+            or pointer.get("runtime_id") != self.spec.runtime_id
+            or not _safe_metadata_value(pointer.get("runtime_version"))
+            or not _safe_metadata_value(pointer.get("platform"))
+            # Well-formed is not the same as usable here. Installation rejects a
+            # manifest whose runtime_version is not EVEROS_VERSION, but the
+            # pointer outlives that check: a ``~/.avibe`` copied between
+            # architectures, or an Avibe upgrade that moves EVEROS_VERSION,
+            # leaves an active pointer at an executable this build cannot run.
+            # Accepting it makes ``resolve_python`` hand back that binary and
+            # Dependencies report ready until the sidecar or processing probe
+            # fails much later, with a far less obvious error.
+            or pointer.get("platform") != runtime_platform_tag()
+            or pointer.get("runtime_version") != EVEROS_VERSION
+            or not _valid_sha256(pointer.get("manifest_sha256"))
+            or not _valid_sha256(pointer.get("archive_sha256"))
+            or not isinstance(install_dir_value, str)
+            or not isinstance(bin_path, str)
+            or archive_path_is_unsafe(bin_path)
+        ):
+            return None
+
+        configured_install_dir = Path(install_dir_value)
+        if not configured_install_dir.is_absolute():
+            return None
+        try:
+            install_dir = configured_install_dir.resolve(strict=True)
+            versions_dir = (self.runtime_dir / "versions").resolve(strict=True)
+            binary = (install_dir / bin_path).resolve(strict=True)
+        except OSError:
+            return None
+        if install_dir == versions_dir or versions_dir not in install_dir.parents or install_dir not in binary.parents:
+            return None
+        if not binary.is_file() or not os.access(binary, os.X_OK):
+            return None
+
+        try:
+            metadata = json.loads((install_dir / self.spec.metadata_filename).read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            return None
+        binary_sha256 = metadata.get("binary_sha256") if isinstance(metadata, dict) else None
+        if not (
+            isinstance(metadata, dict)
+            and metadata.get("provider") == "manifest"
+            and metadata.get("runtime_id") == self.spec.runtime_id
+            and metadata.get("runtime_version") == pointer["runtime_version"]
+            and metadata.get("platform") == pointer["platform"]
+            and metadata.get("manifest_sha256") == pointer["manifest_sha256"]
+            and metadata.get("archive_sha256") == pointer["archive_sha256"]
+            and metadata.get("bin_path") == bin_path
+            and _valid_sha256(binary_sha256)
+            and file_sha256(binary) == binary_sha256
+        ):
+            return None
+        return binary
+
+    def _admitted_active_pointer_binary(
+        self,
+        pointer: dict[str, Any],
+    ) -> Path | None:
+        """Re-admit artifacts accepted under an older compatibility contract."""
+
+        binary = self._verified_active_pointer_binary(pointer)
+        if binary is None:
+            return None
+        revision = pointer.get("admission_revision")
+        if type(revision) is int and revision == ARTIFACT_ADMISSION_REVISION:
+            if pointer.get("admission_ok") is True:
+                return binary
+            self._install_reason = "memory_runtime_install_failed"
+            return None
+        try:
+            file_lock = self._acquire_mutation_lock()
+        except Exception:  # noqa: BLE001
+            self._install_reason = "memory_runtime_install_failed"
+            return None
+        if file_lock is None:
+            return None
+        try:
+            current, invalid = self._read_active_pointer()
+            if invalid or current is None:
+                return None
+            binary = self._verified_active_pointer_binary(current)
+            if binary is None:
+                return None
+            revision = current.get("admission_revision")
+            if type(revision) is int and revision == ARTIFACT_ADMISSION_REVISION:
+                if current.get("admission_ok") is True:
+                    return binary
+                self._install_reason = "memory_runtime_install_failed"
+                return None
+            sync_contract = _sync_contract_from_payload(current)
+            preparation = self._prepare_binary(binary, sync_contract=sync_contract)
+            admission_ok = preparation.get("ok") is True
+            admitted_pointer = dict(current)
+            admitted_pointer["admission_revision"] = ARTIFACT_ADMISSION_REVISION
+            admitted_pointer["admission_ok"] = admission_ok
+            self._restore_current_pointer(admitted_pointer)
+            if not admission_ok:
+                self._install_reason = "memory_runtime_install_failed"
+                return None
+        except Exception:  # noqa: BLE001
+            self._install_reason = "memory_runtime_install_failed"
+            return None
+        finally:
+            self._release_mutation_lock(file_lock)
+        self._install_reason = None
+        return binary
+
     def _write_memory_current_pointer(
         self,
         install_dir: Path,
@@ -662,7 +723,6 @@ class MemoryArtifactManager(ManagedRuntimeManager):
                 "install_dir": str(install_dir),
                 "manifest_sha256": manifest.digest,
                 "archive_sha256": archive.sha256,
-                "binary_sha256": archive.binary_sha256,
                 "bin_path": archive.bin_path,
                 "admission_revision": ARTIFACT_ADMISSION_REVISION,
                 "admission_ok": True,
@@ -709,6 +769,8 @@ class MemoryArtifactManager(ManagedRuntimeManager):
     def _prepare_binary(
         self,
         binary: Path,
+        *,
+        sync_contract: tuple[int, tuple[str, ...], str, str] | None = None,
     ) -> dict[str, Any]:
         try:
             result = subprocess.run(
@@ -724,6 +786,8 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         if result.returncode != 0 or result.stdout.splitlines() != [EVEROS_VERSION, EMBEDDED_PYTHON_VERSION]:
             return {"ok": False, "reason": "memory_runtime_install_failed"}
         if not self._admit_error_scrubbers(binary):
+            return {"ok": False, "reason": "memory_runtime_install_failed"}
+        if not self._admit_sync_contract(binary, sync_contract):
             return {"ok": False, "reason": "memory_runtime_install_failed"}
         return {
             "ok": True,
@@ -799,12 +863,34 @@ def _write_memory_pointer_atomic(
     path: Path,
     payload: dict[str, Any],
 ) -> None:
+    temporary = runtime_root / f".{path.name}.{secrets.token_hex(8)}.tmp"
+    descriptor: int | None = None
     try:
-        write_json_confined_atomic(runtime_root, path, payload)
+        ensure_private_directory(runtime_root, runtime_root)
+        descriptor = create_confined_file(runtime_root, temporary)
+        encoded = (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
+        view = memoryview(encoded)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("memory runtime pointer write made no progress")
+            view = view[written:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        replace_confined(runtime_root, temporary, path)
+        fsync_directory(runtime_root)
     except (ConfinedFilesystemError, OSError) as error:
         raise MemoryRuntimeActivationError(
             "memory runtime pointer could not be written safely"
         ) from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        try:
+            remove_confined_path(runtime_root, temporary)
+        except (ConfinedFilesystemError, OSError):
+            pass
 
 
 @runtime_checkable

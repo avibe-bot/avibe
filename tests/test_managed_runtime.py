@@ -274,56 +274,7 @@ def test_subclass_operational_resolution_uses_disk_snapshot_when_manifest_is_mis
     )
 
 
-@pytest.mark.parametrize("runtime_kind", ["git", "memory", "model-hub"])
-@pytest.mark.parametrize("runtime_state", ["missing", "empty"])
-def test_subclass_proves_clean_runtime_state_absent_and_allows_first_install(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    runtime_kind: str,
-    runtime_state: str,
-) -> None:
-    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
-    _archive, manifest = _write_subclass_runtime_fixture(tmp_path, runtime_kind)
-    manager = _subclass_runtime_manager(tmp_path, runtime_kind, manifest, monkeypatch)
-    if runtime_state == "empty":
-        manager.runtime_dir.mkdir(parents=True)
-
-    status = manager.status()
-
-    assert status["installed"] is False
-    assert status["status"] == "missing"
-    assert status["admission"] == "absent"
-    assert status["inspection_error"] is None
-
-    installed = manager.ensure()
-
-    assert installed["ok"] is True
-    assert _resolve_subclass_runtime(manager, runtime_kind) == Path(installed["path"])
-
-
-@pytest.mark.parametrize("runtime_kind", ["git", "memory", "model-hub"])
-def test_subclass_does_not_project_pointerless_partial_state_as_absent(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    runtime_kind: str,
-) -> None:
-    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
-    _archive, manifest = _write_subclass_runtime_fixture(tmp_path, runtime_kind)
-    manager = _subclass_runtime_manager(tmp_path, runtime_kind, manifest, monkeypatch)
-    partial = manager.runtime_dir / "versions" / "partial"
-    partial.mkdir(parents=True)
-    manifest.unlink()
-
-    status = manager.status()
-
-    assert status["installed"] is False
-    assert status["status"] == "error"
-    assert status["admission"] == "unknown"
-    assert status["inspection_error"] == status["reason"]
-    assert _resolve_subclass_runtime(manager, runtime_kind) is None
-
-
-@pytest.mark.parametrize("runtime_kind", ["git", "memory", "model-hub"])
+@pytest.mark.parametrize("runtime_kind", ["git", "model-hub"])
 def test_subclass_derives_released_missing_bin_path_from_safe_spec_default(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -385,13 +336,16 @@ def test_subclass_status_projects_binary_hashing_failure_as_inspection_error(
     def unreadable_binary(_path: Path) -> str:
         raise OSError("binary became unreadable")
 
-    monkeypatch.setattr(managed_runtime, "file_sha256", unreadable_binary)
+    monkeypatch.setattr(
+        memory_artifact if runtime_kind == "memory" else managed_runtime,
+        "file_sha256",
+        unreadable_binary,
+    )
 
     status = manager.status()
 
     assert status["installed"] is False
     assert status["status"] == "error"
-    assert status["admission"] == "unknown"
     assert status["installed_identity"] is not None
     assert status["inspection_error"] == status["reason"]
     assert _resolve_subclass_runtime(manager, runtime_kind) is None
@@ -407,21 +361,6 @@ def test_memory_reuse_refreshes_changed_manifest_contract_through_activation(
     assert isinstance(manager, MemoryArtifactManager)
     installed = manager.ensure()
     assert installed["ok"] is True
-    installed_metadata = json.loads(
-        (Path(installed["install_dir"]) / manager.spec.metadata_filename).read_text(
-            encoding="utf-8"
-        )
-    )
-    assert {
-        field: installed_metadata[field]
-        for field in memory_artifact._SPEC.persisted_manifest_fields
-    } == {
-        "release_state": "published",
-        "python_version": "3.12.12",
-        "lock_sha256": memory_artifact.PACKAGE_LOCK_SHA256,
-        "lock_id": f"uv-lock-sha256:{memory_artifact.PACKAGE_LOCK_SHA256}",
-        "uv_version": memory_artifact.RUNTIME_BUILDER_UV_VERSION,
-    }
 
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     payload["provider_root_format"] = "everos-2.0"
@@ -574,69 +513,6 @@ def test_existing_subclass_adopts_released_manifest_digest_layout_without_write_
     assert _resolve_subclass_runtime(manager, runtime_kind) == released_binary
     assert pointer_path.read_bytes() == pointer_before
     assert metadata_path.read_bytes() == metadata_before
-
-
-def test_manifest_extension_is_persisted_and_released_metadata_projects_missing_value_as_unknown(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    binary_payload = b"v1\n"
-    archive = tmp_path / "fixture.tar.gz"
-    with tarfile.open(archive, "w:gz") as tar:
-        member = tarfile.TarInfo("fixture")
-        member.mode = 0o755
-        member.size = len(binary_payload)
-        tar.addfile(member, io.BytesIO(binary_payload))
-    manifest = tmp_path / "manifest.json"
-    manifest.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "version": "v1",
-                "source": "fixture",
-                "minimum_node": "^20.19.0 || >=22.12.0",
-                "archives": {
-                    "linux-x64": {
-                        "url": archive.as_uri(),
-                        "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
-                        "binary_sha256": hashlib.sha256(binary_payload).hexdigest(),
-                        "bin_path": "fixture",
-                    }
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: "linux-x64")
-    manager = FixtureRuntimeManager(
-        spec=ManagedRuntimeSpec(
-            runtime_id="fixture",
-            manifest_resource="unused.json",
-            version_field="version",
-            default_bin_path="fixture",
-            persisted_manifest_fields=("minimum_node",),
-        ),
-        runtime_dir=tmp_path / "runtime",
-        manifest_path=manifest,
-    )
-
-    installed = manager.ensure()
-
-    assert installed["ok"] is True
-    metadata_path = Path(installed["install_dir"]) / manager.spec.metadata_filename
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    assert metadata["minimum_node"] == "^20.19.0 || >=22.12.0"
-    assert manager.status()["installed_manifest"] == {
-        "minimum_node": "^20.19.0 || >=22.12.0"
-    }
-
-    del metadata["minimum_node"]
-    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
-    released_status = manager.status()
-    assert released_status["installed"] is True
-    assert released_status["installed_manifest"] == {"minimum_node": None}
-    requirement_known = released_status["installed_manifest"]["minimum_node"] is not None
-    assert requirement_known is False
 
 
 def test_clean_dry_run_is_read_only_and_creates_no_lock(
@@ -842,135 +718,6 @@ def test_shared_ensure_failure_vocabulary_matches_reachable_reason_literals() ->
     assert managed_runtime._ENSURE_FAILURE_SUFFIXES == reason_suffixes
 
 
-@pytest.mark.parametrize(
-    "include_direct_platform",
-    [False, True],
-)
-def test_list_asset_manifest_resolves_the_canonical_platform_alias(
-    tmp_path: Path,
-    monkeypatch,
-    include_direct_platform: bool,
-) -> None:
-    archive = tmp_path / "fixture-linux_amd64.tar.gz"
-    binary_payload = b"v1\n"
-    with tarfile.open(archive, "w:gz") as tar:
-        member = tarfile.TarInfo("fixture")
-        member.mode = 0o755
-        member.size = len(binary_payload)
-        tar.addfile(member, io.BytesIO(binary_payload))
-
-    assets = [
-        {
-            "platform": "linux-amd64",
-            "url": archive.as_uri(),
-            "size_bytes": archive.stat().st_size,
-            "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
-            "binary_sha256": hashlib.sha256(binary_payload).hexdigest(),
-        }
-    ]
-    if include_direct_platform:
-        assets.append({**assets[0], "platform": "linux-x64"})
-    manifest = tmp_path / "manifest.json"
-    manifest.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "version": "v1",
-                "source": "example/fixture",
-                "assets": assets,
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: "linux-x64")
-    manager = FixtureRuntimeManager(
-        spec=ManagedRuntimeSpec(
-            runtime_id="fixture",
-            manifest_resource="unused.json",
-            version_field="version",
-            default_bin_path="fixture",
-            archives_field="assets",
-            archive_size_field="size_bytes",
-            platform_aliases=(("linux-x64", "linux-amd64"),),
-        ),
-        runtime_dir=tmp_path / "runtime",
-        manifest_path=manifest,
-    )
-
-    resolved_targets: list[dict[str, str]] = []
-    result = manager.ensure(on_resolved=resolved_targets.append)
-
-    assert result["ok"] is True
-    assert result["changed"] is True
-    assert result["platform"] == "linux-amd64"
-    assert resolved_targets == [result["target"]]
-    assert Path(result["path"]).read_bytes() == binary_payload
-    assert manager.ensure()["changed"] is False
-    assert manager.status()["installed"] is True
-
-
-def test_platform_aliases_reject_non_idempotent_canonical_chains() -> None:
-    with pytest.raises(ValueError, match="canonical identities"):
-        ManagedRuntimeSpec(
-            runtime_id="fixture",
-            manifest_resource="unused.json",
-            version_field="version",
-            default_bin_path="fixture",
-            platform_aliases=(
-                ("linux-x64", "linux-amd64"),
-                ("linux-amd64", "linux-64"),
-            ),
-        )
-
-
-@pytest.mark.parametrize("runtime_kind", ["git", "memory"])
-def test_shipping_specs_without_aliases_keep_literal_platform_identity(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    runtime_kind: str,
-) -> None:
-    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
-    monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: "linux-x64")
-    missing_manifest = tmp_path / "missing-manifest.json"
-    manager: ManagedRuntimeManager
-    if runtime_kind == "git":
-        manager = GitRuntimeManager(
-            runtime_dir=tmp_path / "git-runtime",
-            manifest_path=missing_manifest,
-        )
-    else:
-        manager = MemoryArtifactManager(
-            runtime_dir=tmp_path / "memory-runtime",
-            manifest_path=missing_manifest,
-            provider_root=tmp_path / "memory-provider-root",
-        )
-    archive = ManagedRuntimeArchive(
-        platform="linux-amd64",
-        name="fixture.tar.gz",
-        url="file:///fixture.tar.gz",
-        sha256="a" * 64,
-        binary_sha256="b" * 64,
-        size=1,
-        bin_path=manager.spec.default_bin_path,
-    )
-    manifest = ManagedRuntimeManifest(
-        schema_version=1,
-        runtime_version="v1",
-        source="fixture",
-        source_url=None,
-        archives={archive.platform: archive},
-        digest="c" * 64,
-        loaded_from="fixture",
-        payload={},
-    )
-
-    assert manager.spec.platform_aliases == ()
-    assert manager._host_artifact_platform() == "linux-x64"
-    assert manager._normalize_installed_artifact_platform("linux-x64") == "linux-x64"
-    assert manager._normalize_installed_artifact_platform("linux-amd64") is None
-    assert manager._manifest_archive_for_platform(manifest) is None
-
-
 def test_ensure_rejects_a_changed_resolved_target_before_archive_access(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1028,30 +775,3 @@ def test_ensure_rejects_a_changed_resolved_target_before_archive_access(
 
     assert result["ok"] is False
     assert result["reason"] == "fixture_install_target_changed"
-
-
-@pytest.mark.parametrize(
-    ("manager_type", "expected_reason"),
-    [
-        (GitRuntimeManager, "git_manifest_missing"),
-        (MemoryArtifactManager, "memory-runtime_manifest_missing"),
-        (EngineRuntimeManager, "model_hub_engine_manifest_missing"),
-    ],
-)
-def test_optional_ensure_hooks_leave_each_existing_subclass_default_unchanged(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    manager_type,
-    expected_reason: str,
-) -> None:
-    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
-    manager = manager_type(
-        runtime_dir=tmp_path / manager_type.__name__,
-        manifest_path=tmp_path / "missing-manifest.json",
-        offline=True,
-    )
-
-    result = manager.ensure()
-
-    assert result["ok"] is False
-    assert result["reason"] == expected_reason
