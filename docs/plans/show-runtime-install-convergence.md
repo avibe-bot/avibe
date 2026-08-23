@@ -174,6 +174,9 @@ Two mechanical rules gate Step 1:
 
 A step gate is self-checked against its intent: an unchanged-result clause is
 valid only for behavior that the intent does not require changing.
+Every allowed and forbidden gate set is an enumerated set of symbols or census
+rows verified by its author with `rg`; a set that cannot be enumerated and
+verified is deleted rather than refined.
 
 ## Migration Sequence And Gates
 
@@ -193,8 +196,9 @@ shared manager so later installer migrations inherit one concurrency owner.
 **Gate:** Shared consumers pass focused guard, preview, cleanup, and install
 tests with no installed-runtime regression. Lost path confinement, retained
 misclassification, or a consumer result change outside the corrections measured
-in the `_release_preview_guard` and **Inspection versus absence** census rows
-stops the sequence before Show uses the guard.
+in the `_preview_busy_reason`, `_windows_preview_busy_reason`,
+`_preview_lock_probe`, `_guard_path_matches_fd`, and `_preview_raced_busy` census
+rows stops the sequence before Show uses the guard.
 
 ### Step 3: Support Composite Artifacts
 
@@ -289,12 +293,7 @@ activation seams makes that arrow non-exhaustive; it is not recalculated or
 used as acceptance evidence. The retained product inventory includes those two
 Memory seams alongside the four Show and two tmux concerns named above.
 
-The migration-wide concept gate requires the measured total of common-owner
-instances plus retained product concepts to decrease strictly while every
-product concept in the inventory survives. Implementation PRs record actual
-lines deleted, behavior moved by ownership, shared-layer additions, and the
-before/after concept inventory at their own heads. A surviving duplicate owner
-is a defect; missing a forecast range is not.
+A surviving duplicate owner is a defect; missing a forecast range is not.
 
 ## Residual Unknown
 
