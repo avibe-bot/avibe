@@ -54,6 +54,15 @@ tmux follows as the final, smaller adapter migration. The original 24-pair and
 The shared layer must own these invariants for every dependency in this
 convergence boundary:
 
+Normative requirements use a terminating form: each is a property measured on
+state or output owned by this repository, not a closed list of accepted input
+origins, payloads, archive orders, or interpreter versions. Fixture lists below
+are minimum coverage, not semantic selectors. A new source path or input shape
+that produces the same measured facts receives the same result; it changes the
+contract only when it exposes a new persisted fact or a different measurable
+postcondition. The predicate census applies this rule to every boundary,
+scenario, and stop point.
+
 - An install identity is the identity of the selected platform artifact, not
   the digest of unrelated manifest entries. Its minimum fields are runtime
   version, the archive's persisted platform label, and the selected archive
@@ -128,15 +137,24 @@ convergence boundary:
   reparse points; the locked descriptor must still be the live path.
 - Extraction explicitly whitelists `REGTYPE`, `AREGTYPE`, `DIRTYPE`,
   `SYMTYPE`, and `LNKTYPE`; device, FIFO, and character members are rejected.
+  Extraction starts in a fresh staging root owned by the extracting user.
   Runtime specs still default to regular files/directories only. A link-enabled
-  spec must validate both `name` and `linkname` against the extraction root and
-  extract sequentially in archive order, resolving a link only to content
-  already extracted. Two-pass and parallel extraction are forbidden. Extraction
-  filter support is capability-detected, never inferred from `sys.version_info`:
-  attempt the repository's existing `extractall(..., filter="data")` call and
-  use the manually guarded fallback only when the keyword is unavailable. The
-  filtered and fallback paths must have the same archive acceptance and
-  rejection set.
+  spec validates both `name` and `linkname` against the extraction root and
+  extracts sequentially in archive order. A hard link must name a previously
+  extracted regular file. A symlink may name a later or absent member, but its
+  normalized target must remain root-confined; before each later write, existing
+  symlink prefixes are resolved and rechecked, and a final no-follow tree walk
+  proves that every materialized path and every resolvable or dangling symlink
+  target remains inside the root. Two-pass and parallel extraction are
+  forbidden. Filter support is capability-detected, never inferred from
+  `sys.version_info`: attempt the repository's existing
+  `extractall(..., filter="data")` call and use the manually guarded fallback
+  only when the keyword is unavailable. Either path must produce the same
+  repository-owned postconditions: no path escapes the root; on POSIX every
+  inode is owned by the extracting user, and every regular-file, directory, or
+  hard-link mode has no setuid, setgid, group-write, or other-write bit. These
+  output properties, not an enumeration of accepted archives or Python's
+  current filter behavior, are the compatibility and security boundary.
 - Default behavior for git, Memory, and model-hub remains binary-strict:
   `binary_sha256` must be declared and a safe resolved `bin_path` must exist.
   The path may come from the archive entry or the already-declarative
@@ -148,13 +166,16 @@ convergence boundary:
   unknown, never supported. To preserve offline reuse, it may enter the existing
   bounded readiness probe; only a successful probe admits serving for that
   process lifetime, and a failed probe does not relabel the install as absent.
-- Tmux remains a strict binary artifact. The exact released schema 1 manifest
-  fixture, metadata, and pointer omit `binary_sha256`; only that released shape
-  is dual-read as a legacy archive-verified install and re-admitted through the
-  existing runnable/version/platform-preparation checks. Canonical tmux uses
-  schema 2 and requires `binary_sha256`; a new or modified schema 1 manifest
-  without it is invalid. The source leaf digest is verified immediately after
-  extraction and before preparation. Preparation may then change bytes (macOS
+- Tmux remains a strict binary artifact. Every schema 1 manifest that passes
+  the versioned schema 1 structural and archive checks is read as the legacy
+  archive-verified contract, regardless of whether it came from the packaged
+  resource, `VIBE_TMUX_MANIFEST_PATH`, or `VIBE_TMUX_MANIFEST_URL`; its
+  corresponding released-layout metadata/pointer is re-admitted through the
+  existing runnable/version/platform-preparation checks. Canonical tmux writes
+  schema 2 and requires `binary_sha256`; source origin or payload identity never
+  upgrades schema 1 into the schema 2 contract. The source leaf digest is
+  verified immediately after extraction and before preparation. Preparation
+  may then change bytes (macOS
   ad-hoc codesigning does); canonical metadata therefore records a distinct
   post-preparation installed digest, and subsequent disk admission verifies
   that digest plus runnable/version requirements. Neither digest may stand for
@@ -208,7 +229,7 @@ Legend:
 | `_preview_busy_reason` | **Superset.** Keep the shared in-process lock hold, add a typed `busy` versus `guard_unavailable` result, and accept staging patterns from the spec. | **Shared defect:** an uninspectable lock, an inode mismatch, and real contention all become `*_install_already_running`, so its three consumers publish the wrong cause. **Show defect:** when the lock path was absent, Show does not hold its in-process `RLock` through planning; it relies on a later race check and can inspect a tree while another local thread mutates it. |
 | `_windows_preview_busy_reason` | **Superset.** Move Show's Windows identity/reparse hardening and typed result into the shared preview guard; staging names remain declarative. | **Shared defect:** the shared side does not distinguish an unopenable/replaced guard from contention and does not use the Windows reparse-point test used by Show. **Show requirement:** only the concrete staging names differ. |
 | `_resolve_manifest_archive` | **Superset.** Shared resolution gains a content-addressed cache-key policy, per-call offline override, and source provenance in its result. | **Shared defect:** caching under `archive.name` and never reclaiming old names causes unbounded versioned archive growth in git, Memory, and model-hub. **Show requirement:** source provenance feeds Show's configured-versus-packaged recovery classification. **Show defect:** the cache fast path tests `exists()` rather than `is_file()`, so a directory or special entry at the digest path can escape the normal cache-miss path as an inspection exception. |
-| `_safe_extract_tar` / `safe_extract_tar` | **Superset.** Atomically replace the shared file/directory-only extractor with the explicit type whitelist, root-confined `name`/`linkname` validation, sequential archive-order extraction, and capability-detected filter described above; retain link denial as the default spec policy. | **Show requirement:** released Darwin/Linux bundles contain 16 symlinks and one esbuild hard link, so a Show-enabled spec must accept both confined link types. **Shared migration blocker, not a current vulnerability:** shared currently rejects the first link and is safe because of that restriction. Removing the restriction without adding `linkname` validation in the same change would make the sole owner weaker than both Show and tmux. **Shared defect:** unlike Show, shared uses a Python 3.12 version gate and skips the available `data` filter on Python 3.10.12+ and 3.11.4+. Git, Memory, and model-hub keep link members denied by spec but currently miss that backported filter protection. |
+| `_safe_extract_tar` / `safe_extract_tar` | **Superset.** Atomically replace the shared file/directory-only extractor with the explicit type whitelist, root-confined `name`/`linkname` validation, sequential archive-order extraction, capability-detected filter, and final-tree postcondition validator described above; retain link denial as the default spec policy. | **Show requirement:** released Darwin/Linux bundles contain 16 symlinks and one esbuild hard link; nine symlinks across the four v3.0.13 Unix archives precede their targets, while each hard link names an earlier regular member. A Show-enabled spec must therefore accept root-confined forward symlinks but keep prior-target hard links. **Shared migration blocker, not a current vulnerability:** shared currently rejects the first link and is safe because of that restriction. Removing the restriction without adding `linkname` validation in the same change would make the sole owner weaker than both Show and tmux. **Shared defect:** unlike Show, shared uses a Python 3.12 version gate and skips the available `data` filter on Python 3.10.12+ and 3.11.4+. Git, Memory, and model-hub keep link members denied by spec but currently miss that backported filter protection and the stable output-mode/ownership postcondition. |
 | `_runtime_platform_tag` / `runtime_platform_tag` | **Subset.** Delete the Show helper. | No behavioral difference; the bodies are identical apart from the name. |
 | `clean` | **Superset.** The shared method owns locking and cleanup; a thin Show wrapper maps the shared report to the existing CLI/Doctor archive payload. | **Shared defect:** shared cleanup omits downloaded archives entirely, so its three consumers have no archive counts, protection result, or reclamation outcome and their caches grow without bound. **Show requirement:** CLI and Doctor retain their existing Show-specific payload wording. **Show defect:** real cleanup deletes staging and version directories before `_clean_downloaded_archives` acquires the install guard, while shared cleanup holds its mutation lock around the whole real operation. |
 | `_write_manifest_install_metadata` | **Different.** Keep a Show metadata compatibility hook, but make the shared atomic writer persist its output and the selected `minimum_node`. Requirement: Show is a directory graph invoked through system Node and must continue reading released `.vibe-show-runtime.json` records whose provider is `manifest-cache` and which have no leaf-binary or Node-requirement fields. | **Show requirement:** legacy filename/provider/field shape and archive-only integrity. **Shared behavior:** `runtime_id`, `bin_path`, and `binary_sha256` support strict single binaries. **Show defect:** direct `Path.write_text` is not atomic, and omitting `minimum_node` makes offline Node compatibility unknowable; a torn or incomplete metadata write can turn a completed install into an uninspectable or compatibility-ambiguous one. |
@@ -386,12 +407,12 @@ Every predicate in the table is schema-aware and keeps these distinctions:
 
 | Fact needed by a disk reader | Authority today | Persistence contract: today -> target | Missing or invalid meaning | Acceptance scenarios |
 | --- | --- | --- | --- | --- |
-| Provider and runtime ownership (`provider`, `runtime_id`) | spec + manifest branch | Shared metadata/pointer have both; released Show/tmux provider/layout contracts can safely derive their runtime id -> canonical metadata/pointer write both | A fully empty tree is absent. A present unknown shape is foreign/corrupt; do not resolve or delete it | C1, C8, C9, C15, C23 |
-| Installed artifact identity (`runtime_version`, artifact `platform`, `archive_sha256`) | selected manifest; current path also includes whole-manifest digest | Fields exist in the wrong shared identity -> canonical metadata/pointer persist this artifact tuple; the artifact platform remains its manifest label and host admission uses spec aliases | Identity unknown/error; never substitute selected identity. An alias-equivalent label is admitted; a label outside the mapping is not | C1-C9, C14-C15 |
-| Install location and entrypoint (`install_dir`, `bin_path` or Show CLI path) | pointer + selected archive/default | Shared/tmux pointers persist it and Show is implicit -> canonical pointer persists the resolved verifier/entrypoint; any accepted manifest may safely derive an omitted `bin_path` from its spec default | An unsafe or unresolvable path is invalid. Field omission alone is not invalid when the versioned spec supplies a safe default; manifest unavailability is unrelated | C1-C2, C7-C10, C15, C17, C19-C20 |
+| Provider and runtime ownership (`provider`, `runtime_id`) | spec + manifest branch | Shared metadata/pointer have both; released Show/tmux provider/layout contracts can safely derive their runtime id -> canonical metadata/pointer write both | A fully empty tree is absent. A present unknown shape is foreign/corrupt; do not resolve or delete it | C1, C8, C9, C15, C23, C27 |
+| Installed artifact identity (`runtime_version`, artifact `platform`, `archive_sha256`) | selected manifest; current path also includes whole-manifest digest | Fields exist in the wrong shared identity -> canonical metadata/pointer persist this artifact tuple; the artifact platform remains its manifest label and host admission uses spec aliases | Identity unknown/error; never substitute selected identity. An alias-equivalent label is admitted; a label outside the mapping is not | C1-C9, C14-C15, C27 |
+| Install location and entrypoint (`install_dir`, `bin_path` or Show CLI path) | pointer + selected archive/default | Shared/tmux pointers persist it and Show is implicit -> canonical pointer persists the resolved verifier/entrypoint; any accepted manifest may safely derive an omitted `bin_path` from its spec default | An unsafe or unresolvable path is invalid. Field omission alone is not invalid when the versioned spec supplies a safe default; manifest unavailability is unrelated | C1-C2, C7-C10, C15, C17, C19-C20, C27 |
 | Source leaf integrity (`binary_sha256`) | selected archive + extracted bytes | One digest currently spans source and installed bytes -> strict canonical manifests persist the declared source digest and verify it before any preparation | Missing is allowed only for an explicitly versioned released legacy shape. A mismatch is source corruption and preparation must not run | C1, C15, C23 |
-| Installed-byte integrity (`installed_binary_sha256`) or archive-verified directory integrity mode | post-preparation staged artifact | Mixed/implicit today -> canonical metadata persists the post-preparation digest or explicit directory/legacy mode separately from the source leaf digest | Unknown installed integrity is not strict verification. Show uses its directory verifier; released tmux uses archive + runnable/version admission | C1, C8-C10, C15, C23 |
-| Installed admission outcome/revision (manifest installability, platform preparation, runnable/version probe) | install transaction + runtime hook | Usually implicit; Memory alone is explicit -> canonical metadata/pointer persist a versioned admission result; a successful released-shape re-admission may persist only a separate identity-keyed derived cache | Not attempted is `unknown`; a false result is `rejected`; an exception is `error`. None is ready or persistently cached as admitted | C1-C2, C7-C8, C11, C15, C21-C23 |
+| Installed-byte integrity (`installed_binary_sha256`) or archive-verified directory integrity mode | post-preparation staged artifact | Mixed/implicit today -> canonical metadata persists the post-preparation digest or explicit directory/legacy mode separately from the source leaf digest | Unknown installed integrity is not strict verification. Show uses its directory verifier; released tmux uses archive + runnable/version admission | C1, C8-C10, C15, C23, C27 |
+| Installed admission outcome/revision (manifest installability, platform preparation, runnable/version probe) | install transaction + runtime hook | Usually implicit; Memory alone is explicit -> canonical metadata/pointer persist a versioned admission result; a successful released-shape re-admission may persist only a separate identity-keyed derived cache | Not attempted is `unknown`; a false result is `rejected`; an exception is `error`. None is ready or persistently cached as admitted | C1-C2, C7-C8, C11, C15, C21-C23, C27 |
 | Whole-manifest digest and source lineage | manifest + install metadata | Present today -> retained only as legacy locator/provenance, outside artifact identity | Legacy locator/provenance only, never installed identity; missing lineage makes source comparison unknown | C4, C9-C10, C14-C15 |
 | Selected/update facts (selected version/artifact, archive catalog, `release_state`, source URLs) | current or cached manifest | Remote cache only -> remain selected facts and are never copied into installed identity | Configured offline is `not_attempted_offline`; a failed fetch is `manifest_unavailable`; missing source is `manifest_missing`; invalid reached bytes are `manifest_invalid`; no host artifact is `platform_unsupported`. Installed/admitted state is unchanged | C2-C6, C16-C17, C19-C20 |
 | Show `minimum_node` | manifest | **Absent** in released metadata -> required in new Show install metadata | A released omission is unknown and not satisfied; a canonical omission is invalid. Serving is withheld unless the released shape's bounded probe succeeds | C2, C10 |
@@ -401,42 +422,50 @@ Every predicate in the table is schema-aware and keeps these distinctions:
 | Derived admission-cache entry (artifact identity, admission revision, successful result) | successful read-only re-admission | Absent today -> shared confined atomic writer under `<runtime_dir>/derived/admission/`; never installed state | Missing/stale/unreadable/unsafe is a cache miss, not failed admission. A write-path redirect or failure leaves external and installed bytes unchanged and falls back to memory | C11, C21-C22, C24 |
 | Memory provider-root compatibility (`provider_root_format`, compatible formats, artifact fingerprint) | manifest-derived candidate | Current pointer yes, older shapes may omit -> canonical pointer requires all applicable fields | Version-permitted omission makes the capability unknown; malformed content is error. Neither invents a compatible format or relabels the binary absent | C11-C12, C25 |
 | Memory sync contract (revision, argv, bootstrap/scrubber digests) | manifest extension | Current pointer yes when declared -> canonical pointer persists the complete declared contract | Version-permitted omission makes sync unavailable, not the artifact absent; malformed content is admission error for sync | C11-C12, C25 |
-| Tmux schema and preparation/admission facts (required utf8proc/terminfo contract, runnable exact version, macOS preparation result) | manifest + install-time/live probes | Released schema 1 requirements exist but omit the leaf digest -> exact released schema 1 stays legacy; canonical schema 2 requires source and installed-byte digests plus requirements and admission revision | Unknown requirement/admission is not ready; checksum omission is accepted only for the released schema 1 fixture, never a new schema 1 default | C2, C7, C15, C23 |
+| Tmux schema and preparation/admission facts (required utf8proc/terminfo contract, runnable exact version, macOS preparation result) | manifest + install-time/live probes | Schema 1 omits the leaf digest -> every structurally valid schema 1 input stays archive-verified legacy; canonical writes schema 2 with source and installed-byte digests plus requirements and admission revision | Unknown requirement/admission is not ready. The parsed schema version, not source route or payload identity, selects legacy versus canonical integrity | C2, C7, C15, C23 |
 | Model Hub durable claim target | selected manifest target | Schema 1/2 persist five fields including `manifest_sha256` -> new schema persists normalized platform-artifact target; platform labels normalize through the same spec alias map used for selection/admission | Dual-read and compare normalized platform-artifact identity; invalid or genuinely incompatible targets are explicit claim errors | C4, C9, C14 |
 | Model Hub durable operation state (`state`, generation, error, reason) | `install-state.json` | Schema 1/2 persist it -> dual-read separately from installed snapshot | A released `not_installed` record is stale when an admitted disk artifact exists; it cannot override installed truth | C2, C13-C14 |
 | Remote manifest cache (`downloads/manifest-<url-digest>.json`) | successful remote fetch | Present beside archives -> remains a typed durable cache entry | Missing under configured offline mode means selected facts were not attempted; present-but-invalid bytes are `manifest_invalid`, not a cache miss. Retention preserves either for diagnosis until explicit repair replaces it | C3, C16-C17, C19 |
-| Archive ownership/protection (verified digest, released `archive_name` alias, current/rollback references, unknown names) | archive metadata + pointer traversal | Archive bytes/references exist -> canonical report classifies only recognized archive entries; derived admission state lives outside `downloads/` | Unprovable ownership/protection means retain. Unknown non-archive names and derived state are never archive candidates | C8-C10, C15-C16 |
+| Archive ownership/protection (verified digest, released `archive_name` alias, current/rollback references, unknown names) | archive metadata + pointer traversal | Archive bytes/references exist -> canonical report classifies only recognized archive entries; derived admission state lives outside `downloads/` | Unprovable ownership/protection means retain. Unknown non-archive names and derived state are never archive candidates | C8-C10, C15-C16, C27 |
 
 ### Normative Predicate Census
 
-The review-loop breaker requires more than fixing the reviewed examples. This is
-the result of scanning every fact row above, every scenario row below, and each
-normative contract and stop point for a value, label, digest, schema, or row that
-could cover two states with different evidence or permitted actions. Sharing a
-row is allowed only when both the evidence and every prescribed action are the
-same. “Scan” identifies distinctions found by that full pass rather than by the
-five findings on `255fb3c35`.
+The review-loop breaker requires more than fixing reviewed examples. This table
+records the full scan of every fact row, scenario row, contract boundary, and
+stop point along two axes: evidence states with different permitted actions may
+not collapse, and an obligation must terminate in a property measured on our
+persisted state, return value, side effects, or final filesystem tree. Source
+paths, payload identities, interpreter versions, and fixture member orders are
+coverage inputs only. Sharing a row is allowed only when both the evidence and
+every measured postcondition are the same. “Scan” identifies distinctions found
+by that full pass rather than by the findings on `255fb3c35` or `b03dfcc41`.
 
-| Predicate location | States that must not collapse | Prescribed behavior and proof | Source |
+| Predicate location | States that must not collapse | Stable measured postcondition | Source |
 | --- | --- | --- | --- |
 | Install-tree presence / C8 | Proven empty vs present-but-partial or uninspectable | Empty permits first install; partial is unknown/error, deletes nothing, and repairs only with a valid target under the guard | Already distinct |
-| Manifest acquisition / C2 and C17 | Source not reached vs reached bytes invalid | Both preserve disk-local status/resolution. A transient fetch failure keeps the admitted runtime operational and reports the fetch error; invalid bytes make `ensure()`/repair fail `manifest_invalid`, never successful reuse | F3 |
+| Installed and selected identity / C1, C4-C5, and C9 | Admitted bytes on disk vs artifact currently selected for installation | Snapshot identity round-trips from pointer/metadata without manifest access; selected identity occupies a separate field; `matches` is computed only from normalized platform-artifact tuples. Editing another platform changes neither installed identity nor path | Scan |
+| Manifest acquisition / C2 and C17 | Source not reached vs reached bytes invalid | Both preserve disk-local status/resolution. A transient fetch failure keeps the admitted runtime operational and reports the fetch error; invalid bytes make `ensure()`/repair fail `manifest_invalid`, never successful reuse | `255fb3c35` F3 |
 | Manifest acquisition / C19 and C2 | Network deliberately not attempted vs attempted and failed | Configured offline performs zero network access and reports `not_attempted_offline`; an attempted fetch retains its `manifest_unavailable` error. Neither manufactures selected facts | Scan |
 | Manifest selection / C20 and C6 | Manifest source missing vs valid manifest with no host artifact | `ensure()`/repair returns `manifest_missing` for the first and `platform_unsupported` for the second; disk-local status/resolution and retention remain available | Scan |
+| Durable claim target / C4, C9, and C14 | Persisted platform-artifact target vs manifest locator/provenance | Each released claim fixture normalizes to the artifact tuple; changing only whole-manifest digest leaves comparison equal, while changing a tuple field does not. Claim read/write round-trips its own schema independently of installed metadata | Scan |
 | Admission / C11, C21, and C22 | Validation not attempted vs attempted rejection vs attempted inspection error | Project `unknown`, `rejected`, and `error` respectively. None is ready or persistently cached as admitted; only a successful probe may populate derived cache | Scan |
-| Tmux manifest version / C15 and C23 | Exact released relaxed contract vs canonical strict contract | The released schema 1 fixture alone may omit the leaf checksum; canonical schema 2 requires it. A novel or modified schema 1 omission is invalid | F1 |
-| Tmux binary integrity / C23 | Pre-preparation source bytes vs post-preparation installed bytes | Verify the manifest leaf digest before preparation; after real byte-changing codesign, persist and verify a separate installed digest. One digest cannot prove both phases | F2 |
+| Tmux manifest version / C15 and C23 | Versioned schema 1 legacy contract vs schema 2 canonical contract | Every parsed, structurally valid schema 1 input projects archive-verified legacy integrity, independent of package/path/URL origin or payload identity. Canonical output always declares schema 2 and both digests; no inspection rewrites legacy state | `b03dfcc41` F1 |
+| Tmux binary integrity / C23 | Pre-preparation source bytes vs post-preparation installed bytes | Verify the manifest leaf digest before preparation; after real byte-changing codesign, persist and verify a separate installed digest. One digest cannot prove both phases | `255fb3c35` F2 |
 | Required fields / C10, C12, and C15 | Omission permitted by a released version vs omission from canonical state | Project the released shape's named unknown/legacy mode without rewriting it; reject a canonical omission. Schema identity, not field absence alone, selects the rule | Scan |
-| Memory provider selection / C18 | Development override configured vs managed provider selected | Test the override before snapshot construction. The development branch touches no manifest or managed state; an unusable override reports its own provider error and does not fall through | F5 |
+| Released and canonical persistence / C9-C12 and C15 | Compatible released read vs canonical write | Inspection byte-compares every released pointer/metadata fixture before and after. Explicit mutation writes the canonical schema selected by the writer; neither source route nor payload fingerprint changes the read contract or triggers an inspection migration | Scan |
+| Memory provider selection / C18 | Development override configured vs managed provider selected | Test the override before snapshot construction. The development branch touches no manifest or managed state; an unusable override reports its own provider error and does not fall through | `255fb3c35` F5 |
 | Entrypoint resolution / C1 and Step 3 | Field omitted with a safe declarative default vs explicit/default path unsafe | Persist the safely derived path in canonical state; reject an escaping or unresolvable path. Literal presence is not the safety predicate | Scan |
+| Artifact policy / Step 3 and C27 | Strict binary artifact vs verified directory graph | A strict spec commits one safe regular executable whose source/installed digests pass; a directory spec commits only a root-confined tree whose declared verifier returns its entrypoint. Link-shaped input never changes a strict spec into a directory spec | Scan |
+| Show Node admission / C10 | Persisted requirement known vs released omission | Canonical installs compare the probed Node version to persisted `minimum_node`; a released omission remains `unknown` and reaches serving-ready only when the bounded runtime probe succeeds. Neither result relabels artifact presence | Scan |
 | Platform admission / C7 | Literal mismatch but alias-equivalent vs genuinely incompatible | Normalize with the one spec map across selection, disk admission, resolver, and claim; reject only the incompatible control | Already distinct |
 | Model Hub operation state / C13 and C14 | Stale terminal failure vs active installing claim vs admitted disk truth | Disk truth stays operational; a stale failure cannot hide it; only an active normalized same-target claim resumes | Scan |
 | Remote manifest cache / C16-C17 and C19 | Cache absent vs cache present but invalid vs recognized valid cache | Absence under configured offline is `not_attempted_offline`; invalid content is `manifest_invalid`; valid content supplies selected facts. Retention preserves the typed entry | Scan |
 | Downloads retention / C16 | Verified unprotected archive vs protected archive vs manifest cache vs unknown name | Delete only the first. Protection uncertainty, non-archive ownership, or unknown type always retains the entry | Already distinct |
 | Preview/mutation guard / Step 2 | Real contention vs guard path unavailable/unsafe/raced | Return typed `busy` and `guard_unavailable` outcomes; neither is flattened to “already running,” and preview never creates the guard | Scan |
 | Automatic cleanup / Step 4 | Protection inspection failure vs candidate deletion failure vs successful install | Both maintenance failures leave the committed install/claim successful and have distinct reports; inspection uncertainty deletes nothing | Scan |
-| Derived-cache write / C24 | Installed-state mutation vs derived best-effort cache write; confined path vs redirected path | Derived write uses the shared no-follow confined writer without the mutation guard. A symlink/reparse/hard-link/race leaves the external target unchanged and degrades to memory | F4 |
-| Tar extraction / Step 3 | Filter keyword unavailable vs archive rejected by either extraction path | Capability absence alone enters the guarded fallback. Filtered and forced-fallback paths accept/reject the same fixtures; an invalid archive is never reinterpreted as capability absence | Scan |
+| Derived-cache write / C24 | Installed-state mutation vs derived best-effort cache write; confined path vs redirected path | Derived write uses the shared no-follow confined writer without the mutation guard. A symlink/reparse/hard-link/race leaves the external target unchanged and degrades to memory | `255fb3c35` F4 |
+| Tar extraction capability / Step 3 | Filter keyword unavailable vs extraction rejected | Capability absence alone enters the guarded fallback; an archive rejection is never reinterpreted as absence. Both paths are judged by the same final-tree facts: confinement, allowed types, current-user ownership, and sanitized POSIX modes, not by matching an input accept/reject list | `b03dfcc41` F2 |
+| Tar link materialization / C27 and Step 3 | Symlink target not yet present or dangling vs hard-link target absent | A confined symlink may be materialized and is accepted only if the final no-follow tree walk proves its normalized target stays inside the root. A hard link is created only to an already materialized regular inode. No later member write or final link chain escapes the root | `b03dfcc41` F3, measured at v3.0.13 |
 
 ### Released-Fixture Scenario Matrix
 
@@ -467,7 +496,7 @@ fact requires a census row and at least one matrix row in the same change.
 | C12 | Released Memory pointer with version-permitted omitted immutable-build, provider-root, or sync fields | Any manifest mode / same host | Artifact and each omitted capability reported separately; no invented contract or compatibility | Binary only if core admission passes; omitted capability withheld | Explicit mutation may canonicalize from a valid manifest | N/A | Protect released artifact |
 | C13 | Admitted Model Hub install + released `state=not_installed` | Any manifest mode / same host | Installed truth wins; persisted failure is projected stale | Engine path | Reuse install; no unnecessary claim/download | Stale failure neither hides runtime nor becomes active claim; inspection does not rewrite it | Protect engine/archive |
 | C14 | Released Model Hub `installing` claim schema 1/2 | Manifest differs only outside host artifact / host admitted through literal or aliased label | Installing/admitted facts remain distinct | Disk path if already admitted | Resume only normalized same target | Resume without target-changed; malformed or genuinely incompatible target fails explicitly | Protect claimed/current bytes |
-| C15 | Released tmux schema 1 manifest/metadata/pointer without `binary_sha256` | Cache-only/unavailable / same host | Installed with explicit legacy integrity level | Path only after runnable/exact-version admission | Reuse without download; inspection never upgrades metadata | N/A | Protect released tmux archive/install |
+| C15 | Structurally valid tmux schema 1 manifest plus released-layout metadata/pointer without `binary_sha256`; exercise package, configured path, and configured URL sources | Cache-only/unavailable / same host | Installed with explicit archive-verified legacy integrity | Path only after runnable/exact-version admission | Reuse without download; inspection never upgrades metadata; equivalent schema 1 payloads have identical results across source routes | N/A | Protect legacy tmux archive/install |
 | C16 | Manifest cache + verified/stale archives + unknown download names | Configured offline / same host | Cache remains usable for selected facts | Existing admitted path | Offline reuse/repair can read cache | Claim behavior unchanged | Delete only typed, unprotected archive candidates; preserve `manifest-*` and every unknown non-archive entry |
 | C17 | Canonical admitted install + manifest bytes that parse or validate incorrectly | Reached invalid manifest / same host | Installed remains true; selected facts carry `manifest_invalid` | Same admitted path | Fail `manifest_invalid`; no successful reuse, repair, download, or installed-state write | Existing admitted artifact remains visible; no target is manufactured | Protect from disk facts |
 | C18 | `AVIBE_MEMORY_DEV_RUNTIME` points to a usable development interpreter; managed tree contains a poison fixture | No manifest mode applies / compatible host | `provider=development`, ready | Development interpreter path | Success, `changed=false`, including `force=true` | N/A | Zero manifest, metadata, pointer, claim, derived-cache, or retention access |
@@ -479,6 +508,7 @@ fact requires a census row and at least one matrix row in the same change.
 | C24 | Released Memory artifact that passes re-admission + derived-cache parent/target symlink, hard-link, reparse, or identity-race fixture | Any manifest mode / same host | Successful projection survives cache-write rejection via process memory | Same admitted path | Reuse without installed-state mutation | N/A | External redirect target, pointer, metadata, and artifact tree remain byte-for-byte unchanged |
 | C25 | Released Memory pointer with a present malformed immutable-build, provider-root, or sync field | Any manifest mode / same host | Core artifact stays separately inspectable; malformed capability is `error`, not version-permitted omission | Binary only if independent core admission passes; malformed capability withheld | Explicit repair requires a valid manifest; no inspection canonicalization | N/A | Protect released artifact and preserve malformed evidence |
 | C26 | Released Memory pointer without admission revision | Probe starts and raises/times out / same host | Installed artifact present; admission `error`, not ready | `None` with inspection error | Explicit mutation may repair from a valid manifest; inspection does not write/cache | N/A | Protect released artifact; derived success cache absent |
+| C27 | Manifest-verified Show v3.0.13 Unix archive with forward symlinks, a symlink chain, and the esbuild hard link | Available or verified cache / matching host | Directory artifact admitted only after final-tree validation | CLI path resolves through the in-root package symlink | Sequential extraction succeeds; hard-link target is executable; every final path/link target is confined and every POSIX ownership/mode postcondition holds | N/A | Protect verified archive/install; no external path changed |
 
 ## Migration Sequence And Stop Points
 
@@ -596,8 +626,11 @@ Add the declarative metadata/provider filename, directory-artifact verifier,
 manifest-extension validator and persistence map, and internal-link extraction
 policy. The extractor change is atomic: allow only `REGTYPE`, `AREGTYPE`,
 `DIRTYPE`, `SYMTYPE`, and `LNKTYPE`; validate both `name` and `linkname` against
-the extraction root; and extract one member at a time in archive order. A link
-must resolve to content already extracted. Do not use a two-pass or parallel
+the extraction root; and extract one member at a time in archive order. A hard
+link must resolve to a regular inode already extracted. A symlink may be
+forward or dangling when its normalized target remains confined: revalidate
+existing symlink prefixes before every later write and validate the complete
+tree without following links before commit. Do not use a two-pass or parallel
 extractor. Defaults remain exactly the current strict binary contract.
 
 **Stop point:** a fixture directory artifact can install through
@@ -613,8 +646,21 @@ For a malicious `linkname="../../../../etc/passwd"`, it raises `ValueError` with
 in the same commit. Run both fixtures once with `filter="data"` available and
 once with `extractall` stubbed to raise `TypeError` for the filter keyword,
 forcing the manually guarded fallback without an old-interpreter matrix. The
-two paths must accept the same benign archive and reject the same malicious
-archive; a path-dependent result blocks the step. Existing git, Memory, and
+fixture also declares foreign uid/gid and setuid, setgid, group-write, and
+other-write mode bits. Inspect each completed tree with no-follow operations:
+every inode is owned by the extracting user; each regular-file, directory, and
+hard-link mode lacks those prohibited bits; every path and normalized symlink
+target is root-confined; and the malicious fixture leaves its external target
+unchanged. Both extraction paths must satisfy those same measured output
+properties. Equality of an enumerated accept/reject set or of Python's internal
+`TarInfo` transformations is insufficient.
+
+Run C27 against the manifest-SHA-verified v3.0.13 Unix archives. It must
+materialize all nine measured forward symlinks, the in-root symlink chain, and
+the prior-target esbuild hard link; the final no-follow traversal passes and the
+Show CLI plus esbuild targets resolve and are executable. Include a confined
+dangling-symlink control and prove final validation accepts it without allowing
+any later write through it to leave the root. Existing git, Memory, and
 model-hub specs still reject a missing `binary_sha256`, an absent or unsafe
 **resolved** binary path, or any link member. Any archive entry that omits
 `bin_path` but has a safe `ManagedRuntimeSpec.default_bin_path` remains
@@ -628,14 +674,18 @@ capability.
 **What breaks:** expected breakage is **none** before Show cuts over. If optional
 leaf checksums or link acceptance become the default, integrity for git,
 Memory, and model-hub breaks. If link acceptance is omitted, Show installation
-fails at the first symlink on every Darwin and Linux archive; if hard links or
-archive order are mishandled, the esbuild binary is unavailable and Show page
-builds fail for every non-Windows user. If link rejection is relaxed without
+fails at the first symlink on every Darwin and Linux archive; if forward
+symlinks are rejected or hard links/archive order are mishandled, released Unix
+installation fails or the esbuild binary is unavailable and Show page builds
+fail for every non-Windows user. If link rejection is relaxed without
 `linkname` hardening, the migration creates the sole extractor without link
 escape protection. Requiring literal `bin_path` presence would break accepted
 manifests that rely on the shared spec default; weakening safe-path validation
 would make that compatibility path unsafe. Retaining the current version gate
 would also make Python 3.10.12+ and 3.11.4+ skip a security filter they provide.
+Relying on that filter alone, or comparing only acceptance/rejection, can leave
+unsafe ownership or mode bits on the forced fallback path. The final-tree
+postconditions are therefore part of the same atomic change.
 Every case blocks Step 5.
 
 ### Step 4: Add Shared Content-Addressed Retention
@@ -695,7 +745,9 @@ manifest, failed and forced replacement, unrelated-platform
 manifest edits, previous fingerprints, legacy parent layout, configured source
 lineage, internal symlinks, Node missing/unsupported, archive cleanup, Doctor,
 and dependencies status. The link case includes the esbuild hard link and
-asserts its target remains executable. Add an invariant test that an injected
+all C27 forward symlinks, then asserts the resolved CLI and hard-link targets
+remain executable and the final tree satisfies the shared confinement,
+ownership, and mode postconditions. Add an invariant test that an injected
 status inspection failure remains unknown/error and is never projected as absent. With
 the manifest unavailable, a new metadata record plus downgraded Node must remain
 unsupported, while every released record lacking `minimum_node` must remain an
@@ -737,21 +789,25 @@ quarantine/codesign preparation, runnable/exact-version admission, and
 utf8proc/terminfo manifest requirements. Dual-read the released schema 1
 manifest, `.avibe-tmux-runtime.json`, `current.json`, and legacy two-level
 install directory. Canonical manifests are schema 2 and require
-`binary_sha256`; only the exact released schema 1 fixture may omit it. Legacy
-installs remain explicitly archive-verified legacy admission and are never
-upgraded by a status write. Canonical metadata records the verified source leaf
-digest and a separate post-preparation installed digest because macOS codesign
-may change the binary.
+`binary_sha256`; every structurally valid schema 1 manifest is read under the
+archive-verified legacy contract, independent of package/path/URL source.
+Legacy installs are never upgraded by a status write. Canonical metadata
+records the verified source leaf digest and a separate post-preparation
+installed digest because macOS codesign may change the binary.
 
 **Stop point:** final architecture. All five dependencies use
 `ManagedRuntimeManager`; Show and tmux contain product adapters, not filesystem
 or install engines.
 
-**Acceptance test:** seed the exact packaged schema 1 manifest and every
-released tmux metadata/pointer/layout fixture and resolve it offline without a
-download or inspection write. A modified or novel schema 1 fixture missing
-`binary_sha256` is `manifest_invalid`. Run C23 with a schema 2 manifest and a
-real signing fixture whose command changes the binary bytes, not a stubbed
+**Acceptance test:** run the same structurally valid schema 1 payload through
+the packaged resource, `VIBE_TMUX_MANIFEST_PATH`, and
+`VIBE_TMUX_MANIFEST_URL`, paired with every released tmux
+metadata/pointer/layout fixture. Each route produces the same archive-verified
+legacy projection and resolves offline without a download or inspection write;
+changing payload bytes without changing its schema version does not select a
+different integrity contract. Canonical generation emits schema 2 only. Run
+C23 with a schema 2 manifest and a real signing fixture whose command changes
+the binary bytes, not a stubbed
 “changed” flag: verify the source leaf digest before preparation, prove the
 source-mismatch control never invokes preparation, run quarantine removal and
 codesign, persist a different installed digest, and use that digest plus exact
@@ -765,11 +821,12 @@ hashing, or extraction. Run focused suites for all five managers and their
 CLI/Doctor/dependencies consumers.
 
 **What breaks:** git, Memory, model-hub, and Show have **no new behavior**. Tmux
-breaks if the released manifest's missing `binary_sha256` is treated as corrupt,
-if its current pointer is rewritten during status, or if preparation/admission
-hooks run in a different transaction phase. Treating a new schema 1 omission as
-legacy, checking manifest bytes only after codesign, or comparing the prepared
-binary to the pre-preparation digest also blocks deletion of the tmux installer.
+breaks if a valid configured schema 1 manifest's missing `binary_sha256` is
+treated as corrupt, if its current pointer is rewritten during status, or if
+preparation/admission hooks run in a different transaction phase. Writing new
+schema 1 state, checking source bytes only after codesign, or comparing the
+prepared binary to the pre-preparation digest also blocks deletion of the tmux
+installer.
 
 ## Measured Size Estimate
 
@@ -851,9 +908,9 @@ The exact endpoint cannot be known without choosing the staged-entrypoint result
 shape. The experiment that narrows the Show range is a compile-only Step 3 fixture:
 implement the smallest directory-artifact subclass without touching Show, then
 remeasure which Show wrappers can become direct projections. The experiment for
-the tmux range is a compile-only spec using the released schema 1 fixtures and
-the three existing binary hooks. Do not use an upper estimate as permission to
-introduce a general callback framework.
+the tmux range is a compile-only spec using versioned schema 1 compatibility
+fixtures across each source route and the three existing binary hooks. Do not
+use an upper estimate as permission to introduce a general callback framework.
 
 ### Concept Count
 
@@ -897,21 +954,39 @@ consumer.
 
 ## Resolved Archive-Link Contract
 
-The previous hard-link unknown is resolved by enumerating every Show v3.0.13
-platform archive:
+The archive-link unknown is resolved by the six-platform v3.0.13 member census
+and a second pass that verified each Unix archive's SHA-256 against the released
+manifest before reading link order:
 
-| Platform | Members | Regular | Directories | Symlinks | Hard links |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| darwin-arm64 / darwin-x64 | 8,376 | 7,869 | 490 | **16** | **1** |
-| linux-arm64 / linux-x64 | 8,376 | 7,869 | 490 | **16** | **1** |
-| win32-arm64 | 8,530 | 8,034 | 496 | 0 | 0 |
-| win32-x64 | 8,534 | 8,037 | 497 | 0 | 0 |
+| Platform | Members | Regular | Directories | Symlinks | Forward symlinks | Hard links |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| darwin-arm64 | 8,376 | 7,869 | 490 | **16** | **2** | **1** |
+| darwin-x64 | 8,376 | 7,869 | 490 | **16** | **2** | **1** |
+| linux-arm64 | 8,376 | 7,869 | 490 | **16** | **3** | **1** |
+| linux-x64 | 8,376 | 7,869 | 490 | **16** | **2** | **1** |
+| win32-arm64 | 8,530 | 8,034 | 496 | 0 | 0 | 0 |
+| win32-x64 | 8,534 | 8,037 | 497 | 0 | 0 | 0 |
+
+The measured forward members and their later targets are:
+
+| Archive | Symlink -> later member |
+| --- | --- |
+| darwin-arm64 / darwin-x64 | `node_modules/.bin/jsesc` -> `node_modules/jsesc/bin/jsesc`; `node_modules/.bin/browserslist` -> `node_modules/browserslist/cli.js` |
+| linux-arm64 | `node_modules/.bin/parser` -> `node_modules/@babel/parser/bin/babel-parser.js`; `node_modules/.bin/semver` -> `node_modules/semver/bin/semver.js`; `node_modules/.bin/vite` -> `node_modules/vite/bin/vite.js` |
+| linux-x64 | `node_modules/.bin/jiti` -> `node_modules/jiti/lib/jiti-cli.mjs`; `node_modules/.bin/semver` -> `node_modules/semver/bin/semver.js` |
+
+There are no finally dangling symlinks. In each Unix archive,
+`node_modules/.bin/avibe-show-runtime` resolves through the earlier
+`node_modules/@avibe/show-runtime` symlink to an already present
+`packages/runtime/dist/cli.js`.
 
 The hard link joins `node_modules/esbuild/bin/esbuild` and
 `node_modules/@esbuild/<platform>/bin/esbuild`. Which member is the link and
 which is the real file reverses between Darwin and Linux because of archive
-member order. Sequential per-member extraction succeeds for both; a two-pass or
-parallel “optimization” fails one of them.
+member order, but the hard-link target is earlier in all four archives.
+Sequential per-member extraction succeeds for both layouts. A rule requiring
+every symlink target to be earlier would reject nine released links, while a
+two-pass or parallel “optimization” can violate the hard-link invariant.
 
 The hermetic three-extractor probe established the current behavior:
 
@@ -935,6 +1010,10 @@ without link-escape protection. After Step 3, the same probe must produce:
 managed_runtime benign    -> extracted ['hard.bin', 'link.so', 'real.bin']
 managed_runtime malicious -> ValueError: <message containing "link target">
 ```
+
+Those lines preserve the original probe for provenance; Step 3 passes on the
+measured final-tree and unchanged-external-target properties above, not on an
+exact message or a closed list of fixture outcomes.
 
 ### Named Unknown: Extraction-Filter Capability (Resolved)
 
@@ -964,10 +1043,13 @@ hermetically. Step 3 moves Show's capability pattern into the sole shared
 extractor and preserves a manually guarded fallback for patch releases that do
 not support the keyword; no path may call unfiltered extraction without those
 guards. Link acceptance, `name`/`linkname` confinement, and filter/fallback
-equivalence are one atomic change. The fallback test stubs the filter call to
-raise `TypeError` and proves that the same malicious fixture has the same
-rejected outcome; no old-interpreter matrix is required. Step 7 deletes tmux's
-version-gated branch when tmux adopts the shared extractor.
+output safety are one atomic change. The fallback test stubs the filter call to
+raise `TypeError`, then measures our completed tree rather than Python's
+implementation: no escaped path, no prohibited POSIX mode bit, and current-user
+ownership. The filtered path must satisfy those same postconditions, and both
+leave the external malicious target unchanged; no old-interpreter matrix is
+required. Step 7 deletes tmux's version-gated branch when tmux adopts the shared
+extractor.
 
 There is no residual product or release decision for archive extraction.
 
