@@ -1488,6 +1488,74 @@ def test_processing_record_route_leaves_operator_lookup_to_runtime() -> None:
     assert verified_user_keys == [user_key]
 
 
+def test_native_processing_record_routes_authorize_the_selected_project() -> None:
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    principal_id = "u-11111111111111111111111111111111"
+    runtime = SimpleNamespace(
+        principal_for_user_key=Mock(return_value=principal_id),
+        list_memory_projects=Mock(return_value=("default", "notes")),
+        processing_record_entries_payload=AsyncMock(
+            return_value={"status": "ok", "entries": [], "next_cursor": None}
+        ),
+        processing_record_entry_payload=AsyncMock(
+            return_value={"status": "ok", "entry": {"memcell_id": "mc_1"}}
+        ),
+    )
+    controller = _build_controller_double()
+    controller.default_memory_project_id.return_value = "default"
+    controller.memory_runtime = runtime
+    secret = "test-memory-ui-secret"
+    user_key = "avibe:local"
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+
+    def headers(path: str) -> dict[str, str]:
+        return {
+            MEMORY_USER_KEY_HEADER: user_key,
+            MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                secret,
+                method="GET",
+                path=path,
+                user_key=user_key,
+            ),
+        }
+
+    async def _exercise() -> tuple[httpx.Response, httpx.Response, httpx.Response]:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as client:
+            list_path = "/internal/memory/processing-record/entries"
+            detail_path = "/internal/memory/processing-record/entry"
+            listed = await client.get(
+                f"{list_path}?project=notes&limit=17",
+                headers=headers(list_path),
+            )
+            detail = await client.get(
+                f"{detail_path}?memcell_id=mc_1&project=notes",
+                headers=headers(detail_path),
+            )
+            unknown = await client.get(
+                f"{list_path}?project=unknown&limit=17",
+                headers=headers(list_path),
+            )
+            return listed, detail, unknown
+
+    listed, detail, unknown = asyncio.run(_exercise())
+
+    assert listed.status_code == 200
+    assert detail.status_code == 200
+    assert unknown.status_code == 400
+    runtime.processing_record_entries_payload.assert_awaited_once_with(
+        principal_id, "notes", None, 17
+    )
+    runtime.processing_record_entry_payload.assert_awaited_once_with(
+        principal_id, "notes", "mc_1"
+    )
+    assert runtime.list_memory_projects.call_count == 3
+
+
 def test_memory_remember_route_rejects_capture_queued_across_runtime_replacement() -> None:
     """The production CLI route cannot repopulate the fresh reset aggregate."""
 

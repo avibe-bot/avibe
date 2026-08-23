@@ -1703,6 +1703,8 @@
     "bind_code_limit_reached": "Too many active bind codes. Revoke an unused code before creating another.",
     "memory_disabled": "Memory is disabled, or this connection can't reach it.",
     "memory_invalid_input": "That Memory request wasn't valid.",
+    "memory_processing_record_entry_not_found": "That Memory processing entry is no longer available.",
+    "memory_failure_history_unavailable": "Detailed Memory failure history is unavailable.",
     "memory_log_entry_not_found": "That Memory processing entry is no longer available.",
     "memory_access_denied": "This caller isn't allowed to read that Memory data.",
     "memory_input_too_large": "That input is too large for Memory.",
@@ -4294,7 +4296,10 @@
         }
       },
       "source": {
-        "health": "Engine health"
+        "health": "Engine health",
+        "memcells": "Native messages",
+        "runs": "Native runs",
+        "semantic": "Linked memories"
       },
       "sourceState": {
         "available": "Available",
@@ -4302,6 +4307,49 @@
         "stale": "Stale",
         "unknown": "Unknown",
         "unavailable": "Unavailable"
+      },
+      "reason": {
+        "native_memcells_unavailable": "Native messages cannot be read",
+        "native_runs_unavailable": "Native runs cannot be read",
+        "native_semantic_unavailable": "Linked memory files cannot be read",
+        "payload_projection_limit": "The original payload exceeds the display limit",
+        "payload_unavailable": "The original payload is unavailable",
+        "payload_malformed": "The retained payload does not match the native schema",
+        "authorized_user_payload_unavailable": "No authorized user payload item is available",
+        "unauthorized_or_bounded_items_omitted": "Unauthorized or over-limit payload items were omitted",
+        "native_runs_missing_or_retained": "Linked native runs are missing or were retained away",
+        "native_run_retention_bounded": "Native run history is retention-bounded",
+        "semantic_results_not_user_scoped": "Linked memories are unavailable for this owner scope",
+        "semantic_results_missing_or_retained": "Linked memories are missing or were retained away",
+        "semantic_projection_bounded": "Linked memory content was bounded for display",
+        "current_state_not_user_scoped": "Current state is unavailable for this owner scope",
+        "current_state_unavailable": "Current profile and index state are unavailable",
+        "index_state_unavailable": "Current index state is unavailable",
+        "index_state_missing_or_retained": "Current index state is missing or was retained away",
+        "index_state_incomplete": "Some linked index state is missing or outside the display bound",
+        "unknown": "Native data is unavailable or incomplete"
+      },
+      "runStatus": {
+        "running": "Running",
+        "success": "Succeeded",
+        "failed": "Failed",
+        "dead_letter": "Stopped permanently",
+        "crashed": "Crashed",
+        "unknown": "Unknown"
+      },
+      "profileStatus": {
+        "present": "Present",
+        "missing": "Missing"
+      },
+      "indexStatus": {
+        "available": "Available",
+        "partial": "Partial",
+        "unavailable": "Unavailable",
+        "pending": "Pending",
+        "processing": "Processing",
+        "done": "Done",
+        "failed": "Failed",
+        "unknown": "Unknown"
       },
       "sourceReason": "Reason: {{reason}}",
       "sourceNotObserved": "Not observed",
@@ -4362,6 +4410,38 @@
         "title": "Recent processing",
         "help": "How recent messages were turned into memories, step by step.",
         "helpLabel": "About recent processing"
+      },
+      "records": {
+        "description": "Authorized native messages and the retained processing facts linked directly to them.",
+        "loading": "Loading native processing records…",
+        "loadFailed": "Couldn't load native processing records.",
+        "detailFailed": "Couldn't load this processing record.",
+        "empty": "No authorized native messages are available.",
+        "loadMore": "Load more",
+        "back": "Back to records",
+        "noPreview": "Authorized user payload is unavailable.",
+        "omittedBytes": "+{{formattedBytes}} bytes omitted",
+        "runCount": "{{count}} runs",
+        "sourceNotice": "{{section}} is {{state}} ({{reason}}).",
+        "project": "Project",
+        "projectLabel": "Memory project",
+        "projectDefault": "Default",
+        "session": "Session",
+        "owner": "Owner",
+        "created": "Created",
+        "payload": "Original user payload",
+        "runs": "Native runs",
+        "semantic": "Linked Episodes and Atomic Facts",
+        "current": "Current state",
+        "currentUnattributed": "Profile and index state are current and unattributed; they are not historical run results.",
+        "profile": "Profile",
+        "indexing": "Indexing",
+        "updated": "Updated",
+        "strategy": "Strategy",
+        "status": "Status",
+        "attempt": "Attempt",
+        "started": "Started",
+        "unavailable": "This section is unavailable or has been retained away."
       }
     },
     "profile": {

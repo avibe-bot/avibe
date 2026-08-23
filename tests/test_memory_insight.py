@@ -44,18 +44,25 @@ def test_scoped_diagnostics_validate_identity_before_reading(tmp_path: Path) -> 
         reader.list_unlinked_calls(("not-a-principal", "default"), 1)
 
 
-def test_processing_source_observation_keeps_calls_independent(tmp_path: Path) -> None:
+def test_processing_source_observation_uses_native_sources_only(tmp_path: Path) -> None:
     reader = _reader(tmp_path)
     observation = reader.source_observation()
-    assert observation.capture.status == "unavailable"
-    assert observation.calls.status == "unavailable"
-    preflight = reader.installation_preflight_calls()
-    assert preflight.source.status == "unavailable"
-    assert preflight.source.reason == "provider_call_log_unavailable"
-    assert preflight.items == ()
+    assert observation.memcells.status == "unavailable"
+    assert observation.runs.status == "unavailable"
+    assert observation.semantic.status == "unavailable"
 
 
-@pytest.mark.parametrize("missing", ["message_ids_json", "payload_json", "timestamp"])
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "session_id",
+        "track",
+        "raw_type",
+        "message_ids_json",
+        "payload_json",
+        "timestamp",
+    ],
+)
 def test_provider_memory_source_requires_every_reader_column(
     tmp_path: Path,
     missing: str,
@@ -64,6 +71,9 @@ def test_provider_memory_source_requires_every_reader_column(
         "memcell_id": "TEXT PRIMARY KEY",
         "app_id": "TEXT",
         "project_id": "TEXT",
+        "session_id": "TEXT",
+        "track": "TEXT",
+        "raw_type": "TEXT",
         "message_ids_json": "TEXT",
         "sender_ids_json": "TEXT",
         "payload_json": "TEXT",
@@ -79,10 +89,10 @@ def test_provider_memory_source_requires_every_reader_column(
             + ")"
         )
 
-    observation = _reader(tmp_path).source_observation().everos
+    observation = _reader(tmp_path).source_observation().memcells
 
     assert observation.status == "unavailable"
-    assert observation.reason == "provider_memory_unavailable"
+    assert observation.reason == "native_memcells_unavailable"
 
 
 def test_empty_authorized_call_log_is_available_not_unavailable(tmp_path: Path) -> None:
@@ -94,7 +104,6 @@ def test_empty_authorized_call_log_is_available_not_unavailable(tmp_path: Path) 
     assert result["calls"] == []
     assert result["truncated"] is False
     assert result["sections"]["calls"]["status"] == "available"
-    assert reader.source_observation().calls.status == "available"
     preflight = reader.installation_preflight_calls()
     assert preflight.source.status == "available"
     assert preflight.items == ()

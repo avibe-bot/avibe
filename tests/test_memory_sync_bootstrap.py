@@ -140,6 +140,44 @@ def test_artifact_scrubber_matches_existing_persistence_redaction(monkeypatch) -
         )
 
 
+@pytest.mark.parametrize(
+    ("name", "value", "replacement"),
+    (
+        ("EVEROS_LLM__API_KEY", "opaque-llm-credential-12345", secret_scrubber.REDACTED),
+        ("EVEROS_MULTIMODAL__API_KEY", "opaque-multimodal-credential-12345", secret_scrubber.REDACTED),
+        ("EVEROS_EMBEDDING__API_KEY", "opaque-embedding-credential-12345", secret_scrubber.REDACTED),
+        ("EVEROS_RERANK__API_KEY", "opaque-rerank-credential-12345", secret_scrubber.REDACTED),
+        ("EVEROS_LLM__BASE_URL", "https://llm.example.invalid/private", secret_scrubber.PROVIDER_BASE_URL),
+        (
+            "EVEROS_MULTIMODAL__BASE_URL",
+            "https://multimodal.example.invalid/private",
+            secret_scrubber.PROVIDER_BASE_URL,
+        ),
+        (
+            "EVEROS_EMBEDDING__BASE_URL",
+            "https://embedding.example.invalid/private",
+            secret_scrubber.PROVIDER_BASE_URL,
+        ),
+        (
+            "EVEROS_RERANK__BASE_URL",
+            "https://rerank.example.invalid/private",
+            secret_scrubber.PROVIDER_BASE_URL,
+        ),
+    ),
+)
+def test_environment_scrubber_covers_every_provider_credential(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    value: str,
+    replacement: str,
+) -> None:
+    monkeypatch.setenv(name, value)
+
+    assert secret_scrubber.scrub_from_environment(f"provider failed at {value}") == (
+        f"provider failed at {replacement}"
+    )
+
+
 def test_artifact_bootstrap_pathless_sync_acceptance_boundary(tmp_path: Path) -> None:
     """Exercise bootstrap ordering and argv admission with a behavioral fake."""
 

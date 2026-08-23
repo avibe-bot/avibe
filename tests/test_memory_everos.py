@@ -2408,6 +2408,17 @@ def test_recorder_health_validates_the_closed_sidecar_projection(recorder, expec
     assert health == expected
 
 
+def test_health_accepts_native_response_without_recorder_projection() -> None:
+    payload = _health_envelope(None)
+    del payload["recorder"]
+
+    with _sidecar_transport(lambda _request: httpx.Response(200, json=payload)):
+        snapshot = asyncio.run(EverOSPort(Path("/tmp/everos.sock")).health_snapshot())
+
+    assert snapshot.recorder == {"state": "disabled", "reason": None}
+    assert "recorder" not in snapshot.payload()
+
+
 def test_recorder_health_degrades_transport_and_invalid_json() -> None:
     responses = iter(
         [

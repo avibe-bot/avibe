@@ -6,7 +6,6 @@ from core.memory.processing_record import (
     MaintenanceProjection,
     ProcessingRecordSummary,
     ProcessingSourceObservations,
-    ProviderCheckProjection,
     RuntimeHealthProjection,
     SourceObservation,
 )
@@ -41,7 +40,7 @@ def test_processing_summary_has_no_legacy_recovery_field():
             can_clear=True,
             clear_in_progress=None,
         ),
-        provider_checks=ProviderCheckProjection(source=available, items=()),
     )
 
     assert not hasattr(summary.maintenance, "clear_in_progress") or summary.maintenance.clear_in_progress is None
+    assert not hasattr(summary, "provider_checks")

@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Literal, TypeAlias
 from core.memory.secret_scrubber import REDACTED as _REDACTED
+from core.memory.secret_scrubber import scrub_json as _canonical_scrub_json
 from core.memory.secret_scrubber import scrub_text as _canonical_scrub_text
 
 from core.memory.confined_filesystem import (
@@ -900,31 +901,11 @@ def _scrub_json(
     base_urls: tuple[str, ...],
     exact_values: tuple[str, ...] = (),
 ) -> JsonValue:
-    if isinstance(value, str):
-        return _scrub_text(value, base_urls=base_urls, exact_values=exact_values)
-    if isinstance(value, list):
-        return [
-            _scrub_json(item, base_urls=base_urls, exact_values=exact_values)
-            for item in value
-        ]
-    if isinstance(value, dict):
-        scrubbed: dict[str, JsonValue] = {}
-        for key, item in value.items():
-            clean_key = _scrub_text(
-                key,
-                base_urls=base_urls,
-                exact_values=exact_values,
-            )
-            if _is_secret_key(key):
-                scrubbed[clean_key] = _REDACTED
-            else:
-                scrubbed[clean_key] = _scrub_json(
-                    item,
-                    base_urls=base_urls,
-                    exact_values=exact_values,
-                )
-        return scrubbed
-    return value
+    return _canonical_scrub_json(
+        value,
+        base_urls=base_urls,
+        exact_values=exact_values,
+    )
 
 
 def _scrub_optional_text(

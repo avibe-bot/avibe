@@ -152,8 +152,10 @@ describe('Memory UI copy contracts', () => {
     expect(text).toMatch(language === 'en' ? /may use/ : /可能消耗/);
   });
 
-  it.each(['en', 'zh'] as const)('localizes the closed cloud capability error in %s', (language) => {
-    expect(BUNDLES[language].errors.memory_capability_unavailable).toBeTruthy();
+  it.each(['en', 'zh'] as const)('localizes stable Memory errors in %s', (language) => {
+    for (const key of ['memory_capability_unavailable', 'memory_failure_history_unavailable'] as const) {
+      expect(BUNDLES[language].errors[key]).toBeTruthy();
+    }
   });
 
   it.each(['en', 'zh'] as const)('localizes best-effort diagnostic source reasons in %s', (language) => {

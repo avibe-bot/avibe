@@ -800,6 +800,53 @@ async def memory_processing_record(
     )
 
 
+async def memory_processing_record_entries(
+    *,
+    cursor: str | None,
+    limit: int,
+    project: str | None,
+    user_key: str,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    path = "/internal/memory/processing-record/entries"
+    params: dict[str, str | int] = {"limit": limit}
+    if cursor is not None:
+        params["cursor"] = cursor
+    if project is not None:
+        params["project"] = project
+    return await _memory_request(
+        "GET",
+        path,
+        params=params,
+        headers=_memory_user_key_headers("GET", path, user_key),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
+async def memory_processing_record_entry(
+    memcell_id: str,
+    *,
+    project: str | None,
+    user_key: str,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    path = "/internal/memory/processing-record/entry"
+    return await _memory_request(
+        "GET",
+        path,
+        params={
+            "memcell_id": memcell_id,
+            **({"project": project} if project is not None else {}),
+        },
+        headers=_memory_user_key_headers("GET", path, user_key),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
 async def memory_failures(
     *,
     user_key: str,
@@ -922,64 +969,6 @@ async def memory_search(
             "/internal/memory/search",
             user_key,
         ),
-        socket_path=socket_path,
-        timeout=timeout,
-    )
-
-
-async def memory_log(
-    *,
-    cursor: str | None,
-    limit: int,
-    user_key: str,
-    socket_path: Optional[Path] = None,
-    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
-) -> dict[str, Any]:
-    path = "/internal/memory/log"
-    params: dict[str, str | int] = {"limit": limit}
-    if cursor is not None:
-        params["cursor"] = cursor
-    return await _memory_request(
-        "GET",
-        path,
-        params=params,
-        headers=_memory_user_key_headers("GET", path, user_key),
-        socket_path=socket_path,
-        timeout=timeout,
-    )
-
-
-async def memory_log_unlinked(
-    *,
-    limit: int,
-    user_key: str,
-    socket_path: Optional[Path] = None,
-    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
-) -> dict[str, Any]:
-    path = "/internal/memory/log/unlinked"
-    return await _memory_request(
-        "GET",
-        path,
-        params={"limit": limit},
-        headers=_memory_user_key_headers("GET", path, user_key),
-        socket_path=socket_path,
-        timeout=timeout,
-    )
-
-
-async def memory_log_entry(
-    memcell_id: str,
-    *,
-    user_key: str,
-    socket_path: Optional[Path] = None,
-    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
-) -> dict[str, Any]:
-    path = "/internal/memory/log/entry"
-    return await _memory_request(
-        "GET",
-        path,
-        params={"memcell_id": memcell_id},
-        headers=_memory_user_key_headers("GET", path, user_key),
         socket_path=socket_path,
         timeout=timeout,
     )

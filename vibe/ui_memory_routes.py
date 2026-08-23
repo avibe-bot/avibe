@@ -26,8 +26,8 @@ from config.v2_config import V2Config
 from vibe.ui_compat import Response, jsonify
 
 
-_MEMORY_LOG_CURSOR_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
-_MEMORY_LOG_ENTRY_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,256}\Z")
+_PROCESSING_RECORD_CURSOR_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
+_PROCESSING_RECORD_ENTRY_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,256}\Z")
 
 
 def _memory_ui_user_key() -> str | None:
@@ -61,45 +61,54 @@ def _memory_response_body(response: Response) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def _memory_log_list_query(request: FastAPIRequest) -> tuple[str | None, int]:
+def _processing_record_list_query(
+    request: FastAPIRequest,
+) -> tuple[str | None, int, str | None]:
     items = list(request.query_params.multi_items())
     keys = [key for key, _value in items]
-    if any(key not in {"cursor", "limit"} for key in keys) or len(keys) != len(set(keys)):
-        raise ValueError("invalid memory log query")
+    if any(key not in {"cursor", "limit", "project"} for key in keys) or len(
+        keys
+    ) != len(set(keys)):
+        raise ValueError("invalid Processing Record query")
     values = dict(items)
     cursor = values.get("cursor")
-    if cursor is not None and _MEMORY_LOG_CURSOR_RE.fullmatch(cursor) is None:
-        raise ValueError("invalid memory log cursor")
+    if cursor is not None and _PROCESSING_RECORD_CURSOR_RE.fullmatch(cursor) is None:
+        raise ValueError("invalid Processing Record cursor")
     raw_limit = values.get("limit", "20")
     if not raw_limit.isascii() or not raw_limit.isdecimal():
-        raise ValueError("invalid memory log limit")
+        raise ValueError("invalid Processing Record limit")
     limit = int(raw_limit)
     if not 1 <= limit <= 50:
-        raise ValueError("invalid memory log limit")
-    return cursor, limit
+        raise ValueError("invalid Processing Record limit")
+    project = values.get("project")
+    if project is not None:
+        from core.memory.project_ids import parse_agent_search_project
+
+        project = parse_agent_search_project(project)
+    return cursor, limit, project
 
 
-def _memory_log_unlinked_query(request: FastAPIRequest) -> int:
+def _processing_record_entry_query(
+    request: FastAPIRequest,
+) -> tuple[str, str | None]:
     items = list(request.query_params.multi_items())
-    if any(key != "limit" for key, _value in items) or len(items) > 1:
-        raise ValueError("invalid unlinked memory log query")
-    raw_limit = items[0][1] if items else "20"
-    if not raw_limit.isascii() or not raw_limit.isdecimal():
-        raise ValueError("invalid unlinked memory log limit")
-    limit = int(raw_limit)
-    if not 1 <= limit <= 20:
-        raise ValueError("invalid unlinked memory log limit")
-    return limit
+    keys = [key for key, _value in items]
+    if (
+        any(key not in {"memcell_id", "project"} for key in keys)
+        or len(keys) != len(set(keys))
+        or "memcell_id" not in keys
+    ):
+        raise ValueError("invalid Processing Record entry query")
+    values = dict(items)
+    memcell_id = values["memcell_id"]
+    if _PROCESSING_RECORD_ENTRY_ID_RE.fullmatch(memcell_id) is None:
+        raise ValueError("invalid Processing Record entry id")
+    project = values.get("project")
+    if project is not None:
+        from core.memory.project_ids import parse_agent_search_project
 
-
-def _memory_log_entry_query(request: FastAPIRequest) -> str:
-    items = list(request.query_params.multi_items())
-    if len(items) != 1 or items[0][0] != "memcell_id":
-        raise ValueError("invalid memory log entry query")
-    memcell_id = items[0][1]
-    if _MEMORY_LOG_ENTRY_ID_RE.fullmatch(memcell_id) is None:
-        raise ValueError("invalid memory log entry id")
-    return memcell_id
+        project = parse_agent_search_project(project)
+    return memcell_id, project
 
 
 async def _memory_internal_result(call: Callable[[], Any]) -> tuple[dict, int]:
@@ -1227,14 +1236,16 @@ def register_memory_routes(app) -> None:
 
         return await app.dispatch_native_request(starlette_request, handler)
 
-    @app.get("/api/memory/log", include_in_schema=False)
-    async def memory_log_get(starlette_request: FastAPIRequest):
+    @app.get("/api/memory/processing-record/entries", include_in_schema=False)
+    async def memory_processing_record_entries_get(starlette_request: FastAPIRequest):
         async def handler():
             user_key = _memory_ui_user_key()
             if user_key is None:
                 return _memory_forbidden_response()
             try:
-                cursor, limit = _memory_log_list_query(starlette_request)
+                cursor, limit, project = _processing_record_list_query(
+                    starlette_request
+                )
             except ValueError:
                 return _memory_response(
                     {"status": "failed", "error": "memory_invalid_input"},
@@ -1243,23 +1254,26 @@ def register_memory_routes(app) -> None:
             from vibe import internal_client
 
             return await _memory_internal_response(
-                lambda: internal_client.memory_log(
+                lambda: internal_client.memory_processing_record_entries(
                     cursor=cursor,
                     limit=limit,
+                    project=project,
                     user_key=user_key,
                 )
             )
 
         return await app.dispatch_native_request(starlette_request, handler)
 
-    @app.get("/api/memory/log/unlinked", include_in_schema=False)
-    async def memory_log_unlinked_get(starlette_request: FastAPIRequest):
+    @app.get("/api/memory/processing-record/entry", include_in_schema=False)
+    async def memory_processing_record_entry_get(starlette_request: FastAPIRequest):
         async def handler():
             user_key = _memory_ui_user_key()
             if user_key is None:
                 return _memory_forbidden_response()
             try:
-                limit = _memory_log_unlinked_query(starlette_request)
+                memcell_id, project = _processing_record_entry_query(
+                    starlette_request
+                )
             except ValueError:
                 return _memory_response(
                     {"status": "failed", "error": "memory_invalid_input"},
@@ -1268,34 +1282,23 @@ def register_memory_routes(app) -> None:
             from vibe import internal_client
 
             return await _memory_internal_response(
-                lambda: internal_client.memory_log_unlinked(
-                    limit=limit,
-                    user_key=user_key,
-                )
-            )
-
-        return await app.dispatch_native_request(starlette_request, handler)
-
-    @app.get("/api/memory/log/entry", include_in_schema=False)
-    async def memory_log_entry_get(starlette_request: FastAPIRequest):
-        async def handler():
-            user_key = _memory_ui_user_key()
-            if user_key is None:
-                return _memory_forbidden_response()
-            try:
-                memcell_id = _memory_log_entry_query(starlette_request)
-            except ValueError:
-                return _memory_response(
-                    {"status": "failed", "error": "memory_invalid_input"},
-                    status_code=400,
-                )
-            from vibe import internal_client
-
-            return await _memory_internal_response(
-                lambda: internal_client.memory_log_entry(
+                lambda: internal_client.memory_processing_record_entry(
                     memcell_id,
+                    project=project,
                     user_key=user_key,
                 )
+            )
+
+        return await app.dispatch_native_request(starlette_request, handler)
+
+    @app.get("/api/memory/log", include_in_schema=False)
+    @app.get("/api/memory/log/unlinked", include_in_schema=False)
+    @app.get("/api/memory/log/entry", include_in_schema=False)
+    async def memory_provider_call_log_removed(starlette_request: FastAPIRequest):
+        async def handler():
+            return _memory_response(
+                {"status": "failed", "error": "memory_route_removed"},
+                status_code=404,
             )
 
         return await app.dispatch_native_request(starlette_request, handler)

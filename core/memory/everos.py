@@ -122,7 +122,6 @@ class ProviderHealthSnapshot:
             "capabilities": dict(self.capabilities),
             "disabled_features": list(self.disabled_features),
             "cascade": dict(self.cascade) if self.cascade is not None else None,
-            "recorder": dict(self.recorder),
         }
 
 
@@ -1909,7 +1908,11 @@ def _provider_health_snapshot(payload: dict[str, Any] | None) -> ProviderHealthS
         or any(not _safe_health_token(item, max_bytes=64) for item in disabled)
     ):
         return None
-    recorder = _project_recorder_health(payload.get("recorder"))
+    recorder = (
+        {"state": "disabled", "reason": None}
+        if "recorder" not in payload
+        else _project_recorder_health(payload.get("recorder"))
+    )
     if recorder is None:
         return None
     cascade = _project_cascade_health(payload.get("cascade"))

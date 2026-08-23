@@ -141,14 +141,14 @@ async def test_clear_completion_rotates_volatile_duplicate_generation(
 
 
 @pytest.mark.asyncio
-async def test_missing_provider_call_log_remains_unavailable(tmp_path: Path) -> None:
+async def test_processing_record_uses_native_sources_without_call_log(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
 
-    projection = await runtime._processing_record_provider_checks(None)
+    projection = await runtime._processing_record_sources(None)
 
-    assert projection.source.status == "unavailable"
-    assert projection.source.reason == "provider_call_log_unavailable"
-    assert projection.items == ()
+    assert projection.memcells.status == "unavailable"
+    assert projection.runs.status == "unavailable"
+    assert projection.semantic.status == "unavailable"
     await runtime.close()
 
 
