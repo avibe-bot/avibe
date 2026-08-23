@@ -183,6 +183,8 @@ Enumeration binds when a gate becomes executable: the in-flight step's allowed
 and forbidden sets are author-verified with `rg` as enumerated symbols or census
 rows. Later gates state only direction and a stop condition; the PR that makes
 one executable inherits its enumeration obligation.
+Deferred intents name inherited obligations and required end-state properties;
+fixtures, operating-system jobs, and scenario lists remain implementation-time proof methods.
 
 ## Migration Sequence And Gates
 
@@ -208,8 +210,9 @@ failure causes** rows stops the sequence before Show uses the guard.
 ### Step 3: Support Composite Artifacts
 
 **Intent:** Let the shared installer represent Show's released directory
-artifact and internal links while retaining the existing binary-artifact path;
-reuse capability detection for tar filtering without raising the Python floor.
+artifact and internal links under the Step 1 disk-state model and Step 2 mutation
+guard while retaining the binary-artifact path; reuse capability detection for
+tar filtering without raising the Python floor.
 
 **Gate:** Every released v3.0.13 platform archive measured in the census installs
 through the shared path and exposes its expected CLI/esbuild entrypoints,
@@ -223,7 +226,8 @@ fallback and no explicit final-tree ownership or POSIX-mode normalization.
 ### Step 4: Add Shared Retention
 
 **Intent:** Give the shared manager one lifecycle for verified downloads,
-installed versions, protected rollback state, and cleanup reporting.
+installed versions, protected rollback state, and cleanup reporting under the
+Step 2 guard, exposed through `vibe runtime clean` for every on-layer consumer.
 
 **Gate:** For requested retention counts of zero, one, and more than one, dry-run
 and real cleanup preserve the current install plus exactly that many eligible
@@ -233,10 +237,10 @@ install; any git/Memory/model-hub loss stops rollout for that dependency.
 
 ### Step 5: Cut Over Show's Manifest Provider
 
-**Intent:** Compose Show's manifest provider on the shared manager while leaving
-direct archive, npm, Node policy, availability, and serving behavior in Show; align
-unreadable-source diagnostics and admission-relevant manifest changes during
-that measured cutover.
+**Intent:** Compose Show's manifest provider as a full consumer of Steps 1-4 while
+leaving direct archive, npm, Node policy, availability, and serving behavior in
+Show; align unreadable-source diagnostics and admission-relevant manifest changes
+during that measured cutover.
 
 **Gate:** Released and canonical Show fixtures cover online, offline, provider,
 layout, Node, Doctor, dependency-status, and composite-archive flows with one
@@ -255,9 +259,9 @@ temporary outlier.
 
 ### Step 7: Migrate Tmux And Enforce Sole Ownership
 
-**Intent:** Move tmux onto the proven shared installer after Show, retaining its
-released-state reader, macOS preparation, and runtime compatibility adapter, and
-inheriting the Step 4 lifecycle.
+**Intent:** Move tmux onto the proven shared installer after Show as a full
+consumer of Steps 1-4, retaining its released-state reader, macOS preparation,
+and runtime compatibility adapter.
 
 **Gate:** Released tmux inputs and prepared-binary tests pass through the shared
 path and the other four dependencies remain unchanged. The non-empty obsolete
