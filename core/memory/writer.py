@@ -159,6 +159,10 @@ class BestEffortMemoryWriter:
     def enable_attachment_intake(self) -> None:
         self._attachments_disabled = self._attachment_store is None
 
+    def _handle_cancelled_attachment_projection(self, error: BaseException) -> None:
+        if isinstance(error, AttachmentPinError):
+            self.disable_attachment_intake()
+
     def replace_provider(self, provider: MemoryProviderPort) -> None:
         self._provider = provider
         self._unavailable = False
@@ -416,6 +420,7 @@ class BestEffortMemoryWriter:
                 attachments = await run_blocking(
                     self._attachment_store.provider_attachments,
                     item.bundle,
+                    on_cancel_error=self._handle_cancelled_attachment_projection,
                 )
             except AttachmentPinError:
                 self._attachments_disabled = True

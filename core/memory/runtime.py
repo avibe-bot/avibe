@@ -1090,11 +1090,9 @@ class MemoryRuntime:
             # Fence and join volatile writer work before inspecting provider
             # state, so no old-embedding call can cross this boundary.
             if not await self.module.quiesce_claims():
-                restored = resume_claims_on_failure and await self._restore_provisional_claims(
-                    previous_config
-                )
-                if not restored:
-                    self._runtime_error = "memory_clear_failed"
+                if resume_claims_on_failure:
+                    self._defer_restart_until_writer_closed()
+                self._runtime_error = "memory_clear_failed"
                 return {"ok": False, "error": "memory_clear_failed"}
             claims_paused = True
             if not await self._embedding_change_is_admissible(self._config, config):
@@ -1140,11 +1138,9 @@ class MemoryRuntime:
         # model, and key changes belong exclusively in its allowlisted child
         # environment and must never leave an old sidecar running.
         if not claims_paused and not await self.module.quiesce_claims():
-            restored = resume_claims_on_failure and await self._restore_provisional_claims(
-                previous_config
-            )
-            if not restored:
-                self._runtime_error = "memory_clear_failed"
+            if resume_claims_on_failure:
+                self._defer_restart_until_writer_closed()
+            self._runtime_error = "memory_clear_failed"
             return {"ok": False, "error": "memory_clear_failed"}
         await self._close_writer()
         await self._sidecar.stop()
@@ -2459,13 +2455,38 @@ class MemoryRuntime:
         if task is None or task.done():
             task = asyncio.create_task(self._restart_once(), name="memory-restart")
             self._restart_task = task
-
-            def clear_restart(completed: asyncio.Task[dict[str, Any]]) -> None:
-                if self._restart_task is completed:
-                    self._restart_task = None
-
-            task.add_done_callback(clear_restart)
+            task.add_done_callback(self._clear_restart_task)
         return task
+
+    def _clear_restart_task(self, completed: asyncio.Task[dict[str, Any]]) -> None:
+        if self._restart_task is completed:
+            self._restart_task = None
+
+    def _defer_restart_until_writer_closed(self) -> None:
+        """Restore settled authority after the timed-out writer cleanup finishes."""
+
+        task = self._restart_task
+        if task is not None and not task.done() and task is not asyncio.current_task():
+            return
+        task = asyncio.create_task(
+            self._restart_after_writer_close(),
+            name="memory-restart-after-writer-close",
+        )
+        self._restart_task = task
+        task.add_done_callback(self._clear_restart_task)
+
+    async def _restart_after_writer_close(self) -> dict[str, Any]:
+        try:
+            await self._close_writer()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Memory writer cleanup failed before deferred restart")
+            self._runtime_error = "memory_restart_failed"
+            return {"ok": False, "error": self._runtime_error}
+        while self._artifact_installing and not self._closing:
+            await asyncio.sleep(0)
+        return await self._restart_once()
 
     async def preflight(self, config: MemoryConfig | None = None) -> dict[str, Any]:
         candidate = deepcopy(config or self._config)
@@ -2798,8 +2819,9 @@ class MemoryRuntime:
             except Exception:
                 quiesced = False
             if not quiesced:
-                await self._restore_provisional_claims(replay)
-                return {"ok": False, "error": "memory_restart_failed"}
+                self._runtime_error = "memory_restart_failed"
+                self._defer_restart_until_writer_closed()
+                return {"ok": False, "error": self._runtime_error}
 
             if old_process is not None:
                 try:
@@ -3440,11 +3462,8 @@ class MemoryRuntime:
                     self.module.pause_claims()
                     raise MemoryRuntimeActivationError("memory clear recovery is required")
                 if not await self.module.quiesce_claims():
-                    restored = await self._restore_provisional_claims(
-                        deepcopy(self._config)
-                    )
-                    if not restored:
-                        self._runtime_error = "memory_runtime_install_failed"
+                    self._runtime_error = "memory_runtime_install_failed"
+                    self._defer_restart_until_writer_closed()
                     raise MemoryRuntimeActivationError("memory writer could not pause")
                 async with self.module.provider_root_lifecycle():
                     meta = None

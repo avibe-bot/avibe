@@ -643,6 +643,58 @@ async def test_close_during_attachment_projection_releases_reservation(
 
 
 @pytest.mark.asyncio
+async def test_cancelled_attachment_projection_failure_disables_later_intake(
+    tmp_path: Path,
+) -> None:
+    projection_entered = threading.Event()
+    finish_projection = threading.Event()
+
+    class AttachmentStore:
+        def __init__(self) -> None:
+            self.released: list[str] = []
+
+        def provider_attachments(self, _bundle):
+            projection_entered.set()
+            finish_projection.wait(timeout=1.0)
+            raise AttachmentBundleInvalidError(
+                "memory_store_unavailable",
+                "bundle verification failed",
+            )
+
+        def release(self, bundle_id: str) -> None:
+            self.released.append(bundle_id)
+
+    attachment_store = AttachmentStore()
+    writer = _writer(
+        tmp_path,
+        FakeMemoryProvider(),
+        attachment_store=attachment_store,
+    )
+    reservation = writer.reserve("digest-0")
+    assert not isinstance(reservation, str)
+    assert writer.offer_capture(
+        reservation,
+        _admission(0),
+        text="message-0",
+        attachments=(),
+        bundle=SimpleNamespace(bundle_id="bundle-0"),
+    ) == "queued"
+    assert await asyncio.to_thread(projection_entered.wait, 1.0)
+
+    closing = asyncio.create_task(writer.close())
+    try:
+        await asyncio.sleep(0)
+        assert not closing.done()
+    finally:
+        finish_projection.set()
+        await asyncio.wait_for(closing, timeout=1.0)
+
+    assert attachment_store.released == ["bundle-0"]
+    assert not writer.attachments_enabled
+    assert writer._permits == MAX_WRITER_PERMITS
+
+
+@pytest.mark.asyncio
 async def test_attachment_cleanup_failure_disables_later_attachment_intake(tmp_path: Path) -> None:
     class FailingAttachmentStore:
         def provider_attachments(self, _bundle):

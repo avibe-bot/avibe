@@ -329,9 +329,11 @@ async def test_rejected_embedding_change_restores_previous_writer_authority(
 
 
 @pytest.mark.asyncio
-async def test_real_quiesce_timeout_restarts_previous_writer_authority(
+@pytest.mark.parametrize("entrypoint", ["reconcile", "restart"])
+async def test_real_quiesce_timeout_defers_previous_writer_authority_restore(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    entrypoint: str,
 ) -> None:
     processing = MemoryProcessingConfig(
         llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
@@ -391,11 +393,12 @@ async def test_real_quiesce_timeout_restarts_previous_writer_authority(
     await add_entered.wait()
 
     recoveries: list[bool] = []
+    finish_settlement = asyncio.Event()
 
     async def stop_then_settle(recover: bool) -> bool:
         recoveries.append(recover)
         await runtime._sidecar.stop()
-        await asyncio.sleep(0.02)
+        await finish_settlement.wait()
         return True
 
     runtime.module._writer._ambiguous_stop_reap = stop_then_settle
@@ -406,14 +409,37 @@ async def test_real_quiesce_timeout_restarts_previous_writer_authority(
         return await original_quiesce(timeout_seconds=0.001)
 
     monkeypatch.setattr(runtime.module, "quiesce_claims", short_quiesce)
-    async with runtime.module.lifecycle():
-        result = await runtime._reconcile_locked(current)
 
-    assert result == {"ok": False, "error": "memory_clear_failed"}
+    async def run_transition() -> dict[str, object]:
+        if entrypoint == "restart":
+            return await runtime.restart()
+        async with runtime.module.lifecycle():
+            return await runtime._reconcile_locked(current)
+
+    recovery: asyncio.Task[dict[str, object]] | None = None
+    try:
+        result = await asyncio.wait_for(run_transition(), timeout=0.2)
+        expected_error = (
+            "memory_restart_failed" if entrypoint == "restart" else "memory_clear_failed"
+        )
+        assert result == {"ok": False, "error": expected_error}
+        assert len(process_factory.supervised) == 1
+        assert process_factory.supervised[0].stopped
+        assert recoveries == [False]
+        assert runtime.module._writer.reserve("while-cleanup-settles") == "unavailable"
+        recovery = runtime._restart_task
+        assert recovery is not None
+        assert not recovery.done()
+    finally:
+        finish_settlement.set()
+
+    assert recovery is not None
+    assert await asyncio.wait_for(asyncio.shield(recovery), timeout=1.0) == {
+        "ok": True,
+        "state": "ready",
+    }
     assert len(process_factory.supervised) == 2
-    assert process_factory.supervised[0].stopped
     assert process_factory.supervised[1].running
-    assert recoveries == [False]
     assert not runtime.module._writer.unavailable
     reservation = runtime.module._writer.reserve("after-timeout")
     assert not isinstance(reservation, str)
