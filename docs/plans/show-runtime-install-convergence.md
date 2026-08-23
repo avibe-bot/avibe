@@ -193,13 +193,17 @@ The following mechanical gates apply to every step:
    step. Test-only call sites do not count.
 3. The contract author marks each normative current-fact row with its owning
    step. All and only the rows marked for a step define that step's corpus
-   membership, which implementation cannot elect. Every marked row has a
-   provenance-verified released fixture and an executable case, or acceptance
-   fails. An unmarked row states an observation, so it contains no `MUST`,
-   `rejects`, or `fails`. That prohibition is the whole test: a row cannot
-   impose a corpus obligation without requirement language, and a path-naming
-   clause is not usable here because a production path and a fixture path are
-   indistinguishable to `rg`.
+   membership, which implementation cannot elect. Every marked row has an
+   executable case. A marked row whose own observation cites a released
+   artifact or record additionally requires a fixture provenance-verified
+   against the released version and digest it derives from. A row citing no
+   released bytes — an interpreter capability, a code behavior, or a
+   constructed hostile input — has no released fixture to verify and is
+   covered by its executable case alone; the row text decides this and
+   implementation never classifies rows. An unmarked row states an
+   observation, so it contains no `MUST`, `rejects`, or `fails`; that
+   prohibition is the whole test, because a path-naming clause cannot
+   distinguish a production path from a fixture path under `rg`.
 
 ### Step 2: Converge The Mutation Guard
 
