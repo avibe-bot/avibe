@@ -118,8 +118,8 @@ async def test_full_queue_discards_increment_process_local_count(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    current = datetime.now(timezone.utc)
-    writer = _writer(tmp_path, FakeMemoryProvider(), now=lambda: current)
+    current = 1_000.0
+    writer = _writer(tmp_path, FakeMemoryProvider(), monotonic=lambda: current)
     writer._ensure_worker = lambda: None
     writer._queue = asyncio.Queue(maxsize=1)
     writer._queue.put_nowait(_BarrierItem())
@@ -142,8 +142,8 @@ async def test_full_queue_discards_increment_process_local_count(
         ref,
         "raw-session",
         deque(["digest"]),
-        current.timestamp(),
-        current.timestamp() - IDLE_FLUSH_SECONDS,
+        current,
+        current - IDLE_FLUSH_SECONDS,
     )
 
     sleeps = 0
@@ -158,7 +158,7 @@ async def test_full_queue_discards_increment_process_local_count(
     await writer._schedule_due_flushes()
 
     assert writer.dropped_count() == 3
-    assert writer._pending[key].retry_after == current.timestamp() + IDLE_FLUSH_SECONDS
+    assert writer._pending[key].retry_after == current + IDLE_FLUSH_SECONDS
 
 
 @pytest.mark.asyncio
@@ -255,6 +255,34 @@ async def test_ambiguous_failure_never_replays_and_disables_intake(tmp_path: Pat
     replacement = writer.reserve("replacement-generation")
     assert not isinstance(replacement, str)
     replacement.release()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("request_id", [None, "", "\ud800", "x" * 129])
+async def test_invalid_add_receipt_is_ambiguous_and_never_replayed(
+    tmp_path: Path,
+    request_id: str | None,
+) -> None:
+    stopped = 0
+
+    async def stop_reap() -> bool:
+        nonlocal stopped
+        stopped += 1
+        return True
+
+    provider = FakeMemoryProvider(
+        add_results=deque([AddAck(request_id=request_id, status="accumulated")])
+    )
+    writer = _writer(tmp_path, provider, ambiguous_stop_reap=stop_reap)
+    _reserve_and_offer(writer, 0)
+
+    await writer.wait_idle_for_tests()
+
+    assert len(provider.captures) == 1
+    assert stopped == 1
+    assert writer.unavailable
+    assert writer._pending == {}
+    assert writer._permits == MAX_WRITER_PERMITS
 
 
 @pytest.mark.asyncio
@@ -554,13 +582,13 @@ async def test_each_exact_flush_threshold_queues_a_visible_barrier(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, threshold: str
 ) -> None:
     provider = FakeMemoryProvider()
-    current = datetime.now(timezone.utc)
-    writer = _writer(tmp_path, provider, now=lambda: current)
+    current = 1_000.0
+    writer = _writer(tmp_path, provider, monotonic=lambda: current)
     ref = _ref()
     key = ref.serialize()
     message_count = MAX_UNFLUSHED_MESSAGES if threshold == "count" else 1
-    first_at = current.timestamp()
-    last_ack_at = current.timestamp()
+    first_at = current
+    last_ack_at = current
     if threshold == "age":
         first_at -= MAX_UNFLUSHED_AGE_SECONDS
     if threshold == "idle":
@@ -596,8 +624,8 @@ async def test_each_exact_flush_threshold_queues_a_visible_barrier(
 async def test_flush_threshold_near_misses_do_not_schedule(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    current = datetime.now(timezone.utc)
-    writer = _writer(tmp_path, FakeMemoryProvider(), now=lambda: current)
+    current = 1_000.0
+    writer = _writer(tmp_path, FakeMemoryProvider(), monotonic=lambda: current)
     ref = _ref()
     key = ref.serialize()
     writer._pending[key] = _PendingSession(
@@ -606,8 +634,8 @@ async def test_flush_threshold_near_misses_do_not_schedule(
         deque(
             f"digest-{index}" for index in range(MAX_UNFLUSHED_MESSAGES - 1)
         ),
-        current.timestamp() - MAX_UNFLUSHED_AGE_SECONDS + 1,
-        current.timestamp() - IDLE_FLUSH_SECONDS + 1,
+        current - MAX_UNFLUSHED_AGE_SECONDS + 1,
+        current - IDLE_FLUSH_SECONDS + 1,
     )
     sleeps = 0
 
@@ -622,6 +650,50 @@ async def test_flush_threshold_near_misses_do_not_schedule(
     assert not writer._pending[key].scheduled
     assert writer._queued_items == 0
     assert writer._queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_wall_clock_rollback_does_not_delay_due_flush(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wall_time = datetime(2026, 8, 23, tzinfo=timezone.utc)
+    monotonic_time = 1_000.0
+    writer = _writer(
+        tmp_path,
+        FakeMemoryProvider(),
+        now=lambda: wall_time,
+        monotonic=lambda: monotonic_time,
+    )
+    ref = _ref()
+    key = ref.serialize()
+    writer._pending[key] = _PendingSession(
+        ref,
+        "raw-session-0",
+        deque(["digest"]),
+        monotonic_time,
+        monotonic_time,
+    )
+    wall_time -= timedelta(days=1)
+    monotonic_time += IDLE_FLUSH_SECONDS
+    sleeps = 0
+
+    async def one_scheduler_tick(_seconds: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps > 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr("core.memory.writer.asyncio.sleep", one_scheduler_tick)
+    await writer._schedule_due_flushes()
+
+    assert writer._pending[key].scheduled
+    queued = writer._queue.get_nowait()
+    assert isinstance(queued, _BarrierItem)
+    assert queued.scheduled_key == key
+    writer._queue.task_done()
+    writer._queued_items = 0
+    writer._release_permit()
 
 
 @pytest.mark.asyncio
@@ -692,16 +764,16 @@ async def test_failed_automatic_barrier_offer_defers_for_five_minutes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    current = datetime.now(timezone.utc)
-    writer = _writer(tmp_path, FakeMemoryProvider(), now=lambda: current)
+    current = 1_000.0
+    writer = _writer(tmp_path, FakeMemoryProvider(), monotonic=lambda: current)
     ref = _ref()
     key = ref.serialize()
     writer._pending[key] = _PendingSession(
         ref,
         "raw-session-0",
         deque(["digest"]),
-        current.timestamp(),
-        current.timestamp() - IDLE_FLUSH_SECONDS,
+        current,
+        current - IDLE_FLUSH_SECONDS,
     )
     writer._permits = 0
     sleeps = 0
@@ -715,7 +787,7 @@ async def test_failed_automatic_barrier_offer_defers_for_five_minutes(
     monkeypatch.setattr("core.memory.writer.asyncio.sleep", two_scheduler_ticks)
     await writer._schedule_due_flushes()
 
-    assert writer._pending[key].retry_after == current.timestamp() + IDLE_FLUSH_SECONDS
+    assert writer._pending[key].retry_after == current + IDLE_FLUSH_SECONDS
     assert writer._queued_items == 0
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -111,6 +112,7 @@ class BestEffortMemoryWriter:
         attachment_store: AttachmentPinStore | None = None,
         ambiguous_stop_reap: AmbiguousStop | None = None,
         now: Callable[[], datetime] | None = None,
+        monotonic: Callable[[], float] | None = None,
         processing_event: Callable[..., Awaitable[bool]] | None = None,
     ) -> None:
         self._store = store
@@ -119,6 +121,7 @@ class BestEffortMemoryWriter:
         self._attachment_store = attachment_store
         self._ambiguous_stop_reap = ambiguous_stop_reap
         self._now = now or (lambda: datetime.now(timezone.utc))
+        self._monotonic = monotonic or time.monotonic
         self._processing_event = processing_event
         self._queue: asyncio.Queue[_CaptureItem | _BarrierItem] = asyncio.Queue(
             maxsize=MAX_WRITER_PERMITS
@@ -438,7 +441,11 @@ class BestEffortMemoryWriter:
             finally:
                 self._active_provider_calls = max(0, self._active_provider_calls - 1)
 
-            if isinstance(result, AddAck) and result.status in {"accumulated", "extracted"}:
+            if (
+                isinstance(result, AddAck)
+                and result.status in {"accumulated", "extracted"}
+                and _valid_receipt(result.request_id)
+            ):
                 await self._success(item)
                 return
             if isinstance(result, AddRejected):
@@ -635,7 +642,13 @@ class BestEffortMemoryWriter:
         self._permits = min(MAX_WRITER_PERMITS, self._permits + 1)
 
     def _clock_seconds(self) -> float:
-        value = self._now()
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        return value.timestamp()
+        return self._monotonic()
+
+
+def _valid_receipt(value: object) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        return len(value.encode("utf-8")) <= 128
+    except UnicodeError:
+        return False
