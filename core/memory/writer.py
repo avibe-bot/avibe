@@ -85,6 +85,13 @@ class WriterReservation:
             self.active = False
             self._writer._release_reservation(self.digest)
 
+    def abandon(self) -> None:
+        """Release work that never entered the writer queue."""
+
+        if self.active:
+            self.active = False
+            self._writer._abandon_reservation(self.digest)
+
 
 class BestEffortMemoryWriter:
     """One ordered worker for volatile add/flush work.
@@ -331,6 +338,10 @@ class BestEffortMemoryWriter:
             self._duplicate_lru[digest] = False
             self._duplicate_lru.move_to_end(digest)
             self._evict_duplicate_entries()
+
+    def _abandon_reservation(self, digest: str) -> None:
+        self._release_permit()
+        self._duplicate_lru.pop(digest, None)
 
     async def _run(self) -> None:
         while not self._closed:

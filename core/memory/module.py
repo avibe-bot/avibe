@@ -699,7 +699,7 @@ class MemoryModule:
             if bundle is not None:
                 await self._release_unadmitted_bundle(bundle.bundle_id)
         finally:
-            reservation.release()
+            reservation.abandon()
 
     def _release_cancelled_pinned_bundle(self, bundle: PinnedBundle) -> None:
         if self._attachment_store is None:

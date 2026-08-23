@@ -18,6 +18,7 @@ from core.memory.types import (
     CaptureDuplicate,
     CaptureRequest,
     CaptureSkipped,
+    OperationFailed,
 )
 from core.memory.writer import MAX_WRITER_PERMITS
 
@@ -194,6 +195,30 @@ async def test_cancelled_unadmitted_cleanup_still_releases_writer_reservation(
 
     assert not reservation.active
     assert module._writer._permits == MAX_WRITER_PERMITS
+
+
+@pytest.mark.asyncio
+async def test_unadmitted_failure_allows_same_source_retry(tmp_path: Path) -> None:
+    module, store, provider = _module(tmp_path)
+    admit = store.admit_volatile_capture
+    attempts = 0
+
+    def fail_once(**kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("temporary store failure")
+        return admit(**kwargs)
+
+    store.admit_volatile_capture = fail_once
+
+    assert await module.capture(_request()) == OperationFailed(
+        error="memory_store_unavailable"
+    )
+    assert await module.capture(_request()) == CaptureAccepted()
+    await module.wait_writer_idle_for_tests()
+
+    assert len(provider.captures) == 1
 
 
 @pytest.mark.asyncio
