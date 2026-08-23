@@ -1172,6 +1172,19 @@ def test_runtime_env_payload_maps_show_runtime_and_llm_env(monkeypatch: pytest.M
     assert "OPENAI_API_KEY=sk-test" in payload
 
 
+@pytest.mark.parametrize("legacy_source", ["github", "github-source"])
+def test_runtime_env_payload_migrates_legacy_github_source(
+    monkeypatch: pytest.MonkeyPatch,
+    legacy_source: str,
+) -> None:
+    monkeypatch.setenv("REGRESSION_SHOW_RUNTIME_SOURCE", legacy_source)
+
+    payload = incus_regression.runtime_env_payload().decode()
+
+    assert "VIBE_SHOW_RUNTIME_SOURCE=archive" in payload
+    assert f"VIBE_SHOW_RUNTIME_SOURCE={legacy_source}" not in payload
+
+
 def test_runtime_env_payload_ignores_legacy_regression_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("REGRESSION_SHOW_RUNTIME_ARCHIVE_PATH", raising=False)
     monkeypatch.delenv("REGRESSION_SLACK_CHANNEL", raising=False)

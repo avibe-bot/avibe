@@ -246,6 +246,11 @@ def regression_env(suffix: str, default: str = "") -> str:
     return value.strip()
 
 
+def regression_show_runtime_source() -> str:
+    source = regression_env("SHOW_RUNTIME_SOURCE", "archive")
+    return "archive" if source in {"github", "github-source"} else source
+
+
 def host_bind_env(default: str = "127.0.0.1") -> str:
     return (
         regression_env("PORT_BIND_HOST")
@@ -1781,7 +1786,7 @@ def compute_fingerprints(repo_root: Path) -> dict:
         "ui_source": ui_source_hash(repo_root),
         "show_runtime": "|".join(
             [
-                regression_env("SHOW_RUNTIME_SOURCE", "archive"),
+                regression_show_runtime_source(),
                 regression_env(
                     "SHOW_RUNTIME_ARCHIVE_PATH",
                     f"{SERVICE_HOME}/.cache/avibe-regression/vibe-show-runtime-node.tgz",
@@ -1946,7 +1951,7 @@ def runtime_env_payload(repo_root: Path | None = None) -> bytes:
         "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS": scm_version,
         "REGRESSION_UI_HOST": CONTAINER_UI_HOST,
         "AVIBE_ALLOW_DEV_STATE_MIGRATION": "1",
-        "VIBE_SHOW_RUNTIME_SOURCE": regression_env("SHOW_RUNTIME_SOURCE", "archive"),
+        "VIBE_SHOW_RUNTIME_SOURCE": regression_show_runtime_source(),
         "VIBE_SHOW_RUNTIME_ARCHIVE_PATH": regression_env(
             "SHOW_RUNTIME_ARCHIVE_PATH",
             f"{SERVICE_HOME}/.cache/avibe-regression/vibe-show-runtime-node.tgz",
@@ -2586,7 +2591,7 @@ def print_summary(target: RegressionTarget) -> None:
     print(f"  Target: {target.target}")
     print(f"  Project: {target.project}")
     print(f"  Instance: {target.instance}")
-    print(f"  Show Runtime source: {regression_env('SHOW_RUNTIME_SOURCE', 'archive')}")
+    print(f"  Show Runtime source: {regression_show_runtime_source()}")
 
 
 def cmd_status(args: argparse.Namespace) -> int:
