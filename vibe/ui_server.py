@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any, Callable, Mapping
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlsplit, urlunsplit
 
 import psutil
-from aiohttp import ClientSession, WSMsgType
+from aiohttp import ClientConnectionError, ClientSession, WSMsgType
 from fastapi import Request as FastAPIRequest, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response as FastAPIResponse
 from starlette.datastructures import UploadFile as StarletteUploadFile
@@ -4390,17 +4390,23 @@ async def _proxy_show_runtime_websocket(
     runtime_path = f"{external_prefix.rstrip('/')}/__vite_hmr"
     if websocket.url.query:
         runtime_path = f"{runtime_path}?{websocket.url.query}"
-    upstream = await get_show_runtime_manager().websocket_target(
+    manager = get_show_runtime_manager()
+    target = await manager.websocket_target(
         runtime_path,
         envelope=ShowRuntimeProtocolEnvelope(context),
     )
     async with ClientSession() as session:
-        async with session.ws_connect(
-            upstream.url,
-            headers=upstream.headers,
-            protocols=["vite-hmr"],
-            autoping=True,
-        ) as upstream:
+        try:
+            upstream = await session.ws_connect(
+                target.url,
+                headers=target.headers,
+                protocols=["vite-hmr"],
+                autoping=True,
+            )
+        except (asyncio.TimeoutError, ClientConnectionError):
+            await manager.invalidate_websocket_target(target)
+            raise
+        async with upstream:
             async def client_to_upstream():
                 try:
                     while True:

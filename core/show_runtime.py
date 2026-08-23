@@ -170,6 +170,8 @@ class ShowRuntimeProtocolEnvelope:
 class ShowRuntimeWebSocketTarget:
     url: str
     headers: dict[str, str]
+    _base_url: str | None = None
+    _process: subprocess.Popen[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -823,10 +825,7 @@ class ShowRuntimeManager:
                         f"Show Runtime request exceeded {total_timeout_seconds:g} seconds"
                     ) from exc
         except (ShowRuntimeRequestTimeoutError, httpx.RequestError) as exc:
-            async with self._lock:
-                if self._base_url == base_url and self._process is process:
-                    self._base_url = None
-                    self._clear_capability_state()
+            await self._invalidate_runtime_snapshot(base_url, process)
             if isinstance(exc, ShowRuntimeRequestTimeoutError):
                 raise
             evidence = ShowRuntimeFailureEvidence(
@@ -919,9 +918,31 @@ class ShowRuntimeManager:
         ready = await self.ensure()
         if not ready.available or not ready.base_url:
             raise self._unavailable_error(ready)
-        await self._negotiate_context_key_capability(ready.base_url)
-        url = f"{ready.base_url.replace('http://', 'ws://', 1).replace('https://', 'wss://', 1)}{path}"
-        return ShowRuntimeWebSocketTarget(url=url, headers=envelope.headers())
+        base_url = ready.base_url
+        process = self._process
+        await self._negotiate_context_key_capability(base_url)
+        url = f"{base_url.replace('http://', 'ws://', 1).replace('https://', 'wss://', 1)}{path}"
+        return ShowRuntimeWebSocketTarget(
+            url=url,
+            headers=envelope.headers(),
+            _base_url=base_url,
+            _process=process,
+        )
+
+    async def invalidate_websocket_target(self, target: ShowRuntimeWebSocketTarget) -> None:
+        if target._base_url is None:
+            return
+        await self._invalidate_runtime_snapshot(target._base_url, target._process)
+
+    async def _invalidate_runtime_snapshot(
+        self,
+        base_url: str,
+        process: subprocess.Popen[str] | None,
+    ) -> None:
+        async with self._lock:
+            if self._base_url == base_url and self._process is process:
+                self._base_url = None
+                self._clear_capability_state()
 
     def _unavailable_error(self, availability: ShowRuntimeAvailability) -> ShowRuntimeUnavailableError:
         reason = availability.reason
