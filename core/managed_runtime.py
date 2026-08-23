@@ -401,12 +401,29 @@ class ManagedRuntimeManager:
     def status(self) -> dict[str, Any]:
         manifest = self._load_manifest(allow_network=False)
         archive = self._manifest_archive_for_platform(manifest) if manifest else None
-        binary = self.resolve_binary()
-        pointer = {}
-        with contextlib.suppress(OSError, RecursionError, UnicodeError, ValueError):
-            pointer = json.loads((self.runtime_dir / "current.json").read_text(encoding="utf-8"))
-            if not isinstance(pointer, dict):
-                pointer = {}
+        pointer_path = self.runtime_dir / "current.json"
+        pointer: dict[str, Any] = {}
+        binary: Path | None = None
+        for _attempt in range(2):
+            try:
+                before = json.loads(pointer_path.read_text(encoding="utf-8"))
+            except (OSError, RecursionError, UnicodeError, ValueError):
+                before = {}
+            if not isinstance(before, dict):
+                before = {}
+            binary = self.resolve_binary()
+            try:
+                after = json.loads(pointer_path.read_text(encoding="utf-8"))
+            except (OSError, RecursionError, UnicodeError, ValueError):
+                after = {}
+            if not isinstance(after, dict):
+                after = {}
+            if before == after:
+                pointer = before
+                break
+        else:
+            binary = None
+            self._install_reason = self._reason("install_inspection_failed")
         matches_manifest = False if binary is not None and manifest and archive else None
         if matches_manifest is not None and isinstance(pointer.get("install_dir"), str):
             with contextlib.suppress(Exception):  # noqa: BLE001

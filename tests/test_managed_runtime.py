@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import tarfile
 from pathlib import Path
 
@@ -267,6 +268,54 @@ def test_subclass_operational_resolution_uses_disk_snapshot_when_manifest_is_mis
         str(installed_path),
         installed_path,
     )
+
+
+def test_shared_status_retries_when_current_pointer_switches_during_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _archive, manifest = _write_subclass_runtime_fixture(tmp_path, "git")
+    manager = _subclass_runtime_manager(tmp_path, "git", manifest, monkeypatch)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+    manifest.unlink()
+
+    pointer_path = manager.runtime_dir / "current.json"
+    old_pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    new_install_dir = manager.runtime_dir / "versions" / "concurrent-replacement"
+    old_install_dir = Path(installed["install_dir"])
+    shutil.copytree(old_install_dir, new_install_dir)
+    metadata_path = new_install_dir / manager.spec.metadata_filename
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["runtime_version"] = "2.56.0"
+    managed_runtime.write_json_atomic(metadata_path, metadata)
+    new_pointer = {
+        **old_pointer,
+        "runtime_version": "2.56.0",
+        "install_dir": str(new_install_dir),
+    }
+
+    original_resolve = manager.resolve_binary
+    resolve_calls = 0
+
+    def switch_pointer_after_first_resolution() -> Path | None:
+        nonlocal resolve_calls
+        binary = original_resolve()
+        resolve_calls += 1
+        if resolve_calls == 1:
+            managed_runtime.write_json_atomic(pointer_path, new_pointer)
+        return binary
+
+    monkeypatch.setattr(manager, "resolve_binary", switch_pointer_after_first_resolution)
+
+    status = manager.status()
+
+    expected_binary = new_install_dir / manager.spec.default_bin_path
+    assert resolve_calls == 2
+    assert status["installed"] is True
+    assert status["version"] == "2.56.0"
+    assert status["path"] == str(expected_binary)
+    assert status["install_dir"] == str(new_install_dir)
 
 
 @pytest.mark.parametrize("runtime_kind", ["git", "model-hub"])
