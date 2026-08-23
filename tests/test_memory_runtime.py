@@ -920,6 +920,57 @@ def test_released_memory_pointer_status_is_shallow_and_resolver_readmits(
         assert active["admission_ok"] is expected_admitted
 
 
+def test_released_memory_pointer_readmission_refuses_symlinked_mutation_guard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = MemoryArtifactManager(
+        runtime_dir=tmp_path / "runtime",
+        manifest_path=tmp_path / "missing-manifest.json",
+        offline=True,
+    )
+    pointer = json.loads(
+        (MEMORY_FIXTURES / "released_active_pointer.json").read_text(encoding="utf-8")
+    )
+    pointer["platform"] = memory_artifact.runtime_platform_tag()
+    install_dir = manager.runtime_dir / "versions" / "released"
+    binary = install_dir / "bin" / "python"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    binary.chmod(0o755)
+    pointer["install_dir"] = str(install_dir)
+    (install_dir / manager.spec.metadata_filename).write_text(
+        json.dumps(
+            {
+                **pointer,
+                "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager._restore_current_pointer(pointer)
+    pointer_path = manager.runtime_dir / "current.json"
+    pointer_before = pointer_path.read_bytes()
+    victim = tmp_path / "victim.txt"
+    victim.write_text("do not rewrite", encoding="utf-8")
+    try:
+        manager._install_file_lock_path.symlink_to(victim)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+    monkeypatch.setattr(
+        manager,
+        "_prepare_binary",
+        lambda *_args, **_kwargs: pytest.fail("unsafe guard reached the compatibility probe"),
+    )
+
+    resolved = manager.resolve_python()
+
+    assert victim.read_text(encoding="utf-8") == "do not rewrite"
+    assert resolved is None
+    assert manager._install_reason == "memory_runtime_install_failed"
+    assert pointer_path.read_bytes() == pointer_before
+
+
 @pytest.mark.parametrize(
     "mismatch",
     [

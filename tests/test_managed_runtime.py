@@ -6,8 +6,10 @@ import io
 import json
 import os
 import shutil
+import stat
 import tarfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -910,6 +912,257 @@ def test_clean_dry_run_holds_preview_guard_through_planning(
     manager._install_lock.release()
 
 
+@pytest.mark.parametrize("runtime_kind", ["git", "memory", "model-hub"])
+def test_subclass_install_refuses_symlinked_mutation_guard_without_external_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_kind: str,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest = _write_subclass_runtime_fixture(tmp_path, runtime_kind)
+    runtime_dir = tmp_path / f"{runtime_kind}-runtime"
+    runtime_dir.mkdir()
+    victim = tmp_path / f"{runtime_kind}-victim.txt"
+    victim.write_text("do not rewrite", encoding="utf-8")
+    try:
+        (runtime_dir / ".install.lock").symlink_to(victim)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+    manager = _subclass_runtime_manager(
+        tmp_path,
+        runtime_kind,
+        manifest,
+        monkeypatch,
+        runtime_dir=runtime_dir,
+    )
+
+    result = manager.ensure()
+
+    assert victim.read_text(encoding="utf-8") == "do not rewrite"
+    assert result["ok"] is False
+    assert result["reason"] == manager._reason("install_lock_failed")
+
+
+def test_real_cleanup_refuses_hardlinked_mutation_guard_without_external_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    runtime_dir = tmp_path / "git-runtime"
+    runtime_dir.mkdir()
+    victim = tmp_path / "victim.txt"
+    victim.write_text("do not rewrite", encoding="utf-8")
+    try:
+        os.link(victim, runtime_dir / ".install.lock")
+    except OSError as exc:
+        pytest.skip(f"hard-link creation unavailable: {exc}")
+    manager = GitRuntimeManager(
+        runtime_dir=runtime_dir,
+        manifest_path=tmp_path / "missing-manifest.json",
+        offline=True,
+    )
+
+    result = manager.clean()
+
+    assert victim.read_text(encoding="utf-8") == "do not rewrite"
+    assert result["ok"] is False
+    assert result["reason"] == "git_clean_lock_failed"
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected_reason"),
+    [("install", "git_install_lock_failed"), ("clean", "git_clean_lock_failed")],
+)
+def test_mutation_reports_uninspectable_guard_as_lock_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    expected_reason: str,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest = _write_subclass_runtime_fixture(tmp_path, "git")
+    runtime_dir = tmp_path / "git-runtime"
+    runtime_dir.mkdir()
+    lock_path = runtime_dir / ".install.lock"
+    lock_path.write_text("", encoding="utf-8")
+    manager = GitRuntimeManager(runtime_dir=runtime_dir, manifest_path=manifest)
+    real_lstat = Path.lstat
+
+    def _lstat(self):
+        if self == lock_path:
+            raise OSError("guard unreadable")
+        return real_lstat(self)
+
+    monkeypatch.setattr(Path, "lstat", _lstat)
+
+    result = manager.ensure() if operation == "install" else manager.clean()
+
+    assert result["ok"] is False
+    assert result["reason"] == expected_reason
+
+
+@pytest.mark.parametrize("runtime_kind", ["git", "memory", "model-hub"])
+def test_subclass_preview_classifies_special_guard_as_inspection_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_kind: str,
+) -> None:
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("FIFO creation unavailable")
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest = _write_subclass_runtime_fixture(tmp_path, runtime_kind)
+    runtime_dir = tmp_path / f"{runtime_kind}-runtime"
+    runtime_dir.mkdir()
+    os.mkfifo(runtime_dir / ".install.lock")
+    manager = _subclass_runtime_manager(
+        tmp_path,
+        runtime_kind,
+        manifest,
+        monkeypatch,
+        runtime_dir=runtime_dir,
+    )
+
+    result = manager.clean(dry_run=True)
+
+    assert result["ok"] is False
+    assert result["reason"] == manager._reason("clean_inspection_failed")
+
+
+def test_preview_classifies_uninspectable_guard_as_inspection_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    runtime_dir = tmp_path / "git-runtime"
+    runtime_dir.mkdir()
+    lock_path = runtime_dir / ".install.lock"
+    lock_path.write_text("", encoding="utf-8")
+    manager = GitRuntimeManager(
+        runtime_dir=runtime_dir,
+        manifest_path=tmp_path / "missing-manifest.json",
+        offline=True,
+    )
+    real_lstat = Path.lstat
+
+    def _lstat(self):
+        if self == lock_path:
+            raise OSError("guard unreadable")
+        return real_lstat(self)
+
+    monkeypatch.setattr(Path, "lstat", _lstat)
+
+    result = manager.clean(dry_run=True)
+
+    assert result["ok"] is False
+    assert result["reason"] == "git_clean_inspection_failed"
+
+
+def test_preview_classifies_special_guard_created_during_planning_as_inspection_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("FIFO creation unavailable")
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    runtime_dir = tmp_path / "git-runtime"
+    manager = GitRuntimeManager(
+        runtime_dir=runtime_dir,
+        manifest_path=tmp_path / "missing-manifest.json",
+        offline=True,
+    )
+
+    def _create_special_guard(*, keep_previous, dry_run=False, removed=None):
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(runtime_dir / ".install.lock")
+        return {"ok": True, "removed": []}
+
+    monkeypatch.setattr(manager, "_clean_locked", _create_special_guard)
+
+    result = manager.clean(dry_run=True)
+
+    assert result["ok"] is False
+    assert result["reason"] == "git_clean_inspection_failed"
+
+
+def test_windows_preview_classifies_reparse_guard_as_inspection_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    runtime_dir = tmp_path / "git-runtime"
+    runtime_dir.mkdir()
+    lock_path = runtime_dir / ".install.lock"
+    lock_path.write_text("", encoding="utf-8")
+    manager = GitRuntimeManager(
+        runtime_dir=runtime_dir,
+        manifest_path=tmp_path / "missing-manifest.json",
+        offline=True,
+    )
+    real_lstat = Path.lstat
+
+    def _lstat(self):
+        info = real_lstat(self)
+        if self != lock_path:
+            return info
+        return SimpleNamespace(
+            st_mode=info.st_mode,
+            st_nlink=info.st_nlink,
+            st_dev=info.st_dev,
+            st_ino=info.st_ino,
+            st_file_attributes=1,
+        )
+
+    monkeypatch.setattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 1, raising=False)
+    monkeypatch.setattr(Path, "lstat", _lstat)
+    monkeypatch.setattr("core.managed_runtime.fcntl_available", lambda: False)
+    monkeypatch.setattr("core.managed_runtime.try_windows_exclusive_lock", lambda _fd: True)
+
+    result = manager.clean(dry_run=True)
+
+    assert result["ok"] is False
+    assert result["reason"] == "git_clean_inspection_failed"
+
+
+def test_install_refuses_guard_replaced_after_lock_acquisition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from storage import lock as storage_lock
+
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest = _write_subclass_runtime_fixture(tmp_path, "git")
+    runtime_dir = tmp_path / "git-runtime"
+    runtime_dir.mkdir()
+    lock_path = runtime_dir / ".install.lock"
+    lock_path.write_text("", encoding="utf-8")
+    manager = GitRuntimeManager(runtime_dir=runtime_dir, manifest_path=manifest)
+    real_lstat = Path.lstat
+    real_try_lock = storage_lock._try_lock
+    replaced = {"value": False}
+
+    def _lstat(self):
+        info = real_lstat(self)
+        if replaced["value"] and self == lock_path:
+            fields = list(info)
+            fields[1] = info.st_ino + 73
+            return os.stat_result(fields)
+        return info
+
+    def _try_lock(handle):
+        acquired = real_try_lock(handle)
+        if acquired:
+            replaced["value"] = True
+        return acquired
+
+    monkeypatch.setattr(Path, "lstat", _lstat)
+    monkeypatch.setattr(storage_lock, "_try_lock", _try_lock)
+
+    result = manager.ensure()
+
+    assert result["ok"] is False
+    assert result["reason"] == "git_install_lock_failed"
+
+
 def test_windows_preview_detects_held_git_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
     runtime_dir = tmp_path / "git-runtime"
@@ -961,7 +1214,7 @@ def test_git_preview_refuses_lock_identity_mismatch(
     monkeypatch.setattr(os, "fstat", _fstat)
     result = manager.clean(dry_run=True)
     assert result["ok"] is False
-    assert result["reason"] == "git_install_already_running"
+    assert result["reason"] == "git_clean_inspection_failed"
 
 
 def test_shared_ensure_failure_vocabulary_matches_reachable_reason_literals() -> None:

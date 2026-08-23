@@ -20,7 +20,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from sysconfig import get_platform
-from typing import Any, Iterator
+from typing import IO, Any, Iterator
 
 from config.atomic_io import write_atomic
 from core.dependency_network import (
@@ -72,6 +72,16 @@ _ENSURE_FAILURE_SUFFIXES = frozenset(
         "pointer_write_failed",
     }
 )
+
+
+def _is_exclusive_regular_file(info: os.stat_result) -> bool:
+    """True only for a one-link regular file that is not a reparse point."""
+
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        return False
+    attrs = getattr(info, "st_file_attributes", 0)
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return not (reparse and attrs & reparse)
 
 
 @dataclass(frozen=True)
@@ -484,16 +494,25 @@ class ManagedRuntimeManager:
                         "ok": False,
                         "removed": [],
                         "reason": busy_reason,
-                        "message": "an install is currently running",
+                        "message": (
+                            "an install is currently running"
+                            if busy_reason == self._reason("install_already_running")
+                            else "the install guard could not be inspected"
+                        ),
                     }
                 try:
                     result = self._clean_locked(keep_previous=keep_previous, dry_run=True, removed=[])
-                    if self._preview_raced_busy():
+                    raced_reason = self._preview_raced_busy()
+                    if raced_reason:
                         return {
                             "ok": False,
                             "removed": [],
-                            "reason": self._reason("install_already_running"),
-                            "message": "an install is currently running",
+                            "reason": raced_reason,
+                            "message": (
+                                "an install is currently running"
+                                if raced_reason == self._reason("install_already_running")
+                                else "the install guard could not be inspected"
+                            ),
                         }
                     return result
                 except Exception as exc:  # noqa: BLE001
@@ -577,12 +596,8 @@ class ManagedRuntimeManager:
         except OSError:
             return False
         return (
-            stat.S_ISREG(open_stat.st_mode)
-            and open_stat.st_nlink == 1
-            and not stat.S_ISLNK(open_stat.st_mode)
-            and stat.S_ISREG(path_stat.st_mode)
-            and path_stat.st_nlink == 1
-            and not stat.S_ISLNK(path_stat.st_mode)
+            _is_exclusive_regular_file(open_stat)
+            and _is_exclusive_regular_file(path_stat)
             and (open_stat.st_dev, open_stat.st_ino) == (path_stat.st_dev, path_stat.st_ino)
         )
 
@@ -597,20 +612,20 @@ class ManagedRuntimeManager:
             flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
             fd = os.open(self._install_file_lock_path, flags)
         except OSError:
-            return self._reason("install_already_running")
+            return self._reason("clean_inspection_failed")
         try:
             if not try_windows_exclusive_lock(fd):
                 os.close(fd)
                 return self._reason("install_already_running")
             if not self._guard_path_matches_fd(fd):
                 os.close(fd)
-                return self._reason("install_already_running")
+                return self._reason("clean_inspection_failed")
             self._preview_guard_fd = fd
             self._preview_guard_msvcrt = True
             return None
         except OSError:
             os.close(fd)
-            return self._reason("install_already_running")
+            return self._reason("clean_inspection_failed")
 
     def _preview_busy_reason(self) -> str | None:
         """Read-only busy check for previews: never creates or rewrites files.
@@ -640,32 +655,23 @@ class ManagedRuntimeManager:
                 flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
                 fd = os.open(self._install_file_lock_path, flags)
             except OSError:
-                # Existing but unopenable (ACLs/permissions): a preview cannot
-                # know whether an install is active — report it as busy rather
-                # than risking a misleading "0 entries" preview.
-                return self._reason("install_already_running")
+                return self._reason("clean_inspection_failed")
             try:
                 fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
                 if not self._guard_path_matches_fd(fd):
                     os.close(fd)
-                    return self._reason("install_already_running")
+                    return self._reason("clean_inspection_failed")
                 self._preview_guard_fd = fd
                 return None
-            except OSError:
+            except BlockingIOError:
                 os.close(fd)
                 return self._reason("install_already_running")
+            except OSError:
+                os.close(fd)
+                return self._reason("clean_inspection_failed")
         except BaseException:
             self._release_preview_guard()
             raise
-
-    def _preview_lock_missing(self) -> bool:
-        try:
-            self._install_file_lock_path.lstat()
-        except FileNotFoundError:
-            return True
-        except OSError:
-            return False
-        return False
 
     def _preview_lock_probe(self) -> str | None:
         try:
@@ -675,19 +681,24 @@ class ManagedRuntimeManager:
             return None
         except OSError:
             self._preview_lock_was_absent = False
-            return self._reason("install_already_running")
+            return self._reason("clean_inspection_failed")
         self._preview_lock_was_absent = False
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-            return self._reason("install_already_running")
+        if not _is_exclusive_regular_file(info):
+            return self._reason("clean_inspection_failed")
         return None
 
-    def _preview_raced_busy(self) -> bool:
-        """True when an install started after a lock-absent preview probe."""
+    def _preview_raced_busy(self) -> str | None:
+        """Classify a guard that appeared after a lock-absent preview probe."""
         if getattr(self, "_preview_guard_fd", None) is not None:
-            return False
+            return None
         if not getattr(self, "_preview_lock_was_absent", False):
-            return False
-        return not self._preview_lock_missing()
+            return None
+        reason = self._preview_lock_probe()
+        if reason is not None:
+            return reason
+        if getattr(self, "_preview_lock_was_absent", False):
+            return None
+        return self._reason("install_already_running")
 
     def _rglob_install_metadata(self, versions_dir: Path) -> Iterator[Path]:
         """rglob metadata files with error-preserving traversal.
@@ -1227,7 +1238,12 @@ class ManagedRuntimeManager:
         if not self._install_lock.acquire(blocking=False):
             return None
         try:
-            file_lock = MigrationFileLock(self._install_file_lock_path, timeout_seconds=0)
+            file_lock = MigrationFileLock(
+                self._install_file_lock_path,
+                timeout_seconds=0,
+                _handle_opener=self._open_mutation_lock_handle,
+                _handle_validator=lambda handle: self._guard_path_matches_fd(handle.fileno()),
+            )
             file_lock.acquire()
         except MigrationLockTimeout:
             self._install_lock.release()
@@ -1236,6 +1252,27 @@ class ManagedRuntimeManager:
             self._install_lock.release()
             raise
         return file_lock
+
+    def _open_mutation_lock_handle(self, lock_path: Path) -> IO[str]:
+        try:
+            info = lock_path.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            if not _is_exclusive_regular_file(info):
+                raise OSError(f"Install guard is not an exclusive regular file: {lock_path}")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0)
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(lock_path, flags, 0o644)
+        try:
+            if not self._guard_path_matches_fd(fd):
+                raise OSError(f"Install guard path does not match its descriptor: {lock_path}")
+            return os.fdopen(fd, "r+", encoding="utf-8")
+        except BaseException:
+            os.close(fd)
+            raise
 
     def _release_mutation_lock(self, file_lock: MigrationFileLock) -> None:
         try:
