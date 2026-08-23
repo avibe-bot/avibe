@@ -12490,17 +12490,32 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
             detail = f"{detail}: {download_error['url']}"
     else:
         detail = reason
+    github_source = status.get("github_source") if isinstance(status.get("github_source"), dict) else {}
+    github_path = github_source.get("path") or install_dir
+    blocking_paths = github_source.get("blocking_paths")
+    blocking_path_text = ", ".join(str(path) for path in blocking_paths) if isinstance(blocking_paths, list) else ""
     github_refusal_messages = {
+        "runtime_github_source_dirty": "runtime.doctor.repairGitHubSourceDirty",
+        "runtime_github_source_owner_mismatch": "runtime.doctor.repairGitHubSourceOwnerMismatch",
+        "runtime_github_source_record_mismatch": "runtime.doctor.repairGitHubSourceRecordMismatch",
+        "runtime_github_source_origin_changed": "runtime.doctor.repairGitHubSourceOriginChanged",
+        "runtime_github_source_ownership_unreadable": "runtime.doctor.repairGitHubSourceOwnershipUnreadable",
+        "runtime_github_source_revision_changed": "runtime.doctor.repairGitHubSourceRevisionChanged",
+        "runtime_github_source_revision_unverified": "runtime.doctor.repairGitHubSourceRevisionUnverified",
+        "runtime_github_source_inspection_failed": "runtime.doctor.repairGitHubSourceInspectionFailed",
         "runtime_github_source_update_failed": "runtime.doctor.repairGitHubSourceUpdateFailed",
     }
     refusal_message = github_refusal_messages.get(reason)
+    if reason == "runtime_github_source_update_failed" and not status_installed:
+        refusal_message = None
     message = (
         i18n_t(
             refusal_message,
             language,
-            path=install_dir,
+            path=github_path,
+            paths=blocking_path_text or "unknown",
         )
-        if refusal_message and install_dir
+        if refusal_message and github_path
         else i18n_t("runtime.doctor.repairPrepareFailed", language, detail=detail)
     )
     return _doctor_repair_result(

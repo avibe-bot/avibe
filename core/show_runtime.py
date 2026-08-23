@@ -247,6 +247,303 @@ class _ManagedInstallAttempt:
             raise ValueError("failed install attempt requires an operation reason")
 
 
+class _ManagedBytesVerdict(str, Enum):
+    PROVEN_MANAGED = "proven_managed"
+    PROVEN_FOREIGN = "proven_foreign"
+    UNDETERMINED = "undetermined"
+
+
+@dataclass(frozen=True)
+class _ManagedBytesOwnership:
+    path: Path
+    verdict: _ManagedBytesVerdict
+    reason: str | None = None
+    blocking_paths: tuple[str, ...] = ()
+    recorded_revision: str | None = None
+    _identity: tuple[int, int] | None = None
+
+    def __post_init__(self) -> None:
+        if self.verdict is _ManagedBytesVerdict.PROVEN_MANAGED:
+            if self._identity is None:
+                raise ValueError("managed bytes require a directory identity")
+            if self.blocking_paths and not self.reason:
+                raise ValueError("unsafe managed bytes require a refusal reason")
+            if not self.blocking_paths and self.reason:
+                raise ValueError("safe managed bytes cannot carry a refusal reason")
+        elif not self.reason or self._identity is not None or self.blocking_paths:
+            raise ValueError("unproven bytes require exactly one refusal reason")
+
+    @property
+    def may_destroy(self) -> bool:
+        return self.verdict is _ManagedBytesVerdict.PROVEN_MANAGED and not self.blocking_paths
+
+
+class _ManagedPublishedBytesOwner:
+    """The only producer and consumer of managed-byte deletion capabilities."""
+
+    _GITHUB_RECORD = "avibe-managed-checkout.json"
+    _GITHUB_BUILD_MARKER = ".avibe-runtime-build"
+
+    def create_staging(self, parent: Path, *, prefix: str) -> _ManagedBytesOwnership:
+        parent.mkdir(parents=True, exist_ok=True)
+        path = Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
+        identity = self._directory_identity(path)
+        if identity is None:  # pragma: no cover - mkdtemp returning a non-directory is an OS defect
+            raise OSError(f"staging directory identity is unavailable: {path}")
+        return _ManagedBytesOwnership(
+            path,
+            _ManagedBytesVerdict.PROVEN_MANAGED,
+            _identity=identity,
+        )
+
+    def record_github_checkout(
+        self,
+        staged: _ManagedBytesOwnership,
+        *,
+        repo: str,
+        ref: str,
+        revision: str,
+    ) -> bool:
+        if not self.allows_destruction(staged):
+            return False
+        payload = {
+            "schema_version": 1,
+            "repo": repo,
+            "ref": ref,
+            "revision": revision,
+        }
+        try:
+            self._github_record_path(staged.path).write_text(
+                json.dumps(payload, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            logger.warning("Failed to record managed GitHub checkout ownership", exc_info=True)
+            return False
+        return True
+
+    def inspect_github_checkout(
+        self,
+        path: Path,
+        *,
+        git: list[str],
+        repo: str,
+        ref: str,
+    ) -> _ManagedBytesOwnership:
+        identity = self._directory_identity(path)
+        if identity is None:
+            return self._refused(
+                path,
+                _ManagedBytesVerdict.PROVEN_FOREIGN,
+                "runtime_github_source_owner_mismatch",
+            )
+        try:
+            record_text = self._github_record_path(path).read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return self._refused(
+                path,
+                _ManagedBytesVerdict.UNDETERMINED,
+                "runtime_github_source_revision_unverified",
+            )
+        except OSError:
+            return self._refused(
+                path,
+                _ManagedBytesVerdict.UNDETERMINED,
+                "runtime_github_source_ownership_unreadable",
+            )
+        try:
+            record = json.loads(record_text)
+        except ValueError:
+            return self._refused(
+                path,
+                _ManagedBytesVerdict.UNDETERMINED,
+                "runtime_github_source_ownership_unreadable",
+            )
+        if (
+            not isinstance(record, dict)
+            or record.get("schema_version") != 1
+            or not isinstance(record.get("repo"), str)
+            or not isinstance(record.get("ref"), str)
+            or not isinstance(record.get("revision"), str)
+            or not record["revision"]
+        ):
+            return self._refused(
+                path,
+                _ManagedBytesVerdict.UNDETERMINED,
+                "runtime_github_source_ownership_unreadable",
+            )
+        revision = record["revision"]
+        if record["repo"] != repo or record["ref"] != ref:
+            return self._refused(
+                path,
+                _ManagedBytesVerdict.PROVEN_FOREIGN,
+                "runtime_github_source_record_mismatch",
+                recorded_revision=revision,
+            )
+        origin = self._git_text(git, path, "remote", "get-url", "origin")
+        head = self._git_text(git, path, "rev-parse", "HEAD")
+        blockers = self._git_change_paths(git, path)
+        if origin is None or head is None or blockers is None:
+            return self._refused(
+                path,
+                _ManagedBytesVerdict.UNDETERMINED,
+                "runtime_github_source_inspection_failed",
+                recorded_revision=revision,
+            )
+        if origin != repo:
+            return self._refused(
+                path,
+                _ManagedBytesVerdict.PROVEN_FOREIGN,
+                "runtime_github_source_origin_changed",
+                recorded_revision=revision,
+            )
+        if head != revision:
+            return self._refused(
+                path,
+                _ManagedBytesVerdict.PROVEN_FOREIGN,
+                "runtime_github_source_revision_changed",
+                recorded_revision=revision,
+            )
+        if self._directory_identity(path) != identity:
+            return self._refused(
+                path,
+                _ManagedBytesVerdict.UNDETERMINED,
+                "runtime_github_source_inspection_failed",
+                recorded_revision=revision,
+            )
+        if blockers:
+            return _ManagedBytesOwnership(
+                path,
+                _ManagedBytesVerdict.PROVEN_MANAGED,
+                reason="runtime_github_source_dirty",
+                blocking_paths=blockers,
+                recorded_revision=revision,
+                _identity=identity,
+            )
+        return _ManagedBytesOwnership(
+            path,
+            _ManagedBytesVerdict.PROVEN_MANAGED,
+            recorded_revision=revision,
+            _identity=identity,
+        )
+
+    def remove(self, ownership: _ManagedBytesOwnership) -> str | None:
+        if not ownership.may_destroy:
+            return ownership.reason or "runtime_github_source_inspection_failed"
+        if not self.allows_destruction(ownership):
+            return "runtime_github_source_inspection_failed"
+        try:
+            shutil.rmtree(ownership.path)
+        except OSError:
+            logger.warning("Failed to remove proven managed bytes at %s", ownership.path, exc_info=True)
+            return "runtime_github_source_update_failed"
+        return None if not os.path.lexists(ownership.path) else "runtime_github_source_update_failed"
+
+    def publish(
+        self,
+        staged: _ManagedBytesOwnership,
+        target: Path,
+        current: _ManagedBytesOwnership | None,
+    ) -> str | None:
+        if not self.allows_destruction(staged):
+            return "runtime_github_source_inspection_failed"
+        if os.path.lexists(target):
+            if current is None or current.path != target:
+                return "runtime_github_source_inspection_failed"
+            refusal = self.remove(current)
+            if refusal:
+                return refusal
+        try:
+            staged.path.rename(target)
+        except OSError:
+            logger.warning("Failed to publish managed bytes at %s", target, exc_info=True)
+            return "runtime_github_source_update_failed"
+        return None
+
+    @classmethod
+    def _github_record_path(cls, path: Path) -> Path:
+        return path / ".git" / cls._GITHUB_RECORD
+
+    @staticmethod
+    def _directory_identity(path: Path) -> tuple[int, int] | None:
+        try:
+            info = path.lstat()
+        except OSError:
+            return None
+        if _is_reparse_point(info) or not stat.S_ISDIR(info.st_mode):
+            return None
+        return info.st_dev, info.st_ino
+
+    def _same_directory(self, ownership: _ManagedBytesOwnership) -> bool:
+        return ownership._identity is not None and self._directory_identity(ownership.path) == ownership._identity
+
+    def allows_destruction(self, ownership: _ManagedBytesOwnership) -> bool:
+        return ownership.may_destroy and self._same_directory(ownership)
+
+    @staticmethod
+    def _git_text(git: list[str], path: Path, *args: str) -> str | None:
+        try:
+            result = subprocess.run(
+                [*git, "-C", str(path), *args],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+                **isolated_subprocess_kwargs(),
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if result.returncode != 0:
+            return None
+        value = result.stdout.strip()
+        return value or None
+
+    @classmethod
+    def _git_change_paths(cls, git: list[str], path: Path) -> tuple[str, ...] | None:
+        paths: set[str] = set()
+        commands = (
+            ("diff", "--name-only", "-z", "--no-ext-diff"),
+            ("diff", "--cached", "--name-only", "-z", "--no-ext-diff"),
+            ("ls-files", "--others", "--exclude-standard", "-z"),
+        )
+        for command in commands:
+            try:
+                result = subprocess.run(
+                    [*git, "-C", str(path), *command],
+                    capture_output=True,
+                    timeout=30,
+                    check=False,
+                    **isolated_subprocess_kwargs(),
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                return None
+            if result.returncode != 0:
+                return None
+            for raw_path in result.stdout.split(b"\0"):
+                if not raw_path:
+                    continue
+                value = os.fsdecode(raw_path)
+                if command[0] == "ls-files" and value == cls._GITHUB_BUILD_MARKER:
+                    continue
+                paths.add(value)
+        return tuple(sorted(paths))
+
+    @staticmethod
+    def _refused(
+        path: Path,
+        verdict: _ManagedBytesVerdict,
+        reason: str,
+        *,
+        recorded_revision: str | None = None,
+    ) -> _ManagedBytesOwnership:
+        return _ManagedBytesOwnership(
+            path,
+            verdict,
+            reason=reason,
+            recorded_revision=recorded_revision,
+        )
+
+
 @dataclass(frozen=True)
 class ShowRuntimeArchive:
     platform: str
@@ -488,6 +785,7 @@ class ShowRuntimeManager:
         self._download_error: dict[str, Any] | None = None
         self._managed_command: list[str] | None = None
         self._availability = ShowRuntimeAvailability()
+        self._published_bytes_owner = _ManagedPublishedBytesOwner()
         self._process: subprocess.Popen[str] | None = None
         self._base_url: str | None = None
         self._lock = asyncio.Lock()
@@ -3328,89 +3626,118 @@ class ShowRuntimeManager:
                 existing_command,
                 replacement_required=replacement_required,
             )
-        if not source_dir.exists():
-            source_dir.parent.mkdir(parents=True, exist_ok=True)
-            if not self._run_install_command(
-                [*git, "clone", "--depth", "1", "--branch", self.github_ref, self.github_repo, str(source_dir)]
-            ):
-                return self._github_install_attempt(
-                    None,
-                    replacement_required=replacement_required,
-                )
-        else:
-            if not self._run_install_command([*git, "-C", str(source_dir), "fetch", "--depth", "1", "origin", self.github_ref]):
-                self._install_reason = None
-                update_failure_reason = "runtime_github_source_update_failed"
-                return self._github_install_attempt(
-                    existing_command,
-                    replacement_required=replacement_required,
-                    operation_reason=update_failure_reason,
-                )
-            fetched = self._git_revision(git, source_dir, "FETCH_HEAD")
-            if not fetched:
-                update_failure_reason = "runtime_github_source_update_failed"
-                return self._github_install_attempt(
-                    existing_command,
-                    replacement_required=replacement_required,
-                    operation_reason=update_failure_reason,
-                )
-            if (
-                not replacement_required
-                and existing_command
-                and fetched
-                and self._read_github_build_marker(source_dir) == fetched
-            ):
-                # The runtime already on disk was built from exactly this
-                # commit, so `npm ci` and `npm run build` would spend a minute
-                # reproducing it byte for byte.
-                return self._github_install_attempt(
-                    existing_command,
-                    replacement_required=False,
-                )
-            if not self._run_install_command([*git, "-C", str(source_dir), "checkout", "FETCH_HEAD"]):
-                self._install_reason = None
+        staged: _ManagedBytesOwnership | None = None
+        published = False
+        try:
+            staged = self._published_bytes_owner.create_staging(
+                source_dir.parent,
+                prefix=f".{source_dir.name}.stage-",
+            )
+            revision = self._clone_github_staging(staged, git)
+            if not revision:
                 return self._github_install_attempt(
                     existing_command,
                     replacement_required=replacement_required,
                     operation_reason="runtime_github_source_update_failed",
                 )
-        # From here on the artifact the marker describes is being replaced:
-        # ``npm ci`` empties node_modules and the build writes into dist. Drop
-        # the marker first so a failure anywhere below leaves "unknown" rather
-        # than a commit that no longer describes what is on disk.
-        self._write_github_build_marker(source_dir, None)
-        if replacement_required:
-            build_output = source_dir / "packages" / "runtime" / "dist"
-            if not self._remove_managed_runtime_tree_for_replacement(build_output, label="GitHub"):
+            if (
+                not replacement_required
+                and existing_command
+                and self._read_github_build_marker(source_dir) == revision
+            ):
+                return self._github_install_attempt(existing_command, replacement_required=False)
+            staged_command = self._build_github_staging(staged, npm, node, revision)
+            if not staged_command:
+                return self._github_install_attempt(
+                    existing_command,
+                    replacement_required=replacement_required,
+                )
+            if not self._published_bytes_owner.record_github_checkout(
+                staged,
+                repo=self.github_repo,
+                ref=self.github_ref,
+                revision=revision,
+            ):
+                return self._refused_github_install("runtime_github_source_update_failed")
+            current = (
+                self._published_bytes_owner.inspect_github_checkout(
+                    source_dir,
+                    git=git,
+                    repo=self.github_repo,
+                    ref=self.github_ref,
+                )
+                if os.path.lexists(source_dir)
+                else None
+            )
+            if current is not None and not current.may_destroy:
+                return self._refused_github_install(
+                    current.reason or "runtime_github_source_inspection_failed"
+                )
+            refusal = self._published_bytes_owner.publish(staged, source_dir, current)
+            if refusal:
+                return self._refused_github_install(refusal)
+            published = True
+            command = self._github_runtime_command(source_dir, node)
+            if not command:
+                self._install_reason = "runtime_install_missing_bin"
                 return self._github_install_attempt(
                     None,
-                    replacement_required=True,
+                    replacement_required=replacement_required,
                 )
-            existing_command = None
-        if not self._run_install_command([*npm, "ci"], cwd=source_dir):
             return self._github_install_attempt(
-                existing_command,
+                command,
                 replacement_required=replacement_required,
+                replacement_completed=replacement_required,
             )
-        if not self._run_install_command([*npm, "run", "build"], cwd=source_dir):
-            return self._github_install_attempt(
-                existing_command,
-                replacement_required=replacement_required,
-            )
-        command = self._github_runtime_command(source_dir, node)
+        finally:
+            if staged is not None and not published and os.path.lexists(staged.path):
+                self._published_bytes_owner.remove(staged)
+
+    def _clone_github_staging(
+        self,
+        staged: _ManagedBytesOwnership,
+        git: list[str],
+    ) -> str | None:
+        if not self._published_bytes_owner.allows_destruction(staged):
+            return None
+        if not self._run_install_command(
+            [
+                *git,
+                "clone",
+                "--depth",
+                "1",
+                "--branch",
+                self.github_ref,
+                self.github_repo,
+                str(staged.path),
+            ]
+        ):
+            return None
+        return self._git_revision(git, staged.path, "HEAD")
+
+    def _build_github_staging(
+        self,
+        staged: _ManagedBytesOwnership,
+        npm: list[str],
+        node: list[str],
+        revision: str,
+    ) -> list[str] | None:
+        if not self._published_bytes_owner.allows_destruction(staged):
+            return None
+        if not self._run_install_command([*npm, "ci"], cwd=staged.path):
+            return None
+        if not self._run_install_command([*npm, "run", "build"], cwd=staged.path):
+            return None
+        command = self._github_runtime_command(staged.path, node)
         if not command:
             self._install_reason = "runtime_install_missing_bin"
-            return self._github_install_attempt(
-                None,
-                replacement_required=replacement_required,
-            )
-        self._write_github_build_marker(source_dir, self._git_revision(git, source_dir, "HEAD"))
-        # A forced build starts with no dist tree, so resolving this command proves replacement.
-        return self._github_install_attempt(
-            command,
-            replacement_required=replacement_required,
-            replacement_completed=replacement_required,
-        )
+            return None
+        self._write_github_build_marker(staged, revision)
+        return command
+
+    def _refused_github_install(self, reason: str) -> _ManagedInstallAttempt:
+        self._install_reason = None
+        return _ManagedInstallAttempt(None, reason)
 
     def _github_build_marker_path(self, source_dir: Path) -> Path:
         return source_dir / ".avibe-runtime-build"
@@ -3418,12 +3745,10 @@ class ShowRuntimeManager:
     def _read_github_build_marker(self, source_dir: Path) -> str | None:
         """The commit that produced the runtime build currently on disk.
 
-        The marker describes the artifact that exists now, not whatever the
-        working tree happens to be checked out at. Both halves of that are
-        enforced by when it moves: it is cleared before a rebuild starts
-        replacing the artifact, and written again only once the build finished
-        and its entry point resolved. So a failed, interrupted, or partial
-        rebuild leaves no marker, and the next prepare rebuilds.
+        The marker describes the artifact that exists now, not a staged or
+        partially built replacement. A fresh checkout receives it only after
+        its build and entry point resolve, then the checkout is published as a
+        unit. A failed build therefore leaves the published marker unchanged.
         """
         try:
             revision = self._github_build_marker_path(source_dir).read_text(encoding="utf-8").strip()
@@ -3431,18 +3756,41 @@ class ShowRuntimeManager:
             return None
         return revision or None
 
-    def _write_github_build_marker(self, source_dir: Path, revision: str | None) -> None:
-        marker = self._github_build_marker_path(source_dir)
+    def _write_github_build_marker(
+        self,
+        ownership: _ManagedBytesOwnership,
+        revision: str,
+    ) -> None:
+        if not self._published_bytes_owner.allows_destruction(ownership):
+            raise ValueError("GitHub build marker requires managed-byte capability")
+        marker = self._github_build_marker_path(ownership.path)
         try:
-            if revision:
-                marker.write_text(f"{revision}\n", encoding="utf-8")
-            else:
-                marker.unlink(missing_ok=True)
+            marker.write_text(f"{revision}\n", encoding="utf-8")
         except OSError:
             pass
 
     def _github_source_status(self, source_dir: Path) -> dict[str, Any]:
-        return {"built_revision": self._read_github_build_marker(source_dir)}
+        ownership: _ManagedBytesOwnership | None = None
+        try:
+            git = _resolve_command("git")
+        except (OSError, ValueError):
+            git = None
+        if git and os.path.lexists(source_dir):
+            ownership = self._published_bytes_owner.inspect_github_checkout(
+                source_dir,
+                git=git,
+                repo=self.github_repo,
+                ref=self.github_ref,
+            )
+        return {
+            "path": str(source_dir),
+            "built_revision": self._read_github_build_marker(source_dir),
+            "managed_revision": ownership.recorded_revision if ownership else None,
+            "ownership": ownership.verdict.value if ownership else None,
+            "destruction_safe": ownership.may_destroy if ownership else None,
+            "reason": ownership.reason if ownership else None,
+            "blocking_paths": list(ownership.blocking_paths) if ownership else [],
+        }
 
     def _git_revision(self, git: list[str], source_dir: Path, ref: str) -> str | None:
         try:

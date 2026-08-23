@@ -9910,8 +9910,10 @@ def test_show_runtime_manager_installs_from_github_source(monkeypatch, tmp_path)
 
     def fake_run(command, *, cwd=None):
         commands.append((command, cwd))
+        if command[:2] == ["/bin/git", "clone"]:
+            (Path(command[-1]) / ".git").mkdir()
         if command[:2] == ["/bin/npm", "run"]:
-            cli_path = source_dir / "packages" / "runtime" / "dist" / "cli.js"
+            cli_path = Path(cwd) / "packages" / "runtime" / "dist" / "cli.js"
             cli_path.parent.mkdir(parents=True, exist_ok=True)
             cli_path.write_text("#!/usr/bin/env node\n", encoding="utf-8")
         return True
@@ -9936,12 +9938,21 @@ def test_show_runtime_manager_installs_from_github_source(monkeypatch, tmp_path)
         "https://github.com/avibe-bot/vibe-show-runtime.git",
     ]
     assert clone_cwd is None
-    assert Path(clone_command[-1]) == source_dir
+    staged_dir = Path(clone_command[-1])
+    assert staged_dir.parent == source_dir.parent
+    assert staged_dir.name.startswith(".main.stage-")
     assert commands[1:] == [
-        (["/bin/npm", "ci"], source_dir),
-        (["/bin/npm", "run", "build"], source_dir),
+        (["/bin/npm", "ci"], staged_dir),
+        (["/bin/npm", "run", "build"], staged_dir),
     ]
-    assert manager.status()["github_source"] == {"built_revision": "0123456789abcdef"}
+    assert manager.status()["github_source"]["built_revision"] == "0123456789abcdef"
+    record = json.loads((source_dir / ".git" / "avibe-managed-checkout.json").read_text(encoding="utf-8"))
+    assert record == {
+        "schema_version": 1,
+        "repo": "https://github.com/avibe-bot/vibe-show-runtime.git",
+        "ref": "main",
+        "revision": "0123456789abcdef",
+    }
 
 
 def test_show_runtime_manager_reuses_installed_github_runtime_when_update_fails(monkeypatch, tmp_path):
@@ -9973,12 +9984,20 @@ def test_show_runtime_manager_reuses_installed_github_runtime_when_update_fails(
 
     assert manager._install_managed_runtime_locked(force=False, offline=False).command == ["/bin/node", str(cli_path)]
     assert manager._install_reason is None
-    assert commands == [
-        (
-            ["/bin/git", "-C", str(source_dir), "fetch", "--depth", "1", "origin", "main"],
-            None,
-        )
+    assert len(commands) == 1
+    clone, cwd = commands[0]
+    assert clone[:-1] == [
+        "/bin/git",
+        "clone",
+        "--depth",
+        "1",
+        "--branch",
+        "main",
+        "https://github.com/avibe-bot/vibe-show-runtime.git",
     ]
+    assert Path(clone[-1]).parent == source_dir.parent
+    assert cwd is None
+    assert cli_path.exists()
 
 
 def test_show_runtime_manager_reuses_installed_github_runtime_without_git(monkeypatch, tmp_path):

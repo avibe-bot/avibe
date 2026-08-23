@@ -2758,6 +2758,94 @@ def test_repair_show_runtime_names_github_update_failure_and_remediation(
     assert prepared == [True]
 
 
+@pytest.mark.parametrize(
+    ("language", "reason", "blocking_paths", "expected_fragments"),
+    [
+        (
+            "en",
+            "runtime_github_source_dirty",
+            [".DS_Store"],
+            (".DS_Store", "Back up or remove those paths"),
+        ),
+        (
+            "zh",
+            "runtime_github_source_dirty",
+            [".DS_Store"],
+            (".DS_Store", "备份或删除这些路径"),
+        ),
+        (
+            "en",
+            "runtime_github_source_revision_unverified",
+            [],
+            ("legacy checkout", "vibe runtime prepare", "Back up or move"),
+        ),
+        (
+            "zh",
+            "runtime_github_source_revision_unverified",
+            [],
+            ("旧 checkout", "vibe runtime prepare", "备份或移走"),
+        ),
+    ],
+)
+def test_repair_show_runtime_names_github_refusal_path_and_recoverable_remedy(
+    monkeypatch,
+    tmp_path,
+    language,
+    reason,
+    blocking_paths,
+    expected_fragments,
+):
+    source_dir = tmp_path / "github-source"
+    command = [str(tmp_path / "node"), str(source_dir / "cli.js")]
+    before = {
+        "provider": "github-source",
+        "platform": "linux-x64",
+        "install": {"state": "installed", "install_dir": str(source_dir)},
+        "command": command,
+    }
+    prepared_status = {
+        **before,
+        "github_source": {
+            "path": str(source_dir),
+            "reason": reason,
+            "blocking_paths": blocking_paths,
+        },
+    }
+    manager = SimpleNamespace(
+        status=lambda: before,
+        prepare=lambda force=False: {
+            "ok": False,
+            "reason": reason,
+            "provider": "github-source",
+            "platform": "linux-x64",
+            "command": command,
+            "status": prepared_status,
+        },
+    )
+
+    def manager_factory(**kwargs):
+        if not kwargs:
+            return manager
+        return SimpleNamespace(
+            ensure=lambda: asyncio.sleep(
+                0,
+                result=SimpleNamespace(available=False, reason="runtime_start_health_timeout"),
+            ),
+            stop=lambda: None,
+        )
+
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", manager_factory)
+
+    result = cli._repair_show_runtime()
+
+    assert result["status"] == "failed"
+    assert result["reason"] == reason
+    assert str(source_dir) in result["message"]
+    for fragment in expected_fragments:
+        assert fragment in result["message"]
+
+
 def test_runtime_prepare_strict_does_not_report_policy_skip_as_ready(monkeypatch, capsys):
     manager = SimpleNamespace(
         prepare=lambda **_kwargs: {

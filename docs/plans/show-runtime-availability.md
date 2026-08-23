@@ -1181,6 +1181,89 @@ generic update-failure reason, `_git_revision`, and `_read_github_build_marker`;
 are one-way dependencies on retained contracts, not checkout ownership leaking back
 into 2b′.
 
+#### 2b″ final contract: own deletion authority, not a path convention
+
+The successor starts by questioning the destructive step rather than optimizing its
+authorization. A fresh tree cannot atomically replace a non-empty directory with
+`os.replace` on macOS (`ENOTEMPTY`), while renaming the old tree away first creates a
+new crash window. Full removal of that boundary therefore requires W6's generation
+directories and pointer switch; pulling half of W6 forward would leave two publish
+models beside the manifest and archive providers. W6 stays out.
+
+The remaining deliverable is the single owner of **who may delete already-published
+bytes**. The GitHub publish boundary is its first consumer, not its definition. A
+destructive call receives a capability produced by that owner; it never derives
+ownership from `runtime_dir`, a sanitized repository/ref path, a marker filename, or
+the absence of contradictory evidence. Fresh staging is `PROVEN_MANAGED` because the
+owner created the directory and carries that creation capability forward. Persistent
+GitHub checkouts receive a schema-versioned record before publication and are inspected
+by the same owner. Stronger proofs held by later consumers enter the funnel as stronger
+proofs; they must not be weakened into marker-file checks for API uniformity.
+
+Ownership has exactly three verdicts:
+
+- `PROVEN_MANAGED`: the creation record, configured repository/ref, Git origin, and
+  recorded `HEAD` agree. Destruction may still be refused by the separate safety check.
+- `PROVEN_FOREIGN`: a measured fact conflicts — for example, the record names another
+  repository/ref, origin changed, or `HEAD` differs from the recorded revision. The
+  reason names the conflicting fact.
+- `UNDETERMINED`: proof is missing or unreadable, Git inspection fails, or directory
+  identity changes during inspection. It cannot reach deletion.
+
+Ownership and deletion safety answer different questions. Modified, staged, deleted,
+or untracked paths do not make a recorded checkout foreign; they make deleting proven
+managed bytes unsafe. That refusal carries the exact relative paths so Doctor can ask
+the user to remove one `.DS_Store` rather than move an entire checkout. Only Avibe's
+own `.avibe-runtime-build` marker is excluded. This exception was measured against a
+real shallow clone of `avibe-bot/vibe-show-runtime`: after `npm ci` and the complete
+build, `node_modules` and `packages/runtime/dist` remained ignored and the marker was
+the only Avibe-written untracked path. The owner implements that measured exception;
+callers do not repeat it.
+
+Legacy GitHub-source checkouts have no creation record. They remain `UNDETERMINED` and
+are never silently adopted, because a developer's manual clone can have the same repo,
+ref, origin, and `HEAD`. A usable legacy runtime keeps serving. The managed update is
+refused with `runtime_github_source_revision_unverified`, and Doctor names the exact
+checkout path and the explicit remedy: back up or move it, then run
+`vibe runtime prepare`. This affects GitHub-source development installs, not manifest,
+archive, or npm installs.
+
+GitHub updates clone and build in a same-parent directory created by the owner. The
+ownership record and build marker are written there before publication. Publishing an
+update inspects the existing checkout, refuses `PROVEN_FOREIGN`, `UNDETERMINED`, or
+unsafe managed bytes, removes only through the capability owner, and then renames the
+complete stage into place. Every destructive staging command rechecks that the path is
+still the directory identity carried by the creation capability; replacing the staging
+path cannot redirect `npm ci` into unrelated bytes. A build or refusal leaves the old
+command and bytes intact.
+The lstat identity recheck narrows the replacement race; it is not described as closing
+TOCTOU. The accepted delete-then-rename crash window was measured by killing a real
+subprocess after `rmtree` returned and before rename: the destination was absent and
+the complete stage remained, so the next prepare can install again rather than meet a
+partial tree that looks foreign. This says nothing stronger about interruption inside
+`rmtree` itself.
+
+The destructive-effect census derives its domain from the module AST. It resolves
+import and local aliases, `functools.partial`, path values, and capability-bearing
+helpers, and recognizes the destructive `git`/`npm` argv used by the install delegate.
+Every migrated effect must be dominated by a capability refusal or live in the owner.
+The not-yet-migrated debt is executable data, not a comment: manifest publish and GC,
+archive publish, npm paths, downloaded-archive cleanup, runtime clean/start logs,
+extraction, cache replacement, and metadata/pointer writes are explicitly allowlisted.
+A new destructive site outside that shrinking list fails without a reviewer first
+having to know it exists. The census states its blind spots: dynamic `getattr`, a
+callable passed out and invoked elsewhere, and arbitrary subprocess semantics beyond
+the recognized argv. Its red-before-green run on master exposed the unguarded GitHub
+clone/build/publish effects and the missing owner types before implementation.
+
+Two-sided acceptance is required. A recorded clean checkout and the sole Avibe marker
+permit replacement; tracked edits and arbitrary untracked files remain
+`PROVEN_MANAGED` but block deletion with exact paths; conflicting record/origin/HEAD
+facts are `PROVEN_FOREIGN`; missing and unreadable records are `UNDETERMINED`; no
+refusal invokes deletion; the record is written before publish; first-install record
+failure exposes no final checkout; failed staging leaves the old runtime; and Doctor's
+English and Chinese remedies name both the affected path and a recoverable action.
+
 #### Shipped in 2b′
 
 *One execution boundary for delegated work.* The shared install-command helper
@@ -1425,7 +1508,7 @@ exposure predates these PRs and shipping the truthful row strictly reduces it.
 | 2a | W4 admission outcome | avibe | The policy/install/runtime contract and every consumer projecting from it. |
 | 2b | W5 readiness proof | avibe | `ensure()` health-probes a fresh start; `doctor` inherits it. Independent of 2a. Bounded retry plus Doctor's three-state startability; claims nothing about replacement. |
 | 2b′ | W4 replacement operation contract | avibe | What `prepare()` claims, what a provider must prove, install-state ownership, build provenance, and destructive cache/delegate boundaries. Split out of 2b after six findings-bearing heads; checkout ownership is not shipped here. |
-| 2b″ | Protect the managed GitHub checkout | avibe | Replace master's unconditional checkout takeover with a three-valued decision that keeps undetermined ownership away from both checkout movement and build-evidence destruction. |
+| 2b″ | Own deletion authority; protect the managed GitHub checkout first | avibe | Fresh-stage GitHub builds carry a creation capability into a three-valued deletion owner; foreign, undetermined, and locally modified published bytes are never removed. Other destructive domains remain in an executable shrinking debt list for later migration. |
 | 2c | W4 evidence + W5 page | avibe | Declared failure classification, typed transport evidence, operational-I/O normalization, and an honest manual recovery page. Retry ownership was frozen and deleted. |
 | 2c′ | Bounded automatic recovery | avibe | Open issue #1637. Design the bound separately before reintroducing any automatic poller or retry state. |
 | 3 | W1 | vibe-show-runtime | Independent; effect appears at the next runtime release. |
