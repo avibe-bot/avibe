@@ -1,1063 +1,315 @@
 # Show Runtime Install Convergence Contract
 
-Status: proposed migration contract
+Status: bounded migration contract
 
 Scope: analysis and design only; no production implementation
 
-Code baseline: measured at `903414cc4` and revalidated against
-`2c6fcbe88` (`origin/master` on 2026-08-23). The intervening Show changes are
-serving-side WebSocket invalidation and failure classification only; no install
-function or measurement below changed.
+Code baseline: `2c6fcbe88` (`origin/master` when the install audit was
+revalidated on 2026-08-23). The original function-span measurement was made at
+`903414cc4`. The GitHub source provider is assumed gone before migration.
 
-Assumption: the GitHub source provider is removed before this migration starts
+## Decision And Boundary
 
-## Decision
+`core/managed_runtime.py` is the target sole installer owner for git, Memory,
+model-hub, Show, and tmux. Show and tmux remain product adapters. Show keeps
+policy/install/serving projection, the system Node prerequisite and command,
+the direct-archive provider, and the npm provider. Memory keeps its explicit
+development provider and its controller-coordinated activation boundary. Tmux
+keeps macOS preparation and its runtime compatibility projection. Show serving
+(request proxying, lifecycle, readiness, prewarm, WebSocket routing, context
+capability, and stop) is outside this migration.
 
-Show Runtime and tmux must stop owning parallel managed-dependency installers.
-Across the five-dependency family (git, Memory, model-hub, Show, and tmux),
-`core/managed_runtime.py` becomes the sole owner of manifest acquisition,
-platform selection, archive acquisition and verification, staging, install
-identity, install metadata, current-pointer persistence, mutation locking,
-retention, and install-state inspection. A small Show-specific adapter remains
-responsible for four product concepts that the other dependencies do not have:
-
-1. policy/install/serving availability and operation-outcome publication;
-2. the system Node command and `minimum_node` prerequisite;
-3. the operator-supplied direct archive escape hatch; and
-4. the npm provider escape hatch.
-
-Memory also retains one product concept outside the shared manifest engine: the
-explicit `AVIBE_MEMORY_DEV_RUNTIME` development provider. It is selected and
-validated before managed-state inspection and therefore remains an adapter
-branch, not another shared provider or installer owner.
-
-The adapter should be a composed `ShowRuntimeInstaller` based on
-`ManagedRuntimeManager`, held by `ShowRuntimeManager`. Making the serving
-manager itself inherit the installer would preserve the current mixed owner and
-would not create a clean deletion boundary.
-
-The migration is not a rewrite of the serving half. Request proxying, process
-lifecycle, readiness, prewarm, WebSocket routing, context capability, and stop
-remain in `core/show_runtime.py`.
-
-`core/tmux_runtime.py` is a live 699-line fifth managed-dependency installer. It
-independently owns six of the seven common capabilities counted below (all but
-retention/cleanup), while also carrying tmux-specific macOS signing, runnable
-probing, utf8proc, and terminfo requirements. It is therefore part of this
-contract, not a narrowed exception to the sole-owner invariant. Show migrates
-first because its larger surface exercises every required shared capability;
-tmux follows as the final, smaller adapter migration. The original 24-pair and
-1,621-line audits remain Show-specific; tmux is measured separately below.
-
-## Contract Boundaries
-
-The shared layer must own these invariants for every dependency in this
-convergence boundary:
-
-Normative requirements use a terminating form: each is a property measured on
-state or output owned by this repository, not a closed list of accepted input
-origins, payloads, archive orders, or interpreter versions. Fixture lists below
-are minimum coverage, not semantic selectors. A new source path or input shape
-that produces the same measured facts receives the same result; it changes the
-contract only when it exposes a new persisted fact or a different measurable
-postcondition. The predicate census applies this rule to every boundary,
-scenario, and stop point.
-
-- An install identity is the identity of the selected platform artifact, not
-  the digest of unrelated manifest entries. Its minimum fields are runtime
-  version, the archive's persisted platform label, and the selected archive
-  SHA-256. Host admission compares that label through the spec's declarative
-  host-to-artifact platform aliases; literal spelling equality is not required.
-- An installed identity is read from the install metadata and current pointer.
-  It is never manufactured from the currently selected manifest.
-- A durable operation claim is a released persistence contract, not an alias
-  for the current in-memory identity type. Model-hub `install-state.json`
-  schema versions 1 and 2 must be dual-read and normalized: a legacy target
-  that differs only by `manifest_sha256` still names the same platform artifact.
-  A new target shape requires a schema-version bump and safe degradation.
-- Status inspection and operational resolution are local and never rewrite
-  installed state. A complete, successful traversal that finds no pointer,
-  metadata, version directory, or other install evidence proves clean absence.
-  Any present-but-partial, unreadable, malformed, unsafe, or raced state is
-  `unknown` or `error`, never absence. A manifest outage cannot make
-  `status()`, Git's `resolve_git_path()`, or model-hub's
-  `resolve_engine_path()` forget an admitted installed artifact.
-- Manifest source outcomes are typed. Configured offline mode means no network
-  attempt; a failed attempted fetch is `manifest_unavailable`; a source that is
-  absent is `manifest_missing`; bytes that were reached but fail parsing or
-  validation are `manifest_invalid`; and a valid manifest without a host
-  artifact is `platform_unsupported`. Status and resolution continue to use an
-  admitted disk artifact in every case, but `ensure()`/repair must not report an
-  invalid or missing manifest as successful reuse. Only configured offline mode
-  and a transient fetch failure may deliberately keep an admitted disk artifact
-  operational without manufacturing a selected target, and their diagnostics
-  and network-attempt evidence remain distinct.
-- An explicit non-manifest provider is selected before any managed-state
-  snapshot. In particular, `AVIBE_MEMORY_DEV_RUNTIME` remains a Memory-owned
-  development provider: status and resolvers may validate the configured
-  interpreter and `ensure()` returns `changed=false` without loading a manifest
-  or reading/writing managed metadata, pointers, claims, or derived state.
-- Runtime-specific admission is a read-only projection over the installed
-  snapshot, but "read-only" describes the installed artifact, metadata, and
-  pointer, not all derived state. After a successful Memory re-admission, the
-  shared layer must atomically attempt to cache that result under
-  `<runtime_dir>/derived/admission/`, keyed by the verified artifact identity
-  and admission revision. It never writes the artifact tree, `current.json`,
-  or a released pointer. A cache-write failure falls back to a process-wide
-  in-memory result, shared by fresh manager instances, and never changes
-  status success; a changed identity makes the entry ineligible immediately.
-  A cache hit is usable only after the pointer, metadata, and artifact identity
-  have been cheaply reverified. Failed or raising probes remain `unknown` or
-  `error` and are not persistently cached as admitted.
-- Derived-cache persistence uses one shared confined atomic writer. Every
-  existing parent and destination component is opened without following a
-  symlink or Windows reparse point, an existing target must be a single-link
-  regular file, and the live path must still name the validated descriptor at
-  commit. A redirect, hard-link alias, identity race, or permission failure
-  leaves every external target byte-for-byte unchanged and falls back to the
-  process-wide in-memory cache. This writer does not acquire the install
-  mutation guard and is not a second installed-state writer.
-- A released on-disk layout is dual-read indefinitely. Migration may write a
-  canonical new shape, but it must adopt released Show layouts without a
-  download and without rewriting them merely to make status work.
-- Archive bytes are content-addressed by verified SHA-256. Cleanup protects the
-  current install and every retained rollback install, and fails closed when
-  that protected set cannot be established.
-- The downloads namespace is typed, not “everything under `downloads/`.” Remote
-  manifest caches and unknown non-archive names are durable or unowned facts and
-  are always retained; only recognized, verified, unprotected archive entries
-  are cleanup candidates.
-- Automatic cleanup runs after the install transaction commits. Its failure
-  means delete nothing and publish or log a separate cleanup report; it never
-  changes install success, the current pointer, or a durable claim settlement.
-- A real cleanup and an install use one mutation guard for the whole operation.
-  A dry-run never creates the guard and holds a read-only exclusion through the
-  complete plan.
-- Lock paths are never followed through symlinks, hard links, or Windows
-  reparse points; the locked descriptor must still be the live path.
-- Extraction explicitly whitelists `REGTYPE`, `AREGTYPE`, `DIRTYPE`,
-  `SYMTYPE`, and `LNKTYPE`; device, FIFO, and character members are rejected.
-  Extraction starts in a fresh staging root owned by the extracting user.
-  Runtime specs still default to regular files/directories only. A link-enabled
-  spec validates both `name` and `linkname` against the extraction root and
-  extracts sequentially in archive order. A hard link must name a previously
-  extracted regular file. A symlink may name a later or absent member, but its
-  normalized target must remain root-confined; before each later write, existing
-  symlink prefixes are resolved and rechecked, and a final no-follow tree walk
-  proves that every materialized path and every resolvable or dangling symlink
-  target remains inside the root. Two-pass and parallel extraction are
-  forbidden. Filter support is capability-detected, never inferred from
-  `sys.version_info`: attempt the repository's existing
-  `extractall(..., filter="data")` call and use the manually guarded fallback
-  only when the keyword is unavailable. Either path must produce the same
-  repository-owned postconditions: no path escapes the root; on POSIX every
-  inode is owned by the extracting user, and every regular-file, directory, or
-  hard-link mode has no setuid, setgid, group-write, or other-write bit. These
-  output properties, not an enumeration of accepted archives or Python's
-  current filter behavior, are the compatibility and security boundary.
-- Default behavior for git, Memory, and model-hub remains binary-strict:
-  `binary_sha256` must be declared and a safe resolved `bin_path` must exist.
-  The path may come from the archive entry or the already-declarative
-  `ManagedRuntimeSpec.default_bin_path`; canonical metadata and pointers persist
-  the resolved value. Show alone may use an archive-verified directory artifact
-  invoked through Node.
-- New Show manifest installs persist the selected `minimum_node` beside the
-  artifact identity. A released record without it reports Node compatibility as
-  unknown, never supported. To preserve offline reuse, it may enter the existing
-  bounded readiness probe; only a successful probe admits serving for that
-  process lifetime, and a failed probe does not relabel the install as absent.
-- Tmux remains a strict binary artifact. Every schema 1 manifest that passes
-  the versioned schema 1 structural and archive checks is read as the legacy
-  archive-verified contract, regardless of whether it came from the packaged
-  resource, `VIBE_TMUX_MANIFEST_PATH`, or `VIBE_TMUX_MANIFEST_URL`; its
-  corresponding released-layout metadata/pointer is re-admitted through the
-  existing runnable/version/platform-preparation checks. Canonical tmux writes
-  schema 2 and requires `binary_sha256`; source origin or payload identity never
-  upgrades schema 1 into the schema 2 contract. The source leaf digest is
-  verified immediately after extraction and before preparation. Preparation
-  may then change bytes (macOS
-  ad-hoc codesigning does); canonical metadata therefore records a distinct
-  post-preparation installed digest, and subsequent disk admission verifies
-  that digest plus runnable/version requirements. Neither digest may stand for
-  both phases.
-
-`ManagedRuntimeSpec` needs only declarative differences, not callbacks for every
-step. The named seams are:
-
-- configurable persisted provider id and metadata filename;
-- strict binary artifact versus archive-verified directory artifact;
-- optional internal-link extraction policy, defaulting to denied;
-- a staged-entrypoint verifier/command builder for directory artifacts;
-- manifest-extension validation and persisted extension metadata
-  (`minimum_node` for Show);
-- a read-only installed-artifact admission projection (Memory supplies its
-  compatibility probe and tmux supplies runnable/version admission), with an
-  opt-in, identity-keyed derived-admission cache for expensive deterministic
-  success results;
-- a confined, no-follow atomic writer for derived admission cache entries;
-- declarative host-to-artifact platform aliases used by manifest selection,
-  installed-state admission, resolution, and durable-claim normalization;
-- legacy install candidates and source-lineage admission;
-- staging-name patterns for preview and cleanup;
-- explicitly ordered staged-binary source-integrity, preparation, installed-byte
-  fingerprinting, and admission phases, using the existing
-  `_prepare_binary_for_manifest`, `_binary_matches_manifest`, and
-  `_binary_version` hooks without conflating their digests; and
-- result adapters that map shared reasons into Show and tmux payloads.
-
-The shared manager continues to expose binary paths to git, Memory, model-hub,
-and tmux. Show's adapter converts its verified entrypoint into
-`[...node_command, cli_path]`; the shared layer does not learn about Node,
-codesign, utf8proc, or terminfo.
+The validation boundary is intentionally finite. This document specifies the
+in-flight Step 1, records current behavior measured at named revisions, and
+defines only an intent and a gate for Steps 2-7. Their detailed contracts are
+written after the preceding step lands and its resulting code can be measured.
+Forecasts are planning history, not acceptance criteria.
 
 ## Per-Function Verdict And Drift Ledger
 
-Legend:
+This table is a non-normative audit census measured at `2c6fcbe88`. **Subset**
+means delete Show's copy and call shared code. **Superset** means adopt shared
+code and extend the named general seam. **Different** means a product
+requirement keeps a Show adapter while common mechanics move underneath it.
+Every one-sided behavior is classified as a deliberate Show requirement or a
+latent defect in the side that lacks it.
 
-- **Subset**: delete Show's implementation and call the shared implementation.
-- **Superset**: adopt the shared implementation and add the named general seam.
-- **Different**: a Show-owned wrapper/hook remains because of the stated product
-  requirement; common mechanics still move underneath it.
-- **Shared defect** and **Show defect** are latent defects in the side that lacks
-  the behavior. **Show requirement** is an intentional product difference.
+| Pair | Verdict | One-sided behavior and classification | Measured at |
+| --- | --- | --- | --- |
+| `status` | **Different:** shared installed snapshot plus Show projection. | **Show requirement:** policy/install/serving dimensions, Node, and provider dispatch. **Shared defect:** selected-manifest failure hides a persisted install and can pair selected version with disk state. **Show defect:** inspection failure can be projected as absence. | `2c6fcbe88` |
+| `probe_archive_reachability` | **Superset:** shared manifest probe plus Show provider/reason adapter. | **Show requirement:** direct archive, npm, and Show reason vocabulary. Shared already handles `file:` URLs. | `2c6fcbe88` |
+| `_clean_locked` | **Superset:** shared retention planner with legacy-layout and staging-pattern data. | **Show requirement:** released layouts and source lineages. **Shared defect:** no archive reclamation or post-install retention. **Show defect:** glob-based discovery can suppress inspection errors. | `2c6fcbe88` |
+| `_preview_busy_reason` | **Superset:** shared preview with typed contention/inspection result and staging patterns. | **Shared defect:** contention and an uninspectable/replaced guard share one reason. **Show defect:** absent-lock planning does not retain its process lock. | `2c6fcbe88` |
+| `_windows_preview_busy_reason` | **Superset:** shared Windows path-identity/reparse check. | **Shared defect:** weaker Windows identity check and collapsed failure reason. **Show requirement:** only staging names differ. | `2c6fcbe88` |
+| `_resolve_manifest_archive` | **Superset:** shared content-addressed cache plus offline/provenance result data. | **Shared defect:** archive-name caching grows without bound. **Show requirement:** provenance drives recovery reporting. **Show defect:** the cache fast path accepts any existing filesystem entry. | `2c6fcbe88` |
+| `_safe_extract_tar` / `safe_extract_tar` | **Superset:** shared composite-artifact extraction policy, defaulting to binary-strict. | **Show requirement:** released Unix bundles contain internal links. **Migration blocker:** shared safely rejects all links today; removing that restriction without link-target confinement would create a defect. **Shared defect:** its version gate skips an available backported data filter on supported Python patch releases. | `2c6fcbe88`; archives `v3.0.13` |
+| `_runtime_platform_tag` / `runtime_platform_tag` | **Subset.** | No behavioral difference. | `2c6fcbe88` |
+| `clean` | **Superset:** shared cleanup plus Show report adapter. | **Shared defect:** downloaded archives are omitted. **Show requirement:** CLI/Doctor payload. **Show defect:** part of real cleanup occurs before the install guard. | `2c6fcbe88` |
+| `_write_manifest_install_metadata` | **Different:** shared atomic persistence plus a Show legacy-shape adapter. | **Show requirement:** released directory-artifact metadata lacks binary fields and uses a Show filename/provider. **Show defect:** direct non-atomic write and no persisted Node prerequisite. | `2c6fcbe88` |
+| `_preview_lock_probe` | **Superset:** typed failure and reparse predicate in shared code. | **Shared defect:** special/uninspectable paths are mislabeled as contention. | `2c6fcbe88` |
+| `_preview_guard` | **Subset.** | **Show defect:** absent-descriptor planning loses process exclusion; shared retains it. | `2c6fcbe88` |
+| `_guard_path_matches_fd` | **Superset:** shared cross-platform exclusive-regular-file predicate. | **Shared defect:** Windows reparse attributes are absent from its identity check. | `2c6fcbe88` |
+| `_release_preview_guard` | **Subset.** | **Show defect:** the absent-descriptor branch has no retained process lock to release. | `2c6fcbe88` |
+| `_manifest_status_payload` | **Superset:** shared installed facts plus Show Node/platform projection. | **Show requirement:** Node compatibility and complete Show platform diagnostics. **Show defect:** released metadata cannot provide offline `minimum_node`. | `2c6fcbe88` |
+| `_manifest_install_dir` | **Superset:** shared platform-artifact identity plus legacy candidates. | **Shared defect:** whole-manifest digest changes reinstall unchanged host bytes. Show already uses platform-artifact identity. | `2c6fcbe88` |
+| `_archive_status_payload` | **Subset:** shared projection omits binary-only fields for directory artifacts. | No missing Show behavior; shared binary fields apply only to strict binaries. | `2c6fcbe88` |
+| `_preview_raced_busy` | **Superset:** shared race check with declarative staging patterns. | **Shared defect:** a new staging path is ignored when the lock path is absent or replaced. | `2c6fcbe88` |
+| `_downloaded_archive_matches` | **Subset.** | No semantic difference beyond helper and reason names. | `2c6fcbe88` |
+| `_preview_lock_missing` | **Subset.** | No semantic difference beyond the guard-path attribute name. | `2c6fcbe88` |
+| `_manifest_archive_for_platform` | **Subset.** | Shared also supports aliases; Show's released manifest uses host tags, so this is neither a Show requirement nor a defect. | `2c6fcbe88` |
+| `_file_sha256` / `file_sha256` | **Subset.** | No behavioral difference. | `2c6fcbe88` |
+| `_env_flag_enabled` / `env_flag_enabled` | **Subset:** use the shared truthy set. | **Show defect:** arbitrary non-false text enables policy; repository callers document `1`/`true`. | `2c6fcbe88` |
+| `_safe_path_part` / `safe_path_part` | **Subset:** shared sanitizer for new paths, metadata discovery for legacy paths. | **Show defect:** `.`/`..` survive and invalid characters use a weaker mapping. | `2c6fcbe88` |
 
-| Pair | Verdict and target seam | Behavior present on only one side |
-| --- | --- | --- |
-| `status` | **Different.** Keep a Show projection over a shared local `InstalledArtifactSnapshot`. Requirement: Show must report policy, install, and serving dimensions plus its Node prerequisite and non-manifest providers. | **Show requirement:** explicit-command/provider dispatch, Node fields, and the three-dimensional availability payload. **Shared defect:** shared status requires the selected manifest before it will resolve an install, and publishes the selected manifest version beside the installed boolean; git, Memory, and model-hub can therefore report a good persisted install as missing or pair it with an identity that is not on disk. **Show defect:** the manifest status branch may fetch a remote manifest and may raise; the dependencies API then fabricates `install.state=absent` (issue #1658), converting failed inspection into absence. |
-| `probe_archive_reachability` | **Superset.** Delegate manifest archive probing to shared code and retain a provider-dispatch wrapper for direct archive and npm. Reason translation belongs in the Show result adapter. | **Show requirement:** direct local archive/path probing and `runtime_*` reason vocabulary. The shared `probe_url` already handles `file:` correctly. No existing shared consumer needs Show's provider dispatch. |
-| `_clean_locked` | **Superset.** Shared cleanup gains an archive-retention planner and a legacy-candidate/source-lineage seam; Show supplies its released layouts and staging patterns as data. | **Show requirement:** released two-level and three-level install layouts, packaged-versus-custom manifest lineages, and `prebuilt-*`/`manifest-*` staging. **Shared defect:** it has no archive protection or reclamation and no post-install retention, so git, Memory, and model-hub accumulate versioned downloads and installs. **Show defect:** install-directory discovery still uses `Path.glob`/`is_dir`, which can suppress inspection errors that the shared `_rglob_install_metadata` deliberately preserves. |
-| `_preview_busy_reason` | **Superset.** Keep the shared in-process lock hold, add a typed `busy` versus `guard_unavailable` result, and accept staging patterns from the spec. | **Shared defect:** an uninspectable lock, an inode mismatch, and real contention all become `*_install_already_running`, so its three consumers publish the wrong cause. **Show defect:** when the lock path was absent, Show does not hold its in-process `RLock` through planning; it relies on a later race check and can inspect a tree while another local thread mutates it. |
-| `_windows_preview_busy_reason` | **Superset.** Move Show's Windows identity/reparse hardening and typed result into the shared preview guard; staging names remain declarative. | **Shared defect:** the shared side does not distinguish an unopenable/replaced guard from contention and does not use the Windows reparse-point test used by Show. **Show requirement:** only the concrete staging names differ. |
-| `_resolve_manifest_archive` | **Superset.** Shared resolution gains a content-addressed cache-key policy, per-call offline override, and source provenance in its result. | **Shared defect:** caching under `archive.name` and never reclaiming old names causes unbounded versioned archive growth in git, Memory, and model-hub. **Show requirement:** source provenance feeds Show's configured-versus-packaged recovery classification. **Show defect:** the cache fast path tests `exists()` rather than `is_file()`, so a directory or special entry at the digest path can escape the normal cache-miss path as an inspection exception. |
-| `_safe_extract_tar` / `safe_extract_tar` | **Superset.** Atomically replace the shared file/directory-only extractor with the explicit type whitelist, root-confined `name`/`linkname` validation, sequential archive-order extraction, capability-detected filter, and final-tree postcondition validator described above; retain link denial as the default spec policy. | **Show requirement:** released Darwin/Linux bundles contain 16 symlinks and one esbuild hard link; nine symlinks across the four v3.0.13 Unix archives precede their targets, while each hard link names an earlier regular member. A Show-enabled spec must therefore accept root-confined forward symlinks but keep prior-target hard links. **Shared migration blocker, not a current vulnerability:** shared currently rejects the first link and is safe because of that restriction. Removing the restriction without adding `linkname` validation in the same change would make the sole owner weaker than both Show and tmux. **Shared defect:** unlike Show, shared uses a Python 3.12 version gate and skips the available `data` filter on Python 3.10.12+ and 3.11.4+. Git, Memory, and model-hub keep link members denied by spec but currently miss that backported filter protection and the stable output-mode/ownership postcondition. |
-| `_runtime_platform_tag` / `runtime_platform_tag` | **Subset.** Delete the Show helper. | No behavioral difference; the bodies are identical apart from the name. |
-| `clean` | **Superset.** The shared method owns locking and cleanup; a thin Show wrapper maps the shared report to the existing CLI/Doctor archive payload. | **Shared defect:** shared cleanup omits downloaded archives entirely, so its three consumers have no archive counts, protection result, or reclamation outcome and their caches grow without bound. **Show requirement:** CLI and Doctor retain their existing Show-specific payload wording. **Show defect:** real cleanup deletes staging and version directories before `_clean_downloaded_archives` acquires the install guard, while shared cleanup holds its mutation lock around the whole real operation. |
-| `_write_manifest_install_metadata` | **Different.** Keep a Show metadata compatibility hook, but make the shared atomic writer persist its output and the selected `minimum_node`. Requirement: Show is a directory graph invoked through system Node and must continue reading released `.vibe-show-runtime.json` records whose provider is `manifest-cache` and which have no leaf-binary or Node-requirement fields. | **Show requirement:** legacy filename/provider/field shape and archive-only integrity. **Shared behavior:** `runtime_id`, `bin_path`, and `binary_sha256` support strict single binaries. **Show defect:** direct `Path.write_text` is not atomic, and omitting `minimum_node` makes offline Node compatibility unknowable; a torn or incomplete metadata write can turn a completed install into an uninspectable or compatibility-ambiguous one. |
-| `_preview_lock_probe` | **Superset.** Shared probe gains typed failure and the reparse-point predicate. | **Shared defect:** special/uninspectable guard paths are mislabeled as contention, and Windows reparse points are not tested explicitly. |
-| `_preview_guard` | **Subset.** Delete the Show context manager and use the shared one. | No behavior unique to Show. **Show defect:** when no descriptor exists, Show's guard does not retain the in-process lock through planning; the shared lifecycle does. This is the same root cause recorded for `_preview_busy_reason`, not a second finding. |
-| `_guard_path_matches_fd` | **Superset.** Use Show's cross-platform exclusive-regular-file predicate in shared code. | **Shared defect:** it checks POSIX symlink/regular/link-count fields but not Windows reparse attributes, so the three shared consumers have a weaker path-identity boundary on Windows. |
-| `_release_preview_guard` | **Subset.** Delete Show's release routine with its preview implementation. | No behavior unique to Show. **Show defect:** Show has no in-process lock to release on the absent-descriptor path because it failed to retain one; shared releases both resources. This is the release-side manifestation of the same preview-lifecycle defect. |
-| `_manifest_status_payload` | **Superset.** Shared status gets a persisted manifest-extension map; Show contributes `minimum_node` and available platforms. | **Show requirement:** Node compatibility and the complete Show platform set are user-visible diagnostic facts. **Show defect:** released metadata does not preserve `minimum_node`, so disk-only status cannot distinguish supported from unsupported Node. `source_url`, `loaded_from`, and `release_state` on the shared side belong to manifests that declare them and are not missing Show behavior. |
-| `_manifest_install_dir` | **Superset.** Change the shared default identity to runtime version + selected platform + selected archive SHA-256, and use a legacy-candidate seam to adopt old paths. | **Shared defect:** the whole-manifest digest makes an edit to another platform create a new install identity and force a download for git, Memory, and model-hub too. Show already has the correct platform-artifact identity and previous-fingerprint adoption. |
-| `_archive_status_payload` | **Subset.** Use the shared projection after making leaf-binary fields optional and omitted for directory artifacts. | Show has only the common archive fields. The shared `binary_sha256`/`bin_path` fields are valid for strict binary artifacts, not missing Show requirements. |
-| `_preview_raced_busy` | **Superset.** Shared race detection accepts staging patterns and checks them before trusting an absent lock path. | **Shared defect:** on a lockless/Windows or replaced-lock path, a fresh staging directory is evidence of a possible live install that its preview does not examine. |
-| `_downloaded_archive_matches` | **Subset.** Delete and use shared archive size/SHA verification, then translate its reason. | No semantic difference beyond helper names and reason prefixes. |
-| `_preview_lock_missing` | **Subset.** Delete and use shared. | No semantic difference beyond the guard-path attribute name. |
-| `_manifest_archive_for_platform` | **Subset.** Delete and use shared. | Shared additionally supports declared platform aliases. Show's release manifest enumerates exact host tags, so the missing alias fallback is not a product requirement or a defect. |
-| `_file_sha256` / `file_sha256` | **Subset.** Delete the Show helper. | No behavioral difference. |
-| `_env_flag_enabled` / `env_flag_enabled` | **Subset.** Standardize on the shared explicit truthy set. | **Show defect:** every value other than `0/false/no/off`, including typos, currently enables offline or install-skip behavior. Repository callers and install scripts document/use `1` or `true`; an unrecognized value must not silently change network or install policy. |
-| `_safe_path_part` / `safe_path_part` | **Subset.** Use shared for new paths; discover old Show paths by metadata rather than by reproducing the old sanitizer. | **Show defect:** `.` and `..` survive unchanged and invalid characters map to a different, weaker layout. Released manifests use safe commit/platform strings, while legacy custom paths must be adopted through the compatibility scanner. |
+### Shared-Layer Defects Exposed By Drift
 
-## Shared-Layer Bugs Exposed By The Drift
+These are the separately enumerated low-cost wins in the existing shared
+consumers. They are current-behavior findings, not issue filings. The rows are
+non-normative and measured at `2c6fcbe88`.
 
-These are live shared-layer defects, not Show migration prerequisites disguised
-as refactors. No issues should be filed until the owner chooses which to split
-out.
+| Defect in shared | Affected existing consumers | Measured consequence | Measured at |
+| --- | --- | --- | --- |
+| Manifest-gated installed state | git, Memory, model-hub | `status()` and `resolve_binary()` can forget an admitted disk install when no installable manifest is available. | `2c6fcbe88` |
+| Selected identity reported as installed identity | git, Memory, model-hub | Status can publish the manifest version beside disk-derived installed state. | `2c6fcbe88` |
+| Whole-manifest target identity | git, Memory, model-hub; claim consequence in model-hub | An unrelated platform edit changes the install directory; released model-hub claims can report `install_target_changed`. | `2c6fcbe88` |
+| Mutation lock follows/under-validates its path | git, Memory, model-hub | Shared locking lacks Show's no-follow, link-count, and post-open path-identity checks. | `2c6fcbe88` |
+| Preview collapses failure causes | git, Memory, model-hub | Special, replaced, or unreadable guard paths look like live contention; Windows reparse identity is weaker. | `2c6fcbe88` |
+| No downloaded-archive retention | git, Memory, model-hub | Versioned downloads accumulate indefinitely. | `2c6fcbe88` |
+| No post-success version retention | git, Memory, model-hub | `ensure()` never invokes existing version cleanup; Memory and model-hub have no equivalent user cleanup path. | `2c6fcbe88` |
+| Version-gated tar data filter | git, Memory, model-hub; also tmux | Shared and tmux skip the backported filter on Python 3.10.12+ and 3.11.4+; their existing whitelist/path checks still apply. | `2c6fcbe88` |
 
-1. **Manifest-dependent installed state (git, Memory, model-hub).**
-   `ManagedRuntimeManager.status()` calls `_load_manifest(allow_network=False)`
-   and only calls `resolve_binary()` when that selected manifest and archive are
-   available. A missing package manifest, unavailable remote-manifest cache, or
-   malformed override therefore publishes `installed=False` without inspecting
-   the persisted `current.json` install. Memory has its own active-pointer
-   resolver, but `super().status()` still gates its installed field on the
-   manifest.
-2. **Selected identity reported as installed identity (git, Memory, model-hub).**
-   Shared status publishes `version=manifest.runtime_version`; the dependency
-   row can pair that selected identity with disk state. The installed version
-   must come from admitted install metadata, with the selected version reported
-   separately as an update target.
-3. **Whole-manifest install and durable-claim identity (git, Memory,
-   model-hub).**
-   `_manifest_install_dir()` hashes `manifest.digest:archive.sha256`. Editing an
-   archive for any other platform changes the local path and causes a needless
-   reinstall even though this host's selected bytes are identical. Model-hub's
-   released
-   `install-state.json` schema versions 1 and 2 require an exact target containing
-   `manifest_sha256`, and recovery passes that target back as
-   `expected_target`. An unrelated-platform manifest edit can therefore turn a
-   valid in-flight claim into `install_target_changed` even when every selected
-   artifact field is unchanged.
-4. **Unsafe mutation-lock path (git, Memory, model-hub).**
-   `_acquire_mutation_lock()` delegates to `MigrationFileLock`, whose append
-   open follows a symlink and can truncate a hard-linked or replaced file. It
-   does not perform Show's no-follow, exclusive-regular-file, and post-lock
-   descriptor/path identity checks.
-5. **False contention diagnosis and weaker Windows preview (git, Memory,
-   model-hub).** Uninspectable/special/replaced lock paths are reported as an
-   active install, and Windows reparse attributes are not part of the shared
-   predicate. This hides state corruption or a permission problem behind retry
-   advice.
-6. **Unbounded downloaded-archive retention (git, Memory, model-hub).** The
-   shared cache uses versioned archive names and `clean()` never considers
-   `downloads/`. Each release with a new name leaves its verified archive
-   indefinitely.
-7. **No post-success version retention (git, Memory, model-hub).** Shared
-   `ensure()` never invokes its existing version cleanup. Git is reachable from
-   `vibe runtime clean`, but Memory and model-hub have no equivalent user path,
-   so old install directories have no automatic lifecycle owner.
-8. **Link-capable sole-owner extraction (Show migration blocker).** Shared
-   `safe_extract_tar()` rejects every non-file/non-directory member. That is
-   safe today, and its three current consumers need no links, but it makes four
-   of Show's six platform archives uninstallable. The latent defect is created
-   only if Step 3 removes that restriction without atomically adding confined
-   `linkname` validation and archive-order extraction. This is not an allegation
-   of a vulnerability in the current shared implementation.
-9. **Version-gated extraction filter (git, Memory, model-hub; also tmux).** On
-   Python 3.10.12+ and 3.11.4+, the runtime provides the PEP 706 `data` filter,
-   but shared tests `sys.version_info >= (3, 12)` and calls unfiltered
-   `extractall()` when that test is false. Its file/directory whitelist and path
-   checks still apply, so this is missed available protection rather than the
-   link-escape vulnerability described in item 8. Tmux repeats the same version
-   gate; Show already uses capability detection.
-
-Items 1-7 and 9 are live defects in git, Memory, and model-hub, except that the
-durable-claim consequence in item 3 is model-hub-only. Items 6 and 7 should land
-with one protected-set contract. Item 9 also affects tmux. Item 8 is a hard
-migration prerequisite whose relaxation and hardening must be one commit.
+Shared link rejection is not a present vulnerability: it is a Step 3 capability
+gap. Four of Show's six archives cannot use the shared extractor until link
+support and confinement arrive together.
 
 ## Uncounterparted Install Code
 
-This section keeps the supplied 1,621-line grouping so implementation can be
-scheduled against the original audit. Some groups split across destinations;
-the classification is by behavior, not by today's function boundary.
-“All five” below means git, Memory, model-hub, Show, and tmux. Tmux receives the
-capability only at the final migration step; that timing does not justify a
-second implementation.
+This non-normative census preserves the supplied **1,621-line** Show grouping.
+Rows were measured at `903414cc4` and revalidated for install-side changes at
+`2c6fcbe88`. Classification follows behavior, so mixed groups have more than
+one destination without double-counting their supplied line total.
 
-### Belongs In The Shared Layer
+| Supplied group | Lines | Classification and destination | Measured at |
+| --- | ---: | --- | --- |
+| Manifest handling | 421 | **Shared capability grows:** source/cache handling, platform-artifact identity, installed-state reading, persistence, and legacy adoption benefit all five. Show manifest duplicates become **dead** after cutover. Show retains only product projection. | `903414cc4`; revalidated `2c6fcbe88` |
+| Archive cache / cleanup / protection | 355 | **Shared capability grows:** content-addressed downloads, protected-set discovery, cleanup reporting, and post-install retention benefit all five. The expectation is confirmed; Show CLI/Doctor wording remains product-specific. | `903414cc4`; revalidated `2c6fcbe88` |
+| Install lock and concurrency guard | 221 | **Shared capability grows:** mutation/preview exclusion and safe path identity benefit all five. Duplicate Show guard code and the duplicate exception branch become **dead**. | `903414cc4`; revalidated `2c6fcbe88` |
+| Install orchestration | 195 | **Mixed:** shared manifest transaction benefits Show/tmux; Show-specific policy, providers, availability, and operation outcomes remain. Duplicate manifest orchestration becomes **dead**. | `903414cc4`; revalidated `2c6fcbe88` |
+| Archive handling | 120 | **Mixed:** shared extraction/materialization grows for Show/tmux; the unpinned direct-archive source remains Show-specific because it is an operator escape hatch outside manifest integrity. Duplicate primitives become **dead**. | `903414cc4`; revalidated `2c6fcbe88` |
+| GitHub provider | 104 | **Dead:** removed by the prerequisite lane; no compatibility path is retained. | `903414cc4`; assumed removed |
+| Status reporting | 89 | **Mixed:** shared disk-installed facts benefit all five; Show keeps policy/install/serving, provider, and Node projection. Duplicate filesystem inspection becomes **dead**. | `903414cc4`; revalidated `2c6fcbe88` |
+| Node version checking | 61 | **Show-specific:** Show executes a JavaScript directory artifact through system Node and enforces its runtime prerequisite. | `903414cc4`; revalidated `2c6fcbe88` |
+| npm provider | 37 | **Show-specific:** an explicit operator provider outside the pinned manifest transaction. | `903414cc4`; revalidated `2c6fcbe88` |
+| Other | 18 | **Shared/dead:** common redaction, errors, hashing, tagging, env parsing, and sanitizing already have shared owners; Show wrappers disappear. | `903414cc4`; revalidated `2c6fcbe88` |
 
-| Supplied group | Lines | Shared capability and beneficiaries |
-| --- | ---: | --- |
-| Manifest handling | 421 | Manifest source caching, composite-artifact parsing, platform-artifact identity, local installed-state snapshots, atomic metadata/current writes, and legacy-candidate adoption belong in shared code. Show supplies only extension data and legacy admission. **All five** gain the corrected identity and disk-only inspection; only Show uses the composite artifact hook. Duplicate Show loading, matching, verification, and pointer writing becomes dead after cutover. |
-| Archive cache / cleanup / protection | 355 | **Expectation confirmed, with one boundary correction.** Content-addressed storage, protected-set construction, error-preserving traversal, secure scan/unlink, abandoned-claim recovery, byte/count reporting, dry-run parity, and post-success pruning are generic. **All five** gain bounded archive storage. CLI/Doctor wording stays outside this layer; it is a Show consumer of the generic report. |
-| Install lock and concurrency guard | 221 | One re-entrant in-process/cross-process mutation guard, safe path opening, typed contention/unavailable results, read-only preview, and race detection belong in shared code. **All five** gain it. Show contributes staging patterns only. The duplicate second `except OSError` in `_install_guard_locked` is dead. |
-| Install orchestration | 195 | The manifest transaction and its target/result must be shared. The existing `expected_target` and `on_resolved` seams remain for model-hub claims. Show's admission policy and outcome publication do not move. **Show and tmux** gain deletion; git, Memory, and model-hub retain their existing call contract. |
-| Status reporting | 89 | A local `InstalledArtifactSnapshot` carrying admitted installed identity, selected identity, comparison state (`matches`, `differs`, `not_comparable`, `unknown`), path, admission projection, and inspection error belongs in shared code. Its opt-in derived-admission cache is shared state, not a Memory pointer extension. **All five** gain truthful status; Memory also avoids repeating its expensive released-shape probe across processes. Show and tmux keep product projections. |
-| Archive handling | 120 (partial) | Safe extraction, content-addressed materialization, and staged-install verification use shared primitives. **Show and tmux** gain reuse. The unpinned direct archive source itself remains Show-specific. |
-| Other | 18 (partial) | URL redaction, dependency-error construction, hashing, platform tagging, env parsing, and path sanitizing already exist in shared modules; Show wrappers are dead. |
+Tmux is a separately measured **699-line** outlier at `2c6fcbe88`; it was not
+part of the supplied 1,621-line Show grouping. It independently owns manifest,
+archive, extraction, transaction/persistence, guard, and status mechanics, but
+not retention. Its macOS preparation, runnable/compatibility checks, utf8proc,
+and terminfo behavior remain product concerns.
 
-### Genuinely Show-Specific
+## Measured Current-Behavior Census
 
-| Supplied group | Lines | Requirement |
-| --- | ---: | --- |
-| Install orchestration | 195 (partial) | Show has an automatic-versus-explicit policy, a forced-replacement operation outcome distinct from installed state, an explicit command, multiple providers, and a policy/install/serving availability model. The adapter owns those decisions and calls one shared manifest installer. |
-| Archive handling | 120 (partial) | `VIBE_SHOW_RUNTIME_ARCHIVE_PATH`/`_URL` is an operator escape hatch with no pinned manifest checksum. Turning unverified input into a normal shared manifest would weaken the shared install contract. Keep source selection in Show while reusing shared extraction/staging helpers after the bytes are acquired. |
-| Status reporting | 89 (partial) | Show projects the shared install snapshot together with Node availability and serving state. It must not make the shared manager understand sidecar health. |
-| Node version checking | 61 | The Show artifact is a Node dependency graph and the manifest declares `minimum_node`; git, Memory, and model-hub ship their own executable and must not inherit a system-Node prerequisite. |
-| npm provider | 37 | npm is a Show operator/source-ladder escape hatch. It remains outside the manifest installer and must converge only at Show's admission/result boundary. |
-| Manifest handling | 421 (small compatibility portion) | The released `.vibe-show-runtime.json` provider/name/field shape and configured manifest source-lineage rule are persisted Show contracts. They remain as declarative legacy admission in the adapter, not as a second loader or writer. |
-| Other | 18 (partial) | Show archive naming/default URL and reason-to-availability mapping remain local product data. |
+This section is non-normative. Each row is a falsifiable observation at its
+named revision, not a promise about a future implementation.
 
-### Dead After Preconditions
+| Current fact | Observation | Measured at |
+| --- | --- | --- |
+| Shared disk readers | `status()` loads a manifest first, and `resolve_binary()` returns `None` before disk resolution when the manifest is unavailable or not installable. | `2c6fcbe88` |
+| Released model-hub claims | `install-state.json` schemas 1 and 2 persist a target containing `manifest_sha256`; recovery compares that target. | `2c6fcbe88` |
+| Record discrimination | Shared, Show, and tmux metadata/current-pointer writers persist no `record_schema_version`, so an unversioned released shape cannot be distinguished from an incomplete future canonical record by field absence alone. | `2c6fcbe88` |
+| Memory development provider | `AVIBE_MEMORY_DEV_RUNTIME` selects a development interpreter before the managed manifest/install path. | `2c6fcbe88` |
+| Memory activation | Memory overrides pointer writing; with a live provider root it fails closed without the controller coordinator, which receives candidate, root state, commit, and rollback callbacks. | `2c6fcbe88`; rechecked on master 2026-08-23 |
+| Memory admission | Released active-pointer admission performs a runtime compatibility probe rather than relying only on shared binary metadata. | `2c6fcbe88` |
+| Unreadable manifest labels | A configured-local `read_bytes` `OSError` is `manifest_missing` in shared and invalid in Show; shared offline-cache read failure is `manifest_unavailable_offline`. | `2c6fcbe88` |
+| Show prerequisite identity | Show install matching compares runtime version, platform, and archive SHA-256, but not `minimum_node`; old metadata continues to supply the old prerequisite after a prerequisite-only manifest edit. | `2c6fcbe88` |
+| Tmux schema 1 admission | `_verified_manifest_binary` checks metadata and `_tmux_binary_runnable`; the runnable check accepts any non-empty `tmux -V` result and does not compare it with manifest `tmux_version`. | `2c6fcbe88` |
+| Tmux byte phases | Source-leaf verification occurs before preparation; macOS ad-hoc signing can change the installed binary bytes afterward. | `2c6fcbe88` |
+| Downloads namespace | Remote manifest caches use `downloads/manifest-<digest>.json`; archive cleanup must distinguish these facts from disposable archive bytes. | `2c6fcbe88` |
+| Inspection versus absence | Shared versions-directory preview preserves traversal errors instead of treating them as proof of no install; Show status can still collapse a raised inspection into absent at its consumer boundary. | `2c6fcbe88` |
+| Released Show links | Each v3.0.13 Darwin/Linux archive has 16 symlinks and one esbuild hard link; the four Unix archives have nine forward symlinks total, prior-target hard links, and no finally dangling symlink. Windows archives have no links. | `v3.0.13` manifests and archives; measured 2026-08-23 |
+| Extractor behavior | Shared rejects the first link member. Show and tmux accept the benign regular/symlink/hard-link probe and reject an escaping `linkname`. | `2c6fcbe88`; hermetic probe 2026-08-23 |
+| Filter capability | The project supports Python 3.10+. Show capability-detects `filter="data"`; shared and tmux use a Python 3.12 version gate even though the filter is backported to 3.10.12 and 3.11.4. | `2c6fcbe88`; Python docs checked 2026-08-23 |
 
-| Supplied group | Lines | Deletion condition |
-| --- | ---: | --- |
-| GitHub provider | 104 | Assumed removed before this migration. No target seam or compatibility path is designed for it. |
-| Manifest handling | 421 (duplicate portion) | Delete Show manifest acquisition/parsing, archive selection, current-pointer writing, install matching, and current-manifest verification after shared composite artifacts and dual-read legacy admission pass. |
-| Install lock and concurrency guard | 221 (duplicate portion) | Delete the Show `RLock` depth, preview implementation, and file-lock implementation after every real mutation and dry-run routes through the shared guard. |
-| Install orchestration | 195 (duplicate portion) | Delete the Show manifest install transaction and manifest branch plumbing after the adapter consumes the shared result. |
-| Archive cache / cleanup / protection | 355 (duplicate portion) | Delete the Show implementation after the generic report is projected unchanged by CLI and Doctor tests. |
-| Other | 18 (duplicate portion) | Delete exact utility wrappers as soon as imports use their shared owners. |
+## Step 1 Normative Contract: Disk Truth
 
-The archive-cache verdict is therefore stronger than “copy the 355 lines into
-the base class.” The capability is shared, but its current implementation must
-be folded into the shared traversal, mutation guard, metadata schema, and reason
-vocabulary. Keeping the block intact as a Show mixin would create a third owner.
+Step 1 moves installed-state truth from the selected manifest to records and
+artifacts already on disk for git, Memory, and model-hub. Public status,
+resolvers, and reuse decisions derive installed identity from that disk state;
+manifest acquisition describes a candidate operation and its failure remains a
+separate diagnostic. Released model-hub claim targets remain readable after
+platform-artifact identity replaces whole-manifest identity.
 
-### Tmux Addendum
+Canonical install metadata and current pointers **must persist
+`record_schema_version`**. Canonical versioned records are invalid when a field
+defined by their schema is absent. Every unversioned released record is read as
+legacy, and field absence alone cannot retroactively make that released shape
+invalid. New writes use only the canonical versioned form. Released model-hub
+claim schemas 1 and 2 are dual-read and normalized for comparison; a new claim
+shape uses a new claim schema version.
 
-Tmux is outside the supplied 1,621-line grouping, so its separate measurement
-must not be blended into those buckets. Its 699 lines contain 38 functions / 568
-function-span lines. Twenty-three common installer functions account for 451
-lines and belong in the shared layer. Eight tmux product helpers account for 92
-lines: macOS quarantine/codesign preparation and runnable/exact-version
-admission are genuine tmux requirements. Three released-layout helpers account
-for 17 lines and become declarative compatibility data; four public wrappers
-account for 8 lines and remain. The remaining 131 non-function lines are imports,
-constants, dataclasses, and class structure, most of which disappear with the
-duplicate `TmuxArchive`/`TmuxManifest` model. The duplicate transaction,
-manifest loader, archive cache, extractor, metadata/current writers, hashing,
-platform mapping, env parsing, and payload helpers are dead after Step 7.
+`AVIBE_MEMORY_DEV_RUNTIME` remains a Memory-owned branch selected before any
+managed manifest, metadata, pointer, or claim access. Step 1 adds one shared
+pointer-commit transaction seam, not a general callback framework. The Memory
+adapter retains its controller coordinator and supplies activation commit and
+rollback through that seam. When a live root requires coordination and the
+coordinator is unavailable, pointer activation fails closed.
 
-## Persisted-Fact Census
+This step does not introduce a generic admission lattice, persisted extension
+map, shared Memory extension hook, canonical-platform helper, derived cache, or
+three general transaction hooks. Runtime-specific compatibility continues
+through the smallest existing adapter boundary until measured implementation
+evidence justifies a shared concept.
 
-Step 1 is a source-of-truth migration, not a `status()` refactor. Every fact
-that a manifest or install-time probe previously supplied to a disk reader must
-either be persisted at install time or have an explicit `unknown`/`error`
-projection with a safe default. No reader may reconstruct an installed fact
-from the currently selected manifest. This table is the normative completeness
-check for the migration.
+**Stop point:** git, Memory, and model-hub read installed identity from disk and
+retain their public projections. Show and tmux production paths are unchanged.
 
-Every predicate in the table is schema-aware and keeps these distinctions:
+**Acceptance:** released fixtures cover manifest unavailable, unrelated-platform
+manifest edits, released model-hub claims, unversioned metadata/pointers, and
+canonical versioned records. For an admitted disk install, shared status and
+Git/model-hub resolvers remain usable without a manifest, and reuse does not
+download or rewrite installed state. Canonical writes contain
+`record_schema_version`; an unversioned released record follows legacy reading,
+while a versioned canonical record missing a schema field is invalid. The
+Memory development fixture resolves and reports `changed=false` with zero
+managed-state access. Memory activation covers all three coordinator outcomes:
+successful commit publishes the candidate pointer; an activation failure runs
+rollback and leaves the prior pointer; coordinator absence with a live root
+publishes no candidate.
 
-1. a successfully inspected, evidence-free runtime is **absent**; missing data
-   inside a present or uninspectable state is **unknown/error**;
-2. a source not inspected, not reached, missing, reached-but-invalid, or valid
-   but without a host artifact has a different reason and mutation policy;
-3. canonical writes persist their required fields, while a released shape may
-   use a safe value that its versioned spec already declares;
-4. artifact and host platform labels compare through the same declarative alias
-   map rather than by literal equality; and
-5. admission not attempted, attempted and rejected, and attempted but errored
-   are distinct from admitted; and
-6. inspection never rewrites installed state, but may write a best-effort
-   derived cache outside the artifact, metadata, pointer, and downloads trees;
-   a write failure changes neither the observed result nor runtime health.
+**Breakage boundary:** any regression in git, Memory, or model-hub offline
+resolution blocks the step. Losing a released model-hub claim, rejecting an
+unversioned released record for a newly canonical field, bypassing Memory's
+coordinator, or exposing a candidate after rollback also blocks it. Show and
+tmux have no behavior change in this step.
 
-| Fact needed by a disk reader | Authority today | Persistence contract: today -> target | Missing or invalid meaning | Acceptance scenarios |
-| --- | --- | --- | --- | --- |
-| Provider and runtime ownership (`provider`, `runtime_id`) | spec + manifest branch | Shared metadata/pointer have both; released Show/tmux provider/layout contracts can safely derive their runtime id -> canonical metadata/pointer write both | A fully empty tree is absent. A present unknown shape is foreign/corrupt; do not resolve or delete it | C1, C8, C9, C15, C23, C27 |
-| Installed artifact identity (`runtime_version`, artifact `platform`, `archive_sha256`) | selected manifest; current path also includes whole-manifest digest | Fields exist in the wrong shared identity -> canonical metadata/pointer persist this artifact tuple; the artifact platform remains its manifest label and host admission uses spec aliases | Identity unknown/error; never substitute selected identity. An alias-equivalent label is admitted; a label outside the mapping is not | C1-C9, C14-C15, C27 |
-| Install location and entrypoint (`install_dir`, `bin_path` or Show CLI path) | pointer + selected archive/default | Shared/tmux pointers persist it and Show is implicit -> canonical pointer persists the resolved verifier/entrypoint; any accepted manifest may safely derive an omitted `bin_path` from its spec default | An unsafe or unresolvable path is invalid. Field omission alone is not invalid when the versioned spec supplies a safe default; manifest unavailability is unrelated | C1-C2, C7-C10, C15, C17, C19-C20, C27 |
-| Source leaf integrity (`binary_sha256`) | selected archive + extracted bytes | One digest currently spans source and installed bytes -> strict canonical manifests persist the declared source digest and verify it before any preparation | Missing is allowed only for an explicitly versioned released legacy shape. A mismatch is source corruption and preparation must not run | C1, C15, C23 |
-| Installed-byte integrity (`installed_binary_sha256`) or archive-verified directory integrity mode | post-preparation staged artifact | Mixed/implicit today -> canonical metadata persists the post-preparation digest or explicit directory/legacy mode separately from the source leaf digest | Unknown installed integrity is not strict verification. Show uses its directory verifier; released tmux uses archive + runnable/version admission | C1, C8-C10, C15, C23, C27 |
-| Installed admission outcome/revision (manifest installability, platform preparation, runnable/version probe) | install transaction + runtime hook | Usually implicit; Memory alone is explicit -> canonical metadata/pointer persist a versioned admission result; a successful released-shape re-admission may persist only a separate identity-keyed derived cache | Not attempted is `unknown`; a false result is `rejected`; an exception is `error`. None is ready or persistently cached as admitted | C1-C2, C7-C8, C11, C15, C21-C23, C27 |
-| Whole-manifest digest and source lineage | manifest + install metadata | Present today -> retained only as legacy locator/provenance, outside artifact identity | Legacy locator/provenance only, never installed identity; missing lineage makes source comparison unknown | C4, C9-C10, C14-C15 |
-| Selected/update facts (selected version/artifact, archive catalog, `release_state`, source URLs) | current or cached manifest | Remote cache only -> remain selected facts and are never copied into installed identity | Configured offline is `not_attempted_offline`; a failed fetch is `manifest_unavailable`; missing source is `manifest_missing`; invalid reached bytes are `manifest_invalid`; no host artifact is `platform_unsupported`. Installed/admitted state is unchanged | C2-C6, C16-C17, C19-C20 |
-| Show `minimum_node` | manifest | **Absent** in released metadata -> required in new Show install metadata | A released omission is unknown and not satisfied; a canonical omission is invalid. Serving is withheld unless the released shape's bounded probe succeeds | C2, C10 |
-| Memory development-provider selection (`provider=development`, interpreter identity and compatibility projection) | `AVIBE_MEMORY_DEV_RUNTIME` + direct interpreter probe | Intentionally not persisted in managed state -> remains a Memory adapter result selected before the shared snapshot | Missing env means use the managed provider; configured but unusable means a development-provider error, never fallback through or mutate managed state | C18 |
-| Memory immutable build contract (`release_state`, EverOS/Python versions, lock digest/id, uv version) | manifest validation | Only runtime version/admission outcome today -> new Memory metadata persists the validated extension or a revision that names it | A version-permitted released omission is unknown; a present malformed field is error. Either needs explicit read-only re-admission or repair before that capability is ready | C11-C12, C25 |
-| Memory admission revision/result | live compatibility probe in `status()` | New pointer yes, released pointer may omit -> canonical pointer persists it at install; successful released-shape probes write only a best-effort cache under `<runtime_dir>/derived/admission/`, keyed by verified artifact identity + revision and consulted only after cheap artifact verification | Not attempted, rejected, and inspection error remain distinct and are never admitted/ready or durably cached. Cache write failure keeps a successful projection and falls back to process-wide memory | C2, C11, C21-C22 |
-| Derived admission-cache entry (artifact identity, admission revision, successful result) | successful read-only re-admission | Absent today -> shared confined atomic writer under `<runtime_dir>/derived/admission/`; never installed state | Missing/stale/unreadable/unsafe is a cache miss, not failed admission. A write-path redirect or failure leaves external and installed bytes unchanged and falls back to memory | C11, C21-C22, C24 |
-| Memory provider-root compatibility (`provider_root_format`, compatible formats, artifact fingerprint) | manifest-derived candidate | Current pointer yes, older shapes may omit -> canonical pointer requires all applicable fields | Version-permitted omission makes the capability unknown; malformed content is error. Neither invents a compatible format or relabels the binary absent | C11-C12, C25 |
-| Memory sync contract (revision, argv, bootstrap/scrubber digests) | manifest extension | Current pointer yes when declared -> canonical pointer persists the complete declared contract | Version-permitted omission makes sync unavailable, not the artifact absent; malformed content is admission error for sync | C11-C12, C25 |
-| Tmux schema and preparation/admission facts (required utf8proc/terminfo contract, runnable exact version, macOS preparation result) | manifest + install-time/live probes | Schema 1 omits the leaf digest -> every structurally valid schema 1 input stays archive-verified legacy; canonical writes schema 2 with source and installed-byte digests plus requirements and admission revision | Unknown requirement/admission is not ready. The parsed schema version, not source route or payload identity, selects legacy versus canonical integrity | C2, C7, C15, C23 |
-| Model Hub durable claim target | selected manifest target | Schema 1/2 persist five fields including `manifest_sha256` -> new schema persists normalized platform-artifact target; platform labels normalize through the same spec alias map used for selection/admission | Dual-read and compare normalized platform-artifact identity; invalid or genuinely incompatible targets are explicit claim errors | C4, C9, C14 |
-| Model Hub durable operation state (`state`, generation, error, reason) | `install-state.json` | Schema 1/2 persist it -> dual-read separately from installed snapshot | A released `not_installed` record is stale when an admitted disk artifact exists; it cannot override installed truth | C2, C13-C14 |
-| Remote manifest cache (`downloads/manifest-<url-digest>.json`) | successful remote fetch | Present beside archives -> remains a typed durable cache entry | Missing under configured offline mode means selected facts were not attempted; present-but-invalid bytes are `manifest_invalid`, not a cache miss. Retention preserves either for diagnosis until explicit repair replaces it | C3, C16-C17, C19 |
-| Archive ownership/protection (verified digest, released `archive_name` alias, current/rollback references, unknown names) | archive metadata + pointer traversal | Archive bytes/references exist -> canonical report classifies only recognized archive entries; derived admission state lives outside `downloads/` | Unprovable ownership/protection means retain. Unknown non-archive names and derived state are never archive candidates | C8-C10, C15-C16, C27 |
-
-### Normative Predicate Census
-
-The review-loop breaker requires more than fixing reviewed examples. This table
-records the full scan of every fact row, scenario row, contract boundary, and
-stop point along two axes: evidence states with different permitted actions may
-not collapse, and an obligation must terminate in a property measured on our
-persisted state, return value, side effects, or final filesystem tree. Source
-paths, payload identities, interpreter versions, and fixture member orders are
-coverage inputs only. Sharing a row is allowed only when both the evidence and
-every measured postcondition are the same. “Scan” identifies distinctions found
-by that full pass rather than by the findings on `255fb3c35` or `b03dfcc41`.
-
-| Predicate location | States that must not collapse | Stable measured postcondition | Source |
-| --- | --- | --- | --- |
-| Install-tree presence / C8 | Proven empty vs present-but-partial or uninspectable | Empty permits first install; partial is unknown/error, deletes nothing, and repairs only with a valid target under the guard | Already distinct |
-| Installed and selected identity / C1, C4-C5, and C9 | Admitted bytes on disk vs artifact currently selected for installation | Snapshot identity round-trips from pointer/metadata without manifest access; selected identity occupies a separate field; `matches` is computed only from normalized platform-artifact tuples. Editing another platform changes neither installed identity nor path | Scan |
-| Manifest acquisition / C2 and C17 | Source not reached vs reached bytes invalid | Both preserve disk-local status/resolution. A transient fetch failure keeps the admitted runtime operational and reports the fetch error; invalid bytes make `ensure()`/repair fail `manifest_invalid`, never successful reuse | `255fb3c35` F3 |
-| Manifest acquisition / C19 and C2 | Network deliberately not attempted vs attempted and failed | Configured offline performs zero network access and reports `not_attempted_offline`; an attempted fetch retains its `manifest_unavailable` error. Neither manufactures selected facts | Scan |
-| Manifest selection / C20 and C6 | Manifest source missing vs valid manifest with no host artifact | `ensure()`/repair returns `manifest_missing` for the first and `platform_unsupported` for the second; disk-local status/resolution and retention remain available | Scan |
-| Durable claim target / C4, C9, and C14 | Persisted platform-artifact target vs manifest locator/provenance | Each released claim fixture normalizes to the artifact tuple; changing only whole-manifest digest leaves comparison equal, while changing a tuple field does not. Claim read/write round-trips its own schema independently of installed metadata | Scan |
-| Admission / C11, C21, and C22 | Validation not attempted vs attempted rejection vs attempted inspection error | Project `unknown`, `rejected`, and `error` respectively. None is ready or persistently cached as admitted; only a successful probe may populate derived cache | Scan |
-| Tmux manifest version / C15 and C23 | Versioned schema 1 legacy contract vs schema 2 canonical contract | Every parsed, structurally valid schema 1 input projects archive-verified legacy integrity, independent of package/path/URL origin or payload identity. Canonical output always declares schema 2 and both digests; no inspection rewrites legacy state | `b03dfcc41` F1 |
-| Tmux binary integrity / C23 | Pre-preparation source bytes vs post-preparation installed bytes | Verify the manifest leaf digest before preparation; after real byte-changing codesign, persist and verify a separate installed digest. One digest cannot prove both phases | `255fb3c35` F2 |
-| Required fields / C10, C12, and C15 | Omission permitted by a released version vs omission from canonical state | Project the released shape's named unknown/legacy mode without rewriting it; reject a canonical omission. Schema identity, not field absence alone, selects the rule | Scan |
-| Released and canonical persistence / C9-C12 and C15 | Compatible released read vs canonical write | Inspection byte-compares every released pointer/metadata fixture before and after. Explicit mutation writes the canonical schema selected by the writer; neither source route nor payload fingerprint changes the read contract or triggers an inspection migration | Scan |
-| Memory provider selection / C18 | Development override configured vs managed provider selected | Test the override before snapshot construction. The development branch touches no manifest or managed state; an unusable override reports its own provider error and does not fall through | `255fb3c35` F5 |
-| Entrypoint resolution / C1 and Step 3 | Field omitted with a safe declarative default vs explicit/default path unsafe | Persist the safely derived path in canonical state; reject an escaping or unresolvable path. Literal presence is not the safety predicate | Scan |
-| Artifact policy / Step 3 and C27 | Strict binary artifact vs verified directory graph | A strict spec commits one safe regular executable whose source/installed digests pass; a directory spec commits only a root-confined tree whose declared verifier returns its entrypoint. Link-shaped input never changes a strict spec into a directory spec | Scan |
-| Show Node admission / C10 | Persisted requirement known vs released omission | Canonical installs compare the probed Node version to persisted `minimum_node`; a released omission remains `unknown` and reaches serving-ready only when the bounded runtime probe succeeds. Neither result relabels artifact presence | Scan |
-| Platform admission / C7 | Literal mismatch but alias-equivalent vs genuinely incompatible | Normalize with the one spec map across selection, disk admission, resolver, and claim; reject only the incompatible control | Already distinct |
-| Model Hub operation state / C13 and C14 | Stale terminal failure vs active installing claim vs admitted disk truth | Disk truth stays operational; a stale failure cannot hide it; only an active normalized same-target claim resumes | Scan |
-| Remote manifest cache / C16-C17 and C19 | Cache absent vs cache present but invalid vs recognized valid cache | Absence under configured offline is `not_attempted_offline`; invalid content is `manifest_invalid`; valid content supplies selected facts. Retention preserves the typed entry | Scan |
-| Downloads retention / C16 | Verified unprotected archive vs protected archive vs manifest cache vs unknown name | Delete only the first. Protection uncertainty, non-archive ownership, or unknown type always retains the entry | Already distinct |
-| Preview/mutation guard / Step 2 | Real contention vs guard path unavailable/unsafe/raced | Return typed `busy` and `guard_unavailable` outcomes; neither is flattened to “already running,” and preview never creates the guard | Scan |
-| Automatic cleanup / Step 4 | Protection inspection failure vs candidate deletion failure vs successful install | Both maintenance failures leave the committed install/claim successful and have distinct reports; inspection uncertainty deletes nothing | Scan |
-| Derived-cache write / C24 | Installed-state mutation vs derived best-effort cache write; confined path vs redirected path | Derived write uses the shared no-follow confined writer without the mutation guard. A symlink/reparse/hard-link/race leaves the external target unchanged and degrades to memory | `255fb3c35` F4 |
-| Tar extraction capability / Step 3 | Filter keyword unavailable vs extraction rejected | Capability absence alone enters the guarded fallback; an archive rejection is never reinterpreted as absence. Both paths are judged by the same final-tree facts: confinement, allowed types, current-user ownership, and sanitized POSIX modes, not by matching an input accept/reject list | `b03dfcc41` F2 |
-| Tar link materialization / C27 and Step 3 | Symlink target not yet present or dangling vs hard-link target absent | A confined symlink may be materialized and is accepted only if the final no-follow tree walk proves its normalized target stays inside the root. A hard link is created only to an already materialized regular inode. No later member write or final link chain escapes the root | `b03dfcc41` F3, measured at v3.0.13 |
-
-### Released-Fixture Scenario Matrix
-
-The matrix is fixture-driven rather than function-driven. Run every applicable
-row for the canonical shape and every shipped layout/schema for git, Memory,
-model-hub, Show, and tmux. The dimensions are explicit: disk shape, manifest
-mode (same, edited, cache-only, configured offline, fetch failed, missing,
-invalid, or platform-unsupported), and host-platform relation
-(same after alias normalization, selected unsupported, or genuinely incompatible
-disk artifact). Each applicable row runs explicit and safe spec-derived
-entrypoints. C8 runs separate clean-empty and partial-state fixtures even though
-they share one fact row. “N/A” requires a product reason; adding a new persisted
-fact requires a census row and at least one matrix row in the same change.
-
-| ID | Disk fixture | Manifest / platform | `status` result | Resolver result | `ensure` result | Model Hub claim result | Retention result |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| C1 | Canonical admitted install | Same selected artifact / host admitted after alias normalization | Installed identity from disk; selected matches | Same admitted path, including a safe spec-derived default | Reuse, `changed=false`, no download | No stale failure | Protect current + rollback |
-| C2 | Canonical admitted install | Network fetch attempted and failed / host admitted after alias normalization | Installed remains true; selected facts unavailable with fetch error | Same admitted path | Reuse disk, `changed=false`, while preserving `manifest_unavailable` in the selected/update error channel; no installed-state write | Existing admitted artifact is not hidden by failure state | Protect from disk facts |
-| C3 | Canonical install + valid remote manifest cache | Configured offline / same host | Installed from disk; selected facts from cache | Same admitted path | Reuse via cache, zero network access | Target comparison uses normalized cached target | Preserve manifest cache |
-| C4 | Canonical install | Only another platform entry edited / same host | Installed and selected identities match | Same path | While edited manifest is online, reuse same path/archive with no download; only then run C2 | Legacy target differing only by manifest digest resumes | No protection change |
-| C5 | Canonical install | This host's selected artifact edited / same host | Installed old identity; selected differs | Old admitted path remains operational | Install selected new identity; commit pointer atomically | New canonical target; old target does not resume as same | Protect old as rollback + new current |
-| C6 | Canonical install | Manifest has no artifact after host-to-artifact alias resolution / same host | Installed disk fact remains; selected is unsupported | Existing admitted path remains operational | Preserve existing install and report selected-platform failure separately | No target is manufactured | Protect existing |
-| C7 | Disk artifact whose platform label is either alias-equivalent or genuinely incompatible | Any manifest mode / current host | Alias-equivalent control is admitted as C2; genuinely incompatible artifact is present but rejected | Admitted path for alias-equivalent control; `None` with mismatch evidence otherwise | Reuse alias-equivalent artifact; install only a valid host target for a genuine mismatch | Target uses normalized artifact label; genuinely incompatible target does not match | Foreign artifact retained until safely classified |
-| C8 | **Empty:** successfully inspected tree with no pointer, metadata, versions, or install evidence. **Partial:** any present malformed, unreadable, escaping, or incomplete pointer/metadata state | Available or unavailable / any host | Empty is `absent`; partial is `unknown` or `error`, never absent | `None` for both | Empty may perform a first install under the mutation guard; partial repairs only under that guard with a valid selected target | Empty may start a claim after target resolution; partial starts none before repair/target resolution | Empty protects nothing; partial deletes nothing whose protection is uninspectable |
-| C9 | Released shared whole-manifest-digest directory | Other platform edited, then cache-only/unavailable / same host | Adopt installed platform identity without write | Released path | Online edited manifest reuses without download; offline reuses disk | Schema 1/2 target normalizes without `install_target_changed` | Protect released layout/archive |
-| C10 | Released Show metadata/layout without `minimum_node` | Unavailable / same host | Installed; Node compatibility unknown, not satisfied | Artifact entrypoint exists; serving command gated by bounded probe | No inspection write/download; explicit install may persist a known requirement | N/A | Protect released layout/archive |
-| C11 | Released Memory pointer without admission revision | Probe supported and succeeds / same host | Admitted projection; best-effort cache by verified identity | Path; fresh managers/processes reuse a durable success cache | Reuse; explicit mutation may persist canonical fields, but inspection never changes the released pointer | N/A | Protect regardless of cache-write failure; pointer and artifact bytes remain identical |
-| C12 | Released Memory pointer with version-permitted omitted immutable-build, provider-root, or sync fields | Any manifest mode / same host | Artifact and each omitted capability reported separately; no invented contract or compatibility | Binary only if core admission passes; omitted capability withheld | Explicit mutation may canonicalize from a valid manifest | N/A | Protect released artifact |
-| C13 | Admitted Model Hub install + released `state=not_installed` | Any manifest mode / same host | Installed truth wins; persisted failure is projected stale | Engine path | Reuse install; no unnecessary claim/download | Stale failure neither hides runtime nor becomes active claim; inspection does not rewrite it | Protect engine/archive |
-| C14 | Released Model Hub `installing` claim schema 1/2 | Manifest differs only outside host artifact / host admitted through literal or aliased label | Installing/admitted facts remain distinct | Disk path if already admitted | Resume only normalized same target | Resume without target-changed; malformed or genuinely incompatible target fails explicitly | Protect claimed/current bytes |
-| C15 | Structurally valid tmux schema 1 manifest plus released-layout metadata/pointer without `binary_sha256`; exercise package, configured path, and configured URL sources | Cache-only/unavailable / same host | Installed with explicit archive-verified legacy integrity | Path only after runnable/exact-version admission | Reuse without download; inspection never upgrades metadata; equivalent schema 1 payloads have identical results across source routes | N/A | Protect legacy tmux archive/install |
-| C16 | Manifest cache + verified/stale archives + unknown download names | Configured offline / same host | Cache remains usable for selected facts | Existing admitted path | Offline reuse/repair can read cache | Claim behavior unchanged | Delete only typed, unprotected archive candidates; preserve `manifest-*` and every unknown non-archive entry |
-| C17 | Canonical admitted install + manifest bytes that parse or validate incorrectly | Reached invalid manifest / same host | Installed remains true; selected facts carry `manifest_invalid` | Same admitted path | Fail `manifest_invalid`; no successful reuse, repair, download, or installed-state write | Existing admitted artifact remains visible; no target is manufactured | Protect from disk facts |
-| C18 | `AVIBE_MEMORY_DEV_RUNTIME` points to a usable development interpreter; managed tree contains a poison fixture | No manifest mode applies / compatible host | `provider=development`, ready | Development interpreter path | Success, `changed=false`, including `force=true` | N/A | Zero manifest, metadata, pointer, claim, derived-cache, or retention access |
-| C19 | Canonical admitted install + no manifest cache | Configured offline / same host | Installed remains true; selected facts are `not_attempted_offline` | Same admitted path | Reuse disk, `changed=false`, zero network and installed-state writes | Existing admitted artifact remains visible; target comparison is not attempted | Protect from disk facts |
-| C20 | Canonical admitted install + absent configured/packaged manifest source | Source missing / same host | Installed remains true; selected facts carry `manifest_missing` | Same admitted path | Fail `manifest_missing`; no target or successful repair is invented | Existing admitted artifact remains visible; no claim starts | Protect from disk facts |
-| C21 | Released Memory pointer without admission revision | Probe supported and returns rejection / same host | Installed artifact present; admission `rejected`, not ready | `None` with rejection evidence | Explicit mutation may repair from a valid manifest; inspection does not write/cache | N/A | Protect released artifact; derived success cache absent |
-| C22 | Released Memory pointer without admission revision | Admission projection cannot be attempted / same host | Installed artifact present; admission `unknown`, not ready | `None` with not-attempted evidence | Explicit mutation may repair from a valid manifest; inspection does not write/cache | N/A | Protect released artifact; derived success cache absent |
-| C23 | Canonical tmux schema 2 manifest | Source leaf digest valid; macOS signing fixture really changes bytes / same host | Installed only after post-preparation digest and runnable/version admission | Prepared tmux path | Verify source digest, mutate bytes, persist distinct installed digest, admit; source mismatch runs no preparation | N/A | Protect schema 2 archive/install and both integrity facts |
-| C24 | Released Memory artifact that passes re-admission + derived-cache parent/target symlink, hard-link, reparse, or identity-race fixture | Any manifest mode / same host | Successful projection survives cache-write rejection via process memory | Same admitted path | Reuse without installed-state mutation | N/A | External redirect target, pointer, metadata, and artifact tree remain byte-for-byte unchanged |
-| C25 | Released Memory pointer with a present malformed immutable-build, provider-root, or sync field | Any manifest mode / same host | Core artifact stays separately inspectable; malformed capability is `error`, not version-permitted omission | Binary only if independent core admission passes; malformed capability withheld | Explicit repair requires a valid manifest; no inspection canonicalization | N/A | Protect released artifact and preserve malformed evidence |
-| C26 | Released Memory pointer without admission revision | Probe starts and raises/times out / same host | Installed artifact present; admission `error`, not ready | `None` with inspection error | Explicit mutation may repair from a valid manifest; inspection does not write/cache | N/A | Protect released artifact; derived success cache absent |
-| C27 | Manifest-verified Show v3.0.13 Unix archive with forward symlinks, a symlink chain, and the esbuild hard link | Available or verified cache / matching host | Directory artifact admitted only after final-tree validation | CLI path resolves through the in-root package symlink | Sequential extraction succeeds; hard-link target is executable; every final path/link target is confined and every POSIX ownership/mode postcondition holds | N/A | Protect verified archive/install; no external path changed |
-
-## Migration Sequence And Stop Points
-
-Every step is independently shippable. Do not begin the next step until the
-acceptance property for the current step holds.
-
-### Step 1: Make The Shared Disk-Fact Snapshot Truthful
-
-Change the shared platform-artifact identity, add dual-read adoption for its old
-manifest-digest directories, and introduce the local installed-artifact
-snapshot. Treat Model Hub's released durable claim target as a separate
-versioned shape: dual-read schema versions 1 and 2, normalize their five fields
-to the four platform-artifact identity fields for comparison, and write a new
-claim shape only under a bumped schema version. Preserve Memory's development
-provider selection before any snapshot or manifest/state access, then add its
-non-mutating admission projection before routing released active pointers
-through the snapshot. Use one declarative host-to-artifact alias mapping for
-manifest selection, disk admission, resolver output, and claim comparison;
-Model Hub's released `linux-amd64` artifact is valid on a `linux-x64` host.
-Persist a successful deterministic re-admission only as an atomic, best-effort
-derived cache under `<runtime_dir>/derived/admission/`, keyed by the verified
-artifact identity and admission revision. Use the shared confined no-follow
-writer: cache creation does not acquire the mutation guard or alter a released
-pointer, and an unsafe or unwritable destination degrades to process memory.
-Keep current public payloads as projections during this step.
-
-**Stop point:** git, Memory, and model-hub use the new snapshot and identity;
-Show and tmux are untouched. Model-hub recovery can resume every released claim
-shape without treating a manifest-only digest change as a target change.
-
-**Acceptance test:** run C1-C9, C11-C14, C17-C22, and C24-C26 for every
-applicable git, Memory, and model-hub released fixture. C4 is ordered: while the
-edited manifest is online, `ensure()` reuses the original path/archive with no
-download; only afterward make the fetch fail and run C2. Under C2, every
-observable column is mandatory: shared `status()` reports disk identity, Git's
-resolver returns the admitted path, model-hub's resolver returns the admitted
-engine, and `ensure()` reuses without an installed-state write while preserving
-the fetch error separately. C17 uses that disk fixture with reached invalid
-manifest bytes: status and both resolvers remain operational, but `ensure()` and
-repair return `manifest_invalid` and may not report successful reuse. A
-status-only or resolver-only test does not pass. C19 proves configured offline
-performs zero network access; C20 proves a missing source is not reported as
-platform unsupported.
-
-C7 includes a released Model Hub `linux-amd64` pointer, metadata, and claim on
-`linux-x64`; status, resolver, ensure, and claim comparison admit the
-alias-equivalent identity, while a genuinely incompatible label fails. C8
-proves both clean first install and fail-closed partial inspection. C11, C21,
-C22, and C26 separately run successful, rejecting, not-attempted, and
-raising/timed-out Memory admission projections and byte-compare the released
-pointer and artifact tree. After C11 succeeds, fresh managers and simulated
-fresh CLI processes reuse the identity-keyed durable result without rerunning
-the subprocess, but only after cheap pointer/metadata/artifact verification.
-Changing the pointer identity makes the old entry ineligible immediately. A
-read-only cache directory leaves the successful projection intact and uses the
-process-wide result; the other three outcomes remain uncached.
-
-C18 poisons every manifest and managed-state reader/writer, then proves
-`provider=development`, both resolvers, and forced `ensure(changed=false)`
-complete with zero calls. C24 runs successful re-admission against parent and
-target symlink/hard-link fixtures plus Windows reparse and identity-race
-simulations: every external target, pointer, metadata file, and artifact stays
-byte-for-byte unchanged and the result falls back to process memory. C13 seeds
-an admitted engine with every released `not_installed` state and proves the
-failure is stale. Every census row used by these dependencies must name a
-passing scenario; a blank cell blocks the step.
-
-**What breaks:** expected functional breakage is **none**. Without dual-read
-adoption, all three can appear missing or redownload while offline; that failure
-blocks the step. Without claim normalization, an in-flight Model Hub operation
-can fail as `install_target_changed`; that also blocks the step. Downstream
-status consumers that currently call the selected version “installed” must be
-updated in the same step. Treating a Memory admission failure as absence or
-mutating its released pointer during inspection also blocks the step. Creating
-a new directory/download while C4's selected host artifact is unchanged, or
-letting C13's stale failure override an admitted engine, proves the source of
-truth did not move completely and blocks the step. Re-probing an unchanged
-released Memory identity in a fresh process, failing status because the derived
-cache is unwritable, rejecting Model Hub's released `linux-amd64` identity on
-`linux-x64`, or classifying C8's proven-empty tree as unknown would also block
-the step. Reading managed state after selecting the Memory development provider,
-following a derived-cache redirect, flattening rejected/not-attempted/errored
-admission, or silently reusing disk after `manifest_invalid` also blocks it.
+## Migration Sequence And Gates
 
 ### Step 2: Converge The Mutation Guard
 
-Merge Show's no-follow/path-identity hardening and typed guard result into the
-shared re-entrant mutation lock. Use it for the whole real cleanup and keep
-dry-runs non-mutating.
+**Intent:** Move the strongest existing guard and preview behavior into the
+shared manager so later installer migrations inherit one concurrency owner.
 
-**Stop point:** both current shared cleanup and ensure use the hardened guard;
-Show still uses its own guard.
+**Gate:** Shared consumers pass focused guard, preview, cleanup, and install
+tests with no installed-runtime regression; any lost path confinement,
+misclassified contention, or changed git/Memory/model-hub result stops the
+sequence before Show uses the guard.
 
-**Acceptance test:** for each shared subclass, prove same-process contention,
-foreign-process contention, absent-lock preview, inode replacement, symlink,
-hard link, Windows reparse simulation, and uninspectable path. A preview must
-either return a complete stable plan or a typed non-success; it never creates
-`.install.lock`. The derived-admission cache is not installed state: its
-best-effort confined atomic write does not use this mutation guard, and racing
-writers of the same identity/revision must converge to the same valid payload
-without following a symlink, hard link, or reparse point. C24's redirected
-external target remains unchanged and write failure falls back to memory. A
-guarded identity change makes all old cache keys ineligible at pointer commit; physical
-pruning of those now-stale derived files remains best-effort maintenance.
+### Step 3: Support Composite Artifacts
 
-**What breaks:** no installed runtime. A new
-`<runtime>_install_guard_unavailable` reason is an intentional API correction;
-any consumer that only recognizes `<runtime>_install_already_running` must be
-updated before this stop point. Loosening `MigrationFileLock` globally is out of
-scope; the managed-runtime guard must open and validate its own descriptor.
+**Intent:** Let the shared installer represent Show's released directory
+artifact and internal links while retaining the existing binary-artifact path;
+reuse capability detection for tar filtering without raising the Python floor.
 
-### Step 3: Add Composite Artifacts Without Weakening Binary Artifacts
+**Gate:** A released v3.0.13 Show archive installs through the shared path and
+its CLI/esbuild entrypoints work, hostile archive probes remain confined, and
+git/Memory/model-hub fixtures stay unchanged; failure breaks Show on macOS and
+Linux or weakens existing binary consumers, so the sequence stops before
+cutover.
 
-Add the declarative metadata/provider filename, directory-artifact verifier,
-manifest-extension validator and persistence map, and internal-link extraction
-policy. The extractor change is atomic: allow only `REGTYPE`, `AREGTYPE`,
-`DIRTYPE`, `SYMTYPE`, and `LNKTYPE`; validate both `name` and `linkname` against
-the extraction root; and extract one member at a time in archive order. A hard
-link must resolve to a regular inode already extracted. A symlink may be
-forward or dangling when its normalized target remains confined: revalidate
-existing symlink prefixes before every later write and validate the complete
-tree without following links before commit. Do not use a two-pass or parallel
-extractor. Defaults remain exactly the current strict binary contract.
+### Step 4: Add Shared Retention
 
-**Stop point:** a fixture directory artifact can install through
-`ManagedRuntimeManager`; Show is not yet cut over. This step cannot stop between
-removing link rejection and adding link-target confinement.
+**Intent:** Give the shared manager one lifecycle for verified downloads,
+installed versions, protected rollback state, and cleanup reporting.
 
-**Acceptance test:** run the same hermetic probe used to establish this contract:
-one regular executable, one symlink, and one hard link. The shared extractor's
-benign result is exactly `extracted ['hard.bin', 'link.so', 'real.bin']`; both
-links remain inside the root, and the hard-link target exists and is executable.
-For a malicious `linkname="../../../../etc/passwd"`, it raises `ValueError` with
-`link target` in the message. Benign success and malicious rejection must land
-in the same commit. Run both fixtures once with `filter="data"` available and
-once with `extractall` stubbed to raise `TypeError` for the filter keyword,
-forcing the manually guarded fallback without an old-interpreter matrix. The
-fixture also declares foreign uid/gid and setuid, setgid, group-write, and
-other-write mode bits. Inspect each completed tree with no-follow operations:
-every inode is owned by the extracting user; each regular-file, directory, and
-hard-link mode lacks those prohibited bits; every path and normalized symlink
-target is root-confined; and the malicious fixture leaves its external target
-unchanged. Both extraction paths must satisfy those same measured output
-properties. Equality of an enumerated accept/reject set or of Python's internal
-`TarInfo` transformations is insufficient.
-
-Run C27 against the manifest-SHA-verified v3.0.13 Unix archives. It must
-materialize all nine measured forward symlinks, the in-root symlink chain, and
-the prior-target esbuild hard link; the final no-follow traversal passes and the
-Show CLI plus esbuild targets resolve and are executable. Include a confined
-dangling-symlink control and prove final validation accepts it without allowing
-any later write through it to leave the root. Existing git, Memory, and
-model-hub specs still reject a missing `binary_sha256`, an absent or unsafe
-**resolved** binary path, or any link member. Any archive entry that omits
-`bin_path` but has a safe `ManagedRuntimeSpec.default_bin_path` remains
-accepted, and canonical metadata/pointer output persists that resolved default;
-an unsafe explicit or default path is rejected. The directory fixture also
-persists its declared runtime prerequisite atomically. Keep the declared Python
-floor at `>=3.10`: Python 3.10/3.11 patch releases without extraction filters
-take the tested fallback, while backported releases use the filtered path by
-capability.
-
-**What breaks:** expected breakage is **none** before Show cuts over. If optional
-leaf checksums or link acceptance become the default, integrity for git,
-Memory, and model-hub breaks. If link acceptance is omitted, Show installation
-fails at the first symlink on every Darwin and Linux archive; if forward
-symlinks are rejected or hard links/archive order are mishandled, released Unix
-installation fails or the esbuild binary is unavailable and Show page builds
-fail for every non-Windows user. If link rejection is relaxed without
-`linkname` hardening, the migration creates the sole extractor without link
-escape protection. Requiring literal `bin_path` presence would break accepted
-manifests that rely on the shared spec default; weakening safe-path validation
-would make that compatibility path unsafe. Retaining the current version gate
-would also make Python 3.10.12+ and 3.11.4+ skip a security filter they provide.
-Relying on that filter alone, or comparing only acceptance/rejection, can leave
-unsafe ownership or mode bits on the forced fallback path. The final-tree
-postconditions are therefore part of the same atomic change.
-Every case blocks Step 5.
-
-### Step 4: Add Shared Content-Addressed Retention
-
-Materialize new downloads under their verified digest, dual-read the old
-archive-name cache, build the protected set from every retained admitted
-install, and add generic dry-run/cleanup reports. Enable post-success cleanup
-one runtime spec at a time. Automatic cleanup is a post-commit maintenance
-operation: an inspection or deletion failure produces its own report and skips
-unsafe deletion, but cannot change the successful ensure result or durable
-claim settlement.
-
-**Stop point:** the capability is enabled for git, Memory, and model-hub before
-Show depends on it.
-
-**Acceptance test:** seed one install of every supported persisted metadata
-shape plus current, rollback, stale, recent, temporary, symlink, abandoned
-claim, and unreadable cases. Dry-run and real cleanup select the same eligible
-set; current/rollback bytes are unchanged; unreadable protection metadata makes
-the cleanup operation fail closed. Inject that failure after a committed
-install and assert that the current pointer and successful result remain intact,
-Model Hub settles its claim as successful, and the separate cleanup report
-retains the inspection error. Run C16 with a real
-`downloads/manifest-<url-digest>.json` and representative unknown non-archive
-names: cleanup preserves all of them, and the manifest cache remains usable for
-offline status, repair, and archive probing. Seed derived-admission entries too:
-they are outside the archive namespace, cannot enter the archive candidate set,
-and an unknown or stale entry cannot weaken protection. Re-run and assert
-idempotence.
-
-**What breaks:** no runnable dependency. Stale unprotected archives and installs
-are deleted by design. If any current or retained install lacks an admitted
-archive identity, cleanup must skip rather than delete; a deletion in that case
-breaks git, Memory, or model-hub rollback safety and blocks rollout for that
-spec. Propagating an automatic-cleanup error through `ensure()` breaks an
-already-committed install and Model Hub claim state, and also blocks rollout.
-Deleting a remote manifest cache or any unknown non-archive name breaks offline
-repair/probing and proves the downloads namespace was classified by location
-rather than ownership; that blocks every spec using `manifest_url`.
+**Gate:** Current and rollback installations survive focused dry-run and real
+cleanup tests, stale owned artifacts become reclaimable, manifest-cache facts
+remain usable offline, and cleanup failure does not overturn a committed
+install; any git/Memory/model-hub loss stops rollout for that dependency.
 
 ### Step 5: Cut Over Show's Manifest Provider
 
-Create the composed Show installer spec/adapter. Route manifest prepare,
-installed resolution, status facts, probe, lock, cleanup, extraction, metadata,
-and current pointer through shared code. Keep direct archive, npm, admission,
-availability, and serving behavior in Show. Dual-read every released Show
-metadata and fingerprint layout. New metadata persists `minimum_node`; old
-records without it produce an explicit unknown compatibility state and must
-pass the bounded runtime readiness probe before serving is admitted.
+**Intent:** Compose a Show installer on the shared manager while leaving direct
+archive, npm, Node policy, availability, and serving behavior in Show.
 
-**Stop point:** manifest-backed Show behavior has one installer owner, but the
-old functions may remain unreachable for one comparison PR.
-
-**Acceptance test:** run the existing Show matrix for packaged/local/remote
-manifest, configured-offline reuse, fetch failure, reached-invalid and missing
-manifest, failed and forced replacement, unrelated-platform
-manifest edits, previous fingerprints, legacy parent layout, configured source
-lineage, internal symlinks, Node missing/unsupported, archive cleanup, Doctor,
-and dependencies status. The link case includes the esbuild hard link and
-all C27 forward symlinks, then asserts the resolved CLI and hard-link targets
-remain executable and the final tree satisfies the shared confinement,
-ownership, and mode postconditions. Add an invariant test that an injected
-status inspection failure remains unknown/error and is never projected as absent. With
-the manifest unavailable, a new metadata record plus downgraded Node must remain
-unsupported, while every released record lacking `minimum_node` must remain an
-installed artifact with unknown compatibility and cannot become serving-ready
-without a successful bounded readiness probe.
-
-**What breaks:** git, Memory, and model-hub have **no new behavior** in this
-step. Show would break for already-installed/offline users if any released
-metadata/provider/layout is omitted, and would break for normal archives if
-safe internal symlinks and hard links are not enabled only for its spec.
+**Gate:** Released and canonical Show fixtures cover online, offline, provider,
+layout, Node, Doctor, dependency-status, and composite-archive flows with one
+manifest installer owner; any released install that disappears, redownloads,
+or cannot serve on its previously supported platform stops deletion.
 
 ### Step 6: Delete Show's Parallel Installer
 
-Delete unreachable Show manifest installer, cache, lock, cleanup, and exact
-utility functions. Reduce retained same-name methods to product wrappers; they
-must not contain a second manifest transaction or filesystem policy.
+**Intent:** Remove unreachable Show manifest installation, cache, guard,
+cleanup, persistence, and utility ownership while retaining product adapters.
 
-**Stop point:** direct archive and npm are visibly separate Show providers; the
-Show manifest provider has exactly one implementation. Tmux remains temporarily
-on its measured legacy installer until Step 7.
-
-**Acceptance test:** an AST ownership test rejects Show definitions or call
-paths for shared manifest acquisition, archive verification/cache, install
-identity, metadata/current writes, mutation lock, archive retention, platform
-tagging, hashing, or extraction. The assertion is scoped to Show and must not be
-described as a whole-repository singleton check. Run focused suites for all four
-audited managers and the Show CLI/Doctor/dependencies consumers.
-
-**What breaks:** no dependency behavior. Tests that monkeypatch deleted Show
-private methods must move to the shared manager or public result boundary; that
-is test migration, not retained compatibility. Do not preserve private shims
-solely for those tests.
+**Gate:** Deleted Show symbols have zero definitions and call-site hits in
+source and tests, focused suites for the four migrated consumers pass, and no
+private compatibility shim recreates a second installer; tmux remains the one
+temporary outlier.
 
 ### Step 7: Migrate Tmux And Enforce Sole Ownership
 
-Express tmux as a `ManagedRuntimeSpec` consumer after Show has validated every
-shared capability. Retain only tmux's public result projection, macOS
-quarantine/codesign preparation, runnable/exact-version admission, and
-utf8proc/terminfo manifest requirements. Dual-read the released schema 1
-manifest, `.avibe-tmux-runtime.json`, `current.json`, and legacy two-level
-install directory. Canonical manifests are schema 2 and require
-`binary_sha256`; every structurally valid schema 1 manifest is read under the
-archive-verified legacy contract, independent of package/path/URL source.
-Legacy installs are never upgraded by a status write. Canonical metadata
-records the verified source leaf digest and a separate post-preparation
-installed digest because macOS codesign may change the binary.
+**Intent:** Move tmux onto the proven shared installer after Show, retaining its
+released-state reader, macOS preparation, and runtime compatibility adapter.
 
-**Stop point:** final architecture. All five dependencies use
-`ManagedRuntimeManager`; Show and tmux contain product adapters, not filesystem
-or install engines.
+**Gate:** Released tmux inputs and prepared-binary tests pass through the shared
+path, the other four dependencies remain unchanged, and Show/tmux shared-owner
+symbols have zero source and test hits; the end state has one installer owner
+for all five dependencies.
 
-**Acceptance test:** run the same structurally valid schema 1 payload through
-the packaged resource, `VIBE_TMUX_MANIFEST_PATH`, and
-`VIBE_TMUX_MANIFEST_URL`, paired with every released tmux
-metadata/pointer/layout fixture. Each route produces the same archive-verified
-legacy projection and resolves offline without a download or inspection write;
-changing payload bytes without changing its schema version does not select a
-different integrity contract. Canonical generation emits schema 2 only. Run
-C23 with a schema 2 manifest and a real signing fixture whose command changes
-the binary bytes, not a stubbed
-“changed” flag: verify the source leaf digest before preparation, prove the
-source-mismatch control never invokes preparation, run quarantine removal and
-codesign, persist a different installed digest, and use that digest plus exact
-version/utf8proc/terminfo admission for immediate and offline resolution. Cover
-codesign command and verification failure separately. Re-run the
-benign/malicious link probe through the shared extractor. An AST ownership test
-rejects Show or tmux
-definitions/call paths for shared manifest loading, archive verification/cache,
-identity, metadata/current writes, mutation lock, retention, platform tagging,
-hashing, or extraction. Run focused suites for all five managers and their
-CLI/Doctor/dependencies consumers.
+## Measured Size And Concept Estimate
 
-**What breaks:** git, Memory, model-hub, and Show have **no new behavior**. Tmux
-breaks if a valid configured schema 1 manifest's missing `binary_sha256` is
-treated as corrupt, if its current pointer is rewritten during status, or if
-preparation/admission hooks run in a different transaction phase. Writing new
-schema 1 state, checking source bytes only after codesign, or comparing the
-prepared binary to the pre-preparation digest also blocks deletion of the tmux
-installer.
+All rows below are non-normative planning measurements. Function spans use
+`end_lineno - lineno + 1`; imports, declarations, blank lines outside
+functions, serving-only functions, and tests are excluded.
 
-## Measured Size Estimate
+| Measurement | Value | Measured at |
+| --- | ---: | --- |
+| Show file / tmux file / combined outliers | 3,370 / 699 / **4,069 physical lines** | `2c6fcbe88` |
+| Show install roots before GitHub-provider removal | 110 functions / 2,579 span lines | `903414cc4`; revalidated `2c6fcbe88` |
+| GitHub-only reachable helpers | 11 functions / 212 span lines | `903414cc4` |
+| Show install roots after that prerequisite | 99 functions / 2,367 span lines | derived from the same audit |
+| The 24 same-name pairs | 561 Show span lines | `2c6fcbe88` |
+| Supplied uncounterparted grouping | 1,621 Show lines | supplied audit at `903414cc4` |
+| Tmux functions | 38 functions / 568 span lines | `2c6fcbe88` |
 
-Measurements use AST function spans (`end_lineno - lineno + 1`) at
-`903414cc4`; blank lines outside functions, imports, dataclass declarations,
-serving-only functions, and tests are excluded. The install spans were
-revalidated at `2c6fcbe88`; the only Show diff is serving-side. The two current
-outliers total **4,069 physical lines**: 3,370 in the supplied Show audit plus
-699 in tmux.
+The historical implementation estimate, measured before later seams were
+discovered, is retained only to answer the sizing question; it is not
+maintained as future steps are designed.
 
-The arithmetic below is a historical planning snapshot measured at those
-revisions. It is not an acceptance criterion and is not maintained as later
-contract discoveries add fields, fixtures, or small seams. Those discoveries
-do not change the measured source spans or ownership decision; implementation
-records the actual diff instead of repeatedly forecasting code not yet written.
+| Historical estimate | Show / Steps 1-6 | Tmux / Step 7 | Total | Measured at |
+| --- | ---: | ---: | ---: | --- |
+| Lines deleted from outlier modules | 1,560-1,650 | 489-539 | **2,049-2,189** | `2c6fcbe88` planning model |
+| Existing behavior moved by ownership | 732 | 451 | **1,183** | `2c6fcbe88` planning model |
+| Lines added to shared layer | 510-610 | 20-50 | **530-660** | `2c6fcbe88` planning model |
+| Net production reduction | 950-1,140 | 439-519 | **1,389-1,659** | `2c6fcbe88` planning model |
 
-- Current install roots reach **110 functions / 2,579 lines**.
-- Eleven GitHub-only reachable helpers account for **212 lines**. Excluding
-  that already-owned removal leaves **99 functions / 2,367 lines**; a few
-  GitHub dispatch lines inside mixed functions make this a conservative
-  baseline.
-- The 24 pairs occupy **561 Show lines** at this head. The supplied 540-line
-  audit predates growth in `status` (97 to 108) and
-  `_resolve_manifest_archive` (33 to 43).
-- The current spans conservatively assigned to irreducible Show behavior total
-  **961 lines** before wrapper reduction. Therefore **1,406 lines is the hard
-  lower bound** on Show deletion even if every retained wrapper stays its
-  current size.
-- Shared delegation removes another measured 150-240 lines from the mixed
-  status/probe/manifest-dispatch/cleanup wrappers. The implementation estimate
-  is therefore **1,560-1,650 lines deleted from `core/show_runtime.py`**, not
-  counting the GitHub lane.
-- **732 source lines move semantically** to the shared owner: 384 for archive
-  cache/reporting, 160 for hardened guard behavior, 155 for disk-only and
-  legacy install admission, and 33 for internal-link extraction plus
-  platform-artifact identity. These lines overlap the deletion figure; “moved”
-  describes behavior, not a promise to preserve their text.
-- Reusing the existing shared traversal, preview, metadata, pointer, and ensure
-  code should require **510-610 net new production lines in
-  `core/managed_runtime.py`** before tmux. The budget is 260-310 for archive
-  retention, 40-70 for guard hardening, 90-120 for disk/legacy admission,
-  90-110 for composite-artifact/spec/result plumbing, and 30-50 for the
-  identity-keyed derived-admission cache. That last range is anchored by the
-  existing 32-line Model Hub verification-cache key and the existing shared
-  atomic JSON writer; it adds persistent schema/read/fallback handling but
-  reuses the snapshot's identity verification.
+The original owner-instance model counted seven common capabilities
+(primitives/extraction, manifest selection, archive acquisition/cache, install
+transaction/persistence, mutation/preview guard, retention/cleanup, and
+status/probe), four Show product concepts, and two tmux product concepts. Its
+historical forecast was **26 concepts before and 13 after**, measured at
+`2c6fcbe88`. Later discovery of Memory's development-provider and coordinated
+activation seams makes that arrow non-exhaustive; it is not recalculated or
+used as acceptance evidence. The retained product inventory includes those two
+Memory seams alongside the four Show and two tmux concerns named above.
 
-The resolved extraction-filter decision does not change this estimate: it
-replaces the two version checks with Show's existing capability-detection
-pattern inside the already-budgeted extraction work.
+Two mechanical rules replace forecast maintenance:
 
-Tmux has **38 functions / 568 function-span lines**. Its measured decomposition
-is 23 common installer functions / 451 lines, eight product helpers / 92 lines,
-three released-layout helpers / 17 lines, four public wrappers / 8 lines, and
-131 non-function lines. The existing shared hooks already express staged binary
-preparation, binary admission, and version reporting. A 160-210-line tmux spec,
-product hook, compatibility data, and wrapper target therefore deletes
-**489-539 lines**; only **20-50 additional shared lines** should be needed after
-the Show seams exist.
+1. Every symbol scheduled for deletion has zero definitions and call-site hits
+   in source and tests at its deletion gate.
+2. The measured total of common-owner instances plus retained product concepts
+   strictly decreases, while every product concept in the inventory survives.
 
-| Historical estimate (non-acceptance) | Show / Steps 1-6 | Tmux / Step 7 | Five-dependency total |
-| --- | ---: | ---: | ---: |
-| Lines deleted from outlier modules | 1,560-1,650 | 489-539 | **2,049-2,189** |
-| Existing behavior moved to the shared owner | 732 | 451 | **1,183** |
-| Lines added to the shared layer | 510-610 | 20-50 | **530-660** |
-| Net production reduction | 950-1,140 | 439-519 | **1,389-1,659** |
+Actual implementation PRs record lines deleted, behavior moved by ownership,
+shared-layer additions, and the before/after concept inventory at their own
+heads. A surviving duplicate owner is a defect; missing a forecast range is
+not.
 
-“Moved” is semantic ownership and overlaps deletion; it is not a promise to
-copy text. The net row is deletion minus shared growth. It excludes the already
-assigned 212-line GitHub-provider removal and does not count test changes.
+## Residual Unknown
 
-The mechanical size gate replaces range maintenance: at the deletion stop
-point, every symbol scheduled for deletion has zero definitions and call-site
-hits in source and tests, and the implementation records actual lines deleted,
-moved by ownership, and added to the shared layer. A forecast falling outside a
-range above is not by itself a defect; a surviving duplicate owner is.
-
-The exact endpoint cannot be known without choosing the staged-entrypoint result
-shape. The experiment that narrows the Show range is a compile-only Step 3 fixture:
-implement the smallest directory-artifact subclass without touching Show, then
-remeasure which Show wrappers can become direct projections. The experiment for
-the tmux range is a compile-only spec using versioned schema 1 compatibility
-fixtures across each source route and the three existing binary hooks. Do not
-use an upper estimate as permission to introduce a general callback framework.
-
-### Concept Count
-
-The count is derived from behavioral owners, not filenames. Seven common
-capabilities are:
-primitives/extraction, manifest selection, archive acquisition/cache, install
-transaction/identity/persistence, mutation/preview locking,
-retention/cleanup, and status/probe. Shared and Show each own all seven; tmux
-owns six, omitting retention/cleanup. Four Show product concepts remain:
-admission/availability, Node prerequisite/command, direct archive, and npm. Two
-tmux product concepts remain: macOS platform preparation, and
-runnable/version/utf8proc/terminfo admission. The predicate census also makes
-Memory's explicit development-provider override a factual product concept: it
-runs before the managed snapshot and cannot be absorbed into manifest selection
-without changing its zero-managed-state contract.
-
-The following arrow is the original forecast measured with the line snapshot
-above. It predates discovery of the Memory development-provider concept and is
-retained for provenance only; it is neither a current exhaustive count nor an
-acceptance target, and later contract findings do not cause it to be recomputed.
-
-| Historical state | Common owner instances | Show product concepts | Tmux product concepts | Total |
-| --- | ---: | ---: | ---: | ---: |
-| Before | shared 7 + Show 7 + tmux 6 = 20 | 4 | 2 | **26** |
-| After | shared 7 | 4 | 2 | **13** |
-
-The acceptance rule is instead mechanical: enumerate common and product owners
-at each deletion stop, preserve every listed product concept including Memory's
-development provider, and require the total concept count to decrease strictly.
-All Show/tmux common owner instances scheduled for deletion must also have zero
-source and test hits. Grouping the two tmux product clusters differently is
-allowed only if it changes before and after inventories equally; platform
-signing and runtime compatibility remain separate here because they fail for
-independent product reasons.
-
-The target adds seams, data fields, and derived cache entries, not another
-engine concept: admission status/probe remains their single behavioral owner. A
-“generic archive-cache helper” owned outside `ManagedRuntimeManager` would add
-an owner and is therefore rejected unless it has an independent non-runtime
-consumer.
-
-## Resolved Archive-Link Contract
-
-The archive-link unknown is resolved by the six-platform v3.0.13 member census
-and a second pass that verified each Unix archive's SHA-256 against the released
-manifest before reading link order:
-
-| Platform | Members | Regular | Directories | Symlinks | Forward symlinks | Hard links |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| darwin-arm64 | 8,376 | 7,869 | 490 | **16** | **2** | **1** |
-| darwin-x64 | 8,376 | 7,869 | 490 | **16** | **2** | **1** |
-| linux-arm64 | 8,376 | 7,869 | 490 | **16** | **3** | **1** |
-| linux-x64 | 8,376 | 7,869 | 490 | **16** | **2** | **1** |
-| win32-arm64 | 8,530 | 8,034 | 496 | 0 | 0 | 0 |
-| win32-x64 | 8,534 | 8,037 | 497 | 0 | 0 | 0 |
-
-The measured forward members and their later targets are:
-
-| Archive | Symlink -> later member |
-| --- | --- |
-| darwin-arm64 / darwin-x64 | `node_modules/.bin/jsesc` -> `node_modules/jsesc/bin/jsesc`; `node_modules/.bin/browserslist` -> `node_modules/browserslist/cli.js` |
-| linux-arm64 | `node_modules/.bin/parser` -> `node_modules/@babel/parser/bin/babel-parser.js`; `node_modules/.bin/semver` -> `node_modules/semver/bin/semver.js`; `node_modules/.bin/vite` -> `node_modules/vite/bin/vite.js` |
-| linux-x64 | `node_modules/.bin/jiti` -> `node_modules/jiti/lib/jiti-cli.mjs`; `node_modules/.bin/semver` -> `node_modules/semver/bin/semver.js` |
-
-There are no finally dangling symlinks. In each Unix archive,
-`node_modules/.bin/avibe-show-runtime` resolves through the earlier
-`node_modules/@avibe/show-runtime` symlink to an already present
-`packages/runtime/dist/cli.js`.
-
-The hard link joins `node_modules/esbuild/bin/esbuild` and
-`node_modules/@esbuild/<platform>/bin/esbuild`. Which member is the link and
-which is the real file reverses between Darwin and Linux because of archive
-member order, but the hard-link target is earlier in all four archives.
-Sequential per-member extraction succeeds for both layouts. A rule requiring
-every symlink target to be earlier would reject nine released links, while a
-two-pass or parallel “optimization” can violate the hard-link invariant.
-
-The hermetic three-extractor probe established the current behavior:
-
-```text
-managed_runtime benign -> ValueError: Unsupported managed runtime archive member: link.so
-show_runtime benign    -> extracted ['hard.bin', 'link.so', 'real.bin']
-tmux_runtime benign    -> extracted ['hard.bin', 'link.so', 'real.bin']
-
-managed_runtime malicious -> ValueError: Unsupported managed runtime archive member: link.so
-show_runtime malicious    -> ValueError: Unsafe archive link target: hard.bin
-tmux_runtime malicious    -> ValueError: Unsafe tmux archive link target: hard.bin
-```
-
-All three reject the malicious fixture today, but shared rejects for the wrong
-reason: it never reaches the malicious `linkname`. Shared is currently safe
-because of a restriction Step 3 must remove. Removing it without simultaneously
-adding `linkname` confinement would make the sole-owner extractor the only one
-without link-escape protection. After Step 3, the same probe must produce:
-
-```text
-managed_runtime benign    -> extracted ['hard.bin', 'link.so', 'real.bin']
-managed_runtime malicious -> ValueError: <message containing "link target">
-```
-
-Those lines preserve the original probe for provenance; Step 3 passes on the
-measured final-tree and unchanged-external-target properties above, not on an
-exact message or a closed list of fixture outcomes.
-
-### Named Unknown: Extraction-Filter Capability (Resolved)
-
-**Original question:** should the migration retain and test a Python 3.10/3.11
-fallback, or raise the project minimum to Python 3.12?
-
-**Resolution:** neither branch of that question describes the actual capability
-boundary. Three facts determine the contract:
-
-1. The project declares `requires-python = ">=3.10"`.
-2. [PEP 706](https://peps.python.org/pep-0706/) extraction filters were
-   security-backported in
-   [Python 3.10.12](https://docs.python.org/3.10/whatsnew/3.10.html#tarfile)
-   and
-   [Python 3.11.4](https://docs.python.org/3.11/whatsnew/3.11.html#tarfile).
-   Python's own
-   [compatibility guidance](https://docs.python.org/3.12/library/tarfile.html#supporting-older-python-versions)
-   therefore requires capability detection rather than a Python-version test.
-3. Show already uses the required `try: extractall(filter="data")` /
-   `except TypeError` capability pattern. Shared and tmux instead gate the
-   filter on `sys.version_info >= (3, 12)`, so they currently skip protection
-   that is available on supported 3.10.12+ and 3.11.4+ interpreters.
-
-Do not raise the Python floor: that would discard the default interpreters on
-Ubuntu 22.04 and Debian 12 to remove a fallback that the product can test
-hermetically. Step 3 moves Show's capability pattern into the sole shared
-extractor and preserves a manually guarded fallback for patch releases that do
-not support the keyword; no path may call unfiltered extraction without those
-guards. Link acceptance, `name`/`linkname` confinement, and filter/fallback
-output safety are one atomic change. The fallback test stubs the filter call to
-raise `TypeError`, then measures our completed tree rather than Python's
-implementation: no escaped path, no prohibited POSIX mode bit, and current-user
-ownership. The filtered path must satisfy those same postconditions, and both
-leave the external malicious target unchanged; no old-interpreter matrix is
-required. Step 7 deletes tmux's version-gated branch when tmux adopts the shared
-extractor.
-
-There is no residual product or release decision for archive extraction.
+Detailed contracts for Steps 2-7 are deliberately deferred, not silently
+assumed. Each is written from the measured output of its predecessor. The prior
+Python-floor question is resolved: keep `requires-python >=3.10`, prefer the
+existing capability-detection pattern, and include its security result in the
+Step 3 gate. There is no remaining archive-link or Python-release decision in
+this document.
 
 ## Non-Goals
 
+- No production code or test change in this PR.
 - No change to Show serving or request behavior.
-- No resurrection or compatibility path for the removed GitHub provider.
+- No resurrection of the removed GitHub provider.
 - No attempt to force direct archive or npm into the manifest security model.
-- No deletion of released on-disk compatibility readers.
-- No issue filing as part of this design PR.
-- No dependency addition.
+- No deletion of released compatibility readers by this document.
+- No issue filing and no dependency addition.
