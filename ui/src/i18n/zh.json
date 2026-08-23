@@ -1704,6 +1704,7 @@
     "memory_disabled": "记忆功能已禁用，或当前连接无法访问它。",
     "memory_invalid_input": "该记忆请求无效。",
     "memory_processing_record_entry_not_found": "该记忆处理条目已不可用。",
+    "memory_failure_history_unavailable": "详细的记忆失败历史记录不可用。",
     "memory_log_entry_not_found": "该记忆处理条目已不可用。",
     "memory_access_denied": "该调用方无权读取此记忆数据。",
     "memory_input_too_large": "输入内容对记忆功能来说太大了。",

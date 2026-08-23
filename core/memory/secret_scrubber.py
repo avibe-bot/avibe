@@ -118,6 +118,7 @@ def scrub_from_environment(value: str) -> str:
             "EVEROS_LLM__API_KEY",
             "EVEROS_MULTIMODAL__API_KEY",
             "EVEROS_EMBEDDING__API_KEY",
+            "EVEROS_RERANK__API_KEY",
         )
         if os.environ.get(name)
     )
@@ -127,6 +128,7 @@ def scrub_from_environment(value: str) -> str:
             "EVEROS_LLM__BASE_URL",
             "EVEROS_MULTIMODAL__BASE_URL",
             "EVEROS_EMBEDDING__BASE_URL",
+            "EVEROS_RERANK__BASE_URL",
         )
         if os.environ.get(name)
     )

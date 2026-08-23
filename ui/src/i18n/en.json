@@ -1704,6 +1704,7 @@
     "memory_disabled": "Memory is disabled, or this connection can't reach it.",
     "memory_invalid_input": "That Memory request wasn't valid.",
     "memory_processing_record_entry_not_found": "That Memory processing entry is no longer available.",
+    "memory_failure_history_unavailable": "Detailed Memory failure history is unavailable.",
     "memory_log_entry_not_found": "That Memory processing entry is no longer available.",
     "memory_access_denied": "This caller isn't allowed to read that Memory data.",
     "memory_input_too_large": "That input is too large for Memory.",
