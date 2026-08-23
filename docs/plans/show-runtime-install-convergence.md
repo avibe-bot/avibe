@@ -118,70 +118,48 @@ named revision, not a promise about a future implementation.
 | Shared disk readers | `status()` loads a manifest first, and `resolve_binary()` returns `None` before disk resolution when the manifest is unavailable or not installable. | `2c6fcbe88` |
 | Released model-hub claims | `install-state.json` schemas 1 and 2 persist a target containing `manifest_sha256`; recovery compares that target. | `2c6fcbe88` |
 | Record discrimination | Shared, Show, and tmux metadata/current-pointer writers persist no `record_schema_version`, so an unversioned released shape cannot be distinguished from an incomplete future canonical record by field absence alone. | `2c6fcbe88` |
-| Memory development provider | `AVIBE_MEMORY_DEV_RUNTIME` selects a development interpreter before the managed manifest/install path. | `2c6fcbe88` |
+| Memory development provider | Presence of `AVIBE_MEMORY_DEV_RUNTIME` selects the development branch before managed state. A missing or incompatible configured interpreter returns the development-provider failure and does not fall through to a managed pointer or manifest. | `2c6fcbe88` |
 | Memory activation | Memory overrides pointer writing; with a live provider root it fails closed without the controller coordinator, which receives candidate, root state, commit, and rollback callbacks. | `2c6fcbe88`; rechecked on master 2026-08-23 |
-| Memory admission | Released active-pointer admission performs a runtime compatibility probe rather than relying only on shared binary metadata. | `2c6fcbe88` |
+| Memory admission | A released active pointer without `admission_revision` reruns the runtime compatibility probe. Success admits it; a false result or raised inspection rejects it rather than trusting shared binary metadata. | `2c6fcbe88` |
 | Unreadable manifest labels | A configured-local `read_bytes` `OSError` is `manifest_missing` in shared and invalid in Show; shared offline-cache read failure is `manifest_unavailable_offline`. | `2c6fcbe88` |
 | Show prerequisite identity | Show install matching compares runtime version, platform, and archive SHA-256, but not `minimum_node`; old metadata continues to supply the old prerequisite after a prerequisite-only manifest edit. | `2c6fcbe88` |
 | Tmux schema 1 admission | `_verified_manifest_binary` checks metadata and `_tmux_binary_runnable`; the runnable check accepts any non-empty `tmux -V` result and does not compare it with manifest `tmux_version`. | `2c6fcbe88` |
 | Tmux byte phases | Source-leaf verification occurs before preparation; macOS ad-hoc signing can change the installed binary bytes afterward. | `2c6fcbe88` |
+| Online unrelated-platform edit | `_manifest_install_dir()` hashes the whole manifest digest with the selected archive digest. An online manifest edit for another platform therefore selects a new directory even when this host's archive bytes are unchanged. | `2c6fcbe88` |
+| Model-hub platform alias | Model-hub maps host `linux-x64` to released artifact label `linux-amd64`; its released pointer, metadata, and claim can therefore carry a label different from the host tag. | `2c6fcbe88` |
 | Downloads namespace | Remote manifest caches use `downloads/manifest-<digest>.json`; archive cleanup must distinguish these facts from disposable archive bytes. | `2c6fcbe88` |
 | Inspection versus absence | Shared versions-directory preview preserves traversal errors instead of treating them as proof of no install; Show status can still collapse a raised inspection into absent at its consumer boundary. | `2c6fcbe88` |
 | Released Show links | Each v3.0.13 Darwin/Linux archive has 16 symlinks and one esbuild hard link; the four Unix archives have nine forward symlinks total, prior-target hard links, and no finally dangling symlink. Windows archives have no links. | `v3.0.13` manifests and archives; measured 2026-08-23 |
 | Extractor behavior | Shared rejects the first link member. Show and tmux accept the benign regular/symlink/hard-link probe and reject an escaping `linkname`. | `2c6fcbe88`; hermetic probe 2026-08-23 |
 | Filter capability | The project supports Python 3.10+. Show capability-detects `filter="data"`; shared and tmux use a Python 3.12 version gate even though the filter is backported to 3.10.12 and 3.11.4. | `2c6fcbe88`; Python docs checked 2026-08-23 |
 
-## Step 1 Normative Contract: Disk Truth
+### Measured Backlog Outside Step 1
 
-Step 1 moves installed-state truth from the selected manifest to records and
-artifacts already on disk for git, Memory, and model-hub. Public status,
-resolvers, and reuse decisions derive installed identity from that disk state;
-manifest acquisition describes a candidate operation and its failure remains a
-separate diagnostic. Released model-hub claim targets remain readable after
-platform-artifact identity replaces whole-manifest identity.
+| Backlog item | Measured behavior | Unmeasured boundary | Measured at |
+| --- | --- | --- | --- |
+| Cleanup protection after pointer inspection failure | `_current_install_dir()` catches every pointer read/parse/path exception and returns `None`; that result feeds the protected set before version candidates reach `shutil.rmtree()`. This code is byte-identical on the measured baseline and the Step 1 implementation head. | The effective `keep_previous` value and the resulting deletion set were not measured; severity and remediation remain open pending that experiment. | `2c6fcbe88`; `6f08611f3` |
 
-Canonical install metadata and current pointers **must persist
-`record_schema_version`**. Canonical versioned records are invalid when a field
-defined by their schema is absent. Every unversioned released record is read as
-legacy, and field absence alone cannot retroactively make that released shape
-invalid. New writes use only the canonical versioned form. Released model-hub
-claim schemas 1 and 2 are dual-read and normalized for comparison; a new claim
-shape uses a new claim schema version.
+## Step 1 Executable Acceptance
 
-`AVIBE_MEMORY_DEV_RUNTIME` remains a Memory-owned branch selected before any
-managed manifest, metadata, pointer, or claim access. Step 1 adds one shared
-pointer-commit transaction seam, not a general callback framework. The Memory
-adapter retains its controller coordinator and supplies activation commit and
-rollback through that seam. When a live root requires coordination and the
-coordinator is unavailable, pointer activation fails closed.
+The Step 1 fixture universe is every data file recursively discovered under
+`tests/fixtures/managed_runtime_released/`. The entrypoint universe is generated
+from the public operation surface exported by the Step 1 manager and adapter
+code, with a reflection check that fails when that surface and its code-owned
+contract registry differ. The executable contract is the Cartesian coverage
+matrix for each fixture's owning adapter; adding a fixture or public operation
+creates an uncovered cell until its test exists. Each Step 1 adapter has a
+non-empty discovered fixture set, and every cell asserts the output and mutation
+predicates owned by its fixture rather than counting a smoke call. This document
+does not repeat fixture names, operation names, or expected scenario outcomes.
 
-This step does not introduce a generic admission lattice, persisted extension
-map, shared Memory extension hook, canonical-platform helper, derived cache, or
-three general transaction hooks. Runtime-specific compatibility continues
-through the smallest existing adapter boundary until measured implementation
-evidence justifies a shared concept.
+Two mechanical rules gate Step 1:
 
-**Stop point:** git, Memory, and model-hub read installed identity from disk and
-retain their public projections. Show and tmux production paths are unchanged.
-
-**Acceptance:** released fixtures cover manifest unavailable, unrelated-platform
-manifest edits, released model-hub claims, unversioned metadata/pointers, and
-canonical versioned records. For an admitted disk install, shared status and
-Git/model-hub resolvers remain usable without a manifest, and reuse does not
-download or rewrite installed state. Canonical writes contain
-`record_schema_version`; an unversioned released record follows legacy reading,
-while a versioned canonical record missing a schema field is invalid. The
-Memory development fixture resolves and reports `changed=false` with zero
-managed-state access. Memory activation covers all three coordinator outcomes:
-successful commit publishes the candidate pointer; an activation failure runs
-rollback and leaves the prior pointer; coordinator absence with a live root
-publishes no candidate.
-
-**Breakage boundary:** any regression in git, Memory, or model-hub offline
-resolution blocks the step. Losing a released model-hub claim, rejecting an
-unversioned released record for a newly canonical field, bypassing Memory's
-coordinator, or exposing a candidate after rollback also blocks it. Show and
-tmux have no behavior change in this step.
+1. Every production or test symbol scheduled for deletion has zero definition
+   and call-site hits at the deletion commit.
+2. A generated before/after predicate inventory accounts for every removed
+   validation, guard, compatibility read, and public projection with a retained
+   executable predicate or an explicitly approved behavior change; an
+   unaccounted predicate disappearance fails the gate.
 
 ## Migration Sequence And Gates
 
@@ -286,17 +264,12 @@ activation seams makes that arrow non-exhaustive; it is not recalculated or
 used as acceptance evidence. The retained product inventory includes those two
 Memory seams alongside the four Show and two tmux concerns named above.
 
-Two mechanical rules replace forecast maintenance:
-
-1. Every symbol scheduled for deletion has zero definitions and call-site hits
-   in source and tests at its deletion gate.
-2. The measured total of common-owner instances plus retained product concepts
-   strictly decreases, while every product concept in the inventory survives.
-
-Actual implementation PRs record lines deleted, behavior moved by ownership,
-shared-layer additions, and the before/after concept inventory at their own
-heads. A surviving duplicate owner is a defect; missing a forecast range is
-not.
+The migration-wide concept gate requires the measured total of common-owner
+instances plus retained product concepts to decrease strictly while every
+product concept in the inventory survives. Implementation PRs record actual
+lines deleted, behavior moved by ownership, shared-layer additions, and the
+before/after concept inventory at their own heads. A surviving duplicate owner
+is a defect; missing a forecast range is not.
 
 ## Residual Unknown
 
