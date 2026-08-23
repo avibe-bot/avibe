@@ -245,6 +245,7 @@ def test_installed_subclass_status_and_resolution_survive_unavailable_manifest(
     assert status["matches_manifest"] is None
     assert status["path"] == str(installed_path)
     assert status["install_dir"] == installed["install_dir"]
+    assert status["reason"] is None
     assert _resolve_subclass_runtime(manager, runtime_kind) == installed_path
     assert pointer_path.read_bytes() == pointer_before
     assert metadata_path.read_bytes() == metadata_before

@@ -1191,6 +1191,7 @@ def test_invalid_manifest_does_not_hide_disk_engine_but_blocks_repair(tmp_path: 
 
     assert status["installed"] is True
     assert status["path"] == str(installed_path)
+    assert status["reason"] is None
     assert manager.resolve_engine_path() == installed_path
     assert repair["ok"] is False
     assert repair["reason"] == "model_hub_engine_manifest_invalid"
