@@ -119,18 +119,19 @@ named revision, not a promise about a future implementation.
 
 | Current fact | Observation | Measured at |
 | --- | --- | --- |
-| Shared disk readers | `status()` loads a manifest first, and `resolve_binary()` returns `None` before disk resolution when the manifest is unavailable or not installable. | `2c6fcbe88` |
-| Released model-hub claims | `install-state.json` schemas 1 and 2 persist a target containing `manifest_sha256`; recovery compares that target. | `2c6fcbe88` |
-| Record discrimination | Shared, Show, and tmux metadata/current-pointer writers persist no `record_schema_version`, so an unversioned released shape cannot be distinguished from an incomplete future canonical record by field absence alone. | `2c6fcbe88` |
-| Memory development provider | Presence of `AVIBE_MEMORY_DEV_RUNTIME` selects the development branch before managed state. A missing or incompatible configured interpreter returns the development-provider failure and does not fall through to a managed pointer or manifest. | `2c6fcbe88` |
-| Memory activation | Memory overrides pointer writing; with a live provider root it fails closed without the controller coordinator, which receives candidate, root state, commit, and rollback callbacks. | `2c6fcbe88`; rechecked on master 2026-08-23 |
-| Memory admission | A released active pointer without `admission_revision` reruns the runtime compatibility probe. Success admits it; a false result or raised inspection rejects it rather than trusting shared binary metadata. | `2c6fcbe88` |
-| Unreadable manifest labels | A configured-local `read_bytes` `OSError` is `manifest_missing` in shared and invalid in Show; shared offline-cache read failure is `manifest_unavailable_offline`. | `2c6fcbe88` |
+| **Step 1:** Shared disk readers | `status()` loads a manifest first, and `resolve_binary()` returns `None` before disk resolution when the manifest is unavailable or not installable. | `2c6fcbe88` |
+| **Step 1:** Released model-hub claims | `install-state.json` schemas 1 and 2 persist a target containing `manifest_sha256`; recovery compares that target. | `2c6fcbe88` |
+| **Step 1:** Record discrimination | Shared, Show, and tmux metadata/current-pointer writers persist no `record_schema_version`, so an unversioned released shape cannot be distinguished from an incomplete future canonical record by field absence alone. | `2c6fcbe88` |
+| **Step 1:** Memory development provider | Presence of `AVIBE_MEMORY_DEV_RUNTIME` selects the development branch before managed state. A missing or incompatible configured interpreter returns the development-provider failure and does not fall through to a managed pointer or manifest. | `2c6fcbe88` |
+| **Step 1:** Memory activation | Memory overrides pointer writing; with a live provider root it fails closed without the controller coordinator, which receives candidate, root state, commit, and rollback callbacks. | `2c6fcbe88`; rechecked on master 2026-08-23 |
+| **Step 1:** Memory admission | A released active pointer without `admission_revision` reruns the runtime compatibility probe. Success admits it; a false result or raised inspection rejects it rather than trusting shared binary metadata. | `2c6fcbe88` |
+| **Step 1:** Memory pointer confinement | `_verified_active_pointer_binary()` requires an absolute install directory that resolves strictly beneath `runtime_dir/versions` and a regular executable binary that resolves beneath that install directory. | `2c6fcbe88` |
+| **Step 1:** Unreadable manifest labels | A configured-local `read_bytes` `OSError` is `manifest_missing` in shared and invalid in Show; shared offline-cache read failure is `manifest_unavailable_offline`. | `2c6fcbe88` |
 | Show prerequisite identity | Show install matching compares runtime version, platform, and archive SHA-256, but not `minimum_node`; old metadata continues to supply the old prerequisite after a prerequisite-only manifest edit. | `2c6fcbe88` |
 | Tmux schema 1 admission | `_verified_manifest_binary` checks metadata and `_tmux_binary_runnable`; the runnable check accepts any non-empty `tmux -V` result and does not compare it with manifest `tmux_version`. | `2c6fcbe88` |
 | Tmux byte phases | Source-leaf verification occurs before preparation; macOS ad-hoc signing can change the installed binary bytes afterward. | `2c6fcbe88` |
-| Online unrelated-platform edit | `_manifest_install_dir()` hashes the whole manifest digest with the selected archive digest. An online manifest edit for another platform therefore selects a new directory even when this host's archive bytes are unchanged. | `2c6fcbe88` |
-| Model-hub platform alias | Model-hub maps host `linux-x64` to released artifact label `linux-amd64`; its released pointer, metadata, and claim can therefore carry a label different from the host tag. | `2c6fcbe88` |
+| **Step 1:** Online unrelated-platform edit | `_manifest_install_dir()` hashes the whole manifest digest with the selected archive digest. An online manifest edit for another platform therefore selects a new directory even when this host's archive bytes are unchanged. | `2c6fcbe88` |
+| **Step 1:** Model-hub platform alias | Model-hub maps host `linux-x64` to released artifact label `linux-amd64`; its released pointer, metadata, and claim can therefore carry a label different from the host tag. | `2c6fcbe88` |
 | Downloads namespace | Remote manifest caches use `downloads/manifest-<digest>.json`; archive cleanup must distinguish these facts from disposable archive bytes. | `2c6fcbe88` |
 | Inspection versus absence | Shared versions-directory preview preserves traversal errors instead of treating them as proof of no install; Show status can still collapse a raised inspection into absent at its consumer boundary. | `2c6fcbe88` |
 | Released Show links | Each v3.0.13 Darwin/Linux archive has 16 symlinks and one esbuild hard link; the four Unix archives have nine forward symlinks total, prior-target hard links, and no finally dangling symlink. Windows archives have no links. | `v3.0.13` manifests and archives; measured 2026-08-23 |
@@ -141,7 +142,7 @@ named revision, not a promise about a future implementation.
 
 | Backlog item | Measured behavior | Unmeasured boundary | Measured at |
 | --- | --- | --- | --- |
-| Cleanup protection after pointer inspection failure | `_current_install_dir()` catches every pointer read/parse/path exception and returns `None`; that result feeds the protected set before version candidates reach `shutil.rmtree()`. This code is byte-identical on the measured baseline and the Step 1 implementation head. | The effective `keep_previous` value and the resulting deletion set were not measured; severity and remediation remain open pending that experiment. | `2c6fcbe88`; `6f08611f3` |
+| Cleanup protection after pointer inspection failure | `_current_install_dir()` catches every pointer read/parse/path exception and returns `None`; that result feeds the protected set before version candidates reach `shutil.rmtree()`. This code is byte-identical on the measured baseline and the Step 1 implementation head. | The effective `keep_previous` value and the resulting deletion set were not measured; severity and remediation remain open pending that experiment. | `2c6fcbe88` |
 
 ## Step 1 Executable Acceptance
 
@@ -150,11 +151,12 @@ selected manifest to admitted disk records and artifacts. Status, resolvers,
 and reuse derive installed identity from disk while manifest failure remains a
 separate candidate-operation diagnostic; Show and tmux are unchanged.
 
-Every fixture consumed by Step 1 acceptance records the released version and
-digest of the released bytes from which it was derived. Acceptance verifies that
-provenance against those bytes and fails when it is absent or mismatched; an
-implementation-authored fixture without released provenance cannot enter the
-corpus. Fixture location belongs to the implementation and is not named here.
+Corpus membership is every current-fact row marked **Step 1** above; each has a
+provenance-verified released fixture and executable case, or acceptance fails.
+Memory pointer-confinement cases reject external or symlink-resolved paths.
+Model-hub claim cases cover schemas 1 and 2 and normalize whole-manifest targets
+for resume/recovery. Acceptance verifies each fixture's released version, digest,
+and source bytes. No fixture path or implementation-authored membership is used.
 The entrypoint universe is generated from the public operation surface exported
 by the Step 1 manager and adapter code, with a reflection check that fails when
 that surface and its code-owned contract registry differ. The executable
@@ -172,6 +174,8 @@ Two mechanical rules gate Step 1:
    of the exact predicates scheduled to change or disappear, keyed by owning
    symbol and call site. Every listed predicate maps to a retained executable
    predicate or an explicitly approved behavior change; an unaccounted row fails.
+   Each retained predicate has a non-zero production call-site count and an
+   acceptance test that exercises it.
 
 A step gate is self-checked against its intent: an unchanged-result clause is
 valid only for behavior that the intent does not require changing.
@@ -184,9 +188,9 @@ one executable inherits its enumeration obligation.
 
 The following mechanical gates apply to every step:
 
-1. A shared hook overridden by every on-layer consumer represents per-consumer
-   semantics, not shared behavior. The step fails until at least one on-layer
-   consumer inherits the hook unchanged.
+1. A non-dunder shared hook that this migration introduces, or converts from
+   `raise NotImplementedError` to concrete behavior, fails when every on-layer
+   consumer overrides it; at least one must inherit it unchanged.
 2. A new public shared-layer symbol with zero production call sites fails the
    step. Test-only call sites do not count.
 
@@ -198,9 +202,8 @@ shared manager so later installer migrations inherit one concurrency owner.
 **Gate:** Shared consumers pass focused guard, preview, cleanup, and install
 tests with no installed-runtime regression. Lost path confinement, retained
 misclassification, or a consumer result change outside the corrections measured
-in the `_preview_busy_reason`, `_windows_preview_busy_reason`,
-`_preview_lock_probe`, `_guard_path_matches_fd`, and `_preview_raced_busy` census
-rows stops the sequence before Show uses the guard.
+in the **Mutation lock follows/under-validates its path** and **Preview collapses
+failure causes** rows stops the sequence before Show uses the guard.
 
 ### Step 3: Support Composite Artifacts
 
@@ -213,6 +216,9 @@ through the shared path and exposes its expected CLI/esbuild entrypoints,
 hostile archive probes remain confined, and git/Memory/model-hub fixtures stay
 unchanged; failure breaks a supported platform or weakens existing binary
 consumers, so the sequence stops before cutover.
+
+**Deferred hardening (non-gating):** both current extractors have an unfiltered
+fallback and no explicit final-tree ownership or POSIX-mode normalization.
 
 ### Step 4: Add Shared Retention
 
@@ -301,10 +307,10 @@ A surviving duplicate owner is a defect; missing a forecast range is not.
 
 Detailed contracts for Steps 2-7 are deliberately deferred, not silently
 assumed. Each is written from the measured output of its predecessor. The prior
-Python-floor question is resolved: keep `requires-python >=3.10`, prefer the
-existing capability-detection pattern, and include its security result in the
-Step 3 gate. There is no remaining archive-link or Python-release decision in
-this document.
+Python-floor question is resolved: keep `requires-python >=3.10` and prefer the
+existing capability-detection pattern. Step 3 gates path/link confinement;
+final-tree mode/ownership alignment remains deferred hardening. There is no
+remaining archive-link or Python-release decision in this document.
 
 ## Non-Goals
 
