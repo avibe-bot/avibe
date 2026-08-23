@@ -878,7 +878,7 @@ def test_memory_restart_maps_read_transport_errors_to_unavailable(
     assert raised.value.__cause__ is transport_error
 
 
-def test_memory_log_helpers_forward_structured_query_and_sign_owner(monkeypatch, socket_path):
+def test_memory_processing_record_helpers_forward_query_and_sign_owner(monkeypatch, socket_path):
     from core.memory import ui_access
 
     captured: list[httpx.Request] = []
@@ -893,18 +893,13 @@ def test_memory_log_helpers_forward_structured_query_and_sign_owner(monkeypatch,
             "vibe.internal_client.httpx.AsyncHTTPTransport",
             return_value=httpx.MockTransport(handler),
         ):
-            await internal_client.memory_log(
+            await internal_client.memory_processing_record_entries(
                 cursor="opaque_cursor",
                 limit=17,
                 user_key="avibe:remote:user-1",
                 socket_path=socket_path,
             )
-            await internal_client.memory_log_unlinked(
-                limit=20,
-                user_key="avibe:remote:user-1",
-                socket_path=socket_path,
-            )
-            await internal_client.memory_log_entry(
+            await internal_client.memory_processing_record_entry(
                 "mc_1",
                 user_key="avibe:remote:user-1",
                 socket_path=socket_path,
@@ -913,9 +908,11 @@ def test_memory_log_helpers_forward_structured_query_and_sign_owner(monkeypatch,
     asyncio.run(_go())
 
     assert [(request.url.path, dict(request.url.params)) for request in captured] == [
-        ("/internal/memory/log", {"cursor": "opaque_cursor", "limit": "17"}),
-        ("/internal/memory/log/unlinked", {"limit": "20"}),
-        ("/internal/memory/log/entry", {"memcell_id": "mc_1"}),
+        (
+            "/internal/memory/processing-record/entries",
+            {"cursor": "opaque_cursor", "limit": "17"},
+        ),
+        ("/internal/memory/processing-record/entry", {"memcell_id": "mc_1"}),
     ]
     for request in captured:
         assert request.headers["x-avibe-memory-user-key"] == "avibe:remote:user-1"

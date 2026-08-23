@@ -70,48 +70,35 @@ _UNSUPPORTED_SOCKET_CHMOD_ERRNOS = frozenset(
     )
     if value is not None
 )
-_MEMORY_LOG_CURSOR_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
-_MEMORY_LOG_ENTRY_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,256}\Z")
+_PROCESSING_RECORD_CURSOR_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
+_PROCESSING_RECORD_ENTRY_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,256}\Z")
 
 
-def _memory_log_list_query(request: Request) -> tuple[str | None, int]:
+def _processing_record_list_query(request: Request) -> tuple[str | None, int]:
     items = list(request.query_params.multi_items())
     keys = [key for key, _value in items]
     if any(key not in {"cursor", "limit"} for key in keys) or len(keys) != len(set(keys)):
-        raise ValueError("invalid memory log query")
+        raise ValueError("invalid Processing Record query")
     values = dict(items)
     cursor = values.get("cursor")
-    if cursor is not None and _MEMORY_LOG_CURSOR_RE.fullmatch(cursor) is None:
-        raise ValueError("invalid memory log cursor")
+    if cursor is not None and _PROCESSING_RECORD_CURSOR_RE.fullmatch(cursor) is None:
+        raise ValueError("invalid Processing Record cursor")
     raw_limit = values.get("limit", "20")
     if not raw_limit.isascii() or not raw_limit.isdecimal():
-        raise ValueError("invalid memory log limit")
+        raise ValueError("invalid Processing Record limit")
     limit = int(raw_limit)
     if not 1 <= limit <= 50:
-        raise ValueError("invalid memory log limit")
+        raise ValueError("invalid Processing Record limit")
     return cursor, limit
 
 
-def _memory_log_unlinked_query(request: Request) -> int:
-    items = list(request.query_params.multi_items())
-    if any(key != "limit" for key, _value in items) or len(items) > 1:
-        raise ValueError("invalid unlinked memory log query")
-    raw_limit = items[0][1] if items else "20"
-    if not raw_limit.isascii() or not raw_limit.isdecimal():
-        raise ValueError("invalid unlinked memory log limit")
-    limit = int(raw_limit)
-    if not 1 <= limit <= 20:
-        raise ValueError("invalid unlinked memory log limit")
-    return limit
-
-
-def _memory_log_entry_query(request: Request) -> str:
+def _processing_record_entry_query(request: Request) -> str:
     items = list(request.query_params.multi_items())
     if len(items) != 1 or items[0][0] != "memcell_id":
-        raise ValueError("invalid memory log entry query")
+        raise ValueError("invalid Processing Record entry query")
     memcell_id = items[0][1]
-    if _MEMORY_LOG_ENTRY_ID_RE.fullmatch(memcell_id) is None:
-        raise ValueError("invalid memory log entry id")
+    if _PROCESSING_RECORD_ENTRY_ID_RE.fullmatch(memcell_id) is None:
+        raise ValueError("invalid Processing Record entry id")
     return memcell_id
 
 
@@ -1344,19 +1331,6 @@ def create_app(
                 raise MemoryStoreUnavailableError("Memory store is unavailable") from exc
         return _memory_cli_scope(request)
 
-    memory_admin_log_access = object()
-
-    def _memory_log_access(request: Request) -> object | tuple[str, str] | None:
-        from core.memory.http_headers import MEMORY_USER_KEY_HEADER
-
-        if str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip():
-            return (
-                memory_admin_log_access
-                if _verified_memory_ui_user_key(request) is not None
-                else None
-            )
-        return _memory_cli_scope(request)
-
     @app.get("/internal/memory/status")
     async def _memory_status() -> Any:
         runtime = _memory_runtime()
@@ -1434,11 +1408,11 @@ def create_app(
             logger.warning("internal memory profile failed")
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_processing_failed"})
 
-    @app.get("/internal/memory/log")
-    async def _memory_log(request: Request) -> Any:
+    @app.get("/internal/memory/processing-record/entries")
+    async def _memory_processing_record_entries(request: Request) -> Any:
         try:
-            cursor, limit = _memory_log_list_query(request)
-            access = _memory_log_access(request)
+            cursor, limit = _processing_record_list_query(request)
+            scope = _memory_read_scope(request)
         except ValueError:
             return JSONResponse(
                 status_code=400,
@@ -1449,7 +1423,7 @@ def create_app(
                 status_code=503,
                 content={"status": "failed", "error": "memory_store_unavailable"},
             )
-        if access is None:
+        if scope is None:
             return JSONResponse(
                 status_code=403,
                 content={"status": "failed", "error": "memory_access_denied"},
@@ -1461,10 +1435,8 @@ def create_app(
                 content={"status": "failed", "error": "memory_runtime_missing"},
             )
         try:
-            if access is memory_admin_log_access:
-                return await runtime.admin_log_entries_payload(cursor, limit)
-            principal_id, project_id = access
-            return await runtime.log_entries_payload(
+            principal_id, project_id = scope
+            return await runtime.processing_record_entries_payload(
                 principal_id,
                 project_id,
                 cursor,
@@ -1476,17 +1448,17 @@ def create_app(
                 content={"status": "failed", "error": "memory_invalid_input"},
             )
         except Exception:
-            logger.warning("internal memory log failed")
+            logger.warning("internal native Processing Record list failed")
             return JSONResponse(
                 status_code=503,
                 content={"status": "failed", "error": "memory_processing_failed"},
             )
 
-    @app.get("/internal/memory/log/unlinked")
-    async def _memory_log_unlinked(request: Request) -> Any:
+    @app.get("/internal/memory/processing-record/entry")
+    async def _memory_processing_record_entry(request: Request) -> Any:
         try:
-            limit = _memory_log_unlinked_query(request)
-            access = _memory_log_access(request)
+            memcell_id = _processing_record_entry_query(request)
+            scope = _memory_read_scope(request)
         except ValueError:
             return JSONResponse(
                 status_code=400,
@@ -1497,7 +1469,7 @@ def create_app(
                 status_code=503,
                 content={"status": "failed", "error": "memory_store_unavailable"},
             )
-        if access is None:
+        if scope is None:
             return JSONResponse(
                 status_code=403,
                 content={"status": "failed", "error": "memory_access_denied"},
@@ -1509,13 +1481,11 @@ def create_app(
                 content={"status": "failed", "error": "memory_runtime_missing"},
             )
         try:
-            if access is memory_admin_log_access:
-                return await runtime.admin_log_unlinked_calls_payload(limit)
-            principal_id, project_id = access
-            return await runtime.log_unlinked_calls_payload(
+            principal_id, project_id = scope
+            payload = await runtime.processing_record_entry_payload(
                 principal_id,
                 project_id,
-                limit,
+                memcell_id,
             )
         except ValueError:
             return JSONResponse(
@@ -1523,55 +1493,7 @@ def create_app(
                 content={"status": "failed", "error": "memory_invalid_input"},
             )
         except Exception:
-            logger.warning("internal unlinked memory log failed")
-            return JSONResponse(
-                status_code=503,
-                content={"status": "failed", "error": "memory_processing_failed"},
-            )
-
-    @app.get("/internal/memory/log/entry")
-    async def _memory_log_entry(request: Request) -> Any:
-        try:
-            memcell_id = _memory_log_entry_query(request)
-            access = _memory_log_access(request)
-        except ValueError:
-            return JSONResponse(
-                status_code=400,
-                content={"status": "failed", "error": "memory_invalid_input"},
-            )
-        except MemoryStoreUnavailableError:
-            return JSONResponse(
-                status_code=503,
-                content={"status": "failed", "error": "memory_store_unavailable"},
-            )
-        if access is None:
-            return JSONResponse(
-                status_code=403,
-                content={"status": "failed", "error": "memory_access_denied"},
-            )
-        runtime = _memory_runtime()
-        if runtime is None:
-            return JSONResponse(
-                status_code=503,
-                content={"status": "failed", "error": "memory_runtime_missing"},
-            )
-        try:
-            if access is memory_admin_log_access:
-                payload = await runtime.admin_log_entry_payload(memcell_id)
-            else:
-                principal_id, project_id = access
-                payload = await runtime.log_entry_payload(
-                    principal_id,
-                    project_id,
-                    memcell_id,
-                )
-        except ValueError:
-            return JSONResponse(
-                status_code=400,
-                content={"status": "failed", "error": "memory_invalid_input"},
-            )
-        except Exception:
-            logger.warning("internal memory log entry failed")
+            logger.warning("internal native Processing Record detail failed")
             return JSONResponse(
                 status_code=503,
                 content={"status": "failed", "error": "memory_processing_failed"},
@@ -1579,7 +1501,10 @@ def create_app(
         if payload.get("status") == "not_found":
             return JSONResponse(
                 status_code=404,
-                content={"status": "failed", "error": "memory_log_entry_not_found"},
+                content={
+                    "status": "failed",
+                    "error": "memory_processing_record_entry_not_found",
+                },
             )
         return payload
 

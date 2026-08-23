@@ -23,6 +23,19 @@ _PREFIXED_KEY_RE = re.compile(r"(?<![A-Za-z0-9])(?:sk|rk|pk|api)-[A-Za-z0-9_-]{8
 _FILE_URL_RE = re.compile(r"(?i)\bfile:///(?:[^\s\"'<>]|\\ )+")
 _POSIX_PATH_RE = re.compile(r"(?<![:/\w])(?<!\[PROVIDER_BASE_URL\])/(?:[^\s\"'<>]|\\ )+")
 _WINDOWS_PATH_RE = re.compile(r"(?<!\w)(?:[A-Za-z]:[\\/]|\\\\)[^\s\"'<>]+")
+_SECRET_KEY_SUFFIXES = (
+    "apikey",
+    "authorization",
+    "cookie",
+    "credential",
+    "credentials",
+    "password",
+    "passwd",
+    "privatekey",
+    "secret",
+    "secretkey",
+    "token",
+)
 
 
 def normalize_provider_base_url(value: str) -> str:
@@ -57,6 +70,45 @@ def scrub_text(value: str, *, base_urls: tuple[str, ...] = (), exact_values: tup
     scrubbed = _FILE_URL_RE.sub(LOCAL_PATH, scrubbed)
     scrubbed = _WINDOWS_PATH_RE.sub(LOCAL_PATH, scrubbed)
     return _POSIX_PATH_RE.sub(LOCAL_PATH, scrubbed)
+
+
+def scrub_json(
+    value: Any,
+    *,
+    base_urls: tuple[str, ...] = (),
+    exact_values: tuple[str, ...] = (),
+) -> Any:
+    """Recursively scrub display JSON without depending on call recording."""
+
+    if isinstance(value, str):
+        return scrub_text(value, base_urls=base_urls, exact_values=exact_values)
+    if isinstance(value, list):
+        return [
+            scrub_json(item, base_urls=base_urls, exact_values=exact_values)
+            for item in value
+        ]
+    if isinstance(value, dict):
+        scrubbed: dict[str, Any] = {}
+        for key, item in value.items():
+            clean_key = scrub_text(
+                str(key), base_urls=base_urls, exact_values=exact_values
+            )
+            scrubbed[clean_key] = (
+                REDACTED
+                if _is_secret_key(str(key))
+                else scrub_json(
+                    item,
+                    base_urls=base_urls,
+                    exact_values=exact_values,
+                )
+            )
+        return scrubbed
+    return value
+
+
+def _is_secret_key(value: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]", "", value.casefold())
+    return normalized.endswith(_SECRET_KEY_SUFFIXES)
 
 
 def scrub_from_environment(value: str) -> str:

@@ -574,6 +574,8 @@ export type ApiContextType = {
   getMemorySettings: () => Promise<MemorySettingsResult>;
   saveMemorySettings: (patch: MemorySettingsPatch) => Promise<MemorySettingsResult>;
   getMemoryProcessingRecord: () => Promise<MemoryProcessingRecordResult>;
+  getMemoryProcessingRecordEntries: (cursor?: string | null, limit?: number) => Promise<MemoryProcessingRecordListResult>;
+  getMemoryProcessingRecordEntry: (memcellId: string) => Promise<MemoryProcessingRecordDetailResult>;
   getMemoryStatus: () => Promise<MemoryStatusResult>;
   getMemoryFailures: () => Promise<MemoryFailureLogResult>;
   getMemoryMaintenance: () => Promise<MemoryMaintenanceResult>;
@@ -584,9 +586,6 @@ export type ApiContextType = {
     options?: { page?: number; cursor?: string | null; limit?: number },
   ) => Promise<MemoryListResult>;
   listMemoryProjects: () => Promise<{ status: 'ok'; projects: Array<{ id: string; kind: 'default' | 'named' | 'all' }> } | { status: 'failed'; error?: string }>;
-  getMemoryLog: (cursor?: string | null, limit?: number) => Promise<MemoryLogListResult>;
-  getMemoryLogUnlinked: (limit?: number) => Promise<MemoryUnlinkedCallListResult>;
-  getMemoryLogEntry: (memcellId: string) => Promise<MemoryLogDetailResult>;
   clearMemory: () => Promise<MemoryClearResult>;
   factoryResetMemory: () => Promise<MemoryFactoryResetResult>;
   restartMemoryRuntime: () => Promise<MemoryRuntimeRestartResult>;
@@ -2026,7 +2025,7 @@ export type MemoryProcessingRecordSummary = {
     source: MemoryStatus['source'];
     health: MemoryStatus['health'];
   };
-  sources: MemoryLogSections;
+  sources: MemoryProcessingRecordSources;
   anomalies: {
     source: MemoryLogSourceStatus;
     items: MemoryFailureLogEntry[];
@@ -2036,10 +2035,6 @@ export type MemoryProcessingRecordSummary = {
     data_exists: boolean;
     can_clear: boolean;
     clear_in_progress: MemoryClearInProgress | null;
-  };
-  provider_checks?: {
-    source: MemoryLogSourceStatus;
-    items: MemoryProviderCall[];
   };
 };
 
@@ -2129,6 +2124,76 @@ export type MemoryLogSourceStatus = {
   observed_at: string | null;
   reason?: string | null;
 };
+
+export type MemoryProcessingRecordSources = {
+  memcells: MemoryLogSourceStatus;
+  runs: MemoryLogSourceStatus;
+  semantic: MemoryLogSourceStatus;
+};
+
+export type MemoryProcessingRecordEntry = {
+  memcell_id: string;
+  project_id: string;
+  session_id: string;
+  owner_id: string;
+  timestamp_ms: number;
+  preview: string;
+  payload: { status: 'available' | 'partial' | 'unavailable'; reason: string | null; item_count: number };
+  runs: { status: 'available' | 'partial' | 'unavailable'; reason: string | null; total: number; statuses: Record<string, number> };
+};
+
+export type MemoryProcessingRecordListResult =
+  | {
+      status: 'ok';
+      entries: MemoryProcessingRecordEntry[];
+      next_cursor: string | null;
+      sections: MemoryProcessingRecordSources;
+    }
+  | MemoryFailure;
+
+export type MemoryProcessingPayloadItem = {
+  id: string;
+  timestamp_ms: number;
+  sender_id: string;
+  content: Array<{ type: 'text'; text: string; omitted_bytes: number }>;
+};
+
+export type MemoryProcessingRun = {
+  run_id: string;
+  strategy: string;
+  attempt: number;
+  status: string;
+  started_at: string | null;
+  finished_at: string | null;
+  error: string | null;
+  event_topic: string;
+};
+
+export type MemoryProcessingSemanticItem = {
+  kind: 'episode' | 'fact';
+  entry_id: string;
+  timestamp: string | null;
+  content: string;
+  subject?: string | null;
+  summary?: string | null;
+};
+
+export type MemoryProcessingRecordDetailResult =
+  | {
+      status: 'ok';
+      entry: Pick<MemoryProcessingRecordEntry, 'memcell_id' | 'project_id' | 'session_id' | 'owner_id' | 'timestamp_ms'>;
+      payload: { status: 'available' | 'partial' | 'unavailable'; reason?: string | null; items: MemoryProcessingPayloadItem[]; omitted_count?: number };
+      runs: { status: 'available' | 'partial' | 'unavailable'; reason?: string | null; items: MemoryProcessingRun[]; omitted_count?: number };
+      semantic: { status: 'available' | 'partial' | 'unavailable'; reason?: string | null; items: MemoryProcessingSemanticItem[]; omitted_count?: number };
+      current_state: {
+        status: 'available' | 'partial' | 'unavailable';
+        reason?: string | null;
+        label?: 'current_unattributed';
+        profile?: { status: 'present' | 'missing'; updated_at_ms: number | null };
+        indexing?: { status: string; reason?: string; items?: Array<{ md_path: string; status: string; updated_at: string | null; error: string | null }> };
+      };
+    }
+  | MemoryFailure;
 
 export type MemoryLogSections = {
   everos: MemoryLogSourceStatus;
@@ -3713,6 +3778,13 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getMemorySettings: () => getJson('/api/memory/settings', { handleError: false }),
     saveMemorySettings: (patch) => patchJson('/api/memory/settings', patch, { handleError: false }),
     getMemoryProcessingRecord: () => getJson('/api/memory/processing-record', { handleError: false }),
+    getMemoryProcessingRecordEntries: (cursor = null, limit = 20) => {
+      const query = new URLSearchParams({ limit: String(limit) });
+      if (cursor) query.set('cursor', cursor);
+      return getJson(`/api/memory/processing-record/entries?${query.toString()}`, { handleError: false });
+    },
+    getMemoryProcessingRecordEntry: (memcellId) =>
+      getJson(`/api/memory/processing-record/entry?memcell_id=${encodeURIComponent(memcellId)}`, { handleError: false }),
     getMemoryStatus: () => getJson('/api/memory/status', { handleError: false }),
     getMemoryFailures: () => getJson('/api/memory/failures', { handleError: false }),
     getMemoryMaintenance: () => getJson('/api/memory/maintenance', { handleError: false }),
@@ -3738,15 +3810,6 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }, { handleError: false });
     },
     listMemoryProjects: () => getJson('/api/memory/projects', { handleError: false }),
-    getMemoryLog: (cursor = null, limit = 20) => {
-      const query = new URLSearchParams({ limit: String(limit) });
-      if (cursor) query.set('cursor', cursor);
-      return getJson(`/api/memory/log?${query.toString()}`, { handleError: false });
-    },
-    getMemoryLogUnlinked: (limit = 20) =>
-      getJson(`/api/memory/log/unlinked?limit=${encodeURIComponent(String(limit))}`, { handleError: false }),
-    getMemoryLogEntry: (memcellId) =>
-      getJson(`/api/memory/log/entry?memcell_id=${encodeURIComponent(memcellId)}`, { handleError: false }),
     clearMemory: () => postJson('/api/memory/clear', { confirm: true }, { handleError: false }),
     factoryResetMemory: async () => parseMemoryFactoryResetResult(
       await postJson('/api/memory/runtime/factory-reset', { confirm: true }, { handleError: false }),

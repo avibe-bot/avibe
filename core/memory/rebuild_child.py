@@ -21,7 +21,7 @@ def _await_parent_ownership() -> None:
 def install_error_scrubbers() -> None:
     """Import scrubbers only after private child process setup is complete."""
 
-    from core.memory.everos_insight import install_error_scrubbers as install
+    from core.memory.secret_scrubber import install_error_scrubbers as install
 
     install()
 

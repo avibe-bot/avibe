@@ -9,7 +9,7 @@ import { ConfirmDialog } from '../ui/confirm-dialog';
 import { InfoHint } from '../ui/info-hint';
 import { SegmentedRadio } from '../ui/segmented';
 import { MemoryProfilePanel } from './memory/MemoryProfilePanel';
-import { MemoryLogPanel } from './memory/MemoryLogPanel';
+import { MemoryProcessingRecordPanel } from './memory/MemoryProcessingRecordPanel';
 import { MemorySearchPanel } from './memory/MemorySearchPanel';
 import { MemorySettingsPanel } from './memory/MemorySettingsPanel';
 import { MemoryStatusPanel } from './memory/MemoryStatusPanel';
@@ -300,8 +300,6 @@ export const SettingsMemoryPage: React.FC = () => {
                 failures={processingRecord?.anomalies.items ?? []}
                 clearInProgress={processingRecord?.maintenance.clear_in_progress ?? null}
                 logSections={processingRecord?.sources ?? null}
-                providerChecks={processingRecord?.provider_checks?.items ?? []}
-                providerChecksSource={processingRecord?.provider_checks?.source ?? null}
                 statusLoading={!processingRecordRead.loaded || processingRecordRead.loading}
                 failuresLoading={!processingRecordRead.loaded || processingRecordRead.loading}
                 statusError={processingRecordRead.error}
@@ -329,7 +327,7 @@ export const SettingsMemoryPage: React.FC = () => {
                     content={t('memory.processingRecord.timeline.help')}
                   />
                 </div>
-                <MemoryLogPanel
+                <MemoryProcessingRecordPanel
                   key={logGeneration}
                   refreshToken={logRefreshToken}
                 />

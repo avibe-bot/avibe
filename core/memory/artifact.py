@@ -87,7 +87,7 @@ _SMOKE_SCRIPT = (
     "print(platform.python_version())\n"
 )
 _SCRUBBER_ADMISSION_SCRIPT = (
-    "from core.memory.everos_insight import install_error_scrubbers\n"
+    "from core.memory.secret_scrubber import install_error_scrubbers\n"
     "install_error_scrubbers()\n"
 )
 

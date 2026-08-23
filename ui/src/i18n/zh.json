@@ -4294,7 +4294,10 @@
         }
       },
       "source": {
-        "health": "引擎健康"
+        "health": "引擎健康",
+        "memcells": "原生消息",
+        "runs": "原生运行记录",
+        "semantic": "已关联记忆"
       },
       "sourceState": {
         "available": "可用",
@@ -4302,6 +4305,38 @@
         "stale": "已过期",
         "unknown": "未知",
         "unavailable": "不可用"
+      },
+      "reason": {
+        "native_memcells_unavailable": "无法读取原生消息",
+        "native_runs_unavailable": "无法读取原生运行记录",
+        "native_semantic_unavailable": "无法读取已关联的记忆文件",
+        "payload_projection_limit": "原始载荷超过显示上限",
+        "payload_unavailable": "原始载荷不可用",
+        "payload_malformed": "保留的载荷不符合原生数据格式",
+        "authorized_user_payload_unavailable": "没有可用的已授权用户载荷项",
+        "unauthorized_or_bounded_items_omitted": "已省略未授权或超过上限的载荷项",
+        "native_runs_missing_or_retained": "已关联的原生运行记录缺失或已因保留策略移除",
+        "native_run_retention_bounded": "原生运行历史受保留策略限制",
+        "semantic_results_not_user_scoped": "此所有者范围无法查看已关联记忆",
+        "semantic_results_missing_or_retained": "已关联记忆缺失或已因保留策略移除",
+        "semantic_projection_bounded": "已关联记忆内容已按显示上限截取",
+        "current_state_not_user_scoped": "此所有者范围无法查看当前状态",
+        "current_state_unavailable": "当前档案和索引状态不可用",
+        "index_state_unavailable": "当前索引状态不可用",
+        "index_state_missing_or_retained": "当前索引状态缺失或已因保留策略移除",
+        "unknown": "原生数据不可用或不完整"
+      },
+      "runStatus": {
+        "running": "运行中",
+        "success": "已成功",
+        "failed": "失败",
+        "dead_letter": "已永久停止",
+        "crashed": "已崩溃",
+        "unknown": "未知"
+      },
+      "profileStatus": {
+        "present": "存在",
+        "missing": "缺失"
       },
       "sourceReason": "原因：{{reason}}",
       "sourceNotObserved": "未观测",
@@ -4362,6 +4397,33 @@
         "title": "最近处理记录",
         "help": "最近的消息是如何一步步被处理成记忆的。",
         "helpLabel": "关于最近处理记录"
+      },
+      "records": {
+        "description": "已授权的原生消息，以及通过直接链接关联的保留处理事实。",
+        "loading": "正在加载原生处理记录…",
+        "loadFailed": "无法加载原生处理记录。",
+        "detailFailed": "无法加载此处理记录。",
+        "empty": "没有可用的已授权原生消息。",
+        "loadMore": "加载更多",
+        "back": "返回记录列表",
+        "noPreview": "已授权的用户载荷不可用。",
+        "runCount": "{{count}} 次运行",
+        "sourceNotice": "{{section}}为{{state}}（{{reason}}）。",
+        "project": "项目",
+        "session": "会话",
+        "owner": "所有者",
+        "created": "创建时间",
+        "payload": "原始用户载荷",
+        "runs": "原生运行记录",
+        "semantic": "已关联的情节与原子事实",
+        "current": "当前状态",
+        "currentUnattributed": "档案和索引状态仅表示当前状态且无法归因，并非历史运行结果。",
+        "profile": "档案",
+        "strategy": "策略",
+        "status": "状态",
+        "attempt": "尝试次数",
+        "started": "开始时间",
+        "unavailable": "此部分不可用或已因保留策略移除。"
       }
     },
     "profile": {

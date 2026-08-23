@@ -16,13 +16,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypeAlias
 
-from core.memory.everos_insight.recorder import _scrub_json, _scrub_text
+from core.memory.native_processing_record import NativeProcessingRecordReader
 from core.memory.processing_record import (
     ProcessingSourceObservations,
     ProviderCheckProjection,
     SourceObservation,
 )
 from core.memory.project_ids import is_persisted_memory_project_id
+from core.memory.secret_scrubber import scrub_json as _scrub_json
+from core.memory.secret_scrubber import scrub_text as _scrub_text
 from core.memory.store import (
     derive_assistant_memory_owner_id,
     is_memory_owner_id,
@@ -109,16 +111,24 @@ class MemoryInsightReader:
                 reverse=True,
             )
         )
+        self._native = NativeProcessingRecordReader(
+            paths.everos_root,
+            provider_base_urls=self._provider_base_urls,
+            exact_redaction_values=self._redactions,
+        )
 
     def source_observation(self) -> ProcessingSourceObservations:
-        observed = _utc_now()
-        return ProcessingSourceObservations(
-            everos=_everos_source_status(self._paths.system_db_path, observed),
-            capture=SourceObservation(
-                "unavailable", observed, "volatile_delivery_state"
-            ),
-            calls=_call_source_status(self._paths.call_log_db_path, observed),
-        )
+        return self._native.source_observation()
+
+    def list_processing_records(
+        self, scope: MemoryReadScope, cursor: str | None, limit: int
+    ) -> dict[str, Any]:
+        return self._native.list_records(scope, cursor, limit)
+
+    def processing_record_detail(
+        self, scope: MemoryReadScope, memcell_id: str
+    ) -> dict[str, Any]:
+        return self._native.record_detail(scope, memcell_id)
 
     def installation_preflight_calls(self) -> ProviderCheckProjection:
         observed = _utc_now()

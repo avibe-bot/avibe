@@ -12,7 +12,6 @@ import math
 import os
 import re
 import stat
-from contextlib import asynccontextmanager
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any, Literal
@@ -23,8 +22,7 @@ from core.memory.project_ids import (
     is_new_stored_memory_project_id,
     is_persisted_memory_project_id,
 )
-from core.memory.everos_insight import install_error_scrubbers, prepare_call_recorder
-from core.memory.everos_insight.patches import boundary_request
+from core.memory.secret_scrubber import install_error_scrubbers
 from core.memory.modality import SUPPORTED_ATTACHMENT_EXTENSIONS
 from core.memory.store import is_memory_owner_id
 from core.memory.types import MAX_AGENTIC_TIMEOUT_SECONDS
@@ -52,10 +50,6 @@ def serve(uds: Path) -> None:
     import uvicorn
 
     install_error_scrubbers()
-    recorder = None
-    if call_log_db := os.environ.get("AVIBE_MEMORY_CALL_LOG_DB"):
-        recorder = prepare_call_recorder(Path(call_log_db))
-
     factory_module = importlib.import_module("everos.entrypoints.api.app")
     create_app = getattr(factory_module, "create_app")
     app = create_app()
@@ -64,25 +58,6 @@ def serve(uds: Path) -> None:
     original_round_logger_level = round_logger.level
     round_logger.setLevel(logging.INFO)
     round_logger.addHandler(round_handler)
-    if recorder is not None:
-        original_lifespan = app.router.lifespan_context
-
-        @asynccontextmanager
-        async def recorder_lifespan(app_instance: Any) -> Any:
-            try:
-                recorder.start()
-            except Exception:
-                logger.warning("memory_call_recorder_start_failed", exc_info=True)
-            try:
-                async with original_lifespan(app_instance) as state:
-                    yield state
-            finally:
-                try:
-                    await recorder.close(timeout=1.0)
-                except Exception:
-                    logger.warning("memory_call_recorder_close_failed", exc_info=True)
-
-        app.router.lifespan_context = recorder_lifespan
     attachments_root = Path(os.environ["AVIBE_MEMORY_ATTACHMENTS_ROOT"])
 
     @app.middleware("http")
@@ -96,16 +71,10 @@ def serve(uds: Path) -> None:
         )
         if rejection is not None:
             return JSONResponse({"detail": "memory_request_rejected"}, status_code=403)
-        if recorder is not None and request.url.path in {
-            "/api/v2/memory/add",
-            "/api/v2/memory/flush",
-        }:
-            with boundary_request():
-                return await call_next(request)
         return await call_next(request)
 
     config = uvicorn.Config(
-        _RecorderHealthProjection(_AgenticDeadlineProjection(app), recorder),
+        _AgenticDeadlineProjection(app),
         uds=str(uds),
         access_log=False,
         log_level="warning",

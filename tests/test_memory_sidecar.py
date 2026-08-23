@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -85,8 +85,8 @@ def test_sidecar_server_bounds_graceful_shutdown(monkeypatch, tmp_path: Path) ->
     assert captured["timeout_graceful_shutdown"] == 1
     assert captured["round_logger_level"] == logging.INFO
     assert round_logger.level == original_round_logger_level
-    assert isinstance(captured["app"], sidecar._RecorderHealthProjection)
-    assert isinstance(captured["app"]._app, sidecar._AgenticDeadlineProjection)
+    assert isinstance(captured["app"], sidecar._AgenticDeadlineProjection)
+    assert not isinstance(captured["app"], sidecar._RecorderHealthProjection)
 
 
 def test_agentic_deadline_projection_cancels_downstream_and_preserves_round() -> None:
@@ -231,7 +231,7 @@ def test_sidecar_rejects_artifact_before_everos_can_persist_diagnostics(
     assert imported is False
 
 
-def test_sidecar_prepares_recorder_before_import_and_wraps_existing_lifespan(
+def test_sidecar_installs_scrubber_without_constructing_recorder(
     monkeypatch, tmp_path: Path
 ) -> None:
     import uvicorn
@@ -265,30 +265,9 @@ def test_sidecar_prepares_recorder_before_import_and_wraps_existing_lifespan(
             events.append("create-app")
             return app
 
-    class _Handle:
-        def start(self) -> None:
-            events.append("recorder-start")
-
-        async def close(self, *, timeout: float) -> None:
-            events.append(("recorder-close", timeout))
-
-        @contextmanager
-        def boundary_request(self):
-            events.append("boundary-enter")
-            try:
-                yield
-            finally:
-                events.append("boundary-exit")
-
-    handle = _Handle()
-
-    def prepare(path: Path):
-        events.append(("prepare", path))
-        return handle
-
     class _Config:
-        def __init__(self, _app, **_kwargs):
-            return None
+        def __init__(self, projected_app, **_kwargs):
+            assert not isinstance(projected_app, sidecar._RecorderHealthProjection)
 
     class _Server:
         def __init__(self, _config):
@@ -308,7 +287,6 @@ def test_sidecar_prepares_recorder_before_import_and_wraps_existing_lifespan(
         "install_error_scrubbers",
         lambda: events.append("install-error-scrubbers"),
     )
-    monkeypatch.setattr(sidecar, "prepare_call_recorder", prepare)
     monkeypatch.setattr(
         sidecar.importlib,
         "import_module",
@@ -325,14 +303,11 @@ def test_sidecar_prepares_recorder_before_import_and_wraps_existing_lifespan(
 
     assert events == [
         "install-error-scrubbers",
-        ("prepare", db_path),
         "import-app",
         "create-app",
-        "recorder-start",
         "everos-start",
         "inside",
         "everos-stop",
-        ("recorder-close", 1.0),
     ]
 
     class _Request:
@@ -380,7 +355,7 @@ def test_sidecar_prepares_recorder_before_import_and_wraps_existing_lifespan(
         )
 
     asyncio.run(exercise_guard())
-    assert "boundary-enter" not in events
+    assert not db_path.exists()
 
 
 def test_sidecar_projects_recorder_state_through_existing_health_response() -> None:

@@ -17,13 +17,11 @@ import { InfoHint } from '../../ui/info-hint';
 import type {
   MemoryClearInProgress,
   MemoryFailureLogEntry,
-  MemoryLogSections,
+  MemoryProcessingRecordSources,
   MemoryLogSourceStatus,
-  MemoryProviderCall,
   MemoryCascadeHealth,
   MemoryStatus,
 } from '../../../context/ApiContext';
-import { ProviderCallRow } from './MemoryLogPanel';
 import { memoryErrorMessage } from '../../../lib/memoryRead';
 import {
   formatMemoryStatusRuntimeFact,
@@ -188,9 +186,7 @@ export const MemoryStatusPanel: React.FC<{
   status: MemoryStatus | null;
   failures: MemoryFailureLogEntry[];
   clearInProgress: MemoryClearInProgress | null;
-  logSections: MemoryLogSections | null;
-  providerChecks: MemoryProviderCall[];
-  providerChecksSource: MemoryLogSourceStatus | null;
+  logSections: MemoryProcessingRecordSources | null;
   statusLoading: boolean;
   failuresLoading: boolean;
   statusError: string | null;
@@ -208,8 +204,6 @@ export const MemoryStatusPanel: React.FC<{
   failures,
   clearInProgress,
   logSections,
-  providerChecks = [],
-  providerChecksSource = null,
   statusLoading,
   failuresLoading,
   statusError,
@@ -229,9 +223,9 @@ export const MemoryStatusPanel: React.FC<{
   const emptySource: MemoryLogSourceStatus = { status: 'unknown', observed_at: null };
   const sources = [
     { key: 'health', label: t('memory.processingRecord.source.health'), value: status?.source ?? emptySource },
-    { key: 'everos', label: t('memory.log.section.everos'), value: logSections?.everos ?? emptySource },
-    { key: 'capture', label: t('memory.log.section.capture'), value: logSections?.capture ?? emptySource },
-    { key: 'calls', label: t('memory.log.section.calls'), value: logSections?.calls ?? emptySource },
+    { key: 'memcells', label: t('memory.processingRecord.source.memcells'), value: logSections?.memcells ?? emptySource },
+    { key: 'runs', label: t('memory.processingRecord.source.runs'), value: logSections?.runs ?? emptySource },
+    { key: 'semantic', label: t('memory.processingRecord.source.semantic'), value: logSections?.semantic ?? emptySource },
   ];
   const repairButton = repairSupported ? (
     <Button
@@ -329,7 +323,7 @@ export const MemoryStatusPanel: React.FC<{
                       </div>
                     )}
                   </div>
-                  <div className="min-w-0 border-t border-border pt-3 lg:col-span-2 lg:grid lg:grid-cols-2 lg:gap-4">
+                  <div className="min-w-0 border-t border-border pt-3 lg:col-span-2">
                     <div className="min-w-0">
                       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                         <div className="flex items-center gap-1.5 text-[11.5px] font-semibold text-foreground">
@@ -345,20 +339,6 @@ export const MemoryStatusPanel: React.FC<{
                         facts={health.cascade}
                         emptyLabel={t('memory.processingRecord.runtime.noFacts')}
                         group="cascade"
-                      />
-                    </div>
-                    <div className="mt-3 min-w-0 lg:mt-0">
-                      <div className="mb-2 flex items-center gap-1.5 text-[11.5px] font-semibold text-foreground">
-                        {t('memory.processingRecord.runtime.recorder')}
-                        <InfoHint
-                          label={t('memory.processingRecord.runtime.recorderHelpLabel')}
-                          content={t('memory.processingRecord.runtime.recorderHelp')}
-                        />
-                      </div>
-                      <FactList
-                        facts={health.recorder}
-                        emptyLabel={t('memory.processingRecord.runtime.noFacts')}
-                        group="recorder"
                       />
                     </div>
                   </div>
@@ -406,36 +386,6 @@ export const MemoryStatusPanel: React.FC<{
         <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
           {sources.map((source) => <SourceCard key={source.key} label={source.label} source={source.value} />)}
         </div>
-      </section>
-
-      <section className="flex flex-col gap-2" aria-labelledby="memory-provider-checks-title">
-        <div>
-          <div className="flex items-center gap-1.5">
-            <h3 id="memory-provider-checks-title" className="text-[13px] font-semibold text-foreground">
-              {t('memory.processingRecord.providerChecks.title')}
-            </h3>
-            <InfoHint
-              label={t('memory.processingRecord.providerChecks.helpLabel')}
-              content={t('memory.processingRecord.providerChecks.help')}
-            />
-          </div>
-          <p className="mt-0.5 text-[11.5px] text-muted">
-            {t('memory.processingRecord.providerChecks.description')}
-          </p>
-        </div>
-        {providerChecksSource?.status === 'unavailable' ? (
-          <div className="rounded-md border border-border bg-surface px-3 py-3 text-[12px] text-muted">
-            {t('memory.processingRecord.providerChecks.unavailable')}
-          </div>
-        ) : providerChecks.length === 0 ? (
-          <div className="rounded-md border border-dashed border-border bg-surface px-3 py-3 text-[12px] text-muted">
-            {t('memory.processingRecord.providerChecks.empty')}
-          </div>
-        ) : (
-          <div className="flex flex-col gap-2">
-            {providerChecks.map((call) => <ProviderCallRow key={call.id} call={call} />)}
-          </div>
-        )}
       </section>
 
       <section className="flex flex-col gap-2" aria-labelledby="memory-anomalies-title">

@@ -82,7 +82,6 @@ from core.memory.processing_record import (
     MemoryProcessingRecordPort,
     ProcessingRecordSummary,
     ProcessingSourceObservations,
-    ProviderCheckProjection,
     RuntimeHealthObservation,
     RuntimeHealthProjection,
     SourceObservation,
@@ -302,16 +301,12 @@ def _processing_record_payload(summary: ProcessingRecordSummary) -> dict[str, An
             "health": runtime["health"],
         },
         "sources": {
-            "everos": _source_observation_payload(summary.sources.everos),
-            "capture": _source_observation_payload(summary.sources.capture),
-            "calls": _source_observation_payload(summary.sources.calls),
+            "memcells": _source_observation_payload(summary.sources.memcells),
+            "runs": _source_observation_payload(summary.sources.runs),
+            "semantic": _source_observation_payload(summary.sources.semantic),
         },
         "anomalies": _anomaly_projection_payload(summary.anomalies),
         "maintenance": _maintenance_projection_payload(summary.maintenance),
-        "provider_checks": {
-            "source": _source_observation_payload(summary.provider_checks.source),
-            "items": list(summary.provider_checks.items),
-        },
     }
 
 
@@ -714,9 +709,7 @@ class MemoryRuntime:
             observe_maintenance=self._processing_record_maintenance_observation,
             observe_health=self._processing_record_health,
             failure_log=self._processing_record_failure_log,
-            recorder_health=lambda: dict(self._recorder_health),
             observe_sources=self._processing_record_sources,
-            provider_checks=self._processing_record_provider_checks,
             maintenance=self._processing_record_maintenance,
         )
 
@@ -1162,10 +1155,7 @@ class MemoryRuntime:
             self.module.pause_claims()
             return {"ok": False, "error": self._runtime_error}
 
-        settings = _process_settings(
-            config,
-            call_log_db_path=self._call_log_db_path,
-        )
+        settings = _process_settings(config)
         try:
             started = await self._sidecar.start(
                 python,
@@ -1257,9 +1247,9 @@ class MemoryRuntime:
                 reason=reason,
             )
             return ProcessingSourceObservations(
-                everos=unavailable,
-                capture=unavailable,
-                calls=unavailable,
+                memcells=unavailable,
+                runs=unavailable,
+                semantic=unavailable,
             )
         reader = self._insight_reader
         if reader is None:
@@ -1273,38 +1263,11 @@ class MemoryRuntime:
                 reason=current_reason or "busy",
             )
             return ProcessingSourceObservations(
-                everos=unavailable,
-                capture=unavailable,
-                calls=unavailable,
+                memcells=unavailable,
+                runs=unavailable,
+                semantic=unavailable,
             )
         return observation
-
-    async def _processing_record_provider_checks(
-        self,
-        maintenance_reason: str | None,
-    ) -> ProviderCheckProjection:
-        before = self._processing_runtime_snapshot()
-        reason = before.local_observation_reason(maintenance_reason)
-        if reason is not None:
-            return ProviderCheckProjection(
-                source=SourceObservation("unavailable", reason=reason),
-                items=(),
-            )
-        reader = self._insight_reader
-        if reader is None:
-            raise self._unavailable()
-        projection = await run_blocking(reader.installation_preflight_calls)
-        after = self._processing_runtime_snapshot()
-        current_reason = after.local_observation_reason(maintenance_reason)
-        if after.generation != before.generation or current_reason is not None:
-            return ProviderCheckProjection(
-                source=SourceObservation(
-                    "unavailable",
-                    reason=current_reason or "busy",
-                ),
-                items=(),
-            )
-        return projection
 
     async def _processing_record_maintenance(
         self,
@@ -2065,6 +2028,37 @@ class MemoryRuntime:
         )
         return self._with_call_log_coverage(payload)
 
+    async def processing_record_entries_payload(
+        self,
+        principal_id: str,
+        project_id: str,
+        cursor: str | None,
+        limit: int,
+    ) -> dict[str, Any]:
+        reader = self._insight_reader
+        if not self.available or reader is None:
+            return {"status": "failed", "error": "memory_store_unavailable"}
+        return await self._run_insight_read(
+            lambda: reader.list_processing_records(
+                (principal_id, project_id), cursor, limit
+            )
+        )
+
+    async def processing_record_entry_payload(
+        self,
+        principal_id: str,
+        project_id: str,
+        memcell_id: str,
+    ) -> dict[str, Any]:
+        reader = self._insight_reader
+        if not self.available or reader is None:
+            return {"status": "failed", "error": "memory_store_unavailable"}
+        return await self._run_insight_read(
+            lambda: reader.processing_record_detail(
+                (principal_id, project_id), memcell_id
+            )
+        )
+
     async def admin_log_unlinked_calls_payload(
         self,
         limit: int,
@@ -2520,7 +2514,6 @@ class MemoryRuntime:
                 if processing.multimodal
                 else None
             ),
-            preflight_call_recorder=self._record_preflight_call,
         )
         return (await provider.preflight()).payload()
 
@@ -2683,10 +2676,7 @@ class MemoryRuntime:
                 python,
                 effective_home=self._effective_home,
                 provider_root=self._provider_root,
-                settings=_process_settings(
-                    self._config,
-                    call_log_db_path=self._call_log_db_path,
-                ),
+                settings=_process_settings(self._config),
             )
             child_result = await child.run()
             if child_result is not SyncProcessResult.COMPLETED:
@@ -2860,10 +2850,7 @@ class MemoryRuntime:
             try:
                 started = await self._sidecar.start(
                     python,
-                    _process_settings(
-                        self._config,
-                        call_log_db_path=self._call_log_db_path,
-                    ),
+                    _process_settings(self._config),
                     provider_root_guard=lambda: self._provider_root_owner.require_owned(
                         meta,
                         active_metadata,
@@ -2943,10 +2930,7 @@ class MemoryRuntime:
             self.module.pause_claims()
             return {**preflight, "result": "failed"}
         self.module.pause_claims()
-        rebuild_settings = _process_settings(
-            candidate,
-            call_log_db_path=self._call_log_db_path,
-        )
+        rebuild_settings = _process_settings(candidate)
 
         async with self.module.lifecycle():
             if self._maintenance_open():
@@ -3175,10 +3159,7 @@ class MemoryRuntime:
                 # preflight; the rebuild child already exercised the candidate.
                 started = await self._sidecar.start(
                     python,
-                    _process_settings(
-                        self._config,
-                        call_log_db_path=self._call_log_db_path,
-                    ),
+                    _process_settings(self._config),
                     provider_root_guard=lambda: self._provider_root_owner.require_owned(
                         meta,
                         active_metadata,
@@ -3792,12 +3773,9 @@ def _same_embedding_identity(current: MemoryConfig, candidate: MemoryConfig) -> 
 
 def _process_settings(
     config: MemoryConfig,
-    *,
-    call_log_db_path: Path | None = None,
 ) -> EverOSProcessSettings:
     return EverOSProcessSettings(
         **_provider_kwargs(config),
-        call_log_db_path=call_log_db_path,
     )
 
 
