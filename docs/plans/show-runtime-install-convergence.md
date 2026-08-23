@@ -170,9 +170,9 @@ Two mechanical rules gate Step 1:
 1. Before implementation, record and `rg`-verify a non-empty baseline enumeration
    of every production or test symbol scheduled for deletion. Every listed
    symbol has zero definition and call-site hits at the deletion commit.
-2. Before implementation, record and `rg`-verify a non-empty baseline enumeration
-   of the exact predicates scheduled to change or disappear, keyed by owning
-   symbol and call site. Every listed predicate maps to a retained executable
+2. At delivery, record and `rg`-verify a non-empty enumeration of every predicate
+   whose text differs between the step's merge base and delivered head, keyed by
+   owning symbol and call site. Every listed predicate maps to a retained executable
    predicate or an explicitly approved behavior change; an unaccounted row fails.
    Each retained predicate has a non-zero production call-site count and an
    acceptance test that exercises it.
@@ -256,7 +256,8 @@ temporary outlier.
 ### Step 7: Migrate Tmux And Enforce Sole Ownership
 
 **Intent:** Move tmux onto the proven shared installer after Show, retaining its
-released-state reader, macOS preparation, and runtime compatibility adapter.
+released-state reader, macOS preparation, and runtime compatibility adapter, and
+inheriting the Step 4 lifecycle.
 
 **Gate:** Released tmux inputs and prepared-binary tests pass through the shared
 path and the other four dependencies remain unchanged. The non-empty obsolete
