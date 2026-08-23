@@ -10,12 +10,14 @@ revalidated on 2026-08-23). The original function-span measurement was made at
 
 ## Decision And Boundary
 
-`core/managed_runtime.py` is the target sole installer owner for git, Memory,
-model-hub, Show, and tmux. Show and tmux remain product adapters. Show keeps
-policy/install/serving projection, the system Node prerequisite and command,
-the direct-archive provider, and the npm provider. Memory keeps its explicit
+`core/managed_runtime.py` is the target owner of declarative manifest
+installation for git, Memory, model-hub, Show's manifest provider, and tmux.
+Show and tmux remain product adapters. Show keeps policy/install/serving
+projection, the system Node prerequisite and command. Memory keeps its explicit
 development provider and its controller-coordinated activation boundary. Tmux
-keeps macOS preparation and its runtime compatibility projection. Show serving
+keeps macOS preparation and its runtime compatibility projection. The final
+ownership of direct-archive and npm awaits the W3 source-ladder decision; this
+contract does not assume either delegates to the shared layer. Show serving
 (request proxying, lifecycle, readiness, prewarm, WebSocket routing, context
 capability, and stop) is outside this migration.
 
@@ -141,6 +143,11 @@ named revision, not a promise about a future implementation.
 
 ## Step 1 Executable Acceptance
 
+**Intent:** Move installed-state truth for git, Memory, and model-hub from the
+selected manifest to admitted disk records and artifacts. Status, resolvers,
+and reuse derive installed identity from disk while manifest failure remains a
+separate candidate-operation diagnostic; Show and tmux are unchanged.
+
 Every fixture consumed by Step 1 acceptance records the released version and
 digest of the released bytes from which it was derived. Acceptance verifies that
 provenance against those bytes and fails when it is absent or mismatched; an
@@ -208,15 +215,15 @@ install; any git/Memory/model-hub loss stops rollout for that dependency.
 
 ### Step 5: Cut Over Show's Manifest Provider
 
-**Intent:** Compose a Show installer on the shared manager while leaving direct
-archive, npm, Node policy, availability, and serving behavior in Show; align
+**Intent:** Compose Show's manifest provider on the shared manager while leaving
+direct archive, npm, Node policy, availability, and serving behavior in Show; align
 unreadable-source diagnostics and admission-relevant manifest changes during
 that measured cutover.
 
 **Gate:** Released and canonical Show fixtures cover online, offline, provider,
 layout, Node, Doctor, dependency-status, and composite-archive flows with one
-manifest installer owner; any released install that disappears, redownloads,
-or cannot serve on its previously supported platform stops deletion.
+declarative manifest installer owner; any released install that disappears,
+redownloads, or cannot serve on its previously supported platform stops deletion.
 
 ### Step 6: Delete Show's Parallel Installer
 
@@ -234,9 +241,10 @@ temporary outlier.
 released-state reader, macOS preparation, and runtime compatibility adapter.
 
 **Gate:** Released tmux inputs and prepared-binary tests pass through the shared
-path, the other four dependencies remain unchanged, and Show/tmux shared-owner
-symbols have zero source and test hits; the end state has one installer owner
-for all five dependencies.
+path and the other four dependencies remain unchanged. The non-empty obsolete
+adapter-owned installer-symbol sets recorded at the Step 6 and Step 7 baselines
+have zero definitions and call-site hits; the end state has one declarative
+manifest installer owner for all five dependencies.
 
 ## Measured Size And Concept Estimate
 
