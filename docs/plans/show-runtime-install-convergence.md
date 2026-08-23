@@ -125,7 +125,7 @@ named revision, not a promise about a future implementation.
 | **Step 1:** Memory development provider | Presence of `AVIBE_MEMORY_DEV_RUNTIME` selects the development branch before managed state. A missing or incompatible configured interpreter returns the development-provider failure and does not fall through to a managed pointer or manifest. | `2c6fcbe88` |
 | **Step 1:** Memory activation | Memory overrides pointer writing; with a live provider root it fails closed without the controller coordinator, which receives candidate, root state, commit, and rollback callbacks. | `2c6fcbe88`; rechecked on master 2026-08-23 |
 | **Step 1:** Memory admission | A released active pointer without `admission_revision` reruns the runtime compatibility probe. Success admits it; a false result or raised inspection rejects it rather than trusting shared binary metadata. | `2c6fcbe88` |
-| **Step 1:** Memory pointer confinement | `_verified_active_pointer_binary()` requires an absolute install directory that resolves strictly beneath `runtime_dir/versions` and a regular executable binary that resolves beneath that install directory. | `2c6fcbe88` |
+| **Step 1:** Disk-pointer confinement asymmetry | Baseline shared `_current_install_dir()` resolves `install_dir` and checks only that the versions root is a parent; the in-flight shared reader adds absolute and strict resolution, rejects the versions root itself, and requires the binary beneath `install_dir`. Memory already adds regular-file and `X_OK` checks. | `2c6fcbe88`; Step 1 diff checked 2026-08-23 |
 | **Step 1:** Unreadable manifest labels | A configured-local `read_bytes` `OSError` is `manifest_missing` in shared and invalid in Show; shared offline-cache read failure is `manifest_unavailable_offline`. | `2c6fcbe88` |
 | Show prerequisite identity | Show install matching compares runtime version, platform, and archive SHA-256, but not `minimum_node`; old metadata continues to supply the old prerequisite after a prerequisite-only manifest edit. | `2c6fcbe88` |
 | Tmux schema 1 admission | `_verified_manifest_binary` checks metadata and `_tmux_binary_runnable`; the runnable check accepts any non-empty `tmux -V` result and does not compare it with manifest `tmux_version`. | `2c6fcbe88` |
@@ -153,7 +153,7 @@ separate candidate-operation diagnostic; Show and tmux are unchanged.
 
 Corpus membership is every current-fact row marked **Step 1** above; each has a
 provenance-verified released fixture and executable case, or acceptance fails.
-Memory pointer-confinement cases reject external or symlink-resolved paths.
+Every Step 1 shared consumer rejects external or symlink-resolved pointer paths.
 Model-hub claim cases cover schemas 1 and 2 and normalize whole-manifest targets
 for resume/recovery. Acceptance verifies each fixture's released version, digest,
 and source bytes. No fixture path or implementation-authored membership is used.
