@@ -55,6 +55,25 @@ def test_incomplete_v4_store_is_rejected_during_initialization(
         MemoryStore(path, effective_home=tmp_path)
 
 
+@pytest.mark.parametrize("table", ["memory_meta", "memory_projects"])
+def test_v4_store_without_required_primary_key_is_rejected_during_initialization(
+    tmp_path: Path,
+    table: str,
+) -> None:
+    path = _store_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    replacement = f"{table}_without_key"
+    with sqlite3.connect(path) as conn:
+        conn.executescript(Path("core/memory/schema.sql").read_text(encoding="utf-8"))
+        conn.execute(f'CREATE TABLE "{replacement}" AS SELECT * FROM "{table}"')
+        conn.execute(f'DROP TABLE "{table}"')
+        conn.execute(f'ALTER TABLE "{replacement}" RENAME TO "{table}"')
+        conn.execute(f"PRAGMA user_version = {MEMORY_STORE_SCHEMA_VERSION}")
+
+    with pytest.raises(RuntimeError, match="schema is incomplete"):
+        MemoryStore(path, effective_home=tmp_path)
+
+
 def test_store_rejects_symlinked_database_without_touching_target(
     tmp_path: Path,
 ) -> None:

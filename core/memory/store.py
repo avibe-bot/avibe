@@ -94,6 +94,10 @@ _V4_TABLE_COLUMNS = {
     ),
     "memory_projects": _V3_PROJECT_COLUMNS,
 }
+_V4_PRIMARY_KEYS = {
+    "memory_meta": ("singleton",),
+    "memory_projects": ("principal_id", "project_id"),
+}
 
 
 @dataclass(frozen=True)
@@ -606,7 +610,20 @@ def _execute_sql_script(conn: sqlite3.Connection, script: str) -> None:
 
 
 def _verify_schema(conn: sqlite3.Connection) -> None:
-    if _table_columns(conn) != _V4_TABLE_COLUMNS:
+    primary_keys = {
+        table: tuple(
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM pragma_table_info(?) WHERE pk > 0 ORDER BY pk",
+                (table,),
+            )
+        )
+        for table in _V4_PRIMARY_KEYS
+    }
+    if (
+        _table_columns(conn) != _V4_TABLE_COLUMNS
+        or primary_keys != _V4_PRIMARY_KEYS
+    ):
         raise RuntimeError("Memory store schema is incomplete")
     check = conn.execute("PRAGMA quick_check").fetchone()
     if check is None or check[0] != "ok":
