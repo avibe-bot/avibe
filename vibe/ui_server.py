@@ -9647,7 +9647,7 @@ async def sessions_archive(session_id: str):
     """Permanently archive a session and reclaim its bound resources.
 
     For an active row, the controller owns the terminal session write. Memory
-    final flush is best-effort after that write and never blocks archive. If the
+    a volatile Memory barrier is best-effort after that write and never blocks archive. If the
     controller seam itself is unavailable, archive fails closed.
 
     The DB-level teardown (status, tasks/watches, runs, Show Page) is atomic in

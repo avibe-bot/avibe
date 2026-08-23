@@ -12,6 +12,12 @@ from unittest.mock import AsyncMock, Mock, patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+async def _wait_capture_tasks(handler) -> None:
+    while handler._memory_capture_tasks:
+        tasks = tuple(handler._memory_capture_tasks)
+        await asyncio.gather(*tasks, return_exceptions=True)
+        handler._memory_capture_tasks.difference_update(tasks)
+
 from modules.im import MessageContext
 from modules.sessions_facade import SessionsFacade
 from core.processing_indicator import ProcessingIndicatorService
@@ -541,7 +547,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         )
 
         await handler.handle_user_message(context, "remember this")
-        await handler.drain_memory_capture_tasks()
+        await _wait_capture_tasks(handler)
 
         handler._materialize_file_attachments.assert_awaited_once()
         controller.reserve_memory_attachment_capture.assert_called_once_with(
@@ -625,7 +631,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         )
 
         await handler.handle_user_message(context, "remember this")
-        await handler.drain_memory_capture_tasks()
+        await _wait_capture_tasks(handler)
 
         self.assertEqual(captured, ["remember this"])
         lease.retain.assert_called_once_with()
@@ -683,7 +689,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
                     "remember this caption",
                     source=handler.TURN_SOURCE_HUMAN,
                 )
-                await handler.drain_memory_capture_tasks()
+                await _wait_capture_tasks(handler)
 
                 self.assertEqual(result, str(materialization_error))
                 controller.capture_user_memory.assert_awaited_once_with(
@@ -878,7 +884,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         )
 
         await handler.handle_user_message(context, "remember this")
-        await handler.drain_memory_capture_tasks()
+        await _wait_capture_tasks(handler)
 
         capture_call = controller.capture_user_memory.await_args
         self.assertIsNone(
@@ -936,7 +942,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         )
 
         await handler.handle_user_message(context, "review this")
-        await handler.drain_memory_capture_tasks()
+        await _wait_capture_tasks(handler)
 
         lease.retain.assert_not_called()
         controller.capture_user_memory.assert_called_once()
@@ -1194,7 +1200,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         assert not blocked_lifecycle.done()
 
         release_capture.set()
-        await handler.drain_memory_capture_tasks()
+        await _wait_capture_tasks(handler)
         admission = await asyncio.wait_for(blocked_lifecycle, timeout=1.0)
         admission.release()
 
@@ -1248,7 +1254,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         )
 
         await handler.handle_user_message(context, "remember this")
-        await handler.drain_memory_capture_tasks()
+        await _wait_capture_tasks(handler)
 
         assert captured.is_set()
 
@@ -1346,7 +1352,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         )
 
         await handler.handle_user_message(context, "remember this")
-        await handler.drain_memory_capture_tasks()
+        await _wait_capture_tasks(handler)
 
         self.assertEqual(captured_session_ids, ["base-session"])
 
@@ -1438,7 +1444,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         assert not capture_finished.is_set()
         handler._admit_human_delivery.assert_awaited_once()
         capture_can_finish.set()
-        await handler.drain_memory_capture_tasks()
+        await _wait_capture_tasks(handler)
         assert lifecycle_released.is_set()
         retained_lease.release.assert_called_once_with()
 
@@ -1523,7 +1529,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
 
         release_download.set()
         await asyncio.wait_for(turn, timeout=1.0)
-        await handler.drain_memory_capture_tasks()
+        await _wait_capture_tasks(handler)
 
         controller.reserve_memory_attachment_capture.assert_not_called()
         lease.retain.assert_not_called()
@@ -1640,7 +1646,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(released_admissions, [])
         assert not second_capture_started.is_set()
         release_first_capture.set()
-        await handler.drain_memory_capture_tasks()
+        await _wait_capture_tasks(handler)
         assert second_capture_started.is_set()
         self.assertEqual(released_admissions, ["base-session", "base-session"])
 

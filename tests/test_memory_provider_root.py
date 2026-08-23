@@ -314,6 +314,8 @@ def _write_released_unsentinelled_root(root: ProviderRoot) -> None:
 def test_provider_root_clear_recovers_released_unsentinelled_first_start(
     tmp_path: Path,
 ) -> None:
+    """MEMORY-CLEAR-203: Clear claims only the released first-start root shape."""
+
     root, meta = _owner(tmp_path)
     metadata = _metadata()
     _write_released_unsentinelled_root(root)

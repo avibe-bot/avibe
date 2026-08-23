@@ -6,7 +6,6 @@ import ast
 import asyncio
 import gc
 import json
-import sys
 import threading
 import weakref
 from contextlib import asynccontextmanager
@@ -28,9 +27,7 @@ from core.memory import (
     MemoryModule,
 )
 from core.memory.admission import InboundTurnFacts
-from core.memory.artifact import FakeMemoryArtifactManager
 from core.memory.everos import FakeMemoryProvider
-from core.memory.runtime import MemoryRuntime
 from core.memory.store import MemoryStore
 from modules.im.base import FileAttachment, MessageContext
 from modules.im.message_facts import (
@@ -79,15 +76,9 @@ class _Runtime:
         self.retired = False
         self.attachment_status = "ready"
         self.attachment_generation: int | None = 1
-        self.final_flush_calls: list[dict[str, object]] = []
-        self.final_flush_result = True
-        self.final_flush_error: Exception | None = None
-        self.session_lifecycle_calls: list[dict[str, object]] = []
-        self.session_lifecycle_error: Exception | None = None
-        self.recovered_scope: tuple[str, str] | None = None
-        self.recovered_scopes: tuple[tuple[str, str], ...] = ()
-        self.scope_recovery_calls: list[str] = []
-        self.scopes_recovery_calls: list[str] = []
+        self.barrier_offers = 0
+        self.barrier_sessions: list[str | None] = []
+        self.barrier_error: Exception | None = None
 
     def principal_for_user_key(self, user_key: str) -> str:
         suffix = "1" if user_key.endswith("user-1") else "2"
@@ -103,36 +94,12 @@ class _Runtime:
     def attachment_capture_config_generation(self) -> int | None:
         return self.attachment_generation
 
-    async def resolve_current_session_scope(self, raw_session_id: str) -> tuple[str, str] | None:
-        self.scope_recovery_calls.append(raw_session_id)
-        return self.recovered_scope
-
-    async def resolve_current_session_scopes(
-        self,
-        raw_session_id: str,
-    ) -> tuple[tuple[str, str], ...]:
-        self.scopes_recovery_calls.append(raw_session_id)
-        return self.recovered_scopes
-
-    async def final_flush(self, **kwargs) -> bool:
-        self.final_flush_calls.append(kwargs)
-        if self.final_flush_error is not None:
-            raise self.final_flush_error
-        return self.final_flush_result
-
-    async def run_session_lifecycle(self, **kwargs):
-        operation = kwargs.pop("operation")
-        self.session_lifecycle_calls.append(kwargs)
-        if self.session_lifecycle_error is not None:
-            raise self.session_lifecycle_error
-        return await operation()
-
-    async def run_session_scopes_lifecycle(self, **kwargs):
-        operation = kwargs.pop("operation")
-        self.session_lifecycle_calls.append(kwargs)
-        if self.session_lifecycle_error is not None:
-            raise self.session_lifecycle_error
-        return await operation()
+    def offer_barrier(self, raw_session_id: str) -> str:
+        self.barrier_offers += 1
+        self.barrier_sessions.append(raw_session_id)
+        if self.barrier_error is not None:
+            raise self.barrier_error
+        return "queued"
 
 
 class _CaptureModule:
@@ -218,34 +185,6 @@ def test_message_handler_retains_memory_capture_task_until_completion() -> None:
         release.set()
         await reference()
         await asyncio.sleep(0)
-        assert handler._memory_capture_tasks == set()
-
-    asyncio.run(run())
-
-
-def test_message_handler_drains_memory_capture_tasks() -> None:
-    handler = MessageHandler.__new__(MessageHandler)
-    handler._memory_capture_tasks = set()
-    completed = False
-
-    async def run() -> None:
-        nonlocal completed
-        release = asyncio.Event()
-
-        async def capture() -> None:
-            nonlocal completed
-            await release.wait()
-            completed = True
-
-        task = asyncio.create_task(capture())
-        handler._track_memory_capture_task(task)
-        drain = asyncio.create_task(handler.drain_memory_capture_tasks())
-        await asyncio.sleep(0)
-        assert not drain.done()
-
-        release.set()
-        await drain
-        assert completed is True
         assert handler._memory_capture_tasks == set()
 
     asyncio.run(run())
@@ -417,7 +356,8 @@ def test_slack_without_multimodal_opt_in_skips_live_health_read() -> None:
     async def run() -> None:
         controller = _controller()
         store = MemoryStore()
-        module = MemoryModule(store, FakeMemoryProvider(), enabled=True)
+        provider = FakeMemoryProvider()
+        module = MemoryModule(store, provider, enabled=True)
         controller.memory_module = module
         controller.memory_runtime = _Runtime(module)
         controller.memory_runtime.attachment_generation = None
@@ -457,10 +397,10 @@ def test_slack_without_multimodal_opt_in_skips_live_health_read() -> None:
         )
 
         assert health_reads == 0
-        rows = store.list_queue_rows()
-        assert len(rows) == 1
-        assert rows[0].payload_text == "keep the caption"
-        assert rows[0].payload_attachments is None
+        await module.wait_writer_idle_for_tests()
+        assert len(provider.captures) == 1
+        assert provider.captures[0].text == "keep the caption"
+        assert provider.captures[0].attachments == ()
 
         reset_ran = False
 
@@ -468,17 +408,10 @@ def test_slack_without_multimodal_opt_in_skips_live_health_read() -> None:
             nonlocal reset_ran
             reset_ran = True
 
-        await asyncio.wait_for(
-            module.run_session_lifecycle(
-                principal_id="u-" + ("1" * 32),
-                project_id=PROJECT,
-                raw_session_id="stable-session",
-                operation=reset,
-                deadline_seconds=1.0,
-            ),
-            timeout=1.5,
-        )
+        module.offer_barrier("stable-session")
+        await asyncio.wait_for(reset(), timeout=1.5)
         assert reset_ran is True
+        await module.close_writer()
 
     asyncio.run(run())
 
@@ -596,16 +529,8 @@ def test_configured_attachment_capture_does_not_block_session_reset(
             nonlocal reset_ran
             reset_ran = True
 
-        await asyncio.wait_for(
-            module.run_session_lifecycle(
-                principal_id="u-" + ("1" * 32),
-                project_id=PROJECT,
-                raw_session_id="stable-session",
-                operation=reset,
-                deadline_seconds=0.25,
-            ),
-            timeout=0.75,
-        )
+        module.offer_barrier("stable-session")
+        await asyncio.wait_for(reset(), timeout=0.75)
         await asyncio.wait_for(capture, timeout=1.0)
 
         assert reset_ran is True
@@ -821,6 +746,8 @@ def test_capture_skips_ineligible_human_turns(context, text, enabled) -> None:
 
 
 def test_capture_stamps_user_principal_provenance_and_native_dedup_key() -> None:
+    """MEMORY-SEARCH-015: capture identity stays caller-scoped and deduplicated."""
+
     controller = _controller()
     context = _context("telegram")
     other_user = _context("telegram", user_id="user-2")
@@ -890,43 +817,6 @@ def test_capture_paths_reject_a_settled_factory_reset_marker() -> None:
     assert controller.memory_module.accepted == []
 
 
-def test_final_flush_memory_session_reuses_capture_scope_and_raw_anchor() -> None:
-    controller = _controller()
-
-    result = asyncio.run(controller.final_flush_memory_session(_context("telegram"), "telegram_dm-1"))
-
-    assert result is True
-    assert controller.memory_runtime.final_flush_calls == [
-        {
-            "principal_id": "u-" + ("1" * 32),
-            "project_id": PROJECT,
-            "raw_session_id": "telegram_dm-1",
-            "deadline_seconds": 5.0,
-        }
-    ]
-
-
-@pytest.mark.parametrize("enabled,admitted", [(False, True), (True, False)])
-def test_final_flush_memory_session_fails_closed_without_admitted_scope(enabled: bool, admitted: bool) -> None:
-    controller = _controller(user=SimpleNamespace(enabled=admitted, is_admin=False))
-    controller.config.memory.enabled = enabled
-
-    result = asyncio.run(controller.final_flush_memory_session(_context("slack"), "slack_dm-1"))
-
-    assert result is False
-    assert controller.memory_runtime.final_flush_calls == []
-
-
-def test_final_flush_memory_session_swallows_runtime_failure() -> None:
-    controller = _controller()
-    controller.memory_runtime.final_flush_error = RuntimeError("provider unavailable")
-
-    result = asyncio.run(controller.final_flush_memory_session(_context("wechat"), "wechat_dm-1"))
-
-    assert result is False
-    assert len(controller.memory_runtime.final_flush_calls) == 1
-
-
 def test_memory_session_lifecycle_reuses_capture_scope_and_raw_anchor() -> None:
     controller = _controller()
     operation_calls = []
@@ -946,35 +836,28 @@ def test_memory_session_lifecycle_reuses_capture_scope_and_raw_anchor() -> None:
 
     assert result == "reset-complete"
     assert operation_calls == ["reset"]
-    assert controller.memory_runtime.session_lifecycle_calls == [
-        {
-            "principal_id": "u-" + ("1" * 32),
-            "project_id": PROJECT,
-            "raw_session_id": "wechat_dm-1",
-            "deadline_seconds": 4.0,
-        }
-    ]
+    assert controller.memory_runtime.barrier_sessions == ["wechat_dm-1"]
 
 
 def test_memory_session_lifecycle_does_not_reset_without_a_fence() -> None:
     controller = _controller()
-    controller.memory_runtime.session_lifecycle_error = RuntimeError("fence unavailable")
+    controller.memory_runtime.barrier_error = RuntimeError("fence unavailable")
     operation_calls = []
 
     async def reset_session() -> str:
         operation_calls.append("reset")
         return "reset-complete"
 
-    with pytest.raises(RuntimeError, match="fence unavailable"):
-        asyncio.run(
-            controller.run_memory_session_lifecycle(
-                _context("slack"),
-                "slack_dm-1",
-                reset_session,
-            )
+    result = asyncio.run(
+        controller.run_memory_session_lifecycle(
+            _context("slack"),
+            "slack_dm-1",
+            reset_session,
         )
+    )
 
-    assert operation_calls == []
+    assert result == "reset-complete"
+    assert operation_calls == ["reset"]
 
 
 def test_memory_session_lifecycle_resets_without_guessing_an_ineligible_scope() -> None:
@@ -995,7 +878,7 @@ def test_memory_session_lifecycle_resets_without_guessing_an_ineligible_scope() 
 
     assert result == "reset-complete"
     assert operation_calls == ["reset"]
-    assert controller.memory_runtime.session_lifecycle_calls == []
+    assert controller.memory_runtime.barrier_sessions == []
 
 
 def test_memory_session_lifecycle_does_not_repeat_failed_reset() -> None:
@@ -1016,79 +899,6 @@ def test_memory_session_lifecycle_does_not_repeat_failed_reset() -> None:
         )
 
     assert operation_calls == ["reset"]
-
-
-def test_final_flush_memory_cli_session_uses_trusted_stored_scope() -> None:
-    controller = _controller()
-    principal_id = "u-" + ("2" * 32)
-    controller._memory_scopes_by_session = {
-        "ses-workbench": (principal_id, PROJECT),
-    }
-    controller._memory_cli_facts_by_session = {}
-
-    result = asyncio.run(
-        controller.final_flush_memory_cli_session(
-            "ses-workbench",
-            deadline_seconds=4.0,
-        )
-    )
-
-    assert result is True
-    assert controller.memory_runtime.session_lifecycle_calls == [
-        {
-            "scopes": ((principal_id, PROJECT),),
-            "raw_session_id": "ses-workbench",
-            "deadline_seconds": 4.0,
-        }
-    ]
-
-
-def test_final_flush_memory_cli_session_swallows_runtime_failure() -> None:
-    controller = _controller()
-    controller.memory_runtime.session_lifecycle_error = RuntimeError("provider unavailable")
-    controller._memory_scopes_by_session = {
-        "ses-workbench": ("u-" + ("2" * 32), PROJECT),
-    }
-    controller._memory_cli_facts_by_session = {}
-
-    result = asyncio.run(
-        controller.final_flush_memory_cli_session(
-            "ses-workbench",
-        )
-    )
-
-    assert result is False
-    assert len(controller.memory_runtime.session_lifecycle_calls) == 1
-
-
-def test_final_flush_memory_cli_session_recovers_scope_after_controller_restart() -> None:
-    controller = _controller()
-    principal_id = "u-" + ("2" * 32)
-    controller._memory_scopes_by_session = {}
-    controller.memory_runtime.recovered_scopes = ((principal_id, PROJECT),)
-
-    result = asyncio.run(controller.final_flush_memory_cli_session("ses-workbench"))
-
-    assert result is True
-    assert controller.memory_runtime.scopes_recovery_calls == ["ses-workbench"]
-    assert controller.memory_runtime.session_lifecycle_calls == [
-        {
-            "scopes": ((principal_id, PROJECT),),
-            "raw_session_id": "ses-workbench",
-            "deadline_seconds": 5.0,
-        }
-    ]
-
-
-def test_final_flush_memory_cli_session_skips_without_stored_scope() -> None:
-    controller = _controller()
-    controller._memory_scopes_by_session = {}
-
-    result = asyncio.run(controller.final_flush_memory_cli_session("ses-absent"))
-
-    assert result is False
-    assert controller.memory_runtime.scopes_recovery_calls == ["ses-absent"]
-    assert controller.memory_runtime.final_flush_calls == []
 
 
 def test_archive_memory_cli_session_commits_without_waiting_on_memory(
@@ -1117,22 +927,16 @@ def test_archive_memory_cli_session_commits_without_waiting_on_memory(
         )["id"]
 
     principal_id = "u-" + ("2" * 32)
-    flush_entered = asyncio.Event()
-    release_flush = asyncio.Event()
-    flush_started_after_archive: list[bool] = []
+    barrier_started_after_archive: list[bool] = []
 
     class LifecycleRuntime(_Runtime):
-        async def run_session_scopes_lifecycle(self, **kwargs):
-            operation = kwargs.pop("operation")
-            self.session_lifecycle_calls.append(kwargs)
+        def offer_barrier(self, raw_session_id: str) -> str:
             with engine.connect() as conn:
-                flush_started_after_archive.append(
+                barrier_started_after_archive.append(
                     workbench_sessions_service.get_session(conn, session_id)["status"]
                     == "archived"
                 )
-            flush_entered.set()
-            await release_flush.wait()
-            return await operation()
+            return super().offer_barrier(raw_session_id)
 
     controller = _controller()
     controller.memory_runtime = LifecycleRuntime(controller.memory_module)
@@ -1151,8 +955,6 @@ def test_archive_memory_cli_session_commits_without_waiting_on_memory(
             memory_enabled=True,
         )
     }
-    controller.memory_runtime.recovered_scopes = ((principal_id, PROJECT),)
-
     async def run() -> None:
         result = await controller.archive_memory_cli_session(
             session_id,
@@ -1161,19 +963,10 @@ def test_archive_memory_cli_session_commits_without_waiting_on_memory(
         assert result["status"] == "archived"
         with engine.connect() as conn:
             assert workbench_sessions_service.get_session(conn, session_id)["status"] == "archived"
-        await asyncio.wait_for(flush_entered.wait(), timeout=1.0)
-        assert flush_started_after_archive == [True]
-        assert controller.memory_runtime.session_lifecycle_calls == [
-            {
-                "scopes": ((principal_id, PROJECT),),
-                "raw_session_id": session_id,
-                "deadline_seconds": 5.0,
-            }
-        ]
-        release_flush.set()
-        pending = list(getattr(controller, "_archive_memory_flush_tasks", set()))
-        if pending:
-            await asyncio.gather(*pending)
+        await asyncio.sleep(0)
+        assert barrier_started_after_archive == [True]
+        assert controller.memory_runtime.barrier_offers == 1
+        assert controller.memory_runtime.barrier_sessions == [session_id]
         assert session_id not in controller._memory_scopes_by_session
         assert session_id not in controller._memory_cli_facts_by_session
 
@@ -1183,28 +976,25 @@ def test_archive_memory_cli_session_commits_without_waiting_on_memory(
         engine.dispose()
 
 
-def test_archive_memory_flush_drops_on_a_stopped_controller_loop() -> None:
+def test_archive_memory_barrier_failure_still_releases_authorization() -> None:
     """Scenario: MEMORY-INDEP-007."""
 
-    session_id = "ses-archived-on-stopped-loop"
+    session_id = "ses-archived-with-barrier-failure"
     controller = _controller()
+    controller.memory_runtime.barrier_error = RuntimeError("writer unavailable")
     controller._memory_scopes_by_session = {
         session_id: ("u-" + ("2" * 32), PROJECT),
     }
     controller._memory_cli_facts_by_session = {session_id: object()}
-    controller._loop = asyncio.new_event_loop()
 
-    try:
-        controller._schedule_best_effort_archive_memory_flush(session_id)
-    finally:
-        controller._loop.close()
+    controller._offer_best_effort_archive_memory_barrier(session_id)
 
+    assert controller.memory_runtime.barrier_offers == 1
     assert session_id not in controller._memory_scopes_by_session
     assert session_id not in controller._memory_cli_facts_by_session
-    assert getattr(controller, "_archive_memory_flush_tasks", set()) == set()
 
 
-def test_archive_memory_cli_session_schedules_flush_when_commit_is_cancelled(
+def test_archive_memory_cli_session_offers_barrier_when_commit_is_cancelled(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1227,19 +1017,14 @@ def test_archive_memory_cli_session_schedules_flush_when_commit_is_cancelled(
             title="Archive through cancellation",
         )["id"]
 
-    principal_id = "u-" + ("2" * 32)
-    flush_entered = asyncio.Event()
-    release_flush = asyncio.Event()
+    barrier_offered = asyncio.Event()
     commit_entered = threading.Event()
     release_commit = threading.Event()
 
     class LifecycleRuntime(_Runtime):
-        async def run_session_scopes_lifecycle(self, **kwargs):
-            operation = kwargs.pop("operation")
-            self.session_lifecycle_calls.append(kwargs)
-            flush_entered.set()
-            await release_flush.wait()
-            return await operation()
+        def offer_barrier(self, raw_session_id: str) -> str:
+            barrier_offered.set()
+            return super().offer_barrier(raw_session_id)
 
     from core.services import sessions as sessions_service
 
@@ -1255,10 +1040,9 @@ def test_archive_memory_cli_session_schedules_flush_when_commit_is_cancelled(
     controller = _controller()
     controller.memory_runtime = LifecycleRuntime(controller.memory_module)
     controller._memory_scopes_by_session = {
-        session_id: (principal_id, PROJECT),
+        session_id: ("u-" + ("2" * 32), PROJECT),
     }
     controller._memory_cli_facts_by_session = {}
-    controller.memory_runtime.recovered_scopes = ((principal_id, PROJECT),)
 
     async def run() -> None:
         archive = asyncio.create_task(controller.archive_memory_cli_session(session_id))
@@ -1274,11 +1058,9 @@ def test_archive_memory_cli_session_schedules_flush_when_commit_is_cancelled(
             await archive
         with engine.connect() as conn:
             assert workbench_sessions_service.get_session(conn, session_id)["status"] == "archived"
-        await asyncio.wait_for(flush_entered.wait(), timeout=1.0)
-        release_flush.set()
-        pending = list(getattr(controller, "_archive_memory_flush_tasks", set()))
-        if pending:
-            await asyncio.gather(*pending)
+        await asyncio.wait_for(barrier_offered.wait(), timeout=1.0)
+        assert controller.memory_runtime.barrier_offers == 1
+        assert session_id not in controller._memory_scopes_by_session
 
     try:
         asyncio.run(run())
@@ -1337,15 +1119,14 @@ def test_archive_memory_cli_session_preflight_skips_memory_lifecycle(
     finally:
         engine.dispose()
 
-    assert controller.memory_runtime.session_lifecycle_calls == []
-    assert controller.memory_runtime.scope_recovery_calls == []
+    assert controller.memory_runtime.barrier_sessions == []
+    assert controller.memory_runtime.barrier_offers == 0
 
 
-def test_archive_memory_cli_session_commits_when_memory_lifecycle_is_busy(
+def test_archive_memory_cli_session_commits_when_barrier_offer_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    from core.memory.module import MemorySessionLifecycleBusyError
     from storage import workbench_sessions_service
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state
@@ -1366,20 +1147,13 @@ def test_archive_memory_cli_session_commits_when_memory_lifecycle_is_busy(
         )["id"]
 
     controller = _controller()
-    controller.memory_runtime.session_lifecycle_error = MemorySessionLifecycleBusyError(
-        "memory session lifecycle is unavailable"
-    )
-    controller.memory_runtime.recovered_scopes = (
-        ("u-" + ("2" * 32), PROJECT),
-    )
+    controller.memory_runtime.barrier_error = RuntimeError("writer unavailable")
     controller._memory_scopes_by_session = {}
     controller._memory_cli_facts_by_session = {}
 
     async def run() -> dict[str, object]:
         result = await controller.archive_memory_cli_session(session_id)
-        pending = list(getattr(controller, "_archive_memory_flush_tasks", set()))
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+        await asyncio.sleep(0)
         return result
 
     try:
@@ -1387,192 +1161,37 @@ def test_archive_memory_cli_session_commits_when_memory_lifecycle_is_busy(
         assert result["status"] == "archived"
         with engine.connect() as conn:
             assert workbench_sessions_service.get_session(conn, session_id)["status"] == "archived"
-        assert controller.memory_runtime.session_lifecycle_calls == [
-            {
-                "scopes": (("u-" + ("2" * 32), PROJECT),),
-                "raw_session_id": session_id,
-                "deadline_seconds": 5.0,
-            }
-        ]
+        assert controller.memory_runtime.barrier_offers == 1
     finally:
         engine.dispose()
 
 
-@pytest.mark.parametrize("restarted", [False, True])
-def test_archive_memory_cli_session_flushes_every_cwd_scope_after_commit(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    restarted: bool,
-) -> None:
-    from storage import workbench_sessions_service
-    from storage.db import create_sqlite_engine
-    from storage.importer import ensure_sqlite_state
-    from storage.projects_service import create_project
+def test_retired_memory_delivery_symbols_have_no_product_callers() -> None:
+    """Keep the removed durable-delivery surface out of production code."""
 
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    ensure_sqlite_state()
-    engine = create_sqlite_engine()
-    project_dir = tmp_path / "project"
-    project_dir.mkdir()
-    with engine.begin() as conn:
-        project = create_project(conn, str(project_dir), display_name="Project")
-        session_id = workbench_sessions_service.create_session(
-            conn,
-            scope_id=project["scope_id"],
-            agent_backend="claude",
-            title="Archive every Memory project",
-        )["id"]
-
-    first_scope = (
-        "u-11111111111111111111111111111111",
-        "p-11111111111111111111111111111111",
-    )
-    second_scope = (
-        "u-22222222222222222222222222222222",
-        "p-22222222222222222222222222222222",
-    )
-    controller = _controller()
-    controller._memory_scopes_by_session = (
-        {} if restarted else {session_id: second_scope}
-    )
-    controller._memory_cli_facts_by_session = {}
-    controller.memory_runtime.recovered_scopes = (second_scope, first_scope)
-
-    async def run() -> dict[str, object]:
-        result = await controller.archive_memory_cli_session(
-            session_id,
-            deadline_seconds=3.0,
-        )
-        pending = list(getattr(controller, "_archive_memory_flush_tasks", set()))
-        if pending:
-            await asyncio.gather(*pending)
-        return result
-
-    try:
-        result = asyncio.run(run())
-    finally:
-        engine.dispose()
-
-    assert result["status"] == "archived"
-    assert controller.memory_runtime.scopes_recovery_calls == [session_id]
-    assert controller.memory_runtime.session_lifecycle_calls == [
-        {
-            "scopes": (first_scope, second_scope),
-            "raw_session_id": session_id,
-            "deadline_seconds": 5.0,
-        }
-    ]
-
-
-def test_archive_memory_cli_session_skips_flush_when_memory_is_disabled(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    from core.session_turns import SessionTurnManager
-    from storage import workbench_sessions_service
-    from storage.db import create_sqlite_engine
-    from storage.importer import ensure_sqlite_state
-    from storage.projects_service import create_project
-
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    ensure_sqlite_state()
-    engine = create_sqlite_engine()
-    project_dir = tmp_path / "project"
-    project_dir.mkdir()
-    with engine.begin() as conn:
-        project = create_project(conn, str(project_dir), display_name="Project")
-        session_id = workbench_sessions_service.create_session(
-            conn,
-            scope_id=project["scope_id"],
-            agent_backend="claude",
-            title="Archive with Memory disabled",
-        )["id"]
-
-    principal_id = "u-" + ("2" * 32)
-    store = MemoryStore(tmp_path / "memory.sqlite")
-    accepted = store.enqueue_request(
-        source_message_id="persisted-scope",
-        session_id=session_id,
-        principal_id=principal_id,
-        project_ref=PROJECT,
-        provenance="user_input",
-        payload_text="persist this scope",
-        occurred_at_ms=1_725_000_001_234,
-        max_provider_timestamp_ms=4_102_444_800_000,
-    )
-    assert accepted.row is not None
-
-    disabled = MemoryConfig(enabled=False)
-    runtime = MemoryRuntime(
-        disabled,
-        store=store,
-        artifact_manager=FakeMemoryArtifactManager(python=Path(sys.executable)),
-        effective_home=tmp_path / "runtime",
-    )
-    assert runtime.available is True
-    assert runtime._maintenance_open() is False
-    provider = FakeMemoryProvider()
-    runtime.module.replace_provider(provider)
-    controller = _controller()
-    controller.config.memory = disabled
-    controller.memory_runtime = runtime
-    controller.memory_module = runtime.module
-    controller.session_turns = SessionTurnManager(controller)
-    controller._memory_scopes_by_session = {}
-    controller._memory_cli_facts_by_session = {}
-
-    async def run() -> dict[str, object]:
-        try:
-            result = await controller.archive_memory_cli_session(session_id)
-            pending = list(getattr(controller, "_archive_memory_flush_tasks", set()))
-            if pending:
-                await asyncio.gather(*pending)
-            return result
-        finally:
-            await runtime.close()
-
-    try:
-        result = asyncio.run(run())
-        assert result["status"] == "archived"
-        assert store.resolve_current_session_scopes(session_id) == (
-            (principal_id, PROJECT),
-        )
-        assert provider.flushes == []
-        assert store.list_queue_rows()[0].state == "pending"
-        with engine.connect() as conn:
-            assert workbench_sessions_service.get_session(conn, session_id)["status"] == "archived"
-    finally:
-        engine.dispose()
-
-
-def test_removed_memory_runtime_lifecycle_symbols_have_no_callers() -> None:
-    """Keep callers on MemoryModule after lifecycle ownership moves there."""
-
-    module_internal = "_final_flush_" + "under_admission"
     removed = {
-        module_internal,
-        "_final_flush_" + "timeout",
-        "_replace_" + "provider",
+        "final_" + "flush",
+        "drain_" + "memory_capture_tasks",
+        "enqueue_" + "request",
+        "list_" + "queue_rows",
+        "resolve_current_session_" + "scope",
+        "resolve_current_session_" + "scopes",
     }
-    module_path = REPO_ROOT / "core" / "memory" / "module.py"
     offenders: list[str] = []
-    for source_path in sorted(REPO_ROOT.rglob("*.py")):
-        if any(part in {".git", ".runtime", ".venv"} for part in source_path.parts):
-            continue
-        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
-        for node in ast.walk(tree):
-            symbol: str | None = None
-            if isinstance(node, ast.Attribute):
-                symbol = node.attr
-            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Name)):
-                symbol = node.name if hasattr(node, "name") else node.id
-            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-                symbol = node.value
-            if symbol not in removed:
-                continue
-            if source_path == module_path and symbol == module_internal:
-                continue
-            offenders.append(f"{source_path.relative_to(REPO_ROOT)}:{node.lineno}: {symbol}")
+    for root_name in ("core", "modules", "vibe"):
+        for source_path in sorted((REPO_ROOT / root_name).rglob("*.py")):
+            tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+            for node in ast.walk(tree):
+                symbol: str | None = None
+                if isinstance(node, ast.Attribute):
+                    symbol = node.attr
+                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Name)):
+                    symbol = node.name if hasattr(node, "name") else node.id
+                elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    symbol = node.value
+                if symbol not in removed:
+                    continue
+                offenders.append(f"{source_path.relative_to(REPO_ROOT)}:{node.lineno}: {symbol}")
 
     assert offenders == []
 

@@ -374,7 +374,6 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
 
         async def close(self) -> None:
             assert stopped["capture"] is True
-            assert archive_flush_task.cancelled()
             self.closed = True
             stopped["runtime"] = True
             stop_order.append("memory-runtime")
@@ -405,14 +404,6 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
 
     controller._memory_factory_reset_task = loop.create_task(retained_factory_reset())
 
-    async def pending_archive_flush() -> None:
-        try:
-            await asyncio.Event().wait()
-        finally:
-            stop_order.append("archive-flush")
-
-    archive_flush_task = loop.create_task(pending_archive_flush())
-    controller._archive_memory_flush_tasks = {archive_flush_task}
     loop.run_until_complete(asyncio.sleep(0))
     controller.update_checker = type("UpdateChecker", (), {"stop": lambda self: None})()
     controller.receiver_tasks = {}
@@ -422,14 +413,8 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
     try:
         controller.cleanup_sync()
     finally:
-        if not archive_flush_task.done():
-            archive_flush_task.cancel()
-            loop.run_until_complete(
-                asyncio.gather(archive_flush_task, return_exceptions=True)
-            )
         loop.close()
 
-    assert archive_flush_task.cancelled()
     assert stopped["tasks"] is True
     assert stopped["watch"] is True
     assert stopped["supervisor"] is True
@@ -445,10 +430,9 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
     assert set(runtime_work_order[1:3]) == {"tasks", "watch"}
     assert runtime_work_order[3] == "supervisor"
     assert stop_order.index("factory-reset") < stop_order.index("capture")
-    assert stop_order[-4:] == [
+    assert stop_order[-3:] == [
         "capture-registration",
         "capture",
-        "archive-flush",
         "memory-runtime",
     ]
 

@@ -92,11 +92,15 @@ describe('Memory UI copy contracts', () => {
 
     expect(disclosure).toMatch(/5,000/);
     if (language === 'en') {
-      expect(disclosure).toContain('raw messages and attachment copies');
+      expect(disclosure).toContain('bounded and process-local');
+      expect(disclosure).toContain('not queued durably');
+      expect(disclosure).toMatch(/ambiguous provider outcomes are not replayed/i);
       expect(disclosure).toContain('Turning Memory off pauses it');
       expect(settings.cloudDisclosureAttachment).toContain('cloud model service');
     } else {
-      expect(disclosure).toContain('原始消息和附件副本');
+      expect(disclosure).toContain('有界且仅由当前进程管理');
+      expect(disclosure).toContain('不会进入持久队列');
+      expect(disclosure).toContain('不会重放');
       expect(disclosure).toContain('关闭记忆只是暂停记录');
       expect(settings.cloudDisclosureAttachment).toContain('云端模型服务');
     }
@@ -119,12 +123,27 @@ describe('Memory UI copy contracts', () => {
     const disclosure = BUNDLES[language].memory.settings.disclosure.join('\n');
 
     if (language === 'en') {
-      expect(disclosure).toContain('proactively save durable notes without being asked');
+      expect(disclosure).toContain('submit long-lived notes for best-effort capture without being asked');
       expect(disclosure).toMatch(/files.*non-plain content/i);
     } else {
       expect(disclosure).toContain('未明确要求');
-      expect(disclosure).toContain('主动保存');
+      expect(disclosure).toContain('尽力捕获');
       expect(disclosure).toMatch(/文件.*非纯文本/);
+    }
+  });
+
+  it.each(['en', 'zh'] as const)('does not promise queue retention while capture is paused in %s', (language) => {
+    const settings = BUNDLES[language].memory.settings;
+    const pausedCopy = [settings.organizationTransitionDescription, settings.cloudPausedDescription].join('\n');
+
+    if (language === 'en') {
+      expect(pausedCopy).toContain('volatile queued work may be discarded');
+      expect(pausedCopy).toContain('new messages are not accepted for capture');
+      expect(pausedCopy).not.toMatch(/queued messages are kept|new messages keep queuing/i);
+    } else {
+      expect(pausedCopy).toContain('排队任务可能被丢弃');
+      expect(pausedCopy).toContain('新消息不会被接受用于捕获');
+      expect(pausedCopy).not.toMatch(/排队中的消息会保留|新消息会继续排队/);
     }
   });
 
@@ -135,6 +154,19 @@ describe('Memory UI copy contracts', () => {
 
   it.each(['en', 'zh'] as const)('localizes the closed cloud capability error in %s', (language) => {
     expect(BUNDLES[language].errors.memory_capability_unavailable).toBeTruthy();
+  });
+
+  it.each(['en', 'zh'] as const)('localizes best-effort diagnostic source reasons in %s', (language) => {
+    const reasons = BUNDLES[language].memory.log.reason;
+    for (const key of [
+      'volatileDeliveryState',
+      'providerMemoryUnavailable',
+      'providerCallLogUnavailable',
+      'processingTimelineUnavailable',
+      'memoryFailureHistoryUnavailable',
+    ] as const) {
+      expect(reasons[key]).toBeTruthy();
+    }
   });
 
   it('keeps processing terminology aligned with the runtime contracts', () => {
@@ -157,7 +189,7 @@ describe('Memory UI copy contracts', () => {
     });
     expect(en.memory.factoryReset.roots.memoryStateStorage).toEqual({
       label: 'Memory state storage',
-      description: 'May include processing queues, recovery progress, and coordination state',
+      description: 'May include Memory identity, project, and health metadata',
     });
     expect(en.memory.factoryReset.technicalPath).toContain('{{path}}');
 
@@ -171,7 +203,7 @@ describe('Memory UI copy contracts', () => {
     });
     expect(zh.memory.factoryReset.roots.memoryStateStorage).toEqual({
       label: '记忆状态存储',
-      description: '可能包含处理队列、恢复进度和协调状态',
+      description: '可能包含记忆身份、项目和健康元数据',
     });
     expect(zh.memory.factoryReset.technicalPath).toContain('{{path}}');
   });
@@ -184,18 +216,22 @@ describe('Memory UI copy contracts', () => {
       expect(bundle.memory.processingRecord.runtime.noneDisabled).toBe('No separately disabled features reported.');
       expect(bundle.memory.processingRecord.anomalies.help).toContain("won't recover automatically");
       expect(bundle.memory.processingRecord.anomalies.help).toContain('Manual review required');
-      expect(disclosure).toContain('raw messages and attachment copies');
+      expect(disclosure).toContain('bounded and process-local');
+      expect(disclosure).not.toMatch(/local Memory queue|manual recovery|waiting to process/i);
       expect(disclosure).toContain('every user and project');
       expect(bundle.memory.clear.confirmDescription).toContain('every user and project');
       expect(bundle.memory.clear.removes[0]).toContain('every user and project');
+      expect(bundle.memory.clear.removes.join('\n')).not.toMatch(/queue|waiting to process/i);
     } else {
       expect(bundle.memory.processingRecord.runtime.noneDisabled).toBe('未报告单独禁用的功能。');
       expect(bundle.memory.processingRecord.anomalies.help).toContain('不会自动恢复');
       expect(bundle.memory.processingRecord.anomalies.help).toContain('需要人工检查');
-      expect(disclosure).toContain('原始消息和附件副本');
+      expect(disclosure).toContain('有界且仅由当前进程管理');
+      expect(disclosure).not.toMatch(/Memory 队列|人工恢复|待处理的消息/);
       expect(disclosure).toContain('所有用户和项目');
       expect(bundle.memory.clear.confirmDescription).toContain('所有用户和项目');
       expect(bundle.memory.clear.removes[0]).toContain('所有用户和项目');
+      expect(bundle.memory.clear.removes.join('\n')).not.toMatch(/处理队列|待处理/);
     }
   });
 

@@ -4472,7 +4472,12 @@
         "expired": "attribution has expired",
         "runsMissing": "processing runs are missing",
         "runsBusy": "processing runs are busy",
-        "runsMalformed": "processing runs are malformed"
+        "runsMalformed": "processing runs are malformed",
+        "volatileDeliveryState": "capture delivery state is process-local",
+        "providerMemoryUnavailable": "provider Memory data is unavailable",
+        "providerCallLogUnavailable": "provider call log is unavailable",
+        "processingTimelineUnavailable": "processing timeline is unavailable",
+        "memoryFailureHistoryUnavailable": "capture failure history is not retained"
       },
       "status": {
         "created": "Created",
@@ -4541,10 +4546,10 @@
       "useAvibeCloud": "Use Avibe Cloud",
       "organizationManaged": "Models are managed by your organization.",
       "organizationTransitionTitle": "Your organization now manages Memory models",
-      "organizationTransitionDescription": "Memory processing is paused. Confirm the change to rebuild the local index with your organization's embedding model; queued messages are kept.",
+      "organizationTransitionDescription": "Memory capture is paused; volatile queued work may be discarded and new messages are not accepted for capture. Confirm the change to rebuild the local index with your organization's embedding model.",
       "organizationTransitionAction": "Review and rebuild",
       "cloudPausedTitle": "Cloud Memory models are unavailable",
-      "cloudPausedDescription": "Memory processing is paused and new messages keep queuing. It resumes automatically when both cloud chat and embedding models are available.",
+      "cloudPausedDescription": "Memory capture is paused; volatile queued work may be discarded and new messages are not accepted for capture. Capture resumes automatically when both cloud chat and embedding models are available.",
       "dependencyNotReady": "The memory-runtime dependency isn't ready yet. Install or repair it from Settings → Dependencies, then try enabling Memory again.",
       "goToDependencies": "Open Dependencies",
       "llmTitle": "Language model (LLM)",
@@ -4584,19 +4589,19 @@
       "saved": "Memory settings saved.",
       "disclosureTitle": "About Memory",
       "disclosure": [
-        "When on, your Workbench messages and authorized users' private messages are distilled into memories. Your Agent can also proactively save durable notes without being asked, including preferences, corrections, decisions, and lasting facts about your machine or accounts found in files, forwarded or shared content, or other non-plain content.",
-        "The local Memory queue keeps raw messages and attachment copies while they wait to process. If a submission needs manual recovery, those copies can remain after processing stops.",
+        "When on, your Workbench messages and authorized users' private messages are offered for Memory capture. Your Agent can also submit long-lived notes for best-effort capture without being asked, including preferences, corrections, decisions, and lasting facts about your machine or accounts found in files, forwarded or shared content, or other non-plain content.",
+        "Memory capture is bounded and process-local: raw messages are not queued durably, and temporary attachment copies are cleaned after use or at startup. Saturation, failure, shutdown, or restart may lose work; ambiguous provider outcomes are not replayed.",
         "To build memories, message content is sent to the model endpoints configured above, and Search sends queries there too. These endpoints are separate from your Agent's models, and their providers handle the data under their own policies.",
         "Avibe's local Memory store stays on this machine and includes scrubbed model-call diagnostics for every user and project on this installation. Diagnostics can contain sensitive conversation text and are kept for up to 14 days or 5,000 calls. Copies sent to model endpoints are outside this local store. Turning Memory off pauses it — it doesn't delete anything.",
-        "Clear Memory Data deletes Avibe-managed Memory data for every user and project on this machine, including profiles, memories, and messages waiting to process. It can't take back content already sent to model endpoints or touch original chat histories.",
+        "Clear Memory Data deletes Avibe-managed Memory data for every user and project on this machine, including profiles, memories, diagnostics, and temporary attachment copies. It can't take back content already sent to model endpoints or touch original chat histories.",
         "Accounts on different platforms each have their own separate memory; they aren't linked."
       ],
       "cloudDisclosure": [
-        "When on, your Workbench messages and authorized users' private messages are distilled into memories. Your Agent can also proactively save durable notes without being asked, including preferences, corrections, decisions, and lasting facts about your machine or accounts found in files, forwarded or shared content, or other non-plain content.",
-        "The local Memory queue keeps raw messages and attachment copies while they wait to process. If a submission needs manual recovery, those copies can remain after processing stops.",
+        "When on, your Workbench messages and authorized users' private messages are offered for Memory capture. Your Agent can also submit long-lived notes for best-effort capture without being asked, including preferences, corrections, decisions, and lasting facts about your machine or accounts found in files, forwarded or shared content, or other non-plain content.",
+        "Memory capture is bounded and process-local: raw messages are not queued durably, and temporary attachment copies are cleaned after use or at startup. Saturation, failure, shutdown, or restart may lose work; ambiguous provider outcomes are not replayed.",
         "To build memories, message content is sent to the cloud models selected by Avibe or your organization, and Search sends queries to that cloud service too. These models are separate from your Agent's models, and the cloud service handles data under its policies.",
         "Avibe's local Memory store stays on this machine and includes scrubbed model-call diagnostics for every user and project on this installation. Diagnostics can contain sensitive conversation text and are kept for up to 14 days or 5,000 calls. Copies sent to model endpoints are outside this local store. Turning Memory off pauses it — it doesn't delete anything.",
-        "Clear Memory Data deletes Avibe-managed Memory data for every user and project on this machine, including profiles, memories, and messages waiting to process. It can't take back content already sent to model endpoints or touch original chat histories.",
+        "Clear Memory Data deletes Avibe-managed Memory data for every user and project on this machine, including profiles, memories, diagnostics, and temporary attachment copies. It can't take back content already sent to model endpoints or touch original chat histories.",
         "Accounts on different platforms each have their own separate memory; they aren't linked."
       ],
       "disclosureAttachment": "When the IM attachment processing endpoint is configured, eligible attachments from bound direct messages are also sent to that provider.",
@@ -4618,12 +4623,12 @@
     "clear": {
       "button": "Clear Memory Data",
       "confirmTitle": "Clear Memory Data for this installation?",
-      "confirmDescription": "This deletes Avibe-managed Memory data for every user and project on this machine, including profiles, distilled memories, and messages waiting to process.",
+      "confirmDescription": "This deletes Avibe-managed Memory data for every user and project on this machine, including profiles, distilled memories, and diagnostic logs.",
       "removesTitle": "This deletes:",
       "removes": [
         "Profiles and all memory entries for every user and project",
         "Local search indexes and caches",
-        "Everything in the processing queue",
+        "Saved Memory project and capture-health metadata",
         "Model-call diagnostic logs"
       ],
       "keepsTitle": "This does not delete:",
@@ -4656,7 +4661,7 @@
         },
         "memoryStateStorage": {
           "label": "Memory state storage",
-          "description": "May include processing queues, recovery progress, and coordination state"
+          "description": "May include Memory identity, project, and health metadata"
         }
       },
       "technicalPath": "Technical path: {{path}}",

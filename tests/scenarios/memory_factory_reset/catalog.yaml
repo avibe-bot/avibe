@@ -30,16 +30,16 @@ scenarios:
     when: Factory Reset is retried
     then: The first response reports partial deletion and the retry completes the remaining root
   - id: MEMORY-FACTORY-003
-    name: Remember is fenced by Controller replacement
+    name: Remember admitted to an old generation is invalidated by Controller replacement
     status: covered
     kind: service_boundary
     layer: scenario
     test: tests/scenarios/memory_factory_reset/test_memory_factory_reset_scenarios.py::test_memory_factory_003_stale_remember_waits_for_controller_replacement_gate
-    given: A capture is queued while replacement owns the gate
+    given: A capture is preparing while replacement owns the authority gate
     when: The old runtime is retired
     then: The stale capture cannot write and returns operation_in_progress
   - id: MEMORY-FACTORY-004
-    name: Captures cannot repopulate a freshly reset runtime
+    name: Stale captures cannot repopulate a freshly reset runtime
     status: covered
     kind: service_boundary
     layer: scenario
@@ -66,12 +66,12 @@ scenarios:
     when: Factory Reset is requested
     then: Both roots remain untouched and the result reports the repair reason
   - id: MEMORY-FACTORY-201
-    name: Worker and process death are quiesced before deletion
+    name: Writer and provider-sidecar ownership are quiesced before deletion
     status: covered
     kind: service_boundary
     layer: scenario
     test: tests/scenarios/memory_factory_reset/test_memory_factory_reset_scenarios.py::test_memory_factory_201_worker_and_process_death_are_quiesced_before_delete
-    given: The old aggregate has active worker/process ownership
+    given: The old aggregate has active writer/provider ownership
     when: Factory Reset retires it
     then: close is awaited before the deletion result is returned
   - id: MEMORY-FACTORY-202

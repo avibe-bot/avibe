@@ -82,6 +82,7 @@ class MessageHandler(BaseHandler):
         lifecycle_admission: Any = None,
         attachment_lease: Any = None,
         attachment_reservation: Any = None,
+        capture: object = None,
     ) -> None:
         """Retain a best-effort capture until asyncio reports its completion."""
 
@@ -99,6 +100,7 @@ class MessageHandler(BaseHandler):
             except Exception:
                 logger.warning("Memory capture task failed", exc_info=True)
             finally:
+                self._close_memory_capture(capture)
                 release_attachment = getattr(attachment_lease, "release", None)
                 if callable(release_attachment):
                     release_attachment()
@@ -198,6 +200,11 @@ class MessageHandler(BaseHandler):
         """Register a capture without awaiting Memory on the turn path."""
 
         if not self._memory_capture_registration_open:
+            self._close_memory_capture(capture)
+            for resource in (attachment_lease, attachment_reservation):
+                release = getattr(resource, "release", None)
+                if callable(release):
+                    release()
             return None
         capture_task = asyncio.create_task(
             self._run_memory_capture(session_id, expected_snapshot, capture),
@@ -208,6 +215,7 @@ class MessageHandler(BaseHandler):
             session_id=session_id,
             attachment_lease=attachment_lease,
             attachment_reservation=attachment_reservation,
+            capture=capture,
         )
         return capture_task
 
@@ -288,14 +296,6 @@ class MessageHandler(BaseHandler):
             self._memory_session_lifecycle_snapshot(session_id)
             == expected_snapshot
         )
-
-    async def drain_memory_capture_tasks(self) -> None:
-        """Settle captures accepted before controller shutdown closes Memory."""
-
-        while self._memory_capture_tasks:
-            tasks = tuple(self._memory_capture_tasks)
-            await asyncio.gather(*tasks, return_exceptions=True)
-            self._memory_capture_tasks.difference_update(tasks)
 
     async def cancel_memory_capture_tasks(self) -> None:
         """Cancel and join captures before the controller event loop closes."""

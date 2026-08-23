@@ -408,8 +408,9 @@ class EverOSPort:
             )
 
         envelope = _optional_json_object(raw)
-        request_id = _bounded_opaque_string(envelope.get("request_id") if envelope else None)
+        raw_request_id = envelope.get("request_id") if envelope else None
         if 200 <= status_code < 300:
+            request_id = _strict_receipt_id(raw_request_id)
             data = envelope.get("data") if envelope is not None else None
             status = data.get("status") if isinstance(data, dict) else None
             if envelope is None:
@@ -425,7 +426,7 @@ class EverOSPort:
         error = envelope.get("error") if envelope is not None else None
         error_code = error.get("code") if isinstance(error, dict) else None
         return FlushRejected(
-            request_id=request_id,
+            request_id=_bounded_opaque_string(raw_request_id),
             error_code=_bounded_opaque_string(error_code),
             server_fault=status_code >= 500,
         )
@@ -1862,7 +1863,7 @@ def _strict_receipt_id(value: object, *, max_bytes: int = 128) -> str | None:
     if not isinstance(value, str):
         return None
     raw = _utf8_bytes(value)
-    return value if raw is not None and len(raw) <= max_bytes else None
+    return value if value and raw is not None and len(raw) <= max_bytes else None
 
 
 def _utf8_bytes(value: str) -> bytes | None:

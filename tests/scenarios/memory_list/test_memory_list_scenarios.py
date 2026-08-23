@@ -98,7 +98,7 @@ def test_captured_processed_episodes_list_through_cli_with_exact_page_boundary(
         )
         for request in requests:
             assert await module.capture(request) == CaptureAccepted()
-        assert await module.drain() == 4
+        await module.wait_writer_idle_for_tests()
 
     asyncio.run(_capture_and_process())
     runtime = object.__new__(MemoryRuntime)

@@ -562,7 +562,7 @@ class MemoryMaintenance:
         return ClearResult("completed", intent.operation_id, intent.target_epoch)
 
     async def _settle_clear_fence_release(self, intent: ClearIntent) -> bool:
-        """Keep replay authority only when the shared queue fence is still held."""
+        """Confirm that the Clear identity fence reached its terminal state."""
 
         assert self._store is not None
         try:

@@ -9,6 +9,7 @@ from unittest.mock import Mock
 import pytest
 
 from core.memory.attachments import AttachmentPinError
+from core.memory.types import CaptureAttachment
 from modules.im.base import FileAttachment
 
 
@@ -57,7 +58,7 @@ async def test_attachment_capture_telemetry_uses_terminal_result(
 ) -> None:
     """Scenario: MEMORY-IM-ATTACH-004."""
 
-    from tests.test_memory_module import _attachment_store, _module, _source_attachment
+    from tests.test_memory_module import _module
     from tests.test_memory_slice3 import _Runtime, _controller
 
     caplog.set_level("INFO", logger="core.memory.admission")
@@ -95,12 +96,20 @@ async def test_attachment_capture_telemetry_uses_terminal_result(
     # One materialized survivor reaches pinning, but the terminal text fallback
     # reports zero because no attachment bundle was actually enqueued.
     caplog.clear()
-    attachment_store = _attachment_store()
-    module, store, _provider = _module(tmp_path, attachment_store=attachment_store)
+    module, _store, provider = _module(tmp_path)
+    attachment_store = module._attachment_store
     controller = _controller()
     controller.memory_module = module
     controller.memory_runtime = _Runtime(module)
-    survivor = _source_attachment("survivor.pdf", b"survivor")
+    source = tmp_path / "attachments" / "avibe" / "survivor.pdf"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"survivor")
+    survivor = CaptureAttachment(
+        kind="pdf",
+        name="survivor.pdf",
+        uri=source.as_uri(),
+        ext="pdf",
+    )
     monkeypatch.setattr(
         "core.memory.admission.select_memory_attachments",
         lambda _lease: SimpleNamespace(attachments=(survivor,), skipped=()),
@@ -126,5 +135,9 @@ async def test_attachment_capture_telemetry_uses_terminal_result(
         attachment_lease=object(),
         attachment_reservation=reservation,
     )
-    assert store.list_queue_rows()[0].payload_attachments is None
+    await module.wait_writer_idle_for_tests()
+    assert len(provider.captures) == 1
+    assert provider.captures[0].text == "keep this caption"
+    assert provider.captures[0].attachments == ()
+    await module.close_writer()
     _assert_single_conservation_record(caplog, total=2, captured=0)

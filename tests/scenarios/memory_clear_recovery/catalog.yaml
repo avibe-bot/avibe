@@ -1,9 +1,10 @@
 version: 1
 capability:
   id: memory_clear_intent
-  name: Durable Memory Clear intent
+  name: Memory Clear control-plane authority over volatile capture
   canonical_tests:
     - tests/test_memory_maintenance.py
+    - tests/test_memory_provider_root.py
     - tests/test_memory_runtime.py
 status_legend:
   covered: scenario coverage exists
@@ -12,43 +13,43 @@ status_legend:
   gap: not covered yet
 scenarios:
   - id: MEMORY-CLEAR-201
-    name: Clear discards retained local evidence and converges after interruption
+    name: Clear resets owned Memory surfaces and converges after interruption
     status: covered
     kind: recovery
     layer: scenario
-    test: tests/test_memory_runtime.py::test_memory_clear_201_discards_manual_required_evidence_and_allows_new_delivery
+    test: tests/test_memory_maintenance.py::test_clear_writes_marker_and_repeats_four_surfaces
     actor: Memory Settings user
-    trigger: A provider add times out after submission and fences its session as manual_required
-    given: The queue retains the ambiguous payload and pinned attachment bundle without replaying it
+    trigger: Clear begins while volatile capture work may still be queued or in flight
+    given: Delivery state is process-local and may be dropped; the identity store is fenced
     when: The user confirms Clear Memory Data
-    then: Marker-owned Clear removes retained evidence, advances the epoch, and a later capture can deliver normally
+    then: Marker-owned Clear resets stable identity, advances the epoch, and a later capture can deliver normally
     expected_outputs:
       - Clear completes through the four existing idempotent deletion primitives
-      - Maintenance advertises can_clear while the manual_required fence exists
-      - The ambiguous payload and attachment bundle are removed without another provider add
-      - The session is unfenced and a subsequent capture reaches the provider
+      - Maintenance advertises can_clear while the volatile writer is quiesced
+      - No durable payload or delivery marker is replayed after Clear
+      - The new epoch remains fail-closed until the authority transition completes
   - id: MEMORY-CLEAR-202
     name: Failed marker is retried automatically on boot
     status: covered
     kind: recovery
     layer: scenario
-    test: tests/test_memory_runtime.py::test_runtime_reconcile_completes_readable_clear_marker_on_boot
+    test: tests/test_memory_maintenance.py::test_failed_clear_persists_failed_projection_and_boot_retries
     actor: Memory runtime
-    trigger: A clear primitive fails after the marker is durable
-    given: Processing Record projects a failed clear marker and Memory remains fenced
-    when: The next runtime reconcile runs
-    then: The marker returns to deleting, all four primitives are retried idempotently, and the marker is removed on success
+    trigger: Runtime replacement or shutdown interrupts volatile work
+    given: Identity state remains available while capture delivery is intentionally best effort
+    when: The next runtime starts
+    then: No delivery replay occurs and control-plane authority remains explicit
   - id: MEMORY-CLEAR-203
     name: Boot Clear recovery repairs Avibe's released unsentinelled first-start root
     status: covered
     kind: recovery
     layer: scenario
-    test: tests/test_memory_runtime.py::test_memory_clear_203_recovers_released_unsentinelled_root_on_boot
+    test: tests/test_memory_provider_root.py::test_provider_root_clear_recovers_released_unsentinelled_first_start
     actor: Memory runtime
     trigger: A released sidecar start populated the provider root before its ownership sentinel existed
-    given: The queue is fenced at the target epoch, the durable Clear marker failed, and the root contains only complete or interrupted Avibe control writes plus provider data created after both controls completed
+    given: The provider root is owned by the existing sidecar lifecycle and the store contains only identity state
     when: The next runtime reconcile retries the durable Clear
-    then: Clear claims the proven released root, empties it, releases the fence, removes the marker, and starts an owned sidecar
+    then: Clear uses the existing authority transition and does not infer delivery evidence from SQLite
     expected_outputs:
       - Missing ownership never permits an ordinary sidecar or rebuild write
       - Clear recovery accepts only bounded released first-start states whose final controls match or whose temporary controls are byte prefixes of generated controls

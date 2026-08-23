@@ -288,14 +288,20 @@ async def test_factory_settles_runtime_tasks_and_sidecar_before_scope_exit(
             "ok": True,
             "state": "ready",
         }
-        worker_task = runtime._worker_task
+        runtime.module._writer._ensure_worker()
+        writer_task = runtime.module._writer._worker_task
+        scheduler_task = runtime.module._writer._scheduler_task
         process = process_factory.supervised[0]
-        assert worker_task is not None
+        assert writer_task is not None
+        assert scheduler_task is not None
 
     assert process.stopped is True
-    assert worker_task.done()
-    assert worker_task not in asyncio.all_tasks()
-    assert runtime._worker_task is None
+    assert writer_task.done()
+    assert writer_task not in asyncio.all_tasks()
+    assert scheduler_task.done()
+    assert scheduler_task not in asyncio.all_tasks()
+    assert runtime.module._writer._worker_task is None
+    assert runtime.module._writer._scheduler_task is None
     assert runtime._process is None
 
 

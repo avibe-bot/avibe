@@ -771,7 +771,7 @@ class EverOSProcess:
             )
             return False
         except asyncio.CancelledError:
-            # ``MemoryWorker`` bounds this probe independently. Do not let that
+            # The bounded Memory writer bounds this probe independently. Do not let that
             # timeout orphan an owned child with the credential environment.
             try:
                 await self._terminate_owned_tree(

@@ -14,6 +14,11 @@ const ENUM_LABEL_KEYS = {
     runs_missing: 'runsMissing',
     runs_busy: 'runsBusy',
     runs_malformed: 'runsMalformed',
+    volatile_delivery_state: 'volatileDeliveryState',
+    provider_memory_unavailable: 'providerMemoryUnavailable',
+    provider_call_log_unavailable: 'providerCallLogUnavailable',
+    processing_timeline_unavailable: 'processingTimelineUnavailable',
+    memory_failure_history_unavailable: 'memoryFailureHistoryUnavailable',
   },
   status: {
     created: 'created',

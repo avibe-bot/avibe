@@ -22,7 +22,7 @@ _MEMORY_HELP_BY_LANGUAGE = {
             "Show the Memory profile",
             "List processed Memory episodes",
             "Search local Memory",
-            "Queue durable personal context",
+            "Submit personal context for best-effort capture",
         ),
         "status": ("Print machine-readable output",),
         "profile": ("Print machine-readable output",),
@@ -46,7 +46,7 @@ _MEMORY_HELP_BY_LANGUAGE = {
             "显示记忆档案",
             "列出已处理的记忆片段",
             "搜索本地记忆",
-            "将长期个人信息加入队列",
+            "提交个人信息供记忆系统尽力处理",
         ),
         "status": ("输出机器可读格式",),
         "profile": ("输出机器可读格式",),
@@ -538,6 +538,58 @@ def test_memory_remember_exits_zero_only_for_queued_outcomes(
     result = json.loads(capsys.readouterr().out)
     assert result["ok"] is True
     assert result["result"]["status"] == outcome
+
+
+@pytest.mark.parametrize(
+    ("language", "expected"),
+    [
+        (
+            "en",
+            "Memory request acknowledged for best-effort processing; persistence is not guaranteed.",
+        ),
+        ("zh", "记忆请求已确认；系统将尽力处理，但不保证持久保存。"),
+    ],
+)
+@pytest.mark.parametrize("outcome", ["accepted", "duplicate"])
+def test_memory_remember_human_output_never_confirms_persistence(
+    monkeypatch,
+    capsys,
+    language,
+    expected,
+    outcome,
+) -> None:
+    args = cli.build_parser().parse_args(["memory", "remember", "keep this"])
+    monkeypatch.setattr(cli, "_memory_cli_language", lambda: language)
+    monkeypatch.setattr(
+        internal_client,
+        "memory_remember_sync",
+        lambda text, **_kwargs: {"status_code": 200, "body": {"status": outcome}},
+    )
+
+    assert cli.cmd_memory(args) == 0
+    assert capsys.readouterr().out.strip() == expected
+
+
+def test_top_level_memory_guides_disclose_best_effort_process_local_delivery() -> None:
+    docs_root = Path(__file__).parents[1] / "docs"
+    guides = {
+        path
+        for path in docs_root.glob("*.md")
+        if "vibe memory" in path.read_text(encoding="utf-8")
+    }
+
+    assert guides
+    for guide in guides:
+        text = guide.read_text(encoding="utf-8")
+        if guide.stem.endswith("_ZH"):
+            assert "尽力" in text
+            assert "进程内" in text
+            assert "不保证" in text
+        else:
+            lowered = text.lower()
+            assert "best-effort" in lowered
+            assert "process-local" in lowered
+            assert "not guarantee" in lowered
 
 
 @pytest.mark.parametrize(

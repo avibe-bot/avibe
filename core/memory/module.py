@@ -21,10 +21,10 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Literal, TypeVar
 from config import paths
 from core.memory.blocking import run_blocking
 from core.memory.attachments import (
+    AttachmentCleanupUnprovenError,
     AttachmentPinError,
     AttachmentPinStore,
     PinnedBundle,
-    encode_pinned_bundle,
 )
 from core.memory.provider_root import ProviderRoot
 from core.memory.everos import (
@@ -38,8 +38,8 @@ from core.memory.project_ids import (
     is_writable_memory_project_id,
 )
 from core.memory.store import (
-    MAX_NONTERMINAL_QUEUE_ROWS,
     MemoryStore,
+    VolatileAdmission,
     derive_assistant_memory_owner_id,
     is_memory_owner_id,
     is_principal_id,
@@ -52,7 +52,6 @@ from core.memory.types import (
     CaptureRequest,
     CaptureSkipped,
     MemoryErrorCode,
-    MemoryFailureLogEntry,
     MemoryItem,
     MemoryItems,
     MemoryListItem,
@@ -69,7 +68,11 @@ from core.memory.types import (
     RecallResult,
     is_memory_error_code,
 )
-from core.memory.worker import MemoryWorker, ProcessingEvent
+from core.memory.writer import (
+    BestEffortMemoryWriter,
+    CaptureOfferOutcome,
+    WriterReservation,
+)
 
 if TYPE_CHECKING:
     from core.inbound_attachment_lease import InboundAttachmentLease
@@ -89,7 +92,6 @@ MAX_PROVIDER_ITEM_BYTES = 64 * 1024
 MAX_PROVIDER_RESULT_BYTES = 256 * 1024
 MAX_PROVIDER_RESULT_ITEMS = 20
 PROVIDER_READ_TIMEOUT_SECONDS = 20.0
-CLEAR_DRAIN_TIMEOUT_SECONDS = 5.0
 
 
 class _HeldCaptureAdmission:
@@ -143,7 +145,6 @@ class _CaptureReservation:
 
 
 logger = logging.getLogger(__name__)
-_SessionLifecycleResult = TypeVar("_SessionLifecycleResult")
 _ProviderReadResult = TypeVar("_ProviderReadResult")
 
 
@@ -172,9 +173,9 @@ class MemoryModule:
         provider_root: Path | None = None,
         maintenance_open: Callable[[], bool] | None = None,
         provider_root_owner: ProviderRoot | None = None,
-        clear_drain_timeout_seconds: float = CLEAR_DRAIN_TIMEOUT_SECONDS,
-        processing_event: ProcessingEvent | None = None,
-        worker: MemoryWorker | None = None,
+        processing_event: Callable[..., Awaitable[bool]] | None = None,
+        ambiguous_stop_reap: Callable[[], Awaitable[bool] | bool] | None = None,
+        writer: BestEffortMemoryWriter | None = None,
         attachment_store: AttachmentPinStore | None = None,
         effective_home: Path | None = None,
     ) -> None:
@@ -194,7 +195,6 @@ class MemoryModule:
             effective_home=self._effective_home,
         )
         self._maintenance_open = maintenance_open or (lambda: False)
-        self._clear_drain_timeout_seconds = _positive_timeout(clear_drain_timeout_seconds)
         self._lifecycle_lock = asyncio.Lock()
         self._capture_admission_locks: weakref.WeakValueDictionary[
             tuple[str, str, str], asyncio.Lock
@@ -205,23 +205,46 @@ class MemoryModule:
         self._invalid_capture_admission_lock = asyncio.Lock()
         self._clear_active = False
         self._retired = False
-        self._attachment_store = attachment_store or AttachmentPinStore(
-            effective_home=self._effective_home
-        )
-        self._worker = worker or MemoryWorker(
+        attachments_available = False
+        self._attachment_store: AttachmentPinStore | None = None
+        try:
+            self._attachment_store = attachment_store or AttachmentPinStore(
+                effective_home=self._effective_home
+            )
+        except AttachmentPinError:
+            logger.warning(
+                "Memory attachment storage is unavailable; text capture remains enabled"
+            )
+        else:
+            try:
+                self._attachment_store.clear_all()
+                attachments_available = True
+            except AttachmentPinError:
+                logger.warning(
+                    "Memory attachment startup cleanup failed; text capture remains enabled"
+                )
+        self._writer = writer or BestEffortMemoryWriter(
             store=store,
             provider=provider,
             enabled=self._is_enabled,
             processing_event=processing_event,
             attachment_store=self._attachment_store,
-            attachment_admission_lock=self._root_lifecycle_lock(),
+            ambiguous_stop_reap=ambiguous_stop_reap,
         )
+        if not attachments_available:
+            self._writer.disable_attachment_intake()
 
     @property
     def maintenance_active(self) -> bool:
         """Whether Runtime-owned maintenance currently fences module work."""
 
         return self._clear_active
+
+    @property
+    def attachment_intake_enabled(self) -> bool:
+        """Whether new attachment captures can enter the volatile writer."""
+
+        return self._writer.attachments_enabled
 
     @property
     def retired(self) -> bool:
@@ -234,7 +257,7 @@ class MemoryModule:
 
         self._retired = True
         self._clear_active = True
-        self._worker.pause_claims()
+        self._writer.pause_intake()
 
     def enter_maintenance(self) -> None:
         """Fence capture and reads before a maintenance transition begins."""
@@ -284,281 +307,55 @@ class MemoryModule:
             lock.release()
 
     def pause_claims(self) -> None:
-        """Synchronously fence new add and flush claims."""
+        """Synchronously fence new volatile writer admissions."""
 
-        self._worker.pause_claims()
+        self._writer.pause_intake()
 
     async def quiesce_claims(self, *, timeout_seconds: float | None = None) -> bool:
         """Fence claims and join in-flight add and flush work under one deadline."""
 
-        if timeout_seconds is None:
-            return await self._worker.pause_and_wait()
-        return await self._worker.pause_and_wait(timeout_seconds=timeout_seconds)
+        return await self._writer.quiesce(
+            timeout_seconds=30.0 if timeout_seconds is None else timeout_seconds
+        )
 
     async def quiesce_claims_for_clear(self) -> bool:
         """Fence claims using the module's configured destructive-work budget."""
 
-        return await self._worker.pause_and_wait(
-            timeout_seconds=self._clear_drain_timeout_seconds
-        )
+        return await self._writer.quiesce(timeout_seconds=5.0)
 
     def resume_claims(self) -> None:
         """Permit add and flush claims after lifecycle recovery succeeds."""
 
-        self._worker.resume_claims()
+        self._writer.resume_intake()
 
-    def begin_activation(self, *, new_lease: bool = False) -> None:
-        """Require recovery before the next drain, optionally rotating lease ownership."""
+    def reset_capture_generation(self) -> None:
+        """Forget volatile duplicate claims after Clear rotates the epoch."""
 
-        if new_lease:
-            self._worker.begin_new_lease_activation()
-            return
-        self._worker.begin_activation()
+        self._writer.reset_duplicate_generation()
 
-    async def drain(self) -> int:
-        """Run one bounded worker drain through the module interface."""
+    async def close_writer(self) -> None:
+        """Drop volatile work during shutdown or runtime replacement."""
 
-        return await self._worker.drain()
+        await self._writer.close()
 
-    async def prepare_shutdown(self) -> None:
-        """Settle in-process flush work without initiating provider writes."""
-
-        await self._worker.prepare_shutdown()
+    async def wait_writer_idle_for_tests(self, *, timeout_seconds: float = 5.0) -> None:
+        await self._writer.wait_idle_for_tests(timeout_seconds=timeout_seconds)
 
     async def clear_attachments(self) -> None:
         """Remove every module-owned pinned attachment during destructive clear."""
 
+        if self._attachment_store is None:
+            raise AttachmentPinError(
+                "memory_store_unavailable",
+                "attachment storage is unavailable",
+            )
         await run_blocking(self._attachment_store.clear_all)
+        self._writer.enable_attachment_intake()
 
-    async def final_flush(
-        self,
-        *,
-        principal_id: str,
-        project_id: str,
-        raw_session_id: str,
-        deadline_seconds: float = 5.0,
-    ) -> bool:
-        """Fence capture and flush one trusted canonical session by deadline."""
+    def offer_barrier(self, raw_session_id: str) -> str:
+        """Offer a provider barrier without waiting for capture delivery."""
 
-        if not self._is_enabled() or self.maintenance_active or self._is_maintenance_open():
-            return False
-        timeout = _positive_timeout(deadline_seconds)
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
-        barrier = self.reserve_capture_admission(
-            principal_id=principal_id,
-            project_id=project_id,
-            session_id=raw_session_id,
-        )
-        admission_lock = self._capture_admission_lock(
-            principal_id=principal_id,
-            project_id=project_id,
-            session_id=raw_session_id,
-        )
-        acquired = False
-        try:
-            await self._wait_for_capture_reservation(barrier, deadline)
-            await asyncio.wait_for(
-                admission_lock.acquire(),
-                timeout=max(deadline - loop.time(), 0.001),
-            )
-            acquired = True
-            return await self._final_flush_under_admission(
-                principal_id=principal_id,
-                project_id=project_id,
-                raw_session_id=raw_session_id,
-                deadline=deadline,
-            )
-        except asyncio.TimeoutError:
-            return False
-        finally:
-            if acquired:
-                admission_lock.release()
-            self.cancel_capture_reservation(barrier)
-
-    async def run_session_lifecycle(
-        self,
-        *,
-        principal_id: str,
-        project_id: str,
-        raw_session_id: str,
-        operation: Callable[[], Awaitable[_SessionLifecycleResult]],
-        deadline_seconds: float = 5.0,
-    ) -> _SessionLifecycleResult:
-        """Flush if capture is quiet, then run the transition; fail open on timeout."""
-
-        if not self._is_enabled() or self.maintenance_active or self._is_maintenance_open():
-            return await operation()
-        timeout = _positive_timeout(deadline_seconds)
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
-        barrier = self.reserve_capture_admission(
-            principal_id=principal_id,
-            project_id=project_id,
-            session_id=raw_session_id,
-        )
-        admission_lock = self._capture_admission_lock(
-            principal_id=principal_id,
-            project_id=project_id,
-            session_id=raw_session_id,
-        )
-        acquired = False
-        try:
-            try:
-                await self._wait_for_capture_reservation(barrier, deadline)
-                await asyncio.wait_for(
-                    admission_lock.acquire(),
-                    timeout=max(deadline - loop.time(), 0.001),
-                )
-                acquired = True
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "memory capture admission did not quiesce before the "
-                    "deadline; skipping final flush session=%s",
-                    raw_session_id,
-                )
-                return await operation()
-            await self._final_flush_under_admission(
-                principal_id=principal_id,
-                project_id=project_id,
-                raw_session_id=raw_session_id,
-                deadline=deadline,
-            )
-            return await operation()
-        finally:
-            if acquired:
-                admission_lock.release()
-            self.cancel_capture_reservation(barrier)
-
-    async def run_session_scopes_lifecycle(
-        self,
-        *,
-        scopes: tuple[tuple[str, str], ...],
-        raw_session_id: str,
-        operation: Callable[[], Awaitable[_SessionLifecycleResult]],
-        deadline_seconds: float = 5.0,
-    ) -> _SessionLifecycleResult:
-        """Flush all session scopes and run one transition under every fence."""
-
-        canonical_scopes = tuple(dict.fromkeys(scopes))
-        if (
-            not canonical_scopes
-            or not isinstance(raw_session_id, str)
-            or not raw_session_id
-            or any(
-                not is_principal_id(principal_id) or not is_persisted_memory_project_id(project_id)
-                for principal_id, project_id in canonical_scopes
-            )
-        ):
-            raise ValueError("invalid canonical Memory session scopes")
-        if not self._is_enabled():
-            return await operation()
-        if self.maintenance_active or self._is_maintenance_open():
-            logger.warning(
-                "memory session lifecycle unavailable during maintenance; "
-                "skipping final flush session=%s",
-                raw_session_id,
-            )
-            result = await operation()
-            return False if isinstance(result, bool) else result
-
-        timeout = _positive_timeout(deadline_seconds)
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
-        barriers = [
-            self.reserve_capture_admission(
-                principal_id=principal_id,
-                project_id=project_id,
-                session_id=raw_session_id,
-            )
-            for principal_id, project_id in canonical_scopes
-        ]
-        locks = [
-            self._capture_admission_lock(
-                principal_id=principal_id,
-                project_id=project_id,
-                session_id=raw_session_id,
-            )
-            for principal_id, project_id in canonical_scopes
-        ]
-        acquired: list[asyncio.Lock] = []
-        try:
-            try:
-                for barrier in barriers:
-                    await self._wait_for_capture_reservation(barrier, deadline)
-                for admission_lock in locks:
-                    remaining = deadline - loop.time()
-                    if remaining <= 0:
-                        raise asyncio.TimeoutError
-                    await asyncio.wait_for(admission_lock.acquire(), timeout=remaining)
-                    acquired.append(admission_lock)
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "memory capture admission did not quiesce before the "
-                    "deadline; skipping final flush session=%s",
-                    raw_session_id,
-                )
-                result = await operation()
-                return False if isinstance(result, bool) else result
-            flush_succeeded = True
-            for principal_id, project_id in canonical_scopes:
-                flush_succeeded = (
-                    await self._final_flush_under_admission(
-                        principal_id=principal_id,
-                        project_id=project_id,
-                        raw_session_id=raw_session_id,
-                        deadline=deadline,
-                    )
-                    and flush_succeeded
-                )
-            result = await operation()
-            if isinstance(result, bool):
-                return result and flush_succeeded
-            return result
-        finally:
-            for admission_lock in reversed(acquired):
-                admission_lock.release()
-            for barrier in reversed(barriers):
-                self.cancel_capture_reservation(barrier)
-
-    async def _final_flush_under_admission(
-        self,
-        *,
-        principal_id: str,
-        project_id: str,
-        raw_session_id: str,
-        deadline: float,
-    ) -> bool:
-        if not self._is_enabled() or self.maintenance_active or self._is_maintenance_open():
-            return False
-        try:
-            session_refs = await self._store_call(
-                self._store.provider_session_refs_with_capture_state,
-                principal_id=principal_id,
-                project_ref=project_id,
-                session_id=raw_session_id,
-            )
-            remaining = deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                return False
-            results = await asyncio.gather(
-                *(
-                    self._worker.coordinator.final_flush(
-                        session_ref,
-                        deadline_seconds=remaining,
-                    )
-                    for session_ref in session_refs
-                ),
-                return_exceptions=True,
-            )
-            return all(result is True for result in results)
-        except asyncio.TimeoutError:
-            return False
-        except (TypeError, ValueError):
-            return False
-        except Exception:
-            logger.warning("Memory final flush failed")
-            return False
+        return self._writer.offer_barrier(raw_session_id)
 
     def replace_provider(self, provider: MemoryProviderPort) -> None:
         """Swap the provider shared by direct reads and claim delivery.
@@ -569,7 +366,7 @@ class MemoryModule:
         """
 
         self._provider = provider
-        self._worker.replace_provider(provider)
+        self._writer.replace_provider(provider)
 
     async def capture(
         self,
@@ -746,6 +543,12 @@ class MemoryModule:
             validation_error = self._capture_validation_error(request, normalized_text)
             if validation_error is not None:
                 return await self._skipped_with_missed(validation_error)
+            if (
+                request.attachments
+                and not self._writer.attachments_enabled
+                and not normalized_text.strip()
+            ):
+                return await self._skipped_with_missed("memory_store_unavailable")
 
             try:
                 disk_free = int(await asyncio.to_thread(self._disk_free_bytes))
@@ -791,98 +594,151 @@ class MemoryModule:
         *,
         source_lease: InboundAttachmentLease | None,
     ) -> CaptureReceipt:
-        """Pin and enqueue one validated capture under the provider-root fence."""
+        """Reserve, pin, and offer one capture to the volatile writer."""
+
+        try:
+            digest = await self._store_call(
+                self._store.source_message_digest,
+                request.source_message_id,
+            )
+        except Exception:
+            return OperationFailed(error="memory_store_unavailable")
+        reservation = self._writer.reserve(digest)
+        if reservation == "duplicate":
+            return CaptureDuplicate()
+        if reservation == "full":
+            await self._skipped_with_missed("memory_queue_full")
+            return CaptureSkipped(reason="memory_queue_full")
+        if reservation == "unavailable":
+            return await self._skipped_with_missed("memory_sidecar_unavailable")
+        if reservation == "disabled":
+            return CaptureSkipped(reason="memory_operation_in_progress")
+        assert isinstance(reservation, WriterReservation)
 
         pinned_bundle: PinnedBundle | None = None
-        if request.attachments:
-            try:
+        try:
+            if request.attachments and self._writer.attachments_enabled:
                 if source_lease is None:
                     pinned_bundle = await run_blocking(
                         self._attachment_store.pin,
                         request.attachments,
+                        on_cancel_result=self._release_cancelled_pinned_bundle,
+                        on_cancel_error=self._handle_cancelled_attachment_failure,
                     )
                 else:
                     pinned_bundle = await run_blocking(
                         self._attachment_store.pin,
                         request.attachments,
                         source_lease=source_lease,
+                        on_cancel_result=self._release_cancelled_pinned_bundle,
+                        on_cancel_error=self._handle_cancelled_attachment_failure,
                     )
-            except Exception as error:
-                if normalized_text.strip():
-                    return await self._capture_under_root(
-                        replace(
-                            request,
-                            attachments=(),
-                            attachment_config_generation=None,
-                        ),
-                        normalized_text,
-                        source_lease=None,
-                    )
-                if isinstance(error, AttachmentPinError):
-                    return await self._capture_pin_failure(error.error)
-                if isinstance(error, UnicodeError):
-                    return await self._skipped_with_missed("memory_invalid_input")
-                return OperationFailed(error="memory_store_unavailable")
-
-        try:
-            attachment_payload = (
-                encode_pinned_bundle(pinned_bundle)
-                if pinned_bundle is not None
-                else None
-            )
-            result = await self._store_call(
-                self._store.enqueue_request,
+            admission = await self._store_call(
+                self._store.admit_volatile_capture,
                 source_message_id=request.source_message_id,
                 session_id=request.session_id,
                 principal_id=request.principal_id,
                 project_ref=request.project_id,
                 provenance=request.provenance,
-                payload_text=normalized_text,
-                payload_attachments=attachment_payload,
-                attachment_bundle_id=(
-                    pinned_bundle.bundle_id if pinned_bundle is not None else None
-                ),
-                attachment_bundle_relative_path=(
-                    pinned_bundle.relative_path if pinned_bundle is not None else None
-                ),
-                attachment_file_count=(
-                    len(pinned_bundle.attachments) if pinned_bundle is not None else 0
-                ),
-                attachment_total_bytes=(
-                    pinned_bundle.total_bytes if pinned_bundle is not None else 0
-                ),
                 occurred_at_ms=request.occurred_at_ms,
                 max_provider_timestamp_ms=MAX_PROVIDER_TIMESTAMP_MS,
-                nonterminal_limit=MAX_NONTERMINAL_QUEUE_ROWS,
             )
-        except UnicodeError:
-            if pinned_bundle is not None:
-                await self._release_unadmitted_bundle(pinned_bundle.bundle_id)
-            return await self._skipped_with_missed("memory_invalid_input")
-        except Exception:
-            if pinned_bundle is not None:
-                await self._release_unadmitted_bundle(pinned_bundle.bundle_id)
+        except asyncio.CancelledError:
+            await self._release_unadmitted_capture(reservation, pinned_bundle)
+            raise
+        except Exception as error:
+            if isinstance(error, AttachmentCleanupUnprovenError):
+                self._writer.disable_attachment_intake()
+            if isinstance(error, AttachmentPinError) and normalized_text.strip() and request.attachments:
+                try:
+                    admission = await self._store_call(
+                        self._store.admit_volatile_capture,
+                        source_message_id=request.source_message_id,
+                        session_id=request.session_id,
+                        principal_id=request.principal_id,
+                        project_ref=request.project_id,
+                        provenance=request.provenance,
+                        occurred_at_ms=request.occurred_at_ms,
+                        max_provider_timestamp_ms=MAX_PROVIDER_TIMESTAMP_MS,
+                    )
+                except asyncio.CancelledError:
+                    await self._release_unadmitted_capture(reservation, pinned_bundle)
+                    raise
+                except Exception:
+                    pass
+                else:
+                    return await self._complete_capture_admission(
+                        reservation,
+                        admission,
+                        text=normalized_text,
+                        bundle=None,
+                    )
+            await self._release_unadmitted_capture(reservation, pinned_bundle)
+            if isinstance(error, AttachmentPinError) and normalized_text.strip() and request.attachments:
+                return CaptureSkipped(reason="memory_store_unavailable")
+            if isinstance(error, AttachmentPinError):
+                return await self._capture_pin_failure(error.error)
+            if isinstance(error, UnicodeError):
+                return await self._skipped_with_missed("memory_invalid_input")
             return OperationFailed(error="memory_store_unavailable")
 
-        if result.outcome == "accepted":
+        return await self._complete_capture_admission(
+            reservation,
+            admission,
+            text=normalized_text,
+            bundle=pinned_bundle,
+        )
+
+    async def _complete_capture_admission(
+        self,
+        reservation: WriterReservation,
+        admission: VolatileAdmission,
+        *,
+        text: str,
+        bundle: PinnedBundle | None,
+    ) -> CaptureReceipt:
+        if admission.outcome == "accepted":
+            return await self._offer_admitted_capture(
+                reservation,
+                admission,
+                text=text,
+                bundle=bundle,
+            )
+
+        await self._release_unadmitted_capture(reservation, bundle)
+        if admission.outcome in {"project_limit", "timestamp_invalid"}:
+            return CaptureSkipped(reason="memory_invalid_input")
+        if admission.outcome == "clear_in_progress":
+            return CaptureSkipped(reason="memory_clear_failed")
+        return OperationFailed(error="memory_store_unavailable")
+
+    async def _offer_admitted_capture(
+        self,
+        reservation: WriterReservation,
+        admission: VolatileAdmission,
+        *,
+        text: str,
+        bundle: PinnedBundle | None,
+    ) -> CaptureReceipt:
+        outcome: CaptureOfferOutcome = self._writer.offer_capture(
+            reservation,
+            admission,
+            text=text,
+            attachments=(),
+            bundle=bundle,
+        )
+        if outcome == "queued":
             return CaptureAccepted(
                 captured_attachment_count=(
-                    len(pinned_bundle.attachments)
-                    if pinned_bundle is not None
-                    else 0
+                    len(bundle.attachments) if bundle is not None else 0
                 )
             )
-        if pinned_bundle is not None:
-            await self._release_unadmitted_bundle(pinned_bundle.bundle_id)
-        if result.outcome == "duplicate":
-            return CaptureDuplicate()
-        if result.outcome == "queue_full":
-            return CaptureSkipped(reason="memory_queue_full")
-        if result.outcome == "timestamp_invalid":
-            return CaptureSkipped(reason="memory_invalid_input")
-        if result.outcome == "project_limit":
-            return CaptureSkipped(reason="memory_invalid_input")
-        return CaptureSkipped(reason="memory_clear_failed")
+        await self._release_unadmitted_capture(reservation, bundle)
+        if outcome == "full":
+            return await self._skipped_with_missed("memory_queue_full")
+        if outcome == "unavailable":
+            return await self._skipped_with_missed("memory_sidecar_unavailable")
+        return await self._skipped_with_missed("memory_operation_in_progress")
 
     async def _capture_pin_failure(self, error: MemoryErrorCode) -> CaptureReceipt:
         if error == "memory_store_unavailable":
@@ -896,11 +752,41 @@ class MemoryModule:
         return OperationFailed(error="memory_store_unavailable")
 
     async def _release_unadmitted_bundle(self, bundle_id: str) -> None:
-        try:
-            await run_blocking(self._attachment_store.release, bundle_id)
-        except Exception:
-            # It has no DB reference and boot reconciliation removes the orphan.
+        if self._attachment_store is None:
+            self._writer.disable_attachment_intake()
             return
+        try:
+            await run_blocking(
+                self._attachment_store.release,
+                bundle_id,
+                on_cancel_error=lambda _error: self._writer.disable_attachment_intake(),
+            )
+        except Exception:
+            self._writer.disable_attachment_intake()
+
+    async def _release_unadmitted_capture(
+        self,
+        reservation: WriterReservation,
+        bundle: PinnedBundle | None,
+    ) -> None:
+        try:
+            if bundle is not None:
+                await self._release_unadmitted_bundle(bundle.bundle_id)
+        finally:
+            reservation.abandon()
+
+    def _release_cancelled_pinned_bundle(self, bundle: PinnedBundle) -> None:
+        if self._attachment_store is None:
+            self._writer.disable_attachment_intake()
+            return
+        try:
+            self._attachment_store.release(bundle.bundle_id)
+        except Exception:
+            self._writer.disable_attachment_intake()
+
+    def _handle_cancelled_attachment_failure(self, error: BaseException) -> None:
+        if isinstance(error, AttachmentCleanupUnprovenError):
+            self._writer.disable_attachment_intake()
 
     async def search(
         self,
@@ -1417,16 +1303,6 @@ class MemoryModule:
             page=page,
             page_size=page_size,
         )
-
-    async def failure_log(self, *, limit: int = 50) -> tuple[MemoryFailureLogEntry, ...]:
-        """Return terminal failure history while fencing its bounded compaction."""
-
-        if self._clear_active or self._is_maintenance_open():
-            return ()
-        async with self._root_lifecycle_lock():
-            if self._clear_active or self._is_maintenance_open():
-                return ()
-            return await self._store_call(self._store.failure_log, limit=limit)
 
     async def _skipped_with_missed(self, error: MemoryErrorCode) -> CaptureReceipt:
         try:

@@ -715,7 +715,7 @@
         "profile": "Show the Memory profile",
         "list": "List processed Memory episodes",
         "search": "Search local Memory",
-        "remember": "Queue durable personal context",
+        "remember": "Submit personal context for best-effort capture",
         "query": "Search query",
         "project": "Memory project: default or a named slug such as billing",
         "page": "Page number (1-based)",
@@ -780,7 +780,7 @@
         "agent": "Agent memory",
         "both": "User + Agent"
       },
-      "remembered": "Memory queued.",
+      "remembered": "Memory request acknowledged for best-effort processing; persistence is not guaranteed.",
       "listWarning": {
         "truncated": "Memory listing reached the provider ordering limit. Later pages may be incomplete."
       },
