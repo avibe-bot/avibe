@@ -257,14 +257,14 @@ Keep artifact installation, sidecar ownership, root confinement,
 
 All authority-changing operations use the barrier; none drains or adds delivery
 state. Clear retains four confined deletion surfaces: identity/catalog/watermark/summary state,
-provider root, call log, and attachments; it completes only after all four succeed.
+provider root, legacy call-log files, and attachments; it completes only after all four succeed.
 
 ### Diagnostics
 
-- Provider Call Log records what its independent recorder observes.
-- Processing Record shows only data safely derived from EverOS and retained call
-  logs. Missing authorization evidence omits the call or marks the source
-  unavailable; it never broadens scope.
+- Processing Record shows only caller-authorized data derived from native EverOS
+  memcells, runs, semantic files, profile state, and index state.
+- Missing, malformed, or retained-away evidence makes the relevant source `partial`
+  or `unavailable`; it never broadens scope or falls back to a legacy call log.
 - Migration, restart, pruning, and ambiguous results may leave history incomplete.
 - Diagnostic read/write failure never blocks writer startup or provider calls.
 

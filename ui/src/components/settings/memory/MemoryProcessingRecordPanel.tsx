@@ -82,7 +82,7 @@ const SectionHeader: React.FC<{
 };
 
 const DetailView: React.FC<{ detail: DetailOk; onBack: () => void }> = ({ detail, onBack }) => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   return (
     <div className="flex flex-col gap-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -113,7 +113,15 @@ const DetailView: React.FC<{ detail: DetailOk; onBack: () => void }> = ({ detail
               {item.content.map((block, index) => (
                 <p key={`${item.id}-${index}`} className="whitespace-pre-wrap break-words text-[12.5px] leading-relaxed text-foreground">
                   {block.text}
-                  {block.omitted_bytes > 0 ? <span className="ml-2 text-muted">+{block.omitted_bytes} B</span> : null}
+                  {block.omitted_bytes > 0 ? (
+                    <span className="ml-2 text-muted">
+                      {t('memory.processingRecord.records.omittedBytes', {
+                        formattedBytes: block.omitted_bytes.toLocaleString(
+                          i18n.resolvedLanguage ?? i18n.language,
+                        ),
+                      })}
+                    </span>
+                  ) : null}
                 </p>
               ))}
             </div>

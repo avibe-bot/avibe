@@ -204,6 +204,59 @@ def test_payload_preserves_authorized_boundaries_and_fails_closed(tmp_path: Path
     )
 
 
+def test_payload_keeps_authorized_text_when_non_text_blocks_are_omitted(
+    tmp_path: Path,
+) -> None:
+    system_db = _system_db(tmp_path)
+    _ome_db(tmp_path)
+    _insert_memcell(
+        system_db,
+        "mc-attachment",
+        PRINCIPAL,
+        items=[
+            {
+                "kind": "text",
+                "id": "message-attachment",
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "attachment caption"},
+                    {
+                        "type": "image",
+                        "name": "photo.png",
+                        "uri": "file:///tmp/photo.png",
+                    },
+                ],
+                "timestamp": 1_700_000_000_000,
+                "sender_id": PRINCIPAL,
+            }
+        ],
+    )
+
+    payload = _reader(tmp_path).record_detail(
+        (PRINCIPAL, "default"), "mc-attachment"
+    )["payload"]
+
+    assert payload == {
+        "status": "partial",
+        "reason": "unauthorized_or_bounded_items_omitted",
+        "items": [
+            {
+                "id": "message-attachment",
+                "timestamp_ms": 1_700_000_000_000,
+                "sender_id": PRINCIPAL,
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "attachment caption",
+                        "omitted_bytes": 0,
+                    }
+                ],
+            }
+        ],
+        "omitted_count": 0,
+    }
+
+
 def test_agent_owned_capture_preserves_payload_and_native_results(
     tmp_path: Path,
 ) -> None:
@@ -663,6 +716,52 @@ def test_index_projection_is_partial_when_linked_paths_exceed_its_bound(
     assert indexing["reason"] == "index_state_incomplete"
     assert indexing["omitted_count"] == 1
     assert len(indexing["items"]) == 50
+
+
+def test_malformed_profile_remains_linked_to_index_diagnostics(
+    tmp_path: Path,
+) -> None:
+    system_db = _system_db(tmp_path)
+    _ome_db(tmp_path)
+    _insert_memcell(system_db, "mc-profile", PRINCIPAL)
+    profile = (
+        tmp_path
+        / "everos"
+        / "avibe"
+        / "default_project"
+        / "users"
+        / PRINCIPAL
+        / "user.md"
+    )
+    profile.parent.mkdir(parents=True)
+    profile.write_text("---\ntype: [\n---\n", encoding="utf-8")
+    relative_path = profile.relative_to(tmp_path / "everos").as_posix()
+    with sqlite3.connect(system_db) as conn:
+        conn.execute(
+            "INSERT INTO md_change_state VALUES (?, 'profile', 'modified', 1, "
+            "'2026-08-24T00:00:00Z', '2026-08-24T00:00:05Z', 1, 'failed', "
+            "0, '2026-08-24T00:00:05Z', 1, 'profile parse failed')",
+            (relative_path,),
+        )
+
+    current = _reader(tmp_path).record_detail(
+        (PRINCIPAL, "default"), "mc-profile"
+    )["current_state"]
+
+    assert current["profile"]["status"] == "missing"
+    assert current["indexing"] == {
+        "status": "available",
+        "reason": None,
+        "items": [
+            {
+                "md_path": relative_path,
+                "status": "failed",
+                "updated_at": "2026-08-24T00:00:05Z",
+                "error": "profile parse failed",
+            }
+        ],
+        "omitted_count": 0,
+    }
 
 
 def test_run_source_requires_the_real_everos_123_contract(tmp_path: Path) -> None:

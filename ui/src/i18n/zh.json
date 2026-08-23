@@ -4419,6 +4419,7 @@
         "loadMore": "加载更多",
         "back": "返回记录列表",
         "noPreview": "已授权的用户载荷不可用。",
+        "omittedBytes": "另省略 {{formattedBytes}} 字节",
         "runCount": "{{count}} 次运行",
         "sourceNotice": "{{section}}为{{state}}（{{reason}}）。",
         "project": "项目",

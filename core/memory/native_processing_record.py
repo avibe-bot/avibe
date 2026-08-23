@@ -496,6 +496,7 @@ class NativeProcessingRecordReader:
         profile = {"status": "missing", "updated_at_ms": None}
         profile_rel = _relative_path(self._root, profile_path)
         if profile_rel is not None and _safe_regular_file(self._root, profile_path):
+            linked_paths.add(profile_rel)
             parsed = _read_markdown(profile_path)
             if parsed is not None:
                 frontmatter, _body = parsed
@@ -510,7 +511,6 @@ class NativeProcessingRecordReader:
                             frontmatter.get("profile_timestamp_ms")
                         ),
                     }
-                    linked_paths.add(profile_rel)
         indexing = self._index_state(linked_paths)
         if profile["status"] == "missing" and indexing["status"] == "unavailable":
             return _unavailable("current_state_unavailable")
@@ -607,26 +607,29 @@ def _payload_projection(row: sqlite3.Row, owner_id: str) -> dict[str, Any]:
     allowed_ids = set(message_ids)
     projected: list[dict[str, Any]] = []
     rejected = 0
-    bounded = False
+    projection_incomplete = False
     for item in payload["items"]:
         if len(projected) >= _MAX_PAYLOAD_ITEMS:
             rejected += 1
             continue
-        value = _authorized_payload_item(item, owner_id, allowed_ids)
-        if value is None:
+        item_projection = _authorized_payload_item(item, owner_id, allowed_ids)
+        if item_projection is None:
             rejected += 1
         else:
+            value, unsupported_blocks_omitted = item_projection
             projected.append(value)
-            bounded = bounded or any(
-                block["omitted_bytes"] > 0 for block in value["content"]
+            projection_incomplete = (
+                projection_incomplete
+                or unsupported_blocks_omitted
+                or any(block["omitted_bytes"] > 0 for block in value["content"])
             )
     if not projected:
         return _unavailable("authorized_user_payload_unavailable")
     return {
-        "status": "partial" if rejected or bounded else "available",
+        "status": "partial" if rejected or projection_incomplete else "available",
         "reason": (
             "unauthorized_or_bounded_items_omitted"
-            if rejected or bounded
+            if rejected or projection_incomplete
             else None
         ),
         "items": projected,
@@ -636,7 +639,7 @@ def _payload_projection(row: sqlite3.Row, owner_id: str) -> dict[str, Any]:
 
 def _authorized_payload_item(
     value: object, owner_id: str, message_ids: set[str]
-) -> dict[str, Any] | None:
+) -> tuple[dict[str, Any], bool] | None:
     if not isinstance(value, dict):
         return None
     item_id = value.get("id")
@@ -653,6 +656,7 @@ def _authorized_payload_item(
     ):
         return None
     content = value.get("content")
+    unsupported_blocks_omitted = False
     if isinstance(content, str):
         blocks = [_text_block(content)]
     elif isinstance(content, list):
@@ -663,18 +667,22 @@ def _authorized_payload_item(
                 or block.get("type") != "text"
                 or not isinstance(block.get("text"), str)
             ):
-                return None
+                unsupported_blocks_omitted = True
+                continue
             blocks.append(_text_block(block["text"]))
     else:
         return None
     if not blocks:
         return None
-    return {
-        "id": item_id,
-        "timestamp_ms": timestamp,
-        "sender_id": owner_id,
-        "content": blocks,
-    }
+    return (
+        {
+            "id": item_id,
+            "timestamp_ms": timestamp,
+            "sender_id": owner_id,
+            "content": blocks,
+        },
+        unsupported_blocks_omitted,
+    )
 
 
 def _text_block(text: str) -> dict[str, Any]:

@@ -4419,6 +4419,7 @@
         "loadMore": "Load more",
         "back": "Back to records",
         "noPreview": "Authorized user payload is unavailable.",
+        "omittedBytes": "+{{formattedBytes}} bytes omitted",
         "runCount": "{{count}} runs",
         "sourceNotice": "{{section}} is {{state}} ({{reason}}).",
         "project": "Project",

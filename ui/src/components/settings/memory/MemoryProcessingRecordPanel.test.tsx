@@ -32,10 +32,16 @@ vi.mock('react-i18next', () => {
     if (key === 'memory.processingRecord.indexStatus.available') return 'Index available';
     if (key === 'memory.processingRecord.indexStatus.failed') return 'Index failed';
     if (key === 'memory.processingRecord.indexStatus.unknown') return 'Unknown index state';
+    if (key === 'memory.processingRecord.records.omittedBytes') return `+${options?.formattedBytes} localized bytes omitted`;
     if (key === 'memory.kind.episode') return 'Episode';
     return key;
   };
-  return { useTranslation: () => ({ t }) };
+  return {
+    useTranslation: () => ({
+      t,
+      i18n: { language: 'en-US', resolvedLanguage: 'en-US' },
+    }),
+  };
 });
 
 const listResult = (memcellId = 'mc-1', preview = 'Authorized payload') => ({
@@ -58,7 +64,7 @@ const listResult = (memcellId = 'mc-1', preview = 'Authorized payload') => ({
   },
 });
 
-const detailResult = (firstBoundary = 'First boundary') => ({
+const detailResult = (firstBoundary = 'First boundary', omittedBytes = 0) => ({
   status: 'ok' as const,
   entry: {
     memcell_id: 'mc-1',
@@ -74,7 +80,7 @@ const detailResult = (firstBoundary = 'First boundary') => ({
       timestamp_ms: 1_700_000_000_000,
       sender_id: 'owner-1',
       content: [
-        { type: 'text', text: firstBoundary, omitted_bytes: 0 },
+        { type: 'text', text: firstBoundary, omitted_bytes: omittedBytes },
         { type: 'text', text: 'Second boundary', omitted_bytes: 0 },
       ],
     }],
@@ -153,6 +159,15 @@ describe('MemoryProcessingRecordPanel', () => {
     expect(screen.getByText('Index projection failed')).toBeTruthy();
     expect(screen.getByText(/Index available/)).toBeTruthy();
     expect(screen.getByText(/Index failed/)).toBeTruthy();
+  });
+
+  it('localizes omitted payload bytes with locale-aware digits', async () => {
+    api.getMemoryProcessingRecordEntry.mockResolvedValue(detailResult('Truncated boundary', 1_234));
+    render(<MemoryProcessingRecordPanel />);
+
+    fireEvent.click((await screen.findByText('Authorized payload')).closest('button')!);
+
+    expect(await screen.findByText('+1,234 localized bytes omitted')).toBeTruthy();
   });
 
   it('ignores a list response superseded by a refresh', async () => {
