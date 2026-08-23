@@ -19,13 +19,17 @@ Across the five-dependency family (git, Memory, model-hub, Show, and tmux),
 platform selection, archive acquisition and verification, staging, install
 identity, install metadata, current-pointer persistence, mutation locking,
 retention, and install-state inspection. A small Show-specific adapter remains
-responsible for four product concepts that the other three dependencies do not
-have:
+responsible for four product concepts that the other dependencies do not have:
 
 1. policy/install/serving availability and operation-outcome publication;
 2. the system Node command and `minimum_node` prerequisite;
 3. the operator-supplied direct archive escape hatch; and
 4. the npm provider escape hatch.
+
+Memory also retains one product concept outside the shared manifest engine: the
+explicit `AVIBE_MEMORY_DEV_RUNTIME` development provider. It is selected and
+validated before managed-state inspection and therefore remains an adapter
+branch, not another shared provider or installer owner.
 
 The adapter should be a composed `ShowRuntimeInstaller` based on
 `ManagedRuntimeManager`, held by `ShowRuntimeManager`. Making the serving
@@ -69,6 +73,21 @@ convergence boundary:
   `unknown` or `error`, never absence. A manifest outage cannot make
   `status()`, Git's `resolve_git_path()`, or model-hub's
   `resolve_engine_path()` forget an admitted installed artifact.
+- Manifest source outcomes are typed. Configured offline mode means no network
+  attempt; a failed attempted fetch is `manifest_unavailable`; a source that is
+  absent is `manifest_missing`; bytes that were reached but fail parsing or
+  validation are `manifest_invalid`; and a valid manifest without a host
+  artifact is `platform_unsupported`. Status and resolution continue to use an
+  admitted disk artifact in every case, but `ensure()`/repair must not report an
+  invalid or missing manifest as successful reuse. Only configured offline mode
+  and a transient fetch failure may deliberately keep an admitted disk artifact
+  operational without manufacturing a selected target, and their diagnostics
+  and network-attempt evidence remain distinct.
+- An explicit non-manifest provider is selected before any managed-state
+  snapshot. In particular, `AVIBE_MEMORY_DEV_RUNTIME` remains a Memory-owned
+  development provider: status and resolvers may validate the configured
+  interpreter and `ensure()` returns `changed=false` without loading a manifest
+  or reading/writing managed metadata, pointers, claims, or derived state.
 - Runtime-specific admission is a read-only projection over the installed
   snapshot, but "read-only" describes the installed artifact, metadata, and
   pointer, not all derived state. After a successful Memory re-admission, the
@@ -81,6 +100,14 @@ convergence boundary:
   A cache hit is usable only after the pointer, metadata, and artifact identity
   have been cheaply reverified. Failed or raising probes remain `unknown` or
   `error` and are not persistently cached as admitted.
+- Derived-cache persistence uses one shared confined atomic writer. Every
+  existing parent and destination component is opened without following a
+  symlink or Windows reparse point, an existing target must be a single-link
+  regular file, and the live path must still name the validated descriptor at
+  commit. A redirect, hard-link alias, identity race, or permission failure
+  leaves every external target byte-for-byte unchanged and falls back to the
+  process-wide in-memory cache. This writer does not acquire the install
+  mutation guard and is not a second installed-state writer.
 - A released on-disk layout is dual-read indefinitely. Migration may write a
   canonical new shape, but it must adopt released Show layouts without a
   download and without rewriting them merely to make status work.
@@ -121,12 +148,17 @@ convergence boundary:
   unknown, never supported. To preserve offline reuse, it may enter the existing
   bounded readiness probe; only a successful probe admits serving for that
   process lifetime, and a failed probe does not relabel the install as absent.
-- Tmux remains a strict binary artifact for new manifests. Its released schema
-  1 manifest, metadata, and pointer omit `binary_sha256`; those shapes are
-  dual-read as legacy archive-verified installs and re-admitted through the
-  existing runnable/version/platform-preparation checks, never silently
-  relabeled as leaf-checksum-verified. A new canonical tmux manifest adds
-  `binary_sha256`.
+- Tmux remains a strict binary artifact. The exact released schema 1 manifest
+  fixture, metadata, and pointer omit `binary_sha256`; only that released shape
+  is dual-read as a legacy archive-verified install and re-admitted through the
+  existing runnable/version/platform-preparation checks. Canonical tmux uses
+  schema 2 and requires `binary_sha256`; a new or modified schema 1 manifest
+  without it is invalid. The source leaf digest is verified immediately after
+  extraction and before preparation. Preparation may then change bytes (macOS
+  ad-hoc codesigning does); canonical metadata therefore records a distinct
+  post-preparation installed digest, and subsequent disk admission verifies
+  that digest plus runnable/version requirements. Neither digest may stand for
+  both phases.
 
 `ManagedRuntimeSpec` needs only declarative differences, not callbacks for every
 step. The named seams are:
@@ -141,13 +173,15 @@ step. The named seams are:
   compatibility probe and tmux supplies runnable/version admission), with an
   opt-in, identity-keyed derived-admission cache for expensive deterministic
   success results;
+- a confined, no-follow atomic writer for derived admission cache entries;
 - declarative host-to-artifact platform aliases used by manifest selection,
   installed-state admission, resolution, and durable-claim normalization;
 - legacy install candidates and source-lineage admission;
-- staging-name patterns for preview and cleanup; and
-- staged-binary preparation/admission hooks already represented by
+- staging-name patterns for preview and cleanup;
+- explicitly ordered staged-binary source-integrity, preparation, installed-byte
+  fingerprinting, and admission phases, using the existing
   `_prepare_binary_for_manifest`, `_binary_matches_manifest`, and
-  `_binary_version`; and
+  `_binary_version` hooks without conflating their digests; and
 - result adapters that map shared reasons into Show and tmux payloads.
 
 The shared manager continues to expose binary paths to git, Memory, model-hub,
@@ -334,44 +368,83 @@ projection with a safe default. No reader may reconstruct an installed fact
 from the currently selected manifest. This table is the normative completeness
 check for the migration.
 
-Every predicate in the table is schema-aware and keeps four distinctions:
+Every predicate in the table is schema-aware and keeps these distinctions:
 
 1. a successfully inspected, evidence-free runtime is **absent**; missing data
    inside a present or uninspectable state is **unknown/error**;
-2. canonical writes persist their required fields, while a released shape may
+2. a source not inspected, not reached, missing, reached-but-invalid, or valid
+   but without a host artifact has a different reason and mutation policy;
+3. canonical writes persist their required fields, while a released shape may
    use a safe value that its versioned spec already declares;
-3. artifact and host platform labels compare through the same declarative alias
+4. artifact and host platform labels compare through the same declarative alias
    map rather than by literal equality; and
-4. inspection never rewrites installed state, but may write a best-effort
+5. admission not attempted, attempted and rejected, and attempted but errored
+   are distinct from admitted; and
+6. inspection never rewrites installed state, but may write a best-effort
    derived cache outside the artifact, metadata, pointer, and downloads trees;
    a write failure changes neither the observed result nor runtime health.
 
 | Fact needed by a disk reader | Authority today | Persistence contract: today -> target | Missing or invalid meaning | Acceptance scenarios |
 | --- | --- | --- | --- | --- |
-| Provider and runtime ownership (`provider`, `runtime_id`) | spec + manifest branch | Shared metadata/pointer have both; released Show/tmux provider/layout contracts can safely derive their runtime id -> canonical metadata/pointer write both | A fully empty tree is absent. A present unknown shape is foreign/corrupt; do not resolve or delete it | C1, C8, C9, C15 |
+| Provider and runtime ownership (`provider`, `runtime_id`) | spec + manifest branch | Shared metadata/pointer have both; released Show/tmux provider/layout contracts can safely derive their runtime id -> canonical metadata/pointer write both | A fully empty tree is absent. A present unknown shape is foreign/corrupt; do not resolve or delete it | C1, C8, C9, C15, C23 |
 | Installed artifact identity (`runtime_version`, artifact `platform`, `archive_sha256`) | selected manifest; current path also includes whole-manifest digest | Fields exist in the wrong shared identity -> canonical metadata/pointer persist this artifact tuple; the artifact platform remains its manifest label and host admission uses spec aliases | Identity unknown/error; never substitute selected identity. An alias-equivalent label is admitted; a label outside the mapping is not | C1-C9, C14-C15 |
-| Install location and entrypoint (`install_dir`, `bin_path` or Show CLI path) | pointer + selected archive/default | Shared/tmux pointers persist it and Show is implicit -> canonical pointer persists the resolved verifier/entrypoint; any accepted manifest may safely derive an omitted `bin_path` from its spec default | An unsafe or unresolvable path is invalid. Field omission alone is not invalid when the versioned spec supplies a safe default; manifest unavailability is unrelated | C1-C2, C7-C10, C15 |
-| Integrity level (`binary_sha256` or archive-verified directory/legacy binary) | selected archive + install verification | Mixed/implicit today -> canonical metadata persists the integrity mode and its applicable digest | Unknown integrity is not strict verification. Show uses its explicit directory verifier; legacy tmux uses archive + runnable/version admission | C1, C8-C10, C15 |
-| Installed admission outcome/revision (manifest installability, platform preparation, runnable/version probe) | install transaction + runtime hook | Usually implicit; Memory alone is explicit -> canonical metadata/pointer persist a versioned admission result; a successful released-shape re-admission may persist only a separate identity-keyed derived cache | Unknown/error is not ready. Re-admission may project/cache success but never rewrites installed state | C1-C2, C7-C8, C11, C15 |
+| Install location and entrypoint (`install_dir`, `bin_path` or Show CLI path) | pointer + selected archive/default | Shared/tmux pointers persist it and Show is implicit -> canonical pointer persists the resolved verifier/entrypoint; any accepted manifest may safely derive an omitted `bin_path` from its spec default | An unsafe or unresolvable path is invalid. Field omission alone is not invalid when the versioned spec supplies a safe default; manifest unavailability is unrelated | C1-C2, C7-C10, C15, C17, C19-C20 |
+| Source leaf integrity (`binary_sha256`) | selected archive + extracted bytes | One digest currently spans source and installed bytes -> strict canonical manifests persist the declared source digest and verify it before any preparation | Missing is allowed only for an explicitly versioned released legacy shape. A mismatch is source corruption and preparation must not run | C1, C15, C23 |
+| Installed-byte integrity (`installed_binary_sha256`) or archive-verified directory integrity mode | post-preparation staged artifact | Mixed/implicit today -> canonical metadata persists the post-preparation digest or explicit directory/legacy mode separately from the source leaf digest | Unknown installed integrity is not strict verification. Show uses its directory verifier; released tmux uses archive + runnable/version admission | C1, C8-C10, C15, C23 |
+| Installed admission outcome/revision (manifest installability, platform preparation, runnable/version probe) | install transaction + runtime hook | Usually implicit; Memory alone is explicit -> canonical metadata/pointer persist a versioned admission result; a successful released-shape re-admission may persist only a separate identity-keyed derived cache | Not attempted is `unknown`; a false result is `rejected`; an exception is `error`. None is ready or persistently cached as admitted | C1-C2, C7-C8, C11, C15, C21-C23 |
 | Whole-manifest digest and source lineage | manifest + install metadata | Present today -> retained only as legacy locator/provenance, outside artifact identity | Legacy locator/provenance only, never installed identity; missing lineage makes source comparison unknown | C4, C9-C10, C14-C15 |
-| Selected/update facts (selected version/artifact, archive catalog, `release_state`, source URLs) | current or cached manifest | Remote cache only -> remain selected facts and are never copied into installed identity | `not_comparable`/unknown update state; installed/admitted state is unchanged | C2-C6, C16 |
+| Selected/update facts (selected version/artifact, archive catalog, `release_state`, source URLs) | current or cached manifest | Remote cache only -> remain selected facts and are never copied into installed identity | Configured offline is `not_attempted_offline`; a failed fetch is `manifest_unavailable`; missing source is `manifest_missing`; invalid reached bytes are `manifest_invalid`; no host artifact is `platform_unsupported`. Installed/admitted state is unchanged | C2-C6, C16-C17, C19-C20 |
 | Show `minimum_node` | manifest | **Absent** in released metadata -> required in new Show install metadata | A released omission is unknown and not satisfied; a canonical omission is invalid. Serving is withheld unless the released shape's bounded probe succeeds | C2, C10 |
-| Memory immutable build contract (`release_state`, EverOS/Python versions, lock digest/id, uv version) | manifest validation | Only runtime version/admission outcome today -> new Memory metadata persists the validated extension or a revision that names it | A matching current admission revision proves the installed contract; otherwise the unprovable fields are unknown and the artifact needs explicit read-only re-admission or repair | C11-C12 |
-| Memory admission revision/result | live compatibility probe in `status()` | New pointer yes, released pointer may omit -> canonical pointer persists it at install; successful released-shape probes write only a best-effort cache under `<runtime_dir>/derived/admission/`, keyed by verified artifact identity + revision and consulted only after cheap artifact verification | False/raise is `unknown` or `error`, never admitted/ready and never durably cached. Cache write failure keeps the successful projection and falls back to process-wide memory | C2, C11 |
-| Memory provider-root compatibility (`provider_root_format`, compatible formats, artifact fingerprint) | manifest-derived candidate | Current pointer yes, older shapes may omit -> canonical pointer requires all applicable fields | Capability/activation unknown; do not invent a compatible format or relabel the binary absent | C11-C12 |
-| Memory sync contract (revision, argv, bootstrap/scrubber digests) | manifest extension | Current pointer yes when declared -> canonical pointer persists the complete declared contract | Missing means sync unavailable, not artifact absence; invalid means admission error for sync | C11-C12 |
-| Tmux preparation/admission facts (required utf8proc/terminfo contract, runnable exact version, macOS preparation result) | manifest + install-time/live probes | Requirements only in metadata and no released leaf digest -> canonical metadata/pointer persist requirements, integrity mode, and admission revision | Unknown requirement/admission is not ready; a released omission is accepted only through explicit legacy runnable/version admission, not as a canonical default | C2, C7, C15 |
+| Memory development-provider selection (`provider=development`, interpreter identity and compatibility projection) | `AVIBE_MEMORY_DEV_RUNTIME` + direct interpreter probe | Intentionally not persisted in managed state -> remains a Memory adapter result selected before the shared snapshot | Missing env means use the managed provider; configured but unusable means a development-provider error, never fallback through or mutate managed state | C18 |
+| Memory immutable build contract (`release_state`, EverOS/Python versions, lock digest/id, uv version) | manifest validation | Only runtime version/admission outcome today -> new Memory metadata persists the validated extension or a revision that names it | A version-permitted released omission is unknown; a present malformed field is error. Either needs explicit read-only re-admission or repair before that capability is ready | C11-C12, C25 |
+| Memory admission revision/result | live compatibility probe in `status()` | New pointer yes, released pointer may omit -> canonical pointer persists it at install; successful released-shape probes write only a best-effort cache under `<runtime_dir>/derived/admission/`, keyed by verified artifact identity + revision and consulted only after cheap artifact verification | Not attempted, rejected, and inspection error remain distinct and are never admitted/ready or durably cached. Cache write failure keeps a successful projection and falls back to process-wide memory | C2, C11, C21-C22 |
+| Derived admission-cache entry (artifact identity, admission revision, successful result) | successful read-only re-admission | Absent today -> shared confined atomic writer under `<runtime_dir>/derived/admission/`; never installed state | Missing/stale/unreadable/unsafe is a cache miss, not failed admission. A write-path redirect or failure leaves external and installed bytes unchanged and falls back to memory | C11, C21-C22, C24 |
+| Memory provider-root compatibility (`provider_root_format`, compatible formats, artifact fingerprint) | manifest-derived candidate | Current pointer yes, older shapes may omit -> canonical pointer requires all applicable fields | Version-permitted omission makes the capability unknown; malformed content is error. Neither invents a compatible format or relabels the binary absent | C11-C12, C25 |
+| Memory sync contract (revision, argv, bootstrap/scrubber digests) | manifest extension | Current pointer yes when declared -> canonical pointer persists the complete declared contract | Version-permitted omission makes sync unavailable, not the artifact absent; malformed content is admission error for sync | C11-C12, C25 |
+| Tmux schema and preparation/admission facts (required utf8proc/terminfo contract, runnable exact version, macOS preparation result) | manifest + install-time/live probes | Released schema 1 requirements exist but omit the leaf digest -> exact released schema 1 stays legacy; canonical schema 2 requires source and installed-byte digests plus requirements and admission revision | Unknown requirement/admission is not ready; checksum omission is accepted only for the released schema 1 fixture, never a new schema 1 default | C2, C7, C15, C23 |
 | Model Hub durable claim target | selected manifest target | Schema 1/2 persist five fields including `manifest_sha256` -> new schema persists normalized platform-artifact target; platform labels normalize through the same spec alias map used for selection/admission | Dual-read and compare normalized platform-artifact identity; invalid or genuinely incompatible targets are explicit claim errors | C4, C9, C14 |
 | Model Hub durable operation state (`state`, generation, error, reason) | `install-state.json` | Schema 1/2 persist it -> dual-read separately from installed snapshot | A released `not_installed` record is stale when an admitted disk artifact exists; it cannot override installed truth | C2, C13-C14 |
-| Remote manifest cache (`downloads/manifest-<url-digest>.json`) | successful remote fetch | Present beside archives -> remains a typed durable cache entry | Missing makes selected/update facts unknown offline; retention must preserve it | C3, C16 |
+| Remote manifest cache (`downloads/manifest-<url-digest>.json`) | successful remote fetch | Present beside archives -> remains a typed durable cache entry | Missing under configured offline mode means selected facts were not attempted; present-but-invalid bytes are `manifest_invalid`, not a cache miss. Retention preserves either for diagnosis until explicit repair replaces it | C3, C16-C17, C19 |
 | Archive ownership/protection (verified digest, released `archive_name` alias, current/rollback references, unknown names) | archive metadata + pointer traversal | Archive bytes/references exist -> canonical report classifies only recognized archive entries; derived admission state lives outside `downloads/` | Unprovable ownership/protection means retain. Unknown non-archive names and derived state are never archive candidates | C8-C10, C15-C16 |
+
+### Normative Predicate Census
+
+The review-loop breaker requires more than fixing the reviewed examples. This is
+the result of scanning every fact row above, every scenario row below, and each
+normative contract and stop point for a value, label, digest, schema, or row that
+could cover two states with different evidence or permitted actions. Sharing a
+row is allowed only when both the evidence and every prescribed action are the
+same. “Scan” identifies distinctions found by that full pass rather than by the
+five findings on `255fb3c35`.
+
+| Predicate location | States that must not collapse | Prescribed behavior and proof | Source |
+| --- | --- | --- | --- |
+| Install-tree presence / C8 | Proven empty vs present-but-partial or uninspectable | Empty permits first install; partial is unknown/error, deletes nothing, and repairs only with a valid target under the guard | Already distinct |
+| Manifest acquisition / C2 and C17 | Source not reached vs reached bytes invalid | Both preserve disk-local status/resolution. A transient fetch failure keeps the admitted runtime operational and reports the fetch error; invalid bytes make `ensure()`/repair fail `manifest_invalid`, never successful reuse | F3 |
+| Manifest acquisition / C19 and C2 | Network deliberately not attempted vs attempted and failed | Configured offline performs zero network access and reports `not_attempted_offline`; an attempted fetch retains its `manifest_unavailable` error. Neither manufactures selected facts | Scan |
+| Manifest selection / C20 and C6 | Manifest source missing vs valid manifest with no host artifact | `ensure()`/repair returns `manifest_missing` for the first and `platform_unsupported` for the second; disk-local status/resolution and retention remain available | Scan |
+| Admission / C11, C21, and C22 | Validation not attempted vs attempted rejection vs attempted inspection error | Project `unknown`, `rejected`, and `error` respectively. None is ready or persistently cached as admitted; only a successful probe may populate derived cache | Scan |
+| Tmux manifest version / C15 and C23 | Exact released relaxed contract vs canonical strict contract | The released schema 1 fixture alone may omit the leaf checksum; canonical schema 2 requires it. A novel or modified schema 1 omission is invalid | F1 |
+| Tmux binary integrity / C23 | Pre-preparation source bytes vs post-preparation installed bytes | Verify the manifest leaf digest before preparation; after real byte-changing codesign, persist and verify a separate installed digest. One digest cannot prove both phases | F2 |
+| Required fields / C10, C12, and C15 | Omission permitted by a released version vs omission from canonical state | Project the released shape's named unknown/legacy mode without rewriting it; reject a canonical omission. Schema identity, not field absence alone, selects the rule | Scan |
+| Memory provider selection / C18 | Development override configured vs managed provider selected | Test the override before snapshot construction. The development branch touches no manifest or managed state; an unusable override reports its own provider error and does not fall through | F5 |
+| Entrypoint resolution / C1 and Step 3 | Field omitted with a safe declarative default vs explicit/default path unsafe | Persist the safely derived path in canonical state; reject an escaping or unresolvable path. Literal presence is not the safety predicate | Scan |
+| Platform admission / C7 | Literal mismatch but alias-equivalent vs genuinely incompatible | Normalize with the one spec map across selection, disk admission, resolver, and claim; reject only the incompatible control | Already distinct |
+| Model Hub operation state / C13 and C14 | Stale terminal failure vs active installing claim vs admitted disk truth | Disk truth stays operational; a stale failure cannot hide it; only an active normalized same-target claim resumes | Scan |
+| Remote manifest cache / C16-C17 and C19 | Cache absent vs cache present but invalid vs recognized valid cache | Absence under configured offline is `not_attempted_offline`; invalid content is `manifest_invalid`; valid content supplies selected facts. Retention preserves the typed entry | Scan |
+| Downloads retention / C16 | Verified unprotected archive vs protected archive vs manifest cache vs unknown name | Delete only the first. Protection uncertainty, non-archive ownership, or unknown type always retains the entry | Already distinct |
+| Preview/mutation guard / Step 2 | Real contention vs guard path unavailable/unsafe/raced | Return typed `busy` and `guard_unavailable` outcomes; neither is flattened to “already running,” and preview never creates the guard | Scan |
+| Automatic cleanup / Step 4 | Protection inspection failure vs candidate deletion failure vs successful install | Both maintenance failures leave the committed install/claim successful and have distinct reports; inspection uncertainty deletes nothing | Scan |
+| Derived-cache write / C24 | Installed-state mutation vs derived best-effort cache write; confined path vs redirected path | Derived write uses the shared no-follow confined writer without the mutation guard. A symlink/reparse/hard-link/race leaves the external target unchanged and degrades to memory | F4 |
+| Tar extraction / Step 3 | Filter keyword unavailable vs archive rejected by either extraction path | Capability absence alone enters the guarded fallback. Filtered and forced-fallback paths accept/reject the same fixtures; an invalid archive is never reinterpreted as capability absence | Scan |
 
 ### Released-Fixture Scenario Matrix
 
 The matrix is fixture-driven rather than function-driven. Run every applicable
 row for the canonical shape and every shipped layout/schema for git, Memory,
 model-hub, Show, and tmux. The dimensions are explicit: disk shape, manifest
-mode (same, edited, cache-only, unavailable/invalid), and host-platform relation
+mode (same, edited, cache-only, configured offline, fetch failed, missing,
+invalid, or platform-unsupported), and host-platform relation
 (same after alias normalization, selected unsupported, or genuinely incompatible
 disk artifact). Each applicable row runs explicit and safe spec-derived
 entrypoints. C8 runs separate clean-empty and partial-state fixtures even though
@@ -381,8 +454,8 @@ fact requires a census row and at least one matrix row in the same change.
 | ID | Disk fixture | Manifest / platform | `status` result | Resolver result | `ensure` result | Model Hub claim result | Retention result |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | C1 | Canonical admitted install | Same selected artifact / host admitted after alias normalization | Installed identity from disk; selected matches | Same admitted path, including a safe spec-derived default | Reuse, `changed=false`, no download | No stale failure | Protect current + rollback |
-| C2 | Canonical admitted install | Manifest unavailable or invalid / host admitted after alias normalization | Installed remains true; selected/update facts unknown | Same admitted path | Reuse disk, `changed=false`, no download or installed-state write | Existing admitted artifact is not hidden by failure state | Protect from disk facts |
-| C3 | Canonical install + remote manifest cache | Network unavailable / same host | Installed from disk; selected facts from cache | Same admitted path | Reuse via cache, no network | Target comparison uses normalized cached target | Preserve manifest cache |
+| C2 | Canonical admitted install | Network fetch attempted and failed / host admitted after alias normalization | Installed remains true; selected facts unavailable with fetch error | Same admitted path | Reuse disk, `changed=false`, while preserving `manifest_unavailable` in the selected/update error channel; no installed-state write | Existing admitted artifact is not hidden by failure state | Protect from disk facts |
+| C3 | Canonical install + valid remote manifest cache | Configured offline / same host | Installed from disk; selected facts from cache | Same admitted path | Reuse via cache, zero network access | Target comparison uses normalized cached target | Preserve manifest cache |
 | C4 | Canonical install | Only another platform entry edited / same host | Installed and selected identities match | Same path | While edited manifest is online, reuse same path/archive with no download; only then run C2 | Legacy target differing only by manifest digest resumes | No protection change |
 | C5 | Canonical install | This host's selected artifact edited / same host | Installed old identity; selected differs | Old admitted path remains operational | Install selected new identity; commit pointer atomically | New canonical target; old target does not resume as same | Protect old as rollback + new current |
 | C6 | Canonical install | Manifest has no artifact after host-to-artifact alias resolution / same host | Installed disk fact remains; selected is unsupported | Existing admitted path remains operational | Preserve existing install and report selected-platform failure separately | No target is manufactured | Protect existing |
@@ -390,12 +463,22 @@ fact requires a census row and at least one matrix row in the same change.
 | C8 | **Empty:** successfully inspected tree with no pointer, metadata, versions, or install evidence. **Partial:** any present malformed, unreadable, escaping, or incomplete pointer/metadata state | Available or unavailable / any host | Empty is `absent`; partial is `unknown` or `error`, never absent | `None` for both | Empty may perform a first install under the mutation guard; partial repairs only under that guard with a valid selected target | Empty may start a claim after target resolution; partial starts none before repair/target resolution | Empty protects nothing; partial deletes nothing whose protection is uninspectable |
 | C9 | Released shared whole-manifest-digest directory | Other platform edited, then cache-only/unavailable / same host | Adopt installed platform identity without write | Released path | Online edited manifest reuses without download; offline reuses disk | Schema 1/2 target normalizes without `install_target_changed` | Protect released layout/archive |
 | C10 | Released Show metadata/layout without `minimum_node` | Unavailable / same host | Installed; Node compatibility unknown, not satisfied | Artifact entrypoint exists; serving command gated by bounded probe | No inspection write/download; explicit install may persist a known requirement | N/A | Protect released layout/archive |
-| C11 | Released Memory pointer without admission revision | Any manifest mode / same host | Probe success admits and best-effort caches by verified identity; false/raise is unknown/error | Path on success; fresh managers/processes reuse a durable success cache | Explicit mutation may re-admit and persist canonical fields; inspection never changes the released pointer | N/A | Protect regardless of probe/cache-write failure; pointer and artifact bytes remain identical |
-| C12 | Released Memory pointer missing/invalid immutable-build, provider-root, or sync fields | Any manifest mode / same host | Artifact and each capability reported separately; no invented contract or compatibility | Binary only if core admission passes; affected capability withheld | Explicit mutation may canonicalize from a valid manifest | N/A | Protect released artifact |
+| C11 | Released Memory pointer without admission revision | Probe supported and succeeds / same host | Admitted projection; best-effort cache by verified identity | Path; fresh managers/processes reuse a durable success cache | Reuse; explicit mutation may persist canonical fields, but inspection never changes the released pointer | N/A | Protect regardless of cache-write failure; pointer and artifact bytes remain identical |
+| C12 | Released Memory pointer with version-permitted omitted immutable-build, provider-root, or sync fields | Any manifest mode / same host | Artifact and each omitted capability reported separately; no invented contract or compatibility | Binary only if core admission passes; omitted capability withheld | Explicit mutation may canonicalize from a valid manifest | N/A | Protect released artifact |
 | C13 | Admitted Model Hub install + released `state=not_installed` | Any manifest mode / same host | Installed truth wins; persisted failure is projected stale | Engine path | Reuse install; no unnecessary claim/download | Stale failure neither hides runtime nor becomes active claim; inspection does not rewrite it | Protect engine/archive |
 | C14 | Released Model Hub `installing` claim schema 1/2 | Manifest differs only outside host artifact / host admitted through literal or aliased label | Installing/admitted facts remain distinct | Disk path if already admitted | Resume only normalized same target | Resume without target-changed; malformed or genuinely incompatible target fails explicitly | Protect claimed/current bytes |
 | C15 | Released tmux schema 1 manifest/metadata/pointer without `binary_sha256` | Cache-only/unavailable / same host | Installed with explicit legacy integrity level | Path only after runnable/exact-version admission | Reuse without download; inspection never upgrades metadata | N/A | Protect released tmux archive/install |
-| C16 | Manifest cache + verified/stale archives + unknown download names | Network unavailable / same host | Cache remains usable for selected facts | Existing admitted path | Offline reuse/repair can read cache | Claim behavior unchanged | Delete only typed, unprotected archive candidates; preserve `manifest-*` and every unknown non-archive entry |
+| C16 | Manifest cache + verified/stale archives + unknown download names | Configured offline / same host | Cache remains usable for selected facts | Existing admitted path | Offline reuse/repair can read cache | Claim behavior unchanged | Delete only typed, unprotected archive candidates; preserve `manifest-*` and every unknown non-archive entry |
+| C17 | Canonical admitted install + manifest bytes that parse or validate incorrectly | Reached invalid manifest / same host | Installed remains true; selected facts carry `manifest_invalid` | Same admitted path | Fail `manifest_invalid`; no successful reuse, repair, download, or installed-state write | Existing admitted artifact remains visible; no target is manufactured | Protect from disk facts |
+| C18 | `AVIBE_MEMORY_DEV_RUNTIME` points to a usable development interpreter; managed tree contains a poison fixture | No manifest mode applies / compatible host | `provider=development`, ready | Development interpreter path | Success, `changed=false`, including `force=true` | N/A | Zero manifest, metadata, pointer, claim, derived-cache, or retention access |
+| C19 | Canonical admitted install + no manifest cache | Configured offline / same host | Installed remains true; selected facts are `not_attempted_offline` | Same admitted path | Reuse disk, `changed=false`, zero network and installed-state writes | Existing admitted artifact remains visible; target comparison is not attempted | Protect from disk facts |
+| C20 | Canonical admitted install + absent configured/packaged manifest source | Source missing / same host | Installed remains true; selected facts carry `manifest_missing` | Same admitted path | Fail `manifest_missing`; no target or successful repair is invented | Existing admitted artifact remains visible; no claim starts | Protect from disk facts |
+| C21 | Released Memory pointer without admission revision | Probe supported and returns rejection / same host | Installed artifact present; admission `rejected`, not ready | `None` with rejection evidence | Explicit mutation may repair from a valid manifest; inspection does not write/cache | N/A | Protect released artifact; derived success cache absent |
+| C22 | Released Memory pointer without admission revision | Admission projection cannot be attempted / same host | Installed artifact present; admission `unknown`, not ready | `None` with not-attempted evidence | Explicit mutation may repair from a valid manifest; inspection does not write/cache | N/A | Protect released artifact; derived success cache absent |
+| C23 | Canonical tmux schema 2 manifest | Source leaf digest valid; macOS signing fixture really changes bytes / same host | Installed only after post-preparation digest and runnable/version admission | Prepared tmux path | Verify source digest, mutate bytes, persist distinct installed digest, admit; source mismatch runs no preparation | N/A | Protect schema 2 archive/install and both integrity facts |
+| C24 | Released Memory artifact that passes re-admission + derived-cache parent/target symlink, hard-link, reparse, or identity-race fixture | Any manifest mode / same host | Successful projection survives cache-write rejection via process memory | Same admitted path | Reuse without installed-state mutation | N/A | External redirect target, pointer, metadata, and artifact tree remain byte-for-byte unchanged |
+| C25 | Released Memory pointer with a present malformed immutable-build, provider-root, or sync field | Any manifest mode / same host | Core artifact stays separately inspectable; malformed capability is `error`, not version-permitted omission | Binary only if independent core admission passes; malformed capability withheld | Explicit repair requires a valid manifest; no inspection canonicalization | N/A | Protect released artifact and preserve malformed evidence |
+| C26 | Released Memory pointer without admission revision | Probe starts and raises/times out / same host | Installed artifact present; admission `error`, not ready | `None` with inspection error | Explicit mutation may repair from a valid manifest; inspection does not write/cache | N/A | Protect released artifact; derived success cache absent |
 
 ## Migration Sequence And Stop Points
 
@@ -409,47 +492,59 @@ manifest-digest directories, and introduce the local installed-artifact
 snapshot. Treat Model Hub's released durable claim target as a separate
 versioned shape: dual-read schema versions 1 and 2, normalize their five fields
 to the four platform-artifact identity fields for comparison, and write a new
-claim shape only under a bumped schema version. Add Memory's non-mutating
-admission projection before routing its released active pointers through the
-snapshot. Use one declarative host-to-artifact alias mapping for manifest
-selection, disk admission, resolver output, and claim comparison; Model Hub's
-released `linux-amd64` artifact is valid on a `linux-x64` host. Persist a
-successful deterministic re-admission only as an atomic, best-effort derived
-cache under `<runtime_dir>/derived/admission/`, keyed by the verified artifact
-identity and admission revision. Cache creation must not acquire the mutation
-guard or alter a released pointer. Keep current public payloads as projections
-during this step.
+claim shape only under a bumped schema version. Preserve Memory's development
+provider selection before any snapshot or manifest/state access, then add its
+non-mutating admission projection before routing released active pointers
+through the snapshot. Use one declarative host-to-artifact alias mapping for
+manifest selection, disk admission, resolver output, and claim comparison;
+Model Hub's released `linux-amd64` artifact is valid on a `linux-x64` host.
+Persist a successful deterministic re-admission only as an atomic, best-effort
+derived cache under `<runtime_dir>/derived/admission/`, keyed by the verified
+artifact identity and admission revision. Use the shared confined no-follow
+writer: cache creation does not acquire the mutation guard or alter a released
+pointer, and an unsafe or unwritable destination degrades to process memory.
+Keep current public payloads as projections during this step.
 
 **Stop point:** git, Memory, and model-hub use the new snapshot and identity;
 Show and tmux are untouched. Model-hub recovery can resume every released claim
 shape without treating a manifest-only digest change as a target change.
 
-**Acceptance test:** run matrix rows C1-C9 and C11-C14 for every applicable git,
-Memory, and model-hub released fixture. C4 is ordered: while the edited manifest
-is still online, `ensure()` must reuse the original path/archive with no
-download; only afterward make the manifest unavailable and run C2. Under C2,
-all observable columns are mandatory: shared `status()` reports disk identity,
-`GitRuntimeManager.resolve_git_path()` returns the admitted Git path,
-model-hub `resolve_engine_path()` returns the admitted engine path, and
-`ensure()` reuses without an installed-state write. A status-only or
-resolver-only test does not pass. C7 includes a released Model Hub
-`linux-amd64` pointer/metadata/claim fixture on `linux-x64`; status, resolver,
-ensure, and claim comparison all admit the alias-equivalent identity, while a
-genuinely incompatible label fails. C8 proves both clean first install and
-fail-closed partial inspection. C11 runs success, false, and raising Memory
-probes and byte-compares the released pointer and artifact tree. After the first
-success, construct fresh managers and simulate fresh CLI processes: they reuse
-the identity-keyed durable result without rerunning the subprocess probe, but
-only after cheap pointer/metadata/artifact verification. Change the pointer
-identity and prove the old entry is ignored immediately. Make the derived-cache
-directory read-only and prove a successful probe still returns success, uses a
-process-wide memory result across fresh managers for the remainder of that
-process, and leaves installed state unchanged. False/raising probes remain
-uncached. C13 seeds an admitted engine together with every released
-`not_installed` state shape and proves the failure
-is stale in the installed-state-preserving projection. Every census row used by
-these three dependencies must name a passing scenario; a blank cell blocks the
-step.
+**Acceptance test:** run C1-C9, C11-C14, C17-C22, and C24-C26 for every
+applicable git, Memory, and model-hub released fixture. C4 is ordered: while the
+edited manifest is online, `ensure()` reuses the original path/archive with no
+download; only afterward make the fetch fail and run C2. Under C2, every
+observable column is mandatory: shared `status()` reports disk identity, Git's
+resolver returns the admitted path, model-hub's resolver returns the admitted
+engine, and `ensure()` reuses without an installed-state write while preserving
+the fetch error separately. C17 uses that disk fixture with reached invalid
+manifest bytes: status and both resolvers remain operational, but `ensure()` and
+repair return `manifest_invalid` and may not report successful reuse. A
+status-only or resolver-only test does not pass. C19 proves configured offline
+performs zero network access; C20 proves a missing source is not reported as
+platform unsupported.
+
+C7 includes a released Model Hub `linux-amd64` pointer, metadata, and claim on
+`linux-x64`; status, resolver, ensure, and claim comparison admit the
+alias-equivalent identity, while a genuinely incompatible label fails. C8
+proves both clean first install and fail-closed partial inspection. C11, C21,
+C22, and C26 separately run successful, rejecting, not-attempted, and
+raising/timed-out Memory admission projections and byte-compare the released
+pointer and artifact tree. After C11 succeeds, fresh managers and simulated
+fresh CLI processes reuse the identity-keyed durable result without rerunning
+the subprocess, but only after cheap pointer/metadata/artifact verification.
+Changing the pointer identity makes the old entry ineligible immediately. A
+read-only cache directory leaves the successful projection intact and uses the
+process-wide result; the other three outcomes remain uncached.
+
+C18 poisons every manifest and managed-state reader/writer, then proves
+`provider=development`, both resolvers, and forced `ensure(changed=false)`
+complete with zero calls. C24 runs successful re-admission against parent and
+target symlink/hard-link fixtures plus Windows reparse and identity-race
+simulations: every external target, pointer, metadata file, and artifact stays
+byte-for-byte unchanged and the result falls back to process memory. C13 seeds
+an admitted engine with every released `not_installed` state and proves the
+failure is stale. Every census row used by these dependencies must name a
+passing scenario; a blank cell blocks the step.
 
 **What breaks:** expected functional breakage is **none**. Without dual-read
 adoption, all three can appear missing or redownload while offline; that failure
@@ -464,7 +559,9 @@ truth did not move completely and blocks the step. Re-probing an unchanged
 released Memory identity in a fresh process, failing status because the derived
 cache is unwritable, rejecting Model Hub's released `linux-amd64` identity on
 `linux-x64`, or classifying C8's proven-empty tree as unknown would also block
-the step.
+the step. Reading managed state after selecting the Memory development provider,
+following a derived-cache redirect, flattening rejected/not-attempted/errored
+admission, or silently reusing disk after `manifest_invalid` also blocks it.
 
 ### Step 2: Converge The Mutation Guard
 
@@ -480,9 +577,11 @@ foreign-process contention, absent-lock preview, inode replacement, symlink,
 hard link, Windows reparse simulation, and uninspectable path. A preview must
 either return a complete stable plan or a typed non-success; it never creates
 `.install.lock`. The derived-admission cache is not installed state: its
-best-effort atomic write does not use this mutation guard, and racing writers of
-the same identity/revision must converge to the same valid payload. A guarded
-identity change makes all old cache keys ineligible at pointer commit; physical
+best-effort confined atomic write does not use this mutation guard, and racing
+writers of the same identity/revision must converge to the same valid payload
+without following a symlink, hard link, or reparse point. C24's redirected
+external target remains unchanged and write failure falls back to memory. A
+guarded identity change makes all old cache keys ineligible at pointer commit; physical
 pruning of those now-stale derived files remains best-effort maintenance.
 
 **What breaks:** no installed runtime. A new
@@ -591,7 +690,8 @@ pass the bounded runtime readiness probe before serving is admitted.
 old functions may remain unreachable for one comparison PR.
 
 **Acceptance test:** run the existing Show matrix for packaged/local/remote
-manifest, offline reuse, failed and forced replacement, unrelated-platform
+manifest, configured-offline reuse, fetch failure, reached-invalid and missing
+manifest, failed and forced replacement, unrelated-platform
 manifest edits, previous fingerprints, legacy parent layout, configured source
 lineage, internal symlinks, Node missing/unsupported, archive cleanup, Doctor,
 and dependencies status. The link case includes the esbuild hard link and
@@ -636,20 +736,29 @@ shared capability. Retain only tmux's public result projection, macOS
 quarantine/codesign preparation, runnable/exact-version admission, and
 utf8proc/terminfo manifest requirements. Dual-read the released schema 1
 manifest, `.avibe-tmux-runtime.json`, `current.json`, and legacy two-level
-install directory. New manifests add `binary_sha256`; legacy installs without it
-remain explicitly archive-verified legacy admission and are never upgraded by a
-status write.
+install directory. Canonical manifests are schema 2 and require
+`binary_sha256`; only the exact released schema 1 fixture may omit it. Legacy
+installs remain explicitly archive-verified legacy admission and are never
+upgraded by a status write. Canonical metadata records the verified source leaf
+digest and a separate post-preparation installed digest because macOS codesign
+may change the binary.
 
 **Stop point:** final architecture. All five dependencies use
 `ManagedRuntimeManager`; Show and tmux contain product adapters, not filesystem
 or install engines.
 
-**Acceptance test:** seed the packaged schema 1 manifest and every released tmux
-metadata/pointer/layout fixture and resolve it offline without a download or
-inspection write. Install a canonical manifest with a leaf checksum, then prove
-checksum, runnable version, utf8proc/terminfo, macOS quarantine removal,
-codesign success/failure, and reason payloads. Re-run the benign/malicious link
-probe through the shared extractor. An AST ownership test rejects Show or tmux
+**Acceptance test:** seed the exact packaged schema 1 manifest and every
+released tmux metadata/pointer/layout fixture and resolve it offline without a
+download or inspection write. A modified or novel schema 1 fixture missing
+`binary_sha256` is `manifest_invalid`. Run C23 with a schema 2 manifest and a
+real signing fixture whose command changes the binary bytes, not a stubbed
+“changed” flag: verify the source leaf digest before preparation, prove the
+source-mismatch control never invokes preparation, run quarantine removal and
+codesign, persist a different installed digest, and use that digest plus exact
+version/utf8proc/terminfo admission for immediate and offline resolution. Cover
+codesign command and verification failure separately. Re-run the
+benign/malicious link probe through the shared extractor. An AST ownership test
+rejects Show or tmux
 definitions/call paths for shared manifest loading, archive verification/cache,
 identity, metadata/current writes, mutation lock, retention, platform tagging,
 hashing, or extraction. Run focused suites for all five managers and their
@@ -658,8 +767,9 @@ CLI/Doctor/dependencies consumers.
 **What breaks:** git, Memory, model-hub, and Show have **no new behavior**. Tmux
 breaks if the released manifest's missing `binary_sha256` is treated as corrupt,
 if its current pointer is rewritten during status, or if preparation/admission
-hooks run in a different transaction phase. Any such result blocks deletion of
-the tmux installer.
+hooks run in a different transaction phase. Treating a new schema 1 omission as
+legacy, checking manifest bytes only after codesign, or comparing the prepared
+binary to the pre-preparation digest also blocks deletion of the tmux installer.
 
 ## Measured Size Estimate
 
@@ -669,6 +779,12 @@ serving-only functions, and tests are excluded. The install spans were
 revalidated at `2c6fcbe88`; the only Show diff is serving-side. The two current
 outliers total **4,069 physical lines**: 3,370 in the supplied Show audit plus
 699 in tmux.
+
+The arithmetic below is a historical planning snapshot measured at those
+revisions. It is not an acceptance criterion and is not maintained as later
+contract discoveries add fields, fixtures, or small seams. Those discoveries
+do not change the measured source spans or ownership decision; implementation
+records the actual diff instead of repeatedly forecasting code not yet written.
 
 - Current install roots reach **110 functions / 2,579 lines**.
 - Eleven GitHub-only reachable helpers account for **212 lines**. Excluding
@@ -714,7 +830,7 @@ product hook, compatibility data, and wrapper target therefore deletes
 **489-539 lines**; only **20-50 additional shared lines** should be needed after
 the Show seams exist.
 
-| Estimate | Show / Steps 1-6 | Tmux / Step 7 | Five-dependency total |
+| Historical estimate (non-acceptance) | Show / Steps 1-6 | Tmux / Step 7 | Five-dependency total |
 | --- | ---: | ---: | ---: |
 | Lines deleted from outlier modules | 1,560-1,650 | 489-539 | **2,049-2,189** |
 | Existing behavior moved to the shared owner | 732 | 451 | **1,183** |
@@ -724,6 +840,12 @@ the Show seams exist.
 “Moved” is semantic ownership and overlaps deletion; it is not a promise to
 copy text. The net row is deletion minus shared growth. It excludes the already
 assigned 212-line GitHub-provider removal and does not count test changes.
+
+The mechanical size gate replaces range maintenance: at the deletion stop
+point, every symbol scheduled for deletion has zero definitions and call-site
+hits in source and tests, and the implementation records actual lines deleted,
+moved by ownership, and added to the shared layer. A forecast falling outside a
+range above is not by itself a defect; a surviving duplicate owner is.
 
 The exact endpoint cannot be known without choosing the staged-entrypoint result
 shape. The experiment that narrows the Show range is a compile-only Step 3 fixture:
@@ -743,17 +865,29 @@ retention/cleanup, and status/probe. Shared and Show each own all seven; tmux
 owns six, omitting retention/cleanup. Four Show product concepts remain:
 admission/availability, Node prerequisite/command, direct archive, and npm. Two
 tmux product concepts remain: macOS platform preparation, and
-runnable/version/utf8proc/terminfo admission.
+runnable/version/utf8proc/terminfo admission. The predicate census also makes
+Memory's explicit development-provider override a factual product concept: it
+runs before the managed snapshot and cannot be absorbed into manifest selection
+without changing its zero-managed-state contract.
 
-| State | Common owner instances | Show product concepts | Tmux product concepts | Total |
+The following arrow is the original forecast measured with the line snapshot
+above. It predates discovery of the Memory development-provider concept and is
+retained for provenance only; it is neither a current exhaustive count nor an
+acceptance target, and later contract findings do not cause it to be recomputed.
+
+| Historical state | Common owner instances | Show product concepts | Tmux product concepts | Total |
 | --- | ---: | ---: | ---: | ---: |
 | Before | shared 7 + Show 7 + tmux 6 = 20 | 4 | 2 | **26** |
 | After | shared 7 | 4 | 2 | **13** |
 
-The migration removes **13 duplicate owner instances** while preserving every
-product concept. Grouping the two tmux clusters differently changes both totals
-equally but not that delta; they are kept separate because platform signing and
-runtime compatibility fail for independent product reasons.
+The acceptance rule is instead mechanical: enumerate common and product owners
+at each deletion stop, preserve every listed product concept including Memory's
+development provider, and require the total concept count to decrease strictly.
+All Show/tmux common owner instances scheduled for deletion must also have zero
+source and test hits. Grouping the two tmux product clusters differently is
+allowed only if it changes before and after inventories equally; platform
+signing and runtime compatibility remain separate here because they fail for
+independent product reasons.
 
 The target adds seams, data fields, and derived cache entries, not another
 engine concept: admission status/probe remains their single behavioral owner. A
