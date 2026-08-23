@@ -261,13 +261,15 @@ def regression_show_runtime_source(source: str | None = None) -> str:
     return "archive" if source in {"github", "github-source"} else source
 
 
-def regression_show_runtime_env(source: str | None = None) -> dict[str, str]:
+def regression_show_runtime_env(
+    source: str | None,
+    service_home: str,
+) -> dict[str, str]:
     resolved = regression_show_runtime_source(source)
     env = {"VIBE_SHOW_RUNTIME_SOURCE": resolved}
     if resolved == "archive":
-        env["VIBE_SHOW_RUNTIME_ARCHIVE_PATH"] = regression_env(
-            "SHOW_RUNTIME_ARCHIVE_PATH",
-            f"{SERVICE_HOME}/.cache/avibe-regression/vibe-show-runtime-node.tgz",
+        env["VIBE_SHOW_RUNTIME_ARCHIVE_PATH"] = (
+            f"{service_home}/.cache/avibe-regression/vibe-show-runtime-node.tgz"
         )
     return env
 
@@ -1801,7 +1803,7 @@ def compute_fingerprints(repo_root: Path) -> dict:
     # ``postcss.config.js``, ``eslint.config.js`` and ``ui/scripts/``; a build
     # input added tomorrow is covered without anyone remembering to extend a
     # literal, including the ones that live outside ``ui/``.
-    show_runtime_env = regression_show_runtime_env()
+    show_runtime_env = regression_show_runtime_env(None, SERVICE_HOME)
     return {
         "python": file_hash(repo_root, ["pyproject.toml", "uv.lock"]),
         "ui_deps": file_hash(repo_root, ["ui/package.json", "ui/package-lock.json"]),
@@ -1970,7 +1972,7 @@ def runtime_env_payload(repo_root: Path | None = None) -> bytes:
         "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS": scm_version,
         "REGRESSION_UI_HOST": CONTAINER_UI_HOST,
         "AVIBE_ALLOW_DEV_STATE_MIGRATION": "1",
-        **regression_show_runtime_env(),
+        **regression_show_runtime_env(None, SERVICE_HOME),
         "ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY", ""),
         "ANTHROPIC_BASE_URL": os.environ.get("ANTHROPIC_BASE_URL", ""),
         "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY", ""),
@@ -2345,7 +2347,7 @@ def prepare_show_runtime(runner: Runner, target: RegressionTarget, *, remote: st
         tenant_exec(target, 'printf "%s" "${VIBE_SHOW_RUNTIME_SOURCE:-}"', remote=remote),
         capture=True,
     )
-    runtime_env = regression_show_runtime_env(source_result.stdout or "")
+    runtime_env = regression_show_runtime_env(source_result.stdout or "", SERVICE_HOME)
     runtime_env_prefix = " ".join(f"{key}={shlex.quote(value)}" for key, value in runtime_env.items())
     runtime_env_exports = "\n".join(f"export {key}={shlex.quote(value)}" for key, value in runtime_env.items())
     runner.run(

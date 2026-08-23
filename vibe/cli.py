@@ -11153,8 +11153,7 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
             items,
             "fail",
             f"Show Runtime provider is unsupported: {provider}",
-            "Remove VIBE_SHOW_RUNTIME_SOURCE to use the packaged runtime, or set "
-            "VIBE_SHOW_RUNTIME_BIN to a runtime you built.",
+            i18n_t("runtime.doctor.providerUnsupportedAction", doctor_language),
             code="show_runtime.provider_unsupported",
         )
 

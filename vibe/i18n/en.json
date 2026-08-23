@@ -956,6 +956,7 @@
       "archiveCacheSkipped": "Show Runtime archive cache was not inspected ({reason}); it may still hold reclaimable archives.",
       "archiveCacheSkippedAction": "Wait for the running install or clean to finish, then rerun Doctor.",
       "archiveCacheSkippedInspectionAction": "Check runtime directory permissions and the Avibe log; retry Doctor once fixed.",
+      "providerUnsupportedAction": "Remove VIBE_SHOW_RUNTIME_SOURCE to use the packaged runtime, or set VIBE_SHOW_RUNTIME_BIN to a runtime you built.",
       "repairHealthy": "Show Runtime starts successfully; no repair is needed.",
       "repairInstalled": "Installed and started Show Runtime.",
       "repairReinstalled": "Reinstalled and started Show Runtime.",

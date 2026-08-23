@@ -12,7 +12,7 @@ from pathlib import Path
 from config import paths
 from config.v2_config import V2Config
 from core.memory.ui_access import generate_ui_read_secret
-from scripts.incus_regression import regression_show_runtime_env
+from scripts.incus_regression import SERVICE_HOME, regression_show_runtime_env
 from vibe import runtime
 
 
@@ -92,7 +92,12 @@ def _config() -> V2Config:
 
 
 def _normalize_show_runtime_source_environment() -> None:
-    os.environ.update(regression_show_runtime_env(os.environ.get("VIBE_SHOW_RUNTIME_SOURCE")))
+    os.environ.update(
+        regression_show_runtime_env(
+            os.environ.get("VIBE_SHOW_RUNTIME_SOURCE"),
+            SERVICE_HOME,
+        )
+    )
 
 
 def main() -> int:

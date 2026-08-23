@@ -1183,7 +1183,8 @@ def test_runtime_env_payload_maps_show_runtime_and_llm_env(monkeypatch: pytest.M
     assert "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS=0.0.0.dev0" in payload
     assert "AVIBE_ALLOW_DEV_STATE_MIGRATION=1" in payload
     assert "VIBE_SHOW_RUNTIME_SOURCE=archive" in payload
-    assert "VIBE_SHOW_RUNTIME_ARCHIVE_PATH=/tmp/show-runtime.tgz" in payload
+    assert "VIBE_SHOW_RUNTIME_ARCHIVE_PATH=/home/avibe/.cache/avibe-regression/vibe-show-runtime-node.tgz" in payload
+    assert "VIBE_SHOW_RUNTIME_ARCHIVE_PATH=/tmp/show-runtime.tgz" not in payload
     assert "REGRESSION_SLACK_CHANNEL=C123" in payload
     assert "VITE_VOICE_REALTIME_ENABLED" not in payload
     assert "REGRESSION_VOICE_REALTIME_ENABLED" not in payload

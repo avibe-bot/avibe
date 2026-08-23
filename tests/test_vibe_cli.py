@@ -1801,7 +1801,11 @@ def test_show_runtime_doctor_fast_mode_reports_local_state_without_network(monke
     assert next(item for item in items if item.get("code") == "show_runtime.archive_probe_skipped")["status"] == "pass"
 
 
-def test_show_runtime_doctor_retires_legacy_source_with_actionable_replacement(monkeypatch):
+@pytest.mark.parametrize("language", ["en", "zh"])
+def test_show_runtime_doctor_retires_legacy_source_with_actionable_replacement(
+    monkeypatch,
+    language,
+):
     manager = SimpleNamespace(
         status=lambda: {
             "provider": "github",
@@ -1814,12 +1818,13 @@ def test_show_runtime_doctor_retires_legacy_source_with_actionable_replacement(m
         archive_cache_status=lambda: {"candidate_count": 0, "candidate_bytes": 0, "skipped_reason": None},
     )
     monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda **_kwargs: manager)
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
 
     items = cli._show_runtime_doctor_items(deep=False)
 
     failure = next(item for item in items if item.get("code") == "show_runtime.provider_unsupported")
     assert failure["status"] == "fail"
-    assert "VIBE_SHOW_RUNTIME_BIN" in failure["action"]
+    assert failure["action"] == cli.i18n_t("runtime.doctor.providerUnsupportedAction", language)
 
 
 def test_show_runtime_doctor_reports_skipped_archive_inspection_as_warn(monkeypatch):
