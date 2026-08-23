@@ -424,7 +424,6 @@ async def test_real_quiesce_timeout_defers_previous_writer_authority_restore(
         )
         assert result == {"ok": False, "error": expected_error}
         assert len(process_factory.supervised) == 1
-        assert recoveries == [False]
         assert runtime.module._writer.reserve("while-cleanup-settles") == "unavailable"
         recovery = runtime._restart_task
         assert recovery is not None
@@ -437,6 +436,7 @@ async def test_real_quiesce_timeout_defers_previous_writer_authority_restore(
         "ok": True,
         "state": "ready",
     }
+    assert recoveries == [False]
     assert len(process_factory.supervised) == 2
     assert process_factory.supervised[0].stopped
     assert process_factory.supervised[1].running
