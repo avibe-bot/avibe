@@ -98,25 +98,23 @@ is either `https://dashscope.aliyuncs.com` or a Bailian workspace host.
 ## Processing Record
 
 The Processing Record combines a direct, bounded EverOS health projection with
-source availability, confirmed pipeline anomalies, clear recovery, and the
-existing processing timeline. It has an explicit Refresh action rather than a
-composite status poll. A section may be marked stale or unavailable while the
-other independently sourced sections continue to render, including while
-Memory is disabled.
+source availability and clear recovery. Its Refresh action reads each source
+independently, so one section may be unavailable while the others still render,
+including while Memory is disabled.
 
 Memory processing fault events are written only to the main Avibe
 service log, including the fault kind and occurrence time. Volatile-capture
 loss is not an administrator message. They are not sent as direct messages on Slack,
 Discord, Telegram, Lark, WeChat, or other IM transports.
 
-The timeline is the installation operator's view across every valid project and
-Memory owner. Each row and its detail view visibly includes the full **Project
-ID** and **User ID**; a derived `-agent` value identifies the caller's Agent
-owner. The timeline then follows the path from message capture through memcell
-creation, processing strategies, profile triggers, and current indexing state.
-The UI routes grant this broad read scope to an authenticated local or Avibe
-Cloud Memory session; profile and search reads remain caller-scoped while
-covering that caller's user and Agent owners.
+The record is the installation operator's view across every valid project and
+Memory owner. Each row and its detail view includes the full **Project ID** and
+**User ID**; a derived `-agent` value identifies the caller's Agent owner. A
+detail shows the observed memcell creation step. Intermediate processing and
+current indexing state are unavailable because capture delivery retains no
+durable per-call history. The UI routes grant this broad read scope to an
+authenticated local or Avibe Cloud Memory session; profile and search reads
+remain caller-scoped while covering that caller's user and Agent owners.
 
 Provider calls are attached only when Avibe can prove their exact provenance to
 the displayed project and Memory owner. Capture delivery has no durable

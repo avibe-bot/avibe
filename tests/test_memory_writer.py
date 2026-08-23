@@ -236,7 +236,7 @@ async def test_ambiguous_failure_never_replays_and_disables_intake(tmp_path: Pat
         calls += 1
         return await original_add(capture)
 
-    async def stop_reap() -> bool:
+    async def stop_reap(_recover: bool) -> bool:
         nonlocal stopped
         stopped += 1
         return True
@@ -290,7 +290,7 @@ async def test_invalid_add_receipt_is_ambiguous_and_never_replayed(
 ) -> None:
     stopped = 0
 
-    async def stop_reap() -> bool:
+    async def stop_reap(_recover: bool) -> bool:
         nonlocal stopped
         stopped += 1
         return True
@@ -327,7 +327,7 @@ async def test_invalid_flush_receipt_is_ambiguous_and_never_replayed(
 ) -> None:
     stopped = 0
 
-    async def stop_reap() -> bool:
+    async def stop_reap(_recover: bool) -> bool:
         nonlocal stopped
         stopped += 1
         return True
@@ -380,7 +380,7 @@ async def test_ambiguous_failure_drops_already_queued_captures_when_reap_fails(
     writer = _writer(
         tmp_path,
         provider,
-        ambiguous_stop_reap=lambda: False,
+        ambiguous_stop_reap=lambda _recover: False,
         now=lambda: current,
         processing_event=processing_event,
     )
@@ -447,9 +447,12 @@ async def test_quiesce_cancels_inflight_call_and_releases_volatile_resources(
         entered.set()
         await asyncio.Event().wait()
 
-    async def stop_reap() -> bool:
+    recoveries: list[bool] = []
+
+    async def stop_reap(recover: bool) -> bool:
         nonlocal stop_calls
         stop_calls += 1
+        recoveries.append(recover)
         return True
 
     class AttachmentStore:
@@ -487,6 +490,7 @@ async def test_quiesce_cancels_inflight_call_and_releases_volatile_resources(
     assert await writer.quiesce(timeout_seconds=1.0)
 
     assert stop_calls == 1
+    assert recoveries == [False]
     assert attachment_store.released == ["bundle-0"]
     assert writer._permits == MAX_WRITER_PERMITS
     assert writer._pending == {}
@@ -505,7 +509,10 @@ async def test_cancelled_flush_reaps_sidecar_before_releasing_barrier(
         flush_entered.set()
         await asyncio.Event().wait()
 
-    async def stop_reap() -> bool:
+    recoveries: list[bool] = []
+
+    async def stop_reap(recover: bool) -> bool:
+        recoveries.append(recover)
         reap_entered.set()
         await finish_reap.wait()
         return True
@@ -532,6 +539,7 @@ async def test_cancelled_flush_reaps_sidecar_before_releasing_barrier(
 
     assert writer._permits == MAX_WRITER_PERMITS
     assert writer._pending == {}
+    assert recoveries == [False]
 
 
 @pytest.mark.asyncio
@@ -652,6 +660,44 @@ async def test_invalid_attachment_bundle_disables_later_attachment_intake(
     assert provider.captures == []
     assert attachment_store.released == ["bundle-0"]
     assert not writer.attachments_enabled
+    assert writer._permits == MAX_WRITER_PERMITS
+
+
+@pytest.mark.asyncio
+async def test_empty_attachment_projection_is_dropped_before_provider_add(
+    tmp_path: Path,
+) -> None:
+    class EmptyAttachmentStore:
+        def __init__(self) -> None:
+            self.released: list[str] = []
+
+        def provider_attachments(self, _bundle):
+            return ()
+
+        def release(self, bundle_id: str) -> None:
+            self.released.append(bundle_id)
+
+    provider = FakeMemoryProvider()
+    attachment_store = EmptyAttachmentStore()
+    writer = _writer(
+        tmp_path,
+        provider,
+        attachment_store=attachment_store,
+    )
+    reservation = writer.reserve("digest-0")
+    assert not isinstance(reservation, str)
+    assert writer.offer_capture(
+        reservation,
+        _admission(0),
+        text="",
+        attachments=(),
+        bundle=SimpleNamespace(bundle_id="bundle-0"),
+    ) == "queued"
+
+    await writer.wait_idle_for_tests()
+
+    assert provider.captures == []
+    assert attachment_store.released == ["bundle-0"]
     assert writer._permits == MAX_WRITER_PERMITS
 
 

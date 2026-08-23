@@ -44,7 +44,7 @@ MAX_UNFLUSHED_MESSAGES = 100
 
 BarrierOutcome = Literal["queued", "full", "disabled"]
 CaptureOfferOutcome = Literal["queued", "full", "disabled", "unavailable"]
-AmbiguousStop = Callable[[], Awaitable[bool] | bool]
+AmbiguousStop = Callable[[bool], Awaitable[bool] | bool]
 
 
 @dataclass(slots=True)
@@ -401,6 +401,9 @@ class BestEffortMemoryWriter:
                 self._attachments_disabled = True
                 await self._cleanup_item(item)
                 return
+        if not capture.text.strip() and not attachments:
+            await self._cleanup_item(item)
+            return
         capture = ProviderCapture(
             session_ref=capture.session_ref,
             text=capture.text,
@@ -414,7 +417,10 @@ class BestEffortMemoryWriter:
             try:
                 result = await self._provider.add(capture)
             except asyncio.CancelledError:
-                await self._ambiguous_outcome("memory_provider_timeout")
+                await self._ambiguous_outcome(
+                    "memory_provider_timeout",
+                    recover=False,
+                )
                 await self._cleanup_item(item)
                 raise
             except MemoryProviderSystemFailure as failure:
@@ -543,7 +549,10 @@ class BestEffortMemoryWriter:
                     result = await self._provider.flush(ref)
                 except asyncio.CancelledError:
                     self._pending.pop(key, None)
-                    await self._ambiguous_outcome("memory_provider_timeout")
+                    await self._ambiguous_outcome(
+                        "memory_provider_timeout",
+                        recover=False,
+                    )
                     raise
                 except MemoryProviderFailure as failure:
                     if failure.ambiguous:
@@ -614,13 +623,13 @@ class BestEffortMemoryWriter:
         except asyncio.CancelledError:
             return
 
-    async def _ambiguous_outcome(self, _error: str) -> None:
+    async def _ambiguous_outcome(self, _error: str, *, recover: bool = True) -> None:
         self._unavailable = True
         self._intake_paused = True
         self._pending.clear()
         if self._ambiguous_stop_reap is not None:
             try:
-                proved = self._ambiguous_stop_reap()
+                proved = self._ambiguous_stop_reap(recover)
                 if asyncio.iscoroutine(proved):
                     proved = await proved
                 if not proved:

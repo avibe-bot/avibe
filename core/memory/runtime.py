@@ -459,7 +459,7 @@ class MemoryRuntime:
                 provider_root_owner=self._provider_root_owner,
                 maintenance_open=self._maintenance_open,
                 processing_event=self._processing_event,
-                ambiguous_stop_reap=self._sidecar.stop,
+                ambiguous_stop_reap=self._settle_ambiguous_provider_outcome,
                 effective_home=self._effective_home,
             )
         except Exception as exc:
@@ -2449,6 +2449,12 @@ class MemoryRuntime:
             return {"ok": False, "error": "memory_operation_in_progress"}
         if self._rebuild_running() or self._repair_running():
             return {"ok": False, "error": "memory_operation_in_progress"}
+        task = self._ensure_restart_task()
+        return await asyncio.shield(task)
+
+    def _ensure_restart_task(self) -> asyncio.Task[dict[str, Any]]:
+        """Return the single runtime-owned sidecar replacement task."""
+
         task = self._restart_task
         if task is None or task.done():
             task = asyncio.create_task(self._restart_once(), name="memory-restart")
@@ -2459,7 +2465,7 @@ class MemoryRuntime:
                     self._restart_task = None
 
             task.add_done_callback(clear_restart)
-        return await asyncio.shield(task)
+        return task
 
     async def preflight(self, config: MemoryConfig | None = None) -> dict[str, Any]:
         candidate = deepcopy(config or self._config)
@@ -3561,6 +3567,14 @@ class MemoryRuntime:
             self.module.pause_claims()
             return
         self.module.resume_claims()
+
+    async def _settle_ambiguous_provider_outcome(self, recover: bool) -> bool:
+        """Prove old ownership ended and reuse the settled runtime when requested."""
+
+        await self._sidecar.stop()
+        if recover and not self._closing and not self._retired:
+            self._ensure_restart_task()
+        return True
 
     async def _restore_provisional_claims(
         self,

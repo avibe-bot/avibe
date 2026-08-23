@@ -8,7 +8,11 @@ import pytest
 
 from config.v2_config import MemoryEndpointConfig, MemoryProcessingConfig
 from core.memory.artifact import FakeMemoryArtifactManager
-from core.memory.everos import FakeMemoryProvider, ProviderHealthSnapshot
+from core.memory.everos import (
+    FakeMemoryProvider,
+    MemoryProviderFailure,
+    ProviderHealthSnapshot,
+)
 from core.memory.process import FakeEverOSProcessFactory
 from core.memory.processing_record import RuntimeHealthProjection, SourceObservation
 from core.memory.runtime import MemoryConfig, MemoryRuntime
@@ -318,7 +322,10 @@ async def test_real_quiesce_timeout_restarts_previous_writer_authority(
     ) == CaptureAccepted()
     await add_entered.wait()
 
-    async def stop_then_settle() -> bool:
+    recoveries: list[bool] = []
+
+    async def stop_then_settle(recover: bool) -> bool:
+        recoveries.append(recover)
         await runtime._sidecar.stop()
         await asyncio.sleep(0.02)
         return True
@@ -338,8 +345,94 @@ async def test_real_quiesce_timeout_restarts_previous_writer_authority(
     assert len(process_factory.supervised) == 2
     assert process_factory.supervised[0].stopped
     assert process_factory.supervised[1].running
+    assert recoveries == [False]
     assert not runtime.module._writer.unavailable
     reservation = runtime.module._writer.reserve("after-timeout")
+    assert not isinstance(reservation, str)
+    reservation.release()
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_add_restarts_settled_runtime_without_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processing = MemoryProcessingConfig(
+        llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
+        embedding=MemoryEndpointConfig(
+            "https://embed.example.test/v1",
+            "embed",
+            "embed-key",
+        ),
+    )
+    current = MemoryConfig(enabled=True, processing=processing)
+    process_factory = FakeEverOSProcessFactory()
+    store = MemoryStore(
+        tmp_path / "state" / "memory" / "memory.sqlite",
+        effective_home=tmp_path,
+    )
+    runtime = MemoryRuntime(
+        current,
+        store=store,
+        artifact_manager=FakeMemoryArtifactManager(
+            python=Path(__file__),
+            root_format="everos-test",
+            fingerprint="test-artifact",
+        ),
+        process_factory=process_factory,
+        effective_home=tmp_path,
+    )
+
+    async def probe_processing(_python: Path, _config: MemoryConfig) -> bool:
+        return True
+
+    monkeypatch.setattr(runtime, "_probe_processing", probe_processing)
+    async with runtime.module.lifecycle():
+        assert await runtime._reconcile_locked(current) == {
+            "ok": True,
+            "state": "ready",
+        }
+
+    calls = 0
+
+    async def ambiguous_add(_capture) -> None:
+        nonlocal calls
+        calls += 1
+        raise MemoryProviderFailure("memory_provider_timeout", ambiguous=True)
+
+    recovered = asyncio.Event()
+    restart_once = runtime._restart_once
+
+    async def observed_restart() -> dict[str, object]:
+        try:
+            return await restart_once()
+        finally:
+            recovered.set()
+
+    monkeypatch.setattr(runtime, "_restart_once", observed_restart)
+    runtime.module.replace_provider(FakeMemoryProvider(add_hook=ambiguous_add))
+    principal = store.principal_for_user_key("slack:U123")
+
+    assert await runtime.module.capture(
+        CaptureRequest(
+            source_message_id="source-ambiguous",
+            session_id="session-1",
+            principal_id=principal,
+            project_id="default",
+            provenance="user_input",
+            text="remember this",
+            occurred_at_ms=1_000,
+        )
+    ) == CaptureAccepted()
+    await asyncio.wait_for(recovered.wait(), timeout=1.0)
+
+    assert calls == 1
+    assert len(process_factory.supervised) == 2
+    assert process_factory.supervised[0].stopped
+    assert process_factory.supervised[1].running
+    assert not runtime.module._writer.unavailable
+    reservation = runtime.module._writer.reserve("after-recovery")
     assert not isinstance(reservation, str)
     reservation.release()
     await runtime.close()
