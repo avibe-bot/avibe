@@ -91,6 +91,8 @@ def _maintenance(tmp_path: Path) -> tuple[MemoryMaintenance, _Port]:
 
 @pytest.mark.asyncio
 async def test_clear_writes_marker_and_repeats_four_surfaces(tmp_path: Path):
+    """MEMORY-CLEAR-201: Clear fences and repeats every owned deletion surface."""
+
     maintenance, port = _maintenance(tmp_path)
     port.assert_clear_fenced = lambda: (
         assert_marker_and_fence(maintenance, tmp_path)
@@ -117,6 +119,8 @@ def assert_marker_and_fence(maintenance: MemoryMaintenance, home: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_failed_clear_persists_failed_projection_and_boot_retries(tmp_path: Path):
+    """MEMORY-CLEAR-202: a failed marker is retained and retried on reconcile."""
+
     maintenance, port = _maintenance(tmp_path)
 
     async def fail(surface, target_epoch: int):

@@ -1,11 +1,17 @@
 """Focused identity-only Memory store contract tests."""
 
+import hashlib
+import hmac
 from pathlib import Path
 import sqlite3
 
 import pytest
 
-from core.memory.store import MEMORY_STORE_SCHEMA_VERSION, MemoryStore
+from core.memory.store import (
+    MEMORY_STORE_SCHEMA_VERSION,
+    MemoryStore,
+    _provider_session_ref,
+)
 
 
 def _store_path(tmp_path: Path) -> Path:
@@ -26,6 +32,8 @@ def test_new_store_is_identity_only_v4(tmp_path: Path) -> None:
 
 
 def test_volatile_admission_preserves_identity_without_payload_tables(tmp_path: Path) -> None:
+    """MEMORY-SEARCH-013: admission persists identity but no delivery payload."""
+
     store = MemoryStore(_store_path(tmp_path), effective_home=tmp_path)
     principal = store.principal_for_user_key("slack:U123")
     project = "project-slug"
@@ -50,6 +58,8 @@ def test_volatile_admission_preserves_identity_without_payload_tables(tmp_path: 
 
 
 def test_clear_preserves_scope_key_and_rotates_epoch(tmp_path: Path) -> None:
+    """MEMORY-CLEAR-201 / MEMORY-SEARCH-012: Clear rotates only the epoch."""
+
     store = MemoryStore(_store_path(tmp_path), effective_home=tmp_path)
     before = store.ensure_meta()
     store.reset_for_clear()
@@ -60,6 +70,8 @@ def test_clear_preserves_scope_key_and_rotates_epoch(tmp_path: Path) -> None:
 
 
 def test_released_v2_migration_discards_delivery_tables_and_derives_projects(tmp_path: Path) -> None:
+    """MEMORY-SEARCH-005: released delivery stores migrate to identity-only v4."""
+
     path = _store_path(tmp_path)
     path.parent.mkdir(parents=True)
     schema = Path("core/memory/schema_v2.sql").read_text(encoding="utf-8")
@@ -113,6 +125,50 @@ def test_released_v2_migration_discards_delivery_tables_and_derives_projects(tmp
         }
         assert tables == {"memory_meta", "memory_projects"}
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+
+
+def test_provider_session_ref_keeps_released_digest_and_epoch_suffix() -> None:
+    scope_key = bytes(range(32))
+    principal = "u-" + "a" * 32
+    project = "default"
+    raw_session = "session:with:colons"
+    epoch = 7
+    expected = hmac.new(
+        scope_key,
+        f"{principal}:{project}:{raw_session}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+    assert _provider_session_ref(
+        scope_key,
+        principal,
+        project,
+        raw_session,
+        epoch,
+    ) == f"src--{expected}--e{epoch}"
+
+
+@pytest.mark.parametrize("version", [1, 2, 3])
+def test_unknown_released_store_shape_is_left_untouched(
+    tmp_path: Path,
+    version: int,
+) -> None:
+    path = _store_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE unexpected (value TEXT NOT NULL)")
+        conn.execute("INSERT INTO unexpected VALUES ('keep-me')")
+        conn.execute(f"PRAGMA user_version = {version}")
+    before = path.read_bytes()
+
+    with pytest.raises(RuntimeError, match="Unsupported Memory store schema"):
+        MemoryStore(path, effective_home=tmp_path)
+
+    assert path.read_bytes() == before
+    assert not path.with_name(f"{path.name}-wal").exists()
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == version
+        assert conn.execute("SELECT value FROM unexpected").fetchone()[0] == "keep-me"
 
 
 @pytest.mark.parametrize("version", [0, 1, 3])

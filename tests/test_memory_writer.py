@@ -50,7 +50,13 @@ def _ref(index: int = 0) -> ProviderSessionRef:
 
 def _admission(index: int) -> VolatileAdmission:
     ref = _ref(index)
-    return VolatileAdmission("accepted", f"digest-{index}", ref, index + 1)
+    return VolatileAdmission(
+        "accepted",
+        f"digest-{index}",
+        ref,
+        index + 1,
+        f"raw-session-{index}",
+    )
 
 
 def _reserve_and_offer(writer: BestEffortMemoryWriter, index: int) -> None:
@@ -74,18 +80,15 @@ async def test_shared_permit_bound_covers_reservations_until_terminal_release(tm
         reservation = writer.reserve(f"digest-{index}")
         assert not isinstance(reservation, str)
         reservations.append(reservation)
-    assert writer.offer_barrier() == "queued"
+    assert writer.offer_barrier("raw-session") == "queued"
     assert writer.reserve("digest-over-bound") == "full"
-    assert writer.offer_barrier() == "full"
+    assert writer.offer_barrier("raw-session") == "full"
 
     quiescing = asyncio.create_task(writer.quiesce(timeout_seconds=0.2))
     await asyncio.sleep(0)
     assert not quiescing.done()
     for reservation in reservations:
         reservation.release()
-    await asyncio.sleep(0)
-    assert not quiescing.done()
-    await writer.close()
     assert await quiescing
     assert writer._permits == MAX_WRITER_PERMITS
 
@@ -199,10 +202,65 @@ async def test_ambiguous_failure_never_replays_and_disables_intake(tmp_path: Pat
     assert writer._permits == MAX_WRITER_PERMITS
     assert writer.unavailable
     assert writer.reserve("later") == "disabled"
+    writer.replace_provider(FakeMemoryProvider())
+    writer.resume_intake()
+    replacement = writer.reserve("replacement-generation")
+    assert not isinstance(replacement, str)
+    replacement.release()
 
 
 @pytest.mark.asyncio
-async def test_close_cancels_inflight_call_and_releases_volatile_resources(tmp_path: Path) -> None:
+async def test_ambiguous_failure_drops_already_queued_captures_when_reap_fails(
+    tmp_path: Path,
+) -> None:
+    provider = FakeMemoryProvider(
+        ingest_failures=deque(
+            [MemoryProviderFailure("memory_provider_timeout", ambiguous=True)]
+        )
+    )
+    calls = 0
+    original_add = provider.add
+
+    async def counted_add(capture):
+        nonlocal calls
+        calls += 1
+        return await original_add(capture)
+
+    provider.add = counted_add
+    writer = _writer(tmp_path, provider, ambiguous_stop_reap=lambda: False)
+    start_worker = writer._ensure_worker
+    writer._ensure_worker = lambda: None
+    _reserve_and_offer(writer, 0)
+    _reserve_and_offer(writer, 1)
+    writer._ensure_worker = start_worker
+    writer._ensure_worker()
+
+    await writer.wait_idle_for_tests()
+
+    assert calls == 1
+    assert provider.captures == []
+    assert writer.unavailable
+    assert writer._permits == MAX_WRITER_PERMITS
+
+
+@pytest.mark.asyncio
+async def test_quiesce_drops_queued_capture_instead_of_delivering_it(tmp_path: Path) -> None:
+    provider = FakeMemoryProvider()
+    writer = _writer(tmp_path, provider)
+    writer._ensure_worker = lambda: None
+    _reserve_and_offer(writer, 0)
+
+    assert await writer.quiesce(timeout_seconds=1.0)
+
+    assert provider.captures == []
+    assert writer._queue.empty()
+    assert writer._permits == MAX_WRITER_PERMITS
+
+
+@pytest.mark.asyncio
+async def test_quiesce_cancels_inflight_call_and_releases_volatile_resources(
+    tmp_path: Path,
+) -> None:
     entered = asyncio.Event()
     stop_calls = 0
 
@@ -244,10 +302,10 @@ async def test_close_cancels_inflight_call_and_releases_volatile_resources(tmp_p
     )
     await entered.wait()
     writer._pending[_ref(1).serialize()] = _PendingSession(
-        _ref(1), deque(["digest-1"]), 0.0, 0.0
+        _ref(1), "raw-session-1", deque(["digest-1"]), 0.0, 0.0
     )
 
-    await asyncio.wait_for(writer.close(), timeout=1.0)
+    assert await writer.quiesce(timeout_seconds=1.0)
 
     assert stop_calls == 1
     assert attachment_store.released == ["bundle-0"]
@@ -348,13 +406,14 @@ async def test_scheduled_barrier_is_visible_until_dequeue_and_retry_exhaustion_s
     now = datetime.now(timezone.utc)
     writer._pending[key] = _PendingSession(
         ref,
+        "raw-session-0",
         deque(f"digest-{index}" for index in range(MAX_PENDING_MESSAGE_IDS)),
         now.timestamp() - MAX_UNFLUSHED_AGE_SECONDS,
         now.timestamp() - IDLE_FLUSH_SECONDS,
         scheduled=True,
     )
     assert writer._pending[key].scheduled
-    await writer._flush_barrier(_BarrierItem(None, key))
+    await writer._flush_barrier(_BarrierItem(scheduled_key=key))
     assert len(provider.flushes) == MAX_ATTEMPTS
     assert key not in writer._pending
 
@@ -378,6 +437,7 @@ async def test_each_exact_flush_threshold_queues_a_visible_barrier(
         last_ack_at -= IDLE_FLUSH_SECONDS
     writer._pending[key] = _PendingSession(
         ref,
+        "raw-session-0",
         deque(f"digest-{index}" for index in range(message_count)),
         first_at,
         last_ack_at,
@@ -412,6 +472,7 @@ async def test_flush_threshold_near_misses_do_not_schedule(
     key = ref.serialize()
     writer._pending[key] = _PendingSession(
         ref,
+        "raw-session-0",
         deque(
             f"digest-{index}" for index in range(MAX_UNFLUSHED_MESSAGES - 1)
         ),
@@ -431,6 +492,101 @@ async def test_flush_threshold_near_misses_do_not_schedule(
     assert not writer._pending[key].scheduled
     assert writer._queued_items == 0
     assert writer._queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_session_barrier_flushes_only_matching_raw_session(tmp_path: Path) -> None:
+    """MEMORY-SEARCH-006: lifecycle barriers are raw-session scoped."""
+
+    provider = FakeMemoryProvider()
+    writer = _writer(tmp_path, provider)
+    first = _ref(1)
+    second = _ref(2)
+    writer._pending[first.serialize()] = _PendingSession(
+        first, "raw-a", deque(["a"]), 0.0, 0.0
+    )
+    writer._pending[second.serialize()] = _PendingSession(
+        second, "raw-b", deque(["b"]), 0.0, 0.0
+    )
+
+    await writer._flush_barrier(_BarrierItem(raw_session_id="raw-a"))
+
+    assert provider.flushes == [first]
+    assert first.serialize() not in writer._pending
+    assert second.serialize() in writer._pending
+
+
+@pytest.mark.asyncio
+async def test_stale_scheduled_barrier_is_a_noop(tmp_path: Path) -> None:
+    provider = FakeMemoryProvider()
+    writer = _writer(tmp_path, provider)
+    retained = _ref(1)
+    writer._pending[retained.serialize()] = _PendingSession(
+        retained, "raw-a", deque(["a"]), 0.0, 0.0
+    )
+
+    await writer._flush_barrier(_BarrierItem(scheduled_key="missing"))
+
+    assert provider.flushes == []
+    assert retained.serialize() in writer._pending
+
+
+@pytest.mark.asyncio
+async def test_full_pending_tracker_keeps_existing_sessions(
+    tmp_path: Path,
+) -> None:
+    provider = FakeMemoryProvider()
+    writer = _writer(tmp_path, provider)
+    retained_keys = []
+    for index in range(MAX_PENDING_SESSIONS):
+        ref = _ref(index + 1)
+        key = ref.serialize()
+        retained_keys.append(key)
+        writer._pending[key] = _PendingSession(
+            ref,
+            f"raw-{index}",
+            deque([f"digest-{index}"]),
+            0.0,
+            0.0,
+        )
+    _reserve_and_offer(writer, MAX_PENDING_SESSIONS + 1)
+
+    await writer.wait_idle_for_tests()
+
+    assert list(writer._pending) == retained_keys
+    assert writer._permits == MAX_WRITER_PERMITS
+
+
+@pytest.mark.asyncio
+async def test_failed_automatic_barrier_offer_defers_for_five_minutes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current = datetime.now(timezone.utc)
+    writer = _writer(tmp_path, FakeMemoryProvider(), now=lambda: current)
+    ref = _ref()
+    key = ref.serialize()
+    writer._pending[key] = _PendingSession(
+        ref,
+        "raw-session-0",
+        deque(["digest"]),
+        current.timestamp(),
+        current.timestamp() - IDLE_FLUSH_SECONDS,
+    )
+    writer._permits = 0
+    sleeps = 0
+
+    async def two_scheduler_ticks(_seconds: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps > 2:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr("core.memory.writer.asyncio.sleep", two_scheduler_ticks)
+    await writer._schedule_due_flushes()
+
+    assert writer._pending[key].retry_after == current.timestamp() + IDLE_FLUSH_SECONDS
+    assert writer._queued_items == 0
 
 
 def test_writer_bounds_are_fixed_and_not_user_tunable() -> None:

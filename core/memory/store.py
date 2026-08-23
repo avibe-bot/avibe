@@ -60,6 +60,7 @@ class VolatileAdmission:
     source_message_digest: str | None = None
     provider_session_ref: ProviderSessionRef | None = None
     provider_timestamp_ms: int | None = None
+    raw_session_id: str | None = None
 
 
 def memory_store_path() -> Path:
@@ -83,7 +84,7 @@ def _provider_session_ref(
 ) -> str:
     digest = _keyed_digest(
         scope_key,
-        f"{principal_id}\0{project_ref}\0{session_id}\0{epoch}",
+        f"{principal_id}:{project_ref}:{session_id}",
     )
     return f"src--{digest}--e{epoch}"
 
@@ -260,6 +261,7 @@ class MemoryStore:
                 _keyed_digest(meta.scope_key, source_message_id),
                 ref,
                 provider_timestamp,
+                session_id,
             )
 
     def mark_capture_success(self) -> None:
@@ -350,7 +352,9 @@ class MemoryStore:
 
     def _initialize(self) -> None:
         schema_sql = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
-        with self._connection() as conn:
+        conn = sqlite3.connect(self.path, timeout=5.0, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        try:
             version = int(conn.execute("PRAGMA user_version").fetchone()[0])
             tables = _application_tables(conn)
             if version == MEMORY_STORE_SCHEMA_VERSION and tables == {"memory_meta", "memory_projects"}:
@@ -360,10 +364,11 @@ class MemoryStore:
                 "memory_meta", "memory_projects", "memory_attachment_bundle", "memory_session_flush_state",
                 "memory_capture_queue", "memory_flush_settlements",
             }
-            if version not in {0, 1, 2, 3} or (version == 0 and tables and not tables.issubset(known)):
+            if version not in {0, 1, 2, 3} or not tables.issubset(known):
                 raise RuntimeError(f"Unsupported Memory store schema version: {version}")
             meta_values = _legacy_meta(conn) if "memory_meta" in tables else None
             projects = _legacy_projects(conn, tables)
+            conn.execute("PRAGMA busy_timeout = 5000")
             conn.execute("PRAGMA foreign_keys = OFF")
             conn.execute("BEGIN IMMEDIATE")
             try:
@@ -394,6 +399,8 @@ class MemoryStore:
             finally:
                 conn.execute("PRAGMA foreign_keys = ON")
             _verify_schema(conn)
+        finally:
+            conn.close()
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:

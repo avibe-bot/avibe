@@ -77,9 +77,8 @@ class _Runtime:
         self.attachment_status = "ready"
         self.attachment_generation: int | None = 1
         self.barrier_offers = 0
+        self.barrier_sessions: list[str | None] = []
         self.barrier_error: Exception | None = None
-        self.session_lifecycle_calls: list[dict[str, object]] = []
-        self.session_lifecycle_error: Exception | None = None
 
     def principal_for_user_key(self, user_key: str) -> str:
         suffix = "1" if user_key.endswith("user-1") else "2"
@@ -95,25 +94,12 @@ class _Runtime:
     def attachment_capture_config_generation(self) -> int | None:
         return self.attachment_generation
 
-    def offer_barrier(self) -> str:
+    def offer_barrier(self, raw_session_id: str) -> str:
         self.barrier_offers += 1
+        self.barrier_sessions.append(raw_session_id)
         if self.barrier_error is not None:
             raise self.barrier_error
         return "queued"
-
-    async def run_session_lifecycle(self, **kwargs):
-        operation = kwargs.pop("operation")
-        self.session_lifecycle_calls.append(kwargs)
-        if self.session_lifecycle_error is not None:
-            raise self.session_lifecycle_error
-        return await operation()
-
-    async def run_session_scopes_lifecycle(self, **kwargs):
-        operation = kwargs.pop("operation")
-        self.session_lifecycle_calls.append(kwargs)
-        if self.session_lifecycle_error is not None:
-            raise self.session_lifecycle_error
-        return await operation()
 
 
 class _CaptureModule:
@@ -422,16 +408,8 @@ def test_slack_without_multimodal_opt_in_skips_live_health_read() -> None:
             nonlocal reset_ran
             reset_ran = True
 
-        await asyncio.wait_for(
-            module.run_session_lifecycle(
-                principal_id="u-" + ("1" * 32),
-                project_id=PROJECT,
-                raw_session_id="stable-session",
-                operation=reset,
-                deadline_seconds=1.0,
-            ),
-            timeout=1.5,
-        )
+        module.offer_barrier("stable-session")
+        await asyncio.wait_for(reset(), timeout=1.5)
         assert reset_ran is True
         await module.close_writer()
 
@@ -551,16 +529,8 @@ def test_configured_attachment_capture_does_not_block_session_reset(
             nonlocal reset_ran
             reset_ran = True
 
-        await asyncio.wait_for(
-            module.run_session_lifecycle(
-                principal_id="u-" + ("1" * 32),
-                project_id=PROJECT,
-                raw_session_id="stable-session",
-                operation=reset,
-                deadline_seconds=0.25,
-            ),
-            timeout=0.75,
-        )
+        module.offer_barrier("stable-session")
+        await asyncio.wait_for(reset(), timeout=0.75)
         await asyncio.wait_for(capture, timeout=1.0)
 
         assert reset_ran is True
@@ -776,6 +746,8 @@ def test_capture_skips_ineligible_human_turns(context, text, enabled) -> None:
 
 
 def test_capture_stamps_user_principal_provenance_and_native_dedup_key() -> None:
+    """MEMORY-SEARCH-015: capture identity stays caller-scoped and deduplicated."""
+
     controller = _controller()
     context = _context("telegram")
     other_user = _context("telegram", user_id="user-2")
@@ -864,35 +836,28 @@ def test_memory_session_lifecycle_reuses_capture_scope_and_raw_anchor() -> None:
 
     assert result == "reset-complete"
     assert operation_calls == ["reset"]
-    assert controller.memory_runtime.session_lifecycle_calls == [
-        {
-            "principal_id": "u-" + ("1" * 32),
-            "project_id": PROJECT,
-            "raw_session_id": "wechat_dm-1",
-            "deadline_seconds": 4.0,
-        }
-    ]
+    assert controller.memory_runtime.barrier_sessions == ["wechat_dm-1"]
 
 
 def test_memory_session_lifecycle_does_not_reset_without_a_fence() -> None:
     controller = _controller()
-    controller.memory_runtime.session_lifecycle_error = RuntimeError("fence unavailable")
+    controller.memory_runtime.barrier_error = RuntimeError("fence unavailable")
     operation_calls = []
 
     async def reset_session() -> str:
         operation_calls.append("reset")
         return "reset-complete"
 
-    with pytest.raises(RuntimeError, match="fence unavailable"):
-        asyncio.run(
-            controller.run_memory_session_lifecycle(
-                _context("slack"),
-                "slack_dm-1",
-                reset_session,
-            )
+    result = asyncio.run(
+        controller.run_memory_session_lifecycle(
+            _context("slack"),
+            "slack_dm-1",
+            reset_session,
         )
+    )
 
-    assert operation_calls == []
+    assert result == "reset-complete"
+    assert operation_calls == ["reset"]
 
 
 def test_memory_session_lifecycle_resets_without_guessing_an_ineligible_scope() -> None:
@@ -913,7 +878,7 @@ def test_memory_session_lifecycle_resets_without_guessing_an_ineligible_scope() 
 
     assert result == "reset-complete"
     assert operation_calls == ["reset"]
-    assert controller.memory_runtime.session_lifecycle_calls == []
+    assert controller.memory_runtime.barrier_sessions == []
 
 
 def test_memory_session_lifecycle_does_not_repeat_failed_reset() -> None:
@@ -965,13 +930,13 @@ def test_archive_memory_cli_session_commits_without_waiting_on_memory(
     barrier_started_after_archive: list[bool] = []
 
     class LifecycleRuntime(_Runtime):
-        def offer_barrier(self) -> str:
+        def offer_barrier(self, raw_session_id: str) -> str:
             with engine.connect() as conn:
                 barrier_started_after_archive.append(
                     workbench_sessions_service.get_session(conn, session_id)["status"]
                     == "archived"
                 )
-            return super().offer_barrier()
+            return super().offer_barrier(raw_session_id)
 
     controller = _controller()
     controller.memory_runtime = LifecycleRuntime(controller.memory_module)
@@ -1001,6 +966,7 @@ def test_archive_memory_cli_session_commits_without_waiting_on_memory(
         await asyncio.sleep(0)
         assert barrier_started_after_archive == [True]
         assert controller.memory_runtime.barrier_offers == 1
+        assert controller.memory_runtime.barrier_sessions == [session_id]
         assert session_id not in controller._memory_scopes_by_session
         assert session_id not in controller._memory_cli_facts_by_session
 
@@ -1056,9 +1022,9 @@ def test_archive_memory_cli_session_offers_barrier_when_commit_is_cancelled(
     release_commit = threading.Event()
 
     class LifecycleRuntime(_Runtime):
-        def offer_barrier(self) -> str:
+        def offer_barrier(self, raw_session_id: str) -> str:
             barrier_offered.set()
-            return super().offer_barrier()
+            return super().offer_barrier(raw_session_id)
 
     from core.services import sessions as sessions_service
 
@@ -1153,7 +1119,7 @@ def test_archive_memory_cli_session_preflight_skips_memory_lifecycle(
     finally:
         engine.dispose()
 
-    assert controller.memory_runtime.session_lifecycle_calls == []
+    assert controller.memory_runtime.barrier_sessions == []
     assert controller.memory_runtime.barrier_offers == 0
 
 

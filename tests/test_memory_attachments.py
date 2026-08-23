@@ -18,6 +18,7 @@ import core.memory.attachments as attachment_module
 import core.memory.confined_filesystem as confined_filesystem_module
 from core.memory.attachments import (
     AttachmentBundleInvalidError,
+    AttachmentCleanupUnprovenError,
     AttachmentPinError,
     AttachmentPinStore,
     PinnedAttachment,
@@ -686,6 +687,33 @@ def test_release_never_follows_bundle_symlink(attachment_roots) -> None:
     _assert_pin_error(error, "memory_store_unavailable")
     assert link.is_symlink()
     assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
+def test_pin_reports_when_failed_staging_cleanup_is_unproven(
+    attachment_roots,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _home, source_root = attachment_roots
+    source = _source_file(source_root, "notes.txt")
+    store = AttachmentPinStore()
+
+    def fail_sync(_descriptor: int, _label: str) -> None:
+        raise AttachmentPinError(
+            "memory_store_unavailable",
+            "sync failed",
+        )
+
+    def fail_cleanup(*_args, **_kwargs) -> None:
+        raise AttachmentPinError(
+            "memory_store_unavailable",
+            "cleanup failed",
+        )
+
+    monkeypatch.setattr(attachment_module, "_fsync_fd", fail_sync)
+    monkeypatch.setattr(attachment_module, "_remove_private_bundle", fail_cleanup)
+
+    with pytest.raises(AttachmentCleanupUnprovenError):
+        store.pin((_attachment(source),))
 
 
 def test_store_rejects_symlinked_storage_parent(attachment_roots) -> None:

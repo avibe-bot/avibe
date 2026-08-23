@@ -4,6 +4,7 @@ capability:
   name: Memory Clear control-plane authority over volatile capture
   canonical_tests:
     - tests/test_memory_maintenance.py
+    - tests/test_memory_provider_root.py
     - tests/test_memory_runtime.py
 status_legend:
   covered: scenario coverage exists
@@ -16,7 +17,7 @@ scenarios:
     status: covered
     kind: recovery
     layer: scenario
-    test: tests/test_memory_store.py::test_clear_preserves_scope_key_and_rotates_epoch
+    test: tests/test_memory_maintenance.py::test_clear_writes_marker_and_repeats_four_surfaces
     actor: Memory Settings user
     trigger: Clear begins while volatile capture work may still be queued or in flight
     given: Delivery state is process-local and may be dropped; the identity store is fenced
@@ -32,7 +33,7 @@ scenarios:
     status: covered
     kind: recovery
     layer: scenario
-    test: tests/test_memory_runtime.py::test_runtime_close_drops_volatile_work
+    test: tests/test_memory_maintenance.py::test_failed_clear_persists_failed_projection_and_boot_retries
     actor: Memory runtime
     trigger: Runtime replacement or shutdown interrupts volatile work
     given: Identity state remains available while capture delivery is intentionally best effort
@@ -43,7 +44,7 @@ scenarios:
     status: covered
     kind: recovery
     layer: scenario
-    test: tests/test_memory_store.py::test_new_store_is_identity_only_v4
+    test: tests/test_memory_provider_root.py::test_provider_root_clear_recovers_released_unsentinelled_first_start
     actor: Memory runtime
     trigger: A released sidecar start populated the provider root before its ownership sentinel existed
     given: The provider root is owned by the existing sidecar lifecycle and the store contains only identity state

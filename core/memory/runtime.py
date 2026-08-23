@@ -19,7 +19,7 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal, TypeVar
+from typing import Any, Literal
 
 from config import paths
 from config.v2_config import (
@@ -96,7 +96,7 @@ from core.memory.project_ids import (
     DEFAULT_MEMORY_PROJECT_ID,
     MEMORY_SEARCH_ALL_PROJECTS,
 )
-from core.memory.store import MemoryStore, is_principal_id, is_project_id
+from core.memory.store import MemoryStore, is_principal_id
 from core.memory.types import (
     MemoryFailureLogEntry,
     MemoryItem,
@@ -120,9 +120,6 @@ ProcessingEvent = Callable[
     [Literal["fault", "recovered"], Literal["credential", "engine"] | None, str, int],
     Awaitable[bool],
 ]
-
-
-_SessionLifecycleResult = TypeVar("_SessionLifecycleResult")
 
 
 ARTIFACT_ACTIVATION_TIMEOUT_SECONDS = 90.0
@@ -1441,63 +1438,12 @@ class MemoryRuntime:
             raise self._unavailable()
         return self._store.project_for_workdir(workdir)
 
-    def offer_barrier(self) -> str:
+    def offer_barrier(self, raw_session_id: str) -> str:
         """Offer a non-blocking provider barrier for lifecycle transitions."""
 
         if not self.available:
             return "disabled"
-        return self.module.offer_barrier()
-
-    async def run_session_lifecycle(
-        self,
-        *,
-        principal_id: str,
-        project_id: str,
-        raw_session_id: str,
-        operation: Callable[[], Awaitable[_SessionLifecycleResult]],
-        deadline_seconds: float = 5.0,
-    ) -> _SessionLifecycleResult:
-        """Run one destructive session transition with non-blocking barrier admission."""
-
-        if not self.available:
-            return await operation()
-        return await self.module.run_session_lifecycle(
-            principal_id=principal_id,
-            project_id=project_id,
-            raw_session_id=raw_session_id,
-            operation=operation,
-            deadline_seconds=deadline_seconds,
-        )
-
-    async def run_session_scopes_lifecycle(
-        self,
-        *,
-        scopes: tuple[tuple[str, str], ...],
-        raw_session_id: str,
-        operation: Callable[[], Awaitable[_SessionLifecycleResult]],
-        deadline_seconds: float = 5.0,
-    ) -> _SessionLifecycleResult:
-        """Run one transition after a non-blocking barrier offer."""
-
-        canonical_scopes = tuple(dict.fromkeys(scopes))
-        if (
-            not canonical_scopes
-            or not isinstance(raw_session_id, str)
-            or not raw_session_id
-            or any(
-                not is_principal_id(principal_id) or not is_project_id(project_id)
-                for principal_id, project_id in canonical_scopes
-            )
-        ):
-            raise ValueError("invalid canonical Memory session scopes")
-        if not self.available:
-            return await operation()
-        return await self.module.run_session_scopes_lifecycle(
-            scopes=canonical_scopes,
-            raw_session_id=raw_session_id,
-            operation=operation,
-            deadline_seconds=deadline_seconds,
-        )
+        return self.module.offer_barrier(raw_session_id)
 
     async def profile_payload(self, principal_id: str, project_id: str) -> dict[str, Any]:
         if not self.available:

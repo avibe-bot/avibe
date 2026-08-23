@@ -20,24 +20,18 @@ def _runtime(tmp_path: Path) -> MemoryRuntime:
 
 @pytest.mark.asyncio
 async def test_session_lifecycle_offers_without_waiting_for_capture(tmp_path: Path) -> None:
+    """MEMORY-SEARCH-006: runtime forwards the raw session to a volatile barrier."""
+
     runtime = _runtime(tmp_path)
-    started = asyncio.Event()
-
-    async def operation() -> str:
-        started.set()
-        return "reset"
-
-    result = await asyncio.wait_for(
-        runtime.run_session_lifecycle(
-            principal_id="u-" + "a" * 32,
-            project_id="default",
-            raw_session_id="session",
-            operation=operation,
-        ),
-        timeout=1.0,
+    offered: list[str | None] = []
+    runtime.module.offer_barrier = lambda raw_session_id: (
+        offered.append(raw_session_id) or "queued"
     )
-    assert result == "reset"
-    assert started.is_set()
+
+    result = runtime.offer_barrier("session")
+
+    assert result == "queued"
+    assert offered == ["session"]
     await runtime.close()
 
 

@@ -7,7 +7,7 @@ import logging
 from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Literal
 
 from core.memory.attachments import AttachmentPinError, AttachmentPinStore, PinnedBundle
@@ -51,11 +51,12 @@ class _CaptureItem:
     capture: ProviderCapture
     bundle: PinnedBundle | None
     reservation: "WriterReservation"
+    raw_session_id: str
 
 
 @dataclass(slots=True)
 class _BarrierItem:
-    refs: tuple[ProviderSessionRef, ...] | None
+    raw_session_id: str | None = None
     scheduled_key: str | None = None
     owns_permit: bool = False
 
@@ -63,10 +64,12 @@ class _BarrierItem:
 @dataclass(slots=True)
 class _PendingSession:
     ref: ProviderSessionRef
+    raw_session_id: str
     message_ids: deque[str]
     first_at: float
     last_ack_at: float
     scheduled: bool = False
+    retry_after: float = 0.0
 
 
 class WriterReservation:
@@ -135,8 +138,12 @@ class BestEffortMemoryWriter:
     def disable_attachment_intake(self) -> None:
         self._attachments_disabled = True
 
+    def enable_attachment_intake(self) -> None:
+        self._attachments_disabled = self._attachment_store is None
+
     def replace_provider(self, provider: MemoryProviderPort) -> None:
         self._provider = provider
+        self._unavailable = False
 
     def pause_intake(self) -> None:
         self._intake_paused = True
@@ -173,13 +180,12 @@ class BestEffortMemoryWriter:
         """Queue one already-admitted capture without waiting for worker space."""
 
         if not reservation.active or admission.outcome != "accepted":
-            reservation.release()
             return False
-        if self._closed or self._unavailable:
-            reservation.release()
+        if self._closed or self._intake_paused or self._unavailable:
             return False
         assert admission.provider_session_ref is not None
         assert admission.provider_timestamp_ms is not None
+        assert admission.raw_session_id is not None
         item = _CaptureItem(
             digest=reservation.digest,
             capture=ProviderCapture(
@@ -190,11 +196,11 @@ class BestEffortMemoryWriter:
             ),
             bundle=bundle,
             reservation=reservation,
+            raw_session_id=admission.raw_session_id,
         )
         try:
             self._queue.put_nowait(item)
         except asyncio.QueueFull:
-            reservation.release()
             return False
         self._queued_items += 1
         self._ensure_worker()
@@ -202,16 +208,25 @@ class BestEffortMemoryWriter:
 
     def offer_barrier(
         self,
-        refs: tuple[ProviderSessionRef, ...] | None = None,
+        raw_session_id: str,
     ) -> BarrierOutcome:
         """Offer a non-blocking flush barrier; no delivery wait is exposed."""
 
-        if self._closed or self._intake_paused or self._unavailable or not self._enabled():
+        if (
+            not isinstance(raw_session_id, str)
+            or not raw_session_id
+            or self._closed
+            or self._intake_paused
+            or self._unavailable
+            or not self._enabled()
+        ):
             return "disabled"
         if not self._try_acquire_permit():
             return "full"
         try:
-            self._queue.put_nowait(_BarrierItem(refs=refs, owns_permit=True))
+            self._queue.put_nowait(
+                _BarrierItem(raw_session_id=raw_session_id, owns_permit=True)
+            )
         except asyncio.QueueFull:
             self._release_permit()
             return "full"
@@ -223,13 +238,17 @@ class BestEffortMemoryWriter:
         """Join current generation admissions for authority-changing transitions."""
 
         self.pause_intake()
-        deadline = asyncio.get_running_loop().time() + max(float(timeout_seconds), 0.001)
-        while (
-            self._permits < MAX_WRITER_PERMITS
-            or self._active_provider_calls
-            or self._queued_items
-        ):
-            if asyncio.get_running_loop().time() >= deadline:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(float(timeout_seconds), 0.001)
+        try:
+            await asyncio.wait_for(
+                self.close(),
+                timeout=max(deadline - loop.time(), 0.001),
+            )
+        except TimeoutError:
+            return False
+        while self._permits < MAX_WRITER_PERMITS:
+            if loop.time() >= deadline:
                 return False
             await asyncio.sleep(0)
         return True
@@ -309,9 +328,13 @@ class BestEffortMemoryWriter:
                 return
             try:
                 if isinstance(item, _CaptureItem):
-                    await self._deliver(item)
+                    if self._unavailable:
+                        await self._cleanup_item(item)
+                    else:
+                        await self._deliver(item)
                 else:
-                    await self._flush_barrier(item)
+                    if not self._unavailable:
+                        await self._flush_barrier(item)
             except asyncio.CancelledError:
                 if isinstance(item, _CaptureItem):
                     await self._cleanup_item(item)
@@ -413,9 +436,9 @@ class BestEffortMemoryWriter:
         pending = self._pending.get(key)
         if pending is None:
             if len(self._pending) >= MAX_PENDING_SESSIONS:
-                oldest_key = next(iter(self._pending))
-                self._pending.pop(oldest_key, None)
-            pending = _PendingSession(ref, deque(), now, now)
+                await self._cleanup_item(item)
+                return
+            pending = _PendingSession(ref, item.raw_session_id, deque(), now, now)
             self._pending[key] = pending
         if len(pending.message_ids) < MAX_PENDING_MESSAGE_IDS:
             pending.message_ids.append(item.digest)
@@ -447,14 +470,20 @@ class BestEffortMemoryWriter:
         )
         if scheduled_pending is not None:
             scheduled_pending.scheduled = False
-        refs = item.refs
-        if refs is None:
-            refs = (
-                (scheduled_pending.ref,)
-                if scheduled_pending is not None
-                else tuple(session.ref for session in self._pending.values())
+        if item.scheduled_key is not None:
+            if scheduled_pending is None:
+                return
+            sessions = (scheduled_pending,)
+        elif item.raw_session_id is not None:
+            sessions = tuple(
+                session
+                for session in self._pending.values()
+                if session.raw_session_id == item.raw_session_id
             )
-        for ref in refs:
+        else:
+            return
+        for session in sessions:
+            ref = session.ref
             key = ref.serialize()
             pending = self._pending.get(key)
             if pending is None or not pending.message_ids:
@@ -498,7 +527,11 @@ class BestEffortMemoryWriter:
                 await asyncio.sleep(1)
                 now = self._clock_seconds()
                 for key, pending in tuple(self._pending.items()):
-                    if pending.scheduled or not pending.message_ids:
+                    if (
+                        pending.scheduled
+                        or not pending.message_ids
+                        or now < pending.retry_after
+                    ):
                         continue
                     if (
                         now - pending.last_ack_at >= IDLE_FLUSH_SECONDS
@@ -508,19 +541,24 @@ class BestEffortMemoryWriter:
                         pending.scheduled = True
                         if not self._try_acquire_permit():
                             pending.scheduled = False
+                            pending.retry_after = now + IDLE_FLUSH_SECONDS
                             continue
                         try:
-                            self._queue.put_nowait(_BarrierItem(None, key, True))
+                            self._queue.put_nowait(
+                                _BarrierItem(scheduled_key=key, owns_permit=True)
+                            )
                             self._queued_items += 1
                         except asyncio.QueueFull:
                             self._release_permit()
                             pending.scheduled = False
+                            pending.retry_after = now + IDLE_FLUSH_SECONDS
         except asyncio.CancelledError:
             return
 
     async def _ambiguous_outcome(self, error: str) -> None:
         self._unavailable = True
         self._intake_paused = True
+        self._pending.clear()
         if self._ambiguous_stop_reap is not None:
             try:
                 proved = self._ambiguous_stop_reap()

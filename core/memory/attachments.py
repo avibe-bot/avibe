@@ -79,6 +79,10 @@ class AttachmentBundleInvalidError(AttachmentPinError):
     """Internal proof that retrying the same pinned bundle cannot make it valid."""
 
 
+class AttachmentCleanupUnprovenError(AttachmentPinError):
+    """Pinning failed and the partial private bundle could not be reclaimed."""
+
+
 @dataclass(frozen=True, slots=True)
 class PinnedAttachment:
     """Persistable metadata for one file in an Avibe-owned bundle."""
@@ -308,25 +312,33 @@ class AttachmentPinStore:
                     attachments=tuple(pinned),
                     total_bytes=total_bytes,
                 )
-            except AttachmentPinError:
+            except AttachmentPinError as error:
                 if stage_name is not None:
                     cleanup_parent_fd = bundles_fd if renamed else staging_fd
                     cleanup_name = bundle_id if renamed else stage_name
-                    _remove_private_bundle_quietly(
+                    if not _remove_private_bundle_quietly(
                         cleanup_parent_fd,
                         cleanup_name,
                         strict_files=renamed,
-                    )
+                    ):
+                        raise AttachmentCleanupUnprovenError(
+                            "memory_store_unavailable",
+                            "failed attachment pin could not be reclaimed",
+                        ) from error
                 raise
             except OSError as error:
                 if stage_name is not None:
                     cleanup_parent_fd = bundles_fd if renamed else staging_fd
                     cleanup_name = bundle_id if renamed else stage_name
-                    _remove_private_bundle_quietly(
+                    if not _remove_private_bundle_quietly(
                         cleanup_parent_fd,
                         cleanup_name,
                         strict_files=renamed,
-                    )
+                    ):
+                        raise AttachmentCleanupUnprovenError(
+                            "memory_store_unavailable",
+                            "failed attachment pin could not be reclaimed",
+                        ) from error
                 raise _storage_failure(error, "attachment bundle could not be pinned") from error
             finally:
                 os.close(bundles_fd)
@@ -504,8 +516,16 @@ class AttachmentPinStore:
                 finally:
                     os.close(stage_fd)
                 _fsync_fd(staging_fd, "attachment staging root")
-            except AttachmentPinError:
-                _remove_private_bundle_quietly(staging_fd, stage_name, strict_files=False)
+            except AttachmentPinError as error:
+                if not _remove_private_bundle_quietly(
+                    staging_fd,
+                    stage_name,
+                    strict_files=False,
+                ):
+                    raise AttachmentCleanupUnprovenError(
+                        "memory_store_unavailable",
+                        "failed attachment staging bundle could not be reclaimed",
+                    ) from error
                 raise
             return bundle_id, stage_name
         raise AttachmentPinError(
@@ -1414,11 +1434,17 @@ def _remove_private_entry(parent_fd: int, name: str) -> None:
     )
 
 
-def _remove_private_bundle_quietly(parent_fd: int, name: str, *, strict_files: bool) -> None:
+def _remove_private_bundle_quietly(
+    parent_fd: int,
+    name: str,
+    *,
+    strict_files: bool,
+) -> bool:
     try:
         _remove_private_bundle(parent_fd, name, strict_files=strict_files)
     except (AttachmentPinError, OSError):
-        return
+        return False
+    return True
 
 
 def _fsync_fd(descriptor: int, label: str) -> None:

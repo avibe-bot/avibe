@@ -8,10 +8,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from core.memory.attachments import AttachmentPinStore
+from core.memory.attachments import AttachmentPinError, AttachmentPinStore
 from core.memory.everos import FakeMemoryProvider
 from core.memory.module import MIN_FREE_DISK_BYTES, MemoryModule
-from core.memory.store import MemoryStore
+from core.memory.store import MemoryStore, VolatileAdmission
 from core.memory.types import (
     CaptureAccepted,
     CaptureAttachment,
@@ -55,6 +55,8 @@ def _module(tmp_path: Path) -> tuple[MemoryModule, MemoryStore, FakeMemoryProvid
 
 @pytest.mark.asyncio
 async def test_capture_is_accepted_and_duplicate_is_process_local(tmp_path: Path) -> None:
+    """MEMORY-SEARCH-013: duplicate suppression is process-local and volatile."""
+
     module, store, provider = _module(tmp_path)
     assert await module.capture(_request()) == CaptureAccepted()
     assert await module.capture(_request()) == CaptureDuplicate()
@@ -69,19 +71,13 @@ async def test_capture_is_accepted_and_duplicate_is_process_local(tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_lifecycle_barrier_does_not_wait_for_writer(tmp_path: Path) -> None:
+    """MEMORY-SEARCH-016: a lifecycle barrier is offered without a drain."""
+
     module, _store, _provider = _module(tmp_path)
+    module._writer._ensure_worker = lambda: None
     await module.capture(_request())
-    result = await module.run_session_lifecycle(
-        principal_id=PRINCIPAL,
-        project_id="default",
-        raw_session_id="session-1",
-        operation=lambda: _result("reset"),
-    )
-    assert result == "reset"
-
-
-async def _result(value: str) -> str:
-    return value
+    assert module.offer_barrier("session-1") == "queued"
+    await module.close_writer()
 
 
 @pytest.mark.asyncio
@@ -137,6 +133,117 @@ async def test_cancelled_pinning_releases_shared_writer_reservation(tmp_path: Pa
     assert await quiescing
     assert module._writer._permits == MAX_WRITER_PERMITS
     assert attachment_store.released == ["cancelled-bundle"]
+
+
+@pytest.mark.asyncio
+async def test_unadmitted_attachment_cleanup_finishes_before_permit_release(
+    tmp_path: Path,
+) -> None:
+    module, store, _provider = _module(tmp_path)
+    cleanup_entered = threading.Event()
+    finish_cleanup = threading.Event()
+
+    class BlockingAttachmentStore:
+        def pin(self, *_args, **_kwargs):
+            return SimpleNamespace(bundle_id="unadmitted-bundle")
+
+        def release(self, _bundle_id: str) -> None:
+            cleanup_entered.set()
+            finish_cleanup.wait(timeout=1.0)
+
+    module._attachment_store = BlockingAttachmentStore()
+    store.admit_volatile_capture = lambda **_kwargs: VolatileAdmission("project_limit")
+    module._writer._permits = 1
+    attachment = CaptureAttachment(
+        kind="image",
+        name="source.png",
+        uri=(tmp_path / "attachments" / "avibe" / "source.png").as_uri(),
+        ext="png",
+    )
+
+    capture = asyncio.create_task(
+        module.capture(_request(attachments=(attachment,)))
+    )
+    assert await asyncio.to_thread(cleanup_entered.wait, 1.0)
+    assert module._writer._permits == 0
+    assert module._writer.reserve("later") == "full"
+    finish_cleanup.set()
+
+    assert await capture == CaptureSkipped(reason="memory_invalid_input")
+    assert module._writer._permits == 1
+
+
+@pytest.mark.asyncio
+async def test_startup_scrubs_leftover_attachment_bundles(tmp_path: Path) -> None:
+    source = tmp_path / "attachments" / "avibe" / "source.png"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"png")
+    attachment_store = AttachmentPinStore(effective_home=tmp_path)
+    bundle = attachment_store.pin(
+        (
+            CaptureAttachment(
+                kind="image",
+                name="source.png",
+                uri=source.as_uri(),
+                ext="png",
+            ),
+        )
+    )
+    bundle_path = tmp_path / "memory" / "attachments" / bundle.relative_path
+    assert bundle_path.exists()
+    store = MemoryStore(
+        tmp_path / "state" / "memory" / "memory.sqlite",
+        effective_home=tmp_path,
+    )
+
+    module = MemoryModule(
+        store,
+        FakeMemoryProvider(),
+        enabled=True,
+        disk_free_bytes=lambda: MIN_FREE_DISK_BYTES,
+        attachment_store=attachment_store,
+        effective_home=tmp_path,
+    )
+
+    assert not bundle_path.exists()
+    assert module._writer.attachments_enabled
+    await module.close_writer()
+
+
+@pytest.mark.asyncio
+async def test_startup_cleanup_failure_disables_only_attachments(tmp_path: Path) -> None:
+    class FailingStartupStore:
+        def __init__(self) -> None:
+            self.clear_calls = 0
+
+        def clear_all(self) -> None:
+            self.clear_calls += 1
+            if self.clear_calls == 1:
+                raise AttachmentPinError(
+                    "memory_store_unavailable",
+                    "cleanup failed",
+                )
+
+    store = MemoryStore(
+        tmp_path / "state" / "memory" / "memory.sqlite",
+        effective_home=tmp_path,
+    )
+    provider = FakeMemoryProvider()
+    module = MemoryModule(
+        store,
+        provider,
+        enabled=True,
+        disk_free_bytes=lambda: MIN_FREE_DISK_BYTES,
+        attachment_store=FailingStartupStore(),
+        effective_home=tmp_path,
+    )
+
+    assert not module._writer.attachments_enabled
+    assert await module.capture(_request()) == CaptureAccepted()
+    await module.wait_writer_idle_for_tests()
+    assert len(provider.captures) == 1
+    await module.clear_attachments()
+    assert module._writer.attachments_enabled
 
 
 @pytest.mark.asyncio

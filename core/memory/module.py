@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Literal, TypeVar
 from config import paths
 from core.memory.blocking import run_blocking
 from core.memory.attachments import (
+    AttachmentCleanupUnprovenError,
     AttachmentPinError,
     AttachmentPinStore,
     PinnedBundle,
@@ -60,7 +61,6 @@ from core.memory.types import (
     MemoryProfileTrait,
     MemoryResult,
     OperationFailed,
-    ProviderSessionRef,
     ProviderSearchItem,
     RecallItems,
     RecallPolicy,
@@ -140,7 +140,6 @@ class _CaptureReservation:
 
 
 logger = logging.getLogger(__name__)
-_SessionLifecycleResult = TypeVar("_SessionLifecycleResult")
 _ProviderReadResult = TypeVar("_ProviderReadResult")
 
 
@@ -201,9 +200,24 @@ class MemoryModule:
         self._invalid_capture_admission_lock = asyncio.Lock()
         self._clear_active = False
         self._retired = False
-        self._attachment_store = attachment_store or AttachmentPinStore(
-            effective_home=self._effective_home
-        )
+        attachments_available = False
+        self._attachment_store: AttachmentPinStore | None = None
+        try:
+            self._attachment_store = attachment_store or AttachmentPinStore(
+                effective_home=self._effective_home
+            )
+        except AttachmentPinError:
+            logger.warning(
+                "Memory attachment storage is unavailable; text capture remains enabled"
+            )
+        else:
+            try:
+                self._attachment_store.clear_all()
+                attachments_available = True
+            except AttachmentPinError:
+                logger.warning(
+                    "Memory attachment startup cleanup failed; text capture remains enabled"
+                )
         self._writer = writer or BestEffortMemoryWriter(
             store=store,
             provider=provider,
@@ -212,6 +226,8 @@ class MemoryModule:
             attachment_store=self._attachment_store,
             ambiguous_stop_reap=ambiguous_stop_reap,
         )
+        if not attachments_available:
+            self._writer.disable_attachment_intake()
 
     @property
     def maintenance_active(self) -> bool:
@@ -312,41 +328,18 @@ class MemoryModule:
     async def clear_attachments(self) -> None:
         """Remove every module-owned pinned attachment during destructive clear."""
 
+        if self._attachment_store is None:
+            raise AttachmentPinError(
+                "memory_store_unavailable",
+                "attachment storage is unavailable",
+            )
         await run_blocking(self._attachment_store.clear_all)
+        self._writer.enable_attachment_intake()
 
-    def offer_barrier(self, refs: tuple[ProviderSessionRef, ...] | None = None) -> str:
+    def offer_barrier(self, raw_session_id: str) -> str:
         """Offer a provider barrier without waiting for capture delivery."""
 
-        return self._writer.offer_barrier(refs)
-
-    async def run_session_lifecycle(
-        self,
-        *,
-        principal_id: str,
-        project_id: str,
-        raw_session_id: str,
-        operation: Callable[[], Awaitable[_SessionLifecycleResult]],
-        deadline_seconds: float = 5.0,
-    ) -> _SessionLifecycleResult:
-        """Offer a lifecycle barrier and run the transition immediately."""
-
-        del principal_id, project_id, raw_session_id, deadline_seconds
-        self.offer_barrier()
-        return await operation()
-
-    async def run_session_scopes_lifecycle(
-        self,
-        *,
-        scopes: tuple[tuple[str, str], ...],
-        raw_session_id: str,
-        operation: Callable[[], Awaitable[_SessionLifecycleResult]],
-        deadline_seconds: float = 5.0,
-    ) -> _SessionLifecycleResult:
-        """Offer one non-blocking barrier for all current scopes."""
-
-        del scopes, raw_session_id, deadline_seconds
-        self.offer_barrier()
-        return await operation()
+        return self._writer.offer_barrier(raw_session_id)
 
     def replace_provider(self, provider: MemoryProviderPort) -> None:
         """Swap the provider shared by direct reads and claim delivery.
@@ -625,11 +618,11 @@ class MemoryModule:
                 max_provider_timestamp_ms=MAX_PROVIDER_TIMESTAMP_MS,
             )
         except asyncio.CancelledError:
-            reservation.release()
-            if pinned_bundle is not None:
-                await self._release_unadmitted_bundle(pinned_bundle.bundle_id)
+            await self._release_unadmitted_capture(reservation, pinned_bundle)
             raise
         except Exception as error:
+            if isinstance(error, AttachmentCleanupUnprovenError):
+                self._writer.disable_attachment_intake()
             if isinstance(error, AttachmentPinError) and normalized_text.strip() and request.attachments:
                 try:
                     admission = await self._store_call(
@@ -648,9 +641,7 @@ class MemoryModule:
                         return CaptureAccepted()
                 except Exception:
                     pass
-            reservation.release()
-            if pinned_bundle is not None:
-                await self._release_unadmitted_bundle(pinned_bundle.bundle_id)
+            await self._release_unadmitted_capture(reservation, pinned_bundle)
             if isinstance(error, AttachmentPinError) and normalized_text.strip() and request.attachments:
                 return CaptureSkipped(reason="memory_store_unavailable")
             if isinstance(error, UnicodeError):
@@ -658,9 +649,7 @@ class MemoryModule:
             return OperationFailed(error="memory_store_unavailable")
 
         if admission.outcome != "accepted":
-            reservation.release()
-            if pinned_bundle is not None:
-                await self._release_unadmitted_bundle(pinned_bundle.bundle_id)
+            await self._release_unadmitted_capture(reservation, pinned_bundle)
             if admission.outcome == "project_limit":
                 return CaptureSkipped(reason="memory_invalid_input")
             if admission.outcome == "timestamp_invalid":
@@ -677,8 +666,7 @@ class MemoryModule:
             bundle=pinned_bundle,
         )
         if not offered:
-            if pinned_bundle is not None:
-                await self._release_unadmitted_bundle(pinned_bundle.bundle_id)
+            await self._release_unadmitted_capture(reservation, pinned_bundle)
             await self._skipped_with_missed("memory_queue_full")
             return CaptureSkipped(reason="memory_queue_full")
         return CaptureAccepted(
@@ -688,12 +676,27 @@ class MemoryModule:
         )
 
     async def _release_unadmitted_bundle(self, bundle_id: str) -> None:
+        if self._attachment_store is None:
+            self._writer.disable_attachment_intake()
+            return
         try:
             await run_blocking(self._attachment_store.release, bundle_id)
         except Exception:
             self._writer.disable_attachment_intake()
 
+    async def _release_unadmitted_capture(
+        self,
+        reservation: WriterReservation,
+        bundle: PinnedBundle | None,
+    ) -> None:
+        if bundle is not None:
+            await self._release_unadmitted_bundle(bundle.bundle_id)
+        reservation.release()
+
     def _release_cancelled_pinned_bundle(self, bundle: PinnedBundle) -> None:
+        if self._attachment_store is None:
+            self._writer.disable_attachment_intake()
+            return
         try:
             self._attachment_store.release(bundle.bundle_id)
         except Exception:

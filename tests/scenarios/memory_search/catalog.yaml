@@ -45,11 +45,11 @@ scenarios:
     layer: contract
     test: tests/test_memory_store.py::test_released_v2_migration_discards_delivery_tables_and_derives_projects
   - id: MEMORY-SEARCH-006
-    name: Session barriers offer bounded volatile flush work for every current scope
-    status: partial
+    name: Session barriers flush only pending work from the same raw session
+    status: covered
     kind: lifecycle
     layer: contract
-    test: tests/test_memory_runtime.py::test_session_lifecycle_offers_without_waiting_for_capture
+    test: tests/test_memory_writer.py::test_session_barrier_flushes_only_matching_raw_session
   - id: MEMORY-SEARCH-007
     name: Agentic CLI recall builds the bounded internal policy envelope
     status: covered
@@ -81,32 +81,32 @@ scenarios:
     layer: contract
     test: tests/test_memory_everos.py::test_assistant_owner_crosses_add_search_and_profile_provider_contract
   - id: MEMORY-SEARCH-012
-    name: Persisted owner catalog remains caller-scoped after v4 migration
+    name: Clear rotates the epoch without replacing the installation scope key
     status: covered
     kind: recovery
     layer: contract
     test: tests/test_memory_store.py::test_clear_preserves_scope_key_and_rotates_epoch
   - id: MEMORY-SEARCH-013
-    name: Volatile writer preserves ordered owner routing for user and Agent captures
+    name: Volatile duplicate suppression prevents process-local repeat delivery
     status: covered
     kind: lifecycle
     layer: contract
     test: tests/test_memory_module.py::test_capture_is_accepted_and_duplicate_is_process_local
   - id: MEMORY-SEARCH-014
-    name: Processing diagnostics retain Assistant-owned captures in scoped and admin views
+    name: Capture diagnostics are unavailable without durable delivery history
     status: covered
     kind: diagnostics
     layer: contract
     test: tests/test_memory_insight.py::test_capture_diagnostics_are_unavailable_without_delivery_history
   - id: MEMORY-SEARCH-015
-    name: Agent write ownership stays isolated across callers
+    name: Capture stamps caller-scoped identity and a native dedupe key
     status: covered
     kind: authorization
     layer: contract
     test: tests/test_memory_slice3.py::test_capture_stamps_user_principal_provenance_and_native_dedup_key
   - id: MEMORY-SEARCH-016
-    name: Agent remember is returned by dual-owner search with Agent provenance
+    name: Lifecycle barrier admission does not wait for volatile delivery
     status: covered
-    kind: happy_path
-    layer: scenario
+    kind: lifecycle
+    layer: contract
     test: tests/test_memory_module.py::test_lifecycle_barrier_does_not_wait_for_writer

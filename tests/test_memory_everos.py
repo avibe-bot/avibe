@@ -754,6 +754,8 @@ def test_search_uses_public_search_only_and_maps_episode_and_nested_fact() -> No
 
 
 def test_assistant_owner_crosses_add_search_and_profile_provider_contract() -> None:
+    """MEMORY-SEARCH-008, MEMORY-SEARCH-009, MEMORY-SEARCH-011 stay scoped."""
+
     assistant_owner = "u-11111111111111111111111111111111-agent"
     session_ref = ProviderSessionRef(
         principal_id=assistant_owner,
@@ -824,6 +826,8 @@ def test_assistant_owner_crosses_add_search_and_profile_provider_contract() -> N
 
 
 def test_agentic_search_retains_allowlisted_round_metadata() -> None:
+    """MEMORY-SEARCH-010: agentic recall uses one bounded provider leg."""
+
     requests: list[dict] = []
     sidecar_timeouts: list[float] = []
     telemetry = AgenticRecallTelemetry()

@@ -2170,22 +2170,18 @@ class Controller:
     ) -> _MemorySessionLifecycleResult:
         """Run an IM session reset without waiting for volatile capture delivery."""
 
-        scope = self._memory_scope_for_im_session(context, raw_session_id)
-        if scope is None:
+        if self._memory_scope_for_im_session(context, raw_session_id) is None:
             return await operation()
 
         runtime = getattr(self, "memory_runtime", None)
-        run_lifecycle = getattr(runtime, "run_session_lifecycle", None)
-        if not callable(run_lifecycle):
-            return await operation()
-
-        return await run_lifecycle(
-            principal_id=scope[0],
-            project_id=scope[1],
-            raw_session_id=raw_session_id,
-            operation=operation,
-            deadline_seconds=deadline_seconds,
-        )
+        offer = getattr(runtime, "offer_barrier", None)
+        if callable(offer):
+            try:
+                offer(raw_session_id)
+            except Exception:
+                logger.debug("Memory session barrier offer failed", exc_info=True)
+        del deadline_seconds
+        return await operation()
 
     def _memory_scope_for_im_session(
         self,
@@ -2221,7 +2217,7 @@ class Controller:
             runtime = getattr(self, "memory_runtime", None)
             offer = getattr(runtime, "offer_barrier", None)
             if callable(offer):
-                offer()
+                offer(raw_session_id)
         except Exception:
             logger.debug("archive: Memory barrier offer failed", exc_info=True)
         finally:

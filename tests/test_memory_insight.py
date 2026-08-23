@@ -25,6 +25,8 @@ def _reader(tmp_path: Path) -> MemoryInsightReader:
 
 
 def test_capture_diagnostics_are_unavailable_without_delivery_history(tmp_path: Path) -> None:
+    """MEMORY-SEARCH-014: absent delivery evidence is unavailable, not empty."""
+
     reader = _reader(tmp_path)
     result = reader.list_entries((PRINCIPAL, "default"), None, 10)
     assert result["entries"] == []
