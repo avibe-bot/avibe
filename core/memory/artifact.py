@@ -171,7 +171,13 @@ class MemoryArtifactManager(ManagedRuntimeManager):
 
         if self._dev_runtime_configured():
             return self._dev_runtime_python()
-        return super().resolve_binary()
+        pointer = self._active_pointer()
+        if pointer is None:
+            return None
+        try:
+            return self._admitted_active_pointer_binary(pointer)
+        except Exception:  # noqa: BLE001
+            return None
 
     def status(self) -> dict[str, Any]:
         """Keep the manifest's release-state reason visible to Dependencies."""

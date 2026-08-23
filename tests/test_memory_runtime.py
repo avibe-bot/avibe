@@ -823,9 +823,15 @@ def test_memory_artifact_status_marks_broken_active_binary_as_error(tmp_path: Pa
     assert status["reason"] == "memory_runtime_install_failed"
 
 
-def test_released_memory_pointer_resolves_read_only_without_deep_probe(
+@pytest.mark.parametrize(
+    ("probe_outcome", "expected_admitted"),
+    [("success", True), ("false", False), ("raise", False)],
+)
+def test_released_memory_pointer_status_is_shallow_and_resolver_readmits(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    probe_outcome: str,
+    expected_admitted: bool,
 ) -> None:
     manager = MemoryArtifactManager(
         runtime_dir=tmp_path / "runtime",
@@ -869,6 +875,7 @@ def test_released_memory_pointer_resolves_read_only_without_deep_probe(
         for path in install_dir.rglob("*")
         if path.is_file()
     }
+    real_restore = manager._restore_current_pointer
 
     monkeypatch.setattr(
         manager,
@@ -882,18 +889,36 @@ def test_released_memory_pointer_resolves_read_only_without_deep_probe(
     )
 
     status = manager.status()
-    resolved = manager.resolve_python()
 
     assert status["installed"] is True
     assert status["status"] == "ready"
     assert status["path"] == str(binary)
-    assert resolved == binary
     assert pointer_path.read_bytes() == pointer_before
     assert {
         path.relative_to(install_dir): path.read_bytes()
         for path in install_dir.rglob("*")
         if path.is_file()
     } == artifact_before
+
+    def probe(*_args, **_kwargs) -> dict[str, bool]:
+        if probe_outcome == "raise":
+            raise RuntimeError("probe failed")
+        return {"ok": probe_outcome == "success"}
+
+    monkeypatch.setattr(manager, "_prepare_binary", probe)
+    monkeypatch.setattr(manager, "_restore_current_pointer", real_restore)
+
+    resolved = manager.resolve_python()
+    active = manager._active_pointer()
+
+    assert resolved == (binary if expected_admitted else None)
+    assert active is not None
+    if probe_outcome == "raise":
+        assert "admission_revision" not in active
+        assert "admission_ok" not in active
+    else:
+        assert active["admission_revision"] == memory_artifact.ARTIFACT_ADMISSION_REVISION
+        assert active["admission_ok"] is expected_admitted
 
 
 @pytest.mark.parametrize(
