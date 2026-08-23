@@ -661,6 +661,9 @@ class MemoryModule:
                         occurred_at_ms=request.occurred_at_ms,
                         max_provider_timestamp_ms=MAX_PROVIDER_TIMESTAMP_MS,
                     )
+                except asyncio.CancelledError:
+                    await self._release_unadmitted_capture(reservation, pinned_bundle)
+                    raise
                 except Exception:
                     pass
                 else:

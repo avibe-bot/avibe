@@ -425,14 +425,64 @@ async def test_quiesce_handles_asyncio_timeout_on_python_310(
     writer = _writer(tmp_path, FakeMemoryProvider())
 
     async def timed_out_close() -> None:
-        writer._closed = True
         await asyncio.Event().wait()
 
     monkeypatch.setattr(writer, "close", timed_out_close)
 
     assert not await writer.quiesce(timeout_seconds=0.001)
-    writer.resume_intake()
-    reservation = writer.reserve("after-timeout")
+    assert writer.reserve("after-timeout") == "disabled"
+
+
+@pytest.mark.asyncio
+async def test_quiesce_deadline_leaves_blocking_cleanup_fenced_in_background(
+    tmp_path: Path,
+) -> None:
+    projection_entered = threading.Event()
+    finish_projection = threading.Event()
+
+    class AttachmentStore:
+        def __init__(self) -> None:
+            self.released: list[str] = []
+
+        def provider_attachments(self, _bundle):
+            projection_entered.set()
+            finish_projection.wait(timeout=1.0)
+            return ()
+
+        def release(self, bundle_id: str) -> None:
+            self.released.append(bundle_id)
+
+    attachment_store = AttachmentStore()
+    writer = _writer(
+        tmp_path,
+        FakeMemoryProvider(),
+        attachment_store=attachment_store,
+    )
+    reservation = writer.reserve("blocking-projection")
+    assert not isinstance(reservation, str)
+    assert writer.offer_capture(
+        reservation,
+        _admission(0),
+        text="caption",
+        attachments=(),
+        bundle=SimpleNamespace(bundle_id="bundle-0"),
+    ) == "queued"
+    assert await asyncio.to_thread(projection_entered.wait, 1.0)
+
+    quiescing = asyncio.create_task(writer.quiesce(timeout_seconds=0.001))
+    try:
+        assert not await asyncio.wait_for(asyncio.shield(quiescing), timeout=0.2)
+        writer.resume_intake()
+        assert writer.reserve("while-cleanup-settles") == "disabled"
+        assert writer._permits == MAX_WRITER_PERMITS - 1
+    finally:
+        finish_projection.set()
+        await asyncio.gather(quiescing, return_exceptions=True)
+        await asyncio.wait_for(writer.close(), timeout=1.0)
+
+    assert attachment_store.released == ["bundle-0"]
+    assert writer._permits == MAX_WRITER_PERMITS
+    reservation = writer.reserve("after-cleanup-settles")
     assert not isinstance(reservation, str)
     reservation.release()
 

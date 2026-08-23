@@ -128,6 +128,7 @@ class BestEffortMemoryWriter:
         )
         self._worker_task: asyncio.Task[None] | None = None
         self._scheduler_task: asyncio.Task[None] | None = None
+        self._close_task: asyncio.Task[None] | None = None
         self._active_provider_calls = 0
         self._queued_items = 0
         self._permits = MAX_WRITER_PERMITS
@@ -166,7 +167,9 @@ class BestEffortMemoryWriter:
         self._intake_paused = True
 
     def resume_intake(self) -> None:
-        if not self._closed and not self._unavailable:
+        # ``_closed`` independently fences a settling cleanup. Clearing the
+        # pause records recovery intent without reopening that old work early.
+        if not self._unavailable:
             self._intake_paused = False
 
     def reset_duplicate_generation(self) -> None:
@@ -277,10 +280,8 @@ class BestEffortMemoryWriter:
                 timeout=max(deadline - loop.time(), 0.001),
             )
         except asyncio.TimeoutError:
-            # ``wait_for`` cancels ``close`` and waits for that cancellation.
-            # The old authority remains active on this failure path, so leave
-            # the volatile writer reusable while intake stays fenced.
-            self._closed = False
+            # ``close`` shields its single cleanup task, so this deadline stops
+            # waiting without reopening the old authority or abandoning cleanup.
             return False
         while self._permits < MAX_WRITER_PERMITS:
             if loop.time() >= deadline:
@@ -291,6 +292,25 @@ class BestEffortMemoryWriter:
     async def close(self) -> None:
         """Drop volatile queued/tracked work during shutdown or replacement."""
 
+        task = self._close_task
+        if task is None:
+            task = asyncio.create_task(
+                self._close_once(),
+                name="memory-writer-close",
+            )
+            self._close_task = task
+            task.add_done_callback(self._retire_close_task)
+        await asyncio.shield(task)
+
+    def _retire_close_task(self, task: asyncio.Task[None]) -> None:
+        if self._close_task is task:
+            self._close_task = None
+        try:
+            task.exception()
+        except asyncio.CancelledError:
+            pass
+
+    async def _close_once(self) -> None:
         self._closed = True
         self._intake_paused = True
         if self._scheduler_task is not None:

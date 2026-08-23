@@ -453,6 +453,56 @@ async def test_caption_fallback_preserves_admission_outcome(
 
 
 @pytest.mark.asyncio
+async def test_cancelled_caption_fallback_releases_reservation_for_retry(
+    tmp_path: Path,
+) -> None:
+    """MEMORY-IM-ATTACH-013: fallback cancellation abandons volatile admission."""
+
+    module, store, provider = _module(tmp_path)
+    admission_entered = threading.Event()
+    finish_admission = threading.Event()
+    admit = store.admit_volatile_capture
+
+    class FailingAttachmentStore:
+        def pin(self, *_args, **_kwargs):
+            raise AttachmentPinError("memory_store_unavailable", "pin failed")
+
+    def blocking_admission(**kwargs):
+        admission_entered.set()
+        finish_admission.wait(timeout=1.0)
+        return admit(**kwargs)
+
+    module._attachment_store = FailingAttachmentStore()
+    store.admit_volatile_capture = blocking_admission
+    attachment = CaptureAttachment(
+        kind="image",
+        name="source.png",
+        uri=(tmp_path / "attachments" / "avibe" / "source.png").as_uri(),
+        ext="png",
+    )
+    request = _request(
+        source_message_id="cancelled-caption-fallback",
+        text="keep the caption",
+        attachments=(attachment,),
+    )
+
+    capture = asyncio.create_task(module.capture(request))
+    assert await asyncio.to_thread(admission_entered.wait, 1.0)
+    capture.cancel("session changed")
+    finish_admission.set()
+
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await capture
+    assert raised.value.args == ("session changed",)
+    assert module._writer._permits == MAX_WRITER_PERMITS
+
+    store.admit_volatile_capture = admit
+    assert await module.capture(request) == CaptureAccepted()
+    await module.wait_writer_idle_for_tests()
+    assert [item.text for item in provider.captures] == ["keep the caption"]
+
+
+@pytest.mark.asyncio
 async def test_startup_scrubs_leftover_attachment_bundles(tmp_path: Path) -> None:
     source = tmp_path / "attachments" / "avibe" / "source.png"
     source.parent.mkdir(parents=True)
