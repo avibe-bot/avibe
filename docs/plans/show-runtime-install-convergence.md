@@ -121,7 +121,7 @@ named revision, not a promise about a future implementation.
 | --- | --- | --- |
 | **Step 1:** Shared disk readers | `status()` loads a manifest first, and `resolve_binary()` returns `None` before disk resolution when the manifest is unavailable or not installable. | `2c6fcbe88` |
 | **Step 1:** Released model-hub claims | `install-state.json` schemas 1 and 2 persist a target containing `manifest_sha256`; recovery compares that target. | `2c6fcbe88` |
-| **Step 1:** Record discrimination | Shared, Show, and tmux metadata/current-pointer writers persist no `record_schema_version`, so an unversioned released shape cannot be distinguished from an incomplete future canonical record by field absence alone. | `2c6fcbe88` |
+| Record discrimination | Current metadata/current-pointer writers persist no `record_schema_version`; released records are therefore unversioned, and field absence carries no record-generation information for a future schema change. | `2c6fcbe88` |
 | **Step 1:** Memory development provider | Presence of `AVIBE_MEMORY_DEV_RUNTIME` selects the development branch before managed state. A missing or incompatible configured interpreter returns the development-provider failure and does not fall through to a managed pointer or manifest. | `2c6fcbe88` |
 | **Step 1:** Memory activation | Memory overrides pointer writing; with a live provider root it fails closed without the controller coordinator, which receives candidate, root state, commit, and rollback callbacks. | `2c6fcbe88`; rechecked on master 2026-08-23 |
 | **Step 1:** Memory admission | A released active pointer without `admission_revision` reruns the runtime compatibility probe. Success admits it; a false result or raised inspection rejects it rather than trusting shared binary metadata. | `2c6fcbe88` |
@@ -132,10 +132,10 @@ named revision, not a promise about a future implementation.
 | Tmux byte phases | Source-leaf verification occurs before preparation; macOS ad-hoc signing can change the installed binary bytes afterward. | `2c6fcbe88` |
 | **Step 1:** Online unrelated-platform edit | `_manifest_install_dir()` hashes the whole manifest digest with the selected archive digest. An online manifest edit for another platform therefore selects a new directory even when this host's archive bytes are unchanged. | `2c6fcbe88` |
 | **Step 1:** Model-hub platform alias | Model-hub maps host `linux-x64` to released artifact label `linux-amd64`; its released pointer, metadata, and claim can therefore carry a label different from the host tag. | `2c6fcbe88` |
-| Downloads namespace | Remote manifest caches use `downloads/manifest-<digest>.json`; archive cleanup must distinguish these facts from disposable archive bytes. | `2c6fcbe88` |
+| Downloads namespace | Remote manifest caches use `downloads/manifest-<digest>.json` beside archives, so the namespace mixes durable manifest facts with disposable archive bytes. | `2c6fcbe88` |
 | Inspection versus absence | Shared versions-directory preview preserves traversal errors instead of treating them as proof of no install; Show status can still collapse a raised inspection into absent at its consumer boundary. | `2c6fcbe88` |
 | Released Show links | Each v3.0.13 Darwin/Linux archive has 16 symlinks and one esbuild hard link; the four Unix archives have nine forward symlinks total, prior-target hard links, and no finally dangling symlink. Windows archives have no links. | `v3.0.13` manifests and archives; measured 2026-08-23 |
-| Extractor behavior | Shared rejects the first link member. Show and tmux accept the benign regular/symlink/hard-link probe and reject an escaping `linkname`. | `2c6fcbe88`; hermetic probe 2026-08-23 |
+| Extractor behavior | Shared stops at the first link member. Show and tmux accept the benign regular/symlink/hard-link probe and raise on an escaping `linkname`. | `2c6fcbe88`; hermetic probe 2026-08-23 |
 | Filter capability | The project supports Python 3.10+. Show capability-detects `filter="data"`; shared and tmux use a Python 3.12 version gate even though the filter is backported to 3.10.12 and 3.11.4. | `2c6fcbe88`; Python docs checked 2026-08-23 |
 
 ### Measured Backlog Outside Step 1
@@ -151,12 +151,12 @@ selected manifest to admitted disk records and artifacts. Status, resolvers,
 and reuse derive installed identity from disk while manifest failure remains a
 separate candidate-operation diagnostic; Show and tmux are unchanged.
 
-Corpus membership is every current-fact row marked **Step 1** above; each has a
-provenance-verified released fixture and executable case, or acceptance fails.
+The contract author marks normative current-fact rows **Step 1**; all and only
+those rows define corpus membership, which implementation cannot elect. Each has
+a provenance-verified released fixture and executable case, or acceptance fails.
 Every Step 1 shared consumer rejects external or symlink-resolved pointer paths.
-Model-hub claim cases cover schemas 1 and 2 and normalize whole-manifest targets
-for resume/recovery. Acceptance verifies each fixture's released version, digest,
-and source bytes. No fixture path or implementation-authored membership is used.
+Model-hub claim cases cover schemas 1 and 2 and normalize whole-manifest targets for resume/recovery; acceptance verifies each fixture's released version, digest, and source bytes.
+Unmarked rows contain no `MUST`, `rejects`, or `fails`; no fixture path is named.
 The entrypoint universe is generated from the public operation surface exported
 by the Step 1 manager and adapter code, with a reflection check that fails when
 that surface and its code-owned contract registry differ. The executable
