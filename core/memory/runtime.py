@@ -1162,8 +1162,7 @@ class MemoryRuntime:
             )
         except Exception:
             self._runtime_error = "memory_clear_failed"
-            if resume_claims_on_failure:
-                self.module.resume_claims()
+            self.module.pause_claims()
             return {"ok": False, "error": self._runtime_error}
 
         settings = _process_settings(
@@ -1297,7 +1296,7 @@ class MemoryRuntime:
         reader = self._insight_reader
         if reader is None:
             raise self._unavailable()
-        items = await run_blocking(reader.installation_preflight_calls)
+        projection = await run_blocking(reader.installation_preflight_calls)
         after = self._processing_runtime_snapshot()
         current_reason = after.local_observation_reason(maintenance_reason)
         if after.generation != before.generation or current_reason is not None:
@@ -1308,13 +1307,7 @@ class MemoryRuntime:
                 ),
                 items=(),
             )
-        return ProviderCheckProjection(
-            source=SourceObservation(
-                "available",
-                observed_at=datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
-            ),
-            items=items,
-        )
+        return projection
 
     async def _processing_record_maintenance(
         self,

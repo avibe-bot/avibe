@@ -16,7 +16,14 @@ from pathlib import Path
 from typing import Literal
 
 from config import paths
-from core.memory.confined_filesystem import ConfinedRoot, ensure_private_directory
+from core.memory.confined_filesystem import (
+    ConfinedFilesystemError,
+    ConfinedRoot,
+    create_confined_file,
+    ensure_private_directory,
+    open_and_harden_confined_regular_file,
+    open_confined_regular_file,
+)
 from core.memory.project_ids import (
     DEFAULT_MEMORY_PROJECT_ID,
     MAX_NAMED_MEMORY_PROJECTS,
@@ -30,6 +37,52 @@ from core.memory.types import MemoryErrorCode, ProviderSessionRef
 MEMORY_STORE_FILENAME = "memory.sqlite"
 MEMORY_STORE_DIRNAME = "memory"
 MEMORY_STORE_SCHEMA_VERSION = 4
+
+_V0_META_COLUMNS = frozenset(
+    """singleton epoch clear_in_progress scope_key provider_root_id
+    last_provider_timestamp_ms missed_count last_success_at last_error last_error_at
+    processing_fault_kind processing_fault_since processing_alert_active updated_at""".split()
+)
+_V0_QUEUE_COLUMNS = frozenset(
+    """source_message_digest epoch session_id principal_id project_ref provenance
+    payload_text payload_attachments occurred_at_ms provider_timestamp_ms state attempts
+    next_retry_at lease_owner lease_at last_error add_request_id flush_observation
+    flush_status flush_error_code flush_request_id flush_observed_at created_at
+    completed_at""".split()
+)
+_V2_TABLE_COLUMNS = {
+    "memory_meta": frozenset(
+        """singleton epoch clear_in_progress scope_key provider_root_id
+        last_provider_timestamp_ms missed_count last_success_at last_error last_error_at
+        processing_fault_generation processing_fault_kind processing_fault_since
+        processing_alert_active processing_recovery_pending_at
+        processing_recovery_generation updated_at""".split()
+    ),
+    "memory_attachment_bundle": frozenset(
+        "bundle_id relative_path state file_count total_bytes created_at updated_at".split()
+    ),
+    "memory_session_flush_state": frozenset(
+        """provider_session_ref epoch open_generation target_generation state
+        first_unflushed_at last_add_ack_at confirmed_add_watermark_ms unflushed_count
+        due_at next_attempt_at retry_count operation_epoch fence_token
+        submission_started_at updated_at""".split()
+    ),
+    "memory_capture_queue": frozenset(
+        """source_message_digest epoch session_id provider_session_ref generation
+        principal_id project_ref provenance payload_text payload_attachments
+        attachment_bundle_id occurred_at_ms provider_timestamp_ms state attempts
+        next_retry_at lease_owner lease_at lease_token last_error add_request_id add_status
+        created_at completed_at""".split()
+    ),
+    "memory_flush_settlements": frozenset(
+        """settlement_id provider_session_ref epoch generation operation_kind
+        operation_token observation request_id confirmed_watermark_ms observed_at
+        error_code recovery_origin attempts""".split()
+    ),
+}
+_V3_PROJECT_COLUMNS = frozenset(
+    "principal_id project_id created_at last_written_at".split()
+)
 
 
 @dataclass(frozen=True)
@@ -145,6 +198,7 @@ class MemoryStore:
         requested = db_path or root.logical_home / "state" / MEMORY_STORE_DIRNAME / MEMORY_STORE_FILENAME
         self.path = root.confine(requested)
         ensure_private_directory(self._effective_home, self.path.parent)
+        self._prepare_database_file(harden=True)
         self._initialize()
 
     def ensure_meta(self) -> MemoryMeta:
@@ -360,11 +414,9 @@ class MemoryStore:
             if version == MEMORY_STORE_SCHEMA_VERSION and tables == {"memory_meta", "memory_projects"}:
                 _verify_schema(conn)
                 return
-            known = {
-                "memory_meta", "memory_projects", "memory_attachment_bundle", "memory_session_flush_state",
-                "memory_capture_queue", "memory_flush_settlements",
-            }
-            if version not in {0, 1, 2, 3} or not tables.issubset(known):
+            if version not in {0, 1, 2, 3} or not _matches_released_schema(
+                conn, version
+            ):
                 raise RuntimeError(f"Unsupported Memory store schema version: {version}")
             meta_values = _legacy_meta(conn) if "memory_meta" in tables else None
             projects = _legacy_projects(conn, tables)
@@ -404,6 +456,7 @@ class MemoryStore:
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
+        self._prepare_database_file()
         conn = sqlite3.connect(self.path, timeout=5.0, isolation_level=None)
         conn.row_factory = sqlite3.Row
         try:
@@ -426,6 +479,35 @@ class MemoryStore:
             else:
                 conn.execute("COMMIT")
 
+    def _prepare_database_file(self, *, harden: bool = False) -> None:
+        descriptor: int | None = None
+        try:
+            try:
+                self.path.lstat()
+            except FileNotFoundError:
+                descriptor = create_confined_file(
+                    self._effective_home,
+                    self.path,
+                    read_write=True,
+                )
+            else:
+                opener = (
+                    open_and_harden_confined_regular_file
+                    if harden
+                    else open_confined_regular_file
+                )
+                descriptor = opener(
+                    self._effective_home,
+                    self.path,
+                )
+        except ConfinedFilesystemError as error:
+            raise OSError(
+                "Memory database path must be a private regular file"
+            ) from error
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+
 
 def _application_tables(conn: sqlite3.Connection) -> set[str]:
     return {
@@ -433,6 +515,44 @@ def _application_tables(conn: sqlite3.Connection) -> set[str]:
         for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         if not str(row[0]).startswith("sqlite_")
     }
+
+
+def _table_columns(conn: sqlite3.Connection) -> dict[str, frozenset[str]]:
+    return {
+        table: frozenset(
+            str(row[0])
+            for row in conn.execute("SELECT name FROM pragma_table_info(?)", (table,))
+        )
+        for table in _application_tables(conn)
+    }
+
+
+def _matches_released_schema(conn: sqlite3.Connection, version: int) -> bool:
+    columns = _table_columns(conn)
+    if version == 0:
+        if not columns:
+            return True
+        if columns.get("memory_meta") != _V0_META_COLUMNS or set(columns) != {
+            "memory_meta",
+            "memory_capture_queue",
+        }:
+            return False
+        queue_columns = columns["memory_capture_queue"]
+        return queue_columns in {
+            _V0_QUEUE_COLUMNS,
+            _V0_QUEUE_COLUMNS | {"provider_session_ref"},
+        }
+    if version not in {1, 2, 3}:
+        return False
+    expected = dict(_V2_TABLE_COLUMNS)
+    if version == 1:
+        expected["memory_meta"] = expected["memory_meta"] - {
+            "processing_fault_generation",
+            "processing_recovery_generation",
+        }
+    if version == 3:
+        expected["memory_projects"] = _V3_PROJECT_COLUMNS
+    return columns == expected
 
 
 def _execute_sql_script(conn: sqlite3.Connection, script: str) -> None:

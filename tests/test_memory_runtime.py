@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from core.memory.artifact import FakeMemoryArtifactManager
 from core.memory.runtime import MemoryConfig, MemoryRuntime
 from core.memory.store import MemoryStore
 
@@ -40,6 +41,53 @@ async def test_runtime_close_drops_volatile_work(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
     await runtime.close()
     assert runtime.closed
+
+
+@pytest.mark.asyncio
+async def test_missing_provider_call_log_remains_unavailable(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+
+    projection = await runtime._processing_record_provider_checks(None)
+
+    assert projection.source.status == "unavailable"
+    assert projection.source.reason == "provider_call_log_unavailable"
+    assert projection.items == ()
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_provider_root_cutover_keeps_capture_fenced(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        store=MemoryStore(
+            tmp_path / "state" / "memory" / "memory.sqlite",
+            effective_home=tmp_path,
+        ),
+        artifact_manager=FakeMemoryArtifactManager(python=Path(__file__)),
+        effective_home=tmp_path,
+    )
+
+    async def probe_processing(_python: Path, _config: MemoryConfig) -> bool:
+        return True
+
+    def reject_provider_root(*_args: object) -> None:
+        raise OSError("provider root is invalid")
+
+    monkeypatch.setattr(runtime, "_probe_processing", probe_processing)
+    monkeypatch.setattr(runtime._provider_root_owner, "ensure", reject_provider_root)
+    runtime.module.pause_claims()
+
+    result = await runtime._reconcile_locked(
+        runtime._config,
+        claims_already_paused=True,
+    )
+
+    assert result == {"ok": False, "error": "memory_clear_failed"}
+    assert runtime.module._writer.reserve("later") == "disabled"
+    await runtime.close()
 
 
 def test_runtime_store_is_identity_only(tmp_path: Path) -> None:

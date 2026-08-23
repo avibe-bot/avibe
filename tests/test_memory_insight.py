@@ -45,9 +45,14 @@ def test_scoped_diagnostics_validate_identity_before_reading(tmp_path: Path) -> 
 
 
 def test_processing_source_observation_keeps_calls_independent(tmp_path: Path) -> None:
-    observation = _reader(tmp_path).source_observation()
+    reader = _reader(tmp_path)
+    observation = reader.source_observation()
     assert observation.capture.status == "unavailable"
     assert observation.calls.status == "unavailable"
+    preflight = reader.installation_preflight_calls()
+    assert preflight.source.status == "unavailable"
+    assert preflight.source.reason == "provider_call_log_unavailable"
+    assert preflight.items == ()
 
 
 def test_empty_authorized_call_log_is_available_not_unavailable(tmp_path: Path) -> None:
@@ -60,6 +65,9 @@ def test_empty_authorized_call_log_is_available_not_unavailable(tmp_path: Path) 
     assert result["truncated"] is False
     assert result["sections"]["calls"]["status"] == "available"
     assert reader.source_observation().calls.status == "available"
+    preflight = reader.installation_preflight_calls()
+    assert preflight.source.status == "available"
+    assert preflight.items == ()
 
 
 def test_empty_call_log_under_uri_significant_home_is_available(tmp_path: Path) -> None:
@@ -120,6 +128,27 @@ def test_provider_calls_are_scoped_by_direct_authorization_evidence(tmp_path: Pa
         "bob",
     }
     assert "unscoped" not in {call["id"] for call in admin["calls"]}
+
+
+def test_parent_linked_calls_are_not_listed_as_unlinked(tmp_path: Path) -> None:
+    call_log = tmp_path / "calls.sqlite"
+    initialize_call_log(call_log)
+    with sqlite3.connect(call_log) as conn:
+        conn.execute(
+            """
+            INSERT INTO provider_call (
+                id, started_at_ms, duration_ms, kind, stage, status,
+                request_json, request_bytes, parent_type, parent_id,
+                project_id, owner_id
+            ) VALUES ('parent-linked', 1, 1, 'llm', 'cascade', 'ok', '{}', 2,
+                      'memcell', 'mc-alice', 'default', ?)
+            """,
+            (PRINCIPAL,),
+        )
+    reader = _reader(tmp_path)
+
+    assert reader.list_unlinked_calls((PRINCIPAL, "default"), 20)["calls"] == []
+    assert reader.list_admin_unlinked_calls(20)["calls"] == []
 
 
 def test_memory_entries_and_linked_calls_remain_authorization_scoped(
@@ -188,6 +217,19 @@ def test_memory_entries_and_linked_calls_remain_authorization_scoped(
                 ("call-assistant", "mc-assistant", f"{PRINCIPAL}-agent"),
             ],
         )
+        conn.executemany(
+            """
+            INSERT INTO provider_call (
+                id, started_at_ms, duration_ms, kind, stage, status,
+                request_json, request_bytes, memcell_id, project_id, owner_id
+            ) VALUES (?, ?, 1, 'llm', 'cascade', 'ok', '{}', 2,
+                      'mc-alice', 'default', ?)
+            """,
+            [
+                (f"call-alice-{index:02d}", index + 2, PRINCIPAL)
+                for index in range(20)
+            ],
+        )
 
     first = reader.list_entries((PRINCIPAL, "default"), None, 1)
     second = reader.list_entries(
@@ -200,7 +242,7 @@ def test_memory_entries_and_linked_calls_remain_authorization_scoped(
     assert [entry["memcell_id"] for entry in second["entries"]] == [
         "mc-assistant"
     ]
-    assert first["entries"][0]["authorized_call_count"] == 1
+    assert first["entries"][0]["authorized_call_count"] == 21
     assert first["sections"]["capture"]["status"] == "unavailable"
     assert first["sections"]["everos"]["status"] == "available"
     assert {entry["memcell_id"] for entry in admin["entries"]} == {
@@ -209,7 +251,9 @@ def test_memory_entries_and_linked_calls_remain_authorization_scoped(
         "mc-bob",
     }
     assert detail["status"] == "ok"
-    assert [call["id"] for call in detail["calls"]] == ["call-alice"]
+    assert len(detail["calls"]) == 20
+    assert detail["omitted_call_count"] == 1
+    assert "call-cross-owner" not in {call["id"] for call in detail["calls"]}
     assert detail["capture"] == {
         "status": "unavailable",
         "reason": "volatile_delivery_state",

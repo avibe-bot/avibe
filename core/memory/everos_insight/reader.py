@@ -17,7 +17,11 @@ from pathlib import Path
 from typing import Any, TypeAlias
 
 from core.memory.everos_insight.recorder import _scrub_json, _scrub_text
-from core.memory.processing_record import ProcessingSourceObservations, SourceObservation
+from core.memory.processing_record import (
+    ProcessingSourceObservations,
+    ProviderCheckProjection,
+    SourceObservation,
+)
 from core.memory.project_ids import is_persisted_memory_project_id
 from core.memory.store import (
     derive_assistant_memory_owner_id,
@@ -112,10 +116,16 @@ class MemoryInsightReader:
             calls=_call_source_status(self._paths.call_log_db_path, observed),
         )
 
-    def installation_preflight_calls(self) -> tuple[dict[str, Any], ...]:
+    def installation_preflight_calls(self) -> ProviderCheckProjection:
+        observed = _utc_now()
         with _read_only(self._paths.call_log_db_path) as conn:
             if conn is None:
-                return ()
+                return ProviderCheckProjection(
+                    SourceObservation(
+                        "unavailable", observed, "provider_call_log_unavailable"
+                    ),
+                    (),
+                )
             try:
                 _validate_provider_call_source(conn)
                 rows = conn.execute(
@@ -124,8 +134,16 @@ class MemoryInsightReader:
                     "ORDER BY started_at_ms DESC, id DESC LIMIT 20"
                 ).fetchall()
             except sqlite3.Error:
-                return ()
-        return tuple(self._call_projection(row) for row in rows)
+                return ProviderCheckProjection(
+                    SourceObservation(
+                        "unavailable", observed, "provider_call_log_unavailable"
+                    ),
+                    (),
+                )
+        return ProviderCheckProjection(
+            SourceObservation("available", observed),
+            tuple(self._call_projection(row) for row in rows),
+        )
 
     def list_unlinked_calls(
         self, scope: MemoryReadScope, limit: int
@@ -161,7 +179,8 @@ class MemoryInsightReader:
                         rows = list(
                             conn.execute(
                                 f"SELECT {_CALL_COLUMNS} FROM provider_call "
-                                "WHERE memcell_id IS NULL AND project_id = ? "
+                                "WHERE memcell_id IS NULL "
+                                "AND parent_type IS NOT 'memcell' AND project_id = ? "
                                 "AND owner_id IN (?, ?) "
                                 "ORDER BY started_at_ms DESC, id DESC LIMIT ?",
                                 (
@@ -191,6 +210,7 @@ class MemoryInsightReader:
                             conn.execute(
                                 f"SELECT {_CALL_COLUMNS} FROM provider_call "
                                 "WHERE memcell_id IS NULL "
+                                "AND parent_type IS NOT 'memcell' "
                                 "AND memory_owner_valid(owner_id) = 1 "
                                 "AND memory_project_valid(project_id) = 1 "
                                 "ORDER BY started_at_ms DESC, id DESC LIMIT ?",
@@ -345,7 +365,7 @@ class MemoryInsightReader:
             }
         row = rows[0]
         owner_id, row_project = _memcell_scope(row)
-        calls, call_source = self._detail_calls(
+        calls, omitted_call_count, call_source = self._detail_calls(
             memcell_id,
             owner_id=owner_id,
             project_id=row_project,
@@ -367,7 +387,7 @@ class MemoryInsightReader:
                 }
             ],
             "calls": calls,
-            "omitted_call_count": 0,
+            "omitted_call_count": omitted_call_count,
             "omitted_step_count": 0,
             "current_state": {
                 "status": "unavailable",
@@ -516,27 +536,30 @@ class MemoryInsightReader:
         *,
         owner_id: str,
         project_id: str,
-    ) -> tuple[list[dict[str, Any]], SourceObservation]:
+    ) -> tuple[list[dict[str, Any]], int, SourceObservation]:
         observed = _utc_now()
         source = _call_source_status(self._paths.call_log_db_path, observed)
         if source.status != "available":
-            return [], source
+            return [], 0, source
         try:
             with _read_only(self._paths.call_log_db_path) as conn:
                 if conn is None:
                     raise sqlite3.OperationalError("call log unavailable")
                 rows = conn.execute(
-                    f"SELECT {_CALL_COLUMNS} FROM provider_call "
+                    f"SELECT {_CALL_COLUMNS}, COUNT(*) OVER () AS total_count "
+                    "FROM provider_call "
                     "WHERE owner_id = ? AND project_id = ? AND "
                     "(memcell_id = ? OR (parent_type = 'memcell' AND parent_id = ?)) "
                     "ORDER BY started_at_ms DESC, id DESC LIMIT 20",
                     (owner_id, project_id, memcell_id, memcell_id),
                 ).fetchall()
         except sqlite3.Error:
-            return [], SourceObservation(
+            return [], 0, SourceObservation(
                 "unavailable", observed, "provider_call_log_unavailable"
             )
-        return [self._call_projection(row) for row in rows], source
+        total_count = int(rows[0]["total_count"]) if rows else 0
+        calls = [self._call_projection(row) for row in rows]
+        return calls, max(0, total_count - len(calls)), source
 
     def _entry_projection(self, row: sqlite3.Row) -> dict[str, Any]:
         owner_id, project_id = _memcell_scope(row)

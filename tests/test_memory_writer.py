@@ -261,6 +261,18 @@ async def test_ambiguous_failure_never_replays_and_disables_intake(tmp_path: Pat
 async def test_ambiguous_failure_drops_already_queued_captures_when_reap_fails(
     tmp_path: Path,
 ) -> None:
+    current = datetime(2026, 8, 23, 1, 2, 3, tzinfo=timezone.utc)
+    processing_events: list[tuple[str, str | None, str, int]] = []
+
+    async def processing_event(
+        event: str,
+        kind: str | None,
+        occurred_at: str,
+        queued: int,
+    ) -> bool:
+        processing_events.append((event, kind, occurred_at, queued))
+        return True
+
     provider = FakeMemoryProvider(
         ingest_failures=deque(
             [MemoryProviderFailure("memory_provider_timeout", ambiguous=True)]
@@ -275,7 +287,13 @@ async def test_ambiguous_failure_drops_already_queued_captures_when_reap_fails(
         return await original_add(capture)
 
     provider.add = counted_add
-    writer = _writer(tmp_path, provider, ambiguous_stop_reap=lambda: False)
+    writer = _writer(
+        tmp_path,
+        provider,
+        ambiguous_stop_reap=lambda: False,
+        now=lambda: current,
+        processing_event=processing_event,
+    )
     start_worker = writer._ensure_worker
     writer._ensure_worker = lambda: None
     _reserve_and_offer(writer, 0)
@@ -289,6 +307,9 @@ async def test_ambiguous_failure_drops_already_queued_captures_when_reap_fails(
     assert provider.captures == []
     assert writer.unavailable
     assert writer._permits == MAX_WRITER_PERMITS
+    assert processing_events == [
+        ("fault", "engine", "2026-08-23T01:02:03.000Z", 2)
+    ]
 
 
 @pytest.mark.asyncio
@@ -303,6 +324,26 @@ async def test_quiesce_drops_queued_capture_instead_of_delivering_it(tmp_path: P
     assert provider.captures == []
     assert writer._queue.empty()
     assert writer._permits == MAX_WRITER_PERMITS
+
+
+@pytest.mark.asyncio
+async def test_quiesce_handles_asyncio_timeout_on_python_310(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = _writer(tmp_path, FakeMemoryProvider())
+
+    async def timed_out_close() -> None:
+        writer._closed = True
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(writer, "close", timed_out_close)
+
+    assert not await writer.quiesce(timeout_seconds=0.001)
+    writer.resume_intake()
+    reservation = writer.reserve("after-timeout")
+    assert not isinstance(reservation, str)
+    reservation.release()
 
 
 @pytest.mark.asyncio

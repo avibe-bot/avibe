@@ -174,6 +174,29 @@ async def test_unadmitted_attachment_cleanup_finishes_before_permit_release(
 
 
 @pytest.mark.asyncio
+async def test_cancelled_unadmitted_cleanup_still_releases_writer_reservation(
+    tmp_path: Path,
+) -> None:
+    module, _store, _provider = _module(tmp_path)
+    reservation = module._writer.reserve("cancelled-cleanup")
+    assert not isinstance(reservation, str)
+
+    async def cancelled_cleanup(_bundle_id: str) -> None:
+        raise asyncio.CancelledError
+
+    module._release_unadmitted_bundle = cancelled_cleanup
+
+    with pytest.raises(asyncio.CancelledError):
+        await module._release_unadmitted_capture(
+            reservation,
+            SimpleNamespace(bundle_id="bundle"),
+        )
+
+    assert not reservation.active
+    assert module._writer._permits == MAX_WRITER_PERMITS
+
+
+@pytest.mark.asyncio
 async def test_startup_scrubs_leftover_attachment_bundles(tmp_path: Path) -> None:
     source = tmp_path / "attachments" / "avibe" / "source.png"
     source.parent.mkdir(parents=True)
@@ -242,6 +265,29 @@ async def test_startup_cleanup_failure_disables_only_attachments(tmp_path: Path)
     assert await module.capture(_request()) == CaptureAccepted()
     await module.wait_writer_idle_for_tests()
     assert len(provider.captures) == 1
+    attachment = CaptureAttachment(
+        kind="image",
+        name="source.png",
+        uri=(tmp_path / "attachments" / "avibe" / "source.png").as_uri(),
+        ext="png",
+    )
+    assert await module.capture(
+        _request(
+            source_message_id="attachment-only",
+            text="",
+            attachments=(attachment,),
+        )
+    ) == CaptureSkipped(reason="memory_store_unavailable")
+    assert await module.capture(
+        _request(
+            source_message_id="captioned-attachment",
+            text="keep the caption",
+            attachments=(attachment,),
+        )
+    ) == CaptureAccepted()
+    await module.wait_writer_idle_for_tests()
+    assert provider.captures[-1].text == "keep the caption"
+    assert provider.captures[-1].attachments == ()
     await module.clear_attachments()
     assert module._writer.attachments_enabled
 

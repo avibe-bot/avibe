@@ -253,7 +253,11 @@ class BestEffortMemoryWriter:
                 self.close(),
                 timeout=max(deadline - loop.time(), 0.001),
             )
-        except TimeoutError:
+        except asyncio.TimeoutError:
+            # ``wait_for`` cancels ``close`` and waits for that cancellation.
+            # The old authority remains active on this failure path, so leave
+            # the volatile writer reusable while intake stays fenced.
+            self._closed = False
             return False
         while self._permits < MAX_WRITER_PERMITS:
             if loop.time() >= deadline:
@@ -564,7 +568,7 @@ class BestEffortMemoryWriter:
         except asyncio.CancelledError:
             return
 
-    async def _ambiguous_outcome(self, error: str) -> None:
+    async def _ambiguous_outcome(self, _error: str) -> None:
         self._unavailable = True
         self._intake_paused = True
         self._pending.clear()
@@ -579,7 +583,17 @@ class BestEffortMemoryWriter:
                 self._unavailable = True
         if self._processing_event is not None:
             try:
-                await self._processing_event("fault", "engine", error, 0)
+                occurred_at = self._now()
+                if occurred_at.tzinfo is None:
+                    occurred_at = occurred_at.replace(tzinfo=timezone.utc)
+                await self._processing_event(
+                    "fault",
+                    "engine",
+                    occurred_at.astimezone(timezone.utc)
+                    .isoformat(timespec="milliseconds")
+                    .replace("+00:00", "Z"),
+                    self._queued_items,
+                )
             except Exception:
                 pass
 

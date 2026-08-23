@@ -31,6 +31,27 @@ def test_new_store_is_identity_only_v4(tmp_path: Path) -> None:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == MEMORY_STORE_SCHEMA_VERSION
 
 
+def test_store_rejects_symlinked_database_without_touching_target(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    path = home / "state" / "memory" / "memory.sqlite"
+    path.parent.mkdir(parents=True)
+    outside = tmp_path / "outside.sqlite"
+    with sqlite3.connect(outside) as conn:
+        conn.execute("CREATE TABLE evidence (value TEXT NOT NULL)")
+        conn.execute("INSERT INTO evidence VALUES ('keep-me')")
+    before = outside.read_bytes()
+    path.symlink_to(outside)
+
+    with pytest.raises(OSError, match="private regular file"):
+        MemoryStore(path, effective_home=home)
+
+    assert outside.read_bytes() == before
+    with sqlite3.connect(outside) as conn:
+        assert conn.execute("SELECT value FROM evidence").fetchone()[0] == "keep-me"
+
+
 def test_volatile_admission_preserves_identity_without_payload_tables(tmp_path: Path) -> None:
     """MEMORY-SEARCH-013: admission persists identity but no delivery payload."""
 
@@ -148,7 +169,7 @@ def test_provider_session_ref_keeps_released_digest_and_epoch_suffix() -> None:
     ) == f"src--{expected}--e{epoch}"
 
 
-@pytest.mark.parametrize("version", [1, 2, 3])
+@pytest.mark.parametrize("version", [0, 1, 2, 3])
 def test_unknown_released_store_shape_is_left_untouched(
     tmp_path: Path,
     version: int,
@@ -156,8 +177,10 @@ def test_unknown_released_store_shape_is_left_untouched(
     path = _store_path(tmp_path)
     path.parent.mkdir(parents=True)
     with sqlite3.connect(path) as conn:
-        conn.execute("CREATE TABLE unexpected (value TEXT NOT NULL)")
-        conn.execute("INSERT INTO unexpected VALUES ('keep-me')")
+        conn.execute(
+            "CREATE TABLE memory_meta (singleton INTEGER PRIMARY KEY, scope_key BLOB)"
+        )
+        conn.execute("INSERT INTO memory_meta VALUES (1, ?)", (b"keep-me",))
         conn.execute(f"PRAGMA user_version = {version}")
     before = path.read_bytes()
 
@@ -168,55 +191,89 @@ def test_unknown_released_store_shape_is_left_untouched(
     assert not path.with_name(f"{path.name}-wal").exists()
     with sqlite3.connect(path) as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == version
-        assert conn.execute("SELECT value FROM unexpected").fetchone()[0] == "keep-me"
+        assert conn.execute(
+            "SELECT scope_key FROM memory_meta WHERE singleton = 1"
+        ).fetchone()[0] == b"keep-me"
 
 
-@pytest.mark.parametrize("version", [0, 1, 3])
-def test_released_identity_shapes_migrate_without_provider_io(tmp_path: Path, version: int) -> None:
+@pytest.mark.parametrize(
+    ("version", "schema_path"),
+    [
+        (0, "tests/fixtures/memory_initial_foundation_v0.sql"),
+        (0, "tests/fixtures/memory_foundation_v0.sql"),
+        (1, "tests/fixtures/memory_foundation_v1.sql"),
+        (3, "core/memory/schema_v2.sql"),
+    ],
+)
+def test_released_identity_shapes_migrate_without_provider_io(
+    tmp_path: Path,
+    version: int,
+    schema_path: str,
+) -> None:
     path = _store_path(tmp_path)
     path.parent.mkdir(parents=True)
     with sqlite3.connect(path) as conn:
-        conn.executescript(
-            """
-            CREATE TABLE memory_meta (
-                singleton INTEGER PRIMARY KEY,
-                epoch INTEGER NOT NULL,
-                clear_in_progress INTEGER NOT NULL,
-                scope_key BLOB NOT NULL,
-                provider_root_id TEXT NOT NULL,
-                last_provider_timestamp_ms INTEGER NOT NULL,
-                missed_count INTEGER NOT NULL DEFAULT 0,
-                last_success_at TEXT,
-                last_error TEXT,
-                last_error_at TEXT,
-                updated_at TEXT
-            );
-            CREATE TABLE memory_capture_queue (
-                source_message_digest TEXT PRIMARY KEY,
-                principal_id TEXT NOT NULL,
-                project_ref TEXT NOT NULL,
-                created_at TEXT
-            );
-            """
-        )
+        conn.executescript(Path(schema_path).read_text(encoding="utf-8"))
         if version == 3:
             conn.execute(
-                "CREATE TABLE memory_projects (principal_id TEXT, project_id TEXT)"
+                """CREATE TABLE memory_projects (
+                    principal_id TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_written_at TEXT NOT NULL,
+                    PRIMARY KEY (principal_id, project_id)
+                )"""
             )
         principal = "u-" + "c" * 32
         project = "p-" + ("d" * 32)
         conn.execute(
-            "INSERT INTO memory_meta VALUES (1, 7, 0, ?, 'legacy-root', 42, 3, ?, NULL, NULL, ?)",
+            """INSERT INTO memory_meta (
+                singleton, epoch, clear_in_progress, scope_key, provider_root_id,
+                last_provider_timestamp_ms, missed_count, last_success_at, updated_at
+            ) VALUES (1, 7, 0, ?, 'legacy-root', 42, 3, ?, ?)""",
             (b"z" * 32, "2026-02-03T00:00:00Z", "2026-02-03T00:00:00Z"),
         )
-        conn.execute(
-            "INSERT INTO memory_capture_queue VALUES ('digest', ?, ?, ?)",
-            (principal, project, "2026-02-01T00:00:00Z"),
-        )
+        queue_columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(memory_capture_queue)")
+        }
+        if "generation" in queue_columns:
+            conn.execute(
+                """INSERT INTO memory_capture_queue (
+                    source_message_digest, epoch, session_id, provider_session_ref,
+                    generation, principal_id, project_ref, provenance, payload_text,
+                    occurred_at_ms, provider_timestamp_ms, state, created_at
+                ) VALUES ('digest', 7, 'session', 'provider-session', 1, ?, ?,
+                          'user_input', 'payload', 1, 1, 'pending', ?)""",
+                (principal, project, "2026-02-01T00:00:00Z"),
+            )
+        else:
+            names = [
+                "source_message_digest", "epoch", "session_id", "principal_id",
+                "project_ref", "provenance", "payload_text", "occurred_at_ms",
+                "provider_timestamp_ms", "state", "created_at",
+            ]
+            values: list[object] = [
+                "digest", 7, "session", principal, project, "user_input", "payload",
+                1, 1, "pending", "2026-02-01T00:00:00Z",
+            ]
+            if "provider_session_ref" in queue_columns:
+                names.insert(3, "provider_session_ref")
+                values.insert(3, "provider-session")
+            placeholders = ", ".join("?" for _ in values)
+            conn.execute(
+                f"INSERT INTO memory_capture_queue ({', '.join(names)}) "
+                f"VALUES ({placeholders})",
+                values,
+            )
         if version == 3:
             conn.execute(
-                "INSERT INTO memory_projects VALUES (?, ?)",
-                (principal, project),
+                "INSERT INTO memory_projects VALUES (?, ?, ?, ?)",
+                (
+                    principal,
+                    project,
+                    "2026-02-01T00:00:00Z",
+                    "2026-02-01T00:00:00Z",
+                ),
             )
         conn.execute(f"PRAGMA user_version = {version}")
     store = MemoryStore(path, effective_home=tmp_path)

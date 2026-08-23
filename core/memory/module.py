@@ -527,6 +527,12 @@ class MemoryModule:
             validation_error = self._capture_validation_error(request, normalized_text)
             if validation_error is not None:
                 return await self._skipped_with_missed(validation_error)
+            if (
+                request.attachments
+                and not self._writer.attachments_enabled
+                and not normalized_text.strip()
+            ):
+                return await self._skipped_with_missed("memory_store_unavailable")
 
             try:
                 disk_free = int(await asyncio.to_thread(self._disk_free_bytes))
@@ -689,9 +695,11 @@ class MemoryModule:
         reservation: WriterReservation,
         bundle: PinnedBundle | None,
     ) -> None:
-        if bundle is not None:
-            await self._release_unadmitted_bundle(bundle.bundle_id)
-        reservation.release()
+        try:
+            if bundle is not None:
+                await self._release_unadmitted_bundle(bundle.bundle_id)
+        finally:
+            reservation.release()
 
     def _release_cancelled_pinned_bundle(self, bundle: PinnedBundle) -> None:
         if self._attachment_store is None:
