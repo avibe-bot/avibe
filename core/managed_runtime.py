@@ -159,7 +159,7 @@ class ManagedRuntimeManager:
         offline: bool = False,
     ) -> None:
         self.spec = spec
-        self.runtime_dir = runtime_dir
+        self.runtime_dir = runtime_dir.expanduser().absolute()
         self.manifest_path = Path(manifest_path).expanduser() if manifest_path else None
         self.manifest_url = manifest_url
         self.offline = offline

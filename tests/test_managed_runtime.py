@@ -113,8 +113,10 @@ def _subclass_runtime_manager(
     runtime_kind: str,
     manifest: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    runtime_dir: Path | None = None,
 ) -> ManagedRuntimeManager:
-    runtime_dir = tmp_path / f"{runtime_kind}-runtime"
+    runtime_dir = runtime_dir or tmp_path / f"{runtime_kind}-runtime"
     if runtime_kind == "git":
         return GitRuntimeManager(runtime_dir=runtime_dir, manifest_path=manifest)
     if runtime_kind == "memory":
@@ -159,6 +161,33 @@ def _resolve_subclass_runtime(manager: ManagedRuntimeManager, runtime_kind: str)
     if runtime_kind == "memory":
         return manager.resolve_python()  # type: ignore[attr-defined]
     return manager.resolve_engine_path()  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("runtime_kind", ["git", "memory", "model-hub"])
+def test_subclass_relative_runtime_directory_persists_an_admissible_absolute_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_kind: str,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest = _write_subclass_runtime_fixture(tmp_path, runtime_kind)
+    monkeypatch.chdir(tmp_path)
+    relative_runtime_dir = Path("relative-runtimes") / runtime_kind
+    manager = _subclass_runtime_manager(
+        tmp_path,
+        runtime_kind,
+        manifest,
+        monkeypatch,
+        runtime_dir=relative_runtime_dir,
+    )
+
+    installed = manager.ensure()
+
+    assert installed["ok"] is True
+    assert manager.runtime_dir == tmp_path / relative_runtime_dir
+    assert Path(installed["install_dir"]).is_absolute()
+    assert manager.status()["path"] == installed["path"]
+    assert _resolve_subclass_runtime(manager, runtime_kind) == Path(installed["path"])
 
 
 @pytest.mark.parametrize("runtime_kind", ["git", "memory", "model-hub"])
