@@ -4325,6 +4325,7 @@
         "current_state_unavailable": "当前档案和索引状态不可用",
         "index_state_unavailable": "当前索引状态不可用",
         "index_state_missing_or_retained": "当前索引状态缺失或已因保留策略移除",
+        "index_state_incomplete": "部分关联索引状态缺失或超出显示上限",
         "unknown": "原生数据不可用或不完整"
       },
       "runStatus": {
@@ -4338,6 +4339,16 @@
       "profileStatus": {
         "present": "存在",
         "missing": "缺失"
+      },
+      "indexStatus": {
+        "available": "可用",
+        "partial": "部分可用",
+        "unavailable": "不可用",
+        "pending": "等待中",
+        "processing": "处理中",
+        "done": "已完成",
+        "failed": "失败",
+        "unknown": "未知"
       },
       "sourceReason": "原因：{{reason}}",
       "sourceNotObserved": "未观测",
@@ -4411,6 +4422,8 @@
         "runCount": "{{count}} 次运行",
         "sourceNotice": "{{section}}为{{state}}（{{reason}}）。",
         "project": "项目",
+        "projectLabel": "记忆项目",
+        "projectDefault": "默认",
         "session": "会话",
         "owner": "所有者",
         "created": "创建时间",

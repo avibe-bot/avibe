@@ -574,8 +574,8 @@ export type ApiContextType = {
   getMemorySettings: () => Promise<MemorySettingsResult>;
   saveMemorySettings: (patch: MemorySettingsPatch) => Promise<MemorySettingsResult>;
   getMemoryProcessingRecord: () => Promise<MemoryProcessingRecordResult>;
-  getMemoryProcessingRecordEntries: (cursor?: string | null, limit?: number) => Promise<MemoryProcessingRecordListResult>;
-  getMemoryProcessingRecordEntry: (memcellId: string) => Promise<MemoryProcessingRecordDetailResult>;
+  getMemoryProcessingRecordEntries: (project: string, cursor?: string | null, limit?: number) => Promise<MemoryProcessingRecordListResult>;
+  getMemoryProcessingRecordEntry: (project: string, memcellId: string) => Promise<MemoryProcessingRecordDetailResult>;
   getMemoryStatus: () => Promise<MemoryStatusResult>;
   getMemoryFailures: () => Promise<MemoryFailureLogResult>;
   getMemoryMaintenance: () => Promise<MemoryMaintenanceResult>;
@@ -3778,13 +3778,15 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getMemorySettings: () => getJson('/api/memory/settings', { handleError: false }),
     saveMemorySettings: (patch) => patchJson('/api/memory/settings', patch, { handleError: false }),
     getMemoryProcessingRecord: () => getJson('/api/memory/processing-record', { handleError: false }),
-    getMemoryProcessingRecordEntries: (cursor = null, limit = 20) => {
-      const query = new URLSearchParams({ limit: String(limit) });
+    getMemoryProcessingRecordEntries: (project, cursor = null, limit = 20) => {
+      const query = new URLSearchParams({ limit: String(limit), project });
       if (cursor) query.set('cursor', cursor);
       return getJson(`/api/memory/processing-record/entries?${query.toString()}`, { handleError: false });
     },
-    getMemoryProcessingRecordEntry: (memcellId) =>
-      getJson(`/api/memory/processing-record/entry?memcell_id=${encodeURIComponent(memcellId)}`, { handleError: false }),
+    getMemoryProcessingRecordEntry: (project, memcellId) => {
+      const query = new URLSearchParams({ memcell_id: memcellId, project });
+      return getJson(`/api/memory/processing-record/entry?${query.toString()}`, { handleError: false });
+    },
     getMemoryStatus: () => getJson('/api/memory/status', { handleError: false }),
     getMemoryFailures: () => getJson('/api/memory/failures', { handleError: false }),
     getMemoryMaintenance: () => getJson('/api/memory/maintenance', { handleError: false }),

@@ -15,6 +15,7 @@ import { MemoryProcessingRecordPanel } from './MemoryProcessingRecordPanel';
 const api = vi.hoisted(() => ({
   getMemoryProcessingRecordEntries: vi.fn(),
   getMemoryProcessingRecordEntry: vi.fn(),
+  listMemoryProjects: vi.fn(),
 }));
 
 vi.mock('../../../context/ApiContext', () => ({
@@ -28,6 +29,9 @@ vi.mock('react-i18next', () => {
       return `${options?.section}: ${options?.state} (${options?.reason})`;
     }
     if (key === 'memory.processingRecord.runStatus.failed') return 'Failed';
+    if (key === 'memory.processingRecord.indexStatus.available') return 'Index available';
+    if (key === 'memory.processingRecord.indexStatus.failed') return 'Index failed';
+    if (key === 'memory.processingRecord.indexStatus.unknown') return 'Unknown index state';
     if (key === 'memory.kind.episode') return 'Episode';
     return key;
   };
@@ -122,6 +126,14 @@ describe('MemoryProcessingRecordPanel', () => {
     vi.clearAllMocks();
     api.getMemoryProcessingRecordEntries.mockResolvedValue(listResult());
     api.getMemoryProcessingRecordEntry.mockResolvedValue(detailResult());
+    api.listMemoryProjects.mockResolvedValue({
+      status: 'ok',
+      projects: [
+        { id: 'default', kind: 'default' },
+        { id: 'notes', kind: 'named' },
+        { id: 'all', kind: 'all' },
+      ],
+    });
   });
 
   it('shows native section availability and preserves payload boundaries in detail', async () => {
@@ -132,13 +144,15 @@ describe('MemoryProcessingRecordPanel', () => {
 
     fireEvent.click(screen.getByText('Authorized payload').closest('button')!);
 
-    await waitFor(() => expect(api.getMemoryProcessingRecordEntry).toHaveBeenCalledWith('mc-1'));
+    await waitFor(() => expect(api.getMemoryProcessingRecordEntry).toHaveBeenCalledWith('default', 'mc-1'));
     expect(await screen.findByText('First boundary')).toBeTruthy();
     expect(screen.getByText('Second boundary')).toBeTruthy();
     expect(screen.getByText('Display-safe error')).toBeTruthy();
     expect(screen.getByText('Episode')).toBeTruthy();
     expect(screen.getByText('avibe/default_project/users/owner-1/episodes/episode-1.md')).toBeTruthy();
     expect(screen.getByText('Index projection failed')).toBeTruthy();
+    expect(screen.getByText(/Index available/)).toBeTruthy();
+    expect(screen.getByText(/Index failed/)).toBeTruthy();
   });
 
   it('ignores a list response superseded by a refresh', async () => {
@@ -176,5 +190,27 @@ describe('MemoryProcessingRecordPanel', () => {
 
     expect(await screen.findByText('After refresh')).toBeTruthy();
     expect(api.getMemoryProcessingRecordEntry).toHaveBeenCalledTimes(2);
+  });
+
+  it('loads list and detail from the selected project only', async () => {
+    render(<MemoryProcessingRecordPanel />);
+    await screen.findByText('Authorized payload');
+    const selector = await screen.findByLabelText(
+      'memory.processingRecord.records.projectLabel',
+    );
+
+    fireEvent.change(selector, { target: { value: 'notes' } });
+
+    await waitFor(() => expect(api.getMemoryProcessingRecordEntries).toHaveBeenCalledWith(
+      'notes',
+      null,
+      20,
+    ));
+    expect(screen.queryByRole('option', { name: 'all' })).toBeNull();
+    fireEvent.click((await screen.findByText('Authorized payload')).closest('button')!);
+    await waitFor(() => expect(api.getMemoryProcessingRecordEntry).toHaveBeenCalledWith(
+      'notes',
+      'mc-1',
+    ));
   });
 });

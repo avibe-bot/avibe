@@ -125,13 +125,18 @@ def _insert_run(
     memcell_id: str,
     session_id: str,
     error: str | None = None,
+    include_session: bool = True,
+    payload_extra: dict[str, object] | None = None,
 ) -> None:
     payload = {
         "memcell_id": memcell_id,
         "app_id": "avibe",
         "project_id": "default",
-        "session_id": session_id,
     }
+    if include_session:
+        payload["session_id"] = session_id
+    if payload_extra:
+        payload.update(payload_extra)
     with sqlite3.connect(db) as conn:
         conn.execute(
             "INSERT INTO run_record VALUES (?, 'extract_user_memory', 'failed', 2, "
@@ -397,6 +402,20 @@ def test_runs_require_direct_native_scope_and_scrub_display_error(tmp_path: Path
     )
     _insert_run(
         ome_db,
+        "run-exact-link-only",
+        memcell_id="mc-1",
+        session_id=SESSION,
+        include_session=False,
+    )
+    _insert_run(
+        ome_db,
+        "run-foreign-owner",
+        memcell_id="mc-1",
+        session_id=SESSION,
+        payload_extra={"owner_id": OTHER_PRINCIPAL},
+    )
+    _insert_run(
+        ome_db,
         "run-adjacent-only",
         memcell_id="mc-other",
         session_id=SESSION,
@@ -407,10 +426,14 @@ def test_runs_require_direct_native_scope_and_scrub_display_error(tmp_path: Path
     )["runs"]
 
     assert runs["status"] == "partial"
-    assert [item["run_id"] for item in runs["items"]] == ["run-direct"]
-    assert "exact-secret" not in runs["items"][0]["error"]
-    assert "provider.example" not in runs["items"][0]["error"]
-    assert "/Users/private" not in runs["items"][0]["error"]
+    assert {item["run_id"] for item in runs["items"]} == {
+        "run-direct",
+        "run-exact-link-only",
+    }
+    direct = next(item for item in runs["items"] if item["run_id"] == "run-direct")
+    assert "exact-secret" not in direct["error"]
+    assert "provider.example" not in direct["error"]
+    assert "/Users/private" not in direct["error"]
 
 
 def test_retained_away_runs_and_semantic_results_are_not_empty_success(
@@ -604,6 +627,42 @@ profile_timestamp_ms: 1700000000000
         "status": "present",
         "updated_at_ms": 1_700_000_000_000,
     }
+    assert detail["current_state"]["indexing"]["status"] == "available"
+
+    with sqlite3.connect(system_db) as conn:
+        conn.execute(
+            "DELETE FROM md_change_state WHERE md_path = ?", (relative_paths[0],)
+        )
+
+    incomplete = _reader(tmp_path).record_detail(
+        (PRINCIPAL, "default"), "mc-1"
+    )["current_state"]["indexing"]
+
+    assert incomplete["status"] == "partial"
+    assert incomplete["reason"] == "index_state_incomplete"
+    assert incomplete["omitted_count"] == 1
+
+
+def test_index_projection_is_partial_when_linked_paths_exceed_its_bound(
+    tmp_path: Path,
+) -> None:
+    system_db = _system_db(tmp_path)
+    _ome_db(tmp_path)
+    paths = {f"avibe/default_project/users/{PRINCIPAL}/episodes/{index}.md" for index in range(51)}
+    with sqlite3.connect(system_db) as conn:
+        conn.executemany(
+            "INSERT INTO md_change_state VALUES (?, 'episode', 'modified', 1, "
+            "'2026-08-24T00:00:00Z', '2026-08-24T00:00:05Z', 1, 'done', "
+            "NULL, '2026-08-24T00:00:05Z', 0, NULL)",
+            [(path,) for path in paths],
+        )
+
+    indexing = _reader(tmp_path)._index_state(paths)
+
+    assert indexing["status"] == "partial"
+    assert indexing["reason"] == "index_state_incomplete"
+    assert indexing["omitted_count"] == 1
+    assert len(indexing["items"]) == 50
 
 
 def test_run_source_requires_the_real_everos_123_contract(tmp_path: Path) -> None:

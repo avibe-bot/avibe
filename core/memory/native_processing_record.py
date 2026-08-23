@@ -392,8 +392,7 @@ class NativeProcessingRecordReader:
         has_session = "session_id" in payload
         has_owner = "owner_id" in payload
         if (
-            not (has_session or has_owner)
-            or (has_session and payload.get("session_id") != memcell["session_id"])
+            (has_session and payload.get("session_id") != memcell["session_id"])
             or (has_owner and payload.get("owner_id") != owner)
         ):
             return None
@@ -573,7 +572,16 @@ class NativeProcessingRecordReader:
         ]
         if not items:
             return _unavailable("index_state_missing_or_retained")
-        return {"status": "available", "items": items}
+        omitted_count = len(paths) - len(items)
+        complete = omitted_count == 0 and {
+            str(item["md_path"]) for item in rows
+        } == set(bounded_paths)
+        return {
+            "status": "available" if complete else "partial",
+            "reason": None if complete else "index_state_incomplete",
+            "items": items,
+            "omitted_count": omitted_count,
+        }
 
     def _owner_root(self, project_id: str, owner_id: str) -> Path:
         project_dir = "default_project" if project_id == "default" else project_id

@@ -247,9 +247,8 @@ attachment intake for that runtime, while a non-empty caption may be offered as
 text-only. The single provider rejection that positively proves no attachment
 write permits the same caption fallback.
 
-Processing Record and Provider Call Log remain independent, authorization-scoped,
-best-effort diagnostics. Missing evidence is reported as unavailable and never
-widens access.
+Processing Record is an authorization-scoped, best-effort projection of retained
+native data. Missing evidence is reported as unavailable and never widens access.
 
 ## Recall policy
 

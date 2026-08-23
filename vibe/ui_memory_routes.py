@@ -61,10 +61,14 @@ def _memory_response_body(response: Response) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def _processing_record_list_query(request: FastAPIRequest) -> tuple[str | None, int]:
+def _processing_record_list_query(
+    request: FastAPIRequest,
+) -> tuple[str | None, int, str | None]:
     items = list(request.query_params.multi_items())
     keys = [key for key, _value in items]
-    if any(key not in {"cursor", "limit"} for key in keys) or len(keys) != len(set(keys)):
+    if any(key not in {"cursor", "limit", "project"} for key in keys) or len(
+        keys
+    ) != len(set(keys)):
         raise ValueError("invalid Processing Record query")
     values = dict(items)
     cursor = values.get("cursor")
@@ -76,17 +80,35 @@ def _processing_record_list_query(request: FastAPIRequest) -> tuple[str | None, 
     limit = int(raw_limit)
     if not 1 <= limit <= 50:
         raise ValueError("invalid Processing Record limit")
-    return cursor, limit
+    project = values.get("project")
+    if project is not None:
+        from core.memory.project_ids import parse_agent_search_project
+
+        project = parse_agent_search_project(project)
+    return cursor, limit, project
 
 
-def _processing_record_entry_query(request: FastAPIRequest) -> str:
+def _processing_record_entry_query(
+    request: FastAPIRequest,
+) -> tuple[str, str | None]:
     items = list(request.query_params.multi_items())
-    if len(items) != 1 or items[0][0] != "memcell_id":
+    keys = [key for key, _value in items]
+    if (
+        any(key not in {"memcell_id", "project"} for key in keys)
+        or len(keys) != len(set(keys))
+        or "memcell_id" not in keys
+    ):
         raise ValueError("invalid Processing Record entry query")
-    memcell_id = items[0][1]
+    values = dict(items)
+    memcell_id = values["memcell_id"]
     if _PROCESSING_RECORD_ENTRY_ID_RE.fullmatch(memcell_id) is None:
         raise ValueError("invalid Processing Record entry id")
-    return memcell_id
+    project = values.get("project")
+    if project is not None:
+        from core.memory.project_ids import parse_agent_search_project
+
+        project = parse_agent_search_project(project)
+    return memcell_id, project
 
 
 async def _memory_internal_result(call: Callable[[], Any]) -> tuple[dict, int]:
@@ -1221,7 +1243,9 @@ def register_memory_routes(app) -> None:
             if user_key is None:
                 return _memory_forbidden_response()
             try:
-                cursor, limit = _processing_record_list_query(starlette_request)
+                cursor, limit, project = _processing_record_list_query(
+                    starlette_request
+                )
             except ValueError:
                 return _memory_response(
                     {"status": "failed", "error": "memory_invalid_input"},
@@ -1233,6 +1257,7 @@ def register_memory_routes(app) -> None:
                 lambda: internal_client.memory_processing_record_entries(
                     cursor=cursor,
                     limit=limit,
+                    project=project,
                     user_key=user_key,
                 )
             )
@@ -1246,7 +1271,9 @@ def register_memory_routes(app) -> None:
             if user_key is None:
                 return _memory_forbidden_response()
             try:
-                memcell_id = _processing_record_entry_query(starlette_request)
+                memcell_id, project = _processing_record_entry_query(
+                    starlette_request
+                )
             except ValueError:
                 return _memory_response(
                     {"status": "failed", "error": "memory_invalid_input"},
@@ -1257,6 +1284,7 @@ def register_memory_routes(app) -> None:
             return await _memory_internal_response(
                 lambda: internal_client.memory_processing_record_entry(
                     memcell_id,
+                    project=project,
                     user_key=user_key,
                 )
             )

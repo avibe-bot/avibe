@@ -896,11 +896,13 @@ def test_memory_processing_record_helpers_forward_query_and_sign_owner(monkeypat
             await internal_client.memory_processing_record_entries(
                 cursor="opaque_cursor",
                 limit=17,
+                project="notes",
                 user_key="avibe:remote:user-1",
                 socket_path=socket_path,
             )
             await internal_client.memory_processing_record_entry(
                 "mc_1",
+                project="notes",
                 user_key="avibe:remote:user-1",
                 socket_path=socket_path,
             )
@@ -910,9 +912,12 @@ def test_memory_processing_record_helpers_forward_query_and_sign_owner(monkeypat
     assert [(request.url.path, dict(request.url.params)) for request in captured] == [
         (
             "/internal/memory/processing-record/entries",
-            {"cursor": "opaque_cursor", "limit": "17"},
+            {"cursor": "opaque_cursor", "limit": "17", "project": "notes"},
         ),
-        ("/internal/memory/processing-record/entry", {"memcell_id": "mc_1"}),
+        (
+            "/internal/memory/processing-record/entry",
+            {"memcell_id": "mc_1", "project": "notes"},
+        ),
     ]
     for request in captured:
         assert request.headers["x-avibe-memory-user-key"] == "avibe:remote:user-1"

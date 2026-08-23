@@ -5,6 +5,7 @@ import { ArrowLeft, Clock3, Database, Loader2, RefreshCw } from 'lucide-react';
 
 import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
+import { Select } from '../../ui/select';
 import { useApi } from '../../../context/ApiContext';
 import type {
   MemoryProcessingRecordDetailResult,
@@ -15,6 +16,7 @@ import { memoryErrorMessage } from '../../../lib/memoryRead';
 import { createRequestSequencer, type RequestSequencer } from './useMemoryResource';
 
 type DetailOk = Extract<MemoryProcessingRecordDetailResult, { status: 'ok' }>;
+const FALLBACK_PROJECTS = [{ id: 'default', kind: 'default' as const }];
 
 const reasonLabel = (t: TFunction, reason: string | null | undefined): string => (
   reason
@@ -29,6 +31,11 @@ const formatTime = (value: number | string | null | undefined): string => {
   if (typeof value === 'string') return new Date(value).toLocaleString();
   return '-';
 };
+
+const indexStatusLabel = (t: TFunction, status: string): string => t(
+  `memory.processingRecord.indexStatus.${status}`,
+  { defaultValue: t('memory.processingRecord.indexStatus.unknown') },
+);
 
 const StatusBadge: React.FC<{ status: 'available' | 'partial' | 'unavailable' }> = ({ status }) => {
   const { t } = useTranslation();
@@ -154,13 +161,13 @@ const DetailView: React.FC<{ detail: DetailOk; onBack: () => void }> = ({ detail
         {detail.current_state.indexing ? (
           <div className="flex flex-col gap-2 text-[11.5px]">
             <div className="text-foreground">
-              {t('memory.processingRecord.records.indexing')}: <code>{detail.current_state.indexing.status}</code>
+              {t('memory.processingRecord.records.indexing')}: {indexStatusLabel(t, detail.current_state.indexing.status)}
             </div>
             {(detail.current_state.indexing.items ?? []).map((item) => (
               <div key={item.md_path} className="border-b border-border pb-2 last:border-b-0">
                 <code className="block break-all text-[10.5px] text-foreground">{item.md_path}</code>
                 <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-muted">
-                  <span>{t('memory.processingRecord.records.status')}: <code>{item.status}</code></span>
+                  <span>{t('memory.processingRecord.records.status')}: {indexStatusLabel(t, item.status)}</span>
                   <span>{t('memory.processingRecord.records.updated')}: {formatTime(item.updated_at)}</span>
                 </div>
                 {item.error ? <p className="mt-1 break-words text-destructive-ink">{item.error}</p> : null}
@@ -176,6 +183,10 @@ const DetailView: React.FC<{ detail: DetailOk; onBack: () => void }> = ({ detail
 export const MemoryProcessingRecordPanel: React.FC<{ refreshToken?: number }> = ({ refreshToken = 0 }) => {
   const { t } = useTranslation();
   const api = useApi();
+  const [project, setProject] = useState('default');
+  const [projects, setProjects] = useState<Array<{ id: string; kind: string }>>(
+    FALLBACK_PROJECTS,
+  );
   const [entries, setEntries] = useState<MemoryProcessingRecordEntry[]>([]);
   const [sources, setSources] = useState<MemoryProcessingRecordSources | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -196,7 +207,7 @@ export const MemoryProcessingRecordPanel: React.FC<{ refreshToken?: number }> = 
     setError(null);
     let result: Awaited<ReturnType<typeof api.getMemoryProcessingRecordEntries>>;
     try {
-      result = await api.getMemoryProcessingRecordEntries(cursor, 20);
+      result = await api.getMemoryProcessingRecordEntries(project, cursor, 20);
     } catch {
       if (listSequencer.settle(ticket)) {
         setError(t('memory.processingRecord.records.loadFailed'));
@@ -214,7 +225,7 @@ export const MemoryProcessingRecordPanel: React.FC<{ refreshToken?: number }> = 
     setSources(result.sections);
     setNextCursor(result.next_cursor);
     setListLoading(false);
-  }, [api, listSequencer, t]);
+  }, [api, listSequencer, project, t]);
 
   const open = useCallback(async (memcellId: string) => {
     const ticket = detailSequencer.begin();
@@ -223,7 +234,7 @@ export const MemoryProcessingRecordPanel: React.FC<{ refreshToken?: number }> = 
     setError(null);
     let result: Awaited<ReturnType<typeof api.getMemoryProcessingRecordEntry>>;
     try {
-      result = await api.getMemoryProcessingRecordEntry(memcellId);
+      result = await api.getMemoryProcessingRecordEntry(project, memcellId);
     } catch {
       if (detailSequencer.settle(ticket)) {
         selectedMemcellIdRef.current = null;
@@ -243,7 +254,7 @@ export const MemoryProcessingRecordPanel: React.FC<{ refreshToken?: number }> = 
     }
     setDetail(result);
     setDetailLoading(false);
-  }, [api, detailSequencer, t]);
+  }, [api, detailSequencer, project, t]);
 
   const closeDetail = useCallback(() => {
     selectedMemcellIdRef.current = null;
@@ -252,6 +263,16 @@ export const MemoryProcessingRecordPanel: React.FC<{ refreshToken?: number }> = 
     setDetailLoading(false);
     setDetail(null);
   }, [detailSequencer]);
+
+  useEffect(() => {
+    let active = true;
+    void api.listMemoryProjects().then((result) => {
+      if (!active || result.status !== 'ok') return;
+      const readable = result.projects.filter((item) => item.kind !== 'all');
+      setProjects(readable.length > 0 ? readable : FALLBACK_PROJECTS);
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [api]);
 
   useEffect(() => {
     const selectedMemcellId = selectedMemcellIdRef.current;
@@ -264,10 +285,38 @@ export const MemoryProcessingRecordPanel: React.FC<{ refreshToken?: number }> = 
     <div className="flex flex-col gap-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-[12px] text-muted">{t('memory.processingRecord.records.description')}</p>
-        <Button variant="ghost" size="sm" onClick={() => void load()} disabled={loading}>
-          <RefreshCw className={loading ? 'animate-spin' : undefined} />
-          {t('memory.processingRecord.refresh')}
-        </Button>
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <Select
+            value={project}
+            onChange={(event) => {
+              selectedMemcellIdRef.current = null;
+              listSequencer.begin();
+              detailSequencer.begin();
+              setEntries([]);
+              setSources(null);
+              setNextCursor(null);
+              setDetail(null);
+              setListLoading(false);
+              setDetailLoading(false);
+              setError(null);
+              setProject(event.target.value);
+            }}
+            aria-label={t('memory.processingRecord.records.projectLabel')}
+            wrapperClassName="w-40"
+          >
+            {projects.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.kind === 'default'
+                  ? t('memory.processingRecord.records.projectDefault')
+                  : item.id}
+              </option>
+            ))}
+          </Select>
+          <Button variant="ghost" size="sm" onClick={() => void load()} disabled={loading}>
+            <RefreshCw className={loading ? 'animate-spin' : undefined} />
+            {t('memory.processingRecord.refresh')}
+          </Button>
+        </div>
       </div>
       {error ? <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] text-destructive-ink">{error}</div> : null}
       {sources ? <SourceNotices sources={sources} /> : null}

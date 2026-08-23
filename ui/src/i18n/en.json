@@ -4325,6 +4325,7 @@
         "current_state_unavailable": "Current profile and index state are unavailable",
         "index_state_unavailable": "Current index state is unavailable",
         "index_state_missing_or_retained": "Current index state is missing or was retained away",
+        "index_state_incomplete": "Some linked index state is missing or outside the display bound",
         "unknown": "Native data is unavailable or incomplete"
       },
       "runStatus": {
@@ -4338,6 +4339,16 @@
       "profileStatus": {
         "present": "Present",
         "missing": "Missing"
+      },
+      "indexStatus": {
+        "available": "Available",
+        "partial": "Partial",
+        "unavailable": "Unavailable",
+        "pending": "Pending",
+        "processing": "Processing",
+        "done": "Done",
+        "failed": "Failed",
+        "unknown": "Unknown"
       },
       "sourceReason": "Reason: {{reason}}",
       "sourceNotObserved": "Not observed",
@@ -4411,6 +4422,8 @@
         "runCount": "{{count}} runs",
         "sourceNotice": "{{section}} is {{state}} ({{reason}}).",
         "project": "Project",
+        "projectLabel": "Memory project",
+        "projectDefault": "Default",
         "session": "Session",
         "owner": "Owner",
         "created": "Created",

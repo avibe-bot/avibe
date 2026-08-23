@@ -74,10 +74,14 @@ _PROCESSING_RECORD_CURSOR_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
 _PROCESSING_RECORD_ENTRY_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,256}\Z")
 
 
-def _processing_record_list_query(request: Request) -> tuple[str | None, int]:
+def _processing_record_list_query(
+    request: Request,
+) -> tuple[str | None, int, str | None]:
     items = list(request.query_params.multi_items())
     keys = [key for key, _value in items]
-    if any(key not in {"cursor", "limit"} for key in keys) or len(keys) != len(set(keys)):
+    if any(key not in {"cursor", "limit", "project"} for key in keys) or len(
+        keys
+    ) != len(set(keys)):
         raise ValueError("invalid Processing Record query")
     values = dict(items)
     cursor = values.get("cursor")
@@ -89,17 +93,33 @@ def _processing_record_list_query(request: Request) -> tuple[str | None, int]:
     limit = int(raw_limit)
     if not 1 <= limit <= 50:
         raise ValueError("invalid Processing Record limit")
-    return cursor, limit
+    project = values.get("project")
+    if project is not None:
+        from core.memory.project_ids import parse_agent_search_project
+
+        project = parse_agent_search_project(project)
+    return cursor, limit, project
 
 
-def _processing_record_entry_query(request: Request) -> str:
+def _processing_record_entry_query(request: Request) -> tuple[str, str | None]:
     items = list(request.query_params.multi_items())
-    if len(items) != 1 or items[0][0] != "memcell_id":
+    keys = [key for key, _value in items]
+    if (
+        any(key not in {"memcell_id", "project"} for key in keys)
+        or len(keys) != len(set(keys))
+        or "memcell_id" not in keys
+    ):
         raise ValueError("invalid Processing Record entry query")
-    memcell_id = items[0][1]
+    values = dict(items)
+    memcell_id = values["memcell_id"]
     if _PROCESSING_RECORD_ENTRY_ID_RE.fullmatch(memcell_id) is None:
         raise ValueError("invalid Processing Record entry id")
-    return memcell_id
+    project = values.get("project")
+    if project is not None:
+        from core.memory.project_ids import parse_agent_search_project
+
+        project = parse_agent_search_project(project)
+    return memcell_id, project
 
 
 def _create_controller_loop_server(config: Any) -> Any:
@@ -1331,6 +1351,22 @@ def create_app(
                 raise MemoryStoreUnavailableError("Memory store is unavailable") from exc
         return _memory_cli_scope(request)
 
+    async def _memory_read_scope_for_project(
+        scope: tuple[str, str],
+        project_id: str | None,
+        runtime: Any,
+    ) -> tuple[str, str]:
+        principal_id, default_project_id = scope
+        if project_id is None or project_id == default_project_id:
+            return scope
+        try:
+            catalog = await run_blocking(runtime.list_memory_projects, principal_id)
+        except Exception as exc:
+            raise MemoryStoreUnavailableError("Memory store is unavailable") from exc
+        if project_id not in catalog:
+            raise ValueError("unknown Memory project")
+        return principal_id, project_id
+
     @app.get("/internal/memory/status")
     async def _memory_status() -> Any:
         runtime = _memory_runtime()
@@ -1411,7 +1447,7 @@ def create_app(
     @app.get("/internal/memory/processing-record/entries")
     async def _memory_processing_record_entries(request: Request) -> Any:
         try:
-            cursor, limit = _processing_record_list_query(request)
+            cursor, limit, requested_project = _processing_record_list_query(request)
             scope = _memory_read_scope(request)
         except ValueError:
             return JSONResponse(
@@ -1435,6 +1471,9 @@ def create_app(
                 content={"status": "failed", "error": "memory_runtime_missing"},
             )
         try:
+            scope = await _memory_read_scope_for_project(
+                scope, requested_project, runtime
+            )
             principal_id, project_id = scope
             return await runtime.processing_record_entries_payload(
                 principal_id,
@@ -1447,6 +1486,11 @@ def create_app(
                 status_code=400,
                 content={"status": "failed", "error": "memory_invalid_input"},
             )
+        except MemoryStoreUnavailableError:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
         except Exception:
             logger.warning("internal native Processing Record list failed")
             return JSONResponse(
@@ -1457,7 +1501,7 @@ def create_app(
     @app.get("/internal/memory/processing-record/entry")
     async def _memory_processing_record_entry(request: Request) -> Any:
         try:
-            memcell_id = _processing_record_entry_query(request)
+            memcell_id, requested_project = _processing_record_entry_query(request)
             scope = _memory_read_scope(request)
         except ValueError:
             return JSONResponse(
@@ -1481,6 +1525,9 @@ def create_app(
                 content={"status": "failed", "error": "memory_runtime_missing"},
             )
         try:
+            scope = await _memory_read_scope_for_project(
+                scope, requested_project, runtime
+            )
             principal_id, project_id = scope
             payload = await runtime.processing_record_entry_payload(
                 principal_id,
@@ -1491,6 +1538,11 @@ def create_app(
             return JSONResponse(
                 status_code=400,
                 content={"status": "failed", "error": "memory_invalid_input"},
+            )
+        except MemoryStoreUnavailableError:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
             )
         except Exception:
             logger.warning("internal native Processing Record detail failed")

@@ -1533,15 +1533,19 @@ def test_processing_record_routes_replace_provider_call_log_routes(monkeypatch, 
     _save_config(tmp_path)
     calls: list[tuple[object, ...]] = []
 
-    async def memory_processing_record_entries(*, cursor: str | None, limit: int, user_key: str):
-        calls.append(("list", cursor, limit, user_key))
+    async def memory_processing_record_entries(
+        *, cursor: str | None, limit: int, project: str | None, user_key: str
+    ):
+        calls.append(("list", cursor, limit, project, user_key))
         return {
             "status_code": 200,
             "body": {"status": "ok", "entries": [], "next_cursor": None},
         }
 
-    async def memory_processing_record_entry(memcell_id: str, *, user_key: str):
-        calls.append(("detail", memcell_id, user_key))
+    async def memory_processing_record_entry(
+        memcell_id: str, *, project: str | None, user_key: str
+    ):
+        calls.append(("detail", memcell_id, project, user_key))
         return {
             "status_code": 200,
             "body": {"status": "ok", "entry": {"memcell_id": memcell_id}},
@@ -1556,9 +1560,18 @@ def test_processing_record_routes_replace_provider_call_log_routes(monkeypatch, 
         "environ_base": {"REMOTE_ADDR": "127.0.0.1"},
     }
 
-    listed = client.get("/api/memory/processing-record/entries?cursor=opaque_cursor&limit=17", **request_options)
-    detail = client.get("/api/memory/processing-record/entry?memcell_id=mc_1", **request_options)
+    listed = client.get(
+        "/api/memory/processing-record/entries?cursor=opaque_cursor&limit=17&project=notes",
+        **request_options,
+    )
+    detail = client.get(
+        "/api/memory/processing-record/entry?memcell_id=mc_1&project=notes",
+        **request_options,
+    )
     duplicate = client.get("/api/memory/processing-record/entries?limit=1&limit=2", **request_options)
+    invalid_project = client.get(
+        "/api/memory/processing-record/entries?project=all", **request_options
+    )
     invalid_id = client.get("/api/memory/processing-record/entry?memcell_id=../secret", **request_options)
     removed = [
         client.get("/api/memory/log", **request_options),
@@ -1571,10 +1584,10 @@ def test_processing_record_routes_replace_provider_call_log_routes(monkeypatch, 
     assert listed.headers["cache-control"] == "no-store"
     assert detail.headers["cache-control"] == "no-store"
     assert calls == [
-        ("list", "opaque_cursor", 17, "avibe:local"),
-        ("detail", "mc_1", "avibe:local"),
+        ("list", "opaque_cursor", 17, "notes", "avibe:local"),
+        ("detail", "mc_1", "notes", "avibe:local"),
     ]
-    for response in (duplicate, invalid_id):
+    for response in (duplicate, invalid_project, invalid_id):
         assert response.status_code == 400
         assert response.get_json() == {"status": "failed", "error": "memory_invalid_input"}
     assert [response.status_code for response in removed] == [404, 404, 404]
