@@ -102,7 +102,10 @@ async def test_clear_writes_marker_and_repeats_four_surfaces(tmp_path: Path):
 
     assert result.status == "completed"
     assert [surface for surface, _epoch in port.deleted] == [
-        surface.surface for surface in DEFAULT_CLEAR_SURFACES
+        "identity",
+        "provider",
+        "call_log",
+        "attachments",
     ]
     assert len({epoch for _surface, epoch in port.deleted}) == 1
     assert ClearIntentStore(tmp_path).load() is None

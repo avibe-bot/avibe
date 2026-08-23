@@ -50,12 +50,12 @@ class ClearIntentUnreadable(ClearIntentError):
 
 @dataclass(frozen=True, slots=True)
 class ClearSurface:
-    surface: Literal["queue", "provider", "call_log", "attachments"]
+    surface: Literal["identity", "provider", "call_log", "attachments"]
     relative_path: str
 
 
 DEFAULT_CLEAR_SURFACES: tuple[ClearSurface, ...] = (
-    ClearSurface("queue", "state/memory/memory.sqlite"),
+    ClearSurface("identity", "state/memory/memory.sqlite"),
     ClearSurface("provider", "memory/everos-root"),
     ClearSurface("call_log", "memory/call-log/call-log.db"),
     ClearSurface("attachments", "memory/attachments"),

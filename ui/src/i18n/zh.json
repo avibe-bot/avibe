@@ -4472,7 +4472,12 @@
         "expired": "关联信息已过期",
         "runsMissing": "处理运行记录缺失",
         "runsBusy": "处理运行记录正忙",
-        "runsMalformed": "处理运行记录格式异常"
+        "runsMalformed": "处理运行记录格式异常",
+        "volatileDeliveryState": "捕获投递状态仅存在于当前进程",
+        "providerMemoryUnavailable": "提供方记忆数据不可用",
+        "providerCallLogUnavailable": "提供方调用日志不可用",
+        "processingTimelineUnavailable": "处理时间线不可用",
+        "memoryFailureHistoryUnavailable": "捕获失败历史不会持久保留"
       },
       "status": {
         "created": "已创建",
@@ -4618,12 +4623,12 @@
     "clear": {
       "button": "清理记忆数据",
       "confirmTitle": "清理本安装的记忆数据？",
-      "confirmDescription": "这会删除 Avibe 在本机上管理的记忆数据，涵盖本安装所有用户和项目，包括画像、已提炼的记忆和待处理的消息。",
+      "confirmDescription": "这会删除 Avibe 在本机上管理的记忆数据，涵盖本安装所有用户和项目，包括画像、已提炼的记忆和诊断日志。",
       "removesTitle": "将会删除：",
       "removes": [
         "本安装所有用户和项目的画像和记忆条目",
         "用于搜索的本地索引和缓存",
-        "处理队列中的全部消息",
+        "已保存的记忆项目和捕获健康元数据",
         "模型调用的诊断记录"
       ],
       "keepsTitle": "不会删除：",
@@ -4656,7 +4661,7 @@
         },
         "memoryStateStorage": {
           "label": "记忆状态存储",
-          "description": "可能包含处理队列、恢复进度和协调状态"
+          "description": "可能包含记忆身份、项目和健康元数据"
         }
       },
       "technicalPath": "技术路径：{{path}}",

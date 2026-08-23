@@ -4472,7 +4472,12 @@
         "expired": "attribution has expired",
         "runsMissing": "processing runs are missing",
         "runsBusy": "processing runs are busy",
-        "runsMalformed": "processing runs are malformed"
+        "runsMalformed": "processing runs are malformed",
+        "volatileDeliveryState": "capture delivery state is process-local",
+        "providerMemoryUnavailable": "provider Memory data is unavailable",
+        "providerCallLogUnavailable": "provider call log is unavailable",
+        "processingTimelineUnavailable": "processing timeline is unavailable",
+        "memoryFailureHistoryUnavailable": "capture failure history is not retained"
       },
       "status": {
         "created": "Created",
@@ -4618,12 +4623,12 @@
     "clear": {
       "button": "Clear Memory Data",
       "confirmTitle": "Clear Memory Data for this installation?",
-      "confirmDescription": "This deletes Avibe-managed Memory data for every user and project on this machine, including profiles, distilled memories, and messages waiting to process.",
+      "confirmDescription": "This deletes Avibe-managed Memory data for every user and project on this machine, including profiles, distilled memories, and diagnostic logs.",
       "removesTitle": "This deletes:",
       "removes": [
         "Profiles and all memory entries for every user and project",
         "Local search indexes and caches",
-        "Everything in the processing queue",
+        "Saved Memory project and capture-health metadata",
         "Model-call diagnostic logs"
       ],
       "keepsTitle": "This does not delete:",
@@ -4656,7 +4661,7 @@
         },
         "memoryStateStorage": {
           "label": "Memory state storage",
-          "description": "May include processing queues, recovery progress, and coordination state"
+          "description": "May include Memory identity, project, and health metadata"
         }
       },
       "technicalPath": "Technical path: {{path}}",

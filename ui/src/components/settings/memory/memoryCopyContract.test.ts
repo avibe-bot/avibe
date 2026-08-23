@@ -137,6 +137,19 @@ describe('Memory UI copy contracts', () => {
     expect(BUNDLES[language].errors.memory_capability_unavailable).toBeTruthy();
   });
 
+  it.each(['en', 'zh'] as const)('localizes best-effort diagnostic source reasons in %s', (language) => {
+    const reasons = BUNDLES[language].memory.log.reason;
+    for (const key of [
+      'volatileDeliveryState',
+      'providerMemoryUnavailable',
+      'providerCallLogUnavailable',
+      'processingTimelineUnavailable',
+      'memoryFailureHistoryUnavailable',
+    ] as const) {
+      expect(reasons[key]).toBeTruthy();
+    }
+  });
+
   it('keeps processing terminology aligned with the runtime contracts', () => {
     expect(en.memory.processingRecord.runtime.fact.cascade.optimizeFailureStreak).not.toMatch(/cleanup/i);
     expect(en.memory.processingRecord.runtime.fact.cascadeReason.optimizeStuck).toMatch(/Optimization/);
@@ -157,7 +170,7 @@ describe('Memory UI copy contracts', () => {
     });
     expect(en.memory.factoryReset.roots.memoryStateStorage).toEqual({
       label: 'Memory state storage',
-      description: 'May include processing queues, recovery progress, and coordination state',
+      description: 'May include Memory identity, project, and health metadata',
     });
     expect(en.memory.factoryReset.technicalPath).toContain('{{path}}');
 
@@ -171,7 +184,7 @@ describe('Memory UI copy contracts', () => {
     });
     expect(zh.memory.factoryReset.roots.memoryStateStorage).toEqual({
       label: '记忆状态存储',
-      description: '可能包含处理队列、恢复进度和协调状态',
+      description: '可能包含记忆身份、项目和健康元数据',
     });
     expect(zh.memory.factoryReset.technicalPath).toContain('{{path}}');
   });
@@ -188,6 +201,7 @@ describe('Memory UI copy contracts', () => {
       expect(disclosure).toContain('every user and project');
       expect(bundle.memory.clear.confirmDescription).toContain('every user and project');
       expect(bundle.memory.clear.removes[0]).toContain('every user and project');
+      expect(bundle.memory.clear.removes.join('\n')).not.toMatch(/queue|waiting to process/i);
     } else {
       expect(bundle.memory.processingRecord.runtime.noneDisabled).toBe('未报告单独禁用的功能。');
       expect(bundle.memory.processingRecord.anomalies.help).toContain('不会自动恢复');
@@ -196,6 +210,7 @@ describe('Memory UI copy contracts', () => {
       expect(disclosure).toContain('所有用户和项目');
       expect(bundle.memory.clear.confirmDescription).toContain('所有用户和项目');
       expect(bundle.memory.clear.removes[0]).toContain('所有用户和项目');
+      expect(bundle.memory.clear.removes.join('\n')).not.toMatch(/处理队列|待处理/);
     }
   });
 

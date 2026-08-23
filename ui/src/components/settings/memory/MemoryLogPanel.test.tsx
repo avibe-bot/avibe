@@ -457,6 +457,19 @@ describe('Memory Log bounded helpers and static states', () => {
   it('localizes known enums and leaves future values as inert fallback text', () => {
     expect(memoryLogEnumLabel(translate as never, 'reason', 'runs_missing'))
       .toBe('memory.log.reason.runsMissing');
+    expect([
+      'volatile_delivery_state',
+      'provider_memory_unavailable',
+      'provider_call_log_unavailable',
+      'processing_timeline_unavailable',
+      'memory_failure_history_unavailable',
+    ].map((reason) => memoryLogEnumLabel(translate as never, 'reason', reason))).toEqual([
+      'memory.log.reason.volatileDeliveryState',
+      'memory.log.reason.providerMemoryUnavailable',
+      'memory.log.reason.providerCallLogUnavailable',
+      'memory.log.reason.processingTimelineUnavailable',
+      'memory.log.reason.memoryFailureHistoryUnavailable',
+    ]);
     expect(memoryLogEnumLabel(translate as never, 'status', 'ok')).toBe('memory.log.status.ok');
     expect(memoryLogEnumLabel(translate as never, 'callKind', 'rerank'))
       .toBe('memory.log.callKind.rerank');

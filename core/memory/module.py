@@ -617,6 +617,7 @@ class MemoryModule:
                         self._attachment_store.pin,
                         request.attachments,
                         on_cancel_result=self._release_cancelled_pinned_bundle,
+                        on_cancel_error=self._handle_cancelled_attachment_failure,
                     )
                 else:
                     pinned_bundle = await run_blocking(
@@ -624,6 +625,7 @@ class MemoryModule:
                         request.attachments,
                         source_lease=source_lease,
                         on_cancel_result=self._release_cancelled_pinned_bundle,
+                        on_cancel_error=self._handle_cancelled_attachment_failure,
                     )
             admission = await self._store_call(
                 self._store.admit_volatile_capture,
@@ -754,6 +756,10 @@ class MemoryModule:
         try:
             self._attachment_store.release(bundle.bundle_id)
         except Exception:
+            self._writer.disable_attachment_intake()
+
+    def _handle_cancelled_attachment_failure(self, error: BaseException) -> None:
+        if isinstance(error, AttachmentCleanupUnprovenError):
             self._writer.disable_attachment_intake()
 
     async def search(

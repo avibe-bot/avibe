@@ -188,17 +188,15 @@ finish before starting another one.
 
 Before Reinitialize Memory, use **Clear Memory Data** when retained Memory data or the
 call-log database is corrupt. Clear Memory Data records a durable intent marker, then
-removes only the queue, provider data, call log, and pinned attachments through their
-idempotent deletion primitives. Clear is irreversible; it does not delete
+resets stable identity state at a new epoch and deletes provider data, the call log,
+and pinned attachments through four idempotent primitives. Clear is irreversible; it does not delete
 the `memory` or `state/memory` roots themselves, original Avibe chats, copies
 already sent to providers, or data outside those surfaces (including logs or
 user-created snapshots); it is not a secure wipe.
 
-Clear Memory Data is also the explicit discard path for a timed-out or otherwise
-unknown provider add. It removes the retained `manual_required` queue evidence
-and pinned attachment bundle, clears that session's local fence, and never
-replays the ambiguous add. Because the provider outcome is unknown, Clear cannot
-remove a copy that may already have reached the provider.
+Clear drops queued and in-flight volatile capture work. It retains no per-capture
+failure evidence or delivery fence and never replays an ambiguous provider add.
+A copy that may already have reached the provider can remain there.
 
 If Clear Memory Data is interrupted, the marker remains durable and Processing Record
 shows its operation, deleting/failed state, timestamp, and error code. Boot automatically
@@ -216,7 +214,7 @@ Retired backup and snapshot residue is also cleaned best effort and never blocks
    Memory data and related operational state from the mixed-purpose `memory`
    and `state/memory` storage locations. The former may include profiles,
    facts, indexes, call diagnostics, and runtime files; the latter may include
-   processing queues, recovery progress, and coordination state. Only a
+   stable identity, project, and capture-health metadata. Only a
    successful cutover starts fresh, usable Memory. It
    preserves Memory settings and credentials, the pinned, installed Memory
    artifact, original Avibe chats, and data outside those two locations. If engine

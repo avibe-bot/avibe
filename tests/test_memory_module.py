@@ -8,7 +8,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from core.memory.attachments import AttachmentPinError, AttachmentPinStore
+from core.memory.attachments import (
+    AttachmentCleanupUnprovenError,
+    AttachmentPinError,
+    AttachmentPinStore,
+)
 from core.memory.everos import FakeMemoryProvider
 from core.memory.module import MIN_FREE_DISK_BYTES, MemoryModule
 from core.memory.store import MemoryStore, VolatileAdmission
@@ -198,6 +202,43 @@ async def test_cancelled_pinning_releases_shared_writer_reservation(tmp_path: Pa
     assert await quiescing
     assert module._writer._permits == MAX_WRITER_PERMITS
     assert attachment_store.released == ["cancelled-bundle"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_pinning_cleanup_failure_disables_attachment_intake(
+    tmp_path: Path,
+) -> None:
+    module, _store, _provider = _module(tmp_path)
+    pin_entered = threading.Event()
+    finish_pin = threading.Event()
+
+    class FailingAttachmentStore:
+        def pin(self, *_args, **_kwargs):
+            pin_entered.set()
+            finish_pin.wait(timeout=1.0)
+            raise AttachmentCleanupUnprovenError(
+                "memory_store_unavailable",
+                "partial attachment bundle could not be reclaimed",
+            )
+
+    module._attachment_store = FailingAttachmentStore()
+    attachment = CaptureAttachment(
+        kind="image",
+        name="source.png",
+        uri=(tmp_path / "attachments" / "avibe" / "source.png").as_uri(),
+        ext="png",
+    )
+    capture = asyncio.create_task(module.capture(_request(attachments=(attachment,))))
+    assert await asyncio.to_thread(pin_entered.wait, 1.0)
+
+    capture.cancel("caller stopped")
+    finish_pin.set()
+
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await capture
+    assert raised.value.args == ("caller stopped",)
+    assert not module._writer.attachments_enabled
+    assert module._writer._permits == MAX_WRITER_PERMITS
 
 
 @pytest.mark.asyncio

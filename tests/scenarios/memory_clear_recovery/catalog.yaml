@@ -13,7 +13,7 @@ status_legend:
   gap: not covered yet
 scenarios:
   - id: MEMORY-CLEAR-201
-    name: Clear discards retained local evidence and converges after interruption
+    name: Clear resets owned Memory surfaces and converges after interruption
     status: covered
     kind: recovery
     layer: scenario
@@ -22,7 +22,7 @@ scenarios:
     trigger: Clear begins while volatile capture work may still be queued or in flight
     given: Delivery state is process-local and may be dropped; the identity store is fenced
     when: The user confirms Clear Memory Data
-    then: Marker-owned Clear removes retained evidence, advances the epoch, and a later capture can deliver normally
+    then: Marker-owned Clear resets stable identity, advances the epoch, and a later capture can deliver normally
     expected_outputs:
       - Clear completes through the four existing idempotent deletion primitives
       - Maintenance advertises can_clear while the volatile writer is quiesced
