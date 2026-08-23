@@ -220,7 +220,9 @@ install; any git/Memory/model-hub loss stops rollout for that dependency.
 ### Step 5: Cut Over Show's Manifest Provider
 
 **Intent:** Compose a Show installer on the shared manager while leaving direct
-archive, npm, Node policy, availability, and serving behavior in Show.
+archive, npm, Node policy, availability, and serving behavior in Show; align
+unreadable-source diagnostics and admission-relevant manifest changes during
+that measured cutover.
 
 **Gate:** Released and canonical Show fixtures cover online, offline, provider,
 layout, Node, Doctor, dependency-status, and composite-archive flows with one
