@@ -99,47 +99,21 @@ is either `https://dashscope.aliyuncs.com` or a Bailian workspace host.
 
 ## Processing Record
 
-The Processing Record combines a direct, bounded EverOS health projection with
-source availability and clear recovery. Its Refresh action reads each source
-independently, so one section may be unavailable while the others still render,
-including while Memory is disabled.
+The Processing Record is a bounded, caller-scoped view of native EverOS data for
+the selected project and the caller's user and Agent owners. A detail can show
+the authorized source payload, retained native runs, linked Episodes and Atomic
+Facts, and the current profile and indexing state. Current state is explicitly
+unattributed; it is not reconstructed historical state for that run.
 
-Memory processing fault events are written only to the main Avibe
-service log, including the fault kind and occurrence time. Volatile-capture
-loss is not an administrator message. They are not sent as direct messages on Slack,
-Discord, Telegram, Lark, WeChat, or other IM transports.
+Each source is read independently. Missing, busy, malformed, or retained-away
+data is shown as unavailable while other sections continue to render. This is a
+best-effort diagnostic: Avibe keeps no durable per-call observer, replay queue,
+or Provider Call Log, and records may be incomplete or lost. The legacy
+`memory.diagnostics.log_provider_calls` config field remains load-compatible but
+does not restore the removed log routes.
 
-The record is the installation operator's view across every valid project and
-Memory owner. Each row and its detail view includes the full **Project ID** and
-**User ID**; a derived `-agent` value identifies the caller's Agent owner. A
-detail shows the observed memcell creation step. Intermediate processing and
-current indexing state are unavailable because capture delivery retains no
-durable per-call history. The UI routes grant this broad read scope to an
-authenticated local or Avibe Cloud Memory session; profile and search reads
-remain caller-scoped while covering that caller's user and Agent owners.
-
-Provider calls are attached only when Avibe can prove their exact provenance to
-the displayed project and Memory owner. Capture delivery has no durable
-provenance table; missing evidence is unavailable and never widens access.
-
-## Provider payload logging
-
-Provider payload diagnostics are always recorded while Memory is enabled. The
-legacy `memory.diagnostics.log_provider_calls` field is still accepted when an
-older config file is loaded, but its value is normalized to `true` and there is
-no settings switch to turn recording off.
-
-Avibe retains bounded, scrubbed LLM, multimodal-LLM, embedding, and reranking
-request and response fields used during Memory processing. It does not store
-embedding vectors, attachment bytes, raw sidecar stdout/stderr, or unrelated
-Search and Get calls. Secrets, configured provider URLs, and absolute local
-paths are scrubbed, and large fields are truncated or replaced with omission
-markers. Diagnostic payloads can still contain sensitive conversation text;
-treat access to the operator log accordingly.
-
-Rows remain readable until normal expiry or Clear Memory Data. Retention runs while
-Memory is disabled as well: rows expire after 14 days and only the newest 5,000
-calls are kept.
+Processing faults are written only to the main Avibe service log. Capture loss
+does not generate administrator messages on IM transports.
 
 ## Recovery ladder
 
@@ -148,11 +122,9 @@ Use these actions in order, from least to most destructive:
 Avibe refuses conflicting Memory maintenance requests. Let the current action
 finish before starting another one.
 
-1. **Restart engine**: Use it for a temporary recorder or engine failure.
+1. **Restart engine**: Use it for a temporary engine failure.
    Memory must be enabled. This restarts the Memory engine without changing
-   settings, rebuilding indexes, or deleting retained data. If the call-log
-   database is corrupt and recording remains degraded after a restart, use
-   **Clear Memory Data** before escalating further.
+   settings, rebuilding indexes, or deleting retained data.
 2. **Repair index**: Use it when restarting does not clear index health
    warnings or pending work. The **Repair index** action is shown only when
    Memory is enabled and `repair_available` is true (the installed Memory
@@ -186,10 +158,11 @@ finish before starting another one.
 
 ### Clear Memory Data
 
-Before Reinitialize Memory, use **Clear Memory Data** when retained Memory data or the
-call-log database is corrupt. Clear Memory Data records a durable intent marker, then
-resets stable identity state at a new epoch and deletes provider data, the call log,
-and pinned attachments through four idempotent primitives. Clear is irreversible; it does not delete
+Before Reinitialize Memory, use **Clear Memory Data** when retained Memory data is
+corrupt. Clear Memory Data records a durable intent marker, then resets stable
+identity state at a new epoch and deletes provider data, obsolete diagnostic
+artifacts, and pinned attachments through four idempotent primitives. Clear is
+irreversible; it does not delete
 the `memory` or `state/memory` roots themselves, original Avibe chats, copies
 already sent to providers, or data outside those surfaces (including logs or
 user-created snapshots); it is not a secure wipe.

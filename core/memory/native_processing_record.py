@@ -49,6 +49,7 @@ _INLINE_RE = re.compile(
 )
 _SECTION_RE = re.compile(r"^###\s+(.+?)\s*$", re.MULTILINE)
 _MAX_CURSOR_BYTES = 256
+_MAX_MEMCELL_ID_BYTES = 174
 _MAX_ID_BYTES = 256
 _MAX_SESSION_ID_BYTES = 256
 _MAX_TIMESTAMP_MS = 4_102_444_800_000
@@ -129,14 +130,16 @@ class NativeProcessingRecordReader:
             _utc_now(),
             "native_runs_unavailable",
         )
+        runs_by_memcell = self._runs_projections(page)
         entries = []
         for row in page:
+            memcell_id = str(row["memcell_id"])
             owner = _memcell_owner(row)
             payload = _payload_projection(row, owner)
-            runs = self._runs_projection(row)
+            runs = runs_by_memcell[memcell_id]
             entries.append(
                 {
-                    "memcell_id": str(row["memcell_id"]),
+                    "memcell_id": memcell_id,
                     "project_id": str(row["project_id"]),
                     "session_id": str(row["session_id"]),
                     "owner_id": owner,
@@ -189,7 +192,7 @@ class NativeProcessingRecordReader:
         row = rows[0]
         owner = _memcell_owner(row)
         payload = _payload_projection(row, owner)
-        runs = self._runs_projection(row)
+        runs = self._runs_projections([row])[str(row["memcell_id"])]
         semantic, linked_paths = self._semantic_projection(row)
         current = self._current_state_projection(row, linked_paths)
         return {
@@ -243,7 +246,7 @@ class NativeProcessingRecordReader:
                 args: list[object] = [
                     _APP_ID,
                     project_id,
-                    _MAX_ID_BYTES,
+                    _MAX_MEMCELL_ID_BYTES,
                     _MAX_SESSION_ID_BYTES,
                     principal_id,
                     derive_assistant_memory_owner_id(principal_id),
@@ -292,34 +295,76 @@ class NativeProcessingRecordReader:
                 )
         return rows, SourceObservation("available", observed)
 
-    def _runs_projection(self, row: sqlite3.Row) -> dict[str, Any]:
+    def _runs_projections(
+        self, rows: list[sqlite3.Row]
+    ) -> dict[str, dict[str, Any]]:
+        memcells = {str(row["memcell_id"]): row for row in rows}
+        if not memcells:
+            return {}
+        unavailable = {
+            memcell_id: _unavailable("native_runs_unavailable")
+            for memcell_id in memcells
+        }
         with _read_only(self._root, self._ome_db) as conn:
             if conn is None:
-                return _unavailable("native_runs_unavailable")
+                return unavailable
             try:
                 conn.execute(
                     f"SELECT {_RUN_COLUMNS} FROM run_record LIMIT 1"
                 ).fetchone()
+                placeholders = ",".join("?" for _ in memcells)
                 candidates = list(
                     conn.execute(
-                        f"SELECT {_RUN_COLUMNS} FROM run_record "
-                        "WHERE length(CAST(event_payload AS BLOB)) <= ? "
-                        "AND json_valid(event_payload) "
-                        "AND json_extract(event_payload, '$.memcell_id') = ? "
-                        "AND json_extract(event_payload, '$.app_id') = ? "
-                        "AND json_extract(event_payload, '$.project_id') = ? "
-                        "ORDER BY started_at DESC, run_id DESC LIMIT ?",
+                        f"""
+                        WITH ranked AS (
+                            SELECT {_RUN_COLUMNS},
+                                   json_extract(event_payload, '$.memcell_id')
+                                       AS linked_memcell_id,
+                                   ROW_NUMBER() OVER (
+                                       PARTITION BY json_extract(
+                                           event_payload, '$.memcell_id'
+                                       )
+                                       ORDER BY started_at DESC, run_id DESC
+                                   ) AS row_number
+                            FROM run_record
+                            WHERE length(CAST(event_payload AS BLOB)) <= ?
+                              AND json_valid(event_payload)
+                              AND json_extract(event_payload, '$.app_id') = ?
+                              AND json_extract(event_payload, '$.project_id') = ?
+                              AND json_extract(event_payload, '$.memcell_id')
+                                  IN ({placeholders})
+                        )
+                        SELECT {_RUN_COLUMNS}, linked_memcell_id
+                        FROM ranked
+                        WHERE row_number <= ?
+                        ORDER BY linked_memcell_id, started_at DESC, run_id DESC
+                        """,
                         (
                             _MAX_JSON_BYTES,
-                            str(row["memcell_id"]),
                             _APP_ID,
-                            str(row["project_id"]),
+                            str(rows[0]["project_id"]),
+                            *memcells,
                             _MAX_RUNS + 1,
                         ),
                     )
                 )
             except (sqlite3.Error, UnicodeError):
-                return _unavailable("native_runs_unavailable")
+                return unavailable
+        grouped: dict[str, list[sqlite3.Row]] = {
+            memcell_id: [] for memcell_id in memcells
+        }
+        for candidate in candidates:
+            linked_memcell_id = candidate["linked_memcell_id"]
+            if isinstance(linked_memcell_id, str) and linked_memcell_id in grouped:
+                grouped[linked_memcell_id].append(candidate)
+        return {
+            memcell_id: self._project_run_candidates(row, grouped[memcell_id])
+            for memcell_id, row in memcells.items()
+        }
+
+    def _project_run_candidates(
+        self, row: sqlite3.Row, candidates: list[sqlite3.Row]
+    ) -> dict[str, Any]:
         items: list[dict[str, Any]] = []
         rejected = 0
         for candidate in candidates[:_MAX_RUNS]:
@@ -848,7 +893,7 @@ def _validate_limit(limit: int) -> None:
 
 
 def _validate_id(value: str) -> None:
-    if not _valid_utf8_text(value, _MAX_ID_BYTES):
+    if not _valid_utf8_text(value, _MAX_MEMCELL_ID_BYTES):
         raise ValueError("invalid memcell id")
 
 
@@ -918,7 +963,9 @@ def _timestamp_ms(value: object) -> int:
 
 
 def _encode_cursor(timestamp_ms: int, memcell_id: str) -> str:
-    raw = json.dumps([timestamp_ms, memcell_id], separators=(",", ":")).encode()
+    raw = json.dumps(
+        [timestamp_ms, memcell_id], separators=(",", ":"), ensure_ascii=False
+    ).encode()
     encoded = base64.urlsafe_b64encode(raw).decode().rstrip("=")
     if len(encoded) > _MAX_CURSOR_BYTES:
         raise ValueError("generated cursor exceeds its budget")
@@ -948,7 +995,7 @@ def _decode_cursor(cursor: str) -> tuple[int, str]:
         or not isinstance(value[0], int)
         or isinstance(value[0], bool)
         or not 0 <= value[0] <= _MAX_TIMESTAMP_MS
-        or not _valid_utf8_text(value[1], _MAX_ID_BYTES)
+        or not _valid_utf8_text(value[1], _MAX_MEMCELL_ID_BYTES)
         or _encode_cursor(value[0], value[1]) != cursor
     ):
         raise ValueError("invalid cursor")
@@ -960,7 +1007,7 @@ def _decode_json(value: object) -> Any:
         return None
     try:
         return json.loads(value)
-    except (json.JSONDecodeError, RecursionError):
+    except (json.JSONDecodeError, RecursionError, ValueError):
         return None
 
 

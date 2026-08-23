@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { ArrowLeft, Clock3, Database, Loader2, RefreshCw } from 'lucide-react';
@@ -12,6 +12,7 @@ import type {
   MemoryProcessingRecordSources,
 } from '../../../context/ApiContext';
 import { memoryErrorMessage } from '../../../lib/memoryRead';
+import { createRequestSequencer, type RequestSequencer } from './useMemoryResource';
 
 type DetailOk = Extract<MemoryProcessingRecordDetailResult, { status: 'ok' }>;
 
@@ -150,6 +151,23 @@ const DetailView: React.FC<{ detail: DetailOk; onBack: () => void }> = ({ detail
             {t('memory.processingRecord.records.profile')}: {t(`memory.processingRecord.profileStatus.${detail.current_state.profile.status}`)}
           </div>
         ) : null}
+        {detail.current_state.indexing ? (
+          <div className="flex flex-col gap-2 text-[11.5px]">
+            <div className="text-foreground">
+              {t('memory.processingRecord.records.indexing')}: <code>{detail.current_state.indexing.status}</code>
+            </div>
+            {(detail.current_state.indexing.items ?? []).map((item) => (
+              <div key={item.md_path} className="border-b border-border pb-2 last:border-b-0">
+                <code className="block break-all text-[10.5px] text-foreground">{item.md_path}</code>
+                <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-muted">
+                  <span>{t('memory.processingRecord.records.status')}: <code>{item.status}</code></span>
+                  <span>{t('memory.processingRecord.records.updated')}: {formatTime(item.updated_at)}</span>
+                </div>
+                {item.error ? <p className="mt-1 break-words text-destructive-ink">{item.error}</p> : null}
+              </div>
+            ))}
+          </div>
+        ) : null}
       </section>
     </div>
   );
@@ -162,45 +180,86 @@ export const MemoryProcessingRecordPanel: React.FC<{ refreshToken?: number }> = 
   const [sources, setSources] = useState<MemoryProcessingRecordSources | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [detail, setDetail] = useState<DetailOk | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [listLoading, setListLoading] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const selectedMemcellIdRef = useRef<string | null>(null);
+  const listSequencerRef = useRef<RequestSequencer | null>(null);
+  const detailSequencerRef = useRef<RequestSequencer | null>(null);
+  const listSequencer = (listSequencerRef.current ??= createRequestSequencer());
+  const detailSequencer = (detailSequencerRef.current ??= createRequestSequencer());
+  const loading = listLoading || detailLoading;
 
   const load = useCallback(async (cursor: string | null = null) => {
-    setLoading(true);
+    const ticket = listSequencer.begin();
+    setListLoading(true);
     setError(null);
+    let result: Awaited<ReturnType<typeof api.getMemoryProcessingRecordEntries>>;
     try {
-      const result = await api.getMemoryProcessingRecordEntries(cursor, 20);
-      if (result.status !== 'ok') {
-        setError(memoryErrorMessage(t, result.error));
-        return;
+      result = await api.getMemoryProcessingRecordEntries(cursor, 20);
+    } catch {
+      if (listSequencer.settle(ticket)) {
+        setError(t('memory.processingRecord.records.loadFailed'));
+        setListLoading(false);
       }
-      setEntries((current) => cursor ? [...current, ...result.entries.filter((entry) => !current.some((item) => item.memcell_id === entry.memcell_id))] : result.entries);
-      setSources(result.sections);
-      setNextCursor(result.next_cursor);
-    } catch {
-      setError(t('memory.processingRecord.records.loadFailed'));
-    } finally {
-      setLoading(false);
+      return;
     }
-  }, [api, t]);
+    if (!listSequencer.settle(ticket)) return;
+    if (result.status !== 'ok') {
+      setError(memoryErrorMessage(t, result.error));
+      setListLoading(false);
+      return;
+    }
+    setEntries((current) => cursor ? [...current, ...result.entries.filter((entry) => !current.some((item) => item.memcell_id === entry.memcell_id))] : result.entries);
+    setSources(result.sections);
+    setNextCursor(result.next_cursor);
+    setListLoading(false);
+  }, [api, listSequencer, t]);
 
-  const open = async (memcellId: string) => {
-    setLoading(true);
+  const open = useCallback(async (memcellId: string) => {
+    const ticket = detailSequencer.begin();
+    selectedMemcellIdRef.current = memcellId;
+    setDetailLoading(true);
     setError(null);
+    let result: Awaited<ReturnType<typeof api.getMemoryProcessingRecordEntry>>;
     try {
-      const result = await api.getMemoryProcessingRecordEntry(memcellId);
-      if (result.status === 'ok') setDetail(result);
-      else setError(memoryErrorMessage(t, result.error));
+      result = await api.getMemoryProcessingRecordEntry(memcellId);
     } catch {
-      setError(t('memory.processingRecord.records.detailFailed'));
-    } finally {
-      setLoading(false);
+      if (detailSequencer.settle(ticket)) {
+        selectedMemcellIdRef.current = null;
+        setDetail(null);
+        setError(t('memory.processingRecord.records.detailFailed'));
+        setDetailLoading(false);
+      }
+      return;
     }
-  };
+    if (!detailSequencer.settle(ticket)) return;
+    if (result.status !== 'ok') {
+      selectedMemcellIdRef.current = null;
+      setDetail(null);
+      setError(memoryErrorMessage(t, result.error));
+      setDetailLoading(false);
+      return;
+    }
+    setDetail(result);
+    setDetailLoading(false);
+  }, [api, detailSequencer, t]);
 
-  useEffect(() => { void load(); }, [load, refreshToken]);
+  const closeDetail = useCallback(() => {
+    selectedMemcellIdRef.current = null;
+    const ticket = detailSequencer.begin();
+    detailSequencer.settle(ticket);
+    setDetailLoading(false);
+    setDetail(null);
+  }, [detailSequencer]);
 
-  if (detail) return <DetailView detail={detail} onBack={() => setDetail(null)} />;
+  useEffect(() => {
+    const selectedMemcellId = selectedMemcellIdRef.current;
+    if (selectedMemcellId) void open(selectedMemcellId);
+    else void load();
+  }, [load, open, refreshToken]);
+
+  if (detail) return <DetailView detail={detail} onBack={closeDetail} />;
   return (
     <div className="flex flex-col gap-3">
       <div className="flex flex-wrap items-center justify-between gap-3">

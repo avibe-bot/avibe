@@ -326,6 +326,55 @@ def test_list_cursor_is_stable_for_equal_native_timestamps(tmp_path: Path) -> No
     assert second["next_cursor"] is None
 
 
+def test_list_cursor_fits_the_route_budget_at_the_memcell_id_limit(
+    tmp_path: Path,
+) -> None:
+    system_db = _system_db(tmp_path)
+    _ome_db(tmp_path)
+    bounded_id = "m" * 174
+    _insert_memcell(system_db, bounded_id, PRINCIPAL)
+    _insert_memcell(system_db, "mc-next", PRINCIPAL)
+
+    reader = _reader(tmp_path)
+    first = reader.list_records((PRINCIPAL, "default"), None, 1)
+    second = reader.list_records(
+        (PRINCIPAL, "default"), first["next_cursor"], 1
+    )
+
+    assert [item["memcell_id"] for item in first["entries"]] == [bounded_id]
+    assert len(first["next_cursor"]) <= 256
+    assert [item["memcell_id"] for item in second["entries"]] == ["mc-next"]
+
+
+def test_list_batches_native_run_reads_for_the_page(
+    tmp_path: Path, monkeypatch
+) -> None:
+    system_db = _system_db(tmp_path)
+    ome_db = _ome_db(tmp_path)
+    for memcell_id in ("mc-1", "mc-2", "mc-3"):
+        _insert_memcell(system_db, memcell_id, PRINCIPAL)
+        _insert_run(
+            ome_db,
+            f"run-{memcell_id}",
+            memcell_id=memcell_id,
+            session_id=SESSION,
+        )
+    real_connect = sqlite3.connect
+    ome_connections: list[object] = []
+
+    def tracked_connect(database, *args, **kwargs):
+        if "ome.db" in str(database):
+            ome_connections.append(database)
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", tracked_connect)
+
+    listed = _reader(tmp_path).list_records((PRINCIPAL, "default"), None, 20)
+
+    assert [item["runs"]["total"] for item in listed["entries"]] == [1, 1, 1]
+    assert len(ome_connections) == 2
+
+
 def test_runs_require_direct_native_scope_and_scrub_display_error(tmp_path: Path) -> None:
     system_db = _system_db(tmp_path)
     ome_db = _ome_db(tmp_path)
@@ -406,6 +455,30 @@ def test_oversized_native_message_metadata_is_unavailable_not_empty_success(
     assert payload == {
         "status": "unavailable",
         "reason": "payload_projection_limit",
+        "items": [],
+    }
+
+
+def test_oversized_json_integer_is_unavailable_not_a_projection_failure(
+    tmp_path: Path,
+) -> None:
+    system_db = _system_db(tmp_path)
+    _ome_db(tmp_path)
+    _insert_memcell(system_db, "mc-1", PRINCIPAL)
+    oversized_integer = "9" * 5_000
+    with sqlite3.connect(system_db) as conn:
+        conn.execute(
+            "UPDATE memcell SET payload_json = ? WHERE memcell_id = 'mc-1'",
+            (f'{{"items":[{oversized_integer}]}}',),
+        )
+
+    payload = _reader(tmp_path).record_detail(
+        (PRINCIPAL, "default"), "mc-1"
+    )["payload"]
+
+    assert payload == {
+        "status": "unavailable",
+        "reason": "payload_malformed",
         "items": [],
     }
 
