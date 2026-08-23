@@ -802,10 +802,13 @@ managed_runtime benign    -> extracted ['hard.bin', 'link.so', 'real.bin']
 managed_runtime malicious -> ValueError: <message containing "link target">
 ```
 
-### Resolved Extraction-Filter Contract
+### Named Unknown: Extraction-Filter Capability (Resolved)
 
-The previous Python-floor decision is resolved; it was a false choice. Three
-facts determine the contract:
+**Original question:** should the migration retain and test a Python 3.10/3.11
+fallback, or raise the project minimum to Python 3.12?
+
+**Resolution:** neither branch of that question describes the actual capability
+boundary. Three facts determine the contract:
 
 1. The project declares `requires-python = ">=3.10"`.
 2. [PEP 706](https://peps.python.org/pep-0706/) extraction filters were
@@ -825,11 +828,12 @@ Do not raise the Python floor: that would discard the default interpreters on
 Ubuntu 22.04 and Debian 12 to remove a fallback that the product can test
 hermetically. Step 3 moves Show's capability pattern into the sole shared
 extractor and preserves a manually guarded fallback for patch releases that do
-not support the keyword. Link acceptance, `name`/`linkname` confinement, and
-filter/fallback equivalence are one atomic change. The fallback test stubs the
-filter call to raise `TypeError` and proves that the same malicious fixture has
-the same rejected outcome; no old-interpreter matrix is required. Step 7
-deletes tmux's version-gated branch when tmux adopts the shared extractor.
+not support the keyword; no path may call unfiltered extraction without those
+guards. Link acceptance, `name`/`linkname` confinement, and filter/fallback
+equivalence are one atomic change. The fallback test stubs the filter call to
+raise `TypeError` and proves that the same malicious fixture has the same
+rejected outcome; no old-interpreter matrix is required. Step 7 deletes tmux's
+version-gated branch when tmux adopts the shared extractor.
 
 There is no residual product or release decision for archive extraction.
 
