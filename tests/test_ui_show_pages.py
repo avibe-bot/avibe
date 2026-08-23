@@ -8,11 +8,13 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import socket
 import ssl
 import struct
 import subprocess
+import sys
 import tarfile
 import textwrap
 import threading
@@ -6617,6 +6619,28 @@ def test_show_runtime_failure_classification(dimension, reason, expected):
 @pytest.mark.parametrize(
     ("provenance", "expected_class", "expected_action"),
     (
+        (None, ShowRuntimeFailureClass.UNCLASSIFIED, ShowRuntimeRecoveryAction.REPAIR),
+        ("configured", ShowRuntimeFailureClass.CONFIGURED, ShowRuntimeRecoveryAction.CHANGE_SETTING),
+    ),
+)
+def test_runtime_child_exit_classification_uses_command_owner(
+    provenance,
+    expected_class,
+    expected_action,
+):
+    evidence = ShowRuntimeFailureEvidence(
+        ShowRuntimeFailureDimension.RUNTIME,
+        "runtime_start_process_unavailable",
+        provenance,
+    )
+
+    assert classify_show_runtime_failure(evidence) is expected_class
+    assert show_runtime_recovery_action(evidence) is expected_action
+
+
+@pytest.mark.parametrize(
+    ("provenance", "expected_class", "expected_action"),
+    (
         ("configured", ShowRuntimeFailureClass.CONFIGURED, ShowRuntimeRecoveryAction.CHANGE_SETTING),
         ("packaged", ShowRuntimeFailureClass.UNCLASSIFIED, ShowRuntimeRecoveryAction.REPAIR),
     ),
@@ -8124,6 +8148,31 @@ def test_show_runtime_manager_reports_url_timeout_separately(monkeypatch, tmp_pa
 
     assert result.available is False
     assert result.reason == "runtime_start_url_timeout"
+
+
+def test_explicit_runtime_child_exit_publishes_configured_recovery_evidence(monkeypatch, tmp_path):
+    started = tmp_path / "configured-runtime-started"
+    runtime_script = tmp_path / "configured-runtime.py"
+    runtime_script.write_text(
+        "from pathlib import Path\n"
+        "from time import sleep\n"
+        f"Path({str(started)!r}).touch()\n"
+        "sleep(0.05)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("VIBE_SHOW_RUNTIME_BIN", shlex.join([sys.executable, str(runtime_script)]))
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+    monkeypatch.setattr(manager, "_sweep_orphan_runtime_servers", lambda: None)
+
+    result = asyncio.run(manager.ensure())
+
+    assert started.exists()
+    assert result.reason == "runtime_start_process_unavailable"
+    assert result.failure_class is ShowRuntimeFailureClass.CONFIGURED
+    assert result.recovery_action is ShowRuntimeRecoveryAction.CHANGE_SETTING
 
 
 def test_show_runtime_manager_rejects_process_that_exits_before_health(monkeypatch, tmp_path):

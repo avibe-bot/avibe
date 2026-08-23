@@ -1401,6 +1401,7 @@ class ShowRuntimeManager:
         runtime_evidence = ShowRuntimeFailureEvidence(
             ShowRuntimeFailureDimension.RUNTIME,
             runtime_reason,
+            provenance="configured" if self._command_explicit else None,
         )
         runtime_failure_class = classify_show_runtime_failure(runtime_evidence) if runtime_reason else None
         availability = replace(
