@@ -2705,6 +2705,9 @@ class MemoryRuntime:
             await run_blocking(lease.release)
 
     async def _restart_once(self) -> dict[str, Any]:
+        repair = self._repair_task
+        if repair is not None and not repair.done():
+            await asyncio.shield(repair)
         lease = MemoryOperationLease(self._effective_home)
         try:
             await run_blocking(lease.acquire)

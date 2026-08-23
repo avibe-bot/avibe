@@ -13,6 +13,7 @@ from core.memory.everos import (
     MemoryProviderFailure,
     ProviderHealthSnapshot,
 )
+from core.memory.operation_lock import MemoryOperationLease
 from core.memory.process import FakeEverOSProcessFactory
 from core.memory.processing_record import RuntimeHealthProjection, SourceObservation
 from core.memory.runtime import MemoryConfig, MemoryRuntime
@@ -79,6 +80,45 @@ async def test_runtime_close_cancels_pending_automatic_restart(
     assert restart.cancelled()
     assert runtime._restart_task is None
     assert runtime.closed
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_recovery_waits_for_active_repair_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    repair_lease = MemoryOperationLease(tmp_path)
+    repair_lease.acquire()
+    release_repair = asyncio.Event()
+
+    async def active_repair() -> dict[str, object]:
+        try:
+            await release_repair.wait()
+            return {"ok": True}
+        finally:
+            repair_lease.release()
+
+    repair = asyncio.create_task(active_repair())
+    runtime._repair_task = repair
+    restarted = asyncio.Event()
+
+    async def restart_locked() -> dict[str, object]:
+        restarted.set()
+        return {"ok": True}
+
+    monkeypatch.setattr(runtime, "_restart_locked", restart_locked)
+    await runtime._settle_ambiguous_provider_outcome(recover=True)
+    restart = runtime._restart_task
+    assert restart is not None
+    await asyncio.sleep(0)
+    assert not restarted.is_set()
+
+    release_repair.set()
+    await asyncio.wait_for(restarted.wait(), timeout=1.0)
+    await restart
+    runtime._repair_task = None
+    await runtime.close()
 
 
 @pytest.mark.asyncio
