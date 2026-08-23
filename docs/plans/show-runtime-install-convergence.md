@@ -165,18 +165,20 @@ fixture's output and mutation predicates rather than counting a smoke call.
 
 Two mechanical rules gate Step 1:
 
-1. Every production or test symbol scheduled for deletion has zero definition
-   and call-site hits at the deletion commit.
-2. A generated before/after predicate inventory accounts for every removed
-   validation, guard, compatibility read, and public projection with a retained
-   executable predicate or an explicitly approved behavior change; an
-   unaccounted predicate disappearance fails the gate.
+1. Before implementation, record and `rg`-verify a non-empty baseline enumeration
+   of every production or test symbol scheduled for deletion. Every listed
+   symbol has zero definition and call-site hits at the deletion commit.
+2. Before implementation, record and `rg`-verify a non-empty baseline enumeration
+   of the exact predicates scheduled to change or disappear, keyed by owning
+   symbol and call site. Every listed predicate maps to a retained executable
+   predicate or an explicitly approved behavior change; an unaccounted row fails.
 
 A step gate is self-checked against its intent: an unchanged-result clause is
 valid only for behavior that the intent does not require changing.
-Every allowed and forbidden gate set is an enumerated set of symbols or census
-rows verified by its author with `rg`; a set that cannot be enumerated and
-verified is deleted rather than refined.
+Enumeration binds when a gate becomes executable: the in-flight step's allowed
+and forbidden sets are author-verified with `rg` as enumerated symbols or census
+rows. Later gates state only direction and a stop condition; the PR that makes
+one executable inherits its enumeration obligation.
 
 ## Migration Sequence And Gates
 
