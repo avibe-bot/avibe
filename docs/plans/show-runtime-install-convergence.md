@@ -163,6 +163,18 @@ Two mechanical rules gate Step 1:
 
 ## Migration Sequence And Gates
 
+The following mechanical gates apply to every step:
+
+1. A step that moves behavior into the shared layer passes only if total source
+   lines across the shared layer and affected consumers decline from that
+   step's base revision. If the shared layer and every affected consumer all
+   grow, the step fails regardless of its findings count.
+2. A shared hook overridden by every on-layer consumer represents per-consumer
+   semantics, not shared behavior. The step fails until at least one on-layer
+   consumer inherits the hook unchanged.
+3. A new public shared-layer symbol with zero production call sites fails the
+   step. Test-only call sites do not count.
+
 ### Step 2: Converge The Mutation Guard
 
 **Intent:** Move the strongest existing guard and preview behavior into the
