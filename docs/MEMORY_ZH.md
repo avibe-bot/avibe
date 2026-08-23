@@ -5,11 +5,11 @@ Avibe 记忆会把符合条件的 Workbench 和私聊消息提炼为按用户隔
 
 ## 用户与 Agent 记忆归属
 
-自动捕获的用户消息仍写入该用户自己的 Memory owner。成功执行
-`vibe memory remember` 后，事实会写入 Avibe 为同一调用者派生的独立 Agent owner；该 ID
-以 `-agent` 结尾，调用者不能自行指定，也不能使用其他用户的 owner。用户捕获与 Agent
-捕获使用互不相同的提供方 session，因此两者的事件、事实和画像不会进入同一个 Memory
-cell。
+自动捕获的用户消息仍以该用户自己的 Memory owner 为目标。`vibe memory remember`
+接受请求后，会向 Avibe 为同一调用者派生的独立 Agent owner 发起尽力而为的进程内投递；
+接受请求不保证提供方投递或持久化。该 ID 以 `-agent` 结尾，调用者不能自行指定，也不能
+使用其他用户的 owner。用户捕获与 Agent 捕获使用互不相同的提供方 session，因此两者的
+事件、事实和画像不会进入同一个 Memory cell。
 
 搜索会同时读取两个 owner，并以**用户**、**Agent**或**两者**标注结果；两个 owner 中完全
 相同的文本只返回一次，并标为**两者**。画像会显示为两个独立的带标签区块，不会合并。

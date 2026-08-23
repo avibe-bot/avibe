@@ -16,10 +16,12 @@ Processing Record, current profile, search results, and settings.
 
 ## User and Agent memory ownership
 
-Automatic capture of a user's messages continues to write to that user's Memory
-owner. A successful `vibe memory remember` records the fact under a separate,
-Avibe-derived Agent owner for the same caller. The derived owner ends in
-`-agent`; callers cannot choose it or use another user's owner. User and Agent
+Automatic capture of a user's messages continues to target that user's Memory
+owner. An accepted `vibe memory remember` request is offered for best-effort,
+process-local delivery under a separate, Avibe-derived Agent owner for the same
+caller; acceptance does not guarantee provider delivery or persistence. The
+derived owner ends in `-agent`; callers cannot choose it or use another user's
+owner. User and Agent
 captures use disjoint provider sessions, so their episodes, facts, and profiles
 cannot be distilled into the same Memory cell.
 

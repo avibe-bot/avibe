@@ -81,9 +81,9 @@ authorization/confinement, stable identity, or control-plane exclusion.
 
 ### `vibe memory remember`
 
-Keep `memory.cli.remembered` (`Memory queued.` in English and existing localized
-values) and JSON `ok: true` with `result.status` in `{accepted, duplicate}`. This
-copy describes volatile admission, not storage.
+Keep `memory.cli.remembered` as an explicit best-effort acknowledgement and JSON
+`ok: true` with `result.status` in `{accepted, duplicate}`. This copy describes
+volatile admission, not storage.
 
 ## Writer design
 

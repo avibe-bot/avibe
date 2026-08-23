@@ -570,6 +570,28 @@ def test_memory_remember_human_output_never_confirms_persistence(
     assert capsys.readouterr().out.strip() == expected
 
 
+def test_top_level_memory_guides_disclose_best_effort_process_local_delivery() -> None:
+    docs_root = Path(__file__).parents[1] / "docs"
+    guides = {
+        path
+        for path in docs_root.glob("*.md")
+        if "vibe memory" in path.read_text(encoding="utf-8")
+    }
+
+    assert guides
+    for guide in guides:
+        text = guide.read_text(encoding="utf-8")
+        if guide.stem.endswith("_ZH"):
+            assert "尽力" in text
+            assert "进程内" in text
+            assert "不保证" in text
+        else:
+            lowered = text.lower()
+            assert "best-effort" in lowered
+            assert "process-local" in lowered
+            assert "not guarantee" in lowered
+
+
 @pytest.mark.parametrize(
     "body,expected",
     [

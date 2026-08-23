@@ -280,26 +280,45 @@ async def test_unadmitted_attachment_cleanup_finishes_before_permit_release(
 
 
 @pytest.mark.asyncio
-async def test_cancelled_unadmitted_cleanup_still_releases_writer_reservation(
+@pytest.mark.parametrize("release_fails", [False, True])
+async def test_cancelled_unadmitted_cleanup_tracks_settled_release_result(
     tmp_path: Path,
+    release_fails: bool,
 ) -> None:
+    """MEMORY-IM-ATTACH-013: unadmitted cleanup preserves the same invariant."""
+
     module, _store, _provider = _module(tmp_path)
+    release_entered = threading.Event()
+    finish_release = threading.Event()
+
+    class AttachmentStore:
+        def release(self, _bundle_id: str) -> None:
+            release_entered.set()
+            finish_release.wait(timeout=1.0)
+            if release_fails:
+                raise OSError("cleanup failed")
+
+    module._attachment_store = AttachmentStore()
     reservation = module._writer.reserve("cancelled-cleanup")
     assert not isinstance(reservation, str)
 
-    async def cancelled_cleanup(_bundle_id: str) -> None:
-        raise asyncio.CancelledError
-
-    module._release_unadmitted_bundle = cancelled_cleanup
-
-    with pytest.raises(asyncio.CancelledError):
-        await module._release_unadmitted_capture(
+    cleanup = asyncio.create_task(
+        module._release_unadmitted_capture(
             reservation,
             SimpleNamespace(bundle_id="bundle"),
         )
+    )
+    assert await asyncio.to_thread(release_entered.wait, 1.0)
+    cleanup.cancel("caller stopped")
+    finish_release.set()
 
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await cleanup
+
+    assert raised.value.args == ("caller stopped",)
     assert not reservation.active
     assert module._writer._permits == MAX_WRITER_PERMITS
+    assert module._writer.attachments_enabled is not release_fails
 
 
 @pytest.mark.asyncio

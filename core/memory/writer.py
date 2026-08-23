@@ -509,12 +509,18 @@ class BestEffortMemoryWriter:
     async def _cleanup_item(self, item: _CaptureItem) -> None:
         if not item.reservation.active:
             return
-        if item.bundle is not None and self._attachment_store is not None:
-            try:
-                await run_blocking(self._attachment_store.release, item.bundle.bundle_id)
-            except (Exception, asyncio.CancelledError):
-                self._attachments_disabled = True
-        item.reservation.release()
+        try:
+            if item.bundle is not None and self._attachment_store is not None:
+                try:
+                    await run_blocking(
+                        self._attachment_store.release,
+                        item.bundle.bundle_id,
+                        on_cancel_error=lambda _error: self.disable_attachment_intake(),
+                    )
+                except Exception:
+                    self.disable_attachment_intake()
+        finally:
+            item.reservation.release()
 
     async def _flush_barrier(self, item: _BarrierItem) -> None:
         scheduled_pending = (

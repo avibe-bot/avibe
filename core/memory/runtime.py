@@ -2445,7 +2445,7 @@ class MemoryRuntime:
     async def restart(self) -> dict[str, Any]:
         """Join or start one process-only replacement of the Memory sidecar."""
 
-        if self._retired:
+        if self._closing or self._retired:
             return {"ok": False, "error": "memory_operation_in_progress"}
         if self._rebuild_running() or self._repair_running():
             return {"ok": False, "error": "memory_operation_in_progress"}
@@ -2752,6 +2752,8 @@ class MemoryRuntime:
     async def _restart_locked(self) -> dict[str, Any]:
         """Replace the sidecar while ``_reconcile_lock`` is held."""
 
+        if self._closing or self._retired:
+            return {"ok": False, "error": "memory_operation_in_progress"}
         self._activation_loop = asyncio.get_running_loop()
         if not self.available or self._store is None or self._module is None:
             logger.warning("Memory rebuild failed branch=store_unavailable")
@@ -3202,9 +3204,21 @@ class MemoryRuntime:
         if rebuild is not None and rebuild is not asyncio.current_task():
             if not rebuild.done():
                 rebuild.cancel()
-            cancellation = await self._join_shutdown_task(rebuild)
+            rebuild_cancellation = await self._join_shutdown_task(rebuild)
+            cancellation = cancellation or rebuild_cancellation
             try:
                 rebuild.result()
+            except (Exception, asyncio.CancelledError):
+                pass
+
+        restart = self._restart_task
+        if restart is not None and restart is not asyncio.current_task():
+            if not restart.done():
+                restart.cancel()
+            restart_cancellation = await self._join_shutdown_task(restart)
+            cancellation = cancellation or restart_cancellation
+            try:
+                restart.result()
             except (Exception, asyncio.CancelledError):
                 pass
 
@@ -3256,14 +3270,6 @@ class MemoryRuntime:
                 await self._maintenance.close()
             except BaseException as error:
                 cleanup_error = error
-        retained = self._restart_task
-        if retained is not None and retained is not asyncio.current_task():
-            try:
-                await asyncio.shield(retained)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                pass
         for task in (self._artifact_activation_task, self._ready_activation_task):
             if task is None or task is asyncio.current_task():
                 continue

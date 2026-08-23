@@ -1,6 +1,7 @@
 """Focused contracts for the process-local best-effort Memory writer."""
 
 import asyncio
+import threading
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -561,7 +562,7 @@ async def test_close_during_attachment_projection_releases_reservation(
 
     attachment_store = AttachmentStore()
 
-    async def controlled_run_blocking(operation, *args):
+    async def controlled_run_blocking(operation, *args, **_kwargs):
         if operation == attachment_store.provider_attachments:
             projection_entered.set()
             await asyncio.Event().wait()
@@ -618,6 +619,52 @@ async def test_attachment_cleanup_failure_disables_later_attachment_intake(tmp_p
     await writer.wait_idle_for_tests()
 
     assert not writer.attachments_enabled
+    assert writer._permits == MAX_WRITER_PERMITS
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("release_fails", [False, True])
+async def test_cancelled_attachment_cleanup_tracks_settled_release_result(
+    tmp_path: Path,
+    release_fails: bool,
+) -> None:
+    """MEMORY-IM-ATTACH-013: readiness follows the settled cleanup result."""
+
+    release_entered = threading.Event()
+    finish_release = threading.Event()
+
+    class AttachmentStore:
+        def provider_attachments(self, _bundle):
+            return ()
+
+        def release(self, _bundle_id: str) -> None:
+            release_entered.set()
+            finish_release.wait(timeout=1.0)
+            if release_fails:
+                raise OSError("cleanup failed")
+
+    writer = _writer(
+        tmp_path,
+        FakeMemoryProvider(),
+        attachment_store=AttachmentStore(),
+    )
+    reservation = writer.reserve("digest-0")
+    assert not isinstance(reservation, str)
+    assert writer.offer_capture(
+        reservation,
+        _admission(0),
+        text="message-0",
+        attachments=(),
+        bundle=SimpleNamespace(bundle_id="bundle-0"),
+    ) == "queued"
+    assert await asyncio.to_thread(release_entered.wait, 1.0)
+
+    closing = asyncio.create_task(writer.close())
+    await asyncio.sleep(0)
+    finish_release.set()
+    await asyncio.wait_for(closing, timeout=1.0)
+
+    assert writer.attachments_enabled is not release_fails
     assert writer._permits == MAX_WRITER_PERMITS
 
 

@@ -753,7 +753,11 @@ class MemoryModule:
             self._writer.disable_attachment_intake()
             return
         try:
-            await run_blocking(self._attachment_store.release, bundle_id)
+            await run_blocking(
+                self._attachment_store.release,
+                bundle_id,
+                on_cancel_error=lambda _error: self._writer.disable_attachment_intake(),
+            )
         except Exception:
             self._writer.disable_attachment_intake()
 

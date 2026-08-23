@@ -54,6 +54,34 @@ async def test_runtime_close_drops_volatile_work(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_runtime_close_cancels_pending_automatic_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MEMORY-INDEP-003: shutdown cancels volatile recovery work."""
+
+    runtime = _runtime(tmp_path)
+    restart_entered = asyncio.Event()
+
+    async def pending_restart() -> dict[str, object]:
+        restart_entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("cancelled restart resumed")
+
+    monkeypatch.setattr(runtime, "_restart_once", pending_restart)
+    await runtime._settle_ambiguous_provider_outcome(recover=True)
+    restart = runtime._restart_task
+    assert restart is not None
+    await restart_entered.wait()
+
+    await asyncio.wait_for(runtime.close(), timeout=1.0)
+
+    assert restart.cancelled()
+    assert runtime._restart_task is None
+    assert runtime.closed
+
+
+@pytest.mark.asyncio
 async def test_clear_completion_rotates_volatile_duplicate_generation(
     tmp_path: Path,
 ) -> None:
