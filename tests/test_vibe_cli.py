@@ -2730,18 +2730,26 @@ def test_runtime_manager_migrates_legacy_source_to_packaged_manifest(
     tmp_path,
     legacy_source,
 ):
-    from core.show_runtime import ShowRuntimeManager
+    from core import show_runtime
 
     monkeypatch.setenv("VIBE_SHOW_RUNTIME_SOURCE", legacy_source)
+    monkeypatch.setattr(show_runtime, "_WARNED_RETIRED_RUNTIME_SOURCES", set())
     with caplog.at_level("WARNING", logger="core.show_runtime"):
-        manager = ShowRuntimeManager(
+        manager = show_runtime.ShowRuntimeManager(
             workspace_root=tmp_path / "show",
             runtime_dir=tmp_path / "runtime",
         )
+        second_manager = show_runtime.ShowRuntimeManager(
+            workspace_root=tmp_path / "show-2",
+            runtime_dir=tmp_path / "runtime-2",
+        )
 
     assert manager.runtime_source == "manifest-cache"
-    assert f"VIBE_SHOW_RUNTIME_SOURCE={legacy_source}" in caplog.text
-    assert "using manifest-cache instead" in caplog.text
+    assert second_manager.runtime_source == "manifest-cache"
+    warnings = [record.message for record in caplog.records if "is retired" in record.message]
+    assert warnings == [
+        f"VIBE_SHOW_RUNTIME_SOURCE={legacy_source} is retired; using manifest-cache instead"
+    ]
 
 
 @pytest.mark.parametrize("failure_phase", ["temporary_directory", "verifier", "cleanup"])

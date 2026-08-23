@@ -426,6 +426,24 @@ def test_require_incus_reports_missing_override(monkeypatch: pytest.MonkeyPatch)
         incus_regression.require_incus()
 
 
+def test_runner_reports_command_timeout(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    command = ["incus", "exec", "avibe-master"]
+
+    def time_out(actual_command, **kwargs):
+        assert kwargs["timeout"] == incus_regression.SHOW_RUNTIME_BUILD_TIMEOUT_SECONDS
+        raise subprocess.TimeoutExpired(actual_command, kwargs["timeout"])
+
+    monkeypatch.setattr(incus_regression.subprocess, "run", time_out)
+
+    with pytest.raises(incus_regression.RegressionError, match="timed out after 300 seconds"):
+        incus_regression.Runner().run(
+            command,
+            timeout=incus_regression.SHOW_RUNTIME_BUILD_TIMEOUT_SECONDS,
+        )
+
+    assert "Command timed out after 300 seconds" in capsys.readouterr().err
+
+
 def test_existence_comes_from_the_names_the_daemon_listed(monkeypatch: pytest.MonkeyPatch) -> None:
     listing = json.dumps([{"name": "avr-master"}, {"name": "avr-wt-demo-branch"}])
     monkeypatch.setattr(incus_regression.subprocess, "run", stub_incus_result(0, stdout=listing))
@@ -4501,6 +4519,7 @@ def test_missing_ui_dist_rebuilds_even_when_python_is_unchanged() -> None:
 
 def test_prepare_show_runtime_builds_archive_and_retries_from_fresh_install() -> None:
     commands = []
+    build_timeouts = []
 
     class RecordingRunner:
         def __init__(self) -> None:
@@ -4509,6 +4528,8 @@ def test_prepare_show_runtime_builds_archive_and_retries_from_fresh_install() ->
         def run(self, command, **kwargs):
             joined = " ".join(command)
             commands.append(joined)
+            if "git clone --depth 1" in joined:
+                build_timeouts.append(kwargs.get("timeout"))
             if "vibe runtime prepare --strict" in joined:
                 self.prepare_attempts += 1
                 return subprocess.CompletedProcess(command, 1 if self.prepare_attempts == 1 else 0)
@@ -4530,6 +4551,9 @@ def test_prepare_show_runtime_builds_archive_and_retries_from_fresh_install() ->
     assert "git clone --depth 1 https://github.com/avibe-bot/vibe-show-runtime.git" in joined
     assert "npm run bundle:vibe-remote" in joined
     assert 'install -D -m 0644 "$1" "$VIBE_SHOW_RUNTIME_ARCHIVE_PATH"' in joined
+    assert build_timeouts == [incus_regression.SHOW_RUNTIME_BUILD_TIMEOUT_SECONDS]
+    build_command = next(command for command in commands if "git clone --depth 1" in command)
+    assert build_command.index("VIBE_SHOW_RUNTIME_ARCHIVE_PATH is required") < build_command.index("git clone")
     assert joined.count("vibe runtime prepare --strict") == 2
     assert "rm -rf ~/.avibe/runtime/show-runtime/prebuilt/current" in joined
     assert "vibe runtime status --json" in joined
@@ -4603,6 +4627,8 @@ def test_prepare_show_runtime_normalizes_preserved_legacy_source_without_rewriti
     assert "cat > /etc/avibe-regression.env" not in joined
     assert "git clone --depth 1 https://github.com/avibe-bot/vibe-show-runtime.git" in joined
     assert joined.count("VIBE_SHOW_RUNTIME_SOURCE=archive") == 4
+    archive_path = f"{incus_regression.SERVICE_HOME}/.cache/avibe-regression/vibe-show-runtime-node.tgz"
+    assert joined.count(f"VIBE_SHOW_RUNTIME_ARCHIVE_PATH={archive_path}") == 4
     assert f"VIBE_SHOW_RUNTIME_SOURCE={legacy_source}" not in joined
 
 

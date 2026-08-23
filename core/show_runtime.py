@@ -62,6 +62,7 @@ _RUNTIME_ARCHIVE_RELEASE_BASE_URL = "https://github.com/avibe-bot/vibe-show-runt
 _RUNTIME_SOURCE_MANIFEST = "manifest-cache"
 _RUNTIME_SOURCE_ARCHIVE = "archive"
 _RUNTIME_SOURCE_NPM = "npm"
+_WARNED_RETIRED_RUNTIME_SOURCES: set[str] = set()
 _RUNTIME_MANIFEST_RESOURCE = "show_runtime_manifest.json"
 _PACKAGED_RUNTIME_MANIFEST_SOURCE = f"package:{_RUNTIME_MANIFEST_RESOURCE}"
 _CUSTOM_MANIFEST_LINEAGE = "*custom*"
@@ -3568,7 +3569,8 @@ def _normalize_runtime_source(value: str | None) -> str:
         "prebuilt": _RUNTIME_SOURCE_ARCHIVE,
         "npm": _RUNTIME_SOURCE_NPM,
     }
-    if normalized in {"github", "github-source"}:
+    if normalized in {"github", "github-source"} and normalized not in _WARNED_RETIRED_RUNTIME_SOURCES:
+        _WARNED_RETIRED_RUNTIME_SOURCES.add(normalized)
         logger.warning(
             "VIBE_SHOW_RUNTIME_SOURCE=%s is retired; using %s instead",
             normalized,

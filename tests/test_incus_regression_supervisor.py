@@ -43,11 +43,18 @@ def test_supervisor_normalizes_preserved_runtime_source_without_touching_other_e
     expected,
 ):
     monkeypatch.setenv("VIBE_SHOW_RUNTIME_SOURCE", configured)
+    monkeypatch.delenv("VIBE_SHOW_RUNTIME_ARCHIVE_PATH", raising=False)
     monkeypatch.setenv("REGRESSION_UNRELATED_SETTING", "preserved")
 
     supervisor._normalize_show_runtime_source_environment()
 
     assert os.environ["VIBE_SHOW_RUNTIME_SOURCE"] == expected
+    if expected == "archive":
+        assert os.environ["VIBE_SHOW_RUNTIME_ARCHIVE_PATH"] == (
+            "/home/avibe/.cache/avibe-regression/vibe-show-runtime-node.tgz"
+        )
+    else:
+        assert "VIBE_SHOW_RUNTIME_ARCHIVE_PATH" not in os.environ
     assert os.environ["REGRESSION_UNRELATED_SETTING"] == "preserved"
 
 
