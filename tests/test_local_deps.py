@@ -1186,6 +1186,9 @@ def test_dependencies_status_shape(monkeypatch):
         def status(self):
             return {
                 "installed": False,
+                "version": None,
+                "selected_version": "1.2.3",
+                "matches_manifest": None,
                 "status": "missing",
                 "manifest": {"everos_version": "1.2.3", "release_state": "unavailable"},
                 "reason": "memory_runtime_unpublished",
@@ -1209,7 +1212,9 @@ def test_dependencies_status_shape(monkeypatch):
         "kind": "runtime",
         "required": True,
         "installed": False,
-        "version": "1.2.3",
+        "version": None,
+        "latest_version": "1.2.3",
+        "has_update": False,
         "status": "missing",
         "reason": "memory_runtime_unpublished",
         "release_state": "unavailable",

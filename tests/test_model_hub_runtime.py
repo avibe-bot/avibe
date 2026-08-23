@@ -41,6 +41,7 @@ from core.handlers.model_hub.stream_wire import (
 )
 from vibe.model_hub_runtime import adapter as runtime_adapter_module
 from vibe.model_hub_runtime import client as client_module
+from vibe.model_hub_runtime import installer as runtime_installer_module
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
 from vibe.model_hub_runtime.client import EngineClient, EngineClientError, EngineConnection
 from vibe.model_hub_runtime.config import write_engine_config
@@ -68,12 +69,14 @@ STREAM_TRANSPORT_BOUNDARIES = json.loads(
 )["cases"]
 DEEP_JSON_ARRAY = b"[" * 10_000 + b"0" + b"]" * 10_000
 RUNTIME_INSTALL_TARGET = {
-    "manifest_sha256": "1" * 64,
     "runtime_version": "v7.2.95",
     "platform": "fixture-platform",
     "archive_sha256": "2" * 64,
     "binary_sha256": "3" * 64,
 }
+RELEASED_INSTALL_CLAIMS = json.loads(
+    (MODEL_HUB_FIXTURES / "released_install_claims.json").read_text(encoding="utf-8")
+)["claims"]
 RUNTIME_INSTALL_GENERATION_A = "a" * 32
 RUNTIME_INSTALL_GENERATION_B = "b" * 32
 
@@ -89,6 +92,41 @@ def _create_runtime_install_claim(
         target=RUNTIME_INSTALL_TARGET,
     )
     return generation
+
+
+@pytest.mark.parametrize(
+    "released_claim",
+    RELEASED_INSTALL_CLAIMS,
+    ids=lambda claim: f"schema-{claim['schema_version']}",
+)
+def test_released_install_claim_is_read_without_rewrite_and_resumed_as_current_schema(
+    tmp_path: Path,
+    released_claim: dict[str, object],
+) -> None:
+    manager = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", offline=True)
+    managed_runtime.write_json_atomic(manager.install_state_path, released_claim)
+    released_bytes = manager.install_state_path.read_bytes()
+
+    projected = manager.install_state()
+
+    assert projected is not None
+    assert projected["target"] == RUNTIME_INSTALL_TARGET
+    assert manager.install_state_path.read_bytes() == released_bytes
+
+    assert manager.transition_install_claim(
+        InstallClaimTransition.RESUME,
+        generation=RUNTIME_INSTALL_GENERATION_B,
+        previous_generation=RUNTIME_INSTALL_GENERATION_A,
+        target=RUNTIME_INSTALL_TARGET,
+    )
+    persisted = json.loads(manager.install_state_path.read_text(encoding="utf-8"))
+    assert persisted == {
+        "schema_version": 3,
+        "state": "installing",
+        "generation": RUNTIME_INSTALL_GENERATION_B,
+        "error_key": None,
+        "target": RUNTIME_INSTALL_TARGET,
+    }
 
 
 def test_stream_prelude_does_not_charge_released_keepalives_to_frame_budget() -> None:
@@ -677,6 +715,154 @@ def test_install_admission_fetches_an_uncached_remote_manifest(tmp_path: Path) -
     assert manager.contract_manifest()["assets"]
 
 
+def test_released_claim_replay_ignores_unrelated_manifest_entry_without_reinstall(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive, binary = _write_fixture_archive(tmp_path / "fixture")
+    manifest_path = _write_fixture_manifest(tmp_path / "fixture", archive, binary)
+    manager = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest_path)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+    original_manifest = manager._load_manifest(allow_network=False)
+    assert original_manifest is not None
+    managed_runtime.write_json_atomic(
+        manager.install_state_path,
+        {
+            "schema_version": 2,
+            "state": "installing",
+            "generation": RUNTIME_INSTALL_GENERATION_A,
+            "error_key": None,
+            "target": {
+                "manifest_sha256": original_manifest.digest,
+                **installed["target"],
+            },
+        },
+    )
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["assets"].append(
+        {
+            "platform": "fixture-unrelated",
+            "url": "https://example.test/unrelated.tar.gz",
+            "size_bytes": 1,
+            "sha256": "d" * 64,
+            "binary_sha256": "e" * 64,
+            "bin_path": "unused",
+        }
+    )
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    pointer_path = manager.runtime_dir / "current.json"
+    metadata_path = Path(installed["install_dir"]) / manager.spec.metadata_filename
+    pointer_before = pointer_path.read_bytes()
+    metadata_before = metadata_path.read_bytes()
+    monkeypatch.setattr(
+        manager,
+        "_resolve_manifest_archive",
+        lambda _archive: pytest.fail("released claim replay accessed an archive"),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_write_current_pointer",
+        lambda *_args: pytest.fail("released claim replay rewrote the pointer"),
+    )
+
+    claim = manager.install_state()
+    assert claim is not None
+    replayed = manager.ensure(expected_target=claim["target"])
+
+    assert claim["target"] == installed["target"]
+    assert replayed["ok"] is True
+    assert replayed["changed"] is False
+    assert replayed["path"] == installed["path"]
+    assert pointer_path.read_bytes() == pointer_before
+    assert metadata_path.read_bytes() == metadata_before
+
+
+def test_released_linux_x64_pointer_and_claim_are_admitted_by_platform_alias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: "linux-x64")
+    archive, binary = _write_fixture_archive(tmp_path / "fixture")
+    manifest_path = _write_fixture_manifest(tmp_path / "fixture", archive, binary)
+    manager = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest_path)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+    assert installed["target"]["platform"] == "linux-amd64"
+    original_manifest = manager._load_manifest(allow_network=False)
+    assert original_manifest is not None
+
+    pointer_path = manager.runtime_dir / "current.json"
+    pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    canonical_install_dir = Path(pointer["install_dir"])
+    alias_platform_dir = canonical_install_dir.parent.with_name("linux-x64")
+    canonical_install_dir.parent.rename(alias_platform_dir)
+    alias_install_dir = alias_platform_dir / canonical_install_dir.name
+    pointer["platform"] = "linux-x64"
+    pointer["install_dir"] = str(alias_install_dir)
+    managed_runtime.write_json_atomic(pointer_path, pointer)
+    metadata_path = alias_install_dir / manager.spec.metadata_filename
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["platform"] = "linux-x64"
+    managed_runtime.write_json_atomic(metadata_path, metadata)
+    managed_runtime.write_json_atomic(
+        manager.install_state_path,
+        {
+            "schema_version": 2,
+            "state": "installing",
+            "generation": RUNTIME_INSTALL_GENERATION_A,
+            "error_key": None,
+            "target": {
+                "manifest_sha256": original_manifest.digest,
+                **installed["target"],
+                "platform": "linux-x64",
+            },
+        },
+    )
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["assets"].append(
+        {
+            "platform": "fixture-unrelated",
+            "url": "https://example.test/unrelated.tar.gz",
+            "size_bytes": 1,
+            "sha256": "d" * 64,
+            "binary_sha256": "e" * 64,
+            "bin_path": "unused",
+        }
+    )
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    pointer_before = pointer_path.read_bytes()
+    metadata_before = metadata_path.read_bytes()
+    monkeypatch.setattr(
+        manager,
+        "_resolve_manifest_archive",
+        lambda _archive: pytest.fail("alias-equivalent replay accessed an archive"),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_write_current_pointer",
+        lambda *_args: pytest.fail("alias-equivalent replay rewrote the pointer"),
+    )
+
+    status = manager.status()
+    claim = manager.install_state()
+    assert claim is not None
+    replayed = manager.ensure(expected_target=claim["target"])
+
+    assert status["installed"] is True
+    assert status["installed_identity"]["platform"] == "linux-amd64"
+    assert status["selected_identity"]["platform"] == "linux-amd64"
+    assert status["comparison"] == "matches"
+    assert status["path"] == str(alias_install_dir / "cli-proxy-api")
+    assert manager.resolve_engine_path() == alias_install_dir / "cli-proxy-api"
+    assert claim["target"] == installed["target"]
+    assert replayed["ok"] is True
+    assert replayed["changed"] is False
+    assert replayed["path"] == str(alias_install_dir / "cli-proxy-api")
+    assert pointer_path.read_bytes() == pointer_before
+    assert metadata_path.read_bytes() == metadata_before
+
+
 @pytest.mark.parametrize("transition", tuple(InstallClaimTransition), ids=lambda item: item.value)
 def test_every_install_claim_transition_preserves_live_generation_ownership(
     tmp_path: Path,
@@ -951,6 +1137,14 @@ def test_engine_installer_selects_verified_packaged_asset(
     assert archive.size == size_bytes
     assert archive.sha256 == archive_sha256
     assert archive.binary_sha256 == binary_sha256
+
+
+def test_engine_platform_identity_is_declared_by_the_shared_spec() -> None:
+    assert dict(runtime_installer_module._ENGINE_SPEC.platform_aliases) == (
+        runtime_installer_module._ENGINE_PLATFORM_MAP
+    )
+    assert "_normalize_installed_artifact_platform" not in EngineRuntimeManager.__dict__
+    assert "_normalized_install_target" not in EngineRuntimeManager.__dict__
 
 
 def test_engine_installer_is_idempotent_and_rejects_tampered_archive(tmp_path: Path) -> None:
