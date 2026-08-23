@@ -50,6 +50,8 @@ _INLINE_RE = re.compile(
 _SECTION_RE = re.compile(r"^###\s+(.+?)\s*$", re.MULTILINE)
 _MAX_CURSOR_BYTES = 256
 _MAX_ID_BYTES = 256
+_MAX_SESSION_ID_BYTES = 256
+_MAX_TIMESTAMP_MS = 4_102_444_800_000
 _MAX_MESSAGE_IDS_BYTES = 16 * 1024
 _MAX_JSON_BYTES = 64 * 1024
 _MAX_MARKDOWN_BYTES = 256 * 1024
@@ -59,12 +61,12 @@ _MAX_TEXT_BYTES = 8 * 1024
 _MAX_RUNS = 50
 _MAX_SEMANTIC_ITEMS = 50
 _MEMCELL_TIMESTAMP_SQL = (
-    "CASE WHEN typeof(timestamp) IN ('integer', 'real') "
+    f"MIN({_MAX_TIMESTAMP_MS}, CASE WHEN typeof(timestamp) IN ('integer', 'real') "
     "THEN MAX(0, CAST(timestamp AS INTEGER)) "
     "ELSE MAX(0, COALESCE(CAST(strftime('%s', timestamp) AS INTEGER) * 1000 + "
     "CASE WHEN instr(timestamp, '.') > 0 THEN "
     "CAST(CAST('0.' || substr(timestamp, instr(timestamp, '.') + 1) AS REAL) "
-    "* 1000 AS INTEGER) ELSE 0 END, 0)) END"
+    "* 1000 AS INTEGER) ELSE 0 END, 0)) END)"
 )
 
 
@@ -88,12 +90,14 @@ class NativeProcessingRecordReader:
         observed = _utc_now()
         return ProcessingSourceObservations(
             memcells=_sqlite_source(
+                self._root,
                 self._system_db,
                 f"SELECT {_MEMCELL_COLUMNS} FROM memcell LIMIT 1",
                 observed,
                 "native_memcells_unavailable",
             ),
             runs=_sqlite_source(
+                self._root,
                 self._ome_db,
                 f"SELECT {_RUN_COLUMNS} FROM run_record LIMIT 1",
                 observed,
@@ -119,6 +123,7 @@ class NativeProcessingRecordReader:
         )
         page = rows[:limit]
         run_source = _sqlite_source(
+            self._root,
             self._ome_db,
             f"SELECT {_RUN_COLUMNS} FROM run_record LIMIT 1",
             _utc_now(),
@@ -126,14 +131,15 @@ class NativeProcessingRecordReader:
         )
         entries = []
         for row in page:
-            payload = _payload_projection(row, principal_id)
+            owner = _memcell_owner(row)
+            payload = _payload_projection(row, owner)
             runs = self._runs_projection(row)
             entries.append(
                 {
                     "memcell_id": str(row["memcell_id"]),
                     "project_id": str(row["project_id"]),
                     "session_id": str(row["session_id"]),
-                    "owner_id": _memcell_owner(row),
+                    "owner_id": owner,
                     "timestamp_ms": _timestamp_ms(row["timestamp"]),
                     "preview": _payload_preview(payload),
                     "payload": _section_summary(payload),
@@ -181,7 +187,8 @@ class NativeProcessingRecordReader:
                 "sections": {"payload": _source_payload(source)},
             }
         row = rows[0]
-        payload = _payload_projection(row, principal_id)
+        owner = _memcell_owner(row)
+        payload = _payload_projection(row, owner)
         runs = self._runs_projection(row)
         semantic, linked_paths = self._semantic_projection(row)
         current = self._current_state_projection(row, linked_paths)
@@ -191,7 +198,7 @@ class NativeProcessingRecordReader:
                 "memcell_id": str(row["memcell_id"]),
                 "project_id": str(row["project_id"]),
                 "session_id": str(row["session_id"]),
-                "owner_id": _memcell_owner(row),
+                "owner_id": owner,
                 "timestamp_ms": _timestamp_ms(row["timestamp"]),
             },
             "payload": payload,
@@ -210,7 +217,7 @@ class NativeProcessingRecordReader:
         limit: int,
     ) -> tuple[list[sqlite3.Row], SourceObservation]:
         observed = _utc_now()
-        with _read_only(self._system_db) as conn:
+        with _read_only(self._root, self._system_db) as conn:
             if conn is None:
                 return [], SourceObservation(
                     "unavailable", observed, "native_memcells_unavailable"
@@ -222,6 +229,10 @@ class NativeProcessingRecordReader:
                 predicates = [
                     "app_id = ?",
                     "project_id = ?",
+                    "typeof(memcell_id) = 'text'",
+                    "length(CAST(memcell_id AS BLOB)) BETWEEN 1 AND ?",
+                    "typeof(session_id) = 'text'",
+                    "length(CAST(session_id AS BLOB)) BETWEEN 1 AND ?",
                     "length(CAST(sender_ids_json AS BLOB)) <= 1024",
                     "json_valid(sender_ids_json)",
                     "json_type(sender_ids_json) = 'array'",
@@ -232,6 +243,8 @@ class NativeProcessingRecordReader:
                 args: list[object] = [
                     _APP_ID,
                     project_id,
+                    _MAX_ID_BYTES,
+                    _MAX_SESSION_ID_BYTES,
                     principal_id,
                     derive_assistant_memory_owner_id(principal_id),
                 ]
@@ -273,14 +286,14 @@ class NativeProcessingRecordReader:
                 sql += " ORDER BY timestamp_ms DESC, memcell_id DESC LIMIT ?"
                 query_args.append(limit)
                 rows = list(conn.execute(sql, query_args))
-            except sqlite3.Error:
+            except (sqlite3.Error, UnicodeError):
                 return [], SourceObservation(
                     "unavailable", observed, "native_memcells_unavailable"
                 )
         return rows, SourceObservation("available", observed)
 
     def _runs_projection(self, row: sqlite3.Row) -> dict[str, Any]:
-        with _read_only(self._ome_db) as conn:
+        with _read_only(self._root, self._ome_db) as conn:
             if conn is None:
                 return _unavailable("native_runs_unavailable")
             try:
@@ -305,7 +318,7 @@ class NativeProcessingRecordReader:
                         ),
                     )
                 )
-            except sqlite3.Error:
+            except (sqlite3.Error, UnicodeError):
                 return _unavailable("native_runs_unavailable")
         items: list[dict[str, Any]] = []
         rejected = 0
@@ -383,8 +396,6 @@ class NativeProcessingRecordReader:
         self, row: sqlite3.Row
     ) -> tuple[dict[str, Any], set[str]]:
         owner = _memcell_owner(row)
-        if not is_principal_id(owner):
-            return _unavailable("semantic_results_not_user_scoped"), set()
         root = self._owner_root(str(row["project_id"]), owner)
         episodes, episode_paths, incomplete = _linked_entries(
             self._root,
@@ -436,8 +447,6 @@ class NativeProcessingRecordReader:
         self, row: sqlite3.Row, linked_paths: set[str]
     ) -> dict[str, Any]:
         owner = _memcell_owner(row)
-        if not is_principal_id(owner):
-            return _unavailable("current_state_not_user_scoped")
         owner_root = self._owner_root(str(row["project_id"]), owner)
         profile_path = owner_root / "user.md"
         profile = {"status": "missing", "updated_at_ms": None}
@@ -478,7 +487,7 @@ class NativeProcessingRecordReader:
     def _index_state(self, paths: set[str]) -> dict[str, Any]:
         if not paths:
             return _unavailable("index_state_unavailable")
-        with _read_only(self._system_db) as conn:
+        with _read_only(self._root, self._system_db) as conn:
             if conn is None:
                 return _unavailable("index_state_unavailable")
             try:
@@ -495,7 +504,7 @@ class NativeProcessingRecordReader:
                         bounded_paths,
                     )
                 )
-            except sqlite3.Error:
+            except (sqlite3.Error, UnicodeError):
                 return _unavailable("index_state_unavailable")
         items = [
             {
@@ -526,7 +535,7 @@ class NativeProcessingRecordReader:
         return self._root / _APP_ID / project_dir / "users" / owner_id
 
 
-def _payload_projection(row: sqlite3.Row, principal_id: str) -> dict[str, Any]:
+def _payload_projection(row: sqlite3.Row, owner_id: str) -> dict[str, Any]:
     if row["payload_json"] is None:
         return _unavailable(
             "payload_projection_limit" if row["payload_withheld"] else "payload_unavailable"
@@ -550,7 +559,7 @@ def _payload_projection(row: sqlite3.Row, principal_id: str) -> dict[str, Any]:
         if len(projected) >= _MAX_PAYLOAD_ITEMS:
             rejected += 1
             continue
-        value = _authorized_payload_item(item, principal_id, allowed_ids)
+        value = _authorized_payload_item(item, owner_id, allowed_ids)
         if value is None:
             rejected += 1
         else:
@@ -573,7 +582,7 @@ def _payload_projection(row: sqlite3.Row, principal_id: str) -> dict[str, Any]:
 
 
 def _authorized_payload_item(
-    value: object, principal_id: str, message_ids: set[str]
+    value: object, owner_id: str, message_ids: set[str]
 ) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
@@ -582,10 +591,9 @@ def _authorized_payload_item(
     if (
         value.get("kind") != "text"
         or value.get("role") != "user"
-        or value.get("sender_id") != principal_id
-        or not isinstance(item_id, str)
+        or value.get("sender_id") != owner_id
+        or not _valid_utf8_text(item_id, _MAX_ID_BYTES)
         or item_id not in message_ids
-        or len(item_id.encode("utf-8")) > _MAX_ID_BYTES
         or not isinstance(timestamp, int)
         or isinstance(timestamp, bool)
         or timestamp < 0
@@ -611,15 +619,19 @@ def _authorized_payload_item(
     return {
         "id": item_id,
         "timestamp_ms": timestamp,
-        "sender_id": principal_id,
+        "sender_id": owner_id,
         "content": blocks,
     }
 
 
 def _text_block(text: str) -> dict[str, Any]:
-    raw = text.encode("utf-8")
+    raw = text.encode("utf-8", errors="replace")
     if len(raw) <= _MAX_TEXT_BYTES:
-        return {"type": "text", "text": text, "omitted_bytes": 0}
+        return {
+            "type": "text",
+            "text": raw.decode("utf-8"),
+            "omitted_bytes": 0,
+        }
     excerpt = raw[:_MAX_TEXT_BYTES].decode("utf-8", errors="ignore")
     return {
         "type": "text",
@@ -718,7 +730,7 @@ def _read_markdown(path: Path) -> tuple[dict[str, Any], str] | None:
         return None
     try:
         frontmatter = yaml.safe_load(text[4:end])
-    except yaml.YAMLError:
+    except (yaml.YAMLError, ValueError, RecursionError):
         return None
     if not isinstance(frontmatter, dict):
         return None
@@ -836,23 +848,19 @@ def _validate_limit(limit: int) -> None:
 
 
 def _validate_id(value: str) -> None:
-    if (
-        not isinstance(value, str)
-        or not value
-        or len(value.encode("utf-8")) > _MAX_ID_BYTES
-    ):
+    if not _valid_utf8_text(value, _MAX_ID_BYTES):
         raise ValueError("invalid memcell id")
 
 
 def _sqlite_source(
-    path: Path, query: str, observed: str, reason: str
+    root: Path, path: Path, query: str, observed: str, reason: str
 ) -> SourceObservation:
-    with _read_only(path) as conn:
+    with _read_only(root, path) as conn:
         if conn is None:
             return SourceObservation("unavailable", observed, reason)
         try:
             conn.execute(query).fetchone()
-        except sqlite3.Error:
+        except (sqlite3.Error, UnicodeError):
             return SourceObservation("unavailable", observed, reason)
     return SourceObservation("available", observed)
 
@@ -890,17 +898,21 @@ def _utc_now() -> str:
 
 
 def _timestamp_ms(value: object) -> int:
-    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-        return value
-    if isinstance(value, float) and value >= 0:
-        return int(value)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return min(_MAX_TIMESTAMP_MS, max(0, int(value)))
+        except (OverflowError, ValueError):
+            return 0
     if not isinstance(value, str):
         return 0
     try:
         instant = datetime.fromisoformat(value.replace("Z", "+00:00"))
         if instant.tzinfo is None:
             instant = instant.replace(tzinfo=timezone.utc)
-        return max(0, int(instant.timestamp() * 1000))
+        return min(
+            _MAX_TIMESTAMP_MS,
+            max(0, int(instant.timestamp() * 1000)),
+        )
     except (ValueError, OverflowError):
         return 0
 
@@ -935,10 +947,8 @@ def _decode_cursor(cursor: str) -> tuple[int, str]:
         or len(value) != 2
         or not isinstance(value[0], int)
         or isinstance(value[0], bool)
-        or not 0 <= value[0] <= 4_102_444_800_000
-        or not isinstance(value[1], str)
-        or not value[1]
-        or len(value[1].encode("utf-8")) > _MAX_ID_BYTES
+        or not 0 <= value[0] <= _MAX_TIMESTAMP_MS
+        or not _valid_utf8_text(value[1], _MAX_ID_BYTES)
         or _encode_cursor(value[0], value[1]) != cursor
     ):
         raise ValueError("invalid cursor")
@@ -955,8 +965,8 @@ def _decode_json(value: object) -> Any:
 
 
 def _bounded_text(value: str, limit: int) -> str:
-    raw = value.encode("utf-8")
-    return value if len(raw) <= limit else raw[:limit].decode("utf-8", errors="ignore")
+    raw = value.encode("utf-8", errors="replace")
+    return raw[:limit].decode("utf-8", errors="ignore")
 
 
 def _bounded_optional_text(value: object, limit: int) -> str | None:
@@ -966,7 +976,7 @@ def _bounded_optional_text(value: object, limit: int) -> str | None:
 def _validated_timestamp(value: object) -> str | None:
     if value is None:
         return None
-    if not isinstance(value, str) or len(value.encode("utf-8")) > 128:
+    if not _valid_utf8_text(value, 128):
         return None
     try:
         datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -976,13 +986,20 @@ def _validated_timestamp(value: object) -> str | None:
 
 
 def _non_negative_int(value: object) -> int | None:
-    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+    if (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 0 <= value <= _MAX_TIMESTAMP_MS
+    ):
         return value
     return None
 
 
 @contextmanager
-def _read_only(path: Path):
+def _read_only(root: Path, path: Path):
+    if not _safe_regular_file(root, path):
+        yield None
+        return
     try:
         conn = sqlite3.connect(path.absolute().as_uri() + "?mode=ro", uri=True)
     except sqlite3.Error:
@@ -993,3 +1010,12 @@ def _read_only(path: Path):
         yield conn
     finally:
         conn.close()
+
+
+def _valid_utf8_text(value: object, limit: int) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        return len(value.encode("utf-8")) <= limit
+    except UnicodeError:
+        return False

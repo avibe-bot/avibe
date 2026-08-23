@@ -49,7 +49,6 @@ from core.memory.everos_insight import MemoryInsightPaths, MemoryInsightReader
 from core.memory.everos_insight.recorder import (
     call_log_retention_policy,
     clear_call_log,
-    maintain_call_log,
     record_preflight_call,
 )
 from core.memory.module import MemoryModule, MemorySessionLifecycleBusyError
@@ -416,11 +415,7 @@ class MemoryRuntime:
             provider_root=self._provider_root,
             effective_home=self._effective_home,
             socket_path=self._socket_path,
-            call_log_db_path=self._call_log_db_path,
-            retain_call_log=self._maintain_call_log_once,
             on_current_sidecar_ready=self._current_sidecar_ready,
-            on_recorder_health=self._update_recorder_health,
-            read_recorder_health=self._provider.recorder_health,
         )
         self._maintenance = MemoryMaintenance(
             None,
@@ -658,18 +653,6 @@ class MemoryRuntime:
     def _process(self, process: EverOSProcessPort | None) -> None:
         self._sidecar._replace_for_runtime(process)
 
-    @property
-    def _process_records_calls(self) -> bool:
-        return self._sidecar.snapshot().records_calls
-
-    @_process_records_calls.setter
-    def _process_records_calls(self, value: bool) -> None:
-        self._sidecar._set_records_calls_for_runtime(value)
-
-    @property
-    def _call_log_retention_task(self) -> asyncio.Task[None] | None:
-        return self._sidecar.retention_task
-
     def _maintenance_open(self) -> bool:
         """Fail closed when the independent clear authority cannot prove terminal."""
 
@@ -700,7 +683,6 @@ class MemoryRuntime:
         )
 
     def _restore_after_clear(self) -> None:
-        self._sidecar.reset_host_retention_after_clear()
         self.module.reset_capture_generation()
 
     def _processing_record_port(self) -> MemoryProcessingRecordPort:
@@ -915,13 +897,7 @@ class MemoryRuntime:
         # sidecar is exactly the boot that may face one from the run before it.
         # Takes and releases the reconcile lock itself; the lock this method
         # acquires later is a separate, sequential acquisition.
-        recorded_sidecar_reaped = await self._reap_recorded_sidecar_if_unowned()
-        if recorded_sidecar_reaped and not self._maintenance_open():
-            # Retention may run while artifact/store/credential preflight is
-            # failing, but only after recovery proved no previous recorder can
-            # still own the database. A recorder launch fences this task again
-            # through ``before_recorder_start`` below.
-            self._ensure_call_log_retention()
+        await self._reap_recorded_sidecar_if_unowned()
         if not self.available:
             # A transient store failure must not close Memory forever: every
             # reconciliation is another chance to open it.
@@ -982,14 +958,10 @@ class MemoryRuntime:
         self._provider = EverOSPort(self._socket_path)
         self.module.replace_provider(self._provider)
         await self._close_writer()
-        stopped_process = self._process is not None
-        if stopped_process:
+        if self._process is not None:
             await self._process.stop()
             self._process = None
-        self._process_records_calls = False
         self._reset_recorder_health_unless_corrupt()
-        if stopped_process:
-            self._ensure_call_log_retention()
         self._runtime_error = None
         return {"ok": True, "state": "disabled"}
 
@@ -1286,7 +1258,6 @@ class MemoryRuntime:
         observed_at: str | None = None,
     ) -> None:
         self._recorder_health = dict(health)
-        self._sidecar.observe_recorder_health(self._recorder_health)
         self._processing_record.observe_recorder(
             self._recorder_health,
             observed_at=observed_at,
@@ -2172,8 +2143,6 @@ class MemoryRuntime:
         if self._process is not None:
             await self._process.stop()
             self._process = None
-        self._process_records_calls = False
-        await self._stop_call_log_retention()
         self._set_recorder_health_disabled()
 
     async def _delete_clear_surface(
@@ -2207,7 +2176,6 @@ class MemoryRuntime:
             return
         if surface.surface == "call_log":
             await run_blocking(clear_call_log, self._call_log_db_path)
-            self._sidecar.reset_host_retention_after_clear()
             self._set_recorder_health_disabled()
             return
         if surface.surface == "attachments":
@@ -2355,8 +2323,6 @@ class MemoryRuntime:
                             "download_error": None,
                         }
                     self._process = None
-                    self._process_records_calls = False
-                    self._ensure_call_log_retention()
                     if (
                         activation_config.recovery_intent is None
                         and not await self._embedding_change_is_admissible(
@@ -2823,8 +2789,6 @@ class MemoryRuntime:
                     self._runtime_error = "memory_restart_failed"
                     return {"ok": False, "error": self._runtime_error}
                 self._process = None
-                self._process_records_calls = False
-                self._ensure_call_log_retention()
 
             # From this point old ownership is gone, so every failure remains
             # fail closed with claims paused.
@@ -3304,10 +3268,6 @@ class MemoryRuntime:
                 except BaseException as error:
                     cleanup_error = cleanup_error or error
         try:
-            await self._stop_call_log_retention()
-        except BaseException as error:
-            cleanup_error = cleanup_error or error
-        try:
             await self._sidecar.close()
         except BaseException as error:
             cleanup_error = cleanup_error or error
@@ -3454,7 +3414,6 @@ class MemoryRuntime:
                         if self._process is not None:
                             await self._process.stop()
                             self._process = None
-                        self._process_records_calls = False
                         if root_state.exists:
                             meta = await asyncio.to_thread(self._store.get_meta)
                             if meta is None:
@@ -3601,35 +3560,6 @@ class MemoryRuntime:
 
     async def _close_writer(self) -> None:
         await self.module.close_writer()
-
-    def _ensure_call_log_retention(self) -> None:
-        if self._recorder_health.get("reason") != "call_log_corrupt":
-            self._sidecar.handoff_to_host_retention()
-
-    async def _stop_call_log_retention(self) -> None:
-        await self._sidecar.stop_host_retention()
-
-    async def _maintain_call_log_once(self) -> tuple[bool, str | None]:
-        async with self._reconcile_lock:
-            if self._module is None:
-                return await self._run_call_log_maintenance()
-            async with self.module.lifecycle():
-                return await self._run_call_log_maintenance()
-
-    async def _run_call_log_maintenance(self) -> str | None:
-        try:
-            return await run_blocking(maintain_call_log, self._call_log_db_path)
-        except Exception:
-            return "writer_failures"
-
-    def _call_log_exists(self) -> bool:
-        try:
-            self._call_log_db_path.lstat()
-        except FileNotFoundError:
-            return False
-        except OSError:
-            return True
-        return True
 
     def _reset_recorder_health_unless_corrupt(self) -> None:
         if self._recorder_health.get("reason") != "call_log_corrupt":

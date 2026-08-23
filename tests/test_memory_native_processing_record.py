@@ -7,10 +7,12 @@ from pathlib import Path
 import sqlite3
 
 from core.memory.native_processing_record import NativeProcessingRecordReader
+from core.memory.store import derive_assistant_memory_owner_id
 
 
 PRINCIPAL = "u-" + "a" * 32
 OTHER_PRINCIPAL = "u-" + "b" * 32
+AGENT_OWNER = derive_assistant_memory_owner_id(PRINCIPAL)
 SESSION = "src--" + "1" * 64 + "--e0"
 OTHER_SESSION = "src--" + "2" * 64 + "--e0"
 
@@ -195,6 +197,133 @@ def test_payload_preserves_authorized_boundaries_and_fails_closed(tmp_path: Path
         reader.record_detail((PRINCIPAL, "default"), "mc-foreign")["status"]
         == "not_found"
     )
+
+
+def test_agent_owned_capture_preserves_payload_and_native_results(
+    tmp_path: Path,
+) -> None:
+    system_db = _system_db(tmp_path)
+    _ome_db(tmp_path)
+    _insert_memcell(system_db, "mc-agent", AGENT_OWNER)
+    owner_root = (
+        tmp_path
+        / "everos"
+        / "avibe"
+        / "default_project"
+        / "users"
+        / AGENT_OWNER
+    )
+    episode = owner_root / "episodes" / "episode-2026-08-24.md"
+    episode.parent.mkdir(parents=True)
+    episode.write_text(
+        _markdown(
+            f"""
+file_type: episode_daily
+user_id: {AGENT_OWNER}
+track: user
+""",
+            f"""<!-- entry:ep_agent -->
+**owner_id**: {AGENT_OWNER}
+**session_id**: {SESSION}
+**timestamp**: 2026-08-24T00:00:02Z
+**parent_type**: memcell
+**parent_id**: mc-agent
+
+### Content
+Agent processing result
+<!-- /entry:ep_agent -->
+""",
+        ),
+        encoding="utf-8",
+    )
+    profile = owner_root / "user.md"
+    profile.write_text(
+        _markdown(
+            f"""
+type: user_profile
+user_id: {AGENT_OWNER}
+track: user
+profile_timestamp_ms: 1700000000000
+"""
+        ),
+        encoding="utf-8",
+    )
+
+    detail = _reader(tmp_path).record_detail(
+        (PRINCIPAL, "default"), "mc-agent"
+    )
+
+    assert detail["entry"]["owner_id"] == AGENT_OWNER
+    assert detail["payload"]["items"][0]["sender_id"] == AGENT_OWNER
+    assert detail["payload"]["items"][0]["content"][0]["text"] == "hello"
+    assert detail["semantic"]["items"][0]["content"] == "Agent processing result"
+    assert detail["current_state"]["profile"]["status"] == "present"
+
+
+def test_native_projection_replaces_malformed_display_text(tmp_path: Path) -> None:
+    system_db = _system_db(tmp_path)
+    _ome_db(tmp_path)
+    _insert_memcell(
+        system_db,
+        "mc-malformed-text",
+        PRINCIPAL,
+        items=[
+            {
+                "kind": "text",
+                "id": "message-malformed",
+                "role": "user",
+                "content": "before-\ud800-after",
+                "timestamp": 1_700_000_000_000,
+                "sender_id": PRINCIPAL,
+            }
+        ],
+    )
+
+    detail = _reader(tmp_path).record_detail(
+        (PRINCIPAL, "default"), "mc-malformed-text"
+    )
+
+    assert detail["payload"]["items"][0]["content"][0]["text"] == (
+        "before-?-after"
+    )
+
+
+def test_native_sqlite_sources_reject_symlinked_ancestors(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside_db = outside / ".index" / "sqlite" / "system.db"
+    outside_db.parent.mkdir(parents=True)
+    with sqlite3.connect(outside_db) as conn:
+        conn.execute(
+            "CREATE TABLE memcell (memcell_id TEXT, app_id TEXT, project_id TEXT, "
+            "session_id TEXT, track TEXT, raw_type TEXT, message_ids_json TEXT, "
+            "sender_ids_json TEXT, payload_json TEXT, timestamp TEXT)"
+        )
+    root = tmp_path / "everos"
+    root.mkdir()
+    (root / ".index").symlink_to(outside / ".index", target_is_directory=True)
+
+    sources = _reader(tmp_path).source_observation()
+
+    assert sources.memcells.status == "unavailable"
+    assert sources.memcells.reason == "native_memcells_unavailable"
+
+
+def test_list_cursor_is_stable_for_equal_native_timestamps(tmp_path: Path) -> None:
+    system_db = _system_db(tmp_path)
+    _ome_db(tmp_path)
+    for memcell_id in ("mc-1", "mc-2", "mc-3"):
+        _insert_memcell(system_db, memcell_id, PRINCIPAL)
+
+    reader = _reader(tmp_path)
+    first = reader.list_records((PRINCIPAL, "default"), None, 2)
+    second = reader.list_records(
+        (PRINCIPAL, "default"), first["next_cursor"], 2
+    )
+
+    assert [item["memcell_id"] for item in first["entries"]] == ["mc-3", "mc-2"]
+    assert first["next_cursor"] is not None
+    assert [item["memcell_id"] for item in second["entries"]] == ["mc-1"]
+    assert second["next_cursor"] is None
 
 
 def test_runs_require_direct_native_scope_and_scrub_display_error(tmp_path: Path) -> None:
