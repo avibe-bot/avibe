@@ -114,10 +114,12 @@ from core.memory.types import (
     memory_item_payload,
     memory_list_page_payload,
 )
-from core.memory.worker import ProcessingEvent
-
-
 logger = logging.getLogger(__name__)
+
+ProcessingEvent = Callable[
+    [Literal["fault", "recovered"], Literal["credential", "engine"] | None, str, int],
+    Awaitable[bool],
+]
 
 
 _SessionLifecycleResult = TypeVar("_SessionLifecycleResult")
@@ -461,6 +463,7 @@ class MemoryRuntime:
                 provider_root_owner=self._provider_root_owner,
                 maintenance_open=self._maintenance_open,
                 processing_event=self._processing_event,
+                ambiguous_stop_reap=self._sidecar.stop,
                 effective_home=self._effective_home,
             )
         except Exception as exc:
@@ -1246,12 +1249,10 @@ class MemoryRuntime:
             reason = acquired.local_observation_reason(maintenance_reason)
             if acquired.generation != before.generation or reason is not None:
                 return FailureLogObservation((), reason or "busy")
-            entries = await run_blocking(self._store.failure_log, limit=50)
-            after = self._processing_runtime_snapshot()
-            reason = after.local_observation_reason(maintenance_reason)
-            if after.generation != before.generation or reason is not None:
-                return FailureLogObservation((), reason or "busy")
-            return FailureLogObservation(entries)
+            # Per-call durable failure history was retired with the delivery
+            # protocol. Keep the diagnostics capability explicit: unavailable
+            # is distinct from an authorized empty result.
+            return FailureLogObservation((), "memory_failure_history_unavailable")
 
     async def _processing_record_sources(
         self,
@@ -1442,47 +1443,12 @@ class MemoryRuntime:
             raise self._unavailable()
         return self._store.project_for_workdir(workdir)
 
-    async def resolve_current_session_scope(self, raw_session_id: str) -> tuple[str, str] | None:
-        """Recover a trusted capture scope from durable current-epoch state."""
+    def offer_barrier(self) -> str:
+        """Offer a non-blocking provider barrier for lifecycle transitions."""
 
         if not self.available:
-            return None
-        return await asyncio.to_thread(
-            self._store.resolve_current_session_scope,
-            raw_session_id,
-        )
-
-    async def resolve_current_session_scopes(
-        self,
-        raw_session_id: str,
-    ) -> tuple[tuple[str, str], ...] | None:
-        """Recover all trusted capture scopes for a terminal session transition."""
-
-        if not self.available:
-            return None
-        return await asyncio.to_thread(
-            self._store.resolve_current_session_scopes,
-            raw_session_id,
-        )
-
-    async def final_flush(
-        self,
-        *,
-        principal_id: str,
-        project_id: str,
-        raw_session_id: str,
-        deadline_seconds: float = 5.0,
-    ) -> bool:
-        """Fence one trusted canonical session at a centralized lifecycle boundary."""
-
-        if not self.available:
-            return False
-        return await self.module.final_flush(
-            principal_id=principal_id,
-            project_id=project_id,
-            raw_session_id=raw_session_id,
-            deadline_seconds=deadline_seconds,
-        )
+            return "disabled"
+        return self.module.offer_barrier()
 
     async def run_session_lifecycle(
         self,
@@ -1493,7 +1459,7 @@ class MemoryRuntime:
         operation: Callable[[], Awaitable[_SessionLifecycleResult]],
         deadline_seconds: float = 5.0,
     ) -> _SessionLifecycleResult:
-        """Flush and run one destructive session transition under one fence."""
+        """Run one destructive session transition with non-blocking barrier admission."""
 
         if not self.available:
             return await operation()
@@ -1513,7 +1479,7 @@ class MemoryRuntime:
         operation: Callable[[], Awaitable[_SessionLifecycleResult]],
         deadline_seconds: float = 5.0,
     ) -> _SessionLifecycleResult:
-        """Flush all session scopes and run one transition under every fence."""
+        """Run one transition after a non-blocking barrier offer."""
 
         canonical_scopes = tuple(dict.fromkeys(scopes))
         if (
@@ -3378,7 +3344,7 @@ class MemoryRuntime:
                         raise RuntimeError(
                             "Memory worker did not quiesce during retired close"
                         )
-                    await self._module.prepare_shutdown()
+                    await self._module.close_writer()
                 except BaseException as error:
                     cleanup_error = cleanup_error or error
         try:
@@ -3669,37 +3635,11 @@ class MemoryRuntime:
         if self._maintenance_open():
             self.module.pause_claims()
             return
-        if self._worker_task is None or self._worker_task.done():
-            self.module.begin_activation()
-            self._worker_task = asyncio.create_task(self._drain_loop(), name="memory-drain")
+        self.module.resume_claims()
 
     async def _stop_worker(self) -> None:
-        task = self._worker_task
-        if task is None:
-            return
-        task.cancel()
-        # ``gather(return_exceptions=True)`` absorbs the worker's expected
-        # cancellation, so any cancellation raised by shield belongs to this
-        # caller. This works on Python 3.10 without ``Task.cancelling()``.
-        settlement = asyncio.gather(task, return_exceptions=True)
-        caller_cancellation: asyncio.CancelledError | None = None
-        while not settlement.done():
-            try:
-                await asyncio.shield(settlement)
-            except asyncio.CancelledError as error:
-                caller_cancellation = caller_cancellation or error
-        try:
-            worker_result = settlement.result()[0]
-        finally:
-            if self._worker_task is task:
-                self._worker_task = None
-        if isinstance(worker_result, BaseException) and not isinstance(
-            worker_result,
-            asyncio.CancelledError,
-        ):
-            raise worker_result
-        if caller_cancellation is not None:
-            raise caller_cancellation
+        await self.module.close_writer()
+        self._worker_task = None
 
     def _ensure_call_log_retention(self) -> None:
         if self._recorder_health.get("reason") != "call_log_corrupt":
@@ -3738,62 +3678,14 @@ class MemoryRuntime:
         self._update_recorder_health(_RECORDER_DISABLED)
 
     async def _drain_loop(self) -> None:
-        while self._config.enabled:
-            try:
-                await self.module.drain()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.warning("Memory drain activation failed; retrying recovery")
-                await self._recover_failed_drain()
-            await asyncio.sleep(1.0)
+        """Retired product drain loop; the writer owns its single worker."""
+
+        return
 
     async def _recover_failed_drain(self) -> None:
-        """Quiesce detached session work before rotating the worker lease."""
+        """Retired durable recovery path."""
 
-        while self._config.enabled:
-            try:
-                if await self.module.quiesce_claims():
-                    break
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.warning("Memory drain quiescence failed; retrying")
-            await asyncio.sleep(1.0)
-        else:
-            return
-
-        async with self._reconcile_lock:
-            if not self._config.enabled or self._maintenance_open():
-                return
-            # A concurrent reconcile may have resumed claims while this task
-            # waited for lifecycle ownership. Fence and join that newer work.
-            while self._config.enabled:
-                try:
-                    if await self.module.quiesce_claims():
-                        break
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    logger.warning("Memory drain quiescence failed; retrying")
-                await asyncio.sleep(1.0)
-            else:
-                return
-
-            self.module.begin_activation(new_lease=True)
-            while self._config.enabled:
-                try:
-                    # Claims remain paused, so this pass can only run boot recovery.
-                    await self.module.drain()
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    logger.warning("Memory drain activation failed; retrying recovery")
-                    await asyncio.sleep(1.0)
-                    continue
-                if not self._maintenance_open():
-                    self.module.resume_claims()
-                return
+        return
 
     def _data_exists(self) -> bool:
         """Return a conservative status projection of vector-bearing state."""
@@ -3807,8 +3699,7 @@ class MemoryRuntime:
         """Inspect all vector-bearing state, raising when it cannot be proven empty."""
 
         root_has_data = self._provider_root_owner.has_data()
-        stats = self._store.queue_stats()
-        return bool(root_has_data or stats.pending or stats.processing or stats.dead or self._store.has_provider_data_history())
+        return bool(root_has_data or self._store.has_provider_data_history())
 
     async def _embedding_change_is_admissible(
         self,

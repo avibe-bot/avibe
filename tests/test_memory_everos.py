@@ -222,61 +222,6 @@ def test_add_and_flush_are_separate_and_parse_provider_envelopes() -> None:
     ]
 
 
-def test_add_payload_owner_matches_provenance_routed_session(
-    tmp_path: Path,
-) -> None:
-    """Scenario: MEMORY-SEARCH-011."""
-
-    caller = "u-11111111111111111111111111111111"
-    payloads: list[dict] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        payloads.append(json.loads(request.content))
-        return httpx.Response(
-            200,
-            json={"request_id": f"add-{len(payloads)}", "data": {"status": "accumulated"}},
-        )
-
-    store = MemoryStore(tmp_path / "memory.sqlite", effective_home=tmp_path)
-    for index, provenance in enumerate(("user_input", "agent"), start=1):
-        result = store.enqueue_request(
-            source_message_id=f"payload-{provenance}",
-            session_id="payload-session",
-            principal_id=caller,
-            project_ref=PROJECT,
-            provenance=provenance,
-            payload_text=f"payload {provenance}",
-            occurred_at_ms=index,
-            max_provider_timestamp_ms=4_102_444_800_000,
-        )
-        assert result.row is not None
-
-    rows = store.list_queue_rows()
-
-    async def run() -> None:
-        provider = EverOSPort(Path("/tmp/everos.sock"))
-        for row in rows:
-            await provider.add(
-                ProviderCapture(
-                    session_ref=row.provider_session_ref,
-                    text=row.payload_text or "",
-                    provider_timestamp_ms=row.provider_timestamp_ms,
-                )
-            )
-
-    with _sidecar_transport(handler):
-        asyncio.run(run())
-
-    expected_owners = [caller, derive_assistant_memory_owner_id(caller)]
-    assert [row.principal_id for row in rows] == [caller, caller]
-    assert [row.provider_session_ref.principal_id for row in rows] == expected_owners
-    assert [payload["messages"][0]["sender_id"] for payload in payloads] == expected_owners
-    assert [payload["messages"][0]["role"] for payload in payloads] == ["user", "user"]
-    assert [payload["session_id"] for payload in payloads] == [
-        row.provider_session_ref.session_id for row in rows
-    ]
-
-
 def test_provider_capture_has_one_canonical_session_identity() -> None:
     capture = ProviderCapture(SESSION_REF, "capture", 1)
     scope_key = b"s" * 32

@@ -270,12 +270,9 @@ class MemoryIMAttachmentScenarioHarness:
             if memory_lease is not None:
                 memory_lease.release()
             batch.lease.release()
-        await self.module.drain()
-        await self.module.final_flush(
-            principal_id=PRINCIPAL,
-            project_id=PROJECT,
-            raw_session_id="stable-session",
-        )
+        # Deterministic synchronization is test-only; product lifecycle offers
+        # remain non-blocking and never expose a delivery drain.
+        await self.module.wait_writer_idle_for_tests()
 
     @property
     def memory_bundle_entries(self) -> tuple[Path, ...]:

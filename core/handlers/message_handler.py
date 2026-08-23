@@ -289,14 +289,6 @@ class MessageHandler(BaseHandler):
             == expected_snapshot
         )
 
-    async def drain_memory_capture_tasks(self) -> None:
-        """Settle captures accepted before controller shutdown closes Memory."""
-
-        while self._memory_capture_tasks:
-            tasks = tuple(self._memory_capture_tasks)
-            await asyncio.gather(*tasks, return_exceptions=True)
-            self._memory_capture_tasks.difference_update(tasks)
-
     async def cancel_memory_capture_tasks(self) -> None:
         """Cancel and join captures before the controller event loop closes."""
 

@@ -17,9 +17,9 @@ contract:
   dispatch: capture_must_not_fence_turn_start
   destructive_ops: new_and_archive_fail_open_on_capture_timeout
   generation: retained_snapshot_prevents_cross_generation_attribution
-  shutdown: capture_and_archive_flush_tasks_settle_before_runtime_close
+  shutdown: capture_and_archive_volatile_work_may_drop_before_runtime_close
   imports: shared_delivery_and_handler_imports_stay_behind_leaf_boundaries
-  retention: settled_lifecycle_and_archive_authorization_state_is_released
+  retention: settled_lifecycle_and_archive_authorization_state_is_released_without_delivery_wait
   scheduling: capture_setup_failure_is_best_effort
   transient_dispatch: lifecycle_snapshots_never_enter_platform_payloads_or_waiters
   processing_events: memory_health_events_stay_in_service_logs_without_im_delivery
@@ -39,7 +39,7 @@ scenarios:
     layer: scenario
     test: tests/test_session_delivery_fsm.py::test_capture_admitted_before_new_is_discarded_after_transition
   - id: MEMORY-INDEP-003
-    name: Idle-session capture still attributes and shutdown still drains accepted captures
+    name: Idle-session capture still attributes while shutdown may drop volatile work
     status: covered
     kind: regression_keep
     layer: scenario
@@ -63,13 +63,13 @@ scenarios:
     layer: contract
     test: tests/test_message_handler_typing.py::MessageHandlerTypingTests::test_text_memory_capture_setup_failure_is_best_effort
   - id: MEMORY-INDEP-007
-    name: Archive releases process-local Memory authorization after final flush
+    name: Archive releases process-local Memory authorization after one non-blocking barrier offer
     status: covered
     kind: guardrail
     layer: contract
     test: tests/test_memory_slice3.py::test_archive_memory_cli_session_commits_without_waiting_on_memory
   - id: MEMORY-INDEP-008
-    name: Shutdown settles archive Memory flush tasks before closing the runtime
+    name: Shutdown drops queued and tracked Memory work before closing the runtime
     status: covered
     kind: guardrail
     layer: contract
@@ -81,11 +81,11 @@ scenarios:
     layer: contract
     test: tests/test_native_session_providers.py::test_native_session_lightweight_imports_do_not_require_sqlite
   - id: MEMORY-INDEP-010
-    name: Lifecycle snapshots cross dispatch outside the platform JSON payload
+    name: Non-blocking lifecycle barriers never wait for capture delivery and stale captures are missed
     status: covered
     kind: guardrail
     layer: scenario
-    test: tests/test_session_delivery_fsm.py::test_session_lifecycle_waits_for_admitted_turn_capture
+    test: tests/test_session_delivery_fsm.py::test_session_lifecycle_barrier_is_non_blocking_for_admitted_turn_capture
   - id: MEMORY-INDEP-011
     name: Streaming waiters release lifecycle snapshots after handler admission
     status: covered

@@ -31,13 +31,12 @@ Profile to inspect Agent-owned memory.
 
 Existing Memory data is not moved. Agent-recorded facts written before this
 split remain under the user owner and are still searchable there. A newer
-installation preserves the released four-field provider-session shape and
-delivers pre-split queued rows under the owner stored when they were enqueued.
+installation preserves the released four-field provider-session shape, but
+delivery remains process-local; pending Agent-owner work may be lost across restart,
+rollback, or runtime replacement and is never replayed from an older queue.
 On rollback, already-delivered Agent-owner memories remain stored but are hidden
-from an older reader until Avibe is upgraded again. Pending Agent-owner rows at
-the instant of rollback are not compatible with the older sidecar owner guard
-and may be rejected and discarded; drain the queue before downgrading when those
-records must be retained.
+from an older reader until Avibe is upgraded again. Already submitted provider
+outcomes are never replayed by this path.
 
 ## IM attachment capture
 
@@ -59,7 +58,7 @@ be captured.
 
 Each turn is limited to 8 captured attachments, 25 MiB per attachment, and
 100 MiB in total. Admitted files are copied into private Avibe storage until the
-durable Memory delivery settles. Their extracted content can be sent to the
+process-local Memory delivery settles. Their extracted content can be sent to the
 configured multimodal provider, so configure that endpoint according to your
 data-handling requirements. Clearing Memory Data removes retained local
 attachment bundles but cannot remove copies already accepted by a provider.
@@ -105,9 +104,9 @@ composite status poll. A section may be marked stale or unavailable while the
 other independently sourced sections continue to render, including while
 Memory is disabled.
 
-Memory processing pause and recovery events are written only to the main Avibe
-service log, including the fault kind, occurrence time, and queued-capture
-count. They are not sent as direct messages to administrators on Slack,
+Memory processing fault events are written only to the main Avibe
+service log, including the fault kind and occurrence time. Volatile-capture
+loss is not an administrator message. They are not sent as direct messages on Slack,
 Discord, Telegram, Lark, WeChat, or other IM transports.
 
 The timeline is the installation operator's view across every valid project and
@@ -120,12 +119,8 @@ Cloud Memory session; profile and search reads remain caller-scoped while
 covering that caller's user and Agent owners.
 
 Provider calls are attached only when Avibe can prove their exact provenance to
-the displayed project and Memory owner. The durable capture queue remains keyed
-by the authenticated caller, so Agent-owner correlation translates that trusted
-caller to the derived owner rather than comparing the two IDs directly. The
-broad UI view does not weaken those joins: foreign, malformed, or multi-owner
-memcells are omitted and a detail request derives the row's real scope before
-reading runs, capture, or calls.
+the displayed project and Memory owner. Capture delivery has no durable
+provenance table; missing evidence is unavailable and never widens access.
 
 ## Provider payload logging
 
@@ -251,42 +246,39 @@ When Memory state is corrupt beyond rebuild, use **Reinitialize Memory** beside 
 
 Reinitialize Memory keeps Memory settings, credentials, and the installed artifact. The request waits for its final result and reports the two storage locations independently, so a partial deletion is shown as partial rather than claimed as a clean success. A durable internal `factory_reset` recovery intent makes retry idempotent after a crash; while that intent is pending, other Memory controls remain disabled and the action is labeled **Retry initialization**. Reinitialize Memory is not a secure wipe and does not remove original chats or copies already sent to remote endpoints.
 
-## Capture delivery and flush coordination
+## Best-effort capture
 
-Each captured row stores the canonical provider session reference
-`(principal_id, epoch, project_ref, session_id)` alongside the durable capture
-queue state. Duplicate source identities remain idempotent within the active
-epoch, and a claimed row is either settled successfully or retained with its
-payload for recovery.
+Capture is deliberately volatile and best effort. A process-local writer admits
+at most 256 captures across attachment pinning, queued work, provider calls, and
+terminal cleanup. It keeps one 256-entry source-message LRU, one ordered worker,
+and a bounded pending-flush tracker (256 sessions, 100 message IDs per session).
+Idle, age, and count thresholds are fixed at five minutes, thirty minutes, and
+100 acknowledgements.
 
-Within that four-field provider reference, `principal_id` is the Memory owner:
-the caller principal for user input and the caller's derived `-agent` owner for
-Agent capture. The queue's separate `principal_id` column remains the caller
-principal for admission, audit, recovery, and cross-user isolation.
+Admission writes only stable identity facts to `memory.sqlite`: the install
+scope key, epoch, provider timestamp watermark, and project catalog. After v4
+migration the only application tables are `memory_meta` and `memory_projects`;
+released queue, lease, settlement, attachment-reference, and recovery tables
+are discarded without provider I/O. Older v0-v3 shapes preserve identity and
+project facts, deriving legacy project rows from their former capture data.
 
-The outbox owns add delivery only. A session-scoped coordinator separately owns
-generations, idle/max-age/message-count flush thresholds, exact fences, and
-immutable settlements. Natural extraction boundaries settle a generation
-without an extra flush. Unknown post-submission outcomes become
-`manual_required` and are never replayed automatically; unrelated sessions keep
-progressing. **Clear Memory Data** is the operator's terminal disposition for
-that retained local evidence; after Clear completes, later captures use the new
-epoch and can deliver normally.
+Lifecycle offers and barriers are non-blocking. `/new`, archive, runtime
+replacement, and shutdown never wait for capture delivery. Work still preparing
+or belonging to a stale authority generation may be missed or invalidated.
+Shutdown and replacement intentionally drop volatile work.
 
-Workbench attachments are copied into a private durable bundle before capture
-is accepted. Queue payloads store only bundle-relative metadata. Confirmed
-delivery or deterministic rejection releases the bundle; pending and
-`manual_required` captures retain it for recovery.
+The writer gives add and flush operations at most three attempts, and retries
+only failures proven to occur before provider execution. A possibly submitted
+result is never replayed; the existing owned-sidecar stop/reap path is invoked
+and Memory remains fail closed if termination cannot be proved. Attachment
+pinning runs under the same bound. A confined pin/cleanup failure disables
+attachment intake for that runtime, while a non-empty caption may be offered as
+text-only. The single provider rejection that positively proves no attachment
+write permits the same caption fallback.
 
-This implementation initializes a clean Avibe-owned schema; migration or
-preservation of earlier Memory databases is intentionally unsupported while the
-feature remains unused.
-
-An incomplete, malformed, overlong-receipt, timed-out, or response-disconnected
-provider add is terminal for automatic delivery: the row is retained and its
-provider session is fenced as `manual_required`. Boot recovery applies the same
-fence to any abandoned `processing` row, so it never silently replays an add
-whose provider outcome is unknown.
+Processing Record and Provider Call Log remain independent, authorization-scoped,
+best-effort diagnostics. Missing evidence is reported as unavailable and never
+widens access.
 
 ## Recall policy
 

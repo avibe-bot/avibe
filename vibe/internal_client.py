@@ -68,9 +68,6 @@ MEMORY_RECONCILE_TIMEOUT_SECONDS = 120.0
 # UI polls the job for 310s (``startAndPollDependencyInstall``), so anything
 # shorter reports a false failure on a slow link while the install continues.
 MEMORY_INSTALL_TIMEOUT_SECONDS = 300.0
-# The controller bounds final flush at 5s. Keep the transport outside that
-# bound so the UI does not archive while a timed-out controller call still runs.
-MEMORY_FINAL_FLUSH_TIMEOUT_SECONDS = 7.0
 # Clearing can include provider-side deletion and journal recovery. Keep the
 # transport outside the controller's bounded operation so a slow success does
 # not race a retry from the settings UI.
@@ -748,33 +745,12 @@ async def memory_repair(
     )
 
 
-async def memory_final_flush(
-    session_id: str,
-    *,
-    socket_path: Optional[Path] = None,
-    timeout: float = MEMORY_FINAL_FLUSH_TIMEOUT_SECONDS,
-) -> dict[str, Any]:
-    """Request the controller's bounded final flush for a Workbench session."""
-
-    return await _memory_request(
-        "POST",
-        "/internal/memory/final-flush",
-        payload={"session_id": session_id},
-        socket_path=socket_path,
-        timeout=timeout,
-    )
-
-
 async def memory_archive_session(
     session_id: str,
     *,
     socket_path: Optional[Path] = None,
 ) -> dict[str, Any]:
-    """Await the controller-owned Workbench archive write without a reporting deadline.
-
-    Memory final flush is not on this round-trip. The controller schedules it
-    best-effort after the archive row commits.
-    """
+    """Await the controller-owned Workbench archive write without a reporting deadline."""
 
     return await _memory_request(
         "POST",

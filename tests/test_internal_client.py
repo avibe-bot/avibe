@@ -382,36 +382,6 @@ def test_memory_remember_round_trip(socket_path):
     assert result == {"status_code": 200, "body": {"status": "accepted"}}
 
 
-def test_memory_final_flush_round_trip(socket_path):
-    captured: dict = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured["method"] = request.method
-        captured["path"] = request.url.path
-        captured["payload"] = json.loads(request.content)
-        return httpx.Response(200, json={"ok": True, "flushed": True})
-
-    async def _exercise():
-        transport = httpx.MockTransport(handler)
-        with patch("vibe.internal_client.httpx.AsyncHTTPTransport", return_value=transport):
-            return await internal_client.memory_final_flush(
-                "ses-memory",
-                socket_path=socket_path,
-            )
-
-    result = asyncio.run(_exercise())
-
-    assert captured == {
-        "method": "POST",
-        "path": "/internal/memory/final-flush",
-        "payload": {"session_id": "ses-memory"},
-    }
-    assert result == {
-        "status_code": 200,
-        "body": {"ok": True, "flushed": True},
-    }
-
-
 def test_memory_archive_session_round_trip_uses_only_session_identity(socket_path):
     captured: dict = {}
 

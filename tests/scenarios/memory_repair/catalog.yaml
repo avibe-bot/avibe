@@ -72,7 +72,7 @@ scenarios:
     layer: scenario
     test: tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_003_retains_owner_and_rejects_conflicting_mutation
     actor: Memory Settings user
-    trigger: The user starts Repair and attempts to invoke Repair again before settlement
+    trigger: The user starts Repair and attempts to invoke Repair again before completion
     conditions:
       - The first Repair request remains pending
       - The Repair capability remains advertised
@@ -138,7 +138,7 @@ scenarios:
       - tests/test_memory_repair.py::test_repair_rejects_artifact_without_sync_capability
       - ui/src/components/settings/memory/MemoryStatusPanel.test.tsx
   - id: MEMORY-REPAIR-006
-    name: Repair leaves the live sidecar action path untouched
+    name: Repair leaves the live sidecar and writer action path untouched
     status: covered
     kind: lifecycle
     layer: scenario
@@ -147,12 +147,12 @@ scenarios:
     trigger: The user confirms Repair while the live Memory sidecar is running
     conditions:
       - The admitted sync child runs beside the live sidecar
-      - The runtime worker remains available and claim processing is not paused
+      - The volatile writer remains available and intake is not paused
     given: A public Memory status read reports the sidecar source available
     when: A confirmed public Repair request remains pending at the internal runtime boundary
-    then: Status stays available during and after Repair without pausing claims or stopping the sidecar
+    then: Status stays available during and after Repair without pausing writer intake or stopping the sidecar
     expected_outputs:
-      - The internal Repair boundary observes the sidecar and worker live with claims unpaused
+      - The internal Repair boundary observes the sidecar and writer live with intake unpaused
       - A public status read remains available while Repair is pending
       - The sidecar stop count remains zero and status remains available after Repair settles
     related_tests:

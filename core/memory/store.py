@@ -1,4 +1,4 @@
-"""Dedicated SQLite state for the provider-independent Memory module."""
+"""Identity-only SQLite state for best-effort Memory capture."""
 
 from __future__ import annotations
 
@@ -7,771 +7,29 @@ import hmac
 import os
 import secrets
 import sqlite3
-import stat
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
 from config import paths
-from core.memory.confined_filesystem import (
-    ConfinedFilesystemError,
-    ConfinedRoot,
-    ensure_private_directory,
-)
-from core.memory.observations import (
-    AddAck,
-    AddRejected,
-    FlushRejected,
-    FlushResult,
-    FlushSucceeded,
-    FlushUnknown,
-)
+from core.memory.confined_filesystem import ConfinedRoot, ensure_private_directory
 from core.memory.project_ids import (
     DEFAULT_MEMORY_PROJECT_ID,
     MAX_NAMED_MEMORY_PROJECTS,
     is_legacy_memory_project_id,
     is_named_memory_project_id,
-    is_new_stored_memory_project_id,
     is_persisted_memory_project_id,
     is_writable_memory_project_id,
 )
-from core.memory.types import (
-    MemoryErrorCode,
-    MemoryFailureLogEntry,
-    ProviderSessionRef,
-    is_memory_error_code,
-)
-
+from core.memory.types import MemoryErrorCode, ProviderSessionRef
 
 MEMORY_STORE_FILENAME = "memory.sqlite"
 MEMORY_STORE_DIRNAME = "memory"
-MEMORY_STORE_SCHEMA_VERSION = 3
-MAX_NONTERMINAL_QUEUE_ROWS = 500
-MAX_MESSAGE_ATTEMPTS = 3
-TERMINAL_TOMBSTONE_LIMIT = 100_000
-TERMINAL_TOMBSTONE_RETENTION = timedelta(days=90)
-
-_MEMORY_STORE_TABLES = frozenset(
-    {
-        "memory_meta",
-        "memory_attachment_bundle",
-        "memory_session_flush_state",
-        "memory_capture_queue",
-        "memory_flush_settlements",
-        "memory_projects",
-    }
-)
-_MEMORY_STORE_REQUIRED_COLUMNS = {
-    "memory_meta": frozenset(
-        {
-            "singleton",
-            "processing_fault_generation",
-            "processing_fault_kind",
-            "processing_fault_since",
-            "processing_alert_active",
-            "processing_recovery_generation",
-            "processing_recovery_pending_at",
-        }
-    ),
-    "memory_attachment_bundle": frozenset({"bundle_id", "relative_path", "state"}),
-    "memory_session_flush_state": frozenset(
-        {
-            "provider_session_ref",
-            "open_generation",
-            "target_generation",
-            "operation_epoch",
-        }
-    ),
-    "memory_capture_queue": frozenset(
-        {
-            "provider_session_ref",
-            "generation",
-            "attachment_bundle_id",
-            "lease_token",
-            "add_status",
-        }
-    ),
-    "memory_flush_settlements": frozenset(
-        {
-            "provider_session_ref",
-            "generation",
-            "operation_token",
-            "recovery_origin",
-            "attempts",
-        }
-    ),
-    "memory_projects": frozenset(
-        {
-            "principal_id",
-            "project_id",
-            "created_at",
-            "last_written_at",
-        }
-    ),
-}
-_MEMORY_STORE_INDEXES = frozenset(
-    {
-        "ix_memory_capture_due",
-        "ix_memory_capture_session_generation",
-        "ix_memory_session_flush_due",
-        "ix_memory_flush_settlements_recent",
-    }
-)
-_MEMORY_STORE_TRIGGERS = frozenset(
-    {
-        "trg_memory_flush_settlements_immutable",
-        "trg_memory_flush_settlements_no_delete",
-    }
-)
-_V0_TABLES = frozenset({"memory_meta", "memory_capture_queue"})
-_V0_META_COLUMNS = frozenset(
-    {
-        "singleton",
-        "epoch",
-        "clear_in_progress",
-        "scope_key",
-        "provider_root_id",
-        "last_provider_timestamp_ms",
-        "missed_count",
-        "last_success_at",
-        "last_error",
-        "last_error_at",
-        "processing_fault_kind",
-        "processing_fault_since",
-        "processing_alert_active",
-        "updated_at",
-    }
-)
-_V0_QUEUE_COLUMNS = frozenset(
-    {
-        "source_message_digest",
-        "epoch",
-        "session_id",
-        "principal_id",
-        "project_ref",
-        "provenance",
-        "payload_text",
-        "payload_attachments",
-        "occurred_at_ms",
-        "provider_timestamp_ms",
-        "state",
-        "attempts",
-        "next_retry_at",
-        "lease_owner",
-        "lease_at",
-        "last_error",
-        "add_request_id",
-        "flush_observation",
-        "flush_status",
-        "flush_error_code",
-        "flush_request_id",
-        "flush_observed_at",
-        "created_at",
-        "completed_at",
-    }
-)
-_PERSISTED_MEMORY_ERRORS = frozenset(
-    {
-        "memory_disabled",
-        "memory_invalid_input",
-        "memory_input_too_large",
-        "memory_queue_full",
-        "memory_low_disk_space",
-        "memory_store_unavailable",
-        "memory_runtime_missing",
-        "memory_runtime_unsupported",
-        "memory_runtime_install_failed",
-        "memory_sidecar_unavailable",
-        "memory_provider_timeout",
-        "memory_provider_response_invalid",
-        "memory_processing_failed",
-        "memory_clear_failed",
-        "memory_capability_unavailable",
-    }
-)
-
-
-def memory_store_path() -> Path:
-    """Return the dedicated Memory database under the effective Avibe state root."""
-
-    return paths.get_state_dir() / MEMORY_STORE_DIRNAME / MEMORY_STORE_FILENAME
-
-
-def utc_now_iso() -> str:
-    """Return a lexically sortable UTC instant with millisecond precision."""
-
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-
-
-def _application_tables(conn: sqlite3.Connection) -> frozenset[str]:
-    return frozenset(
-        str(row[0])
-        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
-        if not str(row[0]).startswith("sqlite_")
-    )
-
-
-def _quote_sqlite_identifier(value: str) -> str:
-    escaped = value.replace('"', '""')
-    return f'"{escaped}"'
-
-
-def _install_clean_schema(
-    conn: sqlite3.Connection,
-    schema_sql: str,
-    application_tables: frozenset[str],
-) -> None:
-    drops = "\n".join(
-        f"DROP TABLE {_quote_sqlite_identifier(table)};"
-        for table in sorted(application_tables)
-    )
-    conn.execute("PRAGMA foreign_keys = OFF")
-    try:
-        conn.executescript(
-            "BEGIN IMMEDIATE;\n"
-            f"{drops}\n"
-            f"{schema_sql}\n"
-            f"PRAGMA user_version = {MEMORY_STORE_SCHEMA_VERSION};\n"
-            "COMMIT;"
-        )
-    except BaseException:
-        if conn.in_transaction:
-            conn.execute("ROLLBACK")
-        raise
-    finally:
-        conn.execute("PRAGMA foreign_keys = ON")
-
-
-def _execute_sql_script(conn: sqlite3.Connection, script: str) -> None:
-    """Execute a schema script without sqlite3.executescript's implicit commit."""
-
-    statement = ""
-    for line in script.splitlines(keepends=True):
-        statement += line
-        if sqlite3.complete_statement(statement):
-            conn.execute(statement)
-            statement = ""
-    if statement.strip():
-        conn.execute(statement)
-
-
-def _recognized_v0_shape(conn: sqlite3.Connection) -> tuple[bool, bool]:
-    """Recognize the two released, unversioned Memory foundation schemas."""
-
-    if _application_tables(conn) != _V0_TABLES:
-        return False, False
-    meta_columns = frozenset(
-        str(row[1]) for row in conn.execute("PRAGMA table_info(memory_meta)")
-    )
-    queue_columns = frozenset(
-        str(row[1]) for row in conn.execute("PRAGMA table_info(memory_capture_queue)")
-    )
-    if meta_columns != _V0_META_COLUMNS:
-        return False, False
-    if queue_columns == _V0_QUEUE_COLUMNS:
-        return True, False
-    if queue_columns == _V0_QUEUE_COLUMNS | {"provider_session_ref"}:
-        return True, True
-    return False, False
-
-
-def _legacy_provider_ref(
-    row: sqlite3.Row,
-    *,
-    has_provider_ref: bool,
-    scope_key: bytes,
-) -> ProviderSessionRef:
-    """Recover the canonical v2 identity from a v0 queue row."""
-
-    values = (
-        str(row["principal_id"]),
-        int(row["epoch"]),
-        str(row["project_ref"]),
-        str(row["session_id"]),
-    )
-    # Every v0 capture predates owner splitting, including agent provenance.
-    # Its persisted principal therefore remains both caller and memory owner.
-    derived_session_id = _provider_session_ref(
-        scope_key,
-        values[0],
-        values[2],
-        values[3],
-        values[1],
-    )
-    if has_provider_ref and row["provider_session_ref"] is not None:
-        try:
-            candidate = ProviderSessionRef.deserialize(str(row["provider_session_ref"]))
-            if candidate.as_tuple() == (*values[:3], derived_session_id):
-                return candidate
-        except ValueError:
-            pass
-    return ProviderSessionRef(
-        principal_id=values[0],
-        epoch=values[1],
-        project_ref=values[2],
-        session_id=derived_session_id,
-    )
-
-
-def _migrate_v0_to_v2(
-    conn: sqlite3.Connection,
-    schema_sql: str,
-    *,
-    has_provider_ref: bool,
-) -> None:
-    """Project a recognized v0 foundation into v2 without dropping user state."""
-
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        conn.execute("DROP INDEX IF EXISTS ix_memory_capture_due")
-        conn.execute("ALTER TABLE memory_meta RENAME TO memory_meta_v0")
-        conn.execute("ALTER TABLE memory_capture_queue RENAME TO memory_capture_queue_v0")
-        _execute_sql_script(conn, schema_sql)
-
-        meta = conn.execute(
-            "SELECT * FROM memory_meta_v0 WHERE singleton = 1"
-        ).fetchone()
-        if meta is not None:
-            last_error = (
-                str(meta["last_error"])
-                if meta["last_error"] in _PERSISTED_MEMORY_ERRORS
-                else None
-            )
-            conn.execute(
-                """
-                INSERT INTO memory_meta (
-                    singleton, epoch, clear_in_progress, scope_key, provider_root_id,
-                    last_provider_timestamp_ms, missed_count, last_success_at,
-                    last_error, last_error_at, processing_fault_generation,
-                    processing_fault_kind, processing_fault_since, processing_alert_active,
-                    processing_recovery_pending_at, processing_recovery_generation, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
-                """,
-                (
-                    meta["singleton"],
-                    meta["epoch"],
-                    meta["clear_in_progress"],
-                    meta["scope_key"],
-                    meta["provider_root_id"],
-                    meta["last_provider_timestamp_ms"],
-                    meta["missed_count"],
-                    meta["last_success_at"],
-                    last_error,
-                    meta["last_error_at"],
-                    1 if meta["processing_fault_since"] is not None else 0,
-                    meta["processing_fault_kind"],
-                    meta["processing_fault_since"],
-                    meta["processing_alert_active"],
-                    meta["updated_at"],
-                ),
-            )
-
-        queue_rows = conn.execute(
-            "SELECT * FROM memory_capture_queue_v0 ORDER BY created_at, source_message_digest"
-        ).fetchall()
-        if meta is None and queue_rows:
-            raise RuntimeError(
-                "Version-zero Memory store has queued data but no metadata; "
-                "preserving the existing file"
-            )
-        grouped: dict[str, list[tuple[sqlite3.Row, ProviderSessionRef, str | None]]] = {}
-        for row in queue_rows:
-            if meta is None:
-                raise RuntimeError(
-                    "Version-zero Memory store has queued data but no metadata; "
-                    "preserving the existing file"
-                )
-            provider_ref = _legacy_provider_ref(
-                row,
-                has_provider_ref=has_provider_ref,
-                scope_key=bytes(meta["scope_key"]),
-            )
-            observation = (
-                str(row["flush_observation"])
-                if row["flush_observation"] is not None
-                else None
-            )
-            old_state = str(row["state"])
-            state = "manual_required" if old_state in {"processing", "manual_required"} else old_state
-            add_status = None
-            if state in {"delivered", "dead"} and row["add_request_id"]:
-                add_status = (
-                    "extracted"
-                    if row["flush_status"] == "extracted"
-                    else "accumulated"
-                )
-            conn.execute(
-                """
-                INSERT INTO memory_capture_queue (
-                    source_message_digest, epoch, session_id, provider_session_ref,
-                    generation, principal_id, project_ref, provenance, payload_text,
-                    payload_attachments, attachment_bundle_id, occurred_at_ms,
-                    provider_timestamp_ms, state, attempts, next_retry_at, lease_owner,
-                    lease_at, lease_token, last_error, add_request_id, add_status,
-                    created_at, completed_at
-                ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, NULL,
-                          NULL, 0, ?, ?, ?, ?, ?)
-                """,
-                (
-                    row["source_message_digest"],
-                    row["epoch"],
-                    provider_ref.session_id,
-                    provider_ref.serialize(),
-                    provider_ref.principal_id,
-                    provider_ref.project_ref,
-                    row["provenance"],
-                    row["payload_text"],
-                    row["payload_attachments"],
-                    row["occurred_at_ms"],
-                    row["provider_timestamp_ms"],
-                    state,
-                    row["attempts"],
-                    row["next_retry_at"] if state == "pending" else None,
-                    row["last_error"] if row["last_error"] in _PERSISTED_MEMORY_ERRORS else None,
-                    row["add_request_id"],
-                    add_status,
-                    row["created_at"],
-                    row["completed_at"],
-                ),
-            )
-            grouped.setdefault(provider_ref.serialize(), []).append((row, provider_ref, observation))
-
-        now = utc_now_iso()
-        for serialized_ref, entries in grouped.items():
-            provider_ref = entries[0][1]
-            manual = any(
-                str(row["state"]) in {"processing", "manual_required"}
-                or observation in {"unknown", "in_flight"}
-                for row, _, observation in entries
-            )
-            needs_flush = any(
-                str(row["state"]) == "delivered"
-                and observation in {None, "not_attempted", "rejected"}
-                for row, _, observation in entries
-            )
-            state = "manual_required" if manual else "due" if needs_flush else "idle"
-            delivered = [row for row, _, _ in entries if str(row["state"]) == "delivered"]
-            unflushed = sum(
-                1
-                for row, _, observation in entries
-                if str(row["state"]) == "delivered" and observation != "succeeded"
-            )
-            first_unflushed = min(
-                (
-                    str(row["completed_at"] or row["created_at"])
-                    for row, _, observation in entries
-                    if str(row["state"]) == "delivered" and observation != "succeeded"
-                ),
-                default=None,
-            )
-            last_ack = max(
-                (str(row["completed_at"] or row["created_at"]) for row in delivered),
-                default=None,
-            )
-            watermark = max(
-                (int(row["provider_timestamp_ms"]) for row in delivered),
-                default=0,
-            )
-            fence_token = (
-                f"migration-v0:{hashlib.sha256(serialized_ref.encode()).hexdigest()[:32]}"
-                if state != "idle"
-                else None
-            )
-            conn.execute(
-                """
-                INSERT INTO memory_session_flush_state (
-                    provider_session_ref, epoch, open_generation, target_generation,
-                    state, first_unflushed_at, last_add_ack_at, confirmed_add_watermark_ms,
-                    unflushed_count, due_at, next_attempt_at, retry_count, operation_epoch,
-                    fence_token, submission_started_at, updated_at
-                ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?, ?, ?)
-                """,
-                (
-                    serialized_ref,
-                    provider_ref.epoch,
-                    1 if state != "idle" else None,
-                    state,
-                    first_unflushed,
-                    last_ack,
-                    watermark or None,
-                    unflushed,
-                    now if state == "due" else None,
-                    1 if state != "idle" else 0,
-                    fence_token,
-                    now if state == "manual_required" else None,
-                    now,
-                ),
-            )
-            for row, _, observation in entries:
-                legacy_state = str(row["state"])
-                if observation not in {"succeeded", "rejected", "unknown", "in_flight"}:
-                    if legacy_state not in {"processing", "manual_required"}:
-                        continue
-                    observation = "manual_required"
-                if observation == "succeeded":
-                    mapped = "settled"
-                elif observation == "rejected":
-                    mapped = "rejected"
-                else:
-                    mapped = "manual_required"
-                observed_at = str(
-                    row["flush_observed_at"]
-                    or row["completed_at"]
-                    or row["created_at"]
-                )
-                conn.execute(
-                    """
-                    INSERT OR IGNORE INTO memory_flush_settlements (
-                        provider_session_ref, epoch, generation, operation_kind,
-                        operation_token, observation, request_id, confirmed_watermark_ms,
-                        observed_at, error_code, recovery_origin, attempts
-                    ) VALUES (?, ?, 1, 'flush', ?, ?, ?, ?, ?, ?, ?, 0)
-                    """,
-                    (
-                        serialized_ref,
-                        provider_ref.epoch,
-                        f"migration-v0:{row['source_message_digest']}:{observation}",
-                        mapped,
-                        row["flush_request_id"],
-                        int(row["provider_timestamp_ms"])
-                        if observation == "succeeded"
-                        else None,
-                        observed_at,
-                        row["flush_error_code"]
-                        or ("memory_provider_timeout" if mapped == "manual_required" else None),
-                        "boot" if mapped == "manual_required" else None,
-                    ),
-                )
-        conn.execute("DROP TABLE memory_capture_queue_v0")
-        conn.execute("DROP TABLE memory_meta_v0")
-        conn.execute("PRAGMA user_version = 2")
-    except BaseException:
-        conn.execute("ROLLBACK")
-        raise
-    else:
-        conn.execute("COMMIT")
-
-
-def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
-    """Add generation fencing without rebuilding or dropping existing v1 data."""
-
-    # SQLite ADD COLUMN cannot retrofit the clean-v2 cross-column pair CHECK.
-    # The backfill and every Store transition update the recovery pair together.
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        conn.execute(
-            """
-            ALTER TABLE memory_meta
-            ADD COLUMN processing_fault_generation INTEGER NOT NULL DEFAULT 0
-                CHECK (processing_fault_generation >= 0)
-            """
-        )
-        conn.execute(
-            """
-            ALTER TABLE memory_meta
-            ADD COLUMN processing_recovery_generation INTEGER
-                CHECK (
-                    processing_recovery_generation IS NULL
-                    OR processing_recovery_generation >= 0
-                )
-            """
-        )
-        conn.execute(
-            """
-            UPDATE memory_meta
-            SET processing_fault_generation = CASE
-                    WHEN processing_fault_since IS NOT NULL
-                         AND processing_recovery_pending_at IS NOT NULL THEN 2
-                    WHEN processing_fault_since IS NOT NULL
-                         OR processing_recovery_pending_at IS NOT NULL THEN 1
-                    ELSE 0
-                END,
-                processing_recovery_generation = CASE
-                    WHEN processing_recovery_pending_at IS NOT NULL THEN 1
-                    ELSE NULL
-                END
-            WHERE singleton = 1
-            """
-        )
-        conn.execute("PRAGMA user_version = 2")
-    except BaseException:
-        conn.execute("ROLLBACK")
-        raise
-    else:
-        conn.execute("COMMIT")
-
-
-def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
-    """Widen project_ref and add the durable project catalog."""
-
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        conn.execute("DROP INDEX IF EXISTS ix_memory_capture_due")
-        conn.execute("DROP INDEX IF EXISTS ix_memory_capture_session_generation")
-        conn.execute("ALTER TABLE memory_capture_queue RENAME TO memory_capture_queue_v2")
-        conn.execute(
-            """
-            CREATE TABLE memory_capture_queue (
-                source_message_digest TEXT PRIMARY KEY,
-                epoch INTEGER NOT NULL,
-                session_id TEXT NOT NULL,
-                provider_session_ref TEXT NOT NULL,
-                generation INTEGER NOT NULL CHECK (generation >= 1),
-                principal_id TEXT NOT NULL CHECK (
-                    length(principal_id) = 34
-                    AND substr(principal_id, 1, 2) = 'u-'
-                    AND substr(principal_id, 3) NOT GLOB '*[^0-9a-f]*'
-                ),
-                project_ref TEXT NOT NULL CHECK (
-                    project_ref = 'default'
-                    OR (
-                        length(project_ref) = 34
-                        AND substr(project_ref, 1, 2) = 'p-'
-                        AND substr(project_ref, 3) NOT GLOB '*[^0-9a-f]*'
-                    )
-                    OR (
-                        length(project_ref) BETWEEN 1 AND 63
-                        AND substr(project_ref, 1, 1) GLOB '[a-z]'
-                        AND project_ref NOT GLOB '*[^a-z0-9_-]*'
-                        AND project_ref NOT IN ('all', 'personal', 'default')
-                        AND substr(project_ref, 1, 2) NOT IN ('p-', 'u-')
-                    )
-                ),
-                provenance TEXT NOT NULL CHECK (provenance IN ('user_input', 'agent')),
-                payload_text TEXT,
-                payload_attachments TEXT,
-                attachment_bundle_id TEXT REFERENCES memory_attachment_bundle(bundle_id) ON DELETE RESTRICT,
-                occurred_at_ms INTEGER NOT NULL,
-                provider_timestamp_ms INTEGER NOT NULL,
-                state TEXT NOT NULL CHECK (
-                    state IN ('pending', 'processing', 'delivered', 'dead', 'manual_required')
-                ),
-                attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
-                next_retry_at TEXT,
-                lease_owner TEXT,
-                lease_at TEXT,
-                lease_token INTEGER NOT NULL DEFAULT 0 CHECK (lease_token >= 0),
-                last_error TEXT CHECK (
-                    last_error IS NULL OR last_error IN (
-                        'memory_disabled', 'memory_invalid_input', 'memory_input_too_large',
-                        'memory_queue_full', 'memory_low_disk_space', 'memory_store_unavailable',
-                        'memory_runtime_missing', 'memory_runtime_unsupported',
-                        'memory_runtime_install_failed', 'memory_sidecar_unavailable',
-                        'memory_provider_timeout', 'memory_provider_response_invalid',
-                        'memory_processing_failed', 'memory_clear_failed'
-                    )
-                ),
-                add_request_id TEXT,
-                add_status TEXT CHECK (add_status IS NULL OR add_status IN ('accumulated', 'extracted')),
-                created_at TEXT NOT NULL,
-                completed_at TEXT,
-                CHECK (
-                    (state IN ('pending', 'processing', 'manual_required') AND payload_text IS NOT NULL)
-                    OR (state IN ('delivered', 'dead') AND payload_text IS NULL)
-                )
-            )
-            """
-        )
-        conn.execute(
-            "INSERT INTO memory_capture_queue SELECT * FROM memory_capture_queue_v2"
-        )
-        conn.execute("DROP TABLE memory_capture_queue_v2")
-        conn.execute(
-            """
-            CREATE INDEX ix_memory_capture_due
-                ON memory_capture_queue (epoch, state, next_retry_at)
-            """
-        )
-        conn.execute(
-            """
-            CREATE INDEX ix_memory_capture_session_generation
-                ON memory_capture_queue (provider_session_ref, epoch, generation, state)
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS memory_projects (
-                principal_id TEXT NOT NULL CHECK (
-                    length(principal_id) = 34
-                    AND substr(principal_id, 1, 2) = 'u-'
-                    AND substr(principal_id, 3) NOT GLOB '*[^0-9a-f]*'
-                ),
-                project_id TEXT NOT NULL CHECK (
-                    project_id = 'default'
-                    OR (
-                        length(project_id) BETWEEN 1 AND 63
-                        AND substr(project_id, 1, 1) GLOB '[a-z]'
-                        AND project_id NOT GLOB '*[^a-z0-9_-]*'
-                        AND project_id NOT IN ('all', 'personal', 'default')
-                        AND substr(project_id, 1, 2) NOT IN ('p-', 'u-')
-                    )
-                ),
-                created_at TEXT NOT NULL,
-                last_written_at TEXT NOT NULL,
-                PRIMARY KEY (principal_id, project_id)
-            )
-            """
-        )
-        for row in conn.execute(
-            "SELECT DISTINCT principal_id, project_ref FROM memory_capture_queue"
-        ):
-            project_ref = str(row["project_ref"])
-            if not is_new_stored_memory_project_id(project_ref):
-                continue
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO memory_projects (
-                    principal_id, project_id, created_at, last_written_at
-                ) VALUES (?, ?, ?, ?)
-                """,
-                (str(row["principal_id"]), project_ref, utc_now_iso(), utc_now_iso()),
-            )
-        leftover = conn.execute("PRAGMA foreign_key_check").fetchall()
-        if leftover:
-            raise RuntimeError("Memory store foreign keys failed after v3 migration")
-        conn.execute("PRAGMA user_version = 3")
-        _verify_current_schema(conn)
-    except BaseException:
-        conn.execute("ROLLBACK")
-        raise
-    else:
-        conn.execute("COMMIT")
-
-
-def _verify_current_schema(conn: sqlite3.Connection) -> None:
-    application_tables = _application_tables(conn)
-    if application_tables != _MEMORY_STORE_TABLES:
-        raise RuntimeError("Memory store schema is incomplete")
-
-    for table, required_columns in _MEMORY_STORE_REQUIRED_COLUMNS.items():
-        columns = frozenset(
-            str(row[1])
-            for row in conn.execute(f"PRAGMA table_info({_quote_sqlite_identifier(table)})")
-        )
-        if not required_columns.issubset(columns):
-            raise RuntimeError("Memory store schema is incomplete")
-
-    indexes = frozenset(
-        str(row[0])
-        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
-        if row[0] is not None
-    )
-    triggers = frozenset(
-        str(row[0])
-        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'trigger'")
-    )
-    if not _MEMORY_STORE_INDEXES.issubset(indexes) or not _MEMORY_STORE_TRIGGERS.issubset(
-        triggers
-    ):
-        raise RuntimeError("Memory store schema is incomplete")
-
-    quick_check = conn.execute("PRAGMA quick_check").fetchone()
-    if quick_check is None or quick_check[0] != "ok":
-        raise RuntimeError("Memory store failed integrity check")
+MEMORY_STORE_SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -795,254 +53,121 @@ class MemoryMeta:
 
 
 @dataclass(frozen=True)
-class QueueRow:
-    source_message_digest: str
-    epoch: int
-    session_id: str
-    provider_session_ref: ProviderSessionRef
-    generation: int
-    principal_id: str
-    project_ref: str
-    provenance: Literal["user_input", "agent"]
-    payload_text: str | None
-    occurred_at_ms: int
-    provider_timestamp_ms: int
-    state: Literal["pending", "processing", "delivered", "dead", "manual_required"]
-    attempts: int
-    next_retry_at: str | None
-    lease_owner: str | None
-    lease_at: str | None
-    last_error: MemoryErrorCode | None
-    created_at: str
-    completed_at: str | None
-    payload_attachments: str | None = None
-    attachment_bundle_id: str | None = None
-    lease_token: int = 0
-    add_request_id: str | None = None
-    add_status: Literal["accumulated", "extracted"] | None = None
-
-
-@dataclass(frozen=True)
-class QueueStats:
-    pending: int = 0
-    processing: int = 0
-    dead: int = 0
-    queue_plaintext_bytes: int = 0
-    awaiting_receipt: int = 0
-    succeeded: int = 0
-    receipt_unknown: int = 0
-    distill_failed: int = 0
-    last_flush_observation: Literal["succeeded", "rejected", "unknown"] | None = None
-    last_flush_status: Literal["extracted", "no_extraction"] | None = None
-    last_flush_error_code: str | None = None
-    last_flush_request_id: str | None = None
-    last_flush_at: str | None = None
-
-
-@dataclass(frozen=True)
-class EnqueueResult:
+class VolatileAdmission:
     outcome: Literal[
-        "accepted",
-        "duplicate",
-        "queue_full",
-        "clearing",
-        "timestamp_invalid",
-        "project_limit",
+        "accepted", "clear_in_progress", "project_limit", "timestamp_invalid", "store_unavailable"
     ]
-    row: QueueRow | None = None
+    source_message_digest: str | None = None
+    provider_session_ref: ProviderSessionRef | None = None
+    provider_timestamp_ms: int | None = None
 
 
-@dataclass(frozen=True)
-class MessageFailureResult:
-    state: Literal["pending", "dead"] | None
-    attempts: int | None
-    attachment_release_id: str | None = None
+def memory_store_path() -> Path:
+    return paths.get_state_dir() / MEMORY_STORE_DIRNAME / MEMORY_STORE_FILENAME
 
 
-@dataclass(frozen=True)
-class Delivered:
-    """The provider accepted the row; scrub the payload and keep the receipt."""
-
-    add_request_id: str | None = None
-    add_status: Literal["accumulated", "extracted"] = "accumulated"
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-@dataclass(frozen=True)
-class AmbiguousAdd:
-    """The provider response cannot prove whether this add was accepted."""
-
-    add_request_id: str | None = None
-    error: MemoryErrorCode = "memory_provider_response_invalid"
+def _keyed_digest(scope_key: bytes, value: str) -> str:
+    return hmac.new(scope_key, value.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
-@dataclass(frozen=True)
-class SystemOutage:
-    """Infrastructure failed, not this row. Release it without spending an attempt."""
-
-    error: MemoryErrorCode
-
-
-@dataclass(frozen=True)
-class MessageFailure:
-    """This row failed. Spend one attempt, then retry or scrub it terminally."""
-
-    error: MemoryErrorCode
-    retryable: bool = True
-
-
-#: Every way a claimed row can leave the ``processing`` state.
-DeliveryOutcome = Delivered | AddRejected | AmbiguousAdd | SystemOutage | MessageFailure
-
-# One atomic store projection tells final-flush orchestration whether it is done,
-# can fence another generation, or has reached a state that requires recovery.
-FinalFlushDisposition = Literal["complete", "flush_required", "blocked"]
+def _provider_session_ref(
+    scope_key: bytes,
+    principal_id: str,
+    project_ref: str,
+    session_id: str,
+    epoch: int,
+) -> str:
+    digest = _keyed_digest(
+        scope_key,
+        f"{principal_id}\0{project_ref}\0{session_id}\0{epoch}",
+    )
+    return f"src--{digest}--e{epoch}"
 
 
-@dataclass(frozen=True)
-class SettleResult:
-    """What one settle transition did to the claimed row."""
-
-    #: False when the fenced update matched no row — a lost or stolen lease.
-    settled: bool
-    state: Literal["delivered", "pending", "dead", "manual_required"] | None = None
-    #: Attempts consumed so far; only a MessageFailure spends one.
-    attempts: int | None = None
-    attachment_release_id: str | None = None
+def derive_principal_id(scope_key: bytes, user_key: str) -> str:
+    if not isinstance(scope_key, bytes) or len(scope_key) < 16:
+        raise ValueError("invalid Memory scope key")
+    if not isinstance(user_key, str) or not user_key or user_key != user_key.strip():
+        raise ValueError("invalid Memory user key")
+    return f"u-{_keyed_digest(scope_key, user_key)[:32]}"
 
 
-@dataclass(frozen=True)
-class AddSettleResult:
-    """Exact result of settling one provider add acknowledgement."""
-
-    settled: bool
-    natural_boundary: bool = False
-    attachment_release_id: str | None = None
-
-
-@dataclass(frozen=True)
-class SessionFlushState:
-    """The minimal durable authority for one canonical provider session."""
-
-    provider_session_ref: ProviderSessionRef
-    epoch: int
-    open_generation: int
-    target_generation: int | None
-    state: Literal["idle", "due", "in_flight", "manual_required"]
-    first_unflushed_at: str | None
-    last_add_ack_at: str | None
-    confirmed_add_watermark_ms: int | None
-    unflushed_count: int
-    due_at: str | None
-    next_attempt_at: str | None
-    retry_count: int
-    operation_epoch: int
-    fence_token: str | None
-    submission_started_at: str | None
-    updated_at: str
+def derive_project_id(scope_key: bytes, workdir: str) -> str:
+    if (
+        not isinstance(workdir, str)
+        or not workdir
+        or workdir != workdir.strip()
+        or not os.path.isabs(workdir)
+        or os.path.abspath(os.path.expanduser(workdir)) != workdir
+    ):
+        raise ValueError("invalid Memory workdir")
+    return f"p-{_keyed_digest(scope_key, workdir)[:32]}"
 
 
-@dataclass(frozen=True)
-class FlushLease:
-    """An exact generation fence used by every flush CAS."""
-
-    provider_session_ref: ProviderSessionRef
-    epoch: int
-    generation: int
-    operation_epoch: int
-    fence_token: str
+def is_principal_id(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 34
+        and value.startswith("u-")
+        and all(char in "0123456789abcdef" for char in value[2:])
+    )
 
 
-@dataclass(frozen=True)
-class FlushSettleResult:
-    settled: bool
-    state: Literal["idle", "due", "manual_required"] | None = None
+def is_project_id(value: object) -> bool:
+    return is_persisted_memory_project_id(value)
 
 
-@dataclass(frozen=True)
-class BootRecovery:
-    """What one boot recovery found, in the order the store had to look."""
-
-    reclaimed: int
-    interrupted_flushes: int
-    due_flushes: int = 0
+def derive_assistant_memory_owner_id(principal_id: str) -> str:
+    if not is_principal_id(principal_id):
+        raise ValueError("invalid Memory principal")
+    return f"{principal_id}-agent"
 
 
-@dataclass(frozen=True)
-class ProcessingHealthProbe:
-    """A provider-health read fenced to one exact open fault cycle."""
-
-    generation: int
-    occurred_at: str
-
-
-@dataclass(frozen=True)
-class ProcessingNotification:
-    """One stable durable processing event awaiting external delivery."""
-
-    event: Literal["fault", "recovered"]
-    generation: int
-    kind: Literal["credential", "engine"] | None
-    occurred_at: str
-
-
-ProcessingAction = ProcessingHealthProbe | ProcessingNotification
-
-
-@dataclass(frozen=True)
-class ProcessingHealthCommit:
-    """Whether a health result classified the exact probe generation."""
-
-    committed: bool
+def is_memory_owner_id(value: object) -> bool:
+    return is_principal_id(value) or (
+        isinstance(value, str)
+        and value.endswith("-agent")
+        and is_principal_id(value[:-6])
+    )
 
 
 class MemoryStore:
-    """Own the small, durable Memory queue without exposing SQLite to callers."""
+    """Persist only identity, authority, project catalog, and watermarks."""
 
-    def __init__(
-        self,
-        db_path: Path | None = None,
-        *,
-        effective_home: Path | str | None = None,
-    ) -> None:
-        root = ConfinedRoot.from_home(
-            paths.get_vibe_remote_dir() if effective_home is None else effective_home
-        )
+    def __init__(self, db_path: Path | None = None, *, effective_home: Path | str | None = None) -> None:
+        root = ConfinedRoot.from_home(paths.get_vibe_remote_dir() if effective_home is None else effective_home)
         self._effective_home = root.physical_home
-        requested_path = (
-            db_path
-            if db_path is not None
-            else root.logical_home / "state" / MEMORY_STORE_DIRNAME / MEMORY_STORE_FILENAME
-        )
-        try:
-            self.path = root.confine(requested_path)
-        except ConfinedFilesystemError as error:
-            raise OSError(
-                "Memory store path must stay within the effective Avibe home"
-            ) from error
-        self._validate_store_confinement()
-        self._prepare_private_directory()
+        requested = db_path or root.logical_home / "state" / MEMORY_STORE_DIRNAME / MEMORY_STORE_FILENAME
+        self.path = root.confine(requested)
+        ensure_private_directory(self._effective_home, self.path.parent)
         self._initialize()
-        self._enforce_private_database_modes()
 
     def ensure_meta(self) -> MemoryMeta:
-        """Create and return the singleton metadata row when Memory first opens."""
-
         with self._transaction() as conn:
-            return self._ensure_meta_in_connection(conn)
+            return self._ensure_meta(conn)
+
+    def get_meta(self) -> MemoryMeta | None:
+        with self._connection() as conn:
+            row = conn.execute("SELECT * FROM memory_meta WHERE singleton = 1").fetchone()
+        return _meta_from_row(row) if row is not None else None
 
     def principal_for_user_key(self, user_key: str) -> str:
-        """Return the stable opaque provider principal for one platform identity."""
-
         with self._transaction() as conn:
-            meta = self._ensure_meta_in_connection(conn)
-            return derive_principal_id(meta.scope_key, user_key)
+            return derive_principal_id(self._ensure_meta(conn).scope_key, user_key)
 
     def project_for_workdir(self, workdir: str) -> str:
-        """Return the stable opaque provider project for one normalized cwd."""
-
         with self._transaction() as conn:
-            meta = self._ensure_meta_in_connection(conn)
-            return derive_project_id(meta.scope_key, workdir)
+            return derive_project_id(self._ensure_meta(conn).scope_key, workdir)
+
+    def source_message_digest(self, source_message_id: str) -> str:
+        if not isinstance(source_message_id, str) or not source_message_id or "\x00" in source_message_id:
+            raise ValueError("invalid Memory source message")
+        with self._transaction() as conn:
+            return _keyed_digest(self._ensure_meta(conn).scope_key, source_message_id)
 
     def provider_session_ref(
         self,
@@ -1052,195 +177,25 @@ class MemoryStore:
         session_id: str,
         memory_owner_id: str | None = None,
     ) -> ProviderSessionRef:
-        """Resolve trusted caller context into an owner-scoped provider identity."""
-
         if not is_principal_id(principal_id) or not is_project_id(project_ref):
             raise ValueError("invalid Memory scope")
-        owner_id = principal_id if memory_owner_id is None else memory_owner_id
-        if owner_id not in {principal_id, derive_assistant_memory_owner_id(principal_id)}:
+        owner = principal_id if memory_owner_id is None else memory_owner_id
+        if owner not in {principal_id, derive_assistant_memory_owner_id(principal_id)}:
             raise ValueError("invalid Memory owner")
         if not isinstance(session_id, str) or not session_id or "\x00" in session_id:
             raise ValueError("invalid Memory session")
         with self._transaction() as conn:
-            meta = self._ensure_meta_in_connection(conn)
+            meta = self._ensure_meta(conn)
             if meta.clear_in_progress:
                 raise RuntimeError("Memory clear is in progress")
             return ProviderSessionRef(
-                principal_id=owner_id,
+                principal_id=owner,
                 epoch=meta.epoch,
                 project_ref=project_ref,
-                session_id=_provider_session_ref(
-                    meta.scope_key,
-                    owner_id,
-                    project_ref,
-                    session_id,
-                    meta.epoch,
-                ),
+                session_id=_provider_session_ref(meta.scope_key, owner, project_ref, session_id, meta.epoch),
             )
 
-    def resolve_current_session_scope(self, session_id: str) -> tuple[str, str] | None:
-        """Recover one unambiguous current-epoch scope for a raw session ID.
-
-        Callers that own a terminal lifecycle transition must use
-        :meth:`resolve_current_session_scopes` so a raw Workbench session that
-        changed projects cannot silently drop an older scope.
-        """
-
-        scopes = self.resolve_current_session_scopes(session_id)
-        return scopes[0] if scopes is not None and len(scopes) == 1 else None
-
-    def resolve_current_session_scopes(
-        self,
-        session_id: str,
-    ) -> tuple[tuple[str, str], ...] | None:
-        """Recover every trusted current-epoch scope for a raw session ID.
-
-        Raw session IDs are never persisted.  Recompute each durable canonical
-        reference with the store-owned key so only exact capture state can
-        authorize recovery after a controller restart.  ``None`` means the
-        durable identity set cannot be trusted; an empty tuple means no exact
-        match exists.
-        """
-
-        if not isinstance(session_id, str) or not session_id or "\x00" in session_id:
-            return ()
-        with self._connection() as conn:
-            meta = self._meta_in_connection(conn)
-            if meta is None:
-                return ()
-            if meta.clear_in_progress:
-                return None
-            rows = conn.execute(
-                """
-                SELECT provider_session_ref
-                FROM memory_session_flush_state
-                WHERE epoch = ?
-                """,
-                (meta.epoch,),
-            ).fetchall()
-
-        matches: set[tuple[str, str]] = set()
-        for row in rows:
-            try:
-                ref = ProviderSessionRef.deserialize(str(row["provider_session_ref"]))
-            except (TypeError, ValueError):
-                return None
-            if (
-                ref.epoch != meta.epoch
-                or not is_memory_owner_id(ref.principal_id)
-                or not is_project_id(ref.project_ref)
-            ):
-                return None
-            caller_principal_id = _caller_principal_for_memory_owner(ref.principal_id)
-            if caller_principal_id is None:
-                return None
-            expected_session_id = _provider_session_ref(
-                meta.scope_key,
-                ref.principal_id,
-                ref.project_ref,
-                session_id,
-                meta.epoch,
-            )
-            if hmac.compare_digest(ref.session_id, expected_session_id):
-                matches.add((caller_principal_id, ref.project_ref))
-        return tuple(sorted(matches))
-
-    def provider_session_refs_with_capture_state(
-        self,
-        *,
-        principal_id: str,
-        project_ref: str,
-        session_id: str,
-    ) -> tuple[ProviderSessionRef, ...]:
-        """Return current owner sessions backed by capture state for one caller scope."""
-
-        if not is_principal_id(principal_id) or not is_project_id(project_ref):
-            raise ValueError("invalid Memory scope")
-        if not isinstance(session_id, str) or not session_id or "\x00" in session_id:
-            raise ValueError("invalid Memory session")
-        with self._connection() as conn:
-            meta = self._meta_in_connection(conn)
-            if meta is None:
-                return ()
-            if meta.clear_in_progress:
-                raise RuntimeError("Memory clear is in progress")
-            candidates = tuple(
-                ProviderSessionRef(
-                    principal_id=owner_id,
-                    epoch=meta.epoch,
-                    project_ref=project_ref,
-                    session_id=_provider_session_ref(
-                        meta.scope_key,
-                        owner_id,
-                        project_ref,
-                        session_id,
-                        meta.epoch,
-                    ),
-                )
-                for owner_id in (
-                    principal_id,
-                    derive_assistant_memory_owner_id(principal_id),
-                )
-            )
-            serialized = tuple(candidate.serialize() for candidate in candidates)
-            rows = conn.execute(
-                """
-                SELECT provider_session_ref
-                FROM memory_session_flush_state
-                WHERE epoch = ? AND provider_session_ref IN (?, ?)
-                """,
-                (meta.epoch, *serialized),
-            ).fetchall()
-        captured = {str(row["provider_session_ref"]) for row in rows}
-        return tuple(
-            candidate
-            for candidate, serialized_ref in zip(candidates, serialized, strict=True)
-            if serialized_ref in captured
-        )
-
-    def get_meta(self) -> MemoryMeta | None:
-        """Return the metadata row without creating Memory state."""
-
-        with self._connection() as conn:
-            row = conn.execute("SELECT * FROM memory_meta WHERE singleton = 1").fetchone()
-        return _meta_from_row(row) if row is not None else None
-
-    def clear_in_progress(self) -> bool:
-        """Return whether a prior or active Clear all operation is unfinished."""
-
-        meta = self.get_meta()
-        return bool(meta and meta.clear_in_progress)
-
-    def list_memory_projects(self, principal_id: str) -> tuple[str, ...]:
-        """Return implicit default plus catalogued named slugs for one principal."""
-
-        if not is_principal_id(principal_id):
-            raise ValueError("invalid Memory principal")
-        with self._connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT project_id, last_written_at FROM memory_projects
-                WHERE principal_id = ? AND project_id != ?
-                ORDER BY last_written_at DESC, project_id ASC
-                """,
-                (principal_id, DEFAULT_MEMORY_PROJECT_ID),
-            ).fetchall()
-        named = tuple(
-            str(row["project_id"])
-            for row in rows
-            if is_named_memory_project_id(str(row["project_id"]))
-        )
-        return (DEFAULT_MEMORY_PROJECT_ID, *named)
-
-    def record_capture_skip(self, error: MemoryErrorCode | None) -> None:
-        """Record a closed admission skip without retaining rejected input."""
-
-        now = utc_now_iso()
-        with self._transaction() as conn:
-            self._ensure_meta_in_connection(conn)
-            self._record_capture_skip_in_connection(conn, error, now)
-
-    def enqueue_request(
+    def admit_volatile_capture(
         self,
         *,
         source_message_id: str,
@@ -1248,2306 +203,212 @@ class MemoryStore:
         principal_id: str,
         project_ref: str,
         provenance: Literal["user_input", "agent"],
-        payload_text: str,
-        payload_attachments: str | None = None,
-        attachment_bundle_id: str | None = None,
-        attachment_bundle_relative_path: str | None = None,
-        attachment_file_count: int = 0,
-        attachment_total_bytes: int = 0,
         occurred_at_ms: int,
         max_provider_timestamp_ms: int,
-        nonterminal_limit: int = MAX_NONTERMINAL_QUEUE_ROWS,
-    ) -> EnqueueResult:
-        """Admit one validated capture in a single local queue transaction.
-
-        Raw source identifiers are transformed only inside this transaction and
-        never written to SQLite.
-        """
-
+    ) -> VolatileAdmission:
         if (
             not is_principal_id(principal_id)
             or not is_writable_memory_project_id(project_ref)
             or provenance not in {"user_input", "agent"}
+            or not isinstance(source_message_id, str)
+            or not source_message_id
+            or not isinstance(session_id, str)
+            or not session_id
+            or "\x00" in source_message_id
+            or "\x00" in session_id
         ):
             raise ValueError("invalid Memory capture identity")
-
         now = utc_now_iso()
         with self._transaction() as conn:
-            meta = self._ensure_meta_in_connection(conn)
+            meta = self._ensure_meta(conn)
             if meta.clear_in_progress:
-                return EnqueueResult(outcome="clearing")
-
-            source_message_digest = _keyed_digest(meta.scope_key, source_message_id)
-            existing = conn.execute(
-                "SELECT * FROM memory_capture_queue WHERE source_message_digest = ?",
-                (source_message_digest,),
-            ).fetchone()
-            if existing is not None:
-                _upsert_memory_project(
-                    conn,
-                    principal_id=principal_id,
-                    project_id=project_ref,
-                    now=now,
-                )
-                return EnqueueResult(outcome="duplicate", row=_queue_from_row(existing))
-
-            pending_count = int(
-                conn.execute(
-                    """
-                    SELECT COUNT(*) FROM memory_capture_queue
-                    WHERE epoch = ?
-                      AND state IN ('pending', 'processing', 'manual_required')
-                    """,
-                    (meta.epoch,),
-                ).fetchone()[0]
-            )
-            if pending_count >= nonterminal_limit:
-                self._record_capture_skip_in_connection(conn, "memory_queue_full", now)
-                return EnqueueResult(outcome="queue_full")
-
-            provider_timestamp_ms = max(occurred_at_ms, meta.last_provider_timestamp_ms + 1)
-            if provider_timestamp_ms > max_provider_timestamp_ms:
-                self._record_capture_skip_in_connection(conn, None, now)
-                return EnqueueResult(outcome="timestamp_invalid")
+                return VolatileAdmission("clear_in_progress")
             if is_named_memory_project_id(project_ref):
-                existing_named = conn.execute(
-                    """
-                    SELECT 1 FROM memory_projects
-                    WHERE principal_id = ? AND project_id = ?
-                    """,
+                named = conn.execute(
+                    "SELECT COUNT(*) FROM memory_projects WHERE principal_id = ? AND project_id != ?",
+                    (principal_id, DEFAULT_MEMORY_PROJECT_ID),
+                ).fetchone()[0]
+                exists = conn.execute(
+                    "SELECT 1 FROM memory_projects WHERE principal_id = ? AND project_id = ?",
                     (principal_id, project_ref),
                 ).fetchone()
-                if existing_named is None:
-                    named_count = int(
-                        conn.execute(
-                            """
-                            SELECT COUNT(*) FROM memory_projects
-                            WHERE principal_id = ? AND project_id != ?
-                            """,
-                            (principal_id, DEFAULT_MEMORY_PROJECT_ID),
-                        ).fetchone()[0]
-                    )
-                    if named_count >= MAX_NAMED_MEMORY_PROJECTS:
-                        return EnqueueResult(outcome="project_limit")
-
-            memory_owner_id = (
-                principal_id
-                if provenance == "user_input"
-                else derive_assistant_memory_owner_id(principal_id)
-            )
-            session_id_ref = _provider_session_ref(
-                meta.scope_key,
-                memory_owner_id,
-                project_ref,
-                session_id,
-                meta.epoch,
-            )
-            provider_session_ref = ProviderSessionRef(
-                principal_id=memory_owner_id,
+                if exists is None and int(named) >= MAX_NAMED_MEMORY_PROJECTS:
+                    self._record_skip(conn, "memory_invalid_input", now)
+                    return VolatileAdmission("project_limit")
+            provider_timestamp = max(int(occurred_at_ms), meta.last_provider_timestamp_ms + 1)
+            if provider_timestamp > int(max_provider_timestamp_ms):
+                self._record_skip(conn, None, now)
+                return VolatileAdmission("timestamp_invalid")
+            owner = principal_id if provenance == "user_input" else derive_assistant_memory_owner_id(principal_id)
+            ref = ProviderSessionRef(
+                principal_id=owner,
                 epoch=meta.epoch,
                 project_ref=project_ref,
-                session_id=session_id_ref,
-            )
-            serialized_ref = provider_session_ref.serialize()
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO memory_session_flush_state (
-                    provider_session_ref, epoch, open_generation,
-                    target_generation, state, first_unflushed_at,
-                    last_add_ack_at, confirmed_add_watermark_ms,
-                    unflushed_count, due_at, next_attempt_at, retry_count,
-                    operation_epoch, fence_token, submission_started_at, updated_at
-                ) VALUES (?, ?, 1, NULL, 'idle', NULL, NULL, NULL, 0,
-                          NULL, NULL, 0, 0, NULL, NULL, ?)
-                """,
-                (serialized_ref, meta.epoch, now),
-            )
-            session_state = conn.execute(
-                """
-                SELECT epoch, open_generation
-                FROM memory_session_flush_state
-                WHERE provider_session_ref = ?
-                """,
-                (serialized_ref,),
-            ).fetchone()
-            if session_state is None or int(session_state["epoch"]) != meta.epoch:
-                raise RuntimeError("Memory session authority is inconsistent")
-            generation = int(session_state["open_generation"])
-
-            if attachment_bundle_id is not None:
-                if (
-                    not _is_bundle_id(attachment_bundle_id)
-                    or not isinstance(attachment_bundle_relative_path, str)
-                    or not attachment_bundle_relative_path
-                    or not 1 <= attachment_file_count <= 8
-                    or attachment_total_bytes < 0
-                ):
-                    raise ValueError("invalid Memory attachment bundle")
-                conn.execute(
-                    """
-                    INSERT INTO memory_attachment_bundle (
-                        bundle_id, relative_path, state, file_count,
-                        total_bytes, created_at, updated_at
-                    ) VALUES (?, ?, 'pinned', ?, ?, ?, ?)
-                    """,
-                    (
-                        attachment_bundle_id,
-                        attachment_bundle_relative_path,
-                        attachment_file_count,
-                        attachment_total_bytes,
-                        now,
-                        now,
-                    ),
-                )
-            conn.execute(
-                """
-                UPDATE memory_meta
-                SET last_provider_timestamp_ms = ?,
-                    last_error = CASE
-                        WHEN last_error IN ('memory_queue_full', 'memory_low_disk_space') THEN NULL
-                        ELSE last_error
-                    END,
-                    last_error_at = CASE
-                        WHEN last_error IN ('memory_queue_full', 'memory_low_disk_space') THEN NULL
-                        ELSE last_error_at
-                    END,
-                    updated_at = ?
-                WHERE singleton = 1
-                """,
-                (provider_timestamp_ms, now),
+                session_id=_provider_session_ref(meta.scope_key, owner, project_ref, session_id, meta.epoch),
             )
             conn.execute(
-                """
-                INSERT INTO memory_capture_queue (
-                    source_message_digest, epoch, session_id, provider_session_ref, generation,
-                    principal_id,
-                    project_ref, provenance, payload_text,
-                    payload_attachments, attachment_bundle_id,
-                    occurred_at_ms, provider_timestamp_ms,
-                    state, attempts,
-                    next_retry_at, lease_owner, lease_at, lease_token, last_error,
-                    created_at, completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0,
-                          NULL, NULL, NULL, 0, NULL, ?, NULL)
-                """,
-                (
-                    source_message_digest,
-                    meta.epoch,
-                    session_id_ref,
-                    serialized_ref,
-                    generation,
-                    principal_id,
-                    project_ref,
-                    provenance,
-                    payload_text,
-                    payload_attachments,
-                    attachment_bundle_id,
-                    occurred_at_ms,
-                    provider_timestamp_ms,
-                    now,
-                ),
-            )
-            _upsert_memory_project(
-                conn,
-                principal_id=principal_id,
-                project_id=project_ref,
-                now=now,
-            )
-            return EnqueueResult(
-                outcome="accepted",
-                row=QueueRow(
-                    source_message_digest=source_message_digest,
-                    epoch=meta.epoch,
-                    session_id=session_id_ref,
-                    provider_session_ref=provider_session_ref,
-                    generation=generation,
-                    principal_id=principal_id,
-                    project_ref=project_ref,
-                    provenance=provenance,
-                    payload_text=payload_text,
-                    occurred_at_ms=occurred_at_ms,
-                    provider_timestamp_ms=provider_timestamp_ms,
-                    state="pending",
-                    attempts=0,
-                    next_retry_at=None,
-                    lease_owner=None,
-                    lease_at=None,
-                    last_error=None,
-                    created_at=now,
-                    completed_at=None,
-                    payload_attachments=payload_attachments,
-                    attachment_bundle_id=attachment_bundle_id,
-                ),
-            )
-
-    def claim_due(self, *, lease_owner: str, now: str) -> QueueRow | None:
-        """Fence one due pending row for a worker without holding a provider call transaction."""
-
-        with self._transaction() as conn:
-            meta = self._meta_in_connection(conn)
-            if meta is None or meta.clear_in_progress:
-                return None
-            row = conn.execute(
-                """
-                SELECT q.* FROM memory_capture_queue AS q
-                JOIN memory_session_flush_state AS session
-                  ON session.provider_session_ref = q.provider_session_ref
-                WHERE q.epoch = ?
-                  AND q.state = 'pending'
-                  AND session.epoch = q.epoch
-                  AND session.state = 'idle'
-                  AND (q.next_retry_at IS NULL OR q.next_retry_at <= ?)
-                ORDER BY q.created_at, q.source_message_digest
-                LIMIT 1
-                """,
-                (meta.epoch, now),
-            ).fetchone()
-            if row is None:
-                return None
-            result = conn.execute(
-                """
-                UPDATE memory_capture_queue
-                SET state = 'processing', lease_owner = ?, lease_at = ?,
-                    lease_token = lease_token + 1
-                WHERE source_message_digest = ? AND epoch = ? AND state = 'pending'
-                """,
-                (lease_owner, now, row["source_message_digest"], meta.epoch),
-            )
-            if result.rowcount != 1:
-                return None
-            claimed = dict(row)
-            claimed["state"] = "processing"
-            claimed["lease_owner"] = lease_owner
-            claimed["lease_at"] = now
-            claimed["lease_token"] = int(row["lease_token"]) + 1
-            return _queue_from_row(claimed)
-
-    def claim_fenced_generation(
-        self,
-        lease: FlushLease,
-        *,
-        lease_owner: str,
-        now: str,
-    ) -> QueueRow | None:
-        """Claim one target-generation add while holding an exact flush fence."""
-
-        serialized_ref = lease.provider_session_ref.serialize()
-        with self._transaction() as conn:
-            authority = conn.execute(
-                """
-                SELECT 1 FROM memory_session_flush_state
-                WHERE provider_session_ref = ? AND epoch = ?
-                  AND target_generation = ? AND operation_epoch = ?
-                  AND fence_token = ? AND state = 'due'
-                """,
-                (
-                    serialized_ref,
-                    lease.epoch,
-                    lease.generation,
-                    lease.operation_epoch,
-                    lease.fence_token,
-                ),
-            ).fetchone()
-            if authority is None:
-                return None
-            row = conn.execute(
-                """
-                SELECT * FROM memory_capture_queue
-                WHERE provider_session_ref = ? AND epoch = ? AND generation = ?
-                  AND state = 'pending'
-                  AND (next_retry_at IS NULL OR next_retry_at <= ?)
-                ORDER BY created_at, source_message_digest
-                LIMIT 1
-                """,
-                (serialized_ref, lease.epoch, lease.generation, now),
-            ).fetchone()
-            if row is None:
-                return None
-            updated = conn.execute(
-                """
-                UPDATE memory_capture_queue
-                SET state = 'processing', lease_owner = ?, lease_at = ?,
-                    lease_token = lease_token + 1
-                WHERE source_message_digest = ? AND epoch = ? AND state = 'pending'
-                """,
-                (lease_owner, now, row["source_message_digest"], lease.epoch),
-            )
-            if updated.rowcount != 1:
-                return None
-            claimed = dict(row)
-            claimed["state"] = "processing"
-            claimed["lease_owner"] = lease_owner
-            claimed["lease_at"] = now
-            claimed["lease_token"] = int(row["lease_token"]) + 1
-            return _queue_from_row(claimed)
-
-    def return_claim_if_fenced(
-        self,
-        row: QueueRow,
-        *,
-        lease_owner: str,
-    ) -> bool:
-        """Return a raced normal claim after a fence was acquired."""
-
-        serialized_ref = row.provider_session_ref.serialize()
-        with self._transaction() as conn:
-            authority = conn.execute(
-                """
-                SELECT state FROM memory_session_flush_state
-                WHERE provider_session_ref = ? AND epoch = ?
-                """,
-                (serialized_ref, row.epoch),
-            ).fetchone()
-            if authority is None or authority["state"] == "idle":
-                return False
-            updated = conn.execute(
-                """
-                UPDATE memory_capture_queue
-                SET state = 'pending', lease_owner = NULL, lease_at = NULL
-                WHERE source_message_digest = ? AND epoch = ?
-                  AND state = 'processing' AND lease_owner = ? AND lease_token = ?
-                """,
-                (
-                    row.source_message_digest,
-                    row.epoch,
-                    lease_owner,
-                    row.lease_token,
-                ),
-            )
-            return updated.rowcount == 1
-
-    def return_unsubmitted_claim(
-        self,
-        row: QueueRow,
-        *,
-        lease_owner: str,
-    ) -> bool:
-        """Return an exact add claim that never crossed the provider boundary."""
-
-        with self._transaction() as conn:
-            updated = conn.execute(
-                """
-                UPDATE memory_capture_queue
-                SET state = 'pending', lease_owner = NULL, lease_at = NULL
-                WHERE source_message_digest = ? AND epoch = ?
-                  AND state = 'processing' AND lease_owner = ? AND lease_token = ?
-                """,
-                (
-                    row.source_message_digest,
-                    row.epoch,
-                    lease_owner,
-                    row.lease_token,
-                ),
-            )
-            return updated.rowcount == 1
-
-    def claim_is_current(
-        self,
-        row: QueueRow,
-        *,
-        lease_owner: str,
-    ) -> bool:
-        """Revalidate an exact add lease immediately before provider submission."""
-
-        with self._connection() as conn:
-            current = conn.execute(
-                """
-                SELECT 1 FROM memory_capture_queue
-                WHERE source_message_digest = ? AND epoch = ?
-                  AND state = 'processing' AND lease_owner = ? AND lease_token = ?
-                """,
-                (
-                    row.source_message_digest,
-                    row.epoch,
-                    lease_owner,
-                    row.lease_token,
-                ),
-            ).fetchone()
-        return current is not None
-
-    def downgrade_claimed_attachment_to_text(
-        self,
-        row: QueueRow,
-        *,
-        lease_owner: str,
-        now: datetime,
-    ) -> str | None:
-        """Atomically return one exact attachment claim as text-only work."""
-
-        now_iso = _iso_from_datetime(now)
-        with self._transaction() as conn:
-            current = conn.execute(
-                """
-                SELECT q.payload_text, q.attachment_bundle_id
-                FROM memory_capture_queue AS q
-                JOIN memory_attachment_bundle AS bundle
-                  ON bundle.bundle_id = q.attachment_bundle_id
-                WHERE q.source_message_digest = ? AND q.epoch = ?
-                  AND q.state = 'processing' AND q.lease_owner = ?
-                  AND q.lease_token = ? AND q.payload_attachments IS NOT NULL
-                  AND q.attachment_bundle_id IS NOT NULL
-                  AND bundle.state = 'pinned'
-                """,
-                (
-                    row.source_message_digest,
-                    row.epoch,
-                    lease_owner,
-                    row.lease_token,
-                ),
-            ).fetchone()
-            if current is None:
-                return None
-            payload_text = current["payload_text"]
-            if not isinstance(payload_text, str) or not payload_text.strip():
-                return None
-            bundle_id = str(current["attachment_bundle_id"])
-            updated = conn.execute(
-                """
-                UPDATE memory_capture_queue
-                SET state = 'pending', payload_attachments = NULL,
-                    attachment_bundle_id = NULL, lease_owner = NULL,
-                    lease_at = NULL
-                WHERE source_message_digest = ? AND epoch = ?
-                  AND state = 'processing' AND lease_owner = ? AND lease_token = ?
-                  AND payload_attachments IS NOT NULL AND attachment_bundle_id = ?
-                """,
-                (
-                    row.source_message_digest,
-                    row.epoch,
-                    lease_owner,
-                    row.lease_token,
-                    bundle_id,
-                ),
-            )
-            if updated.rowcount != 1:
-                return None
-            releasing = conn.execute(
-                """
-                UPDATE memory_attachment_bundle
-                SET state = 'releasing', updated_at = ?
-                WHERE bundle_id = ? AND state = 'pinned'
-                """,
-                (now_iso, bundle_id),
-            )
-            if releasing.rowcount != 1:
-                raise RuntimeError("Memory attachment release intent was lost")
-            # The same commit records cleanup intent, so cancellation or a crash
-            # leaves boot reconciliation a durable bundle to finish releasing.
-            return bundle_id
-
-    def settle(
-        self,
-        row: QueueRow,
-        outcome: DeliveryOutcome,
-        *,
-        lease_owner: str,
-        now: datetime,
-    ) -> SettleResult:
-        """Move one claimed row out of ``processing``, whatever happened to it.
-
-        This is the only way a claim ends. Callers choose *what happened*; which
-        columns move, whether an attempt is spent, and whether the payload is
-        scrubbed are decided here. Keeping the three transitions behind one
-        method is what makes "a claimed row is always settled" checkable in one
-        place instead of remembered at every call site.
-        """
-
-        now_iso = _iso_from_datetime(now)
-        if isinstance(outcome, Delivered):
-            settled = self.settle_add_ack(
-                row,
-                AddAck(
-                    request_id=outcome.add_request_id,
-                    status=outcome.add_status,
-                ),
-                lease_owner=lease_owner,
-                now=now,
-            )
-            return SettleResult(
-                settled=settled.settled,
-                state="delivered" if settled.settled else None,
-                attachment_release_id=settled.attachment_release_id,
-            )
-        if isinstance(outcome, AmbiguousAdd):
-            settled = self._settle_ambiguous_add(
-                row,
-                lease_owner=lease_owner,
-                now=now_iso,
-                add_request_id=outcome.add_request_id,
-                error=outcome.error,
-            )
-            return SettleResult(
-                settled=settled,
-                state="manual_required" if settled else None,
-            )
-        if isinstance(outcome, SystemOutage):
-            settled = self._return_system_failure(
-                row,
-                lease_owner=lease_owner,
-                error=outcome.error,
-                now=now_iso,
-            )
-            return SettleResult(settled=settled, state="pending" if settled else None)
-        if isinstance(outcome, AddRejected):
-            error: MemoryErrorCode = "memory_processing_failed"
-            retryable = False
-            rejection = outcome
-        else:
-            error = outcome.error
-            retryable = outcome.retryable
-            rejection = None
-        failure = self._record_message_failure(
-            row,
-            lease_owner=lease_owner,
-            error=error,
-            retryable=retryable,
-            now=now,
-            rejection=rejection,
-        )
-        return SettleResult(
-            settled=failure.state is not None,
-            state=failure.state,
-            attempts=failure.attempts,
-            attachment_release_id=failure.attachment_release_id,
-        )
-
-    def recover_after_boot(self, *, lease_owner: str, clock: Callable[[], datetime]) -> BootRecovery:
-        """Return the queue to a claimable state after an unclean shutdown.
-
-        Processing add leases are ambiguous and become session-terminal.
-        Submitted flushes are also ambiguous; unsubmitted durable fences remain
-        due and can be resumed with their exact generation/token.
-        """
-
-        reclaimed = self._reclaim_processing(lease_owner=lease_owner)
-        now_iso = _iso_from_datetime(clock())
-        interrupted = self._recover_interrupted_session_flushes(now=now_iso)
-        with self._connection() as conn:
-            due = int(
-                conn.execute(
-                    """
-                    SELECT COUNT(*) FROM memory_session_flush_state
-                    WHERE state = 'due' AND submission_started_at IS NULL
-                    """
-                ).fetchone()[0]
-            )
-        return BootRecovery(
-            reclaimed=reclaimed,
-            interrupted_flushes=interrupted,
-            due_flushes=due,
-        )
-
-    def _recover_interrupted_session_flushes(self, *, now: str) -> int:
-        """Fence every flush that crossed the durable submission boundary."""
-
-        with self._transaction() as conn:
-            rows = conn.execute(
-                """
-                SELECT * FROM memory_session_flush_state
-                WHERE state = 'in_flight'
-                   OR (state = 'due' AND submission_started_at IS NOT NULL)
-                """
-            ).fetchall()
-            for row in rows:
-                conn.execute(
-                    """
-                    INSERT OR IGNORE INTO memory_flush_settlements (
-                        provider_session_ref, epoch, generation, operation_kind,
-                        operation_token, observation, request_id,
-                        confirmed_watermark_ms, observed_at, error_code,
-                        recovery_origin
-                    ) VALUES (?, ?, ?, 'flush', ?, 'manual_required', NULL, ?, ?, ?, 'boot')
-                    """,
-                    (
-                        row["provider_session_ref"],
-                        row["epoch"],
-                        row["target_generation"],
-                        row["fence_token"],
-                        row["confirmed_add_watermark_ms"],
-                        now,
-                        "memory_provider_response_invalid",
-                    ),
-                )
-                conn.execute(
-                    """
-                    UPDATE memory_session_flush_state
-                    SET state = 'manual_required', next_attempt_at = NULL, updated_at = ?
-                    WHERE provider_session_ref = ? AND operation_epoch = ?
-                      AND fence_token = ?
-                    """,
-                    (
-                        now,
-                        row["provider_session_ref"],
-                        row["operation_epoch"],
-                        row["fence_token"],
-                    ),
-                )
-            if rows:
-                self._open_processing_fault_in_connection(conn, now=now)
-            return len(rows)
-
-    def settle_add_ack(
-        self,
-        row: QueueRow,
-        ack: AddAck,
-        *,
-        lease_owner: str,
-        now: datetime,
-        idle_timeout: timedelta = timedelta(minutes=5),
-        max_unflushed_age: timedelta = timedelta(minutes=30),
-        message_bound: int = 100,
-    ) -> AddSettleResult:
-        """Settle an exact add lease and update its session generation atomically."""
-
-        if ack.status not in {"accumulated", "extracted"}:
-            raise ValueError("unsupported Memory add acknowledgement")
-        now_iso = _iso_from_datetime(now)
-        serialized_ref = row.provider_session_ref.serialize()
-        with self._transaction() as conn:
-            current = conn.execute(
-                """
-                SELECT * FROM memory_capture_queue
-                WHERE source_message_digest = ? AND epoch = ?
-                  AND state = 'processing' AND lease_owner = ? AND lease_token = ?
-                """,
-                (
-                    row.source_message_digest,
-                    row.epoch,
-                    lease_owner,
-                    row.lease_token,
-                ),
-            ).fetchone()
-            authority = conn.execute(
-                """
-                SELECT * FROM memory_session_flush_state
-                WHERE provider_session_ref = ? AND epoch = ?
-                """,
-                (serialized_ref, row.epoch),
-            ).fetchone()
-            if current is None or authority is None:
-                return AddSettleResult(settled=False)
-            state = str(authority["state"])
-            open_generation = int(authority["open_generation"])
-            target_generation = (
-                int(authority["target_generation"])
-                if authority["target_generation"] is not None
-                else None
-            )
-            valid_generation = (
-                (state == "idle" and row.generation == open_generation)
-                or (
-                    state == "due"
-                    and target_generation == row.generation
-                    and authority["submission_started_at"] is None
-                )
-            )
-            if not valid_generation:
-                return AddSettleResult(settled=False)
-
-            bundle_id = (
-                str(current["attachment_bundle_id"])
-                if current["attachment_bundle_id"] is not None
-                else None
-            )
-            result = conn.execute(
-                """
-                UPDATE memory_capture_queue
-                SET state = 'delivered', payload_text = NULL, payload_attachments = NULL,
-                    attachment_bundle_id = NULL, next_retry_at = NULL,
-                    lease_owner = NULL, lease_at = NULL, last_error = NULL,
-                    completed_at = ?, add_request_id = ?, add_status = ?
-                WHERE source_message_digest = ? AND epoch = ?
-                  AND state = 'processing' AND lease_owner = ? AND lease_token = ?
-                """,
-                (
-                    now_iso,
-                    _bounded_opaque_text(ack.request_id),
-                    ack.status,
-                    row.source_message_digest,
-                    row.epoch,
-                    lease_owner,
-                    row.lease_token,
-                ),
-            )
-            if result.rowcount != 1:
-                return AddSettleResult(settled=False)
-            if bundle_id is not None:
-                conn.execute(
-                    """
-                    UPDATE memory_attachment_bundle
-                    SET state = 'releasing', updated_at = ?
-                    WHERE bundle_id = ? AND state = 'pinned'
-                    """,
-                    (now_iso, bundle_id),
-                )
-
-            previous_first = (
-                str(authority["first_unflushed_at"])
-                if authority["first_unflushed_at"] is not None
-                else now_iso
-            )
-            confirmed_watermark = max(
-                row.provider_timestamp_ms,
-                int(authority["confirmed_add_watermark_ms"] or 0),
-            )
-            natural_boundary = ack.status == "extracted"
-            if natural_boundary:
-                operation_token = f"add:{row.source_message_digest}:{row.lease_token}"
-                conn.execute(
-                    """
-                    INSERT OR IGNORE INTO memory_flush_settlements (
-                        provider_session_ref, epoch, generation, operation_kind,
-                        operation_token, observation, request_id,
-                        confirmed_watermark_ms, observed_at, error_code
-                    ) VALUES (?, ?, ?, 'add', ?, 'settled', ?, ?, ?, NULL)
-                    """,
-                    (
-                        serialized_ref,
-                        row.epoch,
-                        row.generation,
-                        operation_token,
-                        _bounded_opaque_text(ack.request_id),
-                        confirmed_watermark,
-                        now_iso,
-                    ),
-                )
-                next_generation = (
-                    open_generation if state == "due" else open_generation + 1
-                )
-                conn.execute(
-                    """
-                    UPDATE memory_capture_queue
-                    SET generation = ?
-                    WHERE provider_session_ref = ? AND epoch = ? AND generation = ?
-                      AND state = 'pending'
-                    """,
-                    (next_generation, serialized_ref, row.epoch, row.generation),
-                )
-                conn.execute(
-                    """
-                    UPDATE memory_session_flush_state
-                    SET open_generation = ?, target_generation = NULL, state = 'idle',
-                        first_unflushed_at = NULL, last_add_ack_at = ?,
-                        confirmed_add_watermark_ms = ?, unflushed_count = 0,
-                        due_at = NULL, next_attempt_at = NULL, retry_count = 0,
-                        fence_token = NULL, submission_started_at = NULL,
-                        updated_at = ?
-                    WHERE provider_session_ref = ? AND epoch = ?
-                    """,
-                    (
-                        next_generation,
-                        now_iso,
-                        confirmed_watermark,
-                        now_iso,
-                        serialized_ref,
-                        row.epoch,
-                    ),
-                )
-            else:
-                unflushed_count = int(authority["unflushed_count"]) + 1
-                idle_due = now + idle_timeout
-                max_due = _datetime_from_iso(previous_first) + max_unflushed_age
-                due = min(idle_due, max_due)
-                if unflushed_count >= max(int(message_bound), 1):
-                    due = now
-                conn.execute(
-                    """
-                    UPDATE memory_session_flush_state
-                    SET first_unflushed_at = COALESCE(first_unflushed_at, ?),
-                        last_add_ack_at = ?, confirmed_add_watermark_ms = ?,
-                        unflushed_count = ?, due_at = ?, updated_at = ?
-                    WHERE provider_session_ref = ? AND epoch = ?
-                    """,
-                    (
-                        previous_first,
-                        now_iso,
-                        confirmed_watermark,
-                        unflushed_count,
-                        _iso_from_datetime(due),
-                        now_iso,
-                        serialized_ref,
-                        row.epoch,
-                    ),
-                )
-            conn.execute(
-                """
-                UPDATE memory_meta
-                SET last_success_at = ?, updated_at = ?
-                WHERE singleton = 1
-                """,
-                (now_iso, now_iso),
-            )
-            self._close_processing_fault_in_connection(conn, now=now_iso)
-            self._compact_terminal_tombstones_in_connection(conn, now)
-            return AddSettleResult(
-                settled=True,
-                natural_boundary=natural_boundary,
-                attachment_release_id=bundle_id,
-            )
-
-    def _settle_ambiguous_add(
-        self,
-        row: QueueRow,
-        *,
-        lease_owner: str,
-        now: str,
-        add_request_id: str | None,
-        error: MemoryErrorCode,
-    ) -> bool:
-        """Retain an uncertain add and fence its session against auto-replay."""
-
-        safe_error = _closed_error_or(error, "memory_provider_response_invalid")
-        with self._transaction() as conn:
-            result = conn.execute(
-                """
-                UPDATE memory_capture_queue
-                SET state = 'manual_required', next_retry_at = NULL,
-                    lease_owner = NULL, lease_at = NULL,
-                    last_error = ?, add_request_id = ?, completed_at = ?
-                WHERE source_message_digest = ? AND epoch = ?
-                  AND state = 'processing' AND lease_owner = ? AND lease_token = ?
-                """,
-                (
-                    safe_error,
-                    _bounded_opaque_text(add_request_id),
-                    now,
-                    row.source_message_digest,
-                    row.epoch,
-                    lease_owner,
-                    row.lease_token,
-                ),
-            )
-            if result.rowcount != 1:
-                return False
-            serialized_ref = row.provider_session_ref.serialize()
-            authority = conn.execute(
-                """
-                SELECT open_generation, operation_epoch
-                FROM memory_session_flush_state
-                WHERE provider_session_ref = ? AND epoch = ?
-                """,
-                (serialized_ref, row.epoch),
-            ).fetchone()
-            if authority is None:
-                raise RuntimeError("Memory session authority is missing")
-            operation_epoch = int(authority["operation_epoch"]) + 1
-            fence_token = f"add-{operation_epoch}-{secrets.token_hex(8)}"
-            conn.execute(
-                """
-                UPDATE memory_session_flush_state
-                SET open_generation = CASE
-                        WHEN open_generation <= ? THEN ? + 1
-                        ELSE open_generation
-                    END,
-                    target_generation = ?, state = 'manual_required',
-                    operation_epoch = ?, fence_token = ?,
-                    submission_started_at = ?, next_attempt_at = NULL,
-                    updated_at = ?
-                WHERE provider_session_ref = ? AND epoch = ?
-                """,
-                (
-                    row.generation,
-                    row.generation,
-                    row.generation,
-                    operation_epoch,
-                    fence_token,
-                    now,
-                    now,
-                    serialized_ref,
-                    row.epoch,
-                ),
+                "UPDATE memory_meta SET last_provider_timestamp_ms = ?, updated_at = ? WHERE singleton = 1",
+                (provider_timestamp, now),
             )
             conn.execute(
-                """
-                INSERT OR IGNORE INTO memory_flush_settlements (
-                    provider_session_ref, epoch, generation, operation_kind,
-                    operation_token, observation, request_id,
-                    confirmed_watermark_ms, observed_at, error_code
-                ) VALUES (?, ?, ?, 'add', ?, 'manual_required', ?, NULL, ?, ?)
-                """,
-                (
-                    serialized_ref,
-                    row.epoch,
-                    row.generation,
-                    f"add:{row.source_message_digest}:{row.lease_token}",
-                    _bounded_opaque_text(add_request_id),
-                    now,
-                    safe_error,
-                ),
+                """INSERT INTO memory_projects(principal_id, project_id, created_at, last_written_at)
+                   VALUES(?, ?, ?, ?) ON CONFLICT(principal_id, project_id) DO UPDATE SET last_written_at=excluded.last_written_at""",
+                (principal_id, project_ref, now, now),
             )
-            self._set_last_error_in_connection(conn, safe_error, now)
-            self._open_processing_fault_in_connection(conn, now=now)
-            return True
-
-    def has_manual_required_fence(self) -> bool:
-        """Return whether the active epoch contains a terminal session fence."""
-
-        with self._connection() as conn:
-            meta = self._meta_in_connection(conn)
-            if meta is None:
-                return False
-            row = conn.execute(
-                """
-                SELECT 1 FROM memory_session_flush_state
-                WHERE epoch = ? AND state = 'manual_required'
-                LIMIT 1
-                """,
-                (meta.epoch,),
-            ).fetchone()
-        return row is not None
-
-    def get_session_flush_state(
-        self,
-        provider_session_ref: ProviderSessionRef,
-    ) -> SessionFlushState | None:
-        """Read one canonical session authority for coordination and tests."""
-
-        with self._connection() as conn:
-            row = conn.execute(
-                """
-                SELECT * FROM memory_session_flush_state
-                WHERE provider_session_ref = ?
-                """,
-                (provider_session_ref.serialize(),),
-            ).fetchone()
-        return _session_state_from_row(row) if row is not None else None
-
-    def final_flush_disposition(
-        self,
-        provider_session_ref: ProviderSessionRef,
-    ) -> FinalFlushDisposition:
-        """Project one session's queue and acknowledgement state atomically."""
-
-        serialized_ref = provider_session_ref.serialize()
-        with self._connection() as conn:
-            row = conn.execute(
-                """
-                WITH authority AS (
-                    SELECT state, unflushed_count
-                    FROM memory_session_flush_state
-                    WHERE provider_session_ref = ?
-                ), queue AS (
-                    SELECT
-                        SUM(CASE WHEN state IN ('pending', 'processing') THEN 1 ELSE 0 END)
-                            AS pending_count,
-                        SUM(CASE WHEN state = 'manual_required' THEN 1 ELSE 0 END)
-                            AS manual_count
-                    FROM memory_capture_queue
-                    WHERE provider_session_ref = ?
-                )
-                SELECT
-                    (SELECT state FROM authority) AS authority_state,
-                    COALESCE((SELECT unflushed_count FROM authority), 0)
-                        AS unflushed_count,
-                    COALESCE(queue.pending_count, 0) AS pending_count,
-                    COALESCE(queue.manual_count, 0) AS manual_count
-                FROM queue
-                """,
-                (serialized_ref, serialized_ref),
-            ).fetchone()
-        if row is None:
-            raise RuntimeError("Memory final-flush projection is missing")
-
-        state = row["authority_state"]
-        pending_count = int(row["pending_count"])
-        manual_count = int(row["manual_count"])
-        unflushed_count = int(row["unflushed_count"])
-        if state is None:
-            return "complete" if pending_count == 0 and manual_count == 0 else "blocked"
-        if state != "idle" or manual_count:
-            return "blocked"
-        if pending_count or unflushed_count:
-            return "flush_required"
-        return "complete"
-
-    def begin_flush_attempt(
-        self,
-        *,
-        provider_session_ref: ProviderSessionRef,
-        now: str,
-        force: bool = False,
-    ) -> FlushLease | None:
-        """Acquire or resume one exact session and reclaim its raced claims.
-
-        The caller must hold the exact session lock until the returned lease is
-        settled or returned.
-        """
-
-        serialized_ref = provider_session_ref.serialize()
-        with self._transaction() as conn:
-            meta = self._meta_in_connection(conn)
-            if meta is None or meta.clear_in_progress:
-                return None
-            row = conn.execute(
-                """
-                SELECT * FROM memory_session_flush_state
-                WHERE provider_session_ref = ? AND epoch = ?
-                """,
-                (serialized_ref, meta.epoch),
-            ).fetchone()
-            if row is None:
-                return None
-
-            state = str(row["state"])
-            if state == "due":
-                if row["submission_started_at"] is not None:
-                    return None
-                next_attempt_at = row["next_attempt_at"]
-                if next_attempt_at is not None and str(next_attempt_at) > now:
-                    return None
-                lease = _flush_lease_from_row(row)
-            else:
-                if state != "idle":
-                    return None
-                if force:
-                    pending = conn.execute(
-                        """
-                        SELECT 1 FROM memory_capture_queue
-                        WHERE provider_session_ref = ? AND epoch = ?
-                          AND generation = ? AND state IN ('pending', 'processing')
-                        LIMIT 1
-                        """,
-                        (serialized_ref, meta.epoch, int(row["open_generation"])),
-                    ).fetchone()
-                    if int(row["unflushed_count"]) == 0 and pending is None:
-                        return None
-                elif not (
-                    int(row["unflushed_count"]) > 0
-                    and row["due_at"] is not None
-                    and str(row["due_at"]) <= now
-                ):
-                    return None
-
-                generation = int(row["open_generation"])
-                operation_epoch = int(row["operation_epoch"]) + 1
-                fence_token = f"flush-{operation_epoch}-{secrets.token_hex(16)}"
-                updated = conn.execute(
-                    """
-                    UPDATE memory_session_flush_state
-                    SET open_generation = open_generation + 1,
-                        target_generation = open_generation,
-                        state = 'due', operation_epoch = ?, fence_token = ?,
-                        next_attempt_at = NULL, retry_count = 0,
-                        submission_started_at = NULL, updated_at = ?
-                    WHERE provider_session_ref = ? AND epoch = ?
-                      AND state = 'idle' AND operation_epoch = ?
-                    """,
-                    (
-                        operation_epoch,
-                        fence_token,
-                        now,
-                        serialized_ref,
-                        meta.epoch,
-                        int(row["operation_epoch"]),
-                    ),
-                )
-                if updated.rowcount != 1:
-                    return None
-                lease = FlushLease(
-                    provider_session_ref=provider_session_ref,
-                    epoch=meta.epoch,
-                    generation=generation,
-                    operation_epoch=operation_epoch,
-                    fence_token=fence_token,
-                )
-
-            conn.execute(
-                """
-                UPDATE memory_capture_queue
-                SET state = 'pending', lease_owner = NULL, lease_at = NULL
-                WHERE provider_session_ref = ? AND epoch = ? AND generation = ?
-                  AND state = 'processing'
-                """,
-                (serialized_ref, lease.epoch, lease.generation),
-            )
-            return lease
-
-    def list_flush_candidates(self, *, now: str, limit: int = 16) -> tuple[ProviderSessionRef, ...]:
-        """List independently acquirable session refs without changing state."""
-
-        bounded_limit = max(1, min(int(limit), 64))
-        with self._connection() as conn:
-            meta = self._meta_in_connection(conn)
-            if meta is None or meta.clear_in_progress:
-                return ()
-            rows = conn.execute(
-                """
-                SELECT provider_session_ref
-                FROM memory_session_flush_state
-                WHERE epoch = ? AND (
-                    (state = 'due' AND submission_started_at IS NULL
-                        AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
-                    OR
-                    (state = 'idle' AND unflushed_count > 0
-                        AND due_at IS NOT NULL AND due_at <= ?)
-                )
-                ORDER BY
-                    CASE WHEN state = 'due' THEN 0 ELSE 1 END,
-                    COALESCE(next_attempt_at, due_at), provider_session_ref
-                LIMIT ?
-                """,
-                (meta.epoch, now, now, bounded_limit),
-            ).fetchall()
-        return tuple(
-            ProviderSessionRef.deserialize(str(row["provider_session_ref"]))
-            for row in rows
-        )
-
-    def begin_flush_submission(self, lease: FlushLease, *, now: str) -> bool:
-        """Atomically prove generation emptiness and persist provider submission."""
-
-        serialized_ref = lease.provider_session_ref.serialize()
-        with self._transaction() as conn:
-            updated = conn.execute(
-                """
-                UPDATE memory_session_flush_state
-                SET state = 'in_flight', submission_started_at = ?, updated_at = ?
-                WHERE provider_session_ref = ? AND epoch = ?
-                  AND target_generation = ? AND operation_epoch = ?
-                  AND fence_token = ? AND state = 'due'
-                  AND submission_started_at IS NULL
-                  AND EXISTS (
-                      SELECT 1 FROM memory_meta AS meta
-                      WHERE meta.singleton = 1 AND meta.epoch = ?
-                        AND meta.clear_in_progress = 0
-                  )
-                  AND NOT EXISTS (
-                      SELECT 1 FROM memory_capture_queue AS queue
-                      WHERE queue.provider_session_ref = ? AND queue.epoch = ?
-                        AND queue.generation = ?
-                        AND queue.state IN ('pending', 'processing')
-                  )
-                """,
-                (
-                    now,
-                    now,
-                    serialized_ref,
-                    lease.epoch,
-                    lease.generation,
-                    lease.operation_epoch,
-                    lease.fence_token,
-                    lease.epoch,
-                    serialized_ref,
-                    lease.epoch,
-                    lease.generation,
-                ),
-            )
-            return updated.rowcount == 1
-
-    def return_unsubmitted_flush(self, lease: FlushLease, *, now: str) -> bool:
-        """Return an exact marked flush whose provider coroutine never began."""
-
-        serialized_ref = lease.provider_session_ref.serialize()
-        with self._transaction() as conn:
-            updated = conn.execute(
-                """
-                UPDATE memory_session_flush_state
-                SET state = 'due', submission_started_at = NULL, updated_at = ?
-                WHERE provider_session_ref = ? AND epoch = ?
-                  AND target_generation = ? AND operation_epoch = ?
-                  AND fence_token = ? AND state = 'in_flight'
-                  AND submission_started_at IS NOT NULL
-                """,
-                (
-                    now,
-                    serialized_ref,
-                    lease.epoch,
-                    lease.generation,
-                    lease.operation_epoch,
-                    lease.fence_token,
-                ),
-            )
-            return updated.rowcount == 1
-
-    def settle_flush(
-        self,
-        lease: FlushLease,
-        result: FlushResult,
-        *,
-        now: str,
-    ) -> FlushSettleResult:
-        """Settle one submitted flush with an exact generation/token CAS."""
-
-        if isinstance(result, FlushSucceeded):
-            if result.status not in {"extracted", "no_extraction"} or not result.request_id:
-                observation = "manual_required"
-                request_id = result.request_id
-                error_code = "memory_provider_response_invalid"
-            else:
-                observation = "settled"
-                request_id = result.request_id
-                error_code = None
-        elif isinstance(result, FlushRejected):
-            observation = "rejected"
-            request_id = result.request_id
-            error_code = result.error_code or "memory_processing_failed"
-        elif isinstance(result, FlushUnknown):
-            observation = "manual_required"
-            request_id = None
-            error_code = (
-                "memory_provider_timeout"
-                if result.reason == "timeout"
-                else "memory_provider_response_invalid"
-            )
-        else:
-            raise TypeError("unsupported flush result")
-
-        serialized_ref = lease.provider_session_ref.serialize()
-        with self._transaction() as conn:
-            authority = conn.execute(
-                """
-                SELECT confirmed_add_watermark_ms FROM memory_session_flush_state
-                WHERE provider_session_ref = ? AND epoch = ?
-                  AND target_generation = ? AND operation_epoch = ?
-                  AND fence_token = ? AND state = 'in_flight'
-                  AND submission_started_at IS NOT NULL
-                """,
-                (
-                    serialized_ref,
-                    lease.epoch,
-                    lease.generation,
-                    lease.operation_epoch,
-                    lease.fence_token,
-                ),
-            ).fetchone()
-            if authority is None:
-                return FlushSettleResult(settled=False)
-            conn.execute(
-                """
-                INSERT INTO memory_flush_settlements (
-                    provider_session_ref, epoch, generation, operation_kind,
-                    operation_token, observation, request_id,
-                    confirmed_watermark_ms, observed_at, error_code
-                ) VALUES (?, ?, ?, 'flush', ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    serialized_ref,
-                    lease.epoch,
-                    lease.generation,
-                    lease.fence_token,
-                    observation,
-                    _bounded_opaque_text(request_id),
-                    authority["confirmed_add_watermark_ms"],
-                    now,
-                    _bounded_opaque_text(error_code),
-                ),
-            )
-            if observation == "manual_required":
-                updated = conn.execute(
-                    """
-                    UPDATE memory_session_flush_state
-                    SET state = 'manual_required', next_attempt_at = NULL, updated_at = ?
-                    WHERE provider_session_ref = ? AND epoch = ?
-                      AND target_generation = ? AND operation_epoch = ?
-                      AND fence_token = ? AND state = 'in_flight'
-                    """,
-                    (
-                        now,
-                        serialized_ref,
-                        lease.epoch,
-                        lease.generation,
-                        lease.operation_epoch,
-                        lease.fence_token,
-                    ),
-                )
-                state: Literal["idle", "due", "manual_required"] = "manual_required"
-            else:
-                updated = conn.execute(
-                    """
-                    UPDATE memory_session_flush_state
-                    SET target_generation = NULL, state = 'idle',
-                        first_unflushed_at = NULL, unflushed_count = 0,
-                        due_at = NULL, next_attempt_at = NULL, retry_count = 0,
-                        fence_token = NULL, submission_started_at = NULL,
-                        updated_at = ?
-                    WHERE provider_session_ref = ? AND epoch = ?
-                      AND target_generation = ? AND operation_epoch = ?
-                      AND fence_token = ? AND state = 'in_flight'
-                    """,
-                    (
-                        now,
-                        serialized_ref,
-                        lease.epoch,
-                        lease.generation,
-                        lease.operation_epoch,
-                        lease.fence_token,
-                    ),
-                )
-                state = "idle"
-            if updated.rowcount != 1:
-                raise RuntimeError("Memory flush authority changed inside settlement")
-            if observation == "manual_required" or (
-                isinstance(result, FlushRejected) and result.server_fault
-            ):
-                self._open_processing_fault_in_connection(conn, now=now)
-            elif observation == "settled":
-                self._close_processing_fault_in_connection(conn, now=now)
-            return FlushSettleResult(settled=True, state=state)
-
-    def retry_unsubmitted_flush(
-        self,
-        lease: FlushLease,
-        *,
-        now: datetime,
-        max_attempts: int = 3,
-    ) -> FlushSettleResult:
-        """Back off a failure proven before the submission marker."""
-
-        now_iso = _iso_from_datetime(now)
-        serialized_ref = lease.provider_session_ref.serialize()
-        with self._transaction() as conn:
-            row = conn.execute(
-                """
-                SELECT retry_count FROM memory_session_flush_state
-                WHERE provider_session_ref = ? AND epoch = ?
-                  AND target_generation = ? AND operation_epoch = ?
-                  AND fence_token = ? AND (
-                      (state = 'due' AND submission_started_at IS NULL)
-                      OR state = 'in_flight'
-                  )
-                """,
-                (
-                    serialized_ref,
-                    lease.epoch,
-                    lease.generation,
-                    lease.operation_epoch,
-                    lease.fence_token,
-                ),
-            ).fetchone()
-            if row is None:
-                return FlushSettleResult(settled=False)
-            retries = int(row["retry_count"]) + 1
-            if retries > max(int(max_attempts), 0):
-                conn.execute(
-                    """
-                    INSERT INTO memory_flush_settlements (
-                        provider_session_ref, epoch, generation, operation_kind,
-                        operation_token, observation, request_id,
-                        confirmed_watermark_ms, observed_at, error_code
-                    ) VALUES (?, ?, ?, 'flush', ?, 'manual_required', NULL, NULL, ?, ?)
-                    """,
-                    (
-                        serialized_ref,
-                        lease.epoch,
-                        lease.generation,
-                        lease.fence_token,
-                        now_iso,
-                        "memory_sidecar_unavailable",
-                    ),
-                )
-                conn.execute(
-                    """
-                    UPDATE memory_session_flush_state
-                    SET state = 'manual_required', retry_count = ?,
-                        next_attempt_at = NULL, updated_at = ?
-                    WHERE provider_session_ref = ? AND epoch = ?
-                      AND operation_epoch = ? AND fence_token = ?
-                      AND state IN ('due', 'in_flight')
-                    """,
-                    (
-                        retries,
-                        now_iso,
-                        serialized_ref,
-                        lease.epoch,
-                        lease.operation_epoch,
-                        lease.fence_token,
-                    ),
-                )
-                self._open_processing_fault_in_connection(conn, now=now_iso)
-                return FlushSettleResult(settled=True, state="manual_required")
-            retry_at = now + timedelta(seconds=2 ** (retries - 1))
-            conn.execute(
-                """
-                UPDATE memory_session_flush_state
-                SET state = 'due', retry_count = ?, next_attempt_at = ?,
-                    submission_started_at = NULL, updated_at = ?
-                WHERE provider_session_ref = ? AND epoch = ?
-                  AND operation_epoch = ? AND fence_token = ?
-                  AND state IN ('due', 'in_flight')
-                """,
-                (
-                    retries,
-                    _iso_from_datetime(retry_at),
-                    now_iso,
-                    serialized_ref,
-                    lease.epoch,
-                    lease.operation_epoch,
-                    lease.fence_token,
-                ),
-            )
-            return FlushSettleResult(settled=True, state="due")
-
-    def _return_system_failure(
-        self,
-        row: QueueRow,
-        *,
-        lease_owner: str,
-        error: MemoryErrorCode,
-        now: str,
-    ) -> bool:
-        """Release a claimed row after a global outage without consuming attempts."""
-
-        error = _closed_error_or(error, "memory_sidecar_unavailable")
-        with self._transaction() as conn:
-            result = conn.execute(
-                """
-                UPDATE memory_capture_queue
-                SET state = 'pending', next_retry_at = NULL,
-                    lease_owner = NULL, lease_at = NULL, last_error = ?
-                WHERE source_message_digest = ? AND epoch = ?
-                  AND state = 'processing' AND lease_owner = ? AND lease_token = ?
-                """,
-                (
-                    error,
-                    row.source_message_digest,
-                    row.epoch,
-                    lease_owner,
-                    row.lease_token,
-                ),
-            )
-            if result.rowcount != 1:
-                return False
-            self._set_last_error_in_connection(conn, error, now)
-            if error == "memory_processing_failed":
-                self._open_processing_fault_in_connection(conn, now=now)
-            return True
-
-    def _record_message_failure(
-        self,
-        row: QueueRow,
-        *,
-        lease_owner: str,
-        error: MemoryErrorCode,
-        retryable: bool,
-        now: datetime,
-        rejection: AddRejected | None = None,
-    ) -> MessageFailureResult:
-        """Spend one message failure attempt, retrying or terminally scrubbing it."""
-
-        error = _closed_error_or(error, "memory_processing_failed")
-        now_iso = _iso_from_datetime(now)
-        with self._transaction() as conn:
-            current = conn.execute(
-                """
-                SELECT attempts, attachment_bundle_id FROM memory_capture_queue
-                WHERE source_message_digest = ? AND epoch = ?
-                  AND state = 'processing' AND lease_owner = ? AND lease_token = ?
-                """,
-                (
-                    row.source_message_digest,
-                    row.epoch,
-                    lease_owner,
-                    row.lease_token,
-                ),
-            ).fetchone()
-            if current is None:
-                return MessageFailureResult(state=None, attempts=None)
-            attempts = int(current["attempts"]) + 1
-            bundle_id = (
-                str(current["attachment_bundle_id"])
-                if current["attachment_bundle_id"] is not None
-                else None
-            )
-            terminal = not retryable or attempts >= MAX_MESSAGE_ATTEMPTS
-            if terminal:
-                conn.execute(
-                    """
-                    UPDATE memory_capture_queue
-                    SET state = 'dead', attempts = ?, payload_text = NULL,
-                        payload_attachments = NULL, attachment_bundle_id = NULL,
-                        next_retry_at = NULL, lease_owner = NULL, lease_at = NULL,
-                        last_error = ?, add_request_id = ?, completed_at = ?
-                    WHERE source_message_digest = ? AND epoch = ?
-                      AND state = 'processing' AND lease_owner = ? AND lease_token = ?
-                    """,
-                    (
-                        attempts,
-                        error,
-                        _bounded_opaque_text(
-                            rejection.request_id if rejection is not None else None
-                        ),
-                        now_iso,
-                        row.source_message_digest,
-                        row.epoch,
-                        lease_owner,
-                        row.lease_token,
-                    ),
-                )
-                if bundle_id is not None:
-                    conn.execute(
-                        """
-                        UPDATE memory_attachment_bundle
-                        SET state = 'releasing', updated_at = ?
-                        WHERE bundle_id = ? AND state = 'pinned'
-                        """,
-                        (now_iso, bundle_id),
-                    )
-                if rejection is not None:
-                    conn.execute(
-                        """
-                        INSERT INTO memory_flush_settlements (
-                            provider_session_ref, epoch, generation, operation_kind,
-                            operation_token, observation, request_id,
-                            confirmed_watermark_ms, observed_at, error_code, attempts
-                        ) VALUES (?, ?, ?, 'add', ?, 'rejected', ?, NULL, ?, ?, ?)
-                        """,
-                        (
-                            row.provider_session_ref.serialize(),
-                            row.epoch,
-                            row.generation,
-                            f"add:{row.source_message_digest}:{row.lease_token}",
-                            _bounded_opaque_text(rejection.request_id),
-                            now_iso,
-                            _bounded_opaque_text(
-                                rejection.error_code or "memory_processing_failed"
-                            ),
-                            attempts,
-                        ),
-                    )
-                    if rejection.server_fault:
-                        self._open_processing_fault_in_connection(
-                            conn,
-                            now=now_iso,
-                        )
-                state: Literal["pending", "dead"] = "dead"
-                self._compact_terminal_tombstones_in_connection(conn, now)
-            else:
-                retry_at = now + (timedelta(seconds=30) if attempts == 1 else timedelta(minutes=2))
-                conn.execute(
-                    """
-                    UPDATE memory_capture_queue
-                    SET state = 'pending', attempts = ?, next_retry_at = ?,
-                        lease_owner = NULL, lease_at = NULL, last_error = ?
-                    WHERE source_message_digest = ? AND epoch = ?
-                      AND state = 'processing' AND lease_owner = ? AND lease_token = ?
-                    """,
-                    (
-                        attempts,
-                        _iso_from_datetime(retry_at),
-                        error,
-                        row.source_message_digest,
-                        row.epoch,
-                        lease_owner,
-                        row.lease_token,
-                    ),
-                )
-                state = "pending"
-            self._set_last_error_in_connection(conn, error, now_iso)
-            return MessageFailureResult(
-                state=state,
-                attempts=attempts,
-                attachment_release_id=bundle_id if terminal else None,
+            return VolatileAdmission(
+                "accepted",
+                _keyed_digest(meta.scope_key, source_message_id),
+                ref,
+                provider_timestamp,
             )
 
-    def _reclaim_processing(self, *, lease_owner: str) -> int:
-        """Fence rows whose provider add outcome was ambiguous at boot."""
-
+    def mark_capture_success(self) -> None:
         now = utc_now_iso()
         with self._transaction() as conn:
-            rows = conn.execute(
-                """
-                SELECT * FROM memory_capture_queue
-                WHERE state = 'processing'
-                  AND (lease_owner IS NULL OR lease_owner != ?)
-                """,
-                (lease_owner,),
-            ).fetchall()
-            for row in rows:
-                conn.execute(
-                    """
-                    UPDATE memory_capture_queue
-                    SET state = 'manual_required', lease_owner = NULL, lease_at = NULL,
-                        next_retry_at = NULL,
-                        last_error = 'memory_provider_response_invalid', completed_at = ?
-                    WHERE source_message_digest = ? AND state = 'processing'
-                    """,
-                    (now, row["source_message_digest"]),
-                )
-                serialized_ref = str(row["provider_session_ref"])
-                authority = conn.execute(
-                    """
-                    SELECT open_generation, operation_epoch
-                    FROM memory_session_flush_state
-                    WHERE provider_session_ref = ? AND epoch = ?
-                    """,
-                    (serialized_ref, row["epoch"]),
-                ).fetchone()
-                if authority is None:
-                    continue
-                operation_epoch = int(authority["operation_epoch"]) + 1
-                fence_token = f"boot-add-{operation_epoch}-{secrets.token_hex(8)}"
-                conn.execute(
-                    """
-                    UPDATE memory_session_flush_state
-                    SET open_generation = CASE
-                            WHEN open_generation <= ? THEN ? + 1
-                            ELSE open_generation
-                        END,
-                        target_generation = ?, state = 'manual_required',
-                        operation_epoch = ?, fence_token = ?,
-                        submission_started_at = ?, next_attempt_at = NULL,
-                        updated_at = ?
-                    WHERE provider_session_ref = ? AND epoch = ?
-                    """,
-                    (
-                        row["generation"],
-                        row["generation"],
-                        row["generation"],
-                        operation_epoch,
-                        fence_token,
-                        now,
-                        now,
-                        serialized_ref,
-                        row["epoch"],
-                    ),
-                )
-                conn.execute(
-                    """
-                    INSERT OR IGNORE INTO memory_flush_settlements (
-                        provider_session_ref, epoch, generation, operation_kind,
-                        operation_token, observation, request_id,
-                        confirmed_watermark_ms, observed_at, error_code,
-                        recovery_origin
-                    ) VALUES (?, ?, ?, 'add', ?, 'manual_required', NULL, NULL, ?, ?, 'boot')
-                    """,
-                    (
-                        serialized_ref,
-                        row["epoch"],
-                        row["generation"],
-                        f"add:{row['source_message_digest']}:{row['lease_token']}",
-                        now,
-                        "memory_provider_response_invalid",
-                    ),
-                )
-            if rows:
-                self._open_processing_fault_in_connection(conn, now=now)
-            return len(rows)
+            self._ensure_meta(conn)
+            conn.execute("UPDATE memory_meta SET last_success_at = ?, updated_at = ? WHERE singleton = 1", (now, now))
 
-    def queue_stats(self) -> QueueStats:
-        """Return aggregate counts and retained plaintext bytes for the active epoch."""
-
-        with self._connection() as conn:
-            meta = self._meta_in_connection(conn)
-            if meta is None:
-                return QueueStats()
-            row = conn.execute(
-                """
-                SELECT
-                    SUM(CASE WHEN state = 'pending' THEN 1 ELSE 0 END) AS pending,
-                    SUM(CASE WHEN state = 'processing' THEN 1 ELSE 0 END) AS processing,
-                    SUM(CASE WHEN state = 'dead' THEN 1 ELSE 0 END) AS dead,
-                    SUM(CASE WHEN state = 'delivered' AND add_status = 'accumulated'
-                        THEN 1 ELSE 0 END) AS awaiting_receipt,
-                    SUM(CASE WHEN state = 'delivered' THEN 1 ELSE 0 END) AS succeeded,
-                    SUM(CASE WHEN state = 'manual_required' THEN 1 ELSE 0 END)
-                        AS receipt_unknown,
-                    COALESCE(SUM(
-                        CASE WHEN state IN ('pending', 'processing', 'manual_required')
-                        THEN length(CAST(payload_text AS BLOB))
-                           + length(CAST(COALESCE(payload_attachments, '') AS BLOB))
-                        ELSE 0 END
-                    ), 0) AS plaintext_bytes
-                FROM memory_capture_queue
-                WHERE epoch = ?
-                """,
-                (meta.epoch,),
-            ).fetchone()
-            latest = conn.execute(
-                """
-                SELECT observation, error_code, request_id, observed_at
-                FROM memory_flush_settlements
-                WHERE epoch = ? AND operation_kind = 'flush'
-                ORDER BY observed_at DESC, settlement_id DESC
-                LIMIT 1
-                """,
-                (meta.epoch,),
-            ).fetchone()
-            rejected = int(
-                conn.execute(
-                    """
-                    SELECT COUNT(*) FROM memory_flush_settlements
-                    WHERE epoch = ? AND operation_kind = 'flush'
-                      AND observation = 'rejected'
-                    """,
-                    (meta.epoch,),
-                ).fetchone()[0]
-            )
-        return QueueStats(
-            pending=int(row["pending"] or 0),
-            processing=int(row["processing"] or 0),
-            dead=int(row["dead"] or 0),
-            queue_plaintext_bytes=int(row["plaintext_bytes"] or 0),
-            awaiting_receipt=int(row["awaiting_receipt"] or 0),
-            succeeded=int(row["succeeded"] or 0),
-            receipt_unknown=int(row["receipt_unknown"] or 0),
-            distill_failed=rejected,
-            last_flush_observation=(
-                {
-                    "settled": "succeeded",
-                    "rejected": "rejected",
-                    "manual_required": "unknown",
-                }.get(str(latest["observation"]))
-                if latest is not None
-                else None
-            ),
-            last_flush_status=None,
-            last_flush_error_code=(
-                str(latest["error_code"])
-                if latest is not None and latest["error_code"] is not None
-                else None
-            ),
-            last_flush_request_id=(
-                str(latest["request_id"])
-                if latest is not None and latest["request_id"] is not None
-                else None
-            ),
-            last_flush_at=(
-                str(latest["observed_at"])
-                if latest is not None and latest["observed_at"] is not None
-                else None
-            ),
-        )
-
-    def failure_log(self, *, limit: int = 50) -> tuple[MemoryFailureLogEntry, ...]:
-        """Return sanitized terminal delivery and provider observations."""
-
-        bounded_limit = max(1, min(int(limit), 100))
+    def record_capture_skip(self, error: MemoryErrorCode | None) -> None:
         with self._transaction() as conn:
-            meta = self._meta_in_connection(conn)
-            if meta is None:
-                return ()
-            self._compact_terminal_tombstones_in_connection(conn, datetime.now(timezone.utc))
-            rows = conn.execute(
-                """
-                SELECT anomaly_namespace, anomaly_evidence,
-                       kind, state, operation, generation,
-                       occurred_at, error_code, request_id, attempts
-                FROM (
-                    SELECT
-                        'queue' AS anomaly_namespace,
-                        source_message_digest AS anomaly_evidence,
-                        CASE
-                            WHEN state = 'dead' THEN 'delivery_abandoned'
-                            WHEN EXISTS (
-                                SELECT 1
-                                FROM memory_flush_settlements AS settlement
-                                WHERE settlement.provider_session_ref =
-                                        capture.provider_session_ref
-                                  AND settlement.epoch = capture.epoch
-                                  AND settlement.generation = capture.generation
-                                  AND settlement.operation_kind = 'add'
-                                  AND settlement.observation = 'manual_required'
-                                  AND settlement.recovery_origin = 'boot'
-                                  AND settlement.operation_token =
-                                      'add:' || capture.source_message_digest || ':' ||
-                                      capture.lease_token
-                            ) THEN 'boot_recovery'
-                            ELSE 'result_unknown'
-                        END AS kind,
-                        state,
-                        'add' AS operation,
-                        generation,
-                        COALESCE(completed_at, created_at) AS occurred_at,
-                        last_error AS error_code,
-                        add_request_id AS request_id,
-                        attempts,
-                        source_message_digest AS sort_key
-                    FROM memory_capture_queue AS capture
-                    WHERE capture.epoch = ?
-                      AND capture.state IN ('dead', 'manual_required')
-                      AND NOT EXISTS (
-                          SELECT 1 FROM memory_flush_settlements AS settlement
-                          WHERE settlement.provider_session_ref = capture.provider_session_ref
-                            AND settlement.epoch = capture.epoch
-                            AND settlement.generation = capture.generation
-                            AND settlement.operation_kind = 'add'
-                            AND settlement.observation = 'rejected'
-                            AND settlement.operation_token =
-                                'add:' || capture.source_message_digest || ':' || capture.lease_token
-                      )
-
-                    UNION ALL
-
-                    SELECT
-                        'settlement' AS anomaly_namespace,
-                        CAST(settlement_id AS TEXT) AS anomaly_evidence,
-                        CASE
-                            WHEN recovery_origin = 'boot' THEN 'boot_recovery'
-                            WHEN observation = 'rejected' AND operation_kind = 'flush'
-                                THEN 'distillation_rejected'
-                            WHEN observation = 'rejected' THEN 'delivery_abandoned'
-                            ELSE 'result_unknown'
-                        END AS kind,
-                        observation AS state,
-                        operation_kind AS operation,
-                        generation,
-                        observed_at AS occurred_at,
-                        error_code,
-                        request_id,
-                        attempts,
-                        printf('%020d', settlement_id) AS sort_key
-                    FROM memory_flush_settlements
-                    WHERE epoch = ? AND (
-                        (operation_kind = 'flush'
-                            AND observation IN ('rejected', 'manual_required'))
-                        OR (operation_kind = 'add' AND observation = 'rejected')
-                    )
-                )
-                ORDER BY occurred_at DESC, sort_key DESC
-                LIMIT ?
-                """,
-                (meta.epoch, meta.epoch, bounded_limit),
-            ).fetchall()
-        return tuple(
-            MemoryFailureLogEntry(
-                id=_failure_anomaly_id(
-                    meta.scope_key,
-                    str(row["anomaly_namespace"]),
-                    str(row["anomaly_evidence"]),
-                ),
-                kind=str(row["kind"]),
-                occurred_at=str(row["occurred_at"]),
-                error_code=(str(row["error_code"]) if row["error_code"] is not None else None),
-                request_id=(
-                    str(row["request_id"])
-                    if row["request_id"] is not None
-                    else None
-                ),
-                attempts=int(row["attempts"]),
-                state=str(row["state"]),
-                operation=str(row["operation"]),
-                generation=int(row["generation"]),
-            )
-            for row in rows
-        )
-
-    def has_provider_data_history(self) -> bool:
-        """Whether the active epoch contains any queued or terminal Memory history."""
-
-        with self._connection() as conn:
-            meta = self._meta_in_connection(conn)
-            if meta is None:
-                return False
-            row = conn.execute(
-                """
-                SELECT 1 FROM memory_capture_queue
-                WHERE epoch = ?
-                LIMIT 1
-                """,
-                (meta.epoch,),
-            ).fetchone()
-        return row is not None
-
-    def get_queue_row(self, source_message_digest: str) -> QueueRow | None:
-        """Return one queue row for worker and focused store tests."""
-
-        with self._connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM memory_capture_queue WHERE source_message_digest = ?",
-                (source_message_digest,),
-            ).fetchone()
-        return _queue_from_row(row) if row is not None else None
-
-    def list_queue_rows(self) -> tuple[QueueRow, ...]:
-        """Return queue rows in deterministic order for internal maintenance and tests."""
-
-        with self._connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM memory_capture_queue ORDER BY created_at, source_message_digest"
-            ).fetchall()
-        return tuple(_queue_from_row(row) for row in rows)
-
-    def attachment_bundle_sets(self) -> tuple[frozenset[str], frozenset[str]]:
-        """Return referenced and releasing bundle IDs for filesystem reconciliation."""
-
-        with self._connection() as conn:
-            referenced_rows = conn.execute(
-                """
-                SELECT DISTINCT attachment_bundle_id
-                FROM memory_capture_queue
-                WHERE attachment_bundle_id IS NOT NULL
-                """
-            ).fetchall()
-            releasing_rows = conn.execute(
-                """
-                SELECT bundle_id FROM memory_attachment_bundle
-                WHERE state = 'releasing'
-                """
-            ).fetchall()
-        return (
-            frozenset(str(row[0]) for row in referenced_rows),
-            frozenset(str(row[0]) for row in releasing_rows),
-        )
-
-    def finalize_attachment_release(self, bundle_id: str) -> bool:
-        """Delete one releasing metadata row after its private files are gone."""
-
-        if not _is_bundle_id(bundle_id):
-            return False
-        with self._transaction() as conn:
-            referenced = conn.execute(
-                """
-                SELECT 1 FROM memory_capture_queue
-                WHERE attachment_bundle_id = ? LIMIT 1
-                """,
-                (bundle_id,),
-            ).fetchone()
-            if referenced is not None:
-                return False
-            deleted = conn.execute(
-                """
-                DELETE FROM memory_attachment_bundle
-                WHERE bundle_id = ? AND state = 'releasing'
-                """,
-                (bundle_id,),
-            )
-            return deleted.rowcount == 1
-
-    def begin_clear_fence(self) -> MemoryMeta:
-        """Fence admission without changing the pre-clear snapshot generation."""
-
-        now = utc_now_iso()
-        with self._transaction() as conn:
-            meta = self._ensure_meta_in_connection(conn)
-            conn.execute(
-                """
-                UPDATE memory_meta
-                SET clear_in_progress = 1, updated_at = ?
-                WHERE singleton = 1
-                """,
-                (now,),
-            )
-            refreshed = self._meta_in_connection(conn)
-            if refreshed is None:
-                raise RuntimeError("Memory metadata disappeared while fencing clear")
-            return refreshed
-
-    def release_clear_fence(self) -> MemoryMeta:
-        """Release admission after the marker-owned clear sweep completes."""
-
-        now = utc_now_iso()
-        with self._transaction() as conn:
-            self._ensure_meta_in_connection(conn)
-            conn.execute(
-                """
-                UPDATE memory_meta
-                SET clear_in_progress = 0, updated_at = ?
-                WHERE singleton = 1
-                """,
-                (now,),
-            )
-            refreshed = self._meta_in_connection(conn)
-            if refreshed is None:
-                raise RuntimeError("Memory metadata disappeared while releasing clear")
-            return refreshed
-
-    def reset_for_clear(
-        self,
-        *,
-        target_epoch: int | None = None,
-        release_clear_fence: bool = True,
-    ) -> MemoryMeta:
-        """Clear SQLite state at an exact, replay-safe target epoch.
-
-        ``release_clear_fence=False`` is used by the marker-owned multi-surface
-        sweep so queue reset cannot reopen admission before the other surfaces
-        have reached their terminal state.
-        """
-
-        if not isinstance(release_clear_fence, bool):
-            raise TypeError("release_clear_fence must be a bool")
-
-        with self._transaction() as conn:
-            meta = self._ensure_meta_in_connection(conn)
-            epoch = meta.epoch + 1 if target_epoch is None else target_epoch
-            if (
-                isinstance(epoch, bool)
-                or not isinstance(epoch, int)
-                or epoch < 0
-                or meta.epoch not in {epoch - 1, epoch}
-            ):
-                raise ValueError("Memory clear target epoch does not match current state")
-            now = utc_now_iso()
-            conn.execute(
-                """
-                UPDATE memory_meta
-                SET clear_in_progress = 1, updated_at = ?
-                WHERE singleton = 1
-                """,
-                (now,),
-            )
-            conn.execute("DELETE FROM memory_capture_queue")
-            conn.execute("DELETE FROM memory_flush_settlements")
-            conn.execute("DELETE FROM memory_session_flush_state")
-            conn.execute("DELETE FROM memory_attachment_bundle")
-            conn.execute("DELETE FROM memory_projects")
-            conn.execute(
-                """
-                UPDATE memory_meta
-                SET epoch = ?, clear_in_progress = ?,
-                    last_provider_timestamp_ms = 0, missed_count = 0,
-                    last_success_at = NULL, last_error = NULL, last_error_at = NULL,
-                    processing_fault_kind = NULL, processing_fault_since = NULL,
-                    processing_alert_active = 0,
-                    processing_recovery_pending_at = NULL,
-                    processing_recovery_generation = NULL, updated_at = ?
-                WHERE singleton = 1
-                """,
-                (epoch, 0 if release_clear_fence else 1, now),
-            )
-            refreshed = self._meta_in_connection(conn)
-            if refreshed is None:
-                raise RuntimeError("Memory metadata disappeared during clear")
-            return refreshed
+            self._record_skip(conn, error, utc_now_iso())
 
     def set_last_error(self, error: MemoryErrorCode | None) -> None:
-        """Persist a closed error category without retaining exception details."""
-
         now = utc_now_iso()
         with self._transaction() as conn:
-            self._ensure_meta_in_connection(conn)
-            self._set_last_error_in_connection(
-                conn,
-                _closed_error_or(error, "memory_store_unavailable") if error is not None else None,
-                now,
-            )
+            self._ensure_meta(conn)
+            conn.execute("UPDATE memory_meta SET last_error = ?, last_error_at = ?, updated_at = ? WHERE singleton = 1", (error, now, now))
 
-    def _open_processing_fault_in_connection(
-        self,
-        conn: sqlite3.Connection,
-        *,
-        now: str,
-    ) -> bool:
-        meta = self._ensure_meta_in_connection(conn)
-        newly_open = meta.processing_fault_since is None
-        conn.execute(
-            """
-            UPDATE memory_meta
-            SET processing_fault_generation = CASE
-                    WHEN processing_fault_since IS NULL
-                    THEN processing_fault_generation + 1
-                    ELSE processing_fault_generation
-                END,
-                processing_fault_kind = CASE
-                    WHEN processing_fault_since IS NULL THEN NULL
-                    ELSE processing_fault_kind
-                END,
-                processing_fault_since = CASE
-                    WHEN processing_fault_since IS NULL THEN ?
-                    ELSE processing_fault_since
-                END,
-                last_error = 'memory_processing_failed', last_error_at = ?,
-                updated_at = ?
-            WHERE singleton = 1
-            """,
-            (now, now, now),
-        )
-        return newly_open
-
-    def next_processing_action(self) -> ProcessingAction | None:
-        """Return the next stable external action in durable event order."""
-
+    def list_memory_projects(self, principal_id: str) -> tuple[str, ...]:
+        if not is_principal_id(principal_id):
+            raise ValueError("invalid Memory principal")
         with self._connection() as conn:
-            meta = self._meta_in_connection(conn)
-        if meta is None:
-            return None
-        if (
-            meta.processing_recovery_pending_at is not None
-            and meta.processing_recovery_generation is not None
-        ):
-            return ProcessingNotification(
-                event="recovered",
-                generation=meta.processing_recovery_generation,
-                kind=None,
-                occurred_at=meta.processing_recovery_pending_at,
-            )
-        if meta.processing_fault_since is None:
-            return None
-        if meta.processing_fault_kind is None:
-            return ProcessingHealthProbe(
-                generation=meta.processing_fault_generation,
-                occurred_at=meta.processing_fault_since,
-            )
-        if not meta.processing_alert_active:
-            return ProcessingNotification(
-                event="fault",
-                generation=meta.processing_fault_generation,
-                kind=meta.processing_fault_kind,
-                occurred_at=meta.processing_fault_since,
-            )
-        return None
+            rows = conn.execute(
+                "SELECT project_id FROM memory_projects WHERE principal_id = ? AND project_id != ? ORDER BY last_written_at DESC, project_id",
+                (principal_id, DEFAULT_MEMORY_PROJECT_ID),
+            ).fetchall()
+        return (DEFAULT_MEMORY_PROJECT_ID, *(str(row[0]) for row in rows if is_named_memory_project_id(row[0])))
 
-    def record_processing_health(
-        self,
-        probe: ProcessingHealthProbe,
-        *,
-        healthy: bool,
-    ) -> ProcessingHealthCommit:
-        """Classify only the still-open fault identified by ``probe``."""
+    def clear_in_progress(self) -> bool:
+        meta = self.get_meta()
+        return bool(meta and meta.clear_in_progress)
 
-        kind: Literal["credential", "engine"] = "engine" if healthy else "credential"
+    def begin_clear_fence(self) -> MemoryMeta:
         now = utc_now_iso()
         with self._transaction() as conn:
-            result = conn.execute(
-                """
-                UPDATE memory_meta
-                SET processing_fault_kind = ?, updated_at = ?
-                WHERE singleton = 1 AND processing_fault_generation = ?
-                  AND processing_fault_since = ?
-                  AND processing_fault_kind IS NULL
-                """,
-                (kind, now, probe.generation, probe.occurred_at),
-            )
-            return ProcessingHealthCommit(committed=result.rowcount == 1)
+            self._ensure_meta(conn)
+            conn.execute("UPDATE memory_meta SET clear_in_progress = 1, updated_at = ? WHERE singleton = 1", (now,))
+            return self._ensure_meta(conn)
 
-    def acknowledge_processing_notification(
-        self,
-        notification: ProcessingNotification,
-    ) -> bool:
-        """Acknowledge one exact durable event after at-least-once delivery."""
-
+    def release_clear_fence(self) -> MemoryMeta:
         now = utc_now_iso()
         with self._transaction() as conn:
-            if notification.event == "recovered":
-                if notification.kind is not None:
-                    return False
-                result = conn.execute(
-                    """
-                    UPDATE memory_meta
-                    SET processing_recovery_pending_at = NULL,
-                        processing_recovery_generation = NULL, updated_at = ?
-                    WHERE singleton = 1
-                      AND processing_recovery_generation = ?
-                      AND processing_recovery_pending_at = ?
-                    """,
-                    (now, notification.generation, notification.occurred_at),
-                )
-                return result.rowcount == 1
-            if notification.event != "fault" or notification.kind not in {
-                "credential",
-                "engine",
-            }:
-                return False
-            result = conn.execute(
-                """
-                UPDATE memory_meta
-                SET processing_alert_active = 1, updated_at = ?
-                WHERE singleton = 1 AND processing_fault_generation = ?
-                  AND processing_fault_since = ? AND processing_fault_kind = ?
-                  AND processing_alert_active = 0
-                """,
-                (
-                    now,
-                    notification.generation,
-                    notification.occurred_at,
-                    notification.kind,
-                ),
-            )
-            return result.rowcount == 1
+            self._ensure_meta(conn)
+            conn.execute("UPDATE memory_meta SET clear_in_progress = 0, updated_at = ? WHERE singleton = 1", (now,))
+            return self._ensure_meta(conn)
 
-    def _close_processing_fault_in_connection(
-        self,
-        conn: sqlite3.Connection,
-        *,
-        now: str,
-    ) -> bool:
-        meta = self._meta_in_connection(conn)
-        if meta is None or meta.processing_fault_since is None:
-            return False
+    def reset_for_clear(self, *, target_epoch: int | None = None, release_clear_fence: bool = True) -> MemoryMeta:
+        with self._transaction() as conn:
+            meta = self._ensure_meta(conn)
+            epoch = meta.epoch + 1 if target_epoch is None else target_epoch
+            if epoch not in {meta.epoch, meta.epoch + 1}:
+                raise ValueError("Memory clear target epoch does not match current state")
+            now = utc_now_iso()
+            conn.execute("DELETE FROM memory_projects")
+            conn.execute(
+                """UPDATE memory_meta SET epoch = ?, clear_in_progress = ?, last_provider_timestamp_ms = 0,
+                   missed_count = 0, last_success_at = NULL, last_error = NULL, last_error_at = NULL, updated_at = ?
+                   WHERE singleton = 1""",
+                (epoch, 0 if release_clear_fence else 1, now),
+            )
+            return self._ensure_meta(conn)
+
+    def has_provider_data_history(self) -> bool:
+        meta = self.get_meta()
+        return bool(meta and meta.last_success_at)
+
+    def _record_skip(self, conn: sqlite3.Connection, error: MemoryErrorCode | None, now: str) -> None:
         conn.execute(
-            """
-            UPDATE memory_meta
-            SET processing_fault_kind = NULL, processing_fault_since = NULL,
-                processing_alert_active = 0,
-                processing_recovery_pending_at = CASE
-                    WHEN processing_alert_active = 1
-                    THEN COALESCE(processing_recovery_pending_at, ?)
-                    ELSE processing_recovery_pending_at
-                END,
-                processing_recovery_generation = CASE
-                    WHEN processing_alert_active = 1
-                    THEN COALESCE(
-                        processing_recovery_generation,
-                        processing_fault_generation
-                    )
-                    ELSE processing_recovery_generation
-                END,
-                last_error = CASE
-                    WHEN last_error = 'memory_processing_failed' THEN NULL
-                    ELSE last_error
-                END,
-                last_error_at = CASE
-                    WHEN last_error = 'memory_processing_failed' THEN NULL
-                    ELSE last_error_at
-                END,
-                updated_at = ?
-            WHERE singleton = 1
-            """,
-            (now, now),
+            "UPDATE memory_meta SET missed_count = missed_count + 1, last_error = ?, last_error_at = ?, updated_at = ? WHERE singleton = 1",
+            (error, now if error else None, now),
         )
-        return True
 
-    def compact_terminal_tombstones(self, *, now: datetime | None = None) -> int:
-        """Bound terminal digest retention by age and count without exposing payloads."""
-
-        reference = now or datetime.now(timezone.utc)
-        with self._transaction() as conn:
-            return self._compact_terminal_tombstones_in_connection(conn, reference)
+    def _ensure_meta(self, conn: sqlite3.Connection) -> MemoryMeta:
+        row = conn.execute("SELECT * FROM memory_meta WHERE singleton = 1").fetchone()
+        if row is None:
+            now = utc_now_iso()
+            conn.execute(
+                """INSERT INTO memory_meta(singleton, epoch, clear_in_progress, scope_key, provider_root_id,
+                   last_provider_timestamp_ms, missed_count, last_success_at, last_error, last_error_at,
+                   processing_fault_generation, processing_fault_kind, processing_fault_since,
+                   processing_alert_active, processing_recovery_pending_at, processing_recovery_generation, updated_at)
+                   VALUES(1, 0, 0, ?, ?, 0, 0, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, ?)""",
+                (secrets.token_bytes(32), str(uuid.uuid4()), now),
+            )
+            row = conn.execute("SELECT * FROM memory_meta WHERE singleton = 1").fetchone()
+        assert row is not None
+        return _meta_from_row(row)
 
     def _initialize(self) -> None:
         schema_sql = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
-        v2_schema_sql = Path(__file__).with_name("schema_v2.sql").read_text(encoding="utf-8")
-        # Store migrations deliberately compose on this already-open connection.
         with self._connection() as conn:
             version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-            application_tables = _application_tables(conn)
-            if version not in {0, 1, 2, MEMORY_STORE_SCHEMA_VERSION}:
+            tables = _application_tables(conn)
+            if version == MEMORY_STORE_SCHEMA_VERSION and tables == {"memory_meta", "memory_projects"}:
+                _verify_schema(conn)
+                return
+            known = {
+                "memory_meta", "memory_projects", "memory_attachment_bundle", "memory_session_flush_state",
+                "memory_capture_queue", "memory_flush_settlements",
+            }
+            if version not in {0, 1, 2, 3} or (version == 0 and tables and not tables.issubset(known)):
                 raise RuntimeError(f"Unsupported Memory store schema version: {version}")
-            if version == 0:
-                if not application_tables:
-                    _install_clean_schema(conn, schema_sql, application_tables)
-                else:
-                    recognized, has_provider_ref = _recognized_v0_shape(conn)
-                    if not recognized:
-                        raise RuntimeError(
-                            "Unsupported non-empty version-zero Memory store shape; "
-                            "preserving the existing file"
-                        )
-                    _migrate_v0_to_v2(
-                        conn,
-                        v2_schema_sql,
-                        has_provider_ref=has_provider_ref,
+            meta_values = _legacy_meta(conn) if "memory_meta" in tables else None
+            projects = _legacy_projects(conn, tables)
+            conn.execute("PRAGMA foreign_keys = OFF")
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                for table in sorted(tables, reverse=True):
+                    conn.execute(f'DROP TABLE "{table.replace(chr(34), chr(34) * 2)}"')
+                _execute_sql_script(conn, schema_sql)
+                now = utc_now_iso()
+                if meta_values is not None:
+                    conn.execute(
+                        """INSERT INTO memory_meta(singleton, epoch, clear_in_progress, scope_key, provider_root_id,
+                           last_provider_timestamp_ms, missed_count, last_success_at, last_error, last_error_at,
+                           processing_fault_generation, processing_fault_kind, processing_fault_since,
+                           processing_alert_active, processing_recovery_pending_at, processing_recovery_generation, updated_at)
+                           VALUES(1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, 0, NULL, NULL, ?)""",
+                        meta_values + (now,),
                     )
-                    version = 2
-            if version == 1:
-                _migrate_v1_to_v2(conn)
-                version = 2
-            if version == 2:
-                _migrate_v2_to_v3(conn)
-            _verify_current_schema(conn)
+                conn.execute(f"PRAGMA user_version = {MEMORY_STORE_SCHEMA_VERSION}")
+                for principal, project, created, written in projects:
+                    if is_principal_id(principal) and is_persisted_memory_project_id(project):
+                        conn.execute(
+                            "INSERT OR IGNORE INTO memory_projects(principal_id, project_id, created_at, last_written_at) VALUES(?, ?, ?, ?)",
+                            (principal, project, created or now, written or created or now),
+                        )
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+            finally:
+                conn.execute("PRAGMA foreign_keys = ON")
+            _verify_schema(conn)
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.path, timeout=5.0, isolation_level=None)
         conn.row_factory = sqlite3.Row
         try:
-            self._enforce_private_database_modes()
             conn.execute("PRAGMA journal_mode = WAL")
             conn.execute("PRAGMA foreign_keys = ON")
             conn.execute("PRAGMA busy_timeout = 5000")
             yield conn
         finally:
-            self._enforce_private_database_modes()
             conn.close()
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
-        """Transact on the Store's already-open connection.
-
-        Store migrations and composed writes intentionally retain this path;
-        ``PrivateSqliteDatabase.transaction`` owns newly opened connections.
-        """
-
         with self._connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
@@ -3558,224 +419,84 @@ class MemoryStore:
             else:
                 conn.execute("COMMIT")
 
-    def _ensure_meta_in_connection(self, conn: sqlite3.Connection) -> MemoryMeta:
-        meta = self._meta_in_connection(conn)
-        if meta is not None:
-            return meta
-        now = utc_now_iso()
-        scope_key = secrets.token_bytes(32)
-        provider_root_id = str(uuid.uuid4())
-        conn.execute(
-            """
-            INSERT INTO memory_meta (
-                singleton, epoch, clear_in_progress, scope_key,
-                provider_root_id, last_provider_timestamp_ms, missed_count,
-                last_success_at, last_error, last_error_at, updated_at
-            ) VALUES (1, 0, 0, ?, ?, 0, 0, NULL, NULL, NULL, ?)
-            """,
-            (scope_key, provider_root_id, now),
-        )
-        return MemoryMeta(
-            epoch=0,
-            clear_in_progress=False,
-            scope_key=scope_key,
-            provider_root_id=provider_root_id,
-            last_provider_timestamp_ms=0,
-            missed_count=0,
-            last_success_at=None,
-            last_error=None,
-            last_error_at=None,
-            processing_fault_kind=None,
-            processing_fault_since=None,
-            processing_alert_active=False,
-            processing_fault_generation=0,
-            processing_recovery_generation=None,
-            processing_recovery_pending_at=None,
-            updated_at=now,
-        )
 
-    def _meta_in_connection(self, conn: sqlite3.Connection) -> MemoryMeta | None:
-        row = conn.execute("SELECT * FROM memory_meta WHERE singleton = 1").fetchone()
-        return _meta_from_row(row) if row is not None else None
+def _application_tables(conn: sqlite3.Connection) -> set[str]:
+    return {
+        str(row[0])
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        if not str(row[0]).startswith("sqlite_")
+    }
 
-    def _set_last_error_in_connection(
-        self,
-        conn: sqlite3.Connection,
-        error: MemoryErrorCode | None,
-        now: str,
-    ) -> None:
-        conn.execute(
-            """
-            UPDATE memory_meta
-            SET last_error = ?, last_error_at = ?, updated_at = ?
-            WHERE singleton = 1
-            """,
-            (error, now if error is not None else None, now),
-        )
 
-    def _record_capture_skip_in_connection(
-        self,
-        conn: sqlite3.Connection,
-        error: MemoryErrorCode | None,
-        now: str,
-    ) -> None:
-        """Increment missed work and retain at most a validated closed category."""
+def _execute_sql_script(conn: sqlite3.Connection, script: str) -> None:
+    statement = ""
+    for line in script.splitlines(keepends=True):
+        statement += line
+        if sqlite3.complete_statement(statement):
+            conn.execute(statement)
+            statement = ""
+    if statement.strip():
+        conn.execute(statement)
 
-        safe_error = _closed_error_or(error, "memory_invalid_input") if error is not None else None
-        conn.execute(
-            """
-            UPDATE memory_meta
-            SET missed_count = missed_count + 1,
-                last_error = COALESCE(?, last_error),
-                last_error_at = CASE WHEN ? IS NOT NULL THEN ? ELSE last_error_at END,
-                updated_at = ?
-            WHERE singleton = 1
-            """,
-            (safe_error, safe_error, now, now),
-        )
 
-    def _prepare_private_directory(self) -> None:
-        try:
-            ensure_private_directory(self._effective_home, self.path.parent)
-        except ConfinedFilesystemError as error:
-            raise OSError("Memory store path contains an unsafe directory component") from error
-        directory_info = os.lstat(self.path.parent)
-        if stat.S_ISLNK(directory_info.st_mode) or not stat.S_ISDIR(directory_info.st_mode):
-            raise OSError("Memory store directory must be an owned directory")
-        os.chmod(self.path.parent, 0o700)
-        if stat.S_IMODE(os.lstat(self.path.parent).st_mode) != 0o700:
-            raise OSError("Memory store directory is not owner-only")
-        try:
-            database_info = os.lstat(self.path)
-        except FileNotFoundError:
-            return
-        if stat.S_ISLNK(database_info.st_mode) or not stat.S_ISREG(database_info.st_mode):
-            raise OSError("Memory database path must be a regular file")
+def _verify_schema(conn: sqlite3.Connection) -> None:
+    tables = _application_tables(conn)
+    if tables != {"memory_meta", "memory_projects"}:
+        raise RuntimeError("Memory store schema is incomplete")
+    check = conn.execute("PRAGMA quick_check").fetchone()
+    if check is None or check[0] != "ok":
+        raise RuntimeError("Memory store failed integrity check")
 
-    def _enforce_private_database_modes(self) -> None:
-        self._enforce_private_file_mode(self.path, sidecar=False)
-        self._enforce_private_file_mode(self.path.with_name(f"{self.path.name}-wal"), sidecar=True)
-        self._enforce_private_file_mode(self.path.with_name(f"{self.path.name}-shm"), sidecar=True)
 
-    def _enforce_private_file_mode(self, candidate: Path, *, sidecar: bool) -> None:
-        """Hold one Memory database file at owner-only mode, or fail closed.
+def _legacy_meta(conn: sqlite3.Connection) -> tuple[int, int, bytes, str, int, int, str | None, str | None, str | None] | None:
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(memory_meta)")}
+    row = conn.execute("SELECT * FROM memory_meta WHERE singleton = 1").fetchone()
+    if row is None:
+        return None
+    def value(name: str, default: object = None, *aliases: str) -> object:
+        for candidate in (name, *aliases):
+            if candidate in columns:
+                return row[candidate]
+        return default
 
-        SQLite creates and removes the WAL/shm sidecars itself, so a concurrent
-        connection checkpointing mid-check can delete one between any two of
-        these syscalls. This method runs on both entry to and exit from
-        `_connection()`, so an unguarded ENOENT there surfaces a benign race as
-        `memory_store_unavailable` on an otherwise successful capture or read.
-        A sidecar therefore treats its own disappearance as the race it is;
-        every other verification stays strict, and for the main database only
-        the not-yet-created case is tolerated.
-        """
+    scope_key = value("scope_key")
+    if scope_key is None:
+        raise RuntimeError("legacy Memory metadata has no scope identity")
+    provider_root_id = value("provider_root_id", "")
+    return (
+        int(value("epoch", 0)),
+        int(value("clear_in_progress", 0)),
+        bytes(scope_key),
+        str(provider_root_id),
+        int(value("last_provider_timestamp_ms", 0, "last_provider_timestamp")),
+        int(value("missed_count", 0)),
+        str(value("last_success_at")) if value("last_success_at") is not None else None,
+        str(value("last_error")) if value("last_error") is not None else None,
+        str(value("last_error_at")) if value("last_error_at") is not None else None,
+    )
 
-        try:
-            info = os.lstat(candidate)
-        except FileNotFoundError:
-            return
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-            raise OSError("Memory database path must be a regular file")
-        try:
-            os.chmod(candidate, 0o600)
-            mode = stat.S_IMODE(os.lstat(candidate).st_mode)
-        except FileNotFoundError:
-            if sidecar:
-                return
-            raise
-        if mode != 0o600:
-            raise OSError("Memory database is not owner-only")
 
-    def _validate_store_confinement(self) -> None:
-        try:
-            self.path.relative_to(self._effective_home)
-        except ValueError as error:
-            raise OSError("Memory store path must stay within the effective Avibe home") from error
-        if self.path == self._effective_home:
-            raise OSError("Memory store path must name a database below the effective Avibe home")
-
-    def _compact_terminal_tombstones_in_connection(
-        self,
-        conn: sqlite3.Connection,
-        reference: datetime,
-    ) -> int:
-        cutoff = _iso_from_datetime(reference - TERMINAL_TOMBSTONE_RETENTION)
-        prunable_session_refs = {
-            str(row[0])
+def _legacy_projects(conn: sqlite3.Connection, tables: set[str]) -> list[tuple[str, str, str | None, str | None]]:
+    rows: list[tuple[str, str, str | None, str | None]] = []
+    if "memory_projects" in tables:
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(memory_projects)")}
+        if {"principal_id", "project_id"}.issubset(columns):
+            created = "created_at" if "created_at" in columns else "NULL"
+            written = "last_written_at" if "last_written_at" in columns else created
             for row in conn.execute(
-                """
-                SELECT DISTINCT provider_session_ref
-                FROM memory_capture_queue
-                WHERE state IN ('delivered', 'dead')
-                  AND completed_at IS NOT NULL
-                  AND completed_at < ?
-                """,
-                (cutoff,),
-            ).fetchall()
-        }
-        removed = conn.execute(
-            """
-            DELETE FROM memory_capture_queue
-            WHERE state IN ('delivered', 'dead')
-              AND completed_at IS NOT NULL
-              AND completed_at < ?
-            """,
-            (cutoff,),
-        ).rowcount
-        terminal_count = int(
-            conn.execute(
-                "SELECT COUNT(*) FROM memory_capture_queue WHERE state IN ('delivered', 'dead')"
-            ).fetchone()[0]
-        )
-        overflow = max(terminal_count - TERMINAL_TOMBSTONE_LIMIT, 0)
-        if overflow:
-            overflow_rows = conn.execute(
-                """
-                SELECT provider_session_ref FROM memory_capture_queue
-                WHERE state IN ('delivered', 'dead')
-                ORDER BY completed_at, source_message_digest
-                LIMIT ?
-                """,
-                (overflow,),
-            ).fetchall()
-            prunable_session_refs.update(str(row[0]) for row in overflow_rows)
-            removed += conn.execute(
-                """
-                DELETE FROM memory_capture_queue
-                WHERE source_message_digest IN (
-                    SELECT source_message_digest FROM memory_capture_queue
-                    WHERE state IN ('delivered', 'dead')
-                    ORDER BY completed_at, source_message_digest
-                    LIMIT ?
-                )
-                """,
-                (overflow,),
-            ).rowcount
-        if prunable_session_refs:
-            conn.executemany(
-                """
-                DELETE FROM memory_session_flush_state AS session
-                WHERE provider_session_ref = ?
-                  AND state = 'idle'
-                  AND unflushed_count = 0
-                  AND first_unflushed_at IS NULL
-                  AND due_at IS NULL
-                  AND next_attempt_at IS NULL
-                  AND target_generation IS NULL
-                  AND fence_token IS NULL
-                  AND submission_started_at IS NULL
-                  AND NOT EXISTS (
-                      SELECT 1 FROM memory_capture_queue AS capture
-                      WHERE capture.provider_session_ref = session.provider_session_ref
-                  )
-                """,
-                ((session_ref,) for session_ref in prunable_session_refs),
-            )
-        return int(removed)
+                f"SELECT principal_id, project_id, {created}, {written} FROM memory_projects"
+            ):
+                rows.append((str(row[0]), str(row[1]), str(row[2]), str(row[3])))
+    if not rows and "memory_capture_queue" in tables:
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(memory_capture_queue)")}
+        if {"principal_id", "project_ref"}.issubset(columns):
+            created = "created_at" if "created_at" in columns else "NULL"
+            for row in conn.execute(f"SELECT principal_id, project_ref, MIN({created}), MAX({created}) FROM memory_capture_queue GROUP BY principal_id, project_ref"):
+                rows.append((str(row[0]), str(row[1]), str(row[2]), str(row[3])))
+    return rows
 
 
 def _meta_from_row(row: sqlite3.Row) -> MemoryMeta:
-    error = _closed_error_or(row["last_error"], "memory_store_unavailable") if row["last_error"] is not None else None
     return MemoryMeta(
         epoch=int(row["epoch"]),
         clear_in_progress=bool(row["clear_in_progress"]),
@@ -3784,287 +505,17 @@ def _meta_from_row(row: sqlite3.Row) -> MemoryMeta:
         last_provider_timestamp_ms=int(row["last_provider_timestamp_ms"]),
         missed_count=int(row["missed_count"]),
         last_success_at=str(row["last_success_at"]) if row["last_success_at"] is not None else None,
-        last_error=error,
-        last_error_at=(
-            str(row["last_error_at"])
-            if row["last_error_at"] is not None
-            else None
-        ),
+        last_error=row["last_error"],
+        last_error_at=str(row["last_error_at"]) if row["last_error_at"] is not None else None,
         processing_fault_generation=int(row["processing_fault_generation"]),
-        processing_fault_kind=(
-            str(row["processing_fault_kind"])
-            if row["processing_fault_kind"] in {"credential", "engine"}
-            else None
-        ),
-        processing_fault_since=(
-            str(row["processing_fault_since"])
-            if row["processing_fault_since"] is not None
-            else None
-        ),
+        processing_fault_kind=row["processing_fault_kind"],
+        processing_fault_since=row["processing_fault_since"],
         processing_alert_active=bool(row["processing_alert_active"]),
-        processing_recovery_generation=(
-            int(row["processing_recovery_generation"])
-            if row["processing_recovery_generation"] is not None
-            else None
-        ),
-        processing_recovery_pending_at=(
-            str(row["processing_recovery_pending_at"])
-            if row["processing_recovery_pending_at"] is not None
-            else None
-        ),
+        processing_recovery_generation=(int(row["processing_recovery_generation"]) if row["processing_recovery_generation"] is not None else None),
+        processing_recovery_pending_at=row["processing_recovery_pending_at"],
         updated_at=str(row["updated_at"]),
     )
 
 
-def _queue_from_row(row: sqlite3.Row | dict[str, object]) -> QueueRow:
-    last_error = (
-        _closed_error_or(row["last_error"], "memory_store_unavailable")
-        if row["last_error"] is not None
-        else None
-    )
-    return QueueRow(
-        source_message_digest=str(row["source_message_digest"]),
-        epoch=int(row["epoch"]),
-        session_id=str(row["session_id"]),
-        provider_session_ref=ProviderSessionRef.deserialize(
-            str(row["provider_session_ref"])
-        ),
-        generation=int(row["generation"]),
-        principal_id=str(row["principal_id"]),
-        project_ref=str(row["project_ref"]),
-        provenance=str(row["provenance"]),
-        payload_text=str(row["payload_text"]) if row["payload_text"] is not None else None,
-        payload_attachments=(
-            str(row["payload_attachments"])
-            if row["payload_attachments"] is not None
-            else None
-        ),
-        attachment_bundle_id=(
-            str(row["attachment_bundle_id"])
-            if row["attachment_bundle_id"] is not None
-            else None
-        ),
-        occurred_at_ms=int(row["occurred_at_ms"]),
-        provider_timestamp_ms=int(row["provider_timestamp_ms"]),
-        state=str(row["state"]),
-        attempts=int(row["attempts"]),
-        next_retry_at=str(row["next_retry_at"]) if row["next_retry_at"] is not None else None,
-        lease_owner=str(row["lease_owner"]) if row["lease_owner"] is not None else None,
-        lease_at=str(row["lease_at"]) if row["lease_at"] is not None else None,
-        lease_token=int(row["lease_token"]),
-        last_error=last_error,
-        created_at=str(row["created_at"]),
-        completed_at=str(row["completed_at"]) if row["completed_at"] is not None else None,
-        add_request_id=str(row["add_request_id"]) if row["add_request_id"] is not None else None,
-        add_status=(
-            str(row["add_status"])
-            if row["add_status"] in {"accumulated", "extracted"}
-            else None
-        ),
-    )
-
-
-def _session_state_from_row(row: sqlite3.Row) -> SessionFlushState:
-    return SessionFlushState(
-        provider_session_ref=ProviderSessionRef.deserialize(str(row["provider_session_ref"])),
-        epoch=int(row["epoch"]),
-        open_generation=int(row["open_generation"]),
-        target_generation=(
-            int(row["target_generation"])
-            if row["target_generation"] is not None
-            else None
-        ),
-        state=str(row["state"]),
-        first_unflushed_at=(
-            str(row["first_unflushed_at"])
-            if row["first_unflushed_at"] is not None
-            else None
-        ),
-        last_add_ack_at=(
-            str(row["last_add_ack_at"])
-            if row["last_add_ack_at"] is not None
-            else None
-        ),
-        confirmed_add_watermark_ms=(
-            int(row["confirmed_add_watermark_ms"])
-            if row["confirmed_add_watermark_ms"] is not None
-            else None
-        ),
-        unflushed_count=int(row["unflushed_count"]),
-        due_at=str(row["due_at"]) if row["due_at"] is not None else None,
-        next_attempt_at=(
-            str(row["next_attempt_at"])
-            if row["next_attempt_at"] is not None
-            else None
-        ),
-        retry_count=int(row["retry_count"]),
-        operation_epoch=int(row["operation_epoch"]),
-        fence_token=str(row["fence_token"]) if row["fence_token"] is not None else None,
-        submission_started_at=(
-            str(row["submission_started_at"])
-            if row["submission_started_at"] is not None
-            else None
-        ),
-        updated_at=str(row["updated_at"]),
-    )
-
-
-def _flush_lease_from_row(row: sqlite3.Row) -> FlushLease:
-    target_generation = row["target_generation"]
-    fence_token = row["fence_token"]
-    if target_generation is None or fence_token is None:
-        raise ValueError("invalid Memory flush authority")
-    return FlushLease(
-        provider_session_ref=ProviderSessionRef.deserialize(str(row["provider_session_ref"])),
-        epoch=int(row["epoch"]),
-        generation=int(target_generation),
-        operation_epoch=int(row["operation_epoch"]),
-        fence_token=str(fence_token),
-    )
-
-
-def _iso_from_datetime(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-
-
-def _datetime_from_iso(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
-
-
-def _closed_error_or(value: object, fallback: MemoryErrorCode) -> MemoryErrorCode:
-    return value if is_memory_error_code(value) else fallback
-
-
-def _bounded_opaque_text(value: str | None, *, max_bytes: int = 128) -> str | None:
-    if not isinstance(value, str):
-        return None
-    raw = value.encode("utf-8")
-    if len(raw) <= max_bytes:
-        return value
-    return raw[:max_bytes].decode("utf-8", errors="ignore")
-
-
-def _is_bundle_id(value: object) -> bool:
-    return (
-        isinstance(value, str)
-        and len(value) == 32
-        and all(character in "0123456789abcdef" for character in value)
-    )
-
-
-def _keyed_digest(scope_key: bytes, value: str) -> str:
-    return hmac.new(scope_key, value.encode("utf-8"), hashlib.sha256).hexdigest()
-
-
-def _failure_anomaly_id(scope_key: bytes, namespace: str, evidence: str) -> str:
-    """Hide one immutable internal evidence key behind an install-local ID."""
-
-    domain_value = f"memory-failure-anomaly:v1\0{namespace}\0{evidence}"
-    return f"ma_{_keyed_digest(scope_key, domain_value)}"
-
-
-def derive_principal_id(scope_key: bytes, user_key: str) -> str:
-    """Derive one stable provider-safe principal without retaining the user key."""
-
-    if not isinstance(scope_key, bytes) or len(scope_key) < 16:
-        raise ValueError("invalid Memory scope key")
-    if not isinstance(user_key, str) or not user_key or user_key != user_key.strip():
-        raise ValueError("invalid Memory user key")
-    digest = hmac.new(scope_key, user_key.encode("utf-8"), hashlib.sha256).hexdigest()
-    return f"u-{digest[:32]}"
-
-
-def derive_project_id(scope_key: bytes, workdir: str) -> str:
-    """Derive one stable provider-safe project without retaining the cwd."""
-
-    if not isinstance(scope_key, bytes) or len(scope_key) < 16:
-        raise ValueError("invalid Memory scope key")
-    if (
-        not isinstance(workdir, str)
-        or not workdir
-        or workdir != workdir.strip()
-        or not os.path.isabs(workdir)
-        or os.path.abspath(os.path.expanduser(workdir)) != workdir
-    ):
-        raise ValueError("invalid Memory workdir")
-    digest = hmac.new(scope_key, workdir.encode("utf-8"), hashlib.sha256).hexdigest()
-    return f"p-{digest[:32]}"
-
-
-def is_principal_id(value: object) -> bool:
-    """Return whether a value has the exact opaque Memory principal shape."""
-
-    return (
-        isinstance(value, str)
-        and len(value) == 34
-        and value.startswith("u-")
-        and all(character in "0123456789abcdef" for character in value[2:])
-    )
-
-
-def derive_assistant_memory_owner_id(principal_id: str) -> str:
-    """Derive the server-owned assistant Memory identity for one caller."""
-
-    if not is_principal_id(principal_id):
-        raise ValueError("invalid Memory principal")
-    return f"{principal_id}-agent"
-
-
-def is_memory_owner_id(value: object) -> bool:
-    """Return whether a value is a user or derived assistant Memory owner."""
-
-    if is_principal_id(value):
-        return True
-    return (
-        isinstance(value, str)
-        and value.endswith("-agent")
-        and is_principal_id(value[:-6])
-    )
-
-
-def _caller_principal_for_memory_owner(memory_owner_id: str) -> str | None:
-    if is_principal_id(memory_owner_id):
-        return memory_owner_id
-    if not is_memory_owner_id(memory_owner_id):
-        return None
-    caller_principal_id = memory_owner_id[: -len("-agent")]
-    return (
-        caller_principal_id
-        if derive_assistant_memory_owner_id(caller_principal_id) == memory_owner_id
-        else None
-    )
-
-
-def is_project_id(value: object) -> bool:
-    """Compatibility alias for persisted project ids. Do not use on new writes."""
-
-    return is_persisted_memory_project_id(value)
-
-
-def _upsert_memory_project(
-    conn: sqlite3.Connection,
-    *,
-    principal_id: str,
-    project_id: str,
-    now: str,
-) -> None:
-    if not is_new_stored_memory_project_id(project_id):
-        return
-    conn.execute(
-        """
-        INSERT INTO memory_projects (principal_id, project_id, created_at, last_written_at)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(principal_id, project_id) DO UPDATE SET last_written_at = excluded.last_written_at
-        """,
-        (principal_id, project_id, now, now),
-    )
-
-
-def _provider_session_ref(
-    scope_key: bytes,
-    memory_owner_id: str,
-    project_ref: str,
-    session_id: str,
-    epoch: int,
-) -> str:
-    return f"src--{_keyed_digest(scope_key, f'{memory_owner_id}:{project_ref}:{session_id}')}--e{epoch}"
+def _valid_bundle_id(value: object) -> bool:
+    return isinstance(value, str) and len(value) == 32 and all(char in "0123456789abcdef" for char in value)

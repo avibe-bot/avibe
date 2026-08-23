@@ -14,7 +14,7 @@ from core.memory.everos_insight.reader import MemoryInsightReader
 from core.memory.process import EverOSProcessFactory
 from core.memory.runtime import MemoryRuntime
 from core.memory.store import MemoryStore
-from core.memory.worker import ProcessingEvent
+from core.memory.runtime import ProcessingEvent
 
 
 @dataclass

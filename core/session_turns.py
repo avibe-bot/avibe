@@ -756,18 +756,13 @@ class SessionTurnManager:
         await state.operation_lock.acquire()
         admission = None
         try:
-            try:
-                admission = await asyncio.wait_for(
-                    self.acquire_lifecycle_admission(raw_session_id),
-                    timeout=max(float(deadline_seconds), 0.001),
-                )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "session lifecycle admission did not quiesce before the "
-                    "deadline; proceeding without the capture lock "
-                    "session=%s",
-                    raw_session_id,
-                )
+            # Lifecycle operations are intentionally non-blocking with respect
+            # to Memory delivery. If a capture already owns the admission lock,
+            # advance the generation immediately; the capture will revalidate
+            # its snapshot and drop without provider I/O. An uncontended lock
+            # acquisition completes synchronously on this event loop.
+            if not state.admission_lock.locked():
+                admission = await self.acquire_lifecycle_admission(raw_session_id)
             pre_epoch = state.epoch
             result = await operation()
             if state.epoch == pre_epoch:

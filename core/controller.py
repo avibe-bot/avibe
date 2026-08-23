@@ -265,8 +265,6 @@ class Controller:
         self._removed_im_clients: Dict[str, BaseIMClient] = {}
         self._memory_scopes_by_session: Dict[str, tuple[str, str]] = {}
         self._memory_cli_facts_by_session: Dict[str, InboundTurnFacts] = {}
-        self._archive_memory_flush_tasks: set[asyncio.Task[None]] = set()
-        self._archive_memory_flush_registration_open = True
 
         # Session tracking (must be initialized before handlers)
         self.claude_sessions: Dict[str, Any] = {}
@@ -2162,32 +2160,6 @@ class Controller:
 
         return DEFAULT_MEMORY_PROJECT_ID
 
-    async def final_flush_memory_session(
-        self,
-        context: MessageContext,
-        raw_session_id: str,
-        *,
-        deadline_seconds: float = 5.0,
-    ) -> bool:
-        """Best-effort final Memory flush for a trusted IM session lifecycle event.
-
-        The raw anchor must come from ``SessionHandler.get_base_session_id``.  The
-        handler deliberately never constructs a provider session identifier: this
-        controller boundary reuses capture admission and lets Memory derive its
-        current epoch-scoped identity.
-        """
-
-        scope = self._memory_scope_for_im_session(context, raw_session_id)
-        if scope is None:
-            return False
-
-        return await self._final_flush_memory_scope(
-            raw_session_id,
-            scope[0],
-            scope[1],
-            deadline_seconds=deadline_seconds,
-        )
-
     async def run_memory_session_lifecycle(
         self,
         context: MessageContext,
@@ -2196,7 +2168,7 @@ class Controller:
         *,
         deadline_seconds: float = 5.0,
     ) -> _MemorySessionLifecycleResult:
-        """Run an IM session reset, skipping Memory flush if capture is busy."""
+        """Run an IM session reset without waiting for volatile capture delivery."""
 
         scope = self._memory_scope_for_im_session(context, raw_session_id)
         if scope is None:
@@ -2205,12 +2177,6 @@ class Controller:
         runtime = getattr(self, "memory_runtime", None)
         run_lifecycle = getattr(runtime, "run_session_lifecycle", None)
         if not callable(run_lifecycle):
-            await self._final_flush_memory_scope(
-                raw_session_id,
-                scope[0],
-                scope[1],
-                deadline_seconds=deadline_seconds,
-            )
             return await operation()
 
         return await run_lifecycle(
@@ -2248,153 +2214,18 @@ class Controller:
             return None
         return principal_id, project_id
 
-    async def final_flush_memory_cli_session(
-        self,
-        raw_session_id: str,
-        *,
-        deadline_seconds: float = 5.0,
-    ) -> bool:
-        """Best-effort final flush for a trusted Workbench session ID.
-
-        The controller owns the stored scope and resolves it here; callers must
-        not reconstruct one from a Workbench row or synthesize a
-        ``MessageContext``.
-        """
-
-        if not isinstance(raw_session_id, str) or not raw_session_id:
-            return False
-        from core.memory.project_ids import (
-            DEFAULT_MEMORY_PROJECT_ID,
-            is_persisted_memory_project_id,
-        )
-        from core.memory.store import is_principal_id
-
-        live_scope = self.memory_scope_for_cli_session(raw_session_id)
-        runtime = getattr(self, "memory_runtime", None)
-        resolve_scopes = getattr(runtime, "resolve_current_session_scopes", None)
-        durable_scopes: tuple[tuple[str, str], ...] | None = ()
-        if callable(resolve_scopes):
-            try:
-                durable_scopes = await resolve_scopes(raw_session_id)
-            except Exception:
-                logger.debug("Memory session scope recovery failed", exc_info=True)
-                durable_scopes = None
-        if durable_scopes is None:
-            return False
-        scopes = set(durable_scopes)
-        if live_scope is not None:
-            scopes.add(live_scope)
-        if not scopes:
-            return False
-        ordered = tuple(
-            sorted(
-                scopes,
-                key=lambda scope: (scope[1] != DEFAULT_MEMORY_PROJECT_ID, scope),
-            )
-        )
-        if any(
-            not is_principal_id(principal_id)
-            or not is_persisted_memory_project_id(project_id)
-            for principal_id, project_id in ordered
-        ):
-            return False
-        run_lifecycle = getattr(runtime, "run_session_scopes_lifecycle", None)
-        if not callable(run_lifecycle):
-            return False
-
-        async def _flushed() -> bool:
-            return True
+    def _offer_best_effort_archive_memory_barrier(self, raw_session_id: str) -> None:
+        """Offer a volatile barrier after archive without delaying the archive."""
 
         try:
-            return bool(
-                await run_lifecycle(
-                    scopes=ordered,
-                    raw_session_id=raw_session_id,
-                    operation=_flushed,
-                    deadline_seconds=deadline_seconds,
-                )
-            )
+            runtime = getattr(self, "memory_runtime", None)
+            offer = getattr(runtime, "offer_barrier", None)
+            if callable(offer):
+                offer()
         except Exception:
-            logger.debug("Memory multi-scope final flush failed", exc_info=True)
-            return False
-
-    def _schedule_best_effort_archive_memory_flush(self, raw_session_id: str) -> None:
-        """Flush Memory for an archived session without owning the archive result."""
-
-        if not getattr(self, "_archive_memory_flush_registration_open", True):
+            logger.debug("archive: Memory barrier offer failed", exc_info=True)
+        finally:
             self._forget_memory_cli_session(raw_session_id)
-            return
-
-        async def _flush() -> None:
-            try:
-                await self.final_flush_memory_cli_session(raw_session_id)
-            except Exception:
-                logger.debug(
-                    "archive: best-effort Memory flush failed for %s",
-                    raw_session_id,
-                    exc_info=True,
-                )
-            finally:
-                self._forget_memory_cli_session(raw_session_id)
-
-        def _consume(task: asyncio.Task[None]) -> None:
-            tasks = getattr(self, "_archive_memory_flush_tasks", None)
-            if tasks is not None:
-                tasks.discard(task)
-            try:
-                task.result()
-            except (asyncio.CancelledError, concurrent.futures.CancelledError):
-                return
-            except Exception:
-                logger.debug(
-                    "archive: best-effort Memory flush failed for %s",
-                    raw_session_id,
-                    exc_info=True,
-                )
-
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = getattr(self, "_loop", None)
-            if loop is None or loop.is_closed() or not loop.is_running():
-                logger.debug(
-                    "archive: Memory flush dropped; no running event loop for %s",
-                    raw_session_id,
-                )
-                self._forget_memory_cli_session(raw_session_id)
-                return
-            try:
-                loop.call_soon_threadsafe(
-                    self._schedule_best_effort_archive_memory_flush,
-                    raw_session_id,
-                )
-            except RuntimeError:
-                logger.debug(
-                    "archive: Memory flush dropped; event loop stopped for %s",
-                    raw_session_id,
-                )
-                self._forget_memory_cli_session(raw_session_id)
-            return
-
-        scheduled = _flush()
-        try:
-            task = loop.create_task(
-                scheduled,
-                name=f"archive-memory-flush:{raw_session_id}",
-            )
-        except RuntimeError:
-            scheduled.close()
-            logger.debug(
-                "archive: Memory flush dropped; event loop stopped for %s",
-                raw_session_id,
-            )
-            self._forget_memory_cli_session(raw_session_id)
-            return
-        tasks = getattr(self, "_archive_memory_flush_tasks", None)
-        if tasks is None:
-            self._archive_memory_flush_tasks = tasks = set()
-        tasks.add(task)
-        task.add_done_callback(_consume)
 
     async def archive_memory_cli_session(
         self,
@@ -2404,9 +2235,9 @@ class Controller:
     ) -> dict[str, Any]:
         """Archive one Workbench session without waiting on Memory.
 
-        The controller still owns the terminal session write. Memory final flush
-        is best-effort after that write commits: a failed, busy, or fenced Memory
-        runtime must not block or roll back archive.
+        The controller still owns the terminal session write. Memory barrier
+        admission is best-effort after that write commits: a failed, busy, or
+        fenced runtime must not block or roll back archive.
         """
 
         from core.services import sessions as workbench_sessions_service
@@ -2454,10 +2285,10 @@ class Controller:
 
             def archive_and_schedule() -> dict[str, Any]:
                 session = archive_session()
-                # Schedule before run_blocking can re-raise a pending cancellation.
+                # Offer before run_blocking can re-raise a pending cancellation.
                 try:
                     loop.call_soon_threadsafe(
-                        self._schedule_best_effort_archive_memory_flush,
+                        self._offer_best_effort_archive_memory_barrier,
                         raw_session_id,
                     )
                 except RuntimeError:
@@ -2479,44 +2310,6 @@ class Controller:
                 deadline_seconds=deadline_seconds,
             )
         return await archive_operation()
-
-    async def _final_flush_memory_scope(
-        self,
-        raw_session_id: str,
-        principal_id: str,
-        project_id: str,
-        *,
-        deadline_seconds: float,
-    ) -> bool:
-        """Call the Runtime with one already-admitted canonical scope."""
-
-        from core.memory.store import is_principal_id, is_project_id
-
-        if (
-            not isinstance(raw_session_id, str)
-            or not raw_session_id
-            or not is_principal_id(principal_id)
-            or not is_project_id(project_id)
-        ):
-            return False
-
-        async with self._memory_replacement_lock():
-            runtime = getattr(self, "memory_runtime", None)
-            final_flush = getattr(runtime, "final_flush", None)
-            if not callable(final_flush):
-                return False
-            try:
-                return bool(
-                    await final_flush(
-                        principal_id=principal_id,
-                        project_id=project_id,
-                        raw_session_id=raw_session_id,
-                        deadline_seconds=deadline_seconds,
-                    )
-                )
-            except Exception:
-                logger.debug("Memory final flush failed", exc_info=True)
-                return False
 
     def capture_user_memory(
         self,
@@ -3398,31 +3191,11 @@ class Controller:
             if callable(cancel):
                 await cancel()
 
-        async def _cancel_archive_memory_flush_tasks() -> None:
-            tasks = getattr(self, "_archive_memory_flush_tasks", None)
-            if not isinstance(tasks, set):
-                return
-            pending = tuple(task for task in tasks if not task.done())
-            for task in pending:
-                task.cancel()
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
-            tasks.clear()
-
-        # Close registration before the loop-owned sweep so a completed archive
-        # cannot add another optional flush behind Memory runtime shutdown.
-        self._archive_memory_flush_registration_open = False
-
         # Close registration and sweep the resulting closed task set in one
         # event-loop turn. This does not depend on platform shutdown ordering.
         _stop_loop_coroutine(
             _cancel_memory_capture_tasks(),
             "Memory capture tasks",
-            timeout=None,
-        )
-        _stop_loop_coroutine(
-            _cancel_archive_memory_flush_tasks(),
-            "Archive Memory flush tasks",
             timeout=None,
         )
         memory_runtime = getattr(self, "memory_runtime", None)

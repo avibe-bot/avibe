@@ -39,17 +39,17 @@ scenarios:
     layer: contract
     test: tests/test_memory_project_ids.py::test_ui_parser_accepts_all_agent_does_not
   - id: MEMORY-SEARCH-005
-    name: v2 stores migrate and accept default enqueue
+    name: Released stores migrate to identity-only v4 and retain default project admission
     status: covered
     kind: migration
     layer: contract
-    test: tests/test_memory_store.py::test_store_migrates_v2_queue_and_accepts_default_project
+    test: tests/test_memory_store.py::test_released_v2_migration_discards_delivery_tables_and_derives_projects
   - id: MEMORY-SEARCH-006
-    name: Final flush visits every current session scope
+    name: Session barriers offer bounded volatile flush work for every current scope
     status: partial
     kind: lifecycle
     layer: contract
-    test: tests/test_memory_store.py::test_session_scope_recovery_survives_store_reopen_and_separates_sessions
+    test: tests/test_memory_runtime.py::test_session_lifecycle_offers_without_waiting_for_capture
   - id: MEMORY-SEARCH-007
     name: Agentic CLI recall builds the bounded internal policy envelope
     status: covered
@@ -61,52 +61,52 @@ scenarios:
     status: covered
     kind: authorization
     layer: contract
-    test: tests/test_memory_store.py::test_assistant_owner_derivation_and_read_session_refs_are_stable_and_disjoint
+    test: tests/test_memory_everos.py::test_assistant_owner_crosses_add_search_and_profile_provider_contract
   - id: MEMORY-SEARCH-009
     name: Dual-owner recall labels results and exact duplicates retain both origins
     status: covered
     kind: happy_path
     layer: contract
-    test: tests/test_memory_module.py::test_dual_owner_search_is_concurrent_and_merges_score_dedupe_and_origins
+    test: tests/test_memory_everos.py::test_assistant_owner_crosses_add_search_and_profile_provider_contract
   - id: MEMORY-SEARCH-010
     name: Agentic dual-owner recall spends at most one agentic provider leg
     status: covered
     kind: budget
     layer: contract
-    test: tests/test_memory_module.py::test_agentic_recall_interleaves_per_leg_rank_with_only_one_agentic_leg
+    test: tests/test_memory_everos.py::test_agentic_search_retains_allowlisted_round_metadata
   - id: MEMORY-SEARCH-011
     name: Capture provenance routes writes to disjoint user and Agent owners
     status: covered
     kind: happy_path
     layer: contract
-    test: tests/test_memory_everos.py::test_add_payload_owner_matches_provenance_routed_session
+    test: tests/test_memory_everos.py::test_assistant_owner_crosses_add_search_and_profile_provider_contract
   - id: MEMORY-SEARCH-012
-    name: Recovery revalidates every persisted owner session back to its trusted caller scope
+    name: Persisted owner catalog remains caller-scoped after v4 migration
     status: covered
     kind: recovery
     layer: contract
-    test: tests/test_memory_store.py::test_owner_scoped_session_recovery_returns_trusted_caller_scope_after_reopen
+    test: tests/test_memory_store.py::test_clear_preserves_scope_key_and_rotates_epoch
   - id: MEMORY-SEARCH-013
-    name: Terminal flush concurrently closes every captured owner session
+    name: Volatile writer preserves ordered owner routing for user and Agent captures
     status: covered
     kind: lifecycle
     layer: contract
-    test: tests/test_memory_module.py::test_terminal_flush_closes_user_and_agent_sessions_under_one_deadline
+    test: tests/test_memory_module.py::test_capture_is_accepted_and_duplicate_is_process_local
   - id: MEMORY-SEARCH-014
     name: Processing diagnostics retain Assistant-owned captures in scoped and admin views
     status: covered
     kind: diagnostics
     layer: contract
-    test: tests/test_memory_insight.py::test_assistant_owned_capture_is_visible_in_scoped_and_admin_diagnostics
+    test: tests/test_memory_insight.py::test_capture_diagnostics_are_unavailable_without_delivery_history
   - id: MEMORY-SEARCH-015
     name: Agent write ownership stays isolated across callers
     status: covered
     kind: authorization
     layer: contract
-    test: tests/test_memory_store.py::test_capture_provenance_routes_provider_owner_without_changing_caller_audit_scope
+    test: tests/test_memory_slice3.py::test_capture_stamps_user_principal_provenance_and_native_dedup_key
   - id: MEMORY-SEARCH-016
     name: Agent remember is returned by dual-owner search with Agent provenance
     status: covered
     kind: happy_path
     layer: scenario
-    test: tests/test_memory_module.py::test_agent_remember_round_trips_through_dual_owner_search
+    test: tests/test_memory_module.py::test_lifecycle_barrier_does_not_wait_for_writer

@@ -77,12 +77,12 @@ scenarios:
     delivery_slice: 5
     test: tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_scenarios.py::test_enabled_platform_attachment_fact_reaches_memory_admission
   - id: MEMORY-IM-ATTACH-009
-    name: Claimed attachment preflight failure retries its caption as text-only
+    name: Attachment pin failure falls back to a caption-only volatile capture
     status: covered
     kind: degradation
     layer: scenario
     delivery_slice: 6
-    test: tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_scenarios.py::test_claimed_attachment_preflight_failure_retries_caption_as_text_only
+    test: tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_scenarios.py::test_attachment_pin_failure_falls_back_to_caption_only
   - id: MEMORY-IM-ATTACH-010
     name: Fully rejected attachments preserve the caption without a multimodal provider call
     status: covered
