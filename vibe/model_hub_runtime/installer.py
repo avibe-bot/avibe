@@ -16,6 +16,7 @@ from config import paths
 from core import managed_runtime
 from core.managed_runtime import (
     ManagedRuntimeArchive,
+    ManagedRuntimeArtifactIdentity,
     ManagedRuntimeManager,
     ManagedRuntimeManifest,
     ManagedRuntimeSpec,
@@ -354,15 +355,22 @@ class EngineRuntimeManager(ManagedRuntimeManager):
     def resolve_engine_path(self) -> Path | None:
         return self.resolve_binary()
 
-    def _inspect_admitted_installed_binary(self, pointer: Mapping[str, Any]) -> Path | None:
-        install_dir = pointer.get("install_dir")
+    def _inspect_admitted_installed_binary(
+        self,
+        pointer: Mapping[str, Any],
+        identity: ManagedRuntimeArtifactIdentity,
+        *,
+        install_dir: Path,
+        metadata: Mapping[str, Any],
+    ) -> Path | None:
+        install_dir_value = pointer.get("install_dir")
         bin_path = self._installed_bin_path(pointer)
-        if not isinstance(install_dir, str) or not isinstance(bin_path, str):
+        if not isinstance(install_dir_value, str) or not isinstance(bin_path, str):
             self._verified_binary_cache = None
             return None
-        binary = Path(install_dir) / bin_path
-        metadata = Path(install_dir) / self.spec.metadata_filename
-        identity = (
+        binary = Path(install_dir_value) / bin_path
+        metadata_path = Path(install_dir_value) / self.spec.metadata_filename
+        cache_identity = (
             pointer.get("manifest_sha256"),
             pointer.get("runtime_version"),
             pointer.get("platform"),
@@ -370,16 +378,21 @@ class EngineRuntimeManager(ManagedRuntimeManager):
             pointer.get("binary_sha256"),
             pointer.get("bin_path"),
         )
-        cache_key = self._verification_cache_key(binary, metadata, identity)
+        cache_key = self._verification_cache_key(binary, metadata_path, cache_identity)
         cached = self._verified_binary_cache
         if cache_key is not None and cached is not None and cached[0] == cache_key:
             return cached[1]
 
-        verified = super()._inspect_admitted_installed_binary(pointer)
+        verified = super()._inspect_admitted_installed_binary(
+            pointer,
+            identity,
+            install_dir=install_dir,
+            metadata=metadata,
+        )
         if verified is None:
             self._verified_binary_cache = None
             return None
-        cache_key = self._verification_cache_key(verified, metadata, identity)
+        cache_key = self._verification_cache_key(verified, metadata_path, cache_identity)
         self._verified_binary_cache = (cache_key, verified) if cache_key is not None else None
         return verified
 

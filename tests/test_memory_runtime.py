@@ -906,7 +906,7 @@ def test_released_memory_pointer_projects_read_only_admission_without_rewrite(
     }[probe]
     assert status["path"] == (str(binary) if probe == "success" else None)
     assert resolved == (binary if probe == "success" else None)
-    assert probes == [binary]
+    assert probes == ([binary] if probe == "success" else [binary, binary])
     assert status["installed_manifest"] == {
         field: None for field in memory_artifact._SPEC.persisted_manifest_fields
     }
@@ -939,7 +939,7 @@ def test_released_memory_pointer_projects_read_only_admission_without_rewrite(
     } == artifact_before
 
 
-def test_memory_admission_cache_write_failure_falls_back_to_process_memory(
+def test_memory_admission_cache_refuses_symlinked_parent_and_falls_back_to_process_memory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -989,18 +989,27 @@ def test_memory_admission_cache_write_failure_falls_back_to_process_memory(
         return {"ok": True}
 
     monkeypatch.setattr(manager, "_prepare_binary", admit)
-    monkeypatch.setattr(
-        managed_runtime,
-        "write_json_atomic",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("read-only state")),
-    )
+    external = tmp_path / "external-cache-target"
+    external.mkdir()
+    sentinel = external / "sentinel"
+    sentinel.write_text("unchanged", encoding="utf-8")
+    (manager.runtime_dir / "derived").symlink_to(external, target_is_directory=True)
+    external_before = {
+        path.relative_to(external): path.read_bytes()
+        for path in external.rglob("*")
+        if path.is_file()
+    }
 
     status = manager.status()
 
     assert status["installed"] is True
     assert status["admission"] == "ok"
     assert probes == [binary]
-    assert list((manager.runtime_dir / "derived" / "admission").glob("*.json")) == []
+    assert {
+        path.relative_to(external): path.read_bytes()
+        for path in external.rglob("*")
+        if path.is_file()
+    } == external_before
 
     fresh_manager = MemoryArtifactManager(
         runtime_dir=manager.runtime_dir,
@@ -1211,7 +1220,7 @@ def test_memory_artifact_projects_stale_admission_read_only(
     resolved = manager.resolve_python()
 
     assert resolved == (binary if admitted else None)
-    assert admissions == [binary]
+    assert admissions == ([binary] if admitted else [binary, binary])
     active = manager._active_pointer()
     assert active == pointer
     assert (manager.runtime_dir / "current.json").read_bytes() == pointer_before
@@ -1307,7 +1316,7 @@ def test_memory_artifact_readmits_existing_install_before_reuse(
         assert (manager.runtime_dir / "current.json").read_bytes() == pointer_before
         assert manager.resolve_python() is None
         assert manager.status()["reason"] == "memory_runtime_install_failed"
-        assert admissions == [binary, binary]
+        assert admissions == [binary, binary, binary]
 
 
 def test_memory_artifact_coordinator_rolls_back_the_active_pointer(tmp_path: Path) -> None:
@@ -1364,7 +1373,8 @@ def test_memory_artifact_coordinator_rolls_back_the_active_pointer(tmp_path: Pat
             == memory_artifact.ARTIFACT_ADMISSION_REVISION
         )
         assert manager._active_pointer()["admission_ok"] is True
-        calls.append(("active", manager.provider_root_format()))
+        active = manager._active_pointer()
+        calls.append(("active", active.get("provider_root_format") if active else None))
         rollback()
 
     manager.set_activation_coordinator(coordinate)
@@ -1380,7 +1390,7 @@ def test_memory_artifact_coordinator_rolls_back_the_active_pointer(tmp_path: Pat
         ("active", "everos-2.0"),
     ]
     assert json.loads((manager.runtime_dir / "current.json").read_text(encoding="utf-8")) == previous_pointer
-    assert manager.provider_root_format() == "everos-1.0"
+    assert manager._active_pointer()["provider_root_format"] == "everos-1.0"
 
 
 def test_memory_artifact_pending_reset_can_commit_when_old_root_is_incompatible(
@@ -4586,12 +4596,33 @@ async def test_runtime_artifact_activation_rolls_back_root_and_sidecar(
     manager._restore_current_pointer(previous_pointer)
     monkeypatch.setattr(manager, "resolve_python", lambda: Path(sys.executable))
     monkeypatch.setattr(manager, "status", lambda: {"reason": None})
+    monkeypatch.setattr(
+        manager,
+        "provider_root_format",
+        lambda: manager._active_pointer().get("provider_root_format"),
+    )
+    monkeypatch.setattr(
+        manager,
+        "compatible_provider_root_formats",
+        lambda: frozenset(
+            {
+                manager._active_pointer().get("provider_root_format"),
+                *manager._active_pointer().get("compatible_provider_root_formats", []),
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        manager,
+        "artifact_fingerprint",
+        lambda: manager._active_pointer().get("artifact_fingerprint"),
+    )
 
     class _Process(FakeEverOSProcess):
         """Refuse to boot against the incompatible activated root format."""
 
         async def start(self) -> bool:
-            if manager.provider_root_format() == "everos-2.0":
+            active = manager._active_pointer()
+            if active is not None and active.get("provider_root_format") == "everos-2.0":
                 self.starts += 1
                 return False
             return await super().start()
@@ -4623,7 +4654,7 @@ async def test_runtime_artifact_activation_rolls_back_root_and_sidecar(
         )
 
     assert manager._active_pointer() == previous_pointer
-    assert manager.provider_root_format() == "everos-1.0"
+    assert manager._active_pointer()["provider_root_format"] == "everos-1.0"
     assert len(instances) == 3
     assert instances[0].stopped is True
     assert instances[1].stopped is True
@@ -4661,6 +4692,26 @@ async def test_runtime_artifact_activation_switches_incompatible_empty_root(
     )
     monkeypatch.setattr(manager, "resolve_python", lambda: Path(sys.executable))
     monkeypatch.setattr(manager, "status", lambda: {"reason": None})
+    monkeypatch.setattr(
+        manager,
+        "provider_root_format",
+        lambda: manager._active_pointer().get("provider_root_format"),
+    )
+    monkeypatch.setattr(
+        manager,
+        "compatible_provider_root_formats",
+        lambda: frozenset(
+            {
+                manager._active_pointer().get("provider_root_format"),
+                *manager._active_pointer().get("compatible_provider_root_formats", []),
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        manager,
+        "artifact_fingerprint",
+        lambda: manager._active_pointer().get("artifact_fingerprint"),
+    )
 
     factory = FakeEverOSProcessFactory()
     instances = factory.supervised
@@ -4687,7 +4738,7 @@ async def test_runtime_artifact_activation_switches_incompatible_empty_root(
         _artifact_archive(),
     )
 
-    assert manager.provider_root_format() == "everos-2.0"
+    assert manager._active_pointer()["provider_root_format"] == "everos-2.0"
     assert len(instances) == 2
     assert instances[0].stopped is True
     assert instances[1].stopped is False

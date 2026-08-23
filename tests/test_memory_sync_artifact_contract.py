@@ -114,17 +114,21 @@ def test_sync_capability_rejects_a_nonadmitted_active_pointer(
 ) -> None:
     monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
     manager = MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True)
-    install_dir = manager.runtime_dir / "versions" / "contract"
+    manifest_sha256 = "a" * 64
+    archive_sha256 = "b" * 64
+    platform = runtime_platform_tag()
+    fingerprint = manager._legacy_artifact_fingerprint(manifest_sha256, archive_sha256)
+    install_dir = manager.runtime_dir / "versions" / EVEROS_VERSION / platform / fingerprint
     binary, contract = _runtime_contract(tmp_path, runtime_root=install_dir)
     binary.chmod(0o755)
     pointer = {
         "provider": "manifest",
         "runtime_id": manager.spec.runtime_id,
         "runtime_version": EVEROS_VERSION,
-        "platform": runtime_platform_tag(),
+        "platform": platform,
         "install_dir": str(install_dir),
-        "manifest_sha256": "a" * 64,
-        "archive_sha256": "b" * 64,
+        "manifest_sha256": manifest_sha256,
+        "archive_sha256": archive_sha256,
         "bin_path": "bin/python",
         "admission_revision": ARTIFACT_ADMISSION_REVISION,
         "admission_ok": False,
@@ -139,8 +143,69 @@ def test_sync_capability_rejects_a_nonadmitted_active_pointer(
     )
     manager._restore_current_pointer(pointer)
 
-    assert manager._verified_active_pointer_binary(pointer) == binary
+    assert manager.installed_artifact_snapshot().admission == "broken"
     assert manager.sync_capability() is False
+
+
+def test_sync_corruption_breaks_snapshot_even_when_core_admission_cache_hits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    manager = MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True)
+    manifest_sha256 = "a" * 64
+    archive_sha256 = "b" * 64
+    platform = runtime_platform_tag()
+    fingerprint = manager._legacy_artifact_fingerprint(manifest_sha256, archive_sha256)
+    install_dir = manager.runtime_dir / "versions" / EVEROS_VERSION / platform / fingerprint
+    binary, contract = _runtime_contract(tmp_path, runtime_root=install_dir)
+    binary.chmod(0o755)
+    pointer = {
+        "provider": "manifest",
+        "runtime_id": manager.spec.runtime_id,
+        "runtime_version": EVEROS_VERSION,
+        "platform": platform,
+        "install_dir": str(install_dir),
+        "manifest_sha256": manifest_sha256,
+        "archive_sha256": archive_sha256,
+        "bin_path": "bin/python",
+        "provider_root_format": "everos-1.2.3",
+        "compatible_provider_root_formats": [],
+        "artifact_fingerprint": "released-artifact",
+        "sync_bootstrap_revision": contract[0],
+        "sync_argv": list(contract[1]),
+        "sync_bootstrap_sha256": contract[2],
+        "sync_scrubbers_sha256": contract[3],
+    }
+    (install_dir / manager.spec.metadata_filename).write_text(
+        json.dumps({**pointer, "binary_sha256": _digest(binary)}),
+        encoding="utf-8",
+    )
+    manager._restore_current_pointer(pointer)
+    probes: list[Path] = []
+
+    def admit(candidate: Path) -> dict[str, bool]:
+        probes.append(candidate)
+        return {"ok": True}
+
+    monkeypatch.setattr(manager, "_prepare_binary", admit)
+    assert manager.installed_artifact_snapshot().admission == "ok"
+    assert probes == [binary]
+    assert list((manager.runtime_dir / "derived" / "admission").glob("*.json"))
+
+    scrubbers = (
+        install_dir
+        / "lib"
+        / "python3.12"
+        / "site-packages"
+        / "avibe_memory_sync_scrubbers.py"
+    )
+    scrubbers.write_text("tampered", encoding="ascii")
+
+    snapshot = manager.installed_artifact_snapshot()
+    assert snapshot.admission == "broken"
+    assert manager.sync_capability() is False
+    assert probes == [binary]
 
 
 def test_fresh_install_admits_the_manifest_sync_contract(
@@ -198,22 +263,33 @@ def test_fresh_install_admits_the_manifest_sync_contract(
         provider_root=tmp_path / "memory" / "everos-root",
         offline=True,
     )
-    observed: list[tuple[int, tuple[str, ...], str, str] | None] = []
+    prepared: list[Path] = []
+    admitted: list[tuple[int, tuple[str, ...], str, str] | None] = []
 
     monkeypatch.setattr(manager, "_load_manifest", lambda *, allow_network: manifest)
     monkeypatch.setattr(manager, "_resolve_manifest_archive", lambda _archive: archive_path)
     monkeypatch.setattr(manager, "_binary_matches_manifest", lambda *_args: True)
     monkeypatch.setattr(manager, "_write_current_pointer", lambda *_args: None)
 
-    def prepare(binary: Path, *, sync_contract=None) -> dict[str, bool]:
+    def prepare(binary: Path) -> dict[str, bool]:
         assert binary.name == "python"
-        observed.append(sync_contract)
-        return {"ok": sync_contract == expected_contract}
+        prepared.append(binary)
+        return {"ok": True}
+
+    def admit_sync(
+        binary: Path,
+        contract: tuple[int, tuple[str, ...], str, str] | None,
+    ) -> bool:
+        assert binary.name == "python"
+        admitted.append(contract)
+        return contract == expected_contract
 
     monkeypatch.setattr(manager, "_prepare_binary", prepare)
+    monkeypatch.setattr(manager, "_admit_sync_contract", admit_sync)
 
     assert manager.ensure()["ok"] is True
-    assert observed == [expected_contract]
+    assert len(prepared) == 1
+    assert admitted == [expected_contract]
 
 
 def test_release_guard_hashes_packaged_sync_modules(tmp_path: Path) -> None:

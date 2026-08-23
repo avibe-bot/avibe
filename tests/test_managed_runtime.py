@@ -385,8 +385,7 @@ def test_subclass_status_projects_binary_hashing_failure_as_inspection_error(
     def unreadable_binary(_path: Path) -> str:
         raise OSError("binary became unreadable")
 
-    hash_owner = memory_artifact if runtime_kind == "memory" else managed_runtime
-    monkeypatch.setattr(hash_owner, "file_sha256", unreadable_binary)
+    monkeypatch.setattr(managed_runtime, "file_sha256", unreadable_binary)
 
     status = manager.status()
 
@@ -425,17 +424,9 @@ def test_memory_reuse_refreshes_changed_manifest_contract_through_activation(
     }
 
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    payload.update(
-        {
-            "provider_root_format": "everos-2.0",
-            "compatible_provider_root_formats": ["everos-1.2.3"],
-            "sync_bootstrap_revision": 1,
-            "sync_argv": ["-I", "-m", "everos.entrypoints.cli.main", "cascade", "sync"],
-            "sync_bootstrap_sha256": "a" * 64,
-            "sync_scrubbers_sha256": "b" * 64,
-        }
-    )
+    payload["provider_root_format"] = "everos-2.0"
     manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    updated_manifest_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
     activations: list[str] = []
 
     def activate(candidate, root_state, commit, _rollback) -> None:
@@ -445,6 +436,16 @@ def test_memory_reuse_refreshes_changed_manifest_contract_through_activation(
         commit()
 
     manager.set_activation_coordinator(activate)
+    sync_admissions: list[tuple[int, tuple[str, ...], str, str] | None] = []
+
+    def admit_sync(
+        _binary: Path,
+        contract: tuple[int, tuple[str, ...], str, str] | None,
+    ) -> bool:
+        sync_admissions.append(contract)
+        return True
+
+    monkeypatch.setattr(manager, "_admit_sync_contract", admit_sync)
     monkeypatch.setattr(
         manager,
         "_resolve_manifest_archive",
@@ -460,13 +461,12 @@ def test_memory_reuse_refreshes_changed_manifest_contract_through_activation(
     active = manager._active_pointer()
     assert active is not None
     assert active["provider_root_format"] == "everos-2.0"
-    assert active["compatible_provider_root_formats"] == ["everos-1.2.3"]
-    assert active["sync_bootstrap_revision"] == 1
-    assert active["sync_bootstrap_sha256"] == "a" * 64
-    assert active["sync_scrubbers_sha256"] == "b" * 64
+    assert active["compatible_provider_root_formats"] == []
+    assert active["artifact_fingerprint"] == updated_manifest_digest[:16]
+    assert sync_admissions == []
 
 
-def test_memory_reuse_reports_admission_pointer_write_failure(
+def test_memory_retry_repairs_pointer_after_metadata_commit_outlives_pointer_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -476,29 +476,40 @@ def test_memory_reuse_reports_admission_pointer_write_failure(
     assert isinstance(manager, MemoryArtifactManager)
     installed = manager.ensure()
     assert installed["ok"] is True
-    pointer = manager._active_pointer()
-    assert pointer is not None
-    pointer.pop("admission_revision")
-    pointer.pop("admission_ok")
-    manager._restore_current_pointer(pointer)
-    monkeypatch.setattr(
-        manager,
-        "_persist_active_pointer_admission",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            MemoryRuntimeActivationError("pointer write failed")
-        ),
-    )
+    pointer_path = manager.runtime_dir / "current.json"
+    metadata_path = Path(installed["install_dir"]) / manager.spec.metadata_filename
+    original_pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["source"] = "fixture-updated"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    real_write_pointer = manager._write_memory_current_pointer
+
+    def fail_pointer_write(*_args, **_kwargs) -> None:
+        raise MemoryRuntimeActivationError("pointer write failed")
+
+    monkeypatch.setattr(manager, "_write_memory_current_pointer", fail_pointer_write)
+
+    failed = manager.ensure(force=True)
+
+    assert failed["ok"] is False
+    metadata_after_failure = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata_after_failure["manifest_sha256"] != original_pointer["manifest_sha256"]
+    assert json.loads(pointer_path.read_text(encoding="utf-8")) == original_pointer
+
+    monkeypatch.setattr(manager, "_write_memory_current_pointer", real_write_pointer)
     monkeypatch.setattr(
         manager,
         "_resolve_manifest_archive",
-        lambda _archive: pytest.fail("admission pointer repair accessed an archive"),
+        lambda _archive: pytest.fail("pointer retry accessed an archive"),
     )
 
-    result = manager.ensure()
+    retried = manager.ensure()
 
-    assert result["ok"] is False
-    assert result["reason"] == "memory-runtime_pointer_write_failed"
-    assert result["message"] == "pointer write failed"
+    assert retried["ok"] is True
+    assert retried["changed"] is False
+    repaired_pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    assert repaired_pointer["manifest_sha256"] == metadata_after_failure["manifest_sha256"]
+    assert repaired_pointer["install_dir"] == installed["install_dir"]
 
 
 @pytest.mark.parametrize("runtime_kind", ["git", "memory", "model-hub"])
@@ -896,6 +907,20 @@ def test_list_asset_manifest_resolves_the_canonical_platform_alias(
     assert Path(result["path"]).read_bytes() == binary_payload
     assert manager.ensure()["changed"] is False
     assert manager.status()["installed"] is True
+
+
+def test_platform_aliases_reject_non_idempotent_canonical_chains() -> None:
+    with pytest.raises(ValueError, match="canonical identities"):
+        ManagedRuntimeSpec(
+            runtime_id="fixture",
+            manifest_resource="unused.json",
+            version_field="version",
+            default_bin_path="fixture",
+            platform_aliases=(
+                ("linux-x64", "linux-amd64"),
+                ("linux-amd64", "linux-64"),
+            ),
+        )
 
 
 @pytest.mark.parametrize("runtime_kind", ["git", "memory"])
