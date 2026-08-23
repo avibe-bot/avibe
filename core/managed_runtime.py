@@ -188,14 +188,12 @@ class ManagedRuntimeManager:
                     )
 
             install_dir = self._manifest_install_dir(manifest, archive)
-            existing_install_dir = install_dir
-            existing = self._verified_manifest_binary(install_dir, manifest, archive)
-            if existing is None and (
-                current_install_dir := self._current_install_dir(self.runtime_dir / "versions")
-            ) not in {None, install_dir}:
-                existing = self._verified_manifest_binary(current_install_dir, manifest, archive)
-                if existing is not None:
-                    existing_install_dir = current_install_dir
+            current_install_dir = self._current_install_dir(self.runtime_dir / "versions")
+            existing_install_dir = current_install_dir or install_dir
+            existing = self._verified_manifest_binary(existing_install_dir, manifest, archive)
+            if existing is None and existing_install_dir != install_dir:
+                existing_install_dir = install_dir
+                existing = self._verified_manifest_binary(install_dir, manifest, archive)
             if existing is not None and not force:
                 return self._reuse_existing_install(existing, existing_install_dir, manifest, archive)
 
@@ -217,6 +215,7 @@ class ManagedRuntimeManager:
 
             self.runtime_dir.mkdir(parents=True, exist_ok=True)
             staging_dir = Path(tempfile.mkdtemp(prefix="install-", dir=self.runtime_dir))
+            candidate_install_dir: Path | None = None
             try:
                 with tarfile.open(archive_path, "r:gz") as archive_file:
                     safe_extract_tar(archive_file, staging_dir)
@@ -249,10 +248,15 @@ class ManagedRuntimeManager:
                         archive=archive,
                     )
 
-                if install_dir.exists():
-                    shutil.rmtree(install_dir)
                 install_dir.parent.mkdir(parents=True, exist_ok=True)
+                if install_dir.exists():
+                    replacement = Path(
+                        tempfile.mkdtemp(prefix=f"{install_dir.name}-", dir=install_dir.parent)
+                    )
+                    replacement.rmdir()
+                    install_dir = replacement
                 shutil.move(str(staging_dir), str(install_dir))
+                candidate_install_dir = install_dir
                 installed_binary = install_dir / archive.bin_path
                 self._write_manifest_install_metadata(
                     install_dir,
@@ -261,6 +265,7 @@ class ManagedRuntimeManager:
                     binary_sha256=binary_sha256,
                 )
                 self._write_current_pointer(install_dir, manifest, archive)
+                candidate_install_dir = None
                 self._install_reason = None
                 return {
                     **self._success_payload(
@@ -273,6 +278,8 @@ class ManagedRuntimeManager:
                     "preparation": preparation,
                 }
             except Exception as exc:  # noqa: BLE001
+                if candidate_install_dir is not None:
+                    shutil.rmtree(candidate_install_dir, ignore_errors=True)
                 logger.exception("Failed to install managed %s runtime", self.spec.runtime_id)
                 return self._failure(
                     self._reason("install_failed"),
@@ -313,19 +320,8 @@ class ManagedRuntimeManager:
             if (
                 pointer.get("provider") != "manifest"
                 or pointer.get("runtime_id") != self.spec.runtime_id
-                or not isinstance(runtime_version, str)
-                or not runtime_version
-                or not isinstance(platform_tag, str)
-                or not platform_tag
-                or any(
-                    len(value.encode("utf-8")) > 128
-                    or any(
-                        not character.isascii()
-                        or not (character.isalnum() or character in {".", "-", "_"})
-                        for character in value
-                    )
-                    for value in (runtime_version, platform_tag)
-                )
+                or not _safe_metadata_value(runtime_version)
+                or not _safe_metadata_value(platform_tag)
                 or installed_platform != host_platform
                 or not isinstance(install_dir_value, str)
                 or not isinstance(bin_path, str)
@@ -878,7 +874,7 @@ class ManagedRuntimeManager:
             else:
                 raise ValueError("invalid archive collection")
             for platform_tag, item in archive_entries:
-                if not isinstance(platform_tag, str) or not isinstance(item, dict):
+                if not _safe_metadata_value(platform_tag) or not isinstance(item, dict):
                     raise ValueError("invalid archive entry")
                 url = str(item["url"])
                 name = str(item.get("name") or Path(urllib.parse.urlparse(url).path).name)
@@ -906,9 +902,12 @@ class ManagedRuntimeManager:
                     size=size,
                     bin_path=bin_path,
                 )
+            runtime_version = str(data.get(self.spec.version_field) or "")
+            if not _safe_metadata_value(runtime_version):
+                raise ValueError("invalid runtime version")
             manifest = ManagedRuntimeManifest(
                 schema_version=int(data.get("schema_version")),
-                runtime_version=str(data.get(self.spec.version_field) or ""),
+                runtime_version=runtime_version,
                 source=str(data.get("source") or ""),
                 source_url=str(data.get("source_url") or "") or None,
                 archives=archives,
@@ -1315,6 +1314,18 @@ def make_executable(path: Path) -> None:
 def safe_path_part(value: str) -> str:
     cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "-" for ch in value.strip())
     return cleaned.strip(".-") or "unknown"
+
+
+def _safe_metadata_value(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and len(value.encode("utf-8")) <= 128
+        and all(
+            character.isascii() and (character.isalnum() or character in {".", "-", "_", "+"})
+            for character in value
+        )
+    )
 
 
 def env_flag_enabled(name: str, *, default: bool = False) -> bool:

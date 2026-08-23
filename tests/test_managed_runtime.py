@@ -34,17 +34,28 @@ class FixtureRuntimeManager(ManagedRuntimeManager):
 def _write_subclass_runtime_fixture(
     tmp_path: Path,
     runtime_kind: str,
+    *,
+    bin_path: str | None = None,
+    runtime_version: str | None = None,
 ) -> tuple[Path, Path]:
     binary_paths = {
         "git": "bin/git",
         "memory": "bin/python",
         "model-hub": "cli-proxy-api",
     }
-    binary_path = binary_paths[runtime_kind]
+    binary_path = bin_path or binary_paths[runtime_kind]
+    runtime_version = runtime_version or {
+        "git": "2.55.0",
+        "memory": "1.2.3",
+        "model-hub": "v7.2.95",
+    }[runtime_kind]
     binary_payloads = {
-        "git": b'#!/bin/sh\n[ "$1" = "--version" ] || exit 2\necho git version 2.55.0\n',
+        "git": f'#!/bin/sh\n[ "$1" = "--version" ] || exit 2\necho git version {runtime_version}\n'.encode(),
         "memory": b"#!/bin/sh\nexit 0\n",
-        "model-hub": b'#!/bin/sh\n[ "$1" = "--help" ] || exit 2\necho "CLIProxyAPI Version: 7.2.95" >&2\n',
+        "model-hub": (
+            f'#!/bin/sh\n[ "$1" = "--help" ] || exit 2\n'
+            f'echo "CLIProxyAPI Version: {runtime_version.removeprefix("v")}" >&2\n'
+        ).encode(),
     }
     binary_payload = binary_payloads[runtime_kind]
     archive = tmp_path / f"{runtime_kind}.tar.gz"
@@ -66,7 +77,7 @@ def _write_subclass_runtime_fixture(
     if runtime_kind == "git":
         payload = {
             "schema_version": 1,
-            "git_version": "2.55.0",
+            "git_version": runtime_version,
             "source": "fixture",
             "release_state": "published",
             "archives": {platform_tag: archive_payload},
@@ -74,7 +85,7 @@ def _write_subclass_runtime_fixture(
     elif runtime_kind == "memory":
         payload = {
             "schema_version": 1,
-            "everos_version": "1.2.3",
+            "everos_version": runtime_version,
             "python_version": "3.12.12",
             "lock_sha256": "e6acc17e4c0969563d380326e90134965af0822259bb4a9adb4d54433e9737fe",
             "lock_id": "uv-lock-sha256:e6acc17e4c0969563d380326e90134965af0822259bb4a9adb4d54433e9737fe",
@@ -90,10 +101,10 @@ def _write_subclass_runtime_fixture(
         payload = {
             "schema_version": 1,
             "name": "cliproxyapi",
-            "version": "v7.2.95",
+            "version": runtime_version,
             "source": "router-for-me/CLIProxyAPI",
             "source_sha": "f71ec0eb6776854457892452cf28c47f0d658251",
-            "release_tag": "v7.2.95",
+            "release_tag": runtime_version,
             "license": "MIT",
             "assets": [
                 {
@@ -268,6 +279,49 @@ def test_subclass_operational_resolution_uses_disk_snapshot_when_manifest_is_mis
         str(installed_path),
         installed_path,
     )
+
+
+def test_git_resolves_a_runtime_version_accepted_by_the_installer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _archive, manifest = _write_subclass_runtime_fixture(
+        tmp_path,
+        "git",
+        runtime_version="2.55.0+avibe.1",
+    )
+    manager = _subclass_runtime_manager(tmp_path, "git", manifest, monkeypatch)
+
+    installed = manager.ensure()
+    manifest.unlink()
+
+    assert installed["ok"] is True
+    assert manager.status()["version"] == "2.55.0+avibe.1"
+    assert manager.resolve_git_path() == Path(installed["path"])
+
+
+@pytest.mark.parametrize("bin_path", ["python", "usr/bin/python"])
+def test_memory_status_uses_the_recorded_install_dir_for_any_safe_entrypoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bin_path: str,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest = _write_subclass_runtime_fixture(
+        tmp_path,
+        "memory",
+        bin_path=bin_path,
+    )
+    manager = _subclass_runtime_manager(tmp_path, "memory", manifest, monkeypatch)
+
+    installed = manager.ensure()
+    status = manager.status()
+
+    assert installed["ok"] is True
+    assert status["installed"] is True
+    assert status["matches_manifest"] is True
+    assert status["path"] == installed["path"]
+    assert status["install_dir"] == installed["install_dir"]
 
 
 def test_shared_status_retries_when_current_pointer_switches_during_resolution(
@@ -498,6 +552,12 @@ def test_memory_reuse_refreshes_changed_manifest_contract_through_activation(
     payload["provider_root_format"] = "everos-2.0"
     manifest_path.write_text(json.dumps(payload), encoding="utf-8")
     updated_manifest_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    selected_status = manager.status()
+
+    assert selected_status["installed"] is True
+    assert selected_status["path"] == installed["path"]
+    assert selected_status["matches_manifest"] is False
+
     activations: list[str] = []
 
     def activate(candidate, root_state, commit, _rollback) -> None:
@@ -535,6 +595,7 @@ def test_memory_reuse_refreshes_changed_manifest_contract_through_activation(
     assert active["compatible_provider_root_formats"] == []
     assert active["artifact_fingerprint"] == updated_manifest_digest[:16]
     assert sync_admissions == []
+    assert manager.status()["matches_manifest"] is True
 
 
 def test_memory_selected_contract_failure_preserves_admitted_install(
@@ -567,7 +628,7 @@ def test_memory_selected_contract_failure_preserves_admitted_install(
     assert manager.resolve_python() == Path(installed["path"])
 
 
-def test_memory_retry_repairs_pointer_after_metadata_commit_outlives_pointer_failure(
+def test_memory_force_pointer_failure_preserves_active_install_and_retry_repairs_contract(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -579,9 +640,13 @@ def test_memory_retry_repairs_pointer_after_metadata_commit_outlives_pointer_fai
     assert installed["ok"] is True
     pointer_path = manager.runtime_dir / "current.json"
     metadata_path = Path(installed["install_dir"]) / manager.spec.metadata_filename
+    metadata_before = metadata_path.read_bytes()
+    install_dirs_before = {
+        path.parent for path in manager.runtime_dir.rglob(manager.spec.metadata_filename)
+    }
     original_pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    payload["source"] = "fixture-updated"
+    payload["provider_root_format"] = "everos-2.0"
     manifest_path.write_text(json.dumps(payload), encoding="utf-8")
     real_write_pointer = manager._write_memory_current_pointer
 
@@ -593,9 +658,12 @@ def test_memory_retry_repairs_pointer_after_metadata_commit_outlives_pointer_fai
     failed = manager.ensure(force=True)
 
     assert failed["ok"] is False
-    metadata_after_failure = json.loads(metadata_path.read_text(encoding="utf-8"))
-    assert metadata_after_failure["manifest_sha256"] != original_pointer["manifest_sha256"]
+    assert metadata_path.read_bytes() == metadata_before
     assert json.loads(pointer_path.read_text(encoding="utf-8")) == original_pointer
+    assert manager.resolve_python() == Path(installed["path"])
+    assert {
+        path.parent for path in manager.runtime_dir.rglob(manager.spec.metadata_filename)
+    } == install_dirs_before
 
     monkeypatch.setattr(manager, "_write_memory_current_pointer", real_write_pointer)
     monkeypatch.setattr(
@@ -609,8 +677,72 @@ def test_memory_retry_repairs_pointer_after_metadata_commit_outlives_pointer_fai
     assert retried["ok"] is True
     assert retried["changed"] is False
     repaired_pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
-    assert repaired_pointer["manifest_sha256"] == metadata_after_failure["manifest_sha256"]
+    repaired_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert repaired_pointer["manifest_sha256"] == repaired_metadata["manifest_sha256"]
+    assert repaired_pointer["manifest_sha256"] != original_pointer["manifest_sha256"]
     assert repaired_pointer["install_dir"] == installed["install_dir"]
+
+
+def test_memory_force_repair_rollback_preserves_the_active_install_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest_path = _write_subclass_runtime_fixture(tmp_path, "memory")
+    manager = _subclass_runtime_manager(tmp_path, "memory", manifest_path, monkeypatch)
+    assert isinstance(manager, MemoryArtifactManager)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+    active_dir = Path(installed["install_dir"])
+    pointer_path = manager.runtime_dir / "current.json"
+    metadata_path = active_dir / manager.spec.metadata_filename
+    pointer_before = pointer_path.read_bytes()
+    metadata_before = metadata_path.read_bytes()
+    binary_before = Path(installed["path"]).read_bytes()
+    install_dirs_before = {path.parent for path in manager.runtime_dir.rglob(manager.spec.metadata_filename)}
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["source"] = "fixture-force-repair"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def reject_candidate(_candidate, _root_state, commit, rollback) -> None:
+        commit()
+        candidate = manager._active_pointer()
+        assert candidate is not None
+        assert candidate["install_dir"] != str(active_dir)
+        rollback()
+        raise MemoryRuntimeActivationError("candidate rejected")
+
+    manager.set_activation_coordinator(reject_candidate)
+
+    failed = manager.ensure(force=True)
+
+    assert failed["ok"] is False
+    assert pointer_path.read_bytes() == pointer_before
+    assert metadata_path.read_bytes() == metadata_before
+    assert Path(installed["path"]).read_bytes() == binary_before
+    assert manager.resolve_python() == Path(installed["path"])
+    assert {path.parent for path in manager.runtime_dir.rglob(manager.spec.metadata_filename)} == install_dirs_before
+
+    def accept_candidate(_candidate, _root_state, commit, _rollback) -> None:
+        commit()
+
+    manager.set_activation_coordinator(accept_candidate)
+    repaired = manager.ensure(force=True)
+    assert repaired["ok"] is True
+    assert repaired["changed"] is True
+    assert repaired["install_dir"] != str(active_dir)
+    assert active_dir.is_dir()
+    monkeypatch.setattr(
+        manager,
+        "_resolve_manifest_archive",
+        lambda _archive: pytest.fail("successful force reuse accessed an archive"),
+    )
+
+    reused = manager.ensure()
+
+    assert reused["ok"] is True
+    assert reused["changed"] is False
+    assert reused["install_dir"] == repaired["install_dir"]
 
 
 @pytest.mark.parametrize("runtime_kind", ["git", "memory", "model-hub"])

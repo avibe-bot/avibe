@@ -21,6 +21,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from config import paths
 from core.managed_runtime import (
+    _safe_metadata_value,
     ManagedRuntimeArchive,
     ManagedRuntimeManager,
     ManagedRuntimeManifest,
@@ -205,10 +206,35 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         matches_manifest = None
         if binary is not None and manifest is not None and archive is not None:
             try:
-                matches_manifest = self._verified_manifest_binary(binary.parent.parent, manifest, archive) == binary
+                matches_manifest = (
+                    self._verified_manifest_binary(
+                        Path(pointer["install_dir"]), manifest, archive
+                    )
+                    == binary
+                )
             except OSError:
                 binary = None
                 invalid = True
+            if matches_manifest:
+                try:
+                    candidate = self._candidate_from_manifest(manifest)
+                    compatible_formats = pointer.get("compatible_provider_root_formats")
+                    matches_manifest = (
+                        pointer.get("provider_root_format") == candidate.provider_root_format
+                        and isinstance(compatible_formats, list)
+                        and all(_safe_metadata_value(value) for value in compatible_formats)
+                        and frozenset(
+                            {
+                                pointer.get("provider_root_format"),
+                                *compatible_formats,
+                            }
+                        )
+                        == candidate.compatible_provider_root_formats
+                        and _sync_contract_from_payload(pointer)
+                        == _sync_contract_from_payload(manifest.payload)
+                    )
+                except (MemoryRuntimeActivationError, ValueError):
+                    matches_manifest = False
         installed_version = pointer.get("runtime_version") if binary is not None else None
         return {
             "id": self.spec.runtime_id,
@@ -956,15 +982,6 @@ def get_memory_artifact_manager() -> MemoryArtifactManager:
 def set_memory_artifact_manager_for_tests(manager: MemoryArtifactManager | None) -> None:
     global _manager
     _manager = manager
-
-
-def _safe_metadata_value(value: object) -> bool:
-    return (
-        isinstance(value, str)
-        and bool(value)
-        and len(value.encode("utf-8")) <= 128
-        and all(character.isascii() and (character.isalnum() or character in {".", "-", "_"}) for character in value)
-    )
 
 
 def _sync_contract_from_payload(
