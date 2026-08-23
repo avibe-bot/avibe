@@ -11,12 +11,13 @@ Assumption: the GitHub source provider is removed before this migration starts
 ## Decision
 
 Show Runtime must stop owning a second managed-dependency installer.
-`core/managed_runtime.py` becomes the sole owner of manifest acquisition,
+Within the four-dependency boundary audited here (git, Memory, model-hub, and
+Show), `core/managed_runtime.py` becomes the sole owner of manifest acquisition,
 platform selection, archive acquisition and verification, staging, install
 identity, install metadata, current-pointer persistence, mutation locking,
 retention, and install-state inspection. A small Show-specific adapter remains
-responsible for four product concepts that the other managed dependencies do
-not have:
+responsible for four product concepts that the other three dependencies do not
+have:
 
 1. policy/install/serving availability and operation-outcome publication;
 2. the system Node command and `minimum_node` prerequisite;
@@ -32,15 +33,32 @@ The migration is not a rewrite of the serving half. Request proxying, process
 lifecycle, readiness, prewarm, WebSocket routing, context capability, and stop
 remain in `core/show_runtime.py`.
 
+This is deliberately not a whole-repository sole-owner claim.
+`core/tmux_runtime.py` is a live 699-line fifth managed-dependency installer. It
+independently owns six of the seven common capabilities counted below (all but
+retention/cleanup), while also carrying tmux-specific macOS signing, runnable
+probing, utf8proc, and terminfo requirements. The supplied 24-pair and
+1,621-line audits do not cover it, so silently adding tmux would make the size
+and migration estimates fictitious. This contract accounts for tmux as a
+remaining owner but does not migrate it. A separate audit must measure its
+released layouts and product seams before it can become another
+`ManagedRuntimeSpec` consumer.
+
 ## Contract Boundaries
 
-The shared layer must own these invariants for every managed dependency:
+The shared layer must own these invariants for every dependency in this
+convergence boundary:
 
 - An install identity is the identity of the selected platform artifact, not
   the digest of unrelated manifest entries. Its minimum fields are runtime
   version, selected archive platform, and selected archive SHA-256.
 - An installed identity is read from the install metadata and current pointer.
   It is never manufactured from the currently selected manifest.
+- A durable operation claim is a released persistence contract, not an alias
+  for the current in-memory identity type. Model-hub `install-state.json`
+  schema versions 1 and 2 must be dual-read and normalized: a legacy target
+  that differs only by `manifest_sha256` still names the same platform artifact.
+  A new target shape requires a schema-version bump and safe degradation.
 - Status inspection is local and non-mutating. Failure to inspect is unknown or
   error, never proof of absence.
 - A released on-disk layout is dual-read indefinitely. Migration may write a
@@ -49,6 +67,9 @@ The shared layer must own these invariants for every managed dependency:
 - Archive bytes are content-addressed by verified SHA-256. Cleanup protects the
   current install and every retained rollback install, and fails closed when
   that protected set cannot be established.
+- Automatic cleanup runs after the install transaction commits. Its failure
+  means delete nothing and publish or log a separate cleanup report; it never
+  changes install success, the current pointer, or a durable claim settlement.
 - A real cleanup and an install use one mutation guard for the whole operation.
   A dry-run never creates the guard and holds a read-only exclusion through the
   complete plan.
@@ -59,6 +80,11 @@ The shared layer must own these invariants for every managed dependency:
 - Default behavior for git, Memory, and model-hub remains binary-strict:
   `binary_sha256` and `bin_path` stay required. Show alone may use an
   archive-verified directory artifact invoked through Node.
+- New Show manifest installs persist the selected `minimum_node` beside the
+  artifact identity. A released record without it reports Node compatibility as
+  unknown, never supported. To preserve offline reuse, it may enter the existing
+  bounded readiness probe; only a successful probe admits serving for that
+  process lifetime, and a failed probe does not relabel the install as absent.
 
 `ManagedRuntimeSpec` needs only declarative differences, not callbacks for every
 step. The named seams are:
@@ -67,7 +93,8 @@ step. The named seams are:
 - strict binary artifact versus archive-verified directory artifact;
 - optional internal-link extraction policy, defaulting to denied;
 - a staged-entrypoint verifier/command builder for directory artifacts;
-- manifest-extension validation (`minimum_node` for Show);
+- manifest-extension validation and persisted extension metadata
+  (`minimum_node` for Show);
 - legacy install candidates and source-lineage admission;
 - staging-name patterns for preview and cleanup; and
 - a result adapter that maps shared reasons into the Show availability model.
@@ -98,12 +125,12 @@ Legend:
 | `_safe_extract_tar` / `safe_extract_tar` | **Superset.** Add an opt-in internal-link extraction policy; retain the shared regular-file/directory-only default. | **Show requirement:** the Node bundle contains internal symlinks, including npm package and `.bin` links, and must reject only links that escape the extraction root. Git, Memory, and model-hub must not inherit this relaxation. Whether valid internal hard links are actually required is an explicit unknown described below. |
 | `_runtime_platform_tag` / `runtime_platform_tag` | **Subset.** Delete the Show helper. | No behavioral difference; the bodies are identical apart from the name. |
 | `clean` | **Superset.** The shared method owns locking and cleanup; a thin Show wrapper maps the shared report to the existing CLI/Doctor archive payload. | **Shared defect:** shared cleanup omits downloaded archives entirely, so its three consumers have no archive counts, protection result, or reclamation outcome and their caches grow without bound. **Show requirement:** CLI and Doctor retain their existing Show-specific payload wording. **Show defect:** real cleanup deletes staging and version directories before `_clean_downloaded_archives` acquires the install guard, while shared cleanup holds its mutation lock around the whole real operation. |
-| `_write_manifest_install_metadata` | **Different.** Keep a Show metadata compatibility hook, but make the shared atomic writer persist its output. Requirement: Show is a directory graph invoked through system Node and must continue reading released `.vibe-show-runtime.json` records whose provider is `manifest-cache` and which have no leaf-binary fields. | **Show requirement:** legacy filename/provider/field shape and archive-only integrity. **Shared behavior:** `runtime_id`, `bin_path`, and `binary_sha256` support strict single binaries. **Show defect:** direct `Path.write_text` is not atomic; a torn metadata write can turn a completed install into an uninspectable one. |
+| `_write_manifest_install_metadata` | **Different.** Keep a Show metadata compatibility hook, but make the shared atomic writer persist its output and the selected `minimum_node`. Requirement: Show is a directory graph invoked through system Node and must continue reading released `.vibe-show-runtime.json` records whose provider is `manifest-cache` and which have no leaf-binary or Node-requirement fields. | **Show requirement:** legacy filename/provider/field shape and archive-only integrity. **Shared behavior:** `runtime_id`, `bin_path`, and `binary_sha256` support strict single binaries. **Show defect:** direct `Path.write_text` is not atomic, and omitting `minimum_node` makes offline Node compatibility unknowable; a torn or incomplete metadata write can turn a completed install into an uninspectable or compatibility-ambiguous one. |
 | `_preview_lock_probe` | **Superset.** Shared probe gains typed failure and the reparse-point predicate. | **Shared defect:** special/uninspectable guard paths are mislabeled as contention, and Windows reparse points are not tested explicitly. |
 | `_preview_guard` | **Subset.** Delete the Show context manager and use the shared one. | No behavior unique to Show. **Show defect:** when no descriptor exists, Show's guard does not retain the in-process lock through planning; the shared lifecycle does. This is the same root cause recorded for `_preview_busy_reason`, not a second finding. |
 | `_guard_path_matches_fd` | **Superset.** Use Show's cross-platform exclusive-regular-file predicate in shared code. | **Shared defect:** it checks POSIX symlink/regular/link-count fields but not Windows reparse attributes, so the three shared consumers have a weaker path-identity boundary on Windows. |
 | `_release_preview_guard` | **Subset.** Delete Show's release routine with its preview implementation. | No behavior unique to Show. **Show defect:** Show has no in-process lock to release on the absent-descriptor path because it failed to retain one; shared releases both resources. This is the release-side manifestation of the same preview-lifecycle defect. |
-| `_manifest_status_payload` | **Superset.** Shared status gets a manifest-status extension map; Show contributes `minimum_node` and available platforms. | **Show requirement:** Node compatibility and the complete Show platform set are user-visible diagnostic facts. `source_url`, `loaded_from`, and `release_state` on the shared side belong to manifests that declare them and are not missing Show behavior. |
+| `_manifest_status_payload` | **Superset.** Shared status gets a persisted manifest-extension map; Show contributes `minimum_node` and available platforms. | **Show requirement:** Node compatibility and the complete Show platform set are user-visible diagnostic facts. **Show defect:** released metadata does not preserve `minimum_node`, so disk-only status cannot distinguish supported from unsupported Node. `source_url`, `loaded_from`, and `release_state` on the shared side belong to manifests that declare them and are not missing Show behavior. |
 | `_manifest_install_dir` | **Superset.** Change the shared default identity to runtime version + selected platform + selected archive SHA-256, and use a legacy-candidate seam to adopt old paths. | **Shared defect:** the whole-manifest digest makes an edit to another platform create a new install identity and force a download for git, Memory, and model-hub too. Show already has the correct platform-artifact identity and previous-fingerprint adoption. |
 | `_archive_status_payload` | **Subset.** Use the shared projection after making leaf-binary fields optional and omitted for directory artifacts. | Show has only the common archive fields. The shared `binary_sha256`/`bin_path` fields are valid for strict binary artifacts, not missing Show requirements. |
 | `_preview_raced_busy` | **Superset.** Shared race detection accepts staging patterns and checks them before trusting an absent lock path. | **Shared defect:** on a lockless/Windows or replaced-lock path, a fresh staging directory is evidence of a possible live install that its preview does not examine. |
@@ -137,27 +164,33 @@ out.
    `_manifest_install_dir()` hashes `manifest.digest:archive.sha256`. Editing an
    archive for any other platform changes the local path and causes a needless
    reinstall even though this host's selected bytes are identical.
-4. **Unsafe mutation-lock path (git, Memory, model-hub).**
+4. **Whole-manifest durable claim identity (model-hub).** Released
+   `install-state.json` schema versions 1 and 2 require an exact target containing
+   `manifest_sha256`, and recovery passes that target back as
+   `expected_target`. An unrelated-platform manifest edit can therefore turn a
+   valid in-flight claim into `install_target_changed` even when every selected
+   artifact field is unchanged.
+5. **Unsafe mutation-lock path (git, Memory, model-hub).**
    `_acquire_mutation_lock()` delegates to `MigrationFileLock`, whose append
    open follows a symlink and can truncate a hard-linked or replaced file. It
    does not perform Show's no-follow, exclusive-regular-file, and post-lock
    descriptor/path identity checks.
-5. **False contention diagnosis and weaker Windows preview (git, Memory,
+6. **False contention diagnosis and weaker Windows preview (git, Memory,
    model-hub).** Uninspectable/special/replaced lock paths are reported as an
    active install, and Windows reparse attributes are not part of the shared
    predicate. This hides state corruption or a permission problem behind retry
    advice.
-6. **Unbounded downloaded-archive retention (git, Memory, model-hub).** The
+7. **Unbounded downloaded-archive retention (git, Memory, model-hub).** The
    shared cache uses versioned archive names and `clean()` never considers
    `downloads/`. Each release with a new name leaves its verified archive
    indefinitely.
-7. **No post-success version retention (git, Memory, model-hub).** Shared
+8. **No post-success version retention (git, Memory, model-hub).** Shared
    `ensure()` never invokes its existing version cleanup. Git is reachable from
    `vibe runtime clean`, but Memory and model-hub have no equivalent user path,
    so old install directories have no automatic lifecycle owner.
 
-The first five are small, independently testable correctness/security wins.
-The last two should land with the shared archive-cache capability because their
+The first six are independently testable correctness/security wins. The last
+two should land with the shared archive-cache capability because their
 protected-set contract is one unit.
 
 ## Uncounterparted Install Code
@@ -165,6 +198,9 @@ protected-set contract is one unit.
 This section keeps the supplied 1,621-line grouping so implementation can be
 scheduled against the original audit. Some groups split across destinations;
 the classification is by behavior, not by today's function boundary.
+“All four” below means the audited git, Memory, model-hub, and Show boundary;
+tmux is accounted separately above and receives none of these capabilities in
+this sequence.
 
 ### Belongs In The Shared Layer
 
@@ -215,21 +251,29 @@ acceptance property for the current step holds.
 
 Change the shared platform-artifact identity, add dual-read adoption for its old
 manifest-digest directories, and introduce the local installed-artifact
-snapshot. Keep current public payloads as projections during this step.
+snapshot. Treat Model Hub's released durable claim target as a separate
+versioned shape: dual-read schema versions 1 and 2, normalize their five fields
+to the four platform-artifact identity fields for comparison, and write a new
+claim shape only under a bumped schema version. Keep current public payloads as
+projections during this step.
 
 **Stop point:** git, Memory, and model-hub use the new snapshot and identity;
-Show is untouched.
+Show is untouched. Model-hub recovery can resume every released claim shape
+without treating a manifest-only digest change as a target change.
 
 **Acceptance test:** for each existing subclass, install one artifact, edit only
 another platform's manifest entry, make the manifest source unavailable, and
 assert that the original installed identity/path is still reported from disk
-without archive access. Seed an old-layout install and assert it is adopted
-without a write or download.
+without archive access. Seed every released install layout and every released
+Model Hub `install-state.json` schema, then assert adoption or claim resumption
+without a write or download when the selected artifact identity is unchanged.
 
 **What breaks:** expected functional breakage is **none**. Without dual-read
 adoption, all three can appear missing or redownload while offline; that failure
-blocks the step. Downstream status consumers that currently call the selected
-version “installed” must be updated in the same step.
+blocks the step. Without claim normalization, an in-flight Model Hub operation
+can fail as `install_target_changed`; that also blocks the step. Downstream
+status consumers that currently call the selected version “installed” must be
+updated in the same step.
 
 ### Step 2: Converge The Mutation Guard
 
@@ -255,16 +299,17 @@ scope; the managed-runtime guard must open and validate its own descriptor.
 ### Step 3: Add Composite Artifacts Without Weakening Binary Artifacts
 
 Add the declarative metadata/provider filename, directory-artifact verifier,
-manifest-extension validator, and internal-link extraction policy. Defaults
-remain exactly the current strict binary contract.
+manifest-extension validator and persistence map, and internal-link extraction
+policy. Defaults remain exactly the current strict binary contract.
 
 **Stop point:** a fixture directory artifact can install through
 `ManagedRuntimeManager`; Show is not yet cut over.
 
 **Acceptance test:** the fixture accepts an archive-verified directory with a
 Node-style entrypoint and safe internal symlink, rejects an escaping link, and
-persists atomically. Existing git, Memory, and model-hub fixtures still reject a
-missing `binary_sha256`, missing `bin_path`, or any link member.
+persists its declared runtime prerequisite atomically. Existing git, Memory,
+and model-hub fixtures still reject a missing `binary_sha256`, missing
+`bin_path`, or any link member.
 
 **What breaks:** expected breakage is **none**. If optional leaf checksums or
 link acceptance become the default, integrity for all three existing
@@ -275,7 +320,10 @@ dependencies breaks and the step must not ship.
 Materialize new downloads under their verified digest, dual-read the old
 archive-name cache, build the protected set from every retained admitted
 install, and add generic dry-run/cleanup reports. Enable post-success cleanup
-one runtime spec at a time.
+one runtime spec at a time. Automatic cleanup is a post-commit maintenance
+operation: an inspection or deletion failure produces its own report and skips
+unsafe deletion, but cannot change the successful ensure result or durable
+claim settlement.
 
 **Stop point:** the capability is enabled for git, Memory, and model-hub before
 Show depends on it.
@@ -284,13 +332,17 @@ Show depends on it.
 shape plus current, rollback, stale, recent, temporary, symlink, abandoned
 claim, and unreadable cases. Dry-run and real cleanup select the same eligible
 set; current/rollback bytes are unchanged; unreadable protection metadata makes
-the operation fail closed. Re-run and assert idempotence.
+the cleanup operation fail closed. Inject that failure after a committed
+install and assert that the current pointer and successful result remain intact,
+Model Hub settles its claim as successful, and the separate cleanup report
+retains the inspection error. Re-run and assert idempotence.
 
 **What breaks:** no runnable dependency. Stale unprotected archives and installs
 are deleted by design. If any current or retained install lacks an admitted
 archive identity, cleanup must skip rather than delete; a deletion in that case
 breaks git, Memory, or model-hub rollback safety and blocks rollout for that
-spec.
+spec. Propagating an automatic-cleanup error through `ensure()` breaks an
+already-committed install and Model Hub claim state, and also blocks rollout.
 
 ### Step 5: Cut Over Show's Manifest Provider
 
@@ -298,7 +350,9 @@ Create the composed Show installer spec/adapter. Route manifest prepare,
 installed resolution, status facts, probe, lock, cleanup, extraction, metadata,
 and current pointer through shared code. Keep direct archive, npm, admission,
 availability, and serving behavior in Show. Dual-read every released Show
-metadata and fingerprint layout.
+metadata and fingerprint layout. New metadata persists `minimum_node`; old
+records without it produce an explicit unknown compatibility state and must
+pass the bounded runtime readiness probe before serving is admitted.
 
 **Stop point:** manifest-backed Show behavior has one installer owner, but the
 old functions may remain unreachable for one comparison PR.
@@ -308,7 +362,11 @@ manifest, offline reuse, failed and forced replacement, unrelated-platform
 manifest edits, previous fingerprints, legacy parent layout, configured source
 lineage, internal symlinks, Node missing/unsupported, archive cleanup, Doctor,
 and dependencies status. Add an invariant test that an injected status
-inspection failure remains unknown/error and is never projected as absent.
+inspection failure remains unknown/error and is never projected as absent. With
+the manifest unavailable, a new metadata record plus downgraded Node must remain
+unsupported, while every released record lacking `minimum_node` must remain an
+installed artifact with unknown compatibility and cannot become serving-ready
+without a successful bounded readiness probe.
 
 **What breaks:** git, Memory, and model-hub have **no new behavior** in this
 step. Show would break for already-installed/offline users if any released
@@ -322,13 +380,16 @@ utility functions. Reduce retained same-name methods to product wrappers; they
 must not contain a second manifest transaction or filesystem policy.
 
 **Stop point:** final architecture. Direct archive and npm are visibly separate
-Show providers; the manifest provider has exactly one implementation.
+Show providers; the Show manifest provider has exactly one implementation.
+tmux remains the explicitly accounted separate installer described in the
+scope boundary.
 
 **Acceptance test:** an AST ownership test rejects Show definitions or call
 paths for shared manifest acquisition, archive verification/cache, install
 identity, metadata/current writes, mutation lock, archive retention, platform
-tagging, hashing, or extraction. Run focused suites for all four managers and
-the Show CLI/Doctor/dependencies consumers.
+tagging, hashing, or extraction. The assertion is scoped to Show and must not be
+described as a whole-repository singleton check. Run focused suites for all four
+audited managers and the Show CLI/Doctor/dependencies consumers.
 
 **What breaks:** no dependency behavior. Tests that monkeypatch deleted Show
 private methods must move to the shared manager or public result boundary; that
@@ -339,7 +400,9 @@ solely for those tests.
 
 Measurements use AST function spans (`end_lineno - lineno + 1`) at
 `903414cc4`; blank lines outside functions, imports, dataclass declarations,
-serving-only functions, and tests are excluded.
+serving-only functions, and tests are excluded. These estimates cover only the
+four audited dependencies. The separate 699-line tmux installer is measured as
+an excluded owner, not included in deletion, movement, or shared-growth totals.
 
 - Current install roots reach **110 functions / 2,579 lines**.
 - Eleven GitHub-only reachable helpers account for **212 lines**. Excluding
@@ -378,22 +441,28 @@ upper estimate as permission to introduce a general callback framework.
 
 ### Concept Count
 
-The count is derived from behavioral owners, not filenames. Seven capabilities
-currently have two owners: primitives/extraction, manifest selection, archive
-acquisition/cache, install transaction/identity/persistence, mutation/preview
-locking, retention/cleanup, and status/probe. Four Show-only concepts sit beside
-them: admission/availability, Node prerequisite/command, direct archive, and
-npm.
+The scoped count is derived from behavioral owners, not filenames. Within the
+four-dependency audit, seven capabilities currently have two owners:
+primitives/extraction, manifest selection, archive acquisition/cache, install
+transaction/identity/persistence, mutation/preview locking,
+retention/cleanup, and status/probe. Four Show-only concepts sit beside them:
+admission/availability, Node prerequisite/command, direct archive, and npm.
 
-| State | Shared/common concepts | Show-only concepts | Total |
+| Audited state | Shared/common owner instances | Show-only concepts | Total |
 | --- | ---: | ---: | ---: |
 | Before | 7 capabilities x 2 owners = 14 | 4 | **18** |
 | After | 7 capabilities x 1 owner = 7 | 4 | **11** |
 
-The target adds seams and data fields, not a second engine concept. A “generic
-archive-cache helper” owned outside `ManagedRuntimeManager` would keep the count
-at 12 and is therefore rejected unless it has an independent non-runtime
-consumer.
+Whole-repository accounting adds tmux as a third owner for six common
+capabilities; it has no retention/cleanup implementation to count. On the same
+method, the repository moves from **24** owner/concept instances before this
+migration (18 scoped + 6 tmux) to **17** afterward (11 scoped + 6 tmux), not to
+11 globally. Migrating tmux in a separately measured follow-up is required to
+remove those final six duplicate owners.
+
+The target adds seams and data fields, not another engine concept. A “generic
+archive-cache helper” owned outside `ManagedRuntimeManager` would add an owner
+and is therefore rejected unless it has an independent non-runtime consumer.
 
 ## Named Unknown
 
@@ -409,6 +478,9 @@ treating symlink permission as permission for both.
 ## Non-Goals
 
 - No change to Show serving or request behavior.
+- No tmux migration. Its live duplicate ownership is explicitly counted above;
+  a follow-up must first measure its persisted layouts, macOS signing, runnable
+  probe, utf8proc, and terminfo seams rather than extrapolate Show's estimates.
 - No resurrection or compatibility path for the removed GitHub provider.
 - No attempt to force direct archive or npm into the manifest security model.
 - No deletion of released on-disk compatibility readers.
