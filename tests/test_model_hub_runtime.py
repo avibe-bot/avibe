@@ -1140,7 +1140,7 @@ def test_engine_installer_selects_verified_packaged_asset(
 
 
 def test_engine_platform_identity_is_normalized_locally() -> None:
-    assert runtime_installer_module._ENGINE_SPEC.platform_aliases == ()
+    assert dict(runtime_installer_module._ENGINE_SPEC.platform_aliases) == runtime_installer_module._ENGINE_PLATFORM_MAP
     assert EngineRuntimeManager._normalize_engine_platform("linux-x64") == "linux-amd64"
     assert EngineRuntimeManager._normalize_engine_platform("linux-amd64") == "linux-amd64"
 
@@ -1174,27 +1174,32 @@ def test_engine_installer_is_idempotent_and_rejects_tampered_archive(tmp_path: P
     assert rejected["reason"] == "model_hub_engine_archive_checksum_mismatch"
 
 
-def test_invalid_manifest_does_not_hide_disk_engine_but_blocks_repair(tmp_path: Path) -> None:
+def test_engine_status_rehashes_binary_only_after_file_identity_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     archive, binary = _write_fixture_archive(tmp_path / "fixture")
-    manifest_path = _write_fixture_manifest(tmp_path / "fixture", archive, binary)
-    manager = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest_path)
+    manifest = _write_fixture_manifest(tmp_path / "fixture", archive, binary)
+    manager = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest)
     installed = manager.ensure()
-    assert installed["ok"] is True
-    installed_path = Path(installed["path"])
+    binary_path = Path(installed["path"])
+    original_file_sha256 = managed_runtime.file_sha256
+    hashed_paths: list[Path] = []
 
-    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    payload["license"] = "invalid"
-    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    def tracked_file_sha256(path: Path) -> str:
+        hashed_paths.append(path)
+        return original_file_sha256(path)
 
-    status = manager.status()
-    repair = manager.ensure()
+    monkeypatch.setattr(managed_runtime, "file_sha256", tracked_file_sha256)
 
-    assert status["installed"] is True
-    assert status["path"] == str(installed_path)
-    assert status["reason"] is None
-    assert manager.resolve_engine_path() == installed_path
-    assert repair["ok"] is False
-    assert repair["reason"] == "model_hub_engine_manifest_invalid"
+    assert manager.status()["installed"] is True
+    assert manager.status()["installed"] is True
+    assert hashed_paths == [binary_path]
+
+    binary_path.write_bytes(binary_path.read_bytes() + b"\n# tampered\n")
+
+    assert manager.status()["installed"] is False
+    assert hashed_paths == [binary_path, binary_path]
 
 
 def test_engine_version_check_uses_minimal_environment(

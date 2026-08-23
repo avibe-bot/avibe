@@ -1053,11 +1053,9 @@ def test_memory_artifact_readmits_existing_install_before_reuse(
         assert manager.resolve_python() == binary
         assert admissions == [binary]
     else:
-        assert active["admission_revision"] == memory_artifact.ARTIFACT_ADMISSION_REVISION
-        assert active["admission_ok"] is False
-        assert (manager.runtime_dir / "current.json").read_bytes() != pointer_before
-        assert manager.resolve_python() is None
-        assert manager.status()["reason"] == "memory_runtime_install_failed"
+        assert (manager.runtime_dir / "current.json").read_bytes() == pointer_before
+        assert manager.status()["installed"] is True
+        assert (manager.runtime_dir / "current.json").read_bytes() == pointer_before
         assert admissions == [binary]
 
 

@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
 import platform
-import re
 import shutil
 import subprocess
 import sys
@@ -17,10 +15,7 @@ from core.managed_runtime import (
     ManagedRuntimeManager,
     ManagedRuntimeManifest,
     ManagedRuntimeSpec,
-    archive_path_is_unsafe,
     env_flag_enabled,
-    file_sha256,
-    runtime_platform_tag,
 )
 from core.process_isolation import isolated_subprocess_kwargs
 
@@ -71,69 +66,6 @@ class GitRuntimeManager(ManagedRuntimeManager):
         """Return a verified installed vendored Git, or ``None`` without installing."""
 
         return self.resolve_binary()
-
-    def resolve_binary(self) -> Path | None:
-        try:
-            pointer = json.loads((self.runtime_dir / "current.json").read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return None
-        except (OSError, UnicodeError, ValueError):
-            self._install_reason = self._reason("install_inspection_failed")
-            return None
-        self._install_reason = self._reason("install_inspection_failed")
-        try:
-            install_dir_value = pointer.get("install_dir")
-            bin_path = pointer.get("bin_path", self.spec.default_bin_path)
-            if (
-                pointer.get("provider") != "manifest"
-                or pointer.get("runtime_id") != self.spec.runtime_id
-                or not isinstance(pointer.get("runtime_version"), str)
-                or pointer.get("platform") != runtime_platform_tag()
-                or not isinstance(install_dir_value, str)
-                or not isinstance(bin_path, str)
-                or archive_path_is_unsafe(bin_path)
-            ):
-                return None
-            configured_install_dir = Path(install_dir_value)
-            if not configured_install_dir.is_absolute():
-                return None
-            install_dir = configured_install_dir.resolve(strict=True)
-            versions_dir = (self.runtime_dir / "versions").resolve(strict=True)
-            binary = (install_dir / bin_path).resolve(strict=True)
-            if versions_dir not in install_dir.parents or install_dir not in binary.parents:
-                return None
-            metadata = json.loads((install_dir / self.spec.metadata_filename).read_text(encoding="utf-8"))
-            binary_sha256 = metadata.get("binary_sha256") if isinstance(metadata, dict) else None
-            if not (
-                isinstance(metadata, dict)
-                and metadata.get("provider") == "manifest"
-                and metadata.get("runtime_id") == self.spec.runtime_id
-                and metadata.get("runtime_version") == pointer["runtime_version"]
-                and metadata.get("platform") == pointer["platform"]
-                and metadata.get("manifest_sha256") == pointer.get("manifest_sha256")
-                and metadata.get("archive_sha256") == pointer.get("archive_sha256")
-                and metadata.get("bin_path", self.spec.default_bin_path) == bin_path
-                and isinstance(binary_sha256, str)
-                and re.fullmatch(r"[0-9a-f]{64}", binary_sha256)
-                and binary.is_file()
-                and os.access(binary, os.X_OK)
-                and file_sha256(binary) == binary_sha256
-            ):
-                return None
-            manifest = self._load_manifest(allow_network=False)
-            if manifest is not None and self._manifest_installable(manifest):
-                archive = self._manifest_archive_for_platform(manifest)
-                selected_is_installed = archive is not None and (
-                    pointer.get("runtime_version"),
-                    pointer.get("platform"),
-                    pointer.get("archive_sha256"),
-                ) == (manifest.runtime_version, archive.platform, archive.sha256)
-                if selected_is_installed and self._verified_manifest_binary(install_dir, manifest, archive) != binary:
-                    return None
-            self._install_reason = None
-            return binary
-        except (OSError, RuntimeError, UnicodeError, ValueError):
-            return None
 
     def _manifest_installable(self, manifest: ManagedRuntimeManifest) -> bool:
         if str(manifest.payload.get("release_state") or "published") != "published":

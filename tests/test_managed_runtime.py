@@ -11,7 +11,6 @@ from pathlib import Path
 import pytest
 
 from core import managed_runtime
-from core import git_runtime
 from core.git_runtime import GitRuntimeManager
 from core.managed_runtime import (
     ManagedRuntimeArchive,
@@ -22,7 +21,6 @@ from core.managed_runtime import (
 from core.memory import artifact as memory_artifact
 from core.memory.artifact import MemoryArtifactManager, MemoryRuntimeActivationError
 from vibe.model_hub_runtime.installer import EngineRuntimeManager
-from vibe.model_hub_runtime import installer as model_hub_installer
 
 
 class FixtureRuntimeManager(ManagedRuntimeManager):
@@ -333,14 +331,7 @@ def test_subclass_status_rejects_an_unreadable_installed_binary(
     def unreadable_binary(_path: Path) -> str:
         raise OSError("binary became unreadable")
 
-    module = {
-        "git": git_runtime,
-        "memory": memory_artifact,
-        "model-hub": managed_runtime,
-    }[runtime_kind]
-    monkeypatch.setattr(module, "file_sha256", unreadable_binary)
-    if runtime_kind == "model-hub":
-        monkeypatch.setattr(model_hub_installer.managed_runtime, "file_sha256", unreadable_binary)
+    monkeypatch.setattr(managed_runtime, "file_sha256", unreadable_binary)
 
     status = manager.status()
 
@@ -348,6 +339,99 @@ def test_subclass_status_rejects_an_unreadable_installed_binary(
     assert status["status"] == "error"
     assert status["reason"] is not None
     assert _resolve_subclass_runtime(manager, runtime_kind) is None
+
+
+@pytest.mark.parametrize("runtime_kind", ["git", "memory", "model-hub"])
+@pytest.mark.parametrize("state_file", ["pointer", "metadata"])
+def test_subclass_projects_deep_installed_json_as_an_inspection_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_kind: str,
+    state_file: str,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest = _write_subclass_runtime_fixture(tmp_path, runtime_kind)
+    manager = _subclass_runtime_manager(tmp_path, runtime_kind, manifest, monkeypatch)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+    state_path = (
+        manager.runtime_dir / "current.json"
+        if state_file == "pointer"
+        else Path(installed["install_dir"]) / manager.spec.metadata_filename
+    )
+    state_path.write_text(
+        "[" * 2_000 + "0" + "]" * 2_000,
+        encoding="utf-8",
+    )
+
+    status = manager.status()
+
+    assert status["installed"] is False
+    assert status["status"] == "error"
+    assert _resolve_subclass_runtime(manager, runtime_kind) is None
+
+
+@pytest.mark.parametrize("runtime_kind", ["git", "model-hub"])
+def test_shared_reuse_repairs_pointer_from_persisted_metadata_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_kind: str,
+) -> None:
+    _archive, manifest = _write_subclass_runtime_fixture(tmp_path, runtime_kind)
+    manager = _subclass_runtime_manager(tmp_path, runtime_kind, manifest, monkeypatch)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+    pointer_path = manager.runtime_dir / "current.json"
+    metadata_path = Path(installed["install_dir"]) / manager.spec.metadata_filename
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    pointer["manifest_sha256"] = "f" * 64
+    managed_runtime.write_json_atomic(pointer_path, pointer)
+    metadata_before = metadata_path.read_bytes()
+    monkeypatch.setattr(
+        manager,
+        "_resolve_manifest_archive",
+        lambda _archive: pytest.fail("pointer repair accessed an archive"),
+    )
+
+    reused = manager.ensure()
+
+    assert reused["ok"] is True
+    assert reused["changed"] is False
+    repaired = json.loads(pointer_path.read_text(encoding="utf-8"))
+    assert repaired["manifest_sha256"] == metadata["manifest_sha256"]
+    assert metadata_path.read_bytes() == metadata_before
+    assert _resolve_subclass_runtime(manager, runtime_kind) == Path(installed["path"])
+
+
+@pytest.mark.parametrize("runtime_kind", ["git", "memory", "model-hub"])
+def test_invalid_manifest_keeps_disk_resolution_but_blocks_repair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_kind: str,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest = _write_subclass_runtime_fixture(tmp_path, runtime_kind)
+    manager = _subclass_runtime_manager(tmp_path, runtime_kind, manifest, monkeypatch)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+    installed_path = Path(installed["path"])
+    manifest.write_text("{", encoding="utf-8")
+    monkeypatch.setattr(
+        manager,
+        "_resolve_manifest_archive",
+        lambda _archive: pytest.fail("invalid manifest repair accessed an archive"),
+    )
+
+    status = manager.status()
+    resolved = _resolve_subclass_runtime(manager, runtime_kind)
+    repair = manager.ensure()
+
+    assert status["installed"] is True
+    assert status["path"] == str(installed_path)
+    assert resolved == installed_path
+    assert repair["ok"] is False
+    assert str(repair["reason"]).endswith("manifest_invalid")
 
 
 def test_memory_reuse_refreshes_changed_manifest_contract_through_activation(
@@ -402,6 +486,36 @@ def test_memory_reuse_refreshes_changed_manifest_contract_through_activation(
     assert active["compatible_provider_root_formats"] == []
     assert active["artifact_fingerprint"] == updated_manifest_digest[:16]
     assert sync_admissions == []
+
+
+def test_memory_selected_contract_failure_preserves_admitted_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest_path = _write_subclass_runtime_fixture(tmp_path, "memory")
+    manager = _subclass_runtime_manager(tmp_path, "memory", manifest_path, monkeypatch)
+    assert isinstance(manager, MemoryArtifactManager)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+    pointer_path = manager.runtime_dir / "current.json"
+    pointer_before = pointer_path.read_bytes()
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["provider_root_format"] = "everos-next"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(manager, "_prepare_binary", lambda _binary, **_kwargs: {"ok": False})
+    monkeypatch.setattr(
+        manager,
+        "_resolve_manifest_archive",
+        lambda _archive: pytest.fail("failed Memory re-admission accessed an archive"),
+    )
+
+    failed = manager.ensure()
+
+    assert failed["ok"] is False
+    assert pointer_path.read_bytes() == pointer_before
+    assert manager.status()["installed"] is True
+    assert manager.resolve_python() == Path(installed["path"])
 
 
 def test_memory_retry_repairs_pointer_after_metadata_commit_outlives_pointer_failure(

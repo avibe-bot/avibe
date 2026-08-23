@@ -25,7 +25,6 @@ from core.managed_runtime import (
     ManagedRuntimeManager,
     ManagedRuntimeManifest,
     ManagedRuntimeSpec,
-    archive_path_is_unsafe,
     env_flag_enabled,
     file_sha256,
     runtime_platform_tag,
@@ -434,10 +433,6 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             logger.exception("Failed to admit existing Memory runtime binary")
             preparation = {"ok": False}
         if preparation.get("ok") is not True:
-            try:
-                self._persist_active_pointer_admission(binary, admitted=False)
-            except Exception:  # noqa: BLE001
-                logger.exception("Failed to persist rejected Memory runtime admission")
             return self._failure(
                 "memory_runtime_install_failed",
                 manifest=manifest,
@@ -492,17 +487,6 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         if reason:
             payload["reason"] = reason
         return payload
-
-    def _persist_active_pointer_admission(self, binary: Path, *, admitted: bool) -> None:
-        current, invalid = self._read_active_pointer()
-        if invalid or current is None:
-            return
-        if self._verified_active_pointer_binary(current) != binary:
-            return
-        admitted_pointer = dict(current)
-        admitted_pointer["admission_revision"] = ARTIFACT_ADMISSION_REVISION
-        admitted_pointer["admission_ok"] = admitted
-        self._restore_current_pointer(admitted_pointer)
 
     def _write_current_pointer(
         self,
@@ -608,20 +592,15 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             return None, True
         try:
             pointer = json.loads(payload.decode("utf-8"))
-        except (UnicodeError, ValueError):
+        except (RecursionError, UnicodeError, ValueError):
             return None, True
         return (pointer, False) if isinstance(pointer, dict) else (None, True)
 
     def _verified_active_pointer_binary(self, pointer: dict[str, Any]) -> Path | None:
-        """Verify the binary referenced by ``current.json`` without a manifest lookup."""
+        """Apply Memory's build pin around shared installed-binary verification."""
 
-        install_dir_value = pointer.get("install_dir")
-        bin_path = pointer.get("bin_path")
         if (
-            pointer.get("provider") != "manifest"
-            or pointer.get("runtime_id") != self.spec.runtime_id
-            or not _safe_metadata_value(pointer.get("runtime_version"))
-            or not _safe_metadata_value(pointer.get("platform"))
+            not _safe_metadata_value(pointer.get("runtime_version"))
             # Well-formed is not the same as usable here. Installation rejects a
             # manifest whose runtime_version is not EVEROS_VERSION, but the
             # pointer outlives that check: a ``~/.avibe`` copied between
@@ -630,49 +609,12 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             # Accepting it makes ``resolve_python`` hand back that binary and
             # Dependencies report ready until the sidecar or processing probe
             # fails much later, with a far less obvious error.
-            or pointer.get("platform") != runtime_platform_tag()
             or pointer.get("runtime_version") != EVEROS_VERSION
-            or not _valid_sha256(pointer.get("manifest_sha256"))
-            or not _valid_sha256(pointer.get("archive_sha256"))
-            or not isinstance(install_dir_value, str)
-            or not isinstance(bin_path, str)
-            or archive_path_is_unsafe(bin_path)
         ):
             return None
-
-        configured_install_dir = Path(install_dir_value)
-        if not configured_install_dir.is_absolute():
-            return None
-        try:
-            install_dir = configured_install_dir.resolve(strict=True)
-            versions_dir = (self.runtime_dir / "versions").resolve(strict=True)
-            binary = (install_dir / bin_path).resolve(strict=True)
-        except OSError:
-            return None
-        if install_dir == versions_dir or versions_dir not in install_dir.parents or install_dir not in binary.parents:
-            return None
-        if not binary.is_file() or not os.access(binary, os.X_OK):
-            return None
-
-        try:
-            metadata = json.loads((install_dir / self.spec.metadata_filename).read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, ValueError):
-            return None
-        binary_sha256 = metadata.get("binary_sha256") if isinstance(metadata, dict) else None
-        if not (
-            isinstance(metadata, dict)
-            and metadata.get("provider") == "manifest"
-            and metadata.get("runtime_id") == self.spec.runtime_id
-            and metadata.get("runtime_version") == pointer["runtime_version"]
-            and metadata.get("platform") == pointer["platform"]
-            and metadata.get("manifest_sha256") == pointer["manifest_sha256"]
-            and metadata.get("archive_sha256") == pointer["archive_sha256"]
-            and metadata.get("bin_path") == bin_path
-            and _valid_sha256(binary_sha256)
-            and file_sha256(binary) == binary_sha256
-        ):
-            return None
-        return binary
+        binary = super().resolve_binary()
+        current, invalid = self._read_active_pointer()
+        return binary if binary is not None and not invalid and current == pointer else None
 
     def _admitted_active_pointer_binary(
         self,

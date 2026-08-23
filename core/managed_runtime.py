@@ -289,19 +289,112 @@ class ManagedRuntimeManager:
     def resolve_binary(self) -> Path | None:
         """Resolve an already installed runtime without performing network I/O."""
 
+        inspection_reason = f"{self.spec.runtime_id}_install_inspection_failed"
         try:
+            pointer = json.loads((self.runtime_dir / "current.json").read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (OSError, RecursionError, UnicodeError, ValueError):
+            self._install_reason = inspection_reason
+            return None
+
+        self._install_reason = inspection_reason
+        try:
+            if not isinstance(pointer, dict):
+                return None
+            runtime_version = pointer.get("runtime_version")
+            platform_tag = pointer.get("platform")
+            install_dir_value = pointer.get("install_dir")
+            bin_path = pointer.get("bin_path", self.spec.default_bin_path)
+            digest_fields = ("manifest_sha256", "archive_sha256")
+            aliases = dict(self.spec.platform_aliases)
+            host_platform = aliases.get(runtime_platform_tag(), runtime_platform_tag())
+            installed_platform = aliases.get(platform_tag, platform_tag) if isinstance(platform_tag, str) else None
+            if (
+                pointer.get("provider") != "manifest"
+                or pointer.get("runtime_id") != self.spec.runtime_id
+                or not isinstance(runtime_version, str)
+                or not runtime_version
+                or not isinstance(platform_tag, str)
+                or not platform_tag
+                or any(
+                    len(value.encode("utf-8")) > 128
+                    or any(
+                        not character.isascii()
+                        or not (character.isalnum() or character in {".", "-", "_"})
+                        for character in value
+                    )
+                    for value in (runtime_version, platform_tag)
+                )
+                or installed_platform != host_platform
+                or not isinstance(install_dir_value, str)
+                or not isinstance(bin_path, str)
+                or archive_path_is_unsafe(bin_path)
+                or any(
+                    not _SHA256_RE.fullmatch(str(pointer.get(field) or ""))
+                    for field in digest_fields
+                )
+            ):
+                return None
+
+            configured_install_dir = Path(install_dir_value)
+            if not configured_install_dir.is_absolute():
+                return None
+            install_dir = configured_install_dir.resolve(strict=True)
+            versions_dir = (self.runtime_dir / "versions").resolve(strict=True)
+            binary = (install_dir / bin_path).resolve(strict=True)
+            if (
+                install_dir == versions_dir
+                or versions_dir not in install_dir.parents
+                or install_dir not in binary.parents
+            ):
+                return None
+
+            metadata = json.loads((install_dir / self.spec.metadata_filename).read_text(encoding="utf-8"))
+            if not isinstance(metadata, dict):
+                return None
+            metadata_platform = metadata.get("platform")
+            metadata_bin_path = metadata.get("bin_path", self.spec.default_bin_path)
+            binary_sha256 = metadata.get("binary_sha256")
+            if not (
+                metadata.get("provider") == "manifest"
+                and metadata.get("runtime_id") == self.spec.runtime_id
+                and metadata.get("runtime_version") == runtime_version
+                and isinstance(metadata_platform, str)
+                and aliases.get(metadata_platform, metadata_platform) == installed_platform
+                and all(metadata.get(field) == pointer.get(field) for field in digest_fields)
+                and metadata_bin_path == bin_path
+                and isinstance(binary_sha256, str)
+                and _SHA256_RE.fullmatch(binary_sha256)
+                and binary.is_file()
+                and os.access(binary, os.X_OK)
+            ):
+                return None
+
             manifest = self._load_manifest(allow_network=False)
-            if manifest is None or not self._manifest_installable(manifest):
+            selected_is_installed = False
+            if manifest is not None and self._manifest_installable(manifest):
+                archive = self._manifest_archive_for_platform(manifest)
+                selected_is_installed = archive is not None and (
+                    runtime_version,
+                    installed_platform,
+                    pointer.get(digest_fields[1]),
+                ) == (
+                    manifest.runtime_version,
+                    aliases.get(archive.platform, archive.platform),
+                    archive.sha256,
+                )
+            if selected_is_installed:
+                if self._verified_manifest_binary(install_dir, manifest, archive) != binary:
+                    self._install_reason = inspection_reason
+                    return None
+            elif file_sha256(binary) != binary_sha256:
+                self._install_reason = inspection_reason
                 return None
-            archive = self._manifest_archive_for_platform(manifest)
-            if archive is None:
-                return None
-            return self._verified_manifest_binary(
-                self._manifest_install_dir(manifest, archive),
-                manifest,
-                archive,
-            )
-        except Exception:  # noqa: BLE001
+            self._install_reason = None
+            return binary
+        except (OSError, RecursionError, RuntimeError, UnicodeError, ValueError):
+            self._install_reason = inspection_reason
             logger.debug("Failed to resolve managed %s runtime", self.spec.runtime_id, exc_info=True)
             return None
 
@@ -310,8 +403,10 @@ class ManagedRuntimeManager:
         archive = self._manifest_archive_for_platform(manifest) if manifest else None
         binary = self.resolve_binary()
         pointer = {}
-        with contextlib.suppress(OSError, UnicodeError, ValueError):
+        with contextlib.suppress(OSError, RecursionError, UnicodeError, ValueError):
             pointer = json.loads((self.runtime_dir / "current.json").read_text(encoding="utf-8"))
+            if not isinstance(pointer, dict):
+                pointer = {}
         matches_manifest = False if binary is not None and manifest and archive else None
         if matches_manifest is not None and isinstance(pointer.get("install_dir"), str):
             with contextlib.suppress(Exception):  # noqa: BLE001
@@ -917,14 +1012,18 @@ class ManagedRuntimeManager:
         binary = install_dir / bin_path
         if not binary.is_file() or not os.access(binary, os.X_OK):
             return None
+        target = self._install_target_identity(manifest, archive)
+        target_platform = target.pop("platform")
+        metadata_platform = metadata.get("platform")
+        aliases = dict(self.spec.platform_aliases)
         if not (
             metadata.get("provider") == "manifest"
             and metadata.get("runtime_id") == self.spec.runtime_id
-            and metadata.get("runtime_version") == manifest.runtime_version
-            and metadata.get("platform") == archive.platform
-            and metadata.get("archive_sha256") == archive.sha256
+            and all(metadata.get(key) == value for key, value in target.items())
+            and isinstance(metadata_platform, str)
+            and aliases.get(metadata_platform, metadata_platform)
+            == aliases.get(target_platform, target_platform)
             and bin_path == archive.bin_path
-            and metadata.get("binary_sha256") == archive.binary_sha256
             and file_sha256(binary) == archive.binary_sha256
         ):
             return None
@@ -961,6 +1060,14 @@ class ManagedRuntimeManager:
         manifest: ManagedRuntimeManifest,
         archive: ManagedRuntimeArchive,
     ) -> None:
+        manifest_sha256 = manifest.digest
+        try:
+            metadata = json.loads((install_dir / self.spec.metadata_filename).read_text(encoding="utf-8"))
+            persisted_digest = metadata.get("manifest_sha256") if isinstance(metadata, dict) else None
+            if isinstance(persisted_digest, str) and _SHA256_RE.fullmatch(persisted_digest):
+                manifest_sha256 = persisted_digest
+        except (OSError, RecursionError, UnicodeError, ValueError):
+            pass
         write_json_atomic(
             self.runtime_dir / "current.json",
             {
@@ -969,7 +1076,7 @@ class ManagedRuntimeManager:
                 "runtime_version": manifest.runtime_version,
                 "platform": archive.platform,
                 "install_dir": str(install_dir),
-                "manifest_sha256": manifest.digest,
+                "manifest_sha256": manifest_sha256,
                 "archive_sha256": archive.sha256,
                 "bin_path": archive.bin_path,
             },
