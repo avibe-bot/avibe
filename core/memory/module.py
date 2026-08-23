@@ -317,6 +317,11 @@ class MemoryModule:
 
         self._writer.resume_intake()
 
+    def reset_capture_generation(self) -> None:
+        """Forget volatile duplicate claims after Clear rotates the epoch."""
+
+        self._writer.reset_duplicate_generation()
+
     async def close_writer(self) -> None:
         """Drop volatile work during shutdown or runtime replacement."""
 
@@ -650,6 +655,8 @@ class MemoryModule:
             await self._release_unadmitted_capture(reservation, pinned_bundle)
             if isinstance(error, AttachmentPinError) and normalized_text.strip() and request.attachments:
                 return CaptureSkipped(reason="memory_store_unavailable")
+            if isinstance(error, AttachmentPinError):
+                return await self._capture_pin_failure(error.error)
             if isinstance(error, UnicodeError):
                 return await self._skipped_with_missed("memory_invalid_input")
             return OperationFailed(error="memory_store_unavailable")
@@ -680,6 +687,17 @@ class MemoryModule:
                 len(pinned_bundle.attachments) if pinned_bundle is not None else 0
             )
         )
+
+    async def _capture_pin_failure(self, error: MemoryErrorCode) -> CaptureReceipt:
+        if error == "memory_store_unavailable":
+            return OperationFailed(error=error)
+        if error in {
+            "memory_invalid_input",
+            "memory_input_too_large",
+            "memory_low_disk_space",
+        }:
+            return await self._skipped_with_missed(error)
+        return OperationFailed(error="memory_store_unavailable")
 
     async def _release_unadmitted_bundle(self, bundle_id: str) -> None:
         if self._attachment_store is None:

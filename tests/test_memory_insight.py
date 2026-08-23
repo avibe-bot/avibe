@@ -55,6 +55,36 @@ def test_processing_source_observation_keeps_calls_independent(tmp_path: Path) -
     assert preflight.items == ()
 
 
+@pytest.mark.parametrize("missing", ["message_ids_json", "payload_json", "timestamp"])
+def test_provider_memory_source_requires_every_reader_column(
+    tmp_path: Path,
+    missing: str,
+) -> None:
+    columns = {
+        "memcell_id": "TEXT PRIMARY KEY",
+        "app_id": "TEXT",
+        "project_id": "TEXT",
+        "message_ids_json": "TEXT",
+        "sender_ids_json": "TEXT",
+        "payload_json": "TEXT",
+        "timestamp": "INTEGER",
+    }
+    columns.pop(missing)
+    system_db = tmp_path / "everos" / ".index" / "sqlite" / "system.db"
+    system_db.parent.mkdir(parents=True)
+    with sqlite3.connect(system_db) as conn:
+        conn.execute(
+            "CREATE TABLE memcell ("
+            + ", ".join(f"{name} {kind}" for name, kind in columns.items())
+            + ")"
+        )
+
+    observation = _reader(tmp_path).source_observation().everos
+
+    assert observation.status == "unavailable"
+    assert observation.reason == "provider_memory_unavailable"
+
+
 def test_empty_authorized_call_log_is_available_not_unavailable(tmp_path: Path) -> None:
     reader = _reader(tmp_path)
     initialize_call_log(tmp_path / "calls.sqlite")

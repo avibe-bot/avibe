@@ -317,7 +317,7 @@ the same time merely to split the diff.
 | `MEMORY-INDEP-001`, `-002`, `-012` | retain non-blocking lifecycle, accepted loss, and content-free logs |
 | `MEMORY-INDEP-003`, `-007`, `-008` | rewrite shutdown to drop; archive offers one barrier then releases authorization without settlement waits |
 | `MEMORY-INDEP-010` | rewrite lifecycle snapshots around a non-blocking barrier offer; a capture still preparing or belonging to a stale generation may be missed or invalidated |
-| `MEMORY-SEARCH-005`, `-006`, `-012`, `-013`, `-014` | rewrite v4 migration/diagnostics; remove reopen recovery; bound flush |
+| `MEMORY-SEARCH-005`, `-006`, `-012`, `-013`, `-014`, `-017` | rewrite v4 migration/diagnostics; remove reopen recovery; bound flush |
 | `MEMORY-SEARCH-016`, `MEMORY-IM-ATTACH-001`, `-003`, `-010` | retain healthy/fallback semantics; replace drain/final flush with test-only worker/barrier sync |
 | `MEMORY-REBUILD-202`, `MEMORY-REPAIR-006` | rewrite claim/sidecar assertions around the transition barrier |
 | `MEMORY-CLEAR-201`, `MEMORY-FACTORY-003`, `-004`, `-201` | barrier covers post-pin admission; Clear removes `manual_required` and drops volatile work |

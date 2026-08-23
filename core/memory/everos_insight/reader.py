@@ -37,6 +37,10 @@ _CALL_COLUMNS = """
     response_json, request_bytes, response_bytes, memcell_id, project_id,
     owner_id, parent_type, parent_id, dropped_before
 """
+_MEMCELL_COLUMNS = """
+    memcell_id, app_id, project_id, message_ids_json, sender_ids_json,
+    payload_json, timestamp
+"""
 _MAX_PAYLOAD_BYTES = 12_000
 _MAX_ERROR_BYTES = 1_024
 _MAX_CURSOR_BYTES = 256
@@ -682,8 +686,7 @@ def _everos_source_status(path: Path, observed: str) -> SourceObservation:
             )
         try:
             conn.execute(
-                "SELECT memcell_id, app_id, project_id, sender_ids_json "
-                "FROM memcell LIMIT 1"
+                f"SELECT {_MEMCELL_COLUMNS} FROM memcell LIMIT 1"
             ).fetchone()
         except sqlite3.Error:
             return SourceObservation(

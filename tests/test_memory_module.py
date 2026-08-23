@@ -18,7 +18,10 @@ from core.memory.types import (
     CaptureDuplicate,
     CaptureRequest,
     CaptureSkipped,
+    MemoryItem,
+    MemoryItems,
     OperationFailed,
+    ProviderSearchItem,
 )
 from core.memory.writer import MAX_WRITER_PERMITS
 
@@ -40,9 +43,13 @@ def _request(**overrides: object) -> CaptureRequest:
     return CaptureRequest(**values)
 
 
-def _module(tmp_path: Path) -> tuple[MemoryModule, MemoryStore, FakeMemoryProvider]:
+def _module(
+    tmp_path: Path,
+    *,
+    provider: FakeMemoryProvider | None = None,
+) -> tuple[MemoryModule, MemoryStore, FakeMemoryProvider]:
     store = MemoryStore(tmp_path / "state" / "memory" / "memory.sqlite", effective_home=tmp_path)
-    provider = FakeMemoryProvider()
+    provider = provider or FakeMemoryProvider()
     module = MemoryModule(
         store,
         provider,
@@ -72,13 +79,70 @@ async def test_capture_is_accepted_and_duplicate_is_process_local(tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_lifecycle_barrier_does_not_wait_for_writer(tmp_path: Path) -> None:
-    """MEMORY-SEARCH-016: a lifecycle barrier is offered without a drain."""
+    """MEMORY-SEARCH-017: a lifecycle barrier is offered without a drain."""
 
     module, _store, _provider = _module(tmp_path)
     module._writer._ensure_worker = lambda: None
     await module.capture(_request())
     assert module.offer_barrier("session-1") == "queued"
     await module.close_writer()
+
+
+@pytest.mark.asyncio
+async def test_agent_remember_round_trips_through_dual_owner_search(
+    tmp_path: Path,
+) -> None:
+    """MEMORY-SEARCH-016: Agent remember is returned by dual-owner search."""
+
+    class CapturedSearchProvider(FakeMemoryProvider):
+        async def search(
+            self,
+            principal_id,
+            project_id,
+            query,
+            limit,
+            **_options,
+        ):
+            return tuple(
+                ProviderSearchItem(
+                    item=MemoryItem(kind="episode", text=capture.text),
+                    score=1.0,
+                    episode_id=f"captured-{index}",
+                    timestamp=None,
+                    provider_rank=index,
+                    queried_owner=principal_id,
+                )
+                for index, capture in enumerate(self.captures)
+                if capture.session_ref.principal_id == principal_id
+                and capture.session_ref.project_ref == project_id
+                and query.casefold() in capture.text.casefold()
+            )[:limit]
+
+    provider = CapturedSearchProvider()
+    module, _store, _provider = _module(tmp_path, provider=provider)
+    remembered = "The user plans the release on the 23rd"
+
+    assert await module.capture(
+        _request(
+            source_message_id="agent-remember-round-trip",
+            text=remembered,
+            provenance="agent",
+        )
+    ) == CaptureAccepted()
+    await module.wait_writer_idle_for_tests()
+
+    result = await module.search(
+        "23rd",
+        principal_id=PRINCIPAL,
+        project_id="default",
+    )
+
+    assert [capture.session_ref.principal_id for capture in provider.captures] == [
+        f"{PRINCIPAL}-agent"
+    ]
+    assert result == MemoryItems(
+        items=(MemoryItem(kind="episode", text=remembered, origin="agent"),)
+    )
 
 
 @pytest.mark.asyncio
@@ -219,6 +283,39 @@ async def test_unadmitted_failure_allows_same_source_retry(tmp_path: Path) -> No
     await module.wait_writer_idle_for_tests()
 
     assert len(provider.captures) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    ["memory_invalid_input", "memory_input_too_large", "memory_low_disk_space"],
+)
+async def test_attachment_only_pin_failure_preserves_typed_skip(
+    tmp_path: Path,
+    error: str,
+) -> None:
+    module, store, _provider = _module(tmp_path)
+
+    class FailingAttachmentStore:
+        def pin(self, *_args, **_kwargs):
+            raise AttachmentPinError(error, "pin failed")
+
+    module._attachment_store = FailingAttachmentStore()
+    attachment = CaptureAttachment(
+        kind="image",
+        name="source.png",
+        uri=(tmp_path / "attachments" / "avibe" / "source.png").as_uri(),
+        ext="png",
+    )
+
+    assert await module.capture(
+        _request(
+            source_message_id=f"attachment-{error}",
+            text="",
+            attachments=(attachment,),
+        )
+    ) == CaptureSkipped(reason=error)
+    assert store.ensure_meta().missed_count == 1
 
 
 @pytest.mark.asyncio

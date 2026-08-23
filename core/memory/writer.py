@@ -165,6 +165,11 @@ class BestEffortMemoryWriter:
         if not self._closed and not self._unavailable:
             self._intake_paused = False
 
+    def reset_duplicate_generation(self) -> None:
+        """Forget process-local duplicate claims after a completed Clear."""
+
+        self._duplicate_lru.clear()
+
     def reserve(self, digest: str) -> WriterReservation | Literal["duplicate", "full", "disabled"]:
         """Try to claim one permit before attachment pinning."""
 
@@ -516,6 +521,10 @@ class BestEffortMemoryWriter:
                 self._active_provider_calls += 1
                 try:
                     result = await self._provider.flush(ref)
+                except asyncio.CancelledError:
+                    self._pending.pop(key, None)
+                    await self._ambiguous_outcome("memory_provider_timeout")
+                    raise
                 except MemoryProviderFailure as failure:
                     if failure.ambiguous:
                         self._pending.pop(key, None)

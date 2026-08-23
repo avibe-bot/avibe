@@ -105,6 +105,12 @@ scenarios:
     layer: contract
     test: tests/test_memory_slice3.py::test_capture_stamps_user_principal_provenance_and_native_dedup_key
   - id: MEMORY-SEARCH-016
+    name: Agent remember is returned by dual-owner search
+    status: covered
+    kind: happy_path
+    layer: contract
+    test: tests/test_memory_module.py::test_agent_remember_round_trips_through_dual_owner_search
+  - id: MEMORY-SEARCH-017
     name: Lifecycle barrier admission does not wait for volatile delivery
     status: covered
     kind: lifecycle

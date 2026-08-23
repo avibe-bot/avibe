@@ -701,8 +701,12 @@ class MemoryRuntime:
             quiesce=self._quiesce_for_clear,
             resume=self._resume_after_clear,
             delete_surface=self._delete_clear_surface,
-            restore_completed=self._sidecar.reset_host_retention_after_clear,
+            restore_completed=self._restore_after_clear,
         )
+
+    def _restore_after_clear(self) -> None:
+        self._sidecar.reset_host_retention_after_clear()
+        self.module.reset_capture_generation()
 
     def _processing_record_port(self) -> MemoryProcessingRecordPort:
         return MemoryProcessingRecordPort(

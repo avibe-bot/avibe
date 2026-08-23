@@ -44,6 +44,25 @@ async def test_runtime_close_drops_volatile_work(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_clear_completion_rotates_volatile_duplicate_generation(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    writer = runtime.module._writer
+    reservation = writer.reserve("same-source")
+    assert not isinstance(reservation, str)
+    reservation.release()
+    assert writer.reserve("same-source") == "duplicate"
+
+    runtime._maintenance_runtime_port().restore_completed()
+
+    replacement = writer.reserve("same-source")
+    assert not isinstance(replacement, str)
+    replacement.release()
+    await runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_missing_provider_call_log_remains_unavailable(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
 

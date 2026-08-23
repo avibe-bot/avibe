@@ -404,6 +404,47 @@ async def test_quiesce_cancels_inflight_call_and_releases_volatile_resources(
 
 
 @pytest.mark.asyncio
+async def test_cancelled_flush_reaps_sidecar_before_releasing_barrier(
+    tmp_path: Path,
+) -> None:
+    flush_entered = asyncio.Event()
+    reap_entered = asyncio.Event()
+    finish_reap = asyncio.Event()
+
+    async def block_flush(_session_ref: ProviderSessionRef) -> None:
+        flush_entered.set()
+        await asyncio.Event().wait()
+
+    async def stop_reap() -> bool:
+        reap_entered.set()
+        await finish_reap.wait()
+        return True
+
+    writer = _writer(
+        tmp_path,
+        FakeMemoryProvider(flush_hook=block_flush),
+        ambiguous_stop_reap=stop_reap,
+    )
+    ref = _ref()
+    writer._pending[ref.serialize()] = _PendingSession(
+        ref, "raw-session-0", deque(["digest-0"]), 0.0, 0.0
+    )
+    assert writer.offer_barrier("raw-session-0") == "queued"
+    await flush_entered.wait()
+
+    closing = asyncio.create_task(writer.close())
+    await reap_entered.wait()
+
+    assert not closing.done()
+    assert writer._permits == MAX_WRITER_PERMITS - 1
+    finish_reap.set()
+    await asyncio.wait_for(closing, timeout=1.0)
+
+    assert writer._permits == MAX_WRITER_PERMITS
+    assert writer._pending == {}
+
+
+@pytest.mark.asyncio
 async def test_close_during_attachment_projection_releases_reservation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
