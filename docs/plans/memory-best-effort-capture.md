@@ -6,7 +6,7 @@
 > Capture loss is intentional; the design optimizes for healthy, unsaturated use
 > instead of preserving every item across failures and restarts.
 >
-> This change is docs-only. "Implementation" below means the follow-up code PR.
+> This PR implements the contract below in the same change.
 
 ## Decision
 
@@ -146,11 +146,11 @@ Admission performs no EverOS I/O and no unbounded wait:
 5. Remove a failed pending entry. Otherwise convert the reservation to a queue item
    and mark it admitted/evictable in the 256-entry LRU under the same lock.
 
-Any admission failure without a text fallback releases the permit. A cancelled
-generation returns immediately, but an underlying pin/provider job keeps its shared
-permit until it terminates or its sidecar is reaped, so replacement cannot exceed
-the process-wide bound. Rejection leaves catalog and watermark unchanged; identity
-failure creates no recovery item. Existing projects remain usable at the limit.
+Every reservation stays generation-visible through pinning, its bounded transaction,
+and terminal queue conversion or failure. A cancelled generation returns immediately,
+but old work keeps its permit until joined or reaped; no late catalog or watermark
+commit may cross a transition. Rejected candidates leave state unchanged and create
+no recovery item; existing projects remain usable at the limit.
 
 Every queue entry, including a session barrier, owns one permit until its local
 operation is terminal; attachment cleanup follows the bounded rule below.
@@ -161,9 +161,9 @@ One worker preserves ready-queue order. Concurrent attachment preparation may
 reorder caller arrival; arrival-order FIFO is not a contract.
 
 Each add or flush has at most three attempts, only after proven pre-execution failure.
-A possibly submitted timeout, cancellation, or transport loss is not retried; it
-holds its permit and blocks the worker until proven stopped or the sidecar is reaped.
-Completed malformed/unclassified responses end the item; restart drops volatile knowledge.
+A possibly submitted timeout/cancel/transport loss is not retried: the worker starts
+the existing bounded owned-sidecar stop/reap and holds its permit until termination
+is proved; failure leaves Memory unavailable. Malformed/unclassified responses end.
 
 The sole post-call modality fallback is an attachment rejection for which existing
 `attachment_add_rejection_proves_no_write()` positively proves no write. Under the
@@ -175,13 +175,13 @@ write failure never creates a retry or blocks later capture.
 
 ### Session flush
 
-`PendingFlush` stores only a provider-session reference, raw session reference,
-timestamps, count, and at most 100 message ids. It is bounded to 256 provider
-sessions and disappears on extraction, runtime replacement, or process exit.
+`PendingFlush` stores only refs, timestamps, count, up to 100 message ids, and one
+scheduled bit. At most 256 sessions are tracked; state disappears on extraction,
+runtime replacement, or process exit.
 
-A single process-local scheduler, with no per-session tasks, wakes at the next
-idle/age deadline; the 100th acknowledgement also invokes it. Each trigger makes
-one permit-backed queue offer. Failure defers five minutes; success extracts it.
+One process-local scheduler drives idle/age/count thresholds without per-session
+tasks. An offer failure defers five minutes; success marks it scheduled but
+barrier-visible until dequeue. An earlier barrier may extract it; the offer then no-ops.
 
 If the tracker is full, keep the successful add but leave its session untracked.
 `/new` and archive make one non-blocking attempt to enqueue a session barrier and
@@ -199,10 +199,10 @@ draining; process teardown reaps owned work.
 
 Disable or any transition that changes provider authority or its root -- runtime
 configuration replacement, Restart Engine, Rebuild, Repair, Clear, or Factory Reset
--- also drops volatile work, then uses one bounded barrier to stop/reap old provider
-RPCs and join all attachment-pin jobs before publishing the change, contacting a
-replacement, launching maintenance, or deleting state. Cancellation alone is
-insufficient; failed exclusion keeps the old authority/root and fails closed.
+-- drops volatile work; one bounded barrier stops/reaps old RPCs and joins every
+old-generation reservation through pinning, transaction, and terminal conversion
+before authority publication, provider replacement, maintenance, or deletion.
+Cancellation alone is insufficient; failed exclusion keeps old authority/root and fails closed.
 
 ## Persistent state and migration
 
@@ -232,9 +232,9 @@ Recognize every released v0-v3 shape accepted by the current migrator. Migration
 1. Reconcile readable Factory Reset/Clear intent. An unreadable marker or orphaned
    Clear fence stays blocked until an explicit Clear supplies fresh authority.
 2. Recognize the confined SQLite shape without writing.
-3. In one transaction, preserve identity, catalog, and the exact timestamp watermark
-   from every released shape, deriving v0-v2 catalog rows from queue data; no legacy
-   helper may commit independently. Then discard delivery state and install v4.
+3. In one transaction, preserve identity, catalog, timestamp watermark, and
+   `last_success_at` exactly from each released shape, deriving v0-v2 catalog rows
+   from queue data; no helper commits independently. Discard delivery state; install v4.
 4. Commit, then checkpoint, close owned connections, and reopen through SQLite's
    normal WAL lifecycle. Never unlink WAL, SHM, or journal files directly.
 5. Best-effort scrub the confined attachment root, then enable text capture.
@@ -315,33 +315,33 @@ the same time merely to split the diff.
 | `MEMORY-INDEP-001`, `-002`, `-010`, `-012` | retain non-blocking lifecycle, accepted loss, and content-free logs |
 | `MEMORY-INDEP-003`, `-007`, `-008` | rewrite shutdown to drop; archive offers one barrier then releases authorization without settlement waits |
 | `MEMORY-SEARCH-005`, `-006`, `-012`, `-013`, `-014` | rewrite v4 migration/diagnostics; remove reopen recovery; bound flush |
-| `MEMORY-CLEAR-201` | remove `manual_required`; Clear still discards volatile work |
+| `MEMORY-SEARCH-016`, `MEMORY-IM-ATTACH-001`, `-003`, `-010` | retain healthy/fallback semantics; replace drain/final flush with test-only worker/barrier sync |
 | `MEMORY-REBUILD-202`, `MEMORY-REPAIR-006` | rewrite claim/sidecar assertions around the transition barrier |
-| `MEMORY-FACTORY-003`, `-004`, `-201` | retain exclusion; include pin jobs in the barrier |
-| `MEMORY-IM-ATTACH-004`, `-009`, `-011` | retain normal cleanup/fallback; bound cleanup failure |
+| `MEMORY-CLEAR-201`, `MEMORY-FACTORY-003`, `-004`, `-201` | barrier covers post-pin admission; Clear removes `manual_required` and drops volatile work |
+| `MEMORY-IM-ATTACH-004`, `-009`, `-011` | retain cleanup/fallback; bound cleanup failure |
 
-Remove scenarios that require replay, exact Processing Record history, or drain.
+Remove only scenarios whose product contract requires replay, exact history, or drain.
 
 ### Validation
 
-- Every released fixture preserves identity/catalog data and the exact watermark,
-  including v0-v2 catalog derived from queue rows; delivery rows vanish without provider I/O.
+- Every fixture preserves identity/catalog, exact watermark, and exact `last_success_at`;
+  v0-v2 catalog derives from queue rows and delivery rows vanish without provider I/O.
 - Pre-commit failures leave the old store unchanged with no helper commit;
   post-commit checkpoint/reopen failures retain v4 for normal recovery.
 - Unknown schemas, unsafe paths, and ambiguous Clear authority fail closed without
   writes.
 - The 256 permits bound preparation plus queued/in-flight work; rejected project or
   timestamp candidates leave catalog and watermark unchanged.
-- Ready queue items reach a fake provider in queue order; concurrent preparation
-  may reorder arrivals, and queue and flush trackers stay within bounds.
+- Ready items preserve queue order; queued flushes remain barrier-visible, concurrent
+  preparation may reorder arrivals, and queue/flush trackers stay within bounds.
 - Offers, barriers, replacement, and shutdown never wait for delivery; transitions
   intentionally discard volatile state.
-- Adds and flushes stop after three attempts; pin failures and the sole provider
-  rejection proven unwritten preserve non-empty captions under the same permit.
+- Adds/flushes stop after three attempts; ambiguous calls initiate bounded reaping;
+  pin failures and proven-unwritten rejection preserve non-empty captions.
 - Diagnostics failure cannot reject capture, missing evidence never widens access,
   and unavailable sources are reported truthfully.
-- Authority replacement, maintenance, Clear, and Factory Reset quiesce old RPC and
-  pin work without draining capture; cleanup failure disables further pinning.
+- Authority changes quiesce old RPCs and every admission through queue conversion;
+  no drain occurs, and cleanup failure disables further pinning.
 - Logs, summaries, and receipts remain content-free.
 
 Tests must prove the healthy path, bounds, non-blocking behavior, security, and
