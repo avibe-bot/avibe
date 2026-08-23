@@ -264,38 +264,40 @@ async def test_session_lifecycle_barrier_is_non_blocking_for_admitted_turn_captu
     manager, _other, _engine, _engine_b, _starts = managers
     handler = _capture_handler(manager)
     release_capture = asyncio.Event()
+    capture_entered = asyncio.Event()
     captured: list[str] = []
-
-    admission = await manager.acquire_lifecycle_admission("ses_fsm")
     snapshot = manager.snapshot_session_lifecycle("ses_fsm")
 
     async def capture() -> None:
+        capture_entered.set()
         await release_capture.wait()
         captured.append("provider-write")
 
-    handler._schedule_memory_capture_task(
+    task = handler._schedule_memory_capture_task(
         session_id="ses_fsm",
         expected_snapshot=snapshot,
         capture=capture(),
     )
+    assert task is not None
+    await asyncio.wait_for(capture_entered.wait(), timeout=1.0)
 
     async def lifecycle_operation() -> str:
+        release_capture.set()
+        await asyncio.sleep(0)
+        assert captured == []
         return "reset"
 
-    try:
-        assert await asyncio.wait_for(
-            manager.run_session_lifecycle(
-                "ses_fsm",
-                lifecycle_operation,
-                deadline_seconds=1.0,
-            ),
-            timeout=1.0,
-        ) == "reset"
-    finally:
-        admission.release()
-        release_capture.set()
+    assert await asyncio.wait_for(
+        manager.run_session_lifecycle(
+            "ses_fsm",
+            lifecycle_operation,
+            deadline_seconds=1.0,
+        ),
+        timeout=1.0,
+    ) == "reset"
     await _wait_capture_tasks(handler)
     assert captured == []
+    assert task.cancelled()
 
 
 @pytest.mark.anyio
@@ -524,10 +526,10 @@ async def test_successful_lifecycle_does_not_cancel_a_new_generation_capture(
 
 
 @pytest.mark.anyio
-async def test_failed_timeout_lifecycle_preserves_in_flight_captures(
+async def test_failed_busy_lifecycle_invalidates_in_flight_capture(
     managers,
 ) -> None:
-    """A failed /new after the 5s deadline must not cancel accepted captures."""
+    """A busy old-generation capture is fenced before a failing /new runs."""
 
     manager, _other, _engine, _engine_b, _starts = managers
     handler = _capture_handler(manager)
@@ -539,11 +541,12 @@ async def test_failed_timeout_lifecycle_preserves_in_flight_captures(
         await never_resolves.wait()
 
     sampled_snapshot = manager.snapshot_session_lifecycle("ses_fsm")
-    handler._schedule_memory_capture_task(
+    task = handler._schedule_memory_capture_task(
         session_id="ses_fsm",
         expected_snapshot=sampled_snapshot,
         capture=hung_capture(),
     )
+    assert task is not None
     await asyncio.wait_for(holding.wait(), timeout=1.0)
 
     async def reset_session() -> str:
@@ -556,14 +559,13 @@ async def test_failed_timeout_lifecycle_preserves_in_flight_captures(
             deadline_seconds=0.05,
         )
 
-    assert manager.session_lifecycle_snapshot_matches(
+    await _wait_capture_tasks(handler)
+    assert not manager.session_lifecycle_snapshot_matches(
         "ses_fsm",
         sampled_snapshot,
     )
-    assert handler._memory_capture_tasks
-    assert all(not task.cancelled() for task in handler._memory_capture_tasks)
-    never_resolves.set()
-    await _wait_capture_tasks(handler)
+    assert task.cancelled()
+    assert not handler._memory_capture_tasks
 
 
 async def _activate(

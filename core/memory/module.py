@@ -655,15 +655,15 @@ class MemoryModule:
                         occurred_at_ms=request.occurred_at_ms,
                         max_provider_timestamp_ms=MAX_PROVIDER_TIMESTAMP_MS,
                     )
-                    if admission.outcome == "accepted":
-                        return await self._offer_admitted_capture(
-                            reservation,
-                            admission,
-                            text=normalized_text,
-                            bundle=None,
-                        )
                 except Exception:
                     pass
+                else:
+                    return await self._complete_capture_admission(
+                        reservation,
+                        admission,
+                        text=normalized_text,
+                        bundle=None,
+                    )
             await self._release_unadmitted_capture(reservation, pinned_bundle)
             if isinstance(error, AttachmentPinError) and normalized_text.strip() and request.attachments:
                 return CaptureSkipped(reason="memory_store_unavailable")
@@ -673,22 +673,35 @@ class MemoryModule:
                 return await self._skipped_with_missed("memory_invalid_input")
             return OperationFailed(error="memory_store_unavailable")
 
-        if admission.outcome != "accepted":
-            await self._release_unadmitted_capture(reservation, pinned_bundle)
-            if admission.outcome == "project_limit":
-                return CaptureSkipped(reason="memory_invalid_input")
-            if admission.outcome == "timestamp_invalid":
-                return CaptureSkipped(reason="memory_invalid_input")
-            if admission.outcome == "clear_in_progress":
-                return CaptureSkipped(reason="memory_clear_failed")
-            return OperationFailed(error="memory_store_unavailable")
-
-        return await self._offer_admitted_capture(
+        return await self._complete_capture_admission(
             reservation,
             admission,
             text=normalized_text,
             bundle=pinned_bundle,
         )
+
+    async def _complete_capture_admission(
+        self,
+        reservation: WriterReservation,
+        admission: VolatileAdmission,
+        *,
+        text: str,
+        bundle: PinnedBundle | None,
+    ) -> CaptureReceipt:
+        if admission.outcome == "accepted":
+            return await self._offer_admitted_capture(
+                reservation,
+                admission,
+                text=text,
+                bundle=bundle,
+            )
+
+        await self._release_unadmitted_capture(reservation, bundle)
+        if admission.outcome in {"project_limit", "timestamp_invalid"}:
+            return CaptureSkipped(reason="memory_invalid_input")
+        if admission.outcome == "clear_in_progress":
+            return CaptureSkipped(reason="memory_clear_failed")
+        return OperationFailed(error="memory_store_unavailable")
 
     async def _offer_admitted_capture(
         self,

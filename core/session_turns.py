@@ -744,32 +744,31 @@ class SessionTurnManager:
         *,
         deadline_seconds: float = 5.0,
     ) -> Any:
-        """Run a destructive transition, failing open if capture is still busy.
-
-        Waits up to ``deadline_seconds`` so a nearly-finished capture can
-        flush. On timeout the generation advances, in-flight captures are
-        abandoned, and ``operation`` still runs. A hung Memory sidecar
-        must not fail ``/new`` or archive.
-        """
+        """Run a destructive transition without waiting for Memory capture."""
 
         state = self._session_lifecycle_state(raw_session_id)
         await state.operation_lock.acquire()
         admission = None
         try:
+            pre_epoch = state.epoch
             # Lifecycle operations are intentionally non-blocking with respect
             # to Memory delivery. If a capture already owns the admission lock,
             # advance the generation immediately; the capture will revalidate
             # its snapshot and drop without provider I/O. An uncontended lock
             # acquisition completes synchronously on this event loop.
-            if not state.admission_lock.locked():
+            if state.admission_lock.locked():
+                self._advance_session_lifecycle(
+                    raw_session_id,
+                    state,
+                    abandon_captures=True,
+                )
+            else:
                 admission = await self.acquire_lifecycle_admission(raw_session_id)
-            pre_epoch = state.epoch
             result = await operation()
             if state.epoch == pre_epoch:
                 self._advance_session_lifecycle(
                     raw_session_id,
                     state,
-                    abandon_captures=admission is None,
                 )
             return result
         finally:

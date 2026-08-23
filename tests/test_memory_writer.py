@@ -12,8 +12,10 @@ from core.memory.everos import (
     AddAck,
     FakeMemoryProvider,
     FlushRetryable,
+    FlushSucceeded,
     MemoryProviderFailure,
 )
+from core.memory.attachments import AttachmentBundleInvalidError
 from core.memory.store import MemoryStore, VolatileAdmission
 from core.memory.types import ProviderSessionRef
 from core.memory.writer import (
@@ -286,6 +288,43 @@ async def test_invalid_add_receipt_is_ambiguous_and_never_replayed(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "result",
+    [
+        FlushSucceeded(request_id=None, status="extracted"),
+        FlushSucceeded(request_id="", status="extracted"),
+        FlushSucceeded(request_id="\ud800", status="extracted"),
+        FlushSucceeded(request_id="x" * 129, status="extracted"),
+        FlushSucceeded(request_id="flush-request", status=None),
+    ],
+)
+async def test_invalid_flush_receipt_is_ambiguous_and_never_replayed(
+    tmp_path: Path,
+    result: FlushSucceeded,
+) -> None:
+    stopped = 0
+
+    async def stop_reap() -> bool:
+        nonlocal stopped
+        stopped += 1
+        return True
+
+    provider = FakeMemoryProvider(flush_results=deque([result]))
+    writer = _writer(tmp_path, provider, ambiguous_stop_reap=stop_reap)
+    ref = _ref()
+    writer._pending[ref.serialize()] = _PendingSession(
+        ref, "raw-session-0", deque(["digest-0"]), 0.0, 0.0
+    )
+
+    await writer._flush_barrier(_BarrierItem(raw_session_id="raw-session-0"))
+
+    assert provider.flushes == [ref]
+    assert stopped == 1
+    assert writer.unavailable
+    assert writer._pending == {}
+
+
+@pytest.mark.asyncio
 async def test_ambiguous_failure_drops_already_queued_captures_when_reap_fails(
     tmp_path: Path,
 ) -> None:
@@ -547,6 +586,48 @@ async def test_attachment_cleanup_failure_disables_later_attachment_intake(tmp_p
 
     await writer.wait_idle_for_tests()
 
+    assert not writer.attachments_enabled
+    assert writer._permits == MAX_WRITER_PERMITS
+
+
+@pytest.mark.asyncio
+async def test_invalid_attachment_bundle_disables_later_attachment_intake(
+    tmp_path: Path,
+) -> None:
+    class InvalidAttachmentStore:
+        def __init__(self) -> None:
+            self.released: list[str] = []
+
+        def provider_attachments(self, _bundle):
+            raise AttachmentBundleInvalidError(
+                "memory_store_unavailable",
+                "bundle verification failed",
+            )
+
+        def release(self, bundle_id: str) -> None:
+            self.released.append(bundle_id)
+
+    provider = FakeMemoryProvider()
+    attachment_store = InvalidAttachmentStore()
+    writer = _writer(
+        tmp_path,
+        provider,
+        attachment_store=attachment_store,
+    )
+    reservation = writer.reserve("digest-0")
+    assert not isinstance(reservation, str)
+    assert writer.offer_capture(
+        reservation,
+        _admission(0),
+        text="message-0",
+        attachments=(),
+        bundle=SimpleNamespace(bundle_id="bundle-0"),
+    ) == "queued"
+
+    await writer.wait_idle_for_tests()
+
+    assert provider.captures == []
+    assert attachment_store.released == ["bundle-0"]
     assert not writer.attachments_enabled
     assert writer._permits == MAX_WRITER_PERMITS
 

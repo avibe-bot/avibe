@@ -393,6 +393,47 @@ async def test_attachment_only_pin_failure_preserves_typed_skip(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("outcome", "expected"),
+    [
+        ("project_limit", CaptureSkipped(reason="memory_invalid_input")),
+        ("timestamp_invalid", CaptureSkipped(reason="memory_invalid_input")),
+        ("clear_in_progress", CaptureSkipped(reason="memory_clear_failed")),
+        ("store_unavailable", OperationFailed(error="memory_store_unavailable")),
+    ],
+)
+async def test_caption_fallback_preserves_admission_outcome(
+    tmp_path: Path,
+    outcome: str,
+    expected: object,
+) -> None:
+    module, store, _provider = _module(tmp_path)
+
+    class FailingAttachmentStore:
+        def pin(self, *_args, **_kwargs):
+            raise AttachmentPinError("memory_store_unavailable", "pin failed")
+
+    module._attachment_store = FailingAttachmentStore()
+    store.admit_volatile_capture = lambda **_kwargs: VolatileAdmission(outcome)
+    attachment = CaptureAttachment(
+        kind="image",
+        name="source.png",
+        uri=(tmp_path / "attachments" / "avibe" / "source.png").as_uri(),
+        ext="png",
+    )
+
+    assert await module.capture(
+        _request(
+            source_message_id=f"caption-fallback-{outcome}",
+            text="keep the caption",
+            attachments=(attachment,),
+        )
+    ) == expected
+    assert module._writer._permits == MAX_WRITER_PERMITS
+    assert module._writer._queue.empty()
+
+
+@pytest.mark.asyncio
 async def test_startup_scrubs_leftover_attachment_bundles(tmp_path: Path) -> None:
     source = tmp_path / "attachments" / "avibe" / "source.png"
     source.parent.mkdir(parents=True)

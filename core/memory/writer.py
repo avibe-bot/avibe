@@ -398,6 +398,7 @@ class BestEffortMemoryWriter:
                     item.bundle,
                 )
             except AttachmentPinError:
+                self._attachments_disabled = True
                 await self._cleanup_item(item)
                 return
         capture = ProviderCapture(
@@ -560,6 +561,12 @@ class BestEffortMemoryWriter:
             if isinstance(result, FlushUnknown):
                 self._pending.pop(key, None)
                 await self._ambiguous_outcome("memory_provider_timeout")
+                return
+            if isinstance(result, FlushSucceeded) and (
+                result.status not in {"extracted", "no_extraction"}
+                or not _valid_receipt(result.request_id)
+            ):
+                await self._ambiguous_outcome("memory_provider_response_invalid")
                 return
             if isinstance(result, (FlushSucceeded, FlushRejected, FlushRetryable)):
                 # A retryable response that survives the fixed attempt budget

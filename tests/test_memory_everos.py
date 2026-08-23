@@ -553,6 +553,20 @@ def test_flush_treats_unsupported_2xx_status_as_unknown(caplog) -> None:
     assert "flush returned an unsupported status value" in caplog.text
 
 
+@pytest.mark.parametrize("request_id", ["", "x" * 129])
+def test_flush_rejects_invalid_success_receipt(request_id: str) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"request_id": request_id, "data": {"status": "extracted"}},
+        )
+
+    with _sidecar_transport(handler):
+        result = asyncio.run(EverOSPort(Path("/tmp/everos.sock")).flush(SESSION_REF))
+
+    assert result == FlushUnknown(reason="transport")
+
+
 @pytest.mark.parametrize(
     ("response", "expected"),
     [
