@@ -31,6 +31,29 @@ def test_new_store_is_identity_only_v4(tmp_path: Path) -> None:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == MEMORY_STORE_SCHEMA_VERSION
 
 
+@pytest.mark.parametrize(
+    ("table", "column"),
+    [
+        ("memory_meta", "updated_at"),
+        ("memory_projects", "last_written_at"),
+    ],
+)
+def test_incomplete_v4_store_is_rejected_during_initialization(
+    tmp_path: Path,
+    table: str,
+    column: str,
+) -> None:
+    path = _store_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    with sqlite3.connect(path) as conn:
+        conn.executescript(Path("core/memory/schema.sql").read_text(encoding="utf-8"))
+        conn.execute(f'ALTER TABLE "{table}" DROP COLUMN "{column}"')
+        conn.execute(f"PRAGMA user_version = {MEMORY_STORE_SCHEMA_VERSION}")
+
+    with pytest.raises(RuntimeError, match="schema is incomplete"):
+        MemoryStore(path, effective_home=tmp_path)
+
+
 def test_store_rejects_symlinked_database_without_touching_target(
     tmp_path: Path,
 ) -> None:

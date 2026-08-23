@@ -68,7 +68,7 @@ def _reserve_and_offer(writer: BestEffortMemoryWriter, index: int) -> None:
         text=f"message-{index}",
         attachments=(),
         bundle=None,
-    )
+    ) == "queued"
 
 
 @pytest.mark.asyncio
@@ -126,13 +126,13 @@ async def test_full_queue_discards_increment_process_local_count(
 
     reservation = writer.reserve("capture")
     assert not isinstance(reservation, str)
-    assert not writer.offer_capture(
+    assert writer.offer_capture(
         reservation,
         _admission(0),
         text="message",
         attachments=(),
         bundle=None,
-    )
+    ) == "full"
     reservation.release()
     assert writer.offer_barrier("raw-session") == "full"
 
@@ -242,14 +242,14 @@ async def test_ambiguous_failure_never_replays_and_disables_intake(tmp_path: Pat
         text="message-0",
         attachments=(),
         bundle=SimpleNamespace(bundle_id="bundle-0"),
-    )
+    ) == "queued"
     await writer.wait_idle_for_tests()
     assert calls == 1
     assert stopped == 1
     assert attachment_store.released == ["bundle-0"]
     assert writer._permits == MAX_WRITER_PERMITS
     assert writer.unavailable
-    assert writer.reserve("later") == "disabled"
+    assert writer.reserve("later") == "unavailable"
     writer.replace_provider(FakeMemoryProvider())
     writer.resume_intake()
     replacement = writer.reserve("replacement-generation")
@@ -388,7 +388,7 @@ async def test_quiesce_cancels_inflight_call_and_releases_volatile_resources(
         text="message-0",
         attachments=(),
         bundle=SimpleNamespace(bundle_id="bundle-0"),
-    )
+    ) == "queued"
     await entered.wait()
     writer._pending[_ref(1).serialize()] = _PendingSession(
         _ref(1), "raw-session-1", deque(["digest-1"]), 0.0, 0.0
@@ -483,7 +483,7 @@ async def test_close_during_attachment_projection_releases_reservation(
         text="message-0",
         attachments=(),
         bundle=SimpleNamespace(bundle_id="bundle-0"),
-    )
+    ) == "queued"
     await projection_entered.wait()
 
     await asyncio.wait_for(writer.close(), timeout=1.0)
@@ -515,7 +515,7 @@ async def test_attachment_cleanup_failure_disables_later_attachment_intake(tmp_p
         text="message-0",
         attachments=(),
         bundle=SimpleNamespace(bundle_id="bundle-0"),
-    )
+    ) == "queued"
 
     await writer.wait_idle_for_tests()
 

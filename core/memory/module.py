@@ -39,6 +39,7 @@ from core.memory.project_ids import (
 )
 from core.memory.store import (
     MemoryStore,
+    VolatileAdmission,
     derive_assistant_memory_owner_id,
     is_memory_owner_id,
     is_principal_id,
@@ -67,7 +68,11 @@ from core.memory.types import (
     RecallResult,
     is_memory_error_code,
 )
-from core.memory.writer import BestEffortMemoryWriter, WriterReservation
+from core.memory.writer import (
+    BestEffortMemoryWriter,
+    CaptureOfferOutcome,
+    WriterReservation,
+)
 
 if TYPE_CHECKING:
     from core.inbound_attachment_lease import InboundAttachmentLease
@@ -598,6 +603,8 @@ class MemoryModule:
         if reservation == "full":
             await self._skipped_with_missed("memory_queue_full")
             return CaptureSkipped(reason="memory_queue_full")
+        if reservation == "unavailable":
+            return await self._skipped_with_missed("memory_sidecar_unavailable")
         if reservation == "disabled":
             return CaptureSkipped(reason="memory_operation_in_progress")
         assert isinstance(reservation, WriterReservation)
@@ -646,10 +653,13 @@ class MemoryModule:
                         occurred_at_ms=request.occurred_at_ms,
                         max_provider_timestamp_ms=MAX_PROVIDER_TIMESTAMP_MS,
                     )
-                    if admission.outcome == "accepted" and self._writer.offer_capture(
-                        reservation, admission, text=normalized_text, attachments=(), bundle=None
-                    ):
-                        return CaptureAccepted()
+                    if admission.outcome == "accepted":
+                        return await self._offer_admitted_capture(
+                            reservation,
+                            admission,
+                            text=normalized_text,
+                            bundle=None,
+                        )
                 except Exception:
                     pass
             await self._release_unadmitted_capture(reservation, pinned_bundle)
@@ -671,22 +681,40 @@ class MemoryModule:
                 return CaptureSkipped(reason="memory_clear_failed")
             return OperationFailed(error="memory_store_unavailable")
 
-        offered = self._writer.offer_capture(
+        return await self._offer_admitted_capture(
             reservation,
             admission,
             text=normalized_text,
-            attachments=(),
             bundle=pinned_bundle,
         )
-        if not offered:
-            await self._release_unadmitted_capture(reservation, pinned_bundle)
-            await self._skipped_with_missed("memory_queue_full")
-            return CaptureSkipped(reason="memory_queue_full")
-        return CaptureAccepted(
-            captured_attachment_count=(
-                len(pinned_bundle.attachments) if pinned_bundle is not None else 0
-            )
+
+    async def _offer_admitted_capture(
+        self,
+        reservation: WriterReservation,
+        admission: VolatileAdmission,
+        *,
+        text: str,
+        bundle: PinnedBundle | None,
+    ) -> CaptureReceipt:
+        outcome: CaptureOfferOutcome = self._writer.offer_capture(
+            reservation,
+            admission,
+            text=text,
+            attachments=(),
+            bundle=bundle,
         )
+        if outcome == "queued":
+            return CaptureAccepted(
+                captured_attachment_count=(
+                    len(bundle.attachments) if bundle is not None else 0
+                )
+            )
+        await self._release_unadmitted_capture(reservation, bundle)
+        if outcome == "full":
+            return await self._skipped_with_missed("memory_queue_full")
+        if outcome == "unavailable":
+            return await self._skipped_with_missed("memory_sidecar_unavailable")
+        return await self._skipped_with_missed("memory_operation_in_progress")
 
     async def _capture_pin_failure(self, error: MemoryErrorCode) -> CaptureReceipt:
         if error == "memory_store_unavailable":

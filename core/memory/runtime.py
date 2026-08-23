@@ -1084,6 +1084,7 @@ class MemoryRuntime:
             not skip_embedding_guard
             and _embedding_configuration_changed(self._config, config)
         )
+        previous_config = deepcopy(self._config) if embedding_changed else None
         claims_paused = claims_already_paused
         if embedding_changed:
             # Fence and join volatile writer work before inspecting provider
@@ -1097,16 +1098,13 @@ class MemoryRuntime:
                 self._runtime_error = "memory_clear_failed"
                 return {"ok": False, "error": self._runtime_error}
             claims_paused = True
-            embedding_guard_rejected = False
-            try:
-                if not await self._embedding_change_is_admissible(self._config, config):
-                    embedding_guard_rejected = True
+            if not await self._embedding_change_is_admissible(self._config, config):
+                restored = False
+                if resume_claims_on_failure:
+                    restored = await self._restore_provisional_claims(previous_config)
+                if not restored:
                     self._runtime_error = "memory_clear_failed"
-                    return {"ok": False, "error": self._runtime_error}
-            finally:
-                if embedding_guard_rejected and resume_claims_on_failure:
-                    self.module.resume_claims()
-                    claims_paused = False
+                return {"ok": False, "error": "memory_clear_failed"}
 
         if not config.enabled:
             return await self._disable_locked(config)
@@ -1129,14 +1127,14 @@ class MemoryRuntime:
                 self._config = config
                 self._runtime_error = error
             if claims_paused and resume_claims_on_failure:
-                self.module.resume_claims()
+                await self._restore_provisional_claims(previous_config)
             return {"ok": False, "error": error}
         if not await self._probe_processing(python, config):
             error = "memory_processing_failed"
             if not (self._process and self._process.running):
                 self._runtime_error = error
             if claims_paused and resume_claims_on_failure:
-                self.module.resume_claims()
+                await self._restore_provisional_claims(previous_config)
             return {"ok": False, "error": error}
 
         # Every enabled reconciliation receives a fresh process. Endpoint,
@@ -3558,6 +3556,23 @@ class MemoryRuntime:
             self.module.pause_claims()
             return
         self.module.resume_claims()
+
+    async def _restore_provisional_claims(
+        self,
+        previous_config: MemoryConfig | None,
+    ) -> bool:
+        """Restore old authority after a candidate fails before cutover."""
+
+        if previous_config is None:
+            self.module.resume_claims()
+            return True
+        result = await self._reconcile_locked(
+            previous_config,
+            claims_already_paused=True,
+            skip_embedding_guard=True,
+            resume_claims_on_failure=False,
+        )
+        return result.get("ok") is True
 
     async def _close_writer(self) -> None:
         await self.module.close_writer()

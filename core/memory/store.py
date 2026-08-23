@@ -83,6 +83,16 @@ _V2_TABLE_COLUMNS = {
 _V3_PROJECT_COLUMNS = frozenset(
     "principal_id project_id created_at last_written_at".split()
 )
+_V4_TABLE_COLUMNS = {
+    "memory_meta": frozenset(
+        """singleton epoch clear_in_progress scope_key provider_root_id
+        last_provider_timestamp_ms missed_count last_success_at last_error last_error_at
+        processing_fault_generation processing_fault_kind processing_fault_since
+        processing_alert_active processing_recovery_pending_at
+        processing_recovery_generation updated_at""".split()
+    ),
+    "memory_projects": _V3_PROJECT_COLUMNS,
+}
 
 
 @dataclass(frozen=True)
@@ -567,8 +577,7 @@ def _execute_sql_script(conn: sqlite3.Connection, script: str) -> None:
 
 
 def _verify_schema(conn: sqlite3.Connection) -> None:
-    tables = _application_tables(conn)
-    if tables != {"memory_meta", "memory_projects"}:
+    if _table_columns(conn) != _V4_TABLE_COLUMNS:
         raise RuntimeError("Memory store schema is incomplete")
     check = conn.execute("PRAGMA quick_check").fetchone()
     if check is None or check[0] != "ok":

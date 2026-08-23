@@ -287,6 +287,39 @@ async def test_unadmitted_failure_allows_same_source_retry(tmp_path: Path) -> No
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("transition", "reason"),
+    [
+        ("paused", "memory_operation_in_progress"),
+        ("unavailable", "memory_sidecar_unavailable"),
+    ],
+)
+async def test_offer_preserves_writer_state_after_reservation(
+    tmp_path: Path,
+    transition: str,
+    reason: str,
+) -> None:
+    module, store, _provider = _module(tmp_path)
+    admit = store.admit_volatile_capture
+
+    def transition_after_admission(**kwargs):
+        admission = admit(**kwargs)
+        if transition == "unavailable":
+            module._writer._unavailable = True
+        module._writer.pause_intake()
+        return admission
+
+    store.admit_volatile_capture = transition_after_admission
+
+    assert await module.capture(
+        _request(source_message_id=f"offer-{transition}")
+    ) == CaptureSkipped(reason=reason)
+    assert module._writer._permits == MAX_WRITER_PERMITS
+    assert module._writer._queue.empty()
+    assert store.ensure_meta().missed_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "error",
     ["memory_invalid_input", "memory_input_too_large", "memory_low_disk_space"],
 )

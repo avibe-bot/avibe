@@ -42,6 +42,7 @@ MAX_UNFLUSHED_AGE_SECONDS = 30 * 60
 MAX_UNFLUSHED_MESSAGES = 100
 
 BarrierOutcome = Literal["queued", "full", "disabled"]
+CaptureOfferOutcome = Literal["queued", "full", "disabled", "unavailable"]
 AmbiguousStop = Callable[[], Awaitable[bool] | bool]
 
 
@@ -170,10 +171,15 @@ class BestEffortMemoryWriter:
 
         self._duplicate_lru.clear()
 
-    def reserve(self, digest: str) -> WriterReservation | Literal["duplicate", "full", "disabled"]:
+    def reserve(
+        self,
+        digest: str,
+    ) -> WriterReservation | Literal["duplicate", "full", "disabled", "unavailable"]:
         """Try to claim one permit before attachment pinning."""
 
-        if self._closed or self._intake_paused or self._unavailable or not self._enabled():
+        if self._unavailable:
+            return "unavailable"
+        if self._closed or self._intake_paused or not self._enabled():
             return "disabled"
         if digest in self._duplicate_lru:
             self._duplicate_lru.move_to_end(digest)
@@ -194,13 +200,15 @@ class BestEffortMemoryWriter:
         text: str,
         attachments: tuple[CaptureAttachment, ...],
         bundle: PinnedBundle | None,
-    ) -> bool:
+    ) -> CaptureOfferOutcome:
         """Queue one already-admitted capture without waiting for worker space."""
 
         if not reservation.active or admission.outcome != "accepted":
-            return False
-        if self._closed or self._intake_paused or self._unavailable:
-            return False
+            return "disabled"
+        if self._unavailable:
+            return "unavailable"
+        if self._closed or self._intake_paused or not self._enabled():
+            return "disabled"
         assert admission.provider_session_ref is not None
         assert admission.provider_timestamp_ms is not None
         assert admission.raw_session_id is not None
@@ -220,10 +228,10 @@ class BestEffortMemoryWriter:
             self._queue.put_nowait(item)
         except asyncio.QueueFull:
             self.dropped += 1
-            return False
+            return "full"
         self._queued_items += 1
         self._ensure_worker()
-        return True
+        return "queued"
 
     def offer_barrier(
         self,
