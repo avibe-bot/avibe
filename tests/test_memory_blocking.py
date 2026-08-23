@@ -123,3 +123,27 @@ def test_run_blocking_completed_result_is_not_changed_by_late_cancellation() -> 
         assert call.result() == "settled"
 
     asyncio.run(run())
+
+
+def test_run_blocking_reclaims_settled_result_before_cancellation_propagates() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    reclaimed: list[str] = []
+
+    def operation() -> str:
+        entered.set()
+        release.wait(timeout=1.0)
+        return "bundle-1"
+
+    async def run() -> None:
+        call = asyncio.create_task(
+            run_blocking(operation, on_cancel_result=reclaimed.append)
+        )
+        assert await asyncio.to_thread(entered.wait, 1.0)
+        call.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await call
+
+    asyncio.run(run())
+    assert reclaimed == ["bundle-1"]

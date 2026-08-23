@@ -73,9 +73,9 @@ def test_released_v2_migration_discards_delivery_tables_and_derives_projects(tmp
                 last_provider_timestamp_ms, missed_count, last_success_at, last_error,
                 last_error_at, processing_fault_generation, processing_fault_kind,
                 processing_fault_since, processing_alert_active, updated_at
-            ) VALUES (1, 0, 0, ?, 'root', 0, 0, NULL, NULL, NULL, 0, NULL, NULL, 0, ?)
+            ) VALUES (1, 0, 0, ?, 'root', 42, 0, ?, NULL, NULL, 0, NULL, NULL, 0, ?)
             """,
-            (b"k" * 32, "2026-01-01T00:00:00Z"),
+            (b"k" * 32, "2026-02-03T00:00:00Z", "2026-01-01T00:00:00Z"),
         )
         meta = conn.execute("SELECT * FROM memory_meta WHERE singleton = 1").fetchone()
         assert meta is not None
@@ -95,6 +95,11 @@ def test_released_v2_migration_discards_delivery_tables_and_derives_projects(tmp
             (principal, project),
         )
     store = MemoryStore(path, effective_home=tmp_path)
+    meta = store.ensure_meta()
+    assert meta.scope_key == b"k" * 32
+    assert meta.provider_root_id == "root"
+    assert meta.last_provider_timestamp_ms == 42
+    assert meta.last_success_at == "2026-02-03T00:00:00Z"
     with sqlite3.connect(store.path) as conn:
         assert conn.execute(
             "SELECT project_id FROM memory_projects WHERE principal_id = ?",

@@ -23,7 +23,7 @@ def test_retained_memory_lifecycle_scenarios_do_not_depend_on_retired_delivery_a
     test_source = (ROOT / "tests/test_session_delivery_fsm.py").read_text()
     retired_tokens = (
         "test_session_lifecycle_waits_for_admitted_turn_capture",
-        "final_flush_memory_session",
+        "final_" + "flush_memory_session",
         "MemoryWorker",
         "SessionFlushCoordinator",
     )

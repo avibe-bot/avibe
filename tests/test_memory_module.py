@@ -1,7 +1,10 @@
 """Focused Memory module tests for the bounded best-effort writer."""
 
+import asyncio
 from pathlib import Path
 import sqlite3
+import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,6 +19,7 @@ from core.memory.types import (
     CaptureRequest,
     CaptureSkipped,
 )
+from core.memory.writer import MAX_WRITER_PERMITS
 
 PRINCIPAL = "u-" + "1" * 32
 
@@ -83,9 +87,56 @@ async def _result(value: str) -> str:
 @pytest.mark.asyncio
 async def test_shutdown_drops_volatile_work(tmp_path: Path) -> None:
     module, _store, provider = _module(tmp_path)
+    module._writer._ensure_worker = lambda: None
     await module.capture(_request())
     await module.close_writer()
-    assert provider.captures in ([], provider.captures)
+    assert provider.captures == []
+    assert module._writer._queue.empty()
+    assert module._writer._permits == MAX_WRITER_PERMITS
+
+
+@pytest.mark.asyncio
+async def test_cancelled_pinning_releases_shared_writer_reservation(tmp_path: Path) -> None:
+    module, _store, _provider = _module(tmp_path)
+    pin_entered = threading.Event()
+    finish_pin = threading.Event()
+
+    class BlockingAttachmentStore:
+        def __init__(self) -> None:
+            self.released: list[str] = []
+
+        def pin(self, *_args, **_kwargs):
+            pin_entered.set()
+            finish_pin.wait(timeout=1.0)
+            return SimpleNamespace(bundle_id="cancelled-bundle")
+
+        def release(self, bundle_id: str) -> None:
+            self.released.append(bundle_id)
+
+    attachment_store = BlockingAttachmentStore()
+    module._attachment_store = attachment_store
+    attachment = CaptureAttachment(
+        kind="image",
+        name="source.png",
+        uri=(tmp_path / "attachments" / "avibe" / "source.png").as_uri(),
+        ext="png",
+    )
+    capture = asyncio.create_task(module.capture(_request(attachments=(attachment,))))
+    assert await asyncio.to_thread(pin_entered.wait, 1.0)
+    assert module._writer._permits == MAX_WRITER_PERMITS - 1
+
+    capture.cancel()
+    quiescing = asyncio.create_task(module._writer.quiesce(timeout_seconds=1.0))
+    await asyncio.sleep(0)
+    assert not capture.done()
+    assert not quiescing.done()
+    finish_pin.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await capture
+    assert await quiescing
+    assert module._writer._permits == MAX_WRITER_PERMITS
+    assert attachment_store.released == ["cancelled-bundle"]
 
 
 @pytest.mark.asyncio

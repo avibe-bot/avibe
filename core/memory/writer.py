@@ -57,6 +57,7 @@ class _CaptureItem:
 class _BarrierItem:
     refs: tuple[ProviderSessionRef, ...] | None
     scheduled_key: str | None = None
+    owns_permit: bool = False
 
 
 @dataclass(slots=True)
@@ -131,6 +132,9 @@ class BestEffortMemoryWriter:
     def attachments_enabled(self) -> bool:
         return not self._attachments_disabled
 
+    def disable_attachment_intake(self) -> None:
+        self._attachments_disabled = True
+
     def replace_provider(self, provider: MemoryProviderPort) -> None:
         self._provider = provider
 
@@ -202,11 +206,14 @@ class BestEffortMemoryWriter:
     ) -> BarrierOutcome:
         """Offer a non-blocking flush barrier; no delivery wait is exposed."""
 
-        if self._closed or self._unavailable:
+        if self._closed or self._intake_paused or self._unavailable or not self._enabled():
             return "disabled"
+        if not self._try_acquire_permit():
+            return "full"
         try:
-            self._queue.put_nowait(_BarrierItem(refs=refs))
+            self._queue.put_nowait(_BarrierItem(refs=refs, owns_permit=True))
         except asyncio.QueueFull:
+            self._release_permit()
             return "full"
         self._queued_items += 1
         self._ensure_worker()
@@ -236,6 +243,11 @@ class BestEffortMemoryWriter:
             self._scheduler_task.cancel()
             await asyncio.gather(self._scheduler_task, return_exceptions=True)
             self._scheduler_task = None
+        if self._worker_task is not None:
+            if not self._worker_task.done():
+                self._worker_task.cancel()
+            await asyncio.gather(self._worker_task, return_exceptions=True)
+            self._worker_task = None
         while True:
             try:
                 item = self._queue.get_nowait()
@@ -243,10 +255,11 @@ class BestEffortMemoryWriter:
                 break
             if isinstance(item, _CaptureItem):
                 await self._cleanup_item(item)
+            elif item.owns_permit:
+                self._release_permit()
             self._queue.task_done()
             self._queued_items = max(0, self._queued_items - 1)
-        if self._worker_task is not None and self._worker_task.done():
-            self._worker_task = None
+        self._pending.clear()
         # Runtime replacement reuses the writer object after dropping the old
         # generation.  A later authority transition may resume intake.
         self._closed = False
@@ -282,7 +295,7 @@ class BestEffortMemoryWriter:
                 break
 
     def _release_reservation(self, digest: str) -> None:
-        self._permits = min(MAX_WRITER_PERMITS, self._permits + 1)
+        self._release_permit()
         if digest in self._duplicate_lru:
             self._duplicate_lru[digest] = False
             self._duplicate_lru.move_to_end(digest)
@@ -300,12 +313,16 @@ class BestEffortMemoryWriter:
                 else:
                     await self._flush_barrier(item)
             except asyncio.CancelledError:
+                if isinstance(item, _CaptureItem):
+                    await self._cleanup_item(item)
                 raise
             except Exception:
                 logger.exception("Memory writer item failed")
                 if isinstance(item, _CaptureItem):
                     await self._cleanup_item(item)
             finally:
+                if isinstance(item, _BarrierItem) and item.owns_permit:
+                    self._release_permit()
                 self._queue.task_done()
                 self._queued_items = max(0, self._queued_items - 1)
 
@@ -335,10 +352,12 @@ class BestEffortMemoryWriter:
                 result = await self._provider.add(capture)
             except asyncio.CancelledError:
                 await self._ambiguous_outcome("memory_provider_timeout")
-                return
+                await self._cleanup_item(item)
+                raise
             except MemoryProviderSystemFailure as failure:
                 if failure.ambiguous:
                     await self._ambiguous_outcome(failure.error)
+                    await self._cleanup_item(item)
                     return
                 if attempt < MAX_ATTEMPTS:
                     continue
@@ -347,6 +366,7 @@ class BestEffortMemoryWriter:
             except MemoryProviderFailure as failure:
                 if failure.ambiguous:
                     await self._ambiguous_outcome(failure.error)
+                    await self._cleanup_item(item)
                     return
                 if failure.retryable and attempt < MAX_ATTEMPTS:
                     continue
@@ -354,6 +374,7 @@ class BestEffortMemoryWriter:
                 return
             except Exception:
                 await self._ambiguous_outcome("memory_provider_response_invalid")
+                await self._cleanup_item(item)
                 return
             finally:
                 self._active_provider_calls = max(0, self._active_provider_calls - 1)
@@ -364,6 +385,7 @@ class BestEffortMemoryWriter:
             if isinstance(result, AddRejected):
                 if (
                     attachments
+                    and capture.text.strip()
                     and attachment_add_rejection_proves_no_write(capture, result)
                     and attempt < MAX_ATTEMPTS
                 ):
@@ -377,6 +399,7 @@ class BestEffortMemoryWriter:
                 await self._terminal_failure(item, "memory_processing_failed")
                 return
             await self._ambiguous_outcome("memory_provider_response_invalid")
+            await self._cleanup_item(item)
             return
 
     async def _success(self, item: _CaptureItem) -> None:
@@ -407,10 +430,12 @@ class BestEffortMemoryWriter:
         await self._cleanup_item(item)
 
     async def _cleanup_item(self, item: _CaptureItem) -> None:
+        if not item.reservation.active:
+            return
         if item.bundle is not None and self._attachment_store is not None:
             try:
                 await run_blocking(self._attachment_store.release, item.bundle.bundle_id)
-            except Exception:
+            except (Exception, asyncio.CancelledError):
                 self._attachments_disabled = True
         item.reservation.release()
 
@@ -441,12 +466,14 @@ class BestEffortMemoryWriter:
                     result = await self._provider.flush(ref)
                 except MemoryProviderFailure as failure:
                     if failure.ambiguous:
+                        self._pending.pop(key, None)
                         await self._ambiguous_outcome(failure.error)
                         return
-                    if attempt < MAX_ATTEMPTS:
+                    if failure.retryable and attempt < MAX_ATTEMPTS:
                         continue
                     result = FlushRejected(None, failure.error, True)
                 except Exception:
+                    self._pending.pop(key, None)
                     await self._ambiguous_outcome("memory_provider_response_invalid")
                     return
                 finally:
@@ -479,10 +506,14 @@ class BestEffortMemoryWriter:
                         or len(pending.message_ids) >= MAX_UNFLUSHED_MESSAGES
                     ):
                         pending.scheduled = True
+                        if not self._try_acquire_permit():
+                            pending.scheduled = False
+                            continue
                         try:
-                            self._queue.put_nowait(_BarrierItem(None, key))
+                            self._queue.put_nowait(_BarrierItem(None, key, True))
                             self._queued_items += 1
                         except asyncio.QueueFull:
+                            self._release_permit()
                             pending.scheduled = False
         except asyncio.CancelledError:
             return
@@ -490,21 +521,29 @@ class BestEffortMemoryWriter:
     async def _ambiguous_outcome(self, error: str) -> None:
         self._unavailable = True
         self._intake_paused = True
-        if self._ambiguous_stop_reap is None:
-            return
-        try:
-            proved = self._ambiguous_stop_reap()
-            if asyncio.iscoroutine(proved):
-                proved = await proved
-            if not proved:
+        if self._ambiguous_stop_reap is not None:
+            try:
+                proved = self._ambiguous_stop_reap()
+                if asyncio.iscoroutine(proved):
+                    proved = await proved
+                if not proved:
+                    self._unavailable = True
+            except Exception:
                 self._unavailable = True
-        except Exception:
-            self._unavailable = True
         if self._processing_event is not None:
             try:
                 await self._processing_event("fault", "engine", error, 0)
             except Exception:
                 pass
+
+    def _try_acquire_permit(self) -> bool:
+        if self._permits <= 0:
+            return False
+        self._permits -= 1
+        return True
+
+    def _release_permit(self) -> None:
+        self._permits = min(MAX_WRITER_PERMITS, self._permits + 1)
 
     def _clock_seconds(self) -> float:
         value = self._now()

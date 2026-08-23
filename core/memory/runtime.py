@@ -366,7 +366,7 @@ def create_memory_runtime(
 
 
 class MemoryRuntime:
-    """Own local Memory state, sidecar reconciliation, and periodic draining."""
+    """Own local Memory state, sidecar reconciliation, and volatile capture."""
 
     def __init__(
         self,
@@ -409,7 +409,6 @@ class MemoryRuntime:
         self._ready_activation_task: asyncio.Task[None] | None = None
         self._artifact_activation_task: asyncio.Task[None] | None = None
         self._closing = False
-        self._worker_task: asyncio.Task[None] | None = None
         self._activation_loop: asyncio.AbstractEventLoop | None = None
         self._artifact_installing = False
         self._retired = False
@@ -624,7 +623,7 @@ class MemoryRuntime:
         async with self._reconcile_lock:
             async with self.module.lifecycle():
                 self.module.pause_claims()
-                await self._stop_worker()
+                await self._close_writer()
                 await self._sidecar.stop()
                 self.adopt_recovery_intent(config)
                 self._runtime_error = "memory_factory_reset_failed"
@@ -988,7 +987,7 @@ class MemoryRuntime:
         self._configure_insight_reader(config)
         self._provider = EverOSPort(self._socket_path)
         self.module.replace_provider(self._provider)
-        await self._stop_worker()
+        await self._close_writer()
         stopped_process = self._process is not None
         if stopped_process:
             await self._process.stop()
@@ -1045,7 +1044,7 @@ class MemoryRuntime:
                 self._runtime_error = "memory_rebuild_failed"
                 return {"ok": False, "error": self._runtime_error}
             self.module.pause_claims()
-            await self._stop_worker()
+            await self._close_writer()
             await self._sidecar.stop()
             self._config = deepcopy(config)
             self._restart_config = deepcopy(config)
@@ -1054,7 +1053,7 @@ class MemoryRuntime:
 
         if config.recovery_intent == "factory_reset":
             self.module.pause_claims()
-            await self._stop_worker()
+            await self._close_writer()
             await self._sidecar.stop()
             self._config = deepcopy(config)
             self._restart_config = deepcopy(config)
@@ -1066,7 +1065,7 @@ class MemoryRuntime:
             # a pause, never a fallback to saved custom providers. Capture can
             # keep queuing while claims and the old sidecar stay fenced.
             self.module.pause_claims()
-            await self._stop_worker()
+            await self._close_writer()
             await self._sidecar.stop()
             self._config = deepcopy(config)
             self._restart_config = deepcopy(config)
@@ -1086,13 +1085,12 @@ class MemoryRuntime:
         )
         claims_paused = claims_already_paused
         if embedding_changed:
-            # Stop the worker before inspecting provider state. A capture may
-            # still enqueue while settings are being reconciled, but no
-            # old-embedding drain can cross this boundary.
+            # Fence and join volatile writer work before inspecting provider
+            # state, so no old-embedding call can cross this boundary.
             if not await self.module.quiesce_claims():
                 # ``pause_and_wait`` fences claims before waiting, so a timeout
                 # leaves them fenced. Releasing here is what keeps a failed
-                # settings save from silently stopping the drain loop forever.
+                # settings save from silently pausing capture forever.
                 if resume_claims_on_failure:
                     self.module.resume_claims()
                 self._runtime_error = "memory_clear_failed"
@@ -1145,12 +1143,12 @@ class MemoryRuntime:
         # environment and must never leave an old sidecar running.
         if not claims_paused and not await self.module.quiesce_claims():
             # Same fence release as the embedding guard above: a timed-out pause
-            # must not leave the worker permanently unable to claim.
+            # must not leave the writer permanently unable to admit captures.
             if resume_claims_on_failure:
                 self.module.resume_claims()
             self._runtime_error = "memory_clear_failed"
             return {"ok": False, "error": self._runtime_error}
-        await self._stop_worker()
+        await self._close_writer()
         await self._sidecar.stop()
 
         self._config = config
@@ -1191,7 +1189,7 @@ class MemoryRuntime:
             return {"ok": False, "error": self._runtime_error}
         self._runtime_error = None
         self.module.resume_claims()
-        self._ensure_worker()
+        self._resume_writer()
         return {"ok": True, "state": "ready"}
 
     async def _processing_record_maintenance_observation(
@@ -2231,12 +2229,12 @@ class MemoryRuntime:
 
     async def _pause_clear_claims(self) -> None:
         if not await self.module.quiesce_claims_for_clear():
-            raise RuntimeError("Memory worker did not quiesce before clear")
+            raise RuntimeError("Memory writer did not quiesce before clear")
 
     async def _quiesce_for_clear(self, claims_already_paused: bool = False) -> None:
         if not claims_already_paused:
             await self._pause_clear_claims()
-        await self._stop_worker()
+        await self._close_writer()
         if self._process is not None:
             await self._process.stop()
             self._process = None
@@ -2841,13 +2839,13 @@ class MemoryRuntime:
                 if not await self.module.quiesce_claims(timeout_seconds=5.0):
                     if old_process is not None and old_process.running:
                         self.module.resume_claims()
-                        self._ensure_worker()
+                        self._resume_writer()
                     return {"ok": False, "error": "memory_restart_failed"}
-                await self._stop_worker()
+                await self._close_writer()
             except Exception:
                 if old_process is not None and old_process.running:
                     self.module.resume_claims()
-                    self._ensure_worker()
+                    self._resume_writer()
                 return {"ok": False, "error": "memory_restart_failed"}
 
             if old_process is not None:
@@ -2884,7 +2882,6 @@ class MemoryRuntime:
                 self._runtime_error = "memory_clear_failed"
                 return {"ok": False, "error": self._runtime_error}
 
-            self.module.begin_activation(new_lease=True)
             try:
                 started = await self._sidecar.start(
                     python,
@@ -2906,7 +2903,7 @@ class MemoryRuntime:
 
             self._runtime_error = None
             self.module.resume_claims()
-            self._ensure_worker()
+            self._resume_writer()
             return {"ok": True, "state": "ready"}
 
     async def _rebuild_locked(self) -> dict[str, Any]:
@@ -3044,7 +3041,7 @@ class MemoryRuntime:
                     "result": "failed",
                 }
 
-            await self._stop_worker()
+            await self._close_writer()
             await self._sidecar.stop()
 
             # Only an inspection after proven sidecar death decides whether a
@@ -3198,7 +3195,6 @@ class MemoryRuntime:
                     "result": mapped["result"],
                 }
 
-            self.module.begin_activation(new_lease=True)
             try:
                 # Destructive cutover: skip ordinary healthy-replacement endpoint
                 # preflight; the rebuild child already exercised the candidate.
@@ -3230,7 +3226,7 @@ class MemoryRuntime:
 
             self._runtime_error = None
             self.module.resume_claims()
-            self._ensure_worker()
+            self._resume_writer()
             return {
                 "ok": True,
                 "result": mapped["result"],
@@ -3332,7 +3328,7 @@ class MemoryRuntime:
         if self._module is not None:
             self._module.pause_claims()
             try:
-                await self._stop_worker()
+                await self._close_writer()
             except BaseException as error:
                 cleanup_error = error
             async with self._module.provider_root_lifecycle():
@@ -3342,7 +3338,7 @@ class MemoryRuntime:
                         and not await self._module.quiesce_claims_for_clear()
                     ):
                         raise RuntimeError(
-                            "Memory worker did not quiesce during retired close"
+                            "Memory writer did not quiesce during retired close"
                         )
                     await self._module.close_writer()
                 except BaseException as error:
@@ -3488,12 +3484,12 @@ class MemoryRuntime:
                     raise MemoryRuntimeActivationError("memory clear recovery is required")
                 if not await self.module.quiesce_claims():
                     self.module.resume_claims()
-                    raise MemoryRuntimeActivationError("memory worker could not pause")
+                    raise MemoryRuntimeActivationError("memory writer could not pause")
                 async with self.module.provider_root_lifecycle():
                     meta = None
                     root_rollback: ProviderRootRollback | None = None
                     try:
-                        await self._stop_worker()
+                        await self._close_writer()
                         if self._process is not None:
                             await self._process.stop()
                             self._process = None
@@ -3551,11 +3547,6 @@ class MemoryRuntime:
                             raise
                         raise MemoryRuntimeActivationError("memory runtime activation failed") from activation_error
 
-    async def _stop_sidecar_for_clear(self) -> None:
-        """Compatibility alias for the non-destructive clear quiesce step."""
-
-        await self._quiesce_for_clear()
-
     async def _current_sidecar_ready(self, generation: int) -> None:
         """Accept the lifecycle module's semantic current-sidecar event."""
 
@@ -3571,7 +3562,7 @@ class MemoryRuntime:
                     return
                 self._runtime_error = None
                 self.module.resume_claims()
-                self._ensure_worker()
+                self._resume_writer()
 
     def _schedule_sidecar_ready(self, process: EverOSProcessPort) -> None:
         """Compatibility bridge for legacy direct-supervisor test fixtures."""
@@ -3603,18 +3594,7 @@ class MemoryRuntime:
         )
 
     async def _processing_healthy(self) -> bool:
-        """Answer the drain's processing gate without ever waiting on a peer probe.
-
-        This gate runs inside the worker's drain lock, and Clear, clear recovery
-        and reconciliation all fence that lock with a bounded budget. A
-        processing probe spawns a short-lived child that can run for
-        ``_PROCESSING_PROBE_TIMEOUT_SECONDS`` plus reaping, so queueing behind
-        one already in flight pushed a single drain tick past every fence and
-        stranded the durable clear marker. Single-flight is preserved without a
-        lock: nothing is awaited between reading and setting the flag, so the
-        loop cannot interleave two owners, and a second caller reads the last
-        published verdict instead of blocking.
-        """
+        """Answer processing health without waiting on a peer probe."""
 
         return await self._sidecar.processing_healthy()
 
@@ -3623,23 +3603,21 @@ class MemoryRuntime:
 
         Deliberately shares no state with ``_processing_healthy``: this probe
         never touches the supervised child, and ``_reconcile_lock`` already
-        serializes it. One shared lock made a settings save and the drain loop
-        wait on each other -- the drain past its lifecycle fences, and the
-        reconcile without any bound at all while holding the module lifecycle
-        lock every read and Clear needs.
+        serializes it. One shared lock made settings saves and capture processing
+        wait on each other while holding lifecycle authority needed by reads and
+        Clear.
         """
 
         return await self._sidecar.probe(python, _process_settings(config))
 
-    def _ensure_worker(self) -> None:
+    def _resume_writer(self) -> None:
         if self._maintenance_open():
             self.module.pause_claims()
             return
         self.module.resume_claims()
 
-    async def _stop_worker(self) -> None:
+    async def _close_writer(self) -> None:
         await self.module.close_writer()
-        self._worker_task = None
 
     def _ensure_call_log_retention(self) -> None:
         if self._recorder_health.get("reason") != "call_log_corrupt":
@@ -3676,16 +3654,6 @@ class MemoryRuntime:
 
     def _set_recorder_health_disabled(self) -> None:
         self._update_recorder_health(_RECORDER_DISABLED)
-
-    async def _drain_loop(self) -> None:
-        """Retired product drain loop; the writer owns its single worker."""
-
-        return
-
-    async def _recover_failed_drain(self) -> None:
-        """Retired durable recovery path."""
-
-        return
 
     def _data_exists(self) -> bool:
         """Return a conservative status projection of vector-bearing state."""

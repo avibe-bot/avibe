@@ -579,41 +579,9 @@ def test_provider_projection_rejects_untracked_bundle_file(attachment_roots) -> 
     assert isinstance(error.value, AttachmentBundleInvalidError)
 
 
-def test_reconcile_preserves_references_and_removes_releasing_orphans_and_staging(
-    attachment_roots,
-) -> None:
-    home, source_root = attachment_roots
-    store = AttachmentPinStore()
-    referenced = store.pin((_attachment(_source_file(source_root, "referenced.txt")),))
-    releasing = store.pin((_attachment(_source_file(source_root, "releasing.txt")),))
-    orphan = store.pin((_attachment(_source_file(source_root, "orphan.txt")),))
-
-    root = home / "memory" / "attachments"
-    stale_id = "f" * 32
-    stale = root / "staging" / f"{stale_id}.tmp"
-    stale.mkdir(mode=0o700)
-    partial = stale / "00.txt"
-    partial.write_bytes(b"partial")
-    partial.chmod(0o000)
-    unknown = root / "staging" / "keep.txt"
-    unknown.write_text("keep", encoding="utf-8")
-
-    removed = store.reconcile({referenced.bundle_id}, {releasing.bundle_id})
-
-    assert removed == tuple(sorted((orphan.bundle_id, releasing.bundle_id)))
-    assert (root / referenced.relative_path).is_dir()
-    assert not (root / releasing.relative_path).exists()
-    assert not (root / orphan.relative_path).exists()
-    assert not stale.exists()
-    assert unknown.read_text(encoding="utf-8") == "keep"
-    assert store.reconcile({referenced.bundle_id}, {releasing.bundle_id}) == ()
-
-
-@pytest.mark.parametrize("operation", ["provider", "reconcile"])
 def test_attachment_reads_translate_temporary_ordering_database_failure(
     attachment_roots,
     monkeypatch: pytest.MonkeyPatch,
-    operation: str,
 ) -> None:
     _home, source_root = attachment_roots
     store = AttachmentPinStore()
@@ -630,10 +598,7 @@ def test_attachment_reads_translate_temporary_ordering_database_failure(
     )
 
     with pytest.raises(AttachmentPinError) as raised:
-        if operation == "provider":
-            store.provider_attachments(bundle)
-        else:
-            store.reconcile({bundle.bundle_id}, set())
+        store.provider_attachments(bundle)
 
     _assert_pin_error(raised, "memory_store_unavailable")
     assert not isinstance(raised.value, AttachmentBundleInvalidError)
@@ -642,18 +607,6 @@ def test_attachment_reads_translate_temporary_ordering_database_failure(
         confined_filesystem_module.ConfinedFilesystemError,
     )
     assert raised.value.__cause__.__cause__ is failure
-
-
-def test_reconcile_reports_missing_reference(attachment_roots) -> None:
-    _home, _source_root = attachment_roots
-    store = AttachmentPinStore()
-
-    with pytest.raises(AttachmentPinError) as error:
-        store.reconcile({"a" * 32}, set())
-
-    _assert_pin_error(error, "memory_store_unavailable")
-
-
 def test_clear_all_removes_safe_entries_without_trusting_their_names(
     attachment_roots,
 ) -> None:

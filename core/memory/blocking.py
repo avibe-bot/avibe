@@ -14,9 +14,10 @@ async def run_blocking(
     operation: Callable[..., _Result],
     /,
     *args: Any,
+    on_cancel_result: Callable[[_Result], Any] | None = None,
     **kwargs: Any,
 ) -> _Result:
-    """Settle one synchronous Memory operation before propagating cancellation."""
+    """Settle synchronous work and optionally reclaim its cancelled result."""
 
     task = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))
     cancellation: asyncio.CancelledError | None = None
@@ -29,8 +30,14 @@ async def run_blocking(
             break
     if cancellation is not None:
         try:
-            task.result()
+            result = task.result()
         except (Exception, asyncio.CancelledError):
             pass
+        else:
+            if on_cancel_result is not None:
+                try:
+                    await run_blocking(on_cancel_result, result)
+                except (Exception, asyncio.CancelledError):
+                    pass
         raise cancellation
     return task.result()

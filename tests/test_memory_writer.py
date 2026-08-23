@@ -4,6 +4,7 @@ import asyncio
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -67,19 +68,26 @@ def _reserve_and_offer(writer: BestEffortMemoryWriter, index: int) -> None:
 @pytest.mark.asyncio
 async def test_shared_permit_bound_covers_reservations_until_terminal_release(tmp_path: Path) -> None:
     writer = _writer(tmp_path, FakeMemoryProvider())
+    writer._ensure_worker = lambda: None
     reservations = []
-    for index in range(MAX_WRITER_PERMITS):
+    for index in range(MAX_WRITER_PERMITS - 1):
         reservation = writer.reserve(f"digest-{index}")
         assert not isinstance(reservation, str)
         reservations.append(reservation)
+    assert writer.offer_barrier() == "queued"
     assert writer.reserve("digest-over-bound") == "full"
+    assert writer.offer_barrier() == "full"
 
     quiescing = asyncio.create_task(writer.quiesce(timeout_seconds=0.2))
     await asyncio.sleep(0)
     assert not quiescing.done()
     for reservation in reservations:
         reservation.release()
+    await asyncio.sleep(0)
+    assert not quiescing.done()
+    await writer.close()
     assert await quiescing
+    assert writer._permits == MAX_WRITER_PERMITS
 
 
 def test_completed_duplicate_entries_are_evictable_behind_pending_claims(tmp_path: Path) -> None:
@@ -158,13 +166,173 @@ async def test_ambiguous_failure_never_replays_and_disables_intake(tmp_path: Pat
         return True
 
     provider.add = counted_add
-    writer = _writer(tmp_path, provider, ambiguous_stop_reap=stop_reap)
-    _reserve_and_offer(writer, 0)
+    class AttachmentStore:
+        def __init__(self) -> None:
+            self.released: list[str] = []
+
+        def provider_attachments(self, _bundle):
+            return ()
+
+        def release(self, bundle_id: str) -> None:
+            self.released.append(bundle_id)
+
+    attachment_store = AttachmentStore()
+    writer = _writer(
+        tmp_path,
+        provider,
+        ambiguous_stop_reap=stop_reap,
+        attachment_store=attachment_store,
+    )
+    reservation = writer.reserve("digest-0")
+    assert not isinstance(reservation, str)
+    assert writer.offer_capture(
+        reservation,
+        _admission(0),
+        text="message-0",
+        attachments=(),
+        bundle=SimpleNamespace(bundle_id="bundle-0"),
+    )
     await writer.wait_idle_for_tests()
     assert calls == 1
     assert stopped == 1
+    assert attachment_store.released == ["bundle-0"]
+    assert writer._permits == MAX_WRITER_PERMITS
     assert writer.unavailable
     assert writer.reserve("later") == "disabled"
+
+
+@pytest.mark.asyncio
+async def test_close_cancels_inflight_call_and_releases_volatile_resources(tmp_path: Path) -> None:
+    entered = asyncio.Event()
+    stop_calls = 0
+
+    async def block_add(_capture) -> None:
+        entered.set()
+        await asyncio.Event().wait()
+
+    async def stop_reap() -> bool:
+        nonlocal stop_calls
+        stop_calls += 1
+        return True
+
+    class AttachmentStore:
+        def __init__(self) -> None:
+            self.released: list[str] = []
+
+        def provider_attachments(self, _bundle):
+            return ()
+
+        def release(self, bundle_id: str) -> None:
+            self.released.append(bundle_id)
+
+    provider = FakeMemoryProvider(add_hook=block_add)
+    attachment_store = AttachmentStore()
+    writer = _writer(
+        tmp_path,
+        provider,
+        ambiguous_stop_reap=stop_reap,
+        attachment_store=attachment_store,
+    )
+    reservation = writer.reserve("digest-0")
+    assert not isinstance(reservation, str)
+    assert writer.offer_capture(
+        reservation,
+        _admission(0),
+        text="message-0",
+        attachments=(),
+        bundle=SimpleNamespace(bundle_id="bundle-0"),
+    )
+    await entered.wait()
+    writer._pending[_ref(1).serialize()] = _PendingSession(
+        _ref(1), deque(["digest-1"]), 0.0, 0.0
+    )
+
+    await asyncio.wait_for(writer.close(), timeout=1.0)
+
+    assert stop_calls == 1
+    assert attachment_store.released == ["bundle-0"]
+    assert writer._permits == MAX_WRITER_PERMITS
+    assert writer._pending == {}
+    assert writer._worker_task is None
+
+
+@pytest.mark.asyncio
+async def test_close_during_attachment_projection_releases_reservation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    projection_entered = asyncio.Event()
+
+    class AttachmentStore:
+        def __init__(self) -> None:
+            self.released: list[str] = []
+
+        def provider_attachments(self, _bundle):
+            raise AssertionError("projection is controlled by the async test bridge")
+
+        def release(self, bundle_id: str) -> None:
+            self.released.append(bundle_id)
+
+    attachment_store = AttachmentStore()
+
+    async def controlled_run_blocking(operation, *args):
+        if operation == attachment_store.provider_attachments:
+            projection_entered.set()
+            await asyncio.Event().wait()
+        return operation(*args)
+
+    monkeypatch.setattr("core.memory.writer.run_blocking", controlled_run_blocking)
+    writer = _writer(
+        tmp_path,
+        FakeMemoryProvider(),
+        attachment_store=attachment_store,
+    )
+    reservation = writer.reserve("digest-0")
+    assert not isinstance(reservation, str)
+    assert writer.offer_capture(
+        reservation,
+        _admission(0),
+        text="message-0",
+        attachments=(),
+        bundle=SimpleNamespace(bundle_id="bundle-0"),
+    )
+    await projection_entered.wait()
+
+    await asyncio.wait_for(writer.close(), timeout=1.0)
+
+    assert attachment_store.released == ["bundle-0"]
+    assert writer._permits == MAX_WRITER_PERMITS
+    assert writer._worker_task is None
+
+
+@pytest.mark.asyncio
+async def test_attachment_cleanup_failure_disables_later_attachment_intake(tmp_path: Path) -> None:
+    class FailingAttachmentStore:
+        def provider_attachments(self, _bundle):
+            return ()
+
+        def release(self, _bundle_id: str) -> None:
+            raise OSError("cleanup failed")
+
+    writer = _writer(
+        tmp_path,
+        FakeMemoryProvider(),
+        attachment_store=FailingAttachmentStore(),
+    )
+    reservation = writer.reserve("digest-0")
+    assert not isinstance(reservation, str)
+    assert writer.offer_capture(
+        reservation,
+        _admission(0),
+        text="message-0",
+        attachments=(),
+        bundle=SimpleNamespace(bundle_id="bundle-0"),
+    )
+
+    await writer.wait_idle_for_tests()
+
+    assert not writer.attachments_enabled
+    assert writer._permits == MAX_WRITER_PERMITS
 
 
 @pytest.mark.asyncio
@@ -192,19 +360,27 @@ async def test_scheduled_barrier_is_visible_until_dequeue_and_retry_exhaustion_s
 
 
 @pytest.mark.asyncio
-async def test_scheduler_marks_idle_age_and_count_thresholds_as_barrier_visible(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("threshold", ["idle", "age", "count"])
+async def test_each_exact_flush_threshold_queues_a_visible_barrier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, threshold: str
 ) -> None:
     provider = FakeMemoryProvider()
     current = datetime.now(timezone.utc)
     writer = _writer(tmp_path, provider, now=lambda: current)
     ref = _ref()
     key = ref.serialize()
+    message_count = MAX_UNFLUSHED_MESSAGES if threshold == "count" else 1
+    first_at = current.timestamp()
+    last_ack_at = current.timestamp()
+    if threshold == "age":
+        first_at -= MAX_UNFLUSHED_AGE_SECONDS
+    if threshold == "idle":
+        last_ack_at -= IDLE_FLUSH_SECONDS
     writer._pending[key] = _PendingSession(
         ref,
-        deque(["digest"]),
-        current.timestamp() - MAX_UNFLUSHED_AGE_SECONDS,
-        current.timestamp() - IDLE_FLUSH_SECONDS,
+        deque(f"digest-{index}" for index in range(message_count)),
+        first_at,
+        last_ack_at,
     )
     sleeps = 0
 
@@ -223,6 +399,38 @@ async def test_scheduler_marks_idle_age_and_count_thresholds_as_barrier_visible(
     assert queued.scheduled_key == key
     writer._queue.task_done()
     writer._queued_items = 0
+    writer._release_permit()
+
+
+@pytest.mark.asyncio
+async def test_flush_threshold_near_misses_do_not_schedule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    current = datetime.now(timezone.utc)
+    writer = _writer(tmp_path, FakeMemoryProvider(), now=lambda: current)
+    ref = _ref()
+    key = ref.serialize()
+    writer._pending[key] = _PendingSession(
+        ref,
+        deque(
+            f"digest-{index}" for index in range(MAX_UNFLUSHED_MESSAGES - 1)
+        ),
+        current.timestamp() - MAX_UNFLUSHED_AGE_SECONDS + 1,
+        current.timestamp() - IDLE_FLUSH_SECONDS + 1,
+    )
+    sleeps = 0
+
+    async def one_scheduler_tick(_seconds: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps > 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr("core.memory.writer.asyncio.sleep", one_scheduler_tick)
+    await writer._schedule_due_flushes()
+    assert not writer._pending[key].scheduled
+    assert writer._queued_items == 0
+    assert writer._queue.empty()
 
 
 def test_writer_bounds_are_fixed_and_not_user_tunable() -> None:

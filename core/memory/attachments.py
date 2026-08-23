@@ -1,17 +1,16 @@
-"""Private, durable pinning for Workbench Memory attachments."""
+"""Private pinning for process-local Workbench Memory attachments."""
 
 from __future__ import annotations
 
 import errno
 import hashlib
-import json
 import os
 import re
 import secrets
 import stat
 import threading
 import time
-from collections.abc import Collection, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote_to_bytes, urlsplit
@@ -134,87 +133,6 @@ class PinnedBundle:
     @property
     def relative_path(self) -> str:
         return PurePosixPath("bundles", self.bundle_id).as_posix()
-
-
-def encode_pinned_bundle(bundle: PinnedBundle) -> str:
-    """Encode only the portable manifest metadata stored in the outbox row."""
-
-    return json.dumps(
-        {
-            "version": 1,
-            "total_bytes": bundle.total_bytes,
-            "attachments": [
-                {
-                    "kind": item.kind,
-                    "name": item.name,
-                    "ext": item.ext,
-                    "storage_key": item.storage_key,
-                    "size_bytes": item.size_bytes,
-                    "sha256": item.sha256,
-                }
-                for item in bundle.attachments
-            ],
-        },
-        ensure_ascii=True,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-
-
-def decode_pinned_bundle(bundle_id: str, payload: str) -> PinnedBundle:
-    """Decode the exact closed manifest persisted beside a bundle reference."""
-
-    try:
-        value = json.loads(payload)
-    except (TypeError, ValueError) as error:
-        raise AttachmentBundleInvalidError(
-            "memory_store_unavailable",
-            "pinned attachment manifest is invalid",
-        ) from error
-    if not isinstance(value, dict) or set(value) != {"version", "total_bytes", "attachments"}:
-        raise AttachmentBundleInvalidError(
-            "memory_store_unavailable",
-            "pinned attachment manifest is invalid",
-        )
-    items = value.get("attachments")
-    if value.get("version") != 1 or not isinstance(items, list):
-        raise AttachmentBundleInvalidError(
-            "memory_store_unavailable",
-            "pinned attachment manifest is invalid",
-        )
-    try:
-        attachments = tuple(
-            PinnedAttachment(
-                kind=item["kind"],
-                name=item["name"],
-                ext=item["ext"],
-                storage_key=item["storage_key"],
-                size_bytes=item["size_bytes"],
-                sha256=item["sha256"],
-            )
-            for item in items
-            if isinstance(item, dict)
-            and set(item) == {
-                "kind",
-                "name",
-                "ext",
-                "storage_key",
-                "size_bytes",
-                "sha256",
-            }
-        )
-        if len(attachments) != len(items):
-            raise ValueError("manifest item shape mismatch")
-        return PinnedBundle(
-            bundle_id=bundle_id,
-            attachments=attachments,
-            total_bytes=value["total_bytes"],
-        )
-    except (KeyError, TypeError, ValueError) as error:
-        raise AttachmentBundleInvalidError(
-            "memory_store_unavailable",
-            "pinned attachment manifest is invalid",
-        ) from error
 
 
 class AttachmentPinStore:
@@ -502,54 +420,6 @@ class AttachmentPinStore:
                 _remove_private_bundle(bundles_fd, bundle_id, strict_files=True)
             finally:
                 os.close(bundles_fd)
-
-    def reconcile(
-        self,
-        referenced_bundle_ids: Collection[str],
-        releasing_bundle_ids: Collection[str],
-    ) -> tuple[str, ...]:
-        """Remove staging/releasing/orphan bundles while preserving every reference."""
-
-        referenced = _validated_bundle_ids(referenced_bundle_ids)
-        releasing = _validated_bundle_ids(releasing_bundle_ids)
-        if referenced & releasing:
-            raise AttachmentPinError(
-                "memory_invalid_input",
-                "attachment bundle cannot be referenced and releasing",
-            )
-
-        with self._lock:
-            self._verify_private_layout()
-            staging_fd = _open_private_directory(self._effective_home, self._staging, "attachment staging root")
-            bundles_fd = _open_private_directory(self._effective_home, self._bundles, "attachment bundles root")
-            removed: list[str] = []
-            try:
-                for name in _directory_entry_names(staging_fd):
-                    if _STAGING_NAME_PATTERN.fullmatch(name) is not None:
-                        _remove_private_bundle(staging_fd, name, strict_files=False)
-
-                existing: set[str] = set()
-                for name in _directory_entry_names(bundles_fd):
-                    if not _valid_bundle_id(name):
-                        continue
-                    existing.add(name)
-                    if name in referenced:
-                        _validate_private_bundle(bundles_fd, name)
-                        continue
-                    _remove_private_bundle(bundles_fd, name, strict_files=True)
-                    removed.append(name)
-
-                missing = referenced - existing
-                if missing:
-                    raise AttachmentPinError(
-                        "memory_store_unavailable",
-                        "a referenced attachment bundle is missing",
-                    )
-                # A missing releasing bundle is already fully released.
-                return tuple(sorted(set(removed)))
-            finally:
-                os.close(bundles_fd)
-                os.close(staging_fd)
 
     def clear_all(self) -> None:
         """Remove every safely confined entry, regardless of bundle naming."""
@@ -1365,16 +1235,6 @@ def _valid_storage_key_shape(storage_key: object, extension: str) -> bool:
 
 def _valid_bundle_id(value: object) -> bool:
     return isinstance(value, str) and _BUNDLE_ID_PATTERN.fullmatch(value) is not None
-
-
-def _validated_bundle_ids(values: Collection[str]) -> set[str]:
-    try:
-        checked = set(values)
-    except TypeError as error:
-        raise AttachmentPinError("memory_invalid_input", "invalid attachment bundle ids") from error
-    if any(not _valid_bundle_id(value) for value in checked):
-        raise AttachmentPinError("memory_invalid_input", "invalid attachment bundle id")
-    return checked
 
 
 def _entry_exists(parent_fd: int, name: str) -> bool:

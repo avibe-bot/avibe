@@ -43,7 +43,7 @@ scenarios:
     status: covered
     kind: regression_keep
     layer: scenario
-    test: tests/test_session_delivery_fsm.py::test_idle_session_capture_attributes_and_shutdown_drains
+    test: tests/test_session_delivery_fsm.py::test_idle_session_capture_attributes_while_shutdown_may_drop
   - id: MEMORY-INDEP-004
     name: Shared delivery imports do not load Memory implementations
     status: covered

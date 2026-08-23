@@ -58,7 +58,7 @@ scenarios:
     status: covered
     kind: recovery
     layer: scenario
-    test: tests/test_memory_runtime.py::test_pending_rebuild_install_publishes_artifact_for_explicit_retry
+    test: tests/test_memory_repair.py::test_pending_rebuild_install_publishes_artifact_for_explicit_retry
     given: A rebuild intent is durable and no managed Memory runtime artifact is admitted
     when: Dependencies installs a valid artifact and the user explicitly retries rebuild
     then: Install publishes only the admitted pointer with writer intake and sidecar fenced, and Retry consumes the artifact and clears the intent on success

@@ -458,7 +458,7 @@ async def test_capture_admitted_before_new_is_discarded_after_transition(
 
 
 @pytest.mark.anyio
-async def test_idle_session_capture_attributes_and_shutdown_drains(
+async def test_idle_session_capture_attributes_while_shutdown_may_drop(
     managers,
 ) -> None:
     """Scenario: MEMORY-INDEP-003."""

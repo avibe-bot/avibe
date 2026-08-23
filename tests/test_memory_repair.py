@@ -8,11 +8,23 @@ from pathlib import Path
 import pytest
 
 import core.memory.runtime as memory_runtime
-from config.v2_config import MemoryConfig, MemoryEndpointConfig, MemoryProcessingConfig
-from core.memory.artifact import FakeMemoryArtifactManager
+from config.v2_config import (
+    AgentsConfig,
+    MemoryConfig,
+    MemoryEndpointConfig,
+    MemoryProcessingConfig,
+    RuntimeConfig,
+    SlackConfig,
+    V2Config,
+)
+from core.memory.artifact import (
+    FakeMemoryArtifactManager,
+    MemoryArtifactCandidate,
+    MemoryProviderRootState,
+)
 from core.memory.everos import FakeMemoryProvider, ProviderHealthSnapshot
 from core.memory.operation_lock import MemoryOperationBusy, MemoryOperationLease
-from core.memory.process import FakeEverOSProcess
+from core.memory.process import FakeEverOSProcess, FakeEverOSProcessFactory
 from core.memory.sync_process import SyncProcessResult
 
 
@@ -77,6 +89,57 @@ def _runtime(
     return runtime, sidecar
 
 
+class _FirstRebuildInstallArtifact(FakeMemoryArtifactManager):
+    """Publish a fake first-install pointer through the real activation bridge."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            python=None,
+            root_format=None,
+            fingerprint=None,
+            compatible_formats=frozenset(),
+            status_payload={
+                "installed": False,
+                "status": "missing",
+                "reason": "memory_runtime_missing",
+            },
+        )
+        self.commits = 0
+        self.rollbacks = 0
+
+    def ensure(self, *, force: bool = False) -> dict:
+        self.ensure_calls.append(force)
+        assert force is True
+        assert self.activation_coordinator is not None
+
+        def commit() -> None:
+            self.commits += 1
+            self.python = Path(sys.executable)
+            self.root_format = "everos-1.2.3"
+            self.fingerprint = "first-rebuild-install"
+            self.compatible_formats = frozenset({"everos-1.2.3"})
+            self.status_payload = {
+                "installed": True,
+                "status": "ready",
+                "reason": None,
+            }
+
+        def rollback() -> None:
+            self.rollbacks += 1
+
+        self.activation_coordinator(
+            MemoryArtifactCandidate(
+                provider_root_format="everos-1.2.3",
+                compatible_provider_root_formats=frozenset({"everos-1.2.3"}),
+                artifact_fingerprint="first-rebuild-install",
+            ),
+            MemoryProviderRootState(exists=False),
+            commit,
+            rollback,
+        )
+        return dict(self.ensure_payload)
+
+
 @pytest.mark.parametrize(
     ("healthy", "expected_result"),
     [(True, "completed"), (False, "completed_with_warnings")],
@@ -103,7 +166,7 @@ async def test_repair_runs_sync_beside_live_sidecar_and_projects_health(
 
         async def run(self) -> SyncProcessResult:
             assert sidecar.running
-            assert runtime.module._worker._claims_paused is False
+            assert runtime.module._writer._intake_paused is False
             return SyncProcessResult.COMPLETED
 
     monkeypatch.setattr(memory_runtime, "EverOSSyncProcess", Sync)
@@ -154,6 +217,66 @@ async def test_repair_is_fenced_by_durable_rebuild_intent(
         "result": "failed",
     }
     assert runtime._repair_task is None
+
+
+async def test_pending_rebuild_install_publishes_artifact_for_explicit_retry(
+    tmp_path: Path,
+    memory_runtime_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scenario: MEMORY-REBUILD-202."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    pending = replace(_config(), recovery_intent="rebuild")
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=pending,
+    ).save()
+    artifact = _FirstRebuildInstallArtifact()
+    process_factory = FakeEverOSProcessFactory()
+    runtime = memory_runtime_factory(
+        pending,
+        artifact_manager=artifact,
+        process_factory=process_factory,
+        effective_home=tmp_path,
+    )
+
+    assert runtime.module._writer._intake_paused is True
+    assert await runtime.install_artifact() == {
+        "ok": True,
+        "reason": None,
+        "download_error": None,
+    }
+    assert artifact.commits == 1
+    assert artifact.rollbacks == 0
+    assert artifact.resolve_python() == Path(sys.executable)
+    assert process_factory.created == []
+    assert runtime.module._writer._intake_paused is True
+    assert V2Config.load().memory.recovery_intent == "rebuild"
+
+    async def healthy_preflight(_config: MemoryConfig | None = None) -> dict[str, bool]:
+        return {"ok": True}
+
+    monkeypatch.setattr(runtime, "preflight", healthy_preflight)
+    monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: False)
+    monkeypatch.setattr(
+        runtime,
+        "_probe_processing",
+        lambda *_args: asyncio.sleep(0, result=True),
+    )
+    assert await runtime.rebuild() == {
+        "ok": True,
+        "result": "completed_empty",
+        "state": "ready",
+    }
+    assert V2Config.load().memory.recovery_intent is None
+    assert runtime._restart_config.recovery_intent is None
+    assert len(process_factory.supervised) == 1
+    assert runtime.module._writer._intake_paused is False
 
 
 async def test_repair_rejects_artifact_without_sync_capability(

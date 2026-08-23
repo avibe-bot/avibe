@@ -301,11 +301,6 @@ class MemoryModule:
 
         self._writer.resume_intake()
 
-    def begin_activation(self, *, new_lease: bool = False) -> None:
-        """Retained as a lifecycle hook; volatile work needs no boot recovery."""
-
-        del new_lease
-
     async def close_writer(self) -> None:
         """Drop volatile work during shutdown or runtime replacement."""
 
@@ -610,12 +605,14 @@ class MemoryModule:
                     pinned_bundle = await run_blocking(
                         self._attachment_store.pin,
                         request.attachments,
+                        on_cancel_result=self._release_cancelled_pinned_bundle,
                     )
                 else:
                     pinned_bundle = await run_blocking(
                         self._attachment_store.pin,
                         request.attachments,
                         source_lease=source_lease,
+                        on_cancel_result=self._release_cancelled_pinned_bundle,
                     )
             admission = await self._store_call(
                 self._store.admit_volatile_capture,
@@ -627,6 +624,11 @@ class MemoryModule:
                 occurred_at_ms=request.occurred_at_ms,
                 max_provider_timestamp_ms=MAX_PROVIDER_TIMESTAMP_MS,
             )
+        except asyncio.CancelledError:
+            reservation.release()
+            if pinned_bundle is not None:
+                await self._release_unadmitted_bundle(pinned_bundle.bundle_id)
+            raise
         except Exception as error:
             if isinstance(error, AttachmentPinError) and normalized_text.strip() and request.attachments:
                 try:
@@ -685,23 +687,17 @@ class MemoryModule:
             )
         )
 
-    async def _capture_pin_failure(self, error: MemoryErrorCode) -> CaptureReceipt:
-        if error == "memory_store_unavailable":
-            return OperationFailed(error=error)
-        if error in {
-            "memory_invalid_input",
-            "memory_input_too_large",
-            "memory_low_disk_space",
-        }:
-            return await self._skipped_with_missed(error)
-        return OperationFailed(error="memory_store_unavailable")
-
     async def _release_unadmitted_bundle(self, bundle_id: str) -> None:
         try:
             await run_blocking(self._attachment_store.release, bundle_id)
         except Exception:
-            # It has no DB reference and boot reconciliation removes the orphan.
-            return
+            self._writer.disable_attachment_intake()
+
+    def _release_cancelled_pinned_bundle(self, bundle: PinnedBundle) -> None:
+        try:
+            self._attachment_store.release(bundle.bundle_id)
+        except Exception:
+            self._writer.disable_attachment_intake()
 
     async def search(
         self,

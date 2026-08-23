@@ -149,7 +149,7 @@ class _Runtime:
 
 
 class MemoryIMAttachmentScenarioHarness:
-    """Drive the real shared materializer, admission, pin, outbox, and worker."""
+    """Drive the real shared materializer, admission, pin, and bounded writer."""
 
     def __init__(
         self,
