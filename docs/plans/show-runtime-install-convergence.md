@@ -15,9 +15,11 @@ installation for git, Memory, model-hub, Show's manifest provider, and tmux.
 Show and tmux remain product adapters. Show keeps policy/install/serving
 projection, the system Node prerequisite and command. Memory keeps its explicit
 development provider and its controller-coordinated activation boundary. Tmux
-keeps macOS preparation and its runtime compatibility projection. The final
-ownership of direct-archive and npm awaits the W3 source-ladder decision; this
-contract does not assume either delegates to the shared layer. Show serving
+keeps macOS preparation and its runtime compatibility projection. At the
+measured baseline, direct-archive persists no install metadata and npm acquires
+no archive, so neither can supply the admitted-disk-record model. Their final
+ownership awaits the W3 source-ladder decision; this contract does not assume
+either delegates to the shared layer. Show serving
 (request proxying, lifecycle, readiness, prewarm, WebSocket routing, context
 capability, and stop) is outside this migration.
 
