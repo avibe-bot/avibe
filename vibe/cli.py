@@ -11139,7 +11139,7 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
                 "Prefer the manifest-cache provider for official installations.",
                 code="show_runtime.unpinned_archive_provider",
             )
-    elif provider in {"github", "npm"}:
+    elif provider == "npm":
         _add_doctor_item(
             items,
             "warn",
@@ -11153,7 +11153,8 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
             items,
             "fail",
             f"Show Runtime provider is unsupported: {provider}",
-            "Remove the provider override and reinstall the official Avibe package.",
+            "Remove VIBE_SHOW_RUNTIME_SOURCE to use the packaged runtime, or set "
+            "VIBE_SHOW_RUNTIME_BIN to a runtime you built.",
             code="show_runtime.provider_unsupported",
         )
 
@@ -12490,19 +12491,7 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
             detail = f"{detail}: {download_error['url']}"
     else:
         detail = reason
-    github_refusal_messages = {
-        "runtime_github_source_update_failed": "runtime.doctor.repairGitHubSourceUpdateFailed",
-    }
-    refusal_message = github_refusal_messages.get(reason)
-    message = (
-        i18n_t(
-            refusal_message,
-            language,
-            path=install_dir,
-        )
-        if refusal_message and install_dir
-        else i18n_t("runtime.doctor.repairPrepareFailed", language, detail=detail)
-    )
+    message = i18n_t("runtime.doctor.repairPrepareFailed", language, detail=detail)
     return _doctor_repair_result(
         target,
         "failed",
@@ -14525,11 +14514,16 @@ def cmd_runtime(args) -> int:
                     file=sys.stderr,
                 )
             else:
+                reason = payload.get("reason") or install.get("reason") or "unknown"
                 print(
                     i18n_t(
-                        "runtime.prepare.failed",
+                        (
+                            "runtime.prepare.unsupportedSource"
+                            if reason == "runtime_source_unsupported"
+                            else "runtime.prepare.failed"
+                        ),
                         language,
-                        reason=payload.get("reason") or install.get("reason") or "unknown",
+                        reason=reason,
                     ),
                     file=sys.stderr,
                 )
@@ -15013,7 +15007,7 @@ def build_parser():
     def add_runtime_provider_args(runtime_command_parser):
         runtime_command_parser.add_argument(
             "--source",
-            choices=("manifest-cache", "manifest", "archive", "prebuilt", "github", "github-source", "npm"),
+            choices=("manifest-cache", "manifest", "archive", "prebuilt", "npm"),
             help="Runtime provider override. Defaults to the packaged manifest cache.",
         )
         manifest_group = runtime_command_parser.add_mutually_exclusive_group()

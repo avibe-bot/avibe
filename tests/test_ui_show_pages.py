@@ -7169,7 +7169,6 @@ def test_managed_status_runtime_dimension_uses_availability_schema(monkeypatch, 
     ("provider", "resolver_name"),
     (
         ("manifest-cache", "_installed_manifest_runtime_command"),
-        ("github-source", "_installed_github_runtime_command"),
         ("npm", None),
     ),
 )
@@ -7509,7 +7508,6 @@ def test_provider_install_entrypoints_converge_on_single_admission_owner():
     provider_methods = {
         "_install_manifest_runtime_locked",
         "_install_archive_runtime",
-        "_install_github_runtime",
         "_install_npm_runtime",
     }
     direct_provider_callers = {
@@ -9046,9 +9044,9 @@ def test_show_runtime_prepare_prunes_old_packaged_installs_and_keeps_rollback(mo
         manifest_source=str(tmp_path / "development-manifest.json"),
         mtime=50,
     )
-    github_source = runtime_dir / "source" / "github" / "avibe-bot_vibe-show-runtime" / "main"
-    github_source.mkdir(parents=True)
-    (github_source / "README.md").write_text("development checkout\n", encoding="utf-8")
+    unrelated_source = runtime_dir / "source" / "custom" / "runtime"
+    unrelated_source.mkdir(parents=True)
+    (unrelated_source / "README.md").write_text("custom runtime\n", encoding="utf-8")
     local_bin = runtime_dir / "package" / "node_modules" / ".bin" / "avibe-show-runtime"
     local_bin.parent.mkdir(parents=True)
     local_bin.write_text("#!/bin/sh\n", encoding="utf-8")
@@ -9072,7 +9070,7 @@ def test_show_runtime_prepare_prunes_old_packaged_installs_and_keeps_rollback(mo
     assert previous_install.exists() is True
     assert old_install.exists() is False
     assert custom_install.exists() is True
-    assert github_source.exists() is True
+    assert unrelated_source.exists() is True
     assert local_bin.exists() is True
 
 
@@ -9868,141 +9866,13 @@ def test_show_runtime_manager_fails_closed_when_manifest_is_absent(tmp_path):
     assert manager.status()["reason"] == "runtime_manifest_missing"
 
 
-def test_show_runtime_manager_defaults_to_manifest_provider_outside_development_checkout(monkeypatch, tmp_path):
-    monkeypatch.setattr("core.show_runtime._packaged_runtime_manifest_exists", lambda: False)
-    monkeypatch.setattr("core.show_runtime._running_from_development_checkout", lambda: False)
+def test_show_runtime_manager_defaults_to_manifest_provider(tmp_path):
     manager = ShowRuntimeManager(
         workspace_root=tmp_path / "show",
         runtime_dir=tmp_path / "runtime",
     )
 
     assert manager.runtime_source == "manifest-cache"
-
-
-def test_show_runtime_manager_uses_github_source_in_development_checkout_without_manifest(monkeypatch, tmp_path):
-    monkeypatch.setattr("core.show_runtime._packaged_runtime_manifest_exists", lambda: False)
-    monkeypatch.setattr("core.show_runtime._running_from_development_checkout", lambda: True)
-    manager = ShowRuntimeManager(
-        workspace_root=tmp_path / "show",
-        runtime_dir=tmp_path / "runtime",
-    )
-
-    assert manager.runtime_source == "github"
-
-
-def test_show_runtime_manager_installs_from_github_source(monkeypatch, tmp_path):
-    runtime_dir = tmp_path / "runtime"
-    source_dir = runtime_dir / "source" / "github" / "avibe-bot_vibe-show-runtime" / "main"
-    commands = []
-
-    manager = ShowRuntimeManager(
-        workspace_root=tmp_path / "show",
-        runtime_dir=runtime_dir,
-        runtime_source="github",
-        github_repo="https://github.com/avibe-bot/vibe-show-runtime.git",
-        github_ref="main",
-    )
-
-    monkeypatch.setattr(
-        "core.show_runtime._resolve_command",
-        lambda command: [f"/bin/{command}"] if command in {"git", "npm", "node"} else None,
-    )
-
-    def fake_run(command, *, cwd=None):
-        commands.append((command, cwd))
-        if command[:2] == ["/bin/npm", "run"]:
-            cli_path = source_dir / "packages" / "runtime" / "dist" / "cli.js"
-            cli_path.parent.mkdir(parents=True, exist_ok=True)
-            cli_path.write_text("#!/usr/bin/env node\n", encoding="utf-8")
-        return True
-
-    monkeypatch.setattr(manager, "_run_install_command", fake_run)
-    monkeypatch.setattr(manager, "_git_revision", lambda *_args: "0123456789abcdef")
-
-    attempt = manager._install_managed_runtime_locked(force=False, offline=False)
-
-    assert attempt.command == [
-        "/bin/node",
-        str(source_dir / "packages" / "runtime" / "dist" / "cli.js"),
-    ]
-    clone_command, clone_cwd = commands[0]
-    assert clone_command[:-1] == [
-        "/bin/git",
-        "clone",
-        "--depth",
-        "1",
-        "--branch",
-        "main",
-        "https://github.com/avibe-bot/vibe-show-runtime.git",
-    ]
-    assert clone_cwd is None
-    assert Path(clone_command[-1]) == source_dir
-    assert commands[1:] == [
-        (["/bin/npm", "ci"], source_dir),
-        (["/bin/npm", "run", "build"], source_dir),
-    ]
-    assert manager.status()["github_source"] == {"built_revision": "0123456789abcdef"}
-
-
-def test_show_runtime_manager_reuses_installed_github_runtime_when_update_fails(monkeypatch, tmp_path):
-    runtime_dir = tmp_path / "runtime"
-    source_dir = runtime_dir / "source" / "github" / "avibe-bot_vibe-show-runtime" / "main"
-    cli_path = source_dir / "packages" / "runtime" / "dist" / "cli.js"
-    cli_path.parent.mkdir(parents=True)
-    cli_path.write_text("#!/usr/bin/env node\n", encoding="utf-8")
-    commands = []
-
-    manager = ShowRuntimeManager(
-        workspace_root=tmp_path / "show",
-        runtime_dir=runtime_dir,
-        runtime_source="github",
-        github_repo="https://github.com/avibe-bot/vibe-show-runtime.git",
-        github_ref="main",
-    )
-
-    monkeypatch.setattr(
-        "core.show_runtime._resolve_command",
-        lambda command: [f"/bin/{command}"] if command in {"git", "npm", "node"} else None,
-    )
-
-    def fake_run(command, *, cwd=None):
-        commands.append((command, cwd))
-        return False
-
-    monkeypatch.setattr(manager, "_run_install_command", fake_run)
-
-    assert manager._install_managed_runtime_locked(force=False, offline=False).command == ["/bin/node", str(cli_path)]
-    assert manager._install_reason is None
-    assert commands == [
-        (
-            ["/bin/git", "-C", str(source_dir), "fetch", "--depth", "1", "origin", "main"],
-            None,
-        )
-    ]
-
-
-def test_show_runtime_manager_reuses_installed_github_runtime_without_git(monkeypatch, tmp_path):
-    runtime_dir = tmp_path / "runtime"
-    source_dir = runtime_dir / "source" / "github" / "avibe-bot_vibe-show-runtime" / "main"
-    cli_path = source_dir / "packages" / "runtime" / "dist" / "cli.js"
-    cli_path.parent.mkdir(parents=True)
-    cli_path.write_text("#!/usr/bin/env node\n", encoding="utf-8")
-
-    manager = ShowRuntimeManager(
-        workspace_root=tmp_path / "show",
-        runtime_dir=runtime_dir,
-        runtime_source="github",
-        github_repo="https://github.com/avibe-bot/vibe-show-runtime.git",
-        github_ref="main",
-    )
-
-    monkeypatch.setattr(
-        "core.show_runtime._resolve_command",
-        lambda command: ["/bin/node"] if command == "node" else None,
-    )
-
-    assert manager._install_managed_runtime_locked(force=False, offline=False).command == ["/bin/node", str(cli_path)]
-    assert manager._install_reason is None
 
 
 def test_show_runtime_manager_can_use_npm_source(monkeypatch, tmp_path):

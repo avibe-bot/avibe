@@ -59,11 +59,8 @@ _RUNTIME_BIN = "avibe-show-runtime"
 _RUNTIME_PACKAGE = "@avibe/show-runtime"
 _RUNTIME_ARCHIVE_PREFIX = "vibe-show-runtime-node"
 _RUNTIME_ARCHIVE_RELEASE_BASE_URL = "https://github.com/avibe-bot/vibe-show-runtime/releases/latest/download"
-_RUNTIME_GITHUB_REPO = "https://github.com/avibe-bot/vibe-show-runtime.git"
-_RUNTIME_GITHUB_REF = "main"
 _RUNTIME_SOURCE_MANIFEST = "manifest-cache"
 _RUNTIME_SOURCE_ARCHIVE = "archive"
-_RUNTIME_SOURCE_GITHUB = "github"
 _RUNTIME_SOURCE_NPM = "npm"
 _RUNTIME_MANIFEST_RESOURCE = "show_runtime_manifest.json"
 _PACKAGED_RUNTIME_MANIFEST_SOURCE = f"package:{_RUNTIME_MANIFEST_RESOURCE}"
@@ -441,8 +438,6 @@ class ShowRuntimeManager:
         runtime_source: str | None = None,
         archive_path: Path | str | None = None,
         archive_url: str | None = None,
-        github_repo: str | None = None,
-        github_ref: str | None = None,
         manifest_path: Path | str | None = None,
         manifest_url: str | None = None,
         offline: bool | None = None,
@@ -462,22 +457,12 @@ class ShowRuntimeManager:
         source_value = runtime_source or os.environ.get("VIBE_SHOW_RUNTIME_SOURCE")
         if source_value is None and (archive_path_value or archive_url is not None or archive_url_env):
             source_value = _RUNTIME_SOURCE_ARCHIVE
-        if (
-            source_value is None
-            and not self.manifest_path
-            and not self.manifest_url
-            and not _packaged_runtime_manifest_exists()
-            and _running_from_development_checkout()
-        ):
-            source_value = _RUNTIME_SOURCE_GITHUB
         self.auto_install = _auto_install_enabled() if auto_install is None else auto_install
         self.package_spec = package_spec or os.environ.get("VIBE_SHOW_RUNTIME_PACKAGE_SPEC") or _RUNTIME_PACKAGE
         self.runtime_source = _normalize_runtime_source(source_value)
         configured_archive_url = archive_url if archive_url is not None else archive_url_env
         self.archive_url = configured_archive_url if configured_archive_url is not None else _default_runtime_archive_url()
         self._archive_url_provenance = "configured" if configured_archive_url is not None else "packaged"
-        self.github_repo = github_repo or os.environ.get("VIBE_SHOW_RUNTIME_GITHUB_REPO") or _RUNTIME_GITHUB_REPO
-        self.github_ref = github_ref or os.environ.get("VIBE_SHOW_RUNTIME_GITHUB_REF") or _RUNTIME_GITHUB_REF
         self.offline = _env_flag_enabled("VIBE_SHOW_RUNTIME_OFFLINE", default=False) if offline is None else offline
         self.force_install = force_install
         self.stdout_path = self.runtime_dir / "stdout.log"
@@ -1448,12 +1433,6 @@ class ShowRuntimeManager:
             command = self._install_manifest_runtime_locked(force=force, offline=offline)
         elif self.runtime_source == _RUNTIME_SOURCE_ARCHIVE:
             command = self._install_archive_runtime(force=force, offline=offline)
-        elif self.runtime_source == _RUNTIME_SOURCE_GITHUB:
-            attempt = self._install_github_runtime(force=force)
-            if attempt.command:
-                self._download_error = None
-                self._clean_after_managed_install(attempt.command)
-            return attempt
         elif self.runtime_source == _RUNTIME_SOURCE_NPM:
             command = self._install_npm_runtime(force=force)
         else:
@@ -1470,8 +1449,6 @@ class ShowRuntimeManager:
             return self._installed_manifest_runtime_command(offline=offline)
         if self.runtime_source == _RUNTIME_SOURCE_ARCHIVE:
             return self._installed_archive_runtime_command()
-        if self.runtime_source == _RUNTIME_SOURCE_GITHUB:
-            return self._installed_github_runtime_command()
         if self.runtime_source == _RUNTIME_SOURCE_NPM:
             resolved = _resolve_executable_path(self._managed_bin_path())
             return [resolved] if resolved else None
@@ -1538,7 +1515,6 @@ class ShowRuntimeManager:
         archive_status: dict[str, Any] | None = None
         installed_runtime_version: str | None = None
         installed_matches: bool | None = None
-        github_source_status: dict[str, Any] | None = None
         installed = (
             explicit_availability is not None
             and explicit_availability.install is ShowRuntimeInstallState.INSTALLED
@@ -1579,11 +1555,6 @@ class ShowRuntimeManager:
                 "sha256": None,
                 "size": None,
             }
-        elif explicit_availability is None and self.runtime_source == _RUNTIME_SOURCE_GITHUB:
-            installed_dir = self._github_source_dir()
-            installed_command = self._github_runtime_command(installed_dir, node or ["node"])
-            installed = installed_command is not None
-            github_source_status = self._github_source_status(installed_dir)
         elif explicit_availability is None and self.runtime_source == _RUNTIME_SOURCE_NPM:
             managed = _resolve_executable_path(self._managed_bin_path())
             installed_command = [managed] if managed else None
@@ -1612,7 +1583,6 @@ class ShowRuntimeManager:
             "node_supported": node_supported,
             "manifest": manifest_status,
             "archive": archive_status or _archive_status_payload(archive),
-            "github_source": github_source_status,
             "install": install_payload,
             "runtime": runtime_payload,
             "command": installed_command,
@@ -3272,200 +3242,6 @@ class ShowRuntimeManager:
             return None
         return [*node, str(cli_path)]
 
-    def _installed_github_runtime_command(self) -> list[str] | None:
-        node = _resolve_node_command()
-        if not node:
-            return None
-        return self._github_runtime_command(self._github_source_dir(), node)
-
-    def _github_install_attempt(
-        self,
-        command: list[str] | None,
-        *,
-        replacement_required: bool,
-        replacement_completed: bool = False,
-        operation_reason: str | None = None,
-    ) -> _ManagedInstallAttempt:
-        resolved = self._managed_install_operation_command(
-            command,
-            replacement_required=replacement_required,
-            replacement_completed=replacement_completed,
-        )
-        if resolved:
-            return _ManagedInstallAttempt(resolved)
-        reason = operation_reason or self._install_reason or "runtime_install_failed"
-        self._install_reason = None
-        return _ManagedInstallAttempt(None, reason)
-
-    def _install_github_runtime(
-        self,
-        *,
-        force: bool | None = None,
-    ) -> _ManagedInstallAttempt:
-        replacement_required = self.force_install if force is None else force
-        node = _resolve_node_command()
-        if not node:
-            self._install_reason = "runtime_node_missing"
-            return self._github_install_attempt(None, replacement_required=replacement_required)
-        self.runtime_dir.mkdir(parents=True, exist_ok=True)
-        source_dir = self._github_source_dir()
-        existing_command = self._github_runtime_command(source_dir, node)
-        try:
-            git = _resolve_command("git")
-            npm = _resolve_command("npm")
-        except (OSError, ValueError):
-            git = None
-            npm = None
-        if not git:
-            self._install_reason = "runtime_git_missing"
-            return self._github_install_attempt(
-                existing_command,
-                replacement_required=replacement_required,
-            )
-        if not npm:
-            self._install_reason = "runtime_npm_missing"
-            return self._github_install_attempt(
-                existing_command,
-                replacement_required=replacement_required,
-            )
-        if not source_dir.exists():
-            source_dir.parent.mkdir(parents=True, exist_ok=True)
-            if not self._run_install_command(
-                [*git, "clone", "--depth", "1", "--branch", self.github_ref, self.github_repo, str(source_dir)]
-            ):
-                return self._github_install_attempt(
-                    None,
-                    replacement_required=replacement_required,
-                )
-        else:
-            if not self._run_install_command([*git, "-C", str(source_dir), "fetch", "--depth", "1", "origin", self.github_ref]):
-                self._install_reason = None
-                update_failure_reason = "runtime_github_source_update_failed"
-                return self._github_install_attempt(
-                    existing_command,
-                    replacement_required=replacement_required,
-                    operation_reason=update_failure_reason,
-                )
-            fetched = self._git_revision(git, source_dir, "FETCH_HEAD")
-            if not fetched:
-                update_failure_reason = "runtime_github_source_update_failed"
-                return self._github_install_attempt(
-                    existing_command,
-                    replacement_required=replacement_required,
-                    operation_reason=update_failure_reason,
-                )
-            if (
-                not replacement_required
-                and existing_command
-                and fetched
-                and self._read_github_build_marker(source_dir) == fetched
-            ):
-                # The runtime already on disk was built from exactly this
-                # commit, so `npm ci` and `npm run build` would spend a minute
-                # reproducing it byte for byte.
-                return self._github_install_attempt(
-                    existing_command,
-                    replacement_required=False,
-                )
-            if not self._run_install_command([*git, "-C", str(source_dir), "checkout", "FETCH_HEAD"]):
-                self._install_reason = None
-                return self._github_install_attempt(
-                    existing_command,
-                    replacement_required=replacement_required,
-                    operation_reason="runtime_github_source_update_failed",
-                )
-        # From here on the artifact the marker describes is being replaced:
-        # ``npm ci`` empties node_modules and the build writes into dist. Drop
-        # the marker first so a failure anywhere below leaves "unknown" rather
-        # than a commit that no longer describes what is on disk.
-        self._write_github_build_marker(source_dir, None)
-        if replacement_required:
-            build_output = source_dir / "packages" / "runtime" / "dist"
-            if not self._remove_managed_runtime_tree_for_replacement(build_output, label="GitHub"):
-                return self._github_install_attempt(
-                    None,
-                    replacement_required=True,
-                )
-            existing_command = None
-        if not self._run_install_command([*npm, "ci"], cwd=source_dir):
-            return self._github_install_attempt(
-                existing_command,
-                replacement_required=replacement_required,
-            )
-        if not self._run_install_command([*npm, "run", "build"], cwd=source_dir):
-            return self._github_install_attempt(
-                existing_command,
-                replacement_required=replacement_required,
-            )
-        command = self._github_runtime_command(source_dir, node)
-        if not command:
-            self._install_reason = "runtime_install_missing_bin"
-            return self._github_install_attempt(
-                None,
-                replacement_required=replacement_required,
-            )
-        self._write_github_build_marker(source_dir, self._git_revision(git, source_dir, "HEAD"))
-        # A forced build starts with no dist tree, so resolving this command proves replacement.
-        return self._github_install_attempt(
-            command,
-            replacement_required=replacement_required,
-            replacement_completed=replacement_required,
-        )
-
-    def _github_build_marker_path(self, source_dir: Path) -> Path:
-        return source_dir / ".avibe-runtime-build"
-
-    def _read_github_build_marker(self, source_dir: Path) -> str | None:
-        """The commit that produced the runtime build currently on disk.
-
-        The marker describes the artifact that exists now, not whatever the
-        working tree happens to be checked out at. Both halves of that are
-        enforced by when it moves: it is cleared before a rebuild starts
-        replacing the artifact, and written again only once the build finished
-        and its entry point resolved. So a failed, interrupted, or partial
-        rebuild leaves no marker, and the next prepare rebuilds.
-        """
-        try:
-            revision = self._github_build_marker_path(source_dir).read_text(encoding="utf-8").strip()
-        except OSError:
-            return None
-        return revision or None
-
-    def _write_github_build_marker(self, source_dir: Path, revision: str | None) -> None:
-        marker = self._github_build_marker_path(source_dir)
-        try:
-            if revision:
-                marker.write_text(f"{revision}\n", encoding="utf-8")
-            else:
-                marker.unlink(missing_ok=True)
-        except OSError:
-            pass
-
-    def _github_source_status(self, source_dir: Path) -> dict[str, Any]:
-        return {"built_revision": self._read_github_build_marker(source_dir)}
-
-    def _git_revision(self, git: list[str], source_dir: Path, ref: str) -> str | None:
-        try:
-            result = subprocess.run(
-                [*git, "-C", str(source_dir), "rev-parse", ref],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
-                **isolated_subprocess_kwargs(),
-            )
-        except (OSError, subprocess.SubprocessError):
-            return None
-        if result.returncode != 0:
-            return None
-        return result.stdout.strip() or None
-
-    def _github_runtime_command(self, source_dir: Path, node: list[str]) -> list[str] | None:
-        cli_path = source_dir / "packages" / "runtime" / "dist" / "cli.js"
-        if not cli_path.exists():
-            return None
-        return [*node, str(cli_path)]
-
     def _install_npm_runtime(self, *, force: bool | None = None) -> list[str] | None:
         replacement_required = self.force_install if force is None else force
         try:
@@ -3540,35 +3316,6 @@ class ShowRuntimeManager:
     def _managed_bin_path(self) -> Path:
         suffix = ".cmd" if os.name == "nt" else ""
         return self.runtime_dir / "package" / "node_modules" / ".bin" / f"{_RUNTIME_BIN}{suffix}"
-
-    def _github_source_dir(self) -> Path:
-        repo_slug = self.github_repo.removesuffix(".git").rstrip("/").rsplit("/", 2)[-2:]
-        repo_part = "_".join(repo_slug) if len(repo_slug) == 2 else "vibe-show-runtime"
-        ref_part = _safe_path_part(self.github_ref)
-        return self.runtime_dir / "source" / "github" / repo_part / ref_part
-
-    def _run_install_command(self, command: list[str], *, cwd: Path | None = None) -> bool:
-        try:
-            with self.install_log_path.open("a", encoding="utf-8") as log:
-                log.write(f"$ {' '.join(command)}\n")
-                result = subprocess.run(
-                    command,
-                    cwd=str(cwd) if cwd else None,
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    timeout=300,
-                    check=False,
-                    **isolated_subprocess_kwargs(),
-                )
-        except (OSError, subprocess.SubprocessError):
-            logger.warning("Show Runtime install command failed", exc_info=True)
-            self._install_reason = "runtime_install_failed"
-            return False
-        if result.returncode != 0:
-            self._install_reason = "runtime_install_failed"
-            return False
-        return True
 
 
 _manager: ShowRuntimeManager | None = None
@@ -3810,11 +3557,6 @@ def _packaged_runtime_manifest_exists() -> bool:
     return resource.is_file()
 
 
-def _running_from_development_checkout() -> bool:
-    source_root = Path(__file__).resolve().parents[1]
-    return (source_root / "pyproject.toml").is_file() and (source_root / "main.py").is_file()
-
-
 def _normalize_runtime_source(value: str | None) -> str:
     normalized = (value or _RUNTIME_SOURCE_MANIFEST).strip().lower()
     aliases = {
@@ -3822,8 +3564,6 @@ def _normalize_runtime_source(value: str | None) -> str:
         "manifest-cache": _RUNTIME_SOURCE_MANIFEST,
         "archive": _RUNTIME_SOURCE_ARCHIVE,
         "prebuilt": _RUNTIME_SOURCE_ARCHIVE,
-        "github": _RUNTIME_SOURCE_GITHUB,
-        "github-source": _RUNTIME_SOURCE_GITHUB,
         "npm": _RUNTIME_SOURCE_NPM,
     }
     return aliases.get(normalized, normalized or _RUNTIME_SOURCE_MANIFEST)

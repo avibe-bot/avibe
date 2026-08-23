@@ -1781,9 +1781,11 @@ def compute_fingerprints(repo_root: Path) -> dict:
         "ui_source": ui_source_hash(repo_root),
         "show_runtime": "|".join(
             [
-                regression_env("SHOW_RUNTIME_SOURCE", "github-source"),
-                regression_env("SHOW_RUNTIME_GITHUB_REPO", "https://github.com/avibe-bot/vibe-show-runtime.git"),
-                regression_env("SHOW_RUNTIME_GITHUB_REF", "main"),
+                regression_env("SHOW_RUNTIME_SOURCE", "archive"),
+                regression_env(
+                    "SHOW_RUNTIME_ARCHIVE_PATH",
+                    f"{SERVICE_HOME}/.cache/avibe-regression/vibe-show-runtime-node.tgz",
+                ),
             ]
         ),
     }
@@ -1944,9 +1946,11 @@ def runtime_env_payload(repo_root: Path | None = None) -> bytes:
         "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS": scm_version,
         "REGRESSION_UI_HOST": CONTAINER_UI_HOST,
         "AVIBE_ALLOW_DEV_STATE_MIGRATION": "1",
-        "VIBE_SHOW_RUNTIME_SOURCE": regression_env("SHOW_RUNTIME_SOURCE", "github-source"),
-        "VIBE_SHOW_RUNTIME_GITHUB_REPO": regression_env("SHOW_RUNTIME_GITHUB_REPO", "https://github.com/avibe-bot/vibe-show-runtime.git"),
-        "VIBE_SHOW_RUNTIME_GITHUB_REF": regression_env("SHOW_RUNTIME_GITHUB_REF", "main"),
+        "VIBE_SHOW_RUNTIME_SOURCE": regression_env("SHOW_RUNTIME_SOURCE", "archive"),
+        "VIBE_SHOW_RUNTIME_ARCHIVE_PATH": regression_env(
+            "SHOW_RUNTIME_ARCHIVE_PATH",
+            f"{SERVICE_HOME}/.cache/avibe-regression/vibe-show-runtime-node.tgz",
+        ),
         "ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY", ""),
         "ANTHROPIC_BASE_URL": os.environ.get("ANTHROPIC_BASE_URL", ""),
         "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY", ""),
@@ -2317,13 +2321,32 @@ def restart_and_verify(runner: Runner, target: RegressionTarget, *, remote: str 
 
 
 def prepare_show_runtime(runner: Runner, target: RegressionTarget, *, remote: str | None) -> None:
+    runner.run(
+        tenant_exec(
+            target,
+            """
+set -euo pipefail
+if [ "${VIBE_SHOW_RUNTIME_SOURCE:-}" = "archive" ]; then
+  build_dir=$(mktemp -d)
+  trap 'rm -rf "$build_dir"' EXIT
+  git clone --depth 1 https://github.com/avibe-bot/vibe-show-runtime.git "$build_dir/runtime"
+  (
+    cd "$build_dir/runtime"
+    npm ci
+    npm run build
+    npm run bundle:vibe-remote
+  )
+  set -- "$build_dir"/runtime/dist/vibe-show-runtime-node-*.tgz
+  [ "$#" -eq 1 ] && [ -f "$1" ]
+  install -D -m 0644 "$1" "$VIBE_SHOW_RUNTIME_ARCHIVE_PATH"
+fi
+""".strip(),
+            remote=remote,
+        )
+    )
     result = runner.run(tenant_exec(target, f"{VENV_DIR}/bin/vibe runtime prepare --strict", remote=remote), check=False)
     if result.returncode != 0:
-        # Retry from a fresh checkout. The npm cache is verified rather than
-        # deleted: it grows past a gigabyte, refilling it costs more than the
-        # rest of an update put together, and `npm cache verify` already
-        # discards exactly the corrupt entries that made deleting it tempting.
-        runner.run(tenant_exec(target, "rm -rf ~/.avibe/runtime/show-runtime/source && npm cache verify", remote=remote), check=False)
+        runner.run(tenant_exec(target, "rm -rf ~/.avibe/runtime/show-runtime/prebuilt/current", remote=remote), check=False)
         runner.run(tenant_exec(target, f"{VENV_DIR}/bin/vibe runtime prepare --strict", remote=remote))
     runner.run(tenant_exec(target, f"{VENV_DIR}/bin/vibe runtime status --json", remote=remote))
 
@@ -2563,7 +2586,7 @@ def print_summary(target: RegressionTarget) -> None:
     print(f"  Target: {target.target}")
     print(f"  Project: {target.project}")
     print(f"  Instance: {target.instance}")
-    print(f"  Show Runtime source: {regression_env('SHOW_RUNTIME_SOURCE', 'github-source')}")
+    print(f"  Show Runtime source: {regression_env('SHOW_RUNTIME_SOURCE', 'archive')}")
 
 
 def cmd_status(args: argparse.Namespace) -> int:

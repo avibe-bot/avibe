@@ -40,7 +40,7 @@
       "nodeMessage": "The installed Node.js runtime is missing or is not supported.",
       "platformMessage": "This platform is not supported by the current Show Runtime release.",
       "verificationMessage": "The Show Runtime files did not pass integrity verification.",
-      "configurationMessage": "The configured Show Runtime source cannot be used.",
+      "configurationMessage": "The configured Show Runtime source cannot be used. Remove VIBE_SHOW_RUNTIME_SOURCE to use the packaged runtime, or set VIBE_SHOW_RUNTIME_BIN to a runtime you built.",
       "policyMessage": "Automatic Show Runtime installation is disabled by configuration.",
       "installMessage": "Avibe could not install the Show Runtime.",
       "startMessage": "The Show Runtime is installed but could not start.",
@@ -931,7 +931,8 @@
     "prepare": {
       "prepared": "Show Runtime prepared.",
       "skipped": "Show Runtime preparation skipped: {reason}",
-      "failed": "Show Runtime preparation failed: {reason}"
+      "failed": "Show Runtime preparation failed: {reason}",
+      "unsupportedSource": "Show Runtime preparation failed: {reason}. Remove VIBE_SHOW_RUNTIME_SOURCE and use the packaged runtime, or set VIBE_SHOW_RUNTIME_BIN to a runtime you built."
     },
     "clean": {
       "dryRunHelp": "Report stale archives and cache entries without removing anything.",
@@ -956,7 +957,6 @@
       "archiveCacheSkippedAction": "Wait for the running install or clean to finish, then rerun Doctor.",
       "archiveCacheSkippedInspectionAction": "Check runtime directory permissions and the Avibe log; retry Doctor once fixed.",
       "repairHealthy": "Show Runtime starts successfully; no repair is needed.",
-      "repairGitHubSourceUpdateFailed": "Show Runtime was not rebuilt because Avibe could not complete the managed source update at {path}. The installed runtime was left in place. Check directory permissions and the Avibe log, then rerun Doctor.",
       "repairInstalled": "Installed and started Show Runtime.",
       "repairReinstalled": "Reinstalled and started Show Runtime.",
       "repairInstallStartFailed": "Show Runtime was installed but could not start: {reason}",
