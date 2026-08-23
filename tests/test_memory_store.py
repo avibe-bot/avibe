@@ -76,6 +76,27 @@ def test_store_rejects_symlinked_database_without_touching_target(
         assert conn.execute("SELECT value FROM evidence").fetchone()[0] == "keep-me"
 
 
+@pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])
+def test_store_rejects_symlinked_sqlite_sidecars_before_initialization(
+    tmp_path: Path,
+    suffix: str,
+) -> None:
+    home = tmp_path / "home"
+    path = home / "state" / "memory" / "memory.sqlite"
+    path.parent.mkdir(parents=True)
+    with sqlite3.connect(path):
+        pass
+    outside = tmp_path / "outside-sidecar"
+    outside.write_bytes(b"keep-me")
+    before = outside.read_bytes()
+    path.with_name(f"{path.name}{suffix}").symlink_to(outside)
+
+    with pytest.raises(OSError, match="private regular file"):
+        MemoryStore(path, effective_home=home)
+
+    assert outside.read_bytes() == before
+
+
 def test_volatile_admission_preserves_identity_without_payload_tables(tmp_path: Path) -> None:
     """MEMORY-SEARCH-013: admission persists identity but no delivery payload."""
 

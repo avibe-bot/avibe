@@ -123,12 +123,27 @@ describe('Memory UI copy contracts', () => {
     const disclosure = BUNDLES[language].memory.settings.disclosure.join('\n');
 
     if (language === 'en') {
-      expect(disclosure).toContain('proactively save durable notes without being asked');
+      expect(disclosure).toContain('submit long-lived notes for best-effort capture without being asked');
       expect(disclosure).toMatch(/files.*non-plain content/i);
     } else {
       expect(disclosure).toContain('未明确要求');
-      expect(disclosure).toContain('主动保存');
+      expect(disclosure).toContain('尽力捕获');
       expect(disclosure).toMatch(/文件.*非纯文本/);
+    }
+  });
+
+  it.each(['en', 'zh'] as const)('does not promise queue retention while capture is paused in %s', (language) => {
+    const settings = BUNDLES[language].memory.settings;
+    const pausedCopy = [settings.organizationTransitionDescription, settings.cloudPausedDescription].join('\n');
+
+    if (language === 'en') {
+      expect(pausedCopy).toContain('volatile queued work may be discarded');
+      expect(pausedCopy).toContain('new messages are not accepted for capture');
+      expect(pausedCopy).not.toMatch(/queued messages are kept|new messages keep queuing/i);
+    } else {
+      expect(pausedCopy).toContain('排队任务可能被丢弃');
+      expect(pausedCopy).toContain('新消息不会被接受用于捕获');
+      expect(pausedCopy).not.toMatch(/排队中的消息会保留|新消息会继续排队/);
     }
   });
 

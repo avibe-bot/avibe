@@ -178,6 +178,29 @@ async def test_worker_delivers_captures_in_offer_order(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_extracted_add_clears_existing_volatile_session_state(tmp_path: Path) -> None:
+    provider = FakeMemoryProvider(
+        add_results=deque([AddAck(request_id="add-extracted", status="extracted")])
+    )
+    writer = _writer(tmp_path, provider)
+    ref = _ref()
+    key = ref.serialize()
+    writer._pending[key] = _PendingSession(
+        ref,
+        "raw-session-0",
+        deque(["previous-digest"]),
+        0.0,
+        0.0,
+    )
+
+    _reserve_and_offer(writer, 0)
+    await writer.wait_idle_for_tests()
+
+    assert key not in writer._pending
+    assert provider.flushes == []
+
+
+@pytest.mark.asyncio
 async def test_only_proven_pre_execution_failures_retry_three_times(tmp_path: Path) -> None:
     provider = FakeMemoryProvider(
         ingest_failures=deque(

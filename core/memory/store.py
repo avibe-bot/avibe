@@ -37,6 +37,7 @@ from core.memory.types import MemoryErrorCode, ProviderSessionRef
 MEMORY_STORE_FILENAME = "memory.sqlite"
 MEMORY_STORE_DIRNAME = "memory"
 MEMORY_STORE_SCHEMA_VERSION = 4
+_SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
 
 _V0_META_COLUMNS = frozenset(
     """singleton epoch clear_in_progress scope_key provider_root_id
@@ -209,6 +210,7 @@ class MemoryStore:
         self.path = root.confine(requested)
         ensure_private_directory(self._effective_home, self.path.parent)
         self._prepare_database_file(harden=True)
+        self._validate_database_sidecars()
         self._initialize()
 
     def ensure_meta(self) -> MemoryMeta:
@@ -519,6 +521,31 @@ class MemoryStore:
         finally:
             if descriptor is not None:
                 os.close(descriptor)
+
+    def _validate_database_sidecars(self) -> None:
+        for suffix in _SQLITE_SIDECAR_SUFFIXES:
+            candidate = self.path.with_name(f"{self.path.name}{suffix}")
+            try:
+                candidate.lstat()
+            except FileNotFoundError:
+                continue
+            descriptor: int | None = None
+            try:
+                descriptor = open_and_harden_confined_regular_file(
+                    self._effective_home,
+                    candidate,
+                )
+            except ConfinedFilesystemError as error:
+                try:
+                    candidate.lstat()
+                except FileNotFoundError:
+                    continue
+                raise OSError(
+                    "Memory database path must be a private regular file"
+                ) from error
+            finally:
+                if descriptor is not None:
+                    os.close(descriptor)
 
 
 def _application_tables(conn: sqlite3.Connection) -> set[str]:

@@ -447,7 +447,7 @@ class BestEffortMemoryWriter:
                 and result.status in {"accumulated", "extracted"}
                 and _valid_receipt(result.request_id)
             ):
-                await self._success(item)
+                await self._success(item, extracted=result.status == "extracted")
                 return
             if isinstance(result, AddRejected):
                 if (
@@ -469,14 +469,18 @@ class BestEffortMemoryWriter:
             await self._cleanup_item(item)
             return
 
-    async def _success(self, item: _CaptureItem) -> None:
+    async def _success(self, item: _CaptureItem, *, extracted: bool) -> None:
         try:
             await run_blocking(self._store.mark_capture_success)
         except Exception:
             pass
         ref = item.capture.session_ref
-        now = self._clock_seconds()
         key = ref.serialize()
+        if extracted:
+            self._pending.pop(key, None)
+            await self._cleanup_item(item)
+            return
+        now = self._clock_seconds()
         pending = self._pending.get(key)
         if pending is None:
             if len(self._pending) >= MAX_PENDING_SESSIONS:

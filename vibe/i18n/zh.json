@@ -715,7 +715,7 @@
         "profile": "显示记忆档案",
         "list": "列出已处理的记忆片段",
         "search": "搜索本地记忆",
-        "remember": "将长期个人信息加入队列",
+        "remember": "提交个人信息供记忆系统尽力处理",
         "query": "搜索内容",
         "project": "记忆项目：default，或 billing 这类小写 slug",
         "page": "页码（从 1 开始）",
@@ -780,7 +780,7 @@
         "agent": "Agent 记忆",
         "both": "用户 + Agent"
       },
-      "remembered": "记忆已加入队列。",
+      "remembered": "记忆请求已确认；系统将尽力处理，但不保证持久保存。",
       "listWarning": {
         "truncated": "记忆列表已达到服务排序上限，后续页面可能不完整。"
       },
