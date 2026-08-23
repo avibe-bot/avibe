@@ -1212,13 +1212,15 @@ Ownership has exactly three verdicts:
 
 Ownership and deletion safety answer different questions. Modified, staged, deleted,
 or untracked paths do not make a recorded checkout foreign; they make deleting proven
-managed bytes unsafe. That refusal carries the exact relative paths so Doctor can ask
-the user to remove one `.DS_Store` rather than move an entire checkout. Only Avibe's
-own `.avibe-runtime-build` marker is excluded. This exception was measured against a
-real shallow clone of `avibe-bot/vibe-show-runtime`: after `npm ci` and the complete
-build, `node_modules` and `packages/runtime/dist` remained ignored and the marker was
-the only Avibe-written untracked path. The owner implements that measured exception;
-callers do not repeat it.
+managed bytes unsafe. The probe enumerates untracked paths even when repository or
+global Git configuration ignores them, so `.DS_Store`, `.envrc`, editor state, and
+other user bytes cannot disappear through an ignore rule. That refusal carries the
+exact relative paths so Doctor can ask the user to remove one file rather than move an
+entire checkout. The only exclusions are Avibe's ownership/build marker and the two
+measured build-output roots, `node_modules` and `packages/runtime/dist`. Those outputs
+were measured against a real shallow clone of `avibe-bot/vibe-show-runtime` after
+`npm ci` and the complete build. The owner implements these measured exceptions;
+callers do not repeat them or classify ignored bytes as foreign.
 
 Legacy GitHub-source checkouts have no creation record. They remain `UNDETERMINED` and
 are never silently adopted, because a developer's manual clone can have the same repo,
@@ -1228,8 +1230,21 @@ checkout path and the explicit remedy: back up or move it, then run
 `vibe runtime prepare`. This affects GitHub-source development installs, not manifest,
 archive, or npm installs.
 
-GitHub updates clone and build in a same-parent directory created by the owner. The
-ownership record and build marker are written there before publication. Publishing an
+GitHub updates clone and build in one deterministic same-parent staging directory; the
+path locates an interrupted attempt but never proves it safe to delete. The same
+schema-versioned ownership record used by published checkouts is written immediately
+after the owner creates the stage, before Git fetch, npm install, or build. Its recorded
+directory identity persists the in-process creation capability across a crash. The
+record is updated with Git's observed origin and revision before publication, and later
+origin checks compare two values produced by the same Git representation rather than a
+rewritten URL with raw configuration. A configured value that names an existing local
+path is resolved before staging changes Git's working-directory base; URL and SSH forms
+remain Git-owned. A valid abandoned stage is inspected and removed through the same owner
+on the next install. Missing, partial, conflicting, dirty, or unreadable staging evidence
+refuses deletion and is projected through status so Doctor names the exact path and manual
+remedy; there is no prefix-authorized cleanup, sweeper, timer, or background task.
+
+The ownership record and build marker are written before publication. Publishing an
 update inspects the existing checkout, refuses `PROVEN_FOREIGN`, `UNDETERMINED`, or
 unsafe managed bytes, removes only through the capability owner, and then renames the
 complete stage into place. Every destructive staging command rechecks that the path is
@@ -1239,9 +1254,10 @@ command and bytes intact.
 The lstat identity recheck narrows the replacement race; it is not described as closing
 TOCTOU. The accepted delete-then-rename crash window was measured by killing a real
 subprocess after `rmtree` returned and before rename: the destination was absent and
-the complete stage remained, so the next prepare can install again rather than meet a
-partial tree that looks foreign. This says nothing stronger about interruption inside
-`rmtree` itself.
+the complete, recorded stage remained. The next prepare reclaims that proven stage and
+installs again rather than meeting a partial tree that looks foreign or leaking one full
+build per interruption. This says nothing stronger about interruption inside `rmtree`
+itself; an unprovable remnant survives and is surfaced for manual removal.
 
 The destructive-effect census derives its domain from the module AST. It resolves
 import and local aliases, `functools.partial`, path values, and capability-bearing

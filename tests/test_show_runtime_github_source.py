@@ -73,7 +73,10 @@ class Harness:
 
 
 @pytest.fixture(autouse=True)
-def resolvable_toolchain(monkeypatch: pytest.MonkeyPatch) -> None:
+def resolvable_toolchain(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/dev/null")
     real_resolve = show_runtime._resolve_command
     monkeypatch.setattr(show_runtime, "_resolve_node_command", lambda: ["/usr/bin/node"])
     monkeypatch.setattr(
@@ -165,10 +168,17 @@ def test_first_install_never_publishes_checkout_without_creation_record(
 ) -> None:
     upstream = make_upstream(tmp_path)
     harness = Harness(tmp_path, upstream)
+    real_record = harness.manager._published_bytes_owner.record_github_checkout
+
+    def fail_published_record(*args, **kwargs):
+        if kwargs.get("revision") is not None:
+            return False
+        return real_record(*args, **kwargs)
+
     monkeypatch.setattr(
         harness.manager._published_bytes_owner,
         "record_github_checkout",
-        lambda *_args, **_kwargs: False,
+        fail_published_record,
     )
 
     attempt = harness.manager._install_github_runtime()

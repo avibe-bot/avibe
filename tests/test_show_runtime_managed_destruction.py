@@ -94,9 +94,9 @@ def _literal_words(node: ast.AST) -> tuple[str, ...]:
 
 def _destructive_install_command(call: ast.Call) -> bool:
     words = _literal_words(call)
-    if "clone" in words or "fetch" in words:
+    if "clone" in words or "fetch" in words or "init" in words:
         return True
-    if "checkout" in words or "clean" in words:
+    if "checkout" in words or "clean" in words or {"remote", "add"} <= set(words):
         return True
     return "ci" in words or ("run" in words and "build" in words)
 
@@ -349,6 +349,13 @@ def _git(*args: str, cwd: Path) -> str:
     return result.stdout.strip()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_host_git_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+
+
 def _legacy_github_checkout(tmp_path: Path) -> tuple[show_runtime.ShowRuntimeManager, Path, Path]:
     upstream = tmp_path / "upstream"
     upstream.mkdir()
@@ -364,7 +371,7 @@ def _legacy_github_checkout(tmp_path: Path) -> tuple[show_runtime.ShowRuntimeMan
         github_ref="main",
     )
     source_dir = manager._github_source_dir()
-    subprocess.run(["git", "clone", str(upstream), str(source_dir)], check=True, capture_output=True)
+    _git("clone", str(upstream), str(source_dir), cwd=tmp_path)
     cli_path = source_dir / "packages" / "runtime" / "dist" / "cli.js"
     cli_path.parent.mkdir(parents=True)
     cli_path.write_text("old runtime\n", encoding="utf-8")
@@ -375,10 +382,10 @@ def _recorded_github_checkout(
     tmp_path: Path,
 ) -> tuple[show_runtime._ManagedPublishedBytesOwner, Path, str, str]:
     owner = show_runtime._ManagedPublishedBytesOwner()
-    created = owner.create_staging(tmp_path, prefix="published-")
-    checkout = created.path
     repo = "https://example.invalid/avibe/show-runtime.git"
     ref = "main"
+    checkout = tmp_path / "published"
+    created = owner.create_staging(checkout, repo=repo, ref=ref)
     _git("init", "-b", ref, cwd=checkout)
     (checkout / "runtime.js").write_text("runtime\n", encoding="utf-8")
     _git("add", "runtime.js", cwd=checkout)
@@ -387,6 +394,7 @@ def _recorded_github_checkout(
     revision = _git("rev-parse", "HEAD", cwd=checkout)
     assert owner.record_github_checkout(
         created,
+        git=["git"],
         repo=repo,
         ref=ref,
         revision=revision,
@@ -408,7 +416,8 @@ def test_legacy_checkout_without_creation_record_refuses_but_keeps_runtime(
     )
 
     def fake_clone(staged: show_runtime._ManagedBytesOwnership, _git_command: list[str]) -> str:
-        (staged.path / ".git").mkdir()
+        _git("init", "-b", "main", cwd=staged.path)
+        _git("remote", "add", "origin", manager.github_repo, cwd=staged.path)
         return "0123456789abcdef"
 
     def fake_build(
@@ -455,28 +464,51 @@ def test_github_ownership_record_is_written_before_publish() -> None:
 
 def test_checkout_record_schema_names_creation_inputs(tmp_path: Path) -> None:
     owner = show_runtime._ManagedPublishedBytesOwner()
-    staged = owner.create_staging(tmp_path, prefix="checkout-")
-    (staged.path / ".git").mkdir()
+    staged = owner.create_staging(tmp_path / "checkout", repo="example/repo", ref="main")
+    record_path = staged.path / "avibe-managed-checkout.json"
+    initial = json.loads(record_path.read_text(encoding="utf-8"))
+    assert initial == {
+        "schema_version": 1,
+        "repo": "example/repo",
+        "ref": "main",
+        "revision": None,
+        "origin": None,
+        "device": staged._identity[0],
+        "inode": staged._identity[1],
+    }
+    _git("init", "-b", "main", cwd=staged.path)
+    _git("remote", "add", "origin", "example/repo", cwd=staged.path)
     record = owner.record_github_checkout(
         staged,
+        git=["git"],
         repo="example/repo",
         ref="main",
         revision="0123456789abcdef",
     )
 
     assert record is True
-    payload = json.loads((staged.path / ".git" / "avibe-managed-checkout.json").read_text())
+    payload = json.loads(record_path.read_text())
     assert payload == {
         "schema_version": 1,
         "repo": "example/repo",
         "ref": "main",
         "revision": "0123456789abcdef",
+        "origin": "example/repo",
+        "device": staged._identity[0],
+        "inode": staged._identity[1],
     }
 
 
 def test_recorded_checkout_and_own_build_marker_are_safe_to_replace(tmp_path: Path) -> None:
     owner, checkout, repo, ref = _recorded_github_checkout(tmp_path)
     (checkout / ".avibe-runtime-build").write_text("built\n", encoding="utf-8")
+    generated = (
+        checkout / "node_modules" / "package" / "index.js",
+        checkout / "packages" / "runtime" / "dist" / "cli.js",
+    )
+    for path in generated:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("generated\n", encoding="utf-8")
 
     ownership = owner.inspect_github_checkout(checkout, git=["git"], repo=repo, ref=ref)
 
@@ -484,6 +516,122 @@ def test_recorded_checkout_and_own_build_marker_are_safe_to_replace(tmp_path: Pa
     assert ownership.may_destroy is True
     assert ownership.reason is None
     assert ownership.blocking_paths == ()
+
+
+def test_globally_ignored_untracked_path_still_blocks_deletion(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    owner, checkout, repo, ref = _recorded_github_checkout(tmp_path)
+    ignore_file = tmp_path / "global-ignore"
+    ignore_file.write_text(".envrc\n", encoding="utf-8")
+    global_config = tmp_path / "global.gitconfig"
+    global_config.write_text(
+        f"[core]\n\texcludesFile = {ignore_file}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    (checkout / ".envrc").write_text("export TOKEN=local\n", encoding="utf-8")
+
+    ownership = owner.inspect_github_checkout(checkout, git=["git"], repo=repo, ref=ref)
+
+    assert ownership.verdict is show_runtime._ManagedBytesVerdict.PROVEN_MANAGED
+    assert ownership.may_destroy is False
+    assert ownership.reason == "runtime_github_source_dirty"
+    assert ownership.blocking_paths == (".envrc",)
+
+
+def test_git_url_rewrite_uses_one_observed_origin_representation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    _git("init", "-b", "main", cwd=upstream)
+    _git("commit", "--allow-empty", "-m", "initial", cwd=upstream)
+    global_config = tmp_path / "global.gitconfig"
+    global_config.write_text(
+        f'[url "file://{upstream}"]\n\tinsteadOf = fixture:\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    owner = show_runtime._ManagedPublishedBytesOwner()
+    checkout = tmp_path / "checkout"
+    staged = owner.create_staging(checkout, repo="fixture:", ref="main")
+    _git("init", "-b", "main", cwd=checkout)
+    _git("remote", "add", "origin", "fixture:", cwd=checkout)
+    _git("commit", "--allow-empty", "-m", "checkout", cwd=checkout)
+    revision = _git("rev-parse", "HEAD", cwd=checkout)
+    assert owner.record_github_checkout(
+        staged,
+        git=["git"],
+        repo="fixture:",
+        ref="main",
+        revision=revision,
+    )
+    record_path = checkout / "avibe-managed-checkout.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+
+    ownership = owner.inspect_github_checkout(
+        checkout,
+        git=["git"],
+        repo="fixture:",
+        ref="main",
+    )
+
+    assert record["origin"] == f"file://{upstream}"
+    assert ownership.verdict is show_runtime._ManagedBytesVerdict.PROVEN_MANAGED
+    assert ownership.may_destroy is True
+
+
+def test_relative_local_repo_is_resolved_before_staging_changes_git_base(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    _git("init", "-b", "main", cwd=upstream)
+    (upstream / "package.json").write_text('{"name":"runtime"}\n', encoding="utf-8")
+    _git("add", "package.json", cwd=upstream)
+    _git("commit", "-m", "runtime", cwd=upstream)
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    manager = show_runtime.ShowRuntimeManager(
+        runtime_dir=tmp_path / "runtime",
+        runtime_source="github-source",
+        github_repo="../upstream",
+        github_ref="main",
+    )
+    monkeypatch.setattr(show_runtime, "_resolve_node_command", lambda: ["/usr/bin/node"])
+    real_resolve = show_runtime._resolve_command
+    monkeypatch.setattr(
+        show_runtime,
+        "_resolve_command",
+        lambda name: ["/usr/bin/npm"] if name == "npm" else real_resolve(name),
+    )
+
+    def fake_build(
+        staged: show_runtime._ManagedBytesOwnership,
+        _npm: list[str],
+        node: list[str],
+        revision: str,
+    ) -> list[str]:
+        cli = staged.path / "packages" / "runtime" / "dist" / "cli.js"
+        cli.parent.mkdir(parents=True)
+        cli.write_text("runtime\n", encoding="utf-8")
+        manager._write_github_build_marker(staged, revision)
+        return [*node, str(cli)]
+
+    monkeypatch.setattr(manager, "_build_github_staging", fake_build)
+
+    attempt = manager._install_github_runtime(force=True)
+
+    assert attempt.command
+    source_dir = manager._github_source_dir()
+    record = json.loads((source_dir / "avibe-managed-checkout.json").read_text(encoding="utf-8"))
+    assert record["repo"] == "../upstream"
+    assert record["origin"] == str(upstream.resolve())
 
 
 @pytest.mark.parametrize(
@@ -532,7 +680,7 @@ def test_conflicting_checkout_evidence_proves_foreign(
 ) -> None:
     owner, checkout, repo, ref = _recorded_github_checkout(tmp_path)
     if change == "record":
-        record_path = checkout / ".git" / "avibe-managed-checkout.json"
+        record_path = checkout / "avibe-managed-checkout.json"
         record = json.loads(record_path.read_text(encoding="utf-8"))
         record["ref"] = "other"
         record_path.write_text(json.dumps(record), encoding="utf-8")
@@ -551,7 +699,7 @@ def test_conflicting_checkout_evidence_proves_foreign(
 
 def test_unreadable_ownership_record_is_undetermined(tmp_path: Path) -> None:
     owner, checkout, repo, ref = _recorded_github_checkout(tmp_path)
-    record_path = checkout / ".git" / "avibe-managed-checkout.json"
+    record_path = checkout / "avibe-managed-checkout.json"
     record_path.write_text("not json\n", encoding="utf-8")
 
     ownership = owner.inspect_github_checkout(checkout, git=["git"], repo=repo, ref=ref)
@@ -561,6 +709,111 @@ def test_unreadable_ownership_record_is_undetermined(tmp_path: Path) -> None:
     assert ownership.reason == "runtime_github_source_ownership_unreadable"
 
 
+def test_stage_with_unrecorded_git_origin_is_undetermined(tmp_path: Path) -> None:
+    owner = show_runtime._ManagedPublishedBytesOwner()
+    checkout = tmp_path / "checkout"
+    staged = owner.create_staging(checkout, repo="example/repo", ref="main")
+    _git("init", "-b", "main", cwd=checkout)
+    _git("remote", "add", "origin", "example/repo", cwd=checkout)
+
+    ownership = owner.inspect_github_checkout(
+        checkout,
+        git=["git"],
+        repo="example/repo",
+        ref="main",
+    )
+
+    assert ownership.verdict is show_runtime._ManagedBytesVerdict.UNDETERMINED
+    assert ownership.may_destroy is False
+    assert ownership.reason == "runtime_github_source_inspection_failed"
+
+
+def test_next_install_reclaims_recorded_abandoned_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    _git("init", "-b", "main", cwd=upstream)
+    (upstream / "package.json").write_text('{"name":"runtime"}\n', encoding="utf-8")
+    _git("add", "package.json", cwd=upstream)
+    _git("commit", "-m", "runtime", cwd=upstream)
+    manager = show_runtime.ShowRuntimeManager(
+        runtime_dir=tmp_path / "runtime",
+        runtime_source="github-source",
+        github_repo=str(upstream),
+        github_ref="main",
+    )
+    source_dir = manager._github_source_dir()
+    staging_dir = manager._github_staging_dir(source_dir)
+    abandoned = manager._published_bytes_owner.create_staging(
+        staging_dir,
+        repo=manager.github_repo,
+        ref=manager.github_ref,
+    )
+    _git("init", "-b", "main", cwd=abandoned.path)
+    _git("remote", "add", "origin", manager.github_repo, cwd=abandoned.path)
+    assert manager._published_bytes_owner.record_github_checkout(
+        abandoned,
+        git=["git"],
+        repo=manager.github_repo,
+        ref=manager.github_ref,
+        revision=None,
+    )
+    orphan_marker = abandoned.path / ".git" / "orphan-marker"
+    orphan_marker.write_text("old stage\n", encoding="utf-8")
+    monkeypatch.setattr(show_runtime, "_resolve_node_command", lambda: ["/usr/bin/node"])
+    real_resolve = show_runtime._resolve_command
+    monkeypatch.setattr(
+        show_runtime,
+        "_resolve_command",
+        lambda name: ["/usr/bin/npm"] if name == "npm" else real_resolve(name),
+    )
+
+    def fake_build(
+        staged: show_runtime._ManagedBytesOwnership,
+        _npm: list[str],
+        node: list[str],
+        revision: str,
+    ) -> list[str]:
+        cli = staged.path / "packages" / "runtime" / "dist" / "cli.js"
+        cli.parent.mkdir(parents=True)
+        cli.write_text("runtime\n", encoding="utf-8")
+        manager._write_github_build_marker(staged, revision)
+        return [*node, str(cli)]
+
+    monkeypatch.setattr(manager, "_build_github_staging", fake_build)
+
+    attempt = manager._install_github_runtime(force=True)
+
+    assert attempt.command
+    assert source_dir.exists()
+    assert not staging_dir.exists()
+    assert not orphan_marker.exists()
+
+
+def test_unproven_abandoned_stage_is_published_to_status_with_its_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    manager = show_runtime.ShowRuntimeManager(
+        runtime_dir=tmp_path / "runtime",
+        runtime_source="github-source",
+    )
+    source_dir = manager._github_source_dir()
+    staging_dir = manager._github_staging_dir(source_dir)
+    staging_dir.mkdir(parents=True)
+    (staging_dir / "avibe-managed-checkout.json").write_text("{\n", encoding="utf-8")
+    monkeypatch.setattr(show_runtime, "_resolve_node_command", lambda: ["/usr/bin/node"])
+
+    github_status = manager.status()["github_source"]
+
+    assert github_status["path"] == str(staging_dir)
+    assert github_status["ownership"] == "undetermined"
+    assert github_status["destruction_safe"] is False
+    assert github_status["reason"] == "runtime_github_source_ownership_unreadable"
+
+
 def test_publish_refusal_never_deletes_managed_checkout_with_local_paths(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -568,7 +821,11 @@ def test_publish_refusal_never_deletes_managed_checkout_with_local_paths(
     owner, checkout, repo, ref = _recorded_github_checkout(tmp_path)
     (checkout / ".DS_Store").write_text("finder\n", encoding="utf-8")
     current = owner.inspect_github_checkout(checkout, git=["git"], repo=repo, ref=ref)
-    staged = owner.create_staging(tmp_path, prefix="replacement-")
+    staged = owner.create_staging(
+        tmp_path / "replacement",
+        repo=repo,
+        ref=ref,
+    )
     monkeypatch.setattr(
         show_runtime.shutil,
         "rmtree",
@@ -588,7 +845,11 @@ def test_failed_publish_window_leaves_absence_instead_of_partial_destination(
 ) -> None:
     owner, checkout, repo, ref = _recorded_github_checkout(tmp_path)
     current = owner.inspect_github_checkout(checkout, git=["git"], repo=repo, ref=ref)
-    staged = owner.create_staging(tmp_path, prefix="replacement-")
+    staged = owner.create_staging(
+        tmp_path / "replacement",
+        repo=repo,
+        ref=ref,
+    )
     (staged.path / "complete").write_text("new tree\n", encoding="utf-8")
     real_rename = Path.rename
 
@@ -612,7 +873,11 @@ def test_replaced_staging_directory_cannot_reach_destructive_install_command(
     tmp_path: Path,
 ) -> None:
     manager = show_runtime.ShowRuntimeManager(runtime_dir=tmp_path / "runtime")
-    staged = manager._published_bytes_owner.create_staging(tmp_path, prefix="replacement-")
+    staged = manager._published_bytes_owner.create_staging(
+        tmp_path / "replacement",
+        repo=manager.github_repo,
+        ref=manager.github_ref,
+    )
     moved = tmp_path / "original-stage"
     staged.path.rename(moved)
     staged.path.mkdir()

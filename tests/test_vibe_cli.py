@@ -2785,6 +2785,30 @@ def test_repair_show_runtime_names_github_update_failure_and_remediation(
             [],
             ("旧 checkout", "vibe runtime prepare", "备份或移走"),
         ),
+        (
+            "en",
+            "runtime_github_source_ownership_unreadable",
+            [],
+            ("ownership evidence", "vibe runtime prepare", "back up or move"),
+        ),
+        (
+            "zh",
+            "runtime_github_source_ownership_unreadable",
+            [],
+            ("归属证据", "vibe runtime prepare", "备份或移走"),
+        ),
+        (
+            "en",
+            "runtime_github_source_inspection_failed",
+            [],
+            ("deleting", "was safe", "vibe runtime prepare", "back up or move"),
+        ),
+        (
+            "zh",
+            "runtime_github_source_inspection_failed",
+            [],
+            ("删除", "是否安全", "vibe runtime prepare", "备份或移走"),
+        ),
     ],
 )
 def test_repair_show_runtime_names_github_refusal_path_and_recoverable_remedy(
