@@ -21,14 +21,15 @@ from typing import Any, Protocol, runtime_checkable
 
 from config import paths
 from core.managed_runtime import (
+    _safe_metadata_value,
     ManagedRuntimeArchive,
     ManagedRuntimeManager,
     ManagedRuntimeManifest,
     ManagedRuntimeSpec,
-    archive_path_is_unsafe,
     env_flag_enabled,
     file_sha256,
     runtime_platform_tag,
+    write_json_atomic,
 )
 from core.process_isolation import isolated_subprocess_kwargs
 from core.memory.confined_filesystem import (
@@ -178,33 +179,79 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             return None
 
     def status(self) -> dict[str, Any]:
-        """Keep the manifest's release-state reason visible to Dependencies."""
+        """Report the active pointer without running compatibility probes."""
 
         if self._dev_runtime_configured():
             return self._dev_runtime_status(self._dev_runtime_python())
-        pointer, pointer_invalid = self._read_active_pointer()
-        if pointer is not None and self._admitted_active_pointer_binary(pointer) is None:
-            pointer_invalid = True
-        status_payload = super().status()
-        if pointer_invalid:
-            status_payload.update(
-                {
-                    "installed": False,
-                    "status": "error",
-                    "path": None,
-                    "reason": "memory_runtime_install_failed",
-                }
-            )
-            return status_payload
-        if status_payload.get("reason") is not None:
-            return status_payload
+        self._install_reason = None
+        manifest = self._load_manifest(allow_network=False)
+        if manifest is not None:
+            self._manifest_installable(manifest)
+        archive = self._manifest_archive_for_platform(manifest) if manifest else None
+        pointer, invalid = self._read_active_pointer()
         try:
-            manifest = self._load_manifest(allow_network=False)
-            if manifest is not None and not self._manifest_installable(manifest):
-                status_payload["reason"] = self._install_reason
-        except Exception:  # noqa: BLE001
-            status_payload["reason"] = "memory_runtime_install_failed"
-        return status_payload
+            binary = self._verified_active_pointer_binary(pointer) if pointer is not None else None
+        except OSError:
+            binary = None
+            invalid = True
+        if (
+            pointer is not None
+            and pointer.get("admission_revision") == ARTIFACT_ADMISSION_REVISION
+            and pointer.get("admission_ok") is not True
+        ):
+            binary = None
+            invalid = True
+        invalid = invalid or (pointer is not None and binary is None)
+        selected_version = manifest.runtime_version if manifest is not None else None
+        matches_manifest = None
+        if binary is not None and manifest is not None and archive is not None:
+            try:
+                matches_manifest = (
+                    self._verified_manifest_binary(
+                        Path(pointer["install_dir"]), manifest, archive
+                    )
+                    == binary
+                )
+            except OSError:
+                binary = None
+                invalid = True
+            if matches_manifest:
+                try:
+                    candidate = self._candidate_from_manifest(manifest)
+                    compatible_formats = pointer.get("compatible_provider_root_formats")
+                    matches_manifest = (
+                        pointer.get("provider_root_format") == candidate.provider_root_format
+                        and isinstance(compatible_formats, list)
+                        and all(_safe_metadata_value(value) for value in compatible_formats)
+                        and frozenset(
+                            {
+                                pointer.get("provider_root_format"),
+                                *compatible_formats,
+                            }
+                        )
+                        == candidate.compatible_provider_root_formats
+                        and _sync_contract_from_payload(pointer)
+                        == _sync_contract_from_payload(manifest.payload)
+                    )
+                except (MemoryRuntimeActivationError, ValueError):
+                    matches_manifest = False
+        installed_version = pointer.get("runtime_version") if binary is not None else None
+        return {
+            "id": self.spec.runtime_id,
+            "provider": "manifest",
+            "platform": runtime_platform_tag(),
+            "installed": binary is not None,
+            "version": installed_version,
+            "selected_version": selected_version,
+            "matches_manifest": matches_manifest,
+            "status": "ready" if binary is not None else ("error" if invalid else "missing"),
+            "path": str(binary) if binary is not None else None,
+            "install_dir": pointer.get("install_dir") if binary is not None else None,
+            "manifest": self._manifest_status_payload(manifest),
+            "archive": self._archive_status_payload(archive),
+            "reason": "memory_runtime_install_failed" if invalid else (self._install_reason if binary is None else None),
+            "download_error": self._download_error,
+        }
 
     def provider_root_format(self) -> str | None:
         if self._dev_runtime_configured():
@@ -389,8 +436,6 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         binary: Path,
         manifest: ManagedRuntimeManifest,
     ) -> dict[str, Any]:
-        """Admit fresh archives against the sync contract they advertise."""
-
         return self._prepare_binary(
             binary,
             sync_contract=_sync_contract_from_payload(manifest.payload),
@@ -405,47 +450,69 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         *,
         reason: str | None = None,
     ) -> dict[str, Any]:
-        """Re-admit an existing install before activating it under this contract."""
+        """Re-admit and atomically activate an existing Memory runtime contract."""
 
         try:
             sync_contract = _sync_contract_from_payload(manifest.payload)
-            preparation = (
-                self._prepare_binary(binary)
-                if sync_contract is None
-                else self._prepare_binary(binary, sync_contract=sync_contract)
-            )
-            admission_ok = preparation.get("ok") is True
+            preparation = self._prepare_binary(binary, sync_contract=sync_contract)
         except Exception:  # noqa: BLE001
             logger.exception("Failed to admit existing Memory runtime binary")
-            admission_ok = False
-        if not admission_ok:
-            try:
-                self._persist_active_pointer_admission(binary, admitted=False)
-            except Exception:  # noqa: BLE001
-                logger.exception("Failed to persist rejected Memory runtime admission")
+            preparation = {"ok": False}
+        if preparation.get("ok") is not True:
             return self._failure(
                 "memory_runtime_install_failed",
                 manifest=manifest,
                 archive=archive,
             )
-        return super()._reuse_existing_install(
-            binary,
-            install_dir,
-            manifest,
-            archive,
-            reason=reason,
-        )
 
-    def _persist_active_pointer_admission(self, binary: Path, *, admitted: bool) -> None:
+        candidate = self._candidate_from_manifest(manifest)
         current, invalid = self._read_active_pointer()
-        if invalid or current is None:
-            return
-        if self._verified_active_pointer_binary(current) != binary:
-            return
-        admitted_pointer = dict(current)
-        admitted_pointer["admission_revision"] = ARTIFACT_ADMISSION_REVISION
-        admitted_pointer["admission_ok"] = admitted
-        self._restore_current_pointer(admitted_pointer)
+        current_binary = (
+            self._verified_active_pointer_binary(current)
+            if not invalid and current is not None
+            else None
+        )
+        current_contract = None
+        if current is not None:
+            try:
+                current_contract = _sync_contract_from_payload(current)
+            except ValueError:
+                pass
+        pointer_is_current = (
+            current is not None
+            and current_binary == binary
+            and current.get("admission_revision") == ARTIFACT_ADMISSION_REVISION
+            and current.get("admission_ok") is True
+            and current.get("provider_root_format") == candidate.provider_root_format
+            and isinstance(current.get("compatible_provider_root_formats"), list)
+            and all(
+                _safe_metadata_value(value)
+                for value in current["compatible_provider_root_formats"]
+            )
+            and frozenset(
+                {
+                    current.get("provider_root_format"),
+                    *current["compatible_provider_root_formats"],
+                }
+            )
+            == candidate.compatible_provider_root_formats
+            and current_contract == sync_contract
+        )
+        if not pointer_is_current:
+            try:
+                self._write_current_pointer(install_dir, manifest, archive)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Failed to refresh Memory runtime pointer")
+                return self._failure(
+                    self._reason("pointer_write_failed"),
+                    manifest=manifest,
+                    archive=archive,
+                    message=str(exc),
+                )
+        payload = self._success_payload(binary, install_dir, manifest, archive, changed=False)
+        if reason:
+            payload["reason"] = reason
+        return payload
 
     def _write_current_pointer(
         self,
@@ -467,11 +534,24 @@ class MemoryArtifactManager(ManagedRuntimeManager):
                 raise MemoryRuntimeActivationError(str(error)) from error
             root_state = None
         previous_pointer = self._active_pointer()
+        metadata_path = install_dir / self.spec.metadata_filename
+        try:
+            previous_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            previous_metadata = None
 
         def commit() -> None:
+            self._write_manifest_install_metadata(
+                install_dir,
+                manifest,
+                archive,
+                binary_sha256=archive.binary_sha256,
+            )
             self._write_memory_current_pointer(install_dir, manifest, archive, candidate)
 
         def rollback() -> None:
+            if previous_metadata is not None:
+                write_json_atomic(metadata_path, previous_metadata)
             self._restore_current_pointer(previous_pointer)
 
         coordinator = self._activation_coordinator
@@ -538,20 +618,15 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             return None, True
         try:
             pointer = json.loads(payload.decode("utf-8"))
-        except (UnicodeError, ValueError):
+        except (RecursionError, UnicodeError, ValueError):
             return None, True
         return (pointer, False) if isinstance(pointer, dict) else (None, True)
 
     def _verified_active_pointer_binary(self, pointer: dict[str, Any]) -> Path | None:
-        """Verify the binary referenced by ``current.json`` without a manifest lookup."""
+        """Apply Memory's build pin around shared installed-binary verification."""
 
-        install_dir_value = pointer.get("install_dir")
-        bin_path = pointer.get("bin_path")
         if (
-            pointer.get("provider") != "manifest"
-            or pointer.get("runtime_id") != self.spec.runtime_id
-            or not _safe_metadata_value(pointer.get("runtime_version"))
-            or not _safe_metadata_value(pointer.get("platform"))
+            not _safe_metadata_value(pointer.get("runtime_version"))
             # Well-formed is not the same as usable here. Installation rejects a
             # manifest whose runtime_version is not EVEROS_VERSION, but the
             # pointer outlives that check: a ``~/.avibe`` copied between
@@ -560,49 +635,12 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             # Accepting it makes ``resolve_python`` hand back that binary and
             # Dependencies report ready until the sidecar or processing probe
             # fails much later, with a far less obvious error.
-            or pointer.get("platform") != runtime_platform_tag()
             or pointer.get("runtime_version") != EVEROS_VERSION
-            or not _valid_sha256(pointer.get("manifest_sha256"))
-            or not _valid_sha256(pointer.get("archive_sha256"))
-            or not isinstance(install_dir_value, str)
-            or not isinstance(bin_path, str)
-            or archive_path_is_unsafe(bin_path)
         ):
             return None
-
-        configured_install_dir = Path(install_dir_value)
-        if not configured_install_dir.is_absolute():
-            return None
-        try:
-            install_dir = configured_install_dir.resolve(strict=True)
-            versions_dir = (self.runtime_dir / "versions").resolve(strict=True)
-            binary = (install_dir / bin_path).resolve(strict=True)
-        except OSError:
-            return None
-        if install_dir == versions_dir or versions_dir not in install_dir.parents or install_dir not in binary.parents:
-            return None
-        if not binary.is_file() or not os.access(binary, os.X_OK):
-            return None
-
-        try:
-            metadata = json.loads((install_dir / self.spec.metadata_filename).read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, ValueError):
-            return None
-        binary_sha256 = metadata.get("binary_sha256") if isinstance(metadata, dict) else None
-        if not (
-            isinstance(metadata, dict)
-            and metadata.get("provider") == "manifest"
-            and metadata.get("runtime_id") == self.spec.runtime_id
-            and metadata.get("runtime_version") == pointer["runtime_version"]
-            and metadata.get("platform") == pointer["platform"]
-            and metadata.get("manifest_sha256") == pointer["manifest_sha256"]
-            and metadata.get("archive_sha256") == pointer["archive_sha256"]
-            and metadata.get("bin_path") == bin_path
-            and _valid_sha256(binary_sha256)
-            and file_sha256(binary) == binary_sha256
-        ):
-            return None
-        return binary
+        binary = super().resolve_binary()
+        current, invalid = self._read_active_pointer()
+        return binary if binary is not None and not invalid and current == pointer else None
 
     def _admitted_active_pointer_binary(
         self,
@@ -640,11 +678,7 @@ class MemoryArtifactManager(ManagedRuntimeManager):
                 self._install_reason = "memory_runtime_install_failed"
                 return None
             sync_contract = _sync_contract_from_payload(current)
-            preparation = (
-                self._prepare_binary(binary)
-                if sync_contract is None
-                else self._prepare_binary(binary, sync_contract=sync_contract)
-            )
+            preparation = self._prepare_binary(binary, sync_contract=sync_contract)
             admission_ok = preparation.get("ok") is True
             admitted_pointer = dict(current)
             admitted_pointer["admission_revision"] = ARTIFACT_ADMISSION_REVISION
@@ -948,15 +982,6 @@ def get_memory_artifact_manager() -> MemoryArtifactManager:
 def set_memory_artifact_manager_for_tests(manager: MemoryArtifactManager | None) -> None:
     global _manager
     _manager = manager
-
-
-def _safe_metadata_value(value: object) -> bool:
-    return (
-        isinstance(value, str)
-        and bool(value)
-        and len(value.encode("utf-8")) <= 128
-        and all(character.isascii() and (character.isalnum() or character in {".", "-", "_"}) for character in value)
-    )
 
 
 def _sync_contract_from_payload(

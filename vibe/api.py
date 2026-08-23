@@ -8487,7 +8487,12 @@ def dependencies_status(*, offline: bool = False) -> dict:
             "kind": "runtime",
             "required": memory_required,
             "installed": bool(memory_runtime.get("installed")),
-            "version": memory_manifest.get("everos_version"),
+            "version": memory_runtime.get("version"),
+            "latest_version": memory_runtime.get("selected_version"),
+            "has_update": bool(
+                memory_runtime.get("installed")
+                and memory_runtime.get("matches_manifest") is False
+            ),
             "status": _memory_runtime_dependency_status(memory_runtime),
             "reason": memory_runtime.get("reason"),
             "release_state": release_state if release_state in {"published", "unavailable"} else None,
