@@ -26,7 +26,9 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
+import core.dependency_network as dependency_network
 import core.show_runtime as show_runtime
+import core.show_runtime_failures as show_runtime_failures_module
 from starlette.websockets import WebSocketDisconnect
 
 from config import paths
@@ -137,7 +139,7 @@ class _FakeShowRuntimeManager:
         self.stopped = False
 
     def _unavailable_error(self):
-        declaration = SHOW_RUNTIME_FAILURE_DECLARATIONS.get((self.failure_reason, None))
+        declaration = SHOW_RUNTIME_FAILURE_DECLARATIONS.get((self.failure_reason, None, None))
         evidence = ShowRuntimeFailureEvidence(
             declaration.dimension if declaration else ShowRuntimeFailureDimension.RUNTIME,
             self.failure_reason,
@@ -6655,6 +6657,71 @@ def test_archive_failure_classification_uses_published_provenance(
     assert show_runtime_recovery_action(evidence) is expected_action
 
 
+@pytest.mark.parametrize(
+    ("reason", "provenance", "retryable", "expected_class", "expected_action"),
+    (
+        (
+            "runtime_manifest_download_failed",
+            "configured",
+            False,
+            ShowRuntimeFailureClass.CONFIGURED,
+            ShowRuntimeRecoveryAction.CHANGE_SETTING,
+        ),
+        (
+            "runtime_manifest_download_failed",
+            "configured",
+            True,
+            ShowRuntimeFailureClass.TRANSIENT,
+            ShowRuntimeRecoveryAction.REPAIR,
+        ),
+        (
+            "runtime_archive_download_failed",
+            "configured",
+            False,
+            ShowRuntimeFailureClass.CONFIGURED,
+            ShowRuntimeRecoveryAction.CHANGE_SETTING,
+        ),
+        (
+            "runtime_archive_download_failed",
+            "packaged",
+            False,
+            ShowRuntimeFailureClass.UNCLASSIFIED,
+            ShowRuntimeRecoveryAction.REPAIR,
+        ),
+        (
+            "runtime_archive_download_failed",
+            "configured",
+            True,
+            ShowRuntimeFailureClass.TRANSIENT,
+            ShowRuntimeRecoveryAction.REPAIR,
+        ),
+        (
+            "runtime_archive_download_failed",
+            "packaged",
+            True,
+            ShowRuntimeFailureClass.TRANSIENT,
+            ShowRuntimeRecoveryAction.REPAIR,
+        ),
+    ),
+)
+def test_download_failure_classification_uses_owner_evidence(
+    reason,
+    provenance,
+    retryable,
+    expected_class,
+    expected_action,
+):
+    evidence = ShowRuntimeFailureEvidence(
+        ShowRuntimeFailureDimension.INSTALL,
+        reason,
+        provenance,
+        retryable,
+    )
+
+    assert classify_show_runtime_failure(evidence) is expected_class
+    assert show_runtime_recovery_action(evidence) is expected_action
+
+
 def test_show_runtime_failure_declarations_are_total_and_owner_safe():
     assert len(SHOW_RUNTIME_FAILURE_DECLARATIONS) == len(set(SHOW_RUNTIME_FAILURE_DECLARATIONS))
     assert all(
@@ -6666,6 +6733,49 @@ def test_show_runtime_failure_declarations_are_total_and_owner_safe():
         for declaration in SHOW_RUNTIME_FAILURE_DECLARATIONS.values()
         if declaration.failure_class is ShowRuntimeFailureClass.CONFIGURED
     )
+
+
+def test_download_failure_declaration_keys_cover_owner_stored_fields():
+    details_tree = ast.parse(textwrap.dedent(inspect.getsource(dependency_network.dependency_error_details)))
+    owner_stored_fields: set[str] = set()
+
+    class DownloadDetailFieldVisitor(ast.NodeVisitor):
+        def visit_Dict(self, node: ast.Dict) -> None:
+            owner_stored_fields.update(
+                key.value
+                for key in node.keys
+                if isinstance(key, ast.Constant) and isinstance(key.value, str)
+            )
+            self.generic_visit(node)
+
+        def visit_Call(self, node: ast.Call) -> None:
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "update":
+                owner_stored_fields.update(keyword.arg for keyword in node.keywords if keyword.arg)
+            self.generic_visit(node)
+
+    DownloadDetailFieldVisitor().visit(details_tree)
+    declaration_lookup_tree = ast.parse(
+        textwrap.dedent(inspect.getsource(show_runtime_failures_module._failure_declaration))
+    )
+    declaration_key_fields = {
+        node.attr
+        for node in ast.walk(declaration_lookup_tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "evidence"
+    }
+    explicitly_irrelevant = {
+        "attempts",
+        "exception_type",
+        "host",
+        "http_status",
+        "kind",
+        "message",
+        "retry_after_seconds",
+        "url",
+    }
+
+    assert owner_stored_fields - explicitly_irrelevant <= declaration_key_fields
 
 
 def test_archive_failure_provenance_census_matches_archive_path_emissions():
@@ -6726,7 +6836,7 @@ def test_archive_failure_provenance_census_matches_archive_path_emissions():
     declared_provenance = {
         reason: {
             provenance
-            for (declared_reason, provenance), declaration in SHOW_RUNTIME_FAILURE_DECLARATIONS.items()
+            for (declared_reason, provenance, _retryable), declaration in SHOW_RUNTIME_FAILURE_DECLARATIONS.items()
             if declared_reason == reason and "archive" in declaration.owning_artifact
         }
         for reason in configured_archive_reasons
@@ -6737,7 +6847,7 @@ def test_archive_failure_provenance_census_matches_archive_path_emissions():
     assert {
         declaration.reason
         for declaration in SHOW_RUNTIME_FAILURE_DECLARATIONS.values()
-        if declaration.provenance == "configured" and "archive" in declaration.owning_artifact
+        if declaration.provenance == "configured" and declaration.owning_artifact == "configured-archive"
     } == configured_archive_reasons
 
 
@@ -6748,7 +6858,7 @@ def test_show_runtime_reason_literals_have_declared_evidence():
         for value in re.findall(r'(["\'])(runtime_[a-z0-9_]+)\1', source)
         if value[1] not in {"runtime_source", "runtime_version"}
     }
-    declared = {reason for reason, _provenance in SHOW_RUNTIME_FAILURE_DECLARATIONS}
+    declared = {reason for reason, _provenance, _retryable in SHOW_RUNTIME_FAILURE_DECLARATIONS}
     assert {value for _quote, value in reason_literals} <= declared
 
 
@@ -8467,6 +8577,8 @@ def test_show_runtime_manager_preserves_structured_http_download_error(monkeypat
 
     assert result["ok"] is False
     assert result["reason"] == "runtime_archive_download_failed"
+    assert result["install"]["failure_class"] == "configured"
+    assert result["install"]["recovery_action"] == "change_setting"
     assert result["status"]["download_error"] == {
         "kind": "http",
         "message": "HTTP 404 Not Found",
@@ -8478,6 +8590,104 @@ def test_show_runtime_manager_preserves_structured_http_download_error(monkeypat
         "attempts": 1,
     }
     assert "secret" not in json.dumps(result)
+
+
+@pytest.mark.parametrize(
+    ("retryable", "expected_class", "expected_action"),
+    (
+        (False, "configured", "change_setting"),
+        (True, "transient", "repair"),
+    ),
+)
+def test_manifest_download_failure_publishes_measured_retryability(
+    monkeypatch,
+    tmp_path,
+    retryable,
+    expected_class,
+    expected_action,
+):
+    manifest_url = "https://example.test/show-runtime-manifest.json"
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        manifest_url=manifest_url,
+    )
+    monkeypatch.setattr(
+        "core.show_runtime._resolve_command",
+        lambda command: ["/bin/node"] if command == "node" else None,
+    )
+
+    def fail_manifest(*_args, **_kwargs):
+        raise dependency_network.DependencyNetworkError(
+            {
+                "kind": "network" if retryable else "http",
+                "message": "manifest unavailable",
+                "url": manifest_url,
+                "host": "example.test",
+                "exception_type": "HTTPError",
+                "retryable": retryable,
+                "attempts": 1,
+            }
+        )
+
+    monkeypatch.setattr("core.show_runtime.fetch_bytes", fail_manifest)
+
+    result = manager.prepare()
+
+    assert result["reason"] == "runtime_manifest_download_failed"
+    assert result["install"]["failure_class"] == expected_class
+    assert result["install"]["recovery_action"] == expected_action
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected_class", "expected_action"),
+    (
+        (True, "configured", "change_setting"),
+        (False, "unclassified", "repair"),
+    ),
+)
+def test_archive_download_failure_publishes_url_provenance(
+    monkeypatch,
+    tmp_path,
+    configured,
+    expected_class,
+    expected_action,
+):
+    archive_url = "https://example.test/runtime.tgz"
+    monkeypatch.delenv("VIBE_SHOW_RUNTIME_ARCHIVE_URL", raising=False)
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        runtime_source="archive",
+        archive_url=archive_url if configured else None,
+    )
+    monkeypatch.setattr(
+        "core.show_runtime._resolve_command",
+        lambda command: ["/bin/node"] if command == "node" else None,
+    )
+    monkeypatch.setattr(manager, "_copy_packaged_runtime_archive", lambda: None)
+
+    def fail_archive(*_args, **_kwargs):
+        raise dependency_network.DependencyNetworkError(
+            {
+                "kind": "http",
+                "message": "HTTP 404 Not Found",
+                "url": archive_url,
+                "host": "example.test",
+                "exception_type": "HTTPError",
+                "http_status": 404,
+                "retryable": False,
+                "attempts": 1,
+            }
+        )
+
+    monkeypatch.setattr("core.show_runtime.fetch_to_path", fail_archive)
+
+    result = manager.prepare()
+
+    assert result["reason"] == "runtime_archive_download_failed"
+    assert result["install"]["failure_class"] == expected_class
+    assert result["install"]["recovery_action"] == expected_action
 
 
 def test_show_runtime_manager_retries_transient_archive_failure(monkeypatch, tmp_path):

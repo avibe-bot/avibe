@@ -473,10 +473,9 @@ class ShowRuntimeManager:
         self.auto_install = _auto_install_enabled() if auto_install is None else auto_install
         self.package_spec = package_spec or os.environ.get("VIBE_SHOW_RUNTIME_PACKAGE_SPEC") or _RUNTIME_PACKAGE
         self.runtime_source = _normalize_runtime_source(source_value)
-        self.archive_url = archive_url if archive_url is not None else os.environ.get(
-            "VIBE_SHOW_RUNTIME_ARCHIVE_URL",
-            _default_runtime_archive_url(),
-        )
+        configured_archive_url = archive_url if archive_url is not None else archive_url_env
+        self.archive_url = configured_archive_url if configured_archive_url is not None else _default_runtime_archive_url()
+        self._archive_url_provenance = "configured" if configured_archive_url is not None else "packaged"
         self.github_repo = github_repo or os.environ.get("VIBE_SHOW_RUNTIME_GITHUB_REPO") or _RUNTIME_GITHUB_REPO
         self.github_ref = github_ref or os.environ.get("VIBE_SHOW_RUNTIME_GITHUB_REF") or _RUNTIME_GITHUB_REF
         self.offline = _env_flag_enabled("VIBE_SHOW_RUNTIME_OFFLINE", default=False) if offline is None else offline
@@ -520,11 +519,34 @@ class ShowRuntimeManager:
             else None
         )
 
-    def _record_install_failure(self, reason: str, *, provenance: str | None = None) -> None:
+    def _record_install_failure(
+        self,
+        reason: str,
+        *,
+        provenance: str | None = None,
+        retryable: bool | None = None,
+    ) -> None:
         self._install_evidence = ShowRuntimeFailureEvidence(
             ShowRuntimeFailureDimension.INSTALL,
             reason,
             provenance,
+            retryable,
+        )
+
+    def _record_download_failure(
+        self,
+        reason: str,
+        exc: BaseException,
+        url: str,
+        *,
+        provenance: str,
+    ) -> None:
+        self._download_error = _runtime_download_error(exc, url)
+        retryable = self._download_error.get("retryable")
+        self._record_install_failure(
+            reason,
+            provenance=provenance,
+            retryable=retryable if isinstance(retryable, bool) else None,
         )
 
     def _resolve_explicit_command_availability(self) -> ShowRuntimeAvailability:
@@ -1456,10 +1478,15 @@ class ShowRuntimeManager:
         return None
 
     def _safe_installed_managed_runtime_command(self, *, offline: bool) -> list[str] | None:
+        evidence = self._install_evidence
+        download_error = self._download_error
         try:
             return self._installed_managed_runtime_command(offline=offline)
         except (OSError, ValueError):
             return None
+        finally:
+            self._install_evidence = evidence
+            self._download_error = download_error
 
     def _clean_after_managed_install(self, command: list[str]) -> None:
         try:
@@ -2762,7 +2789,11 @@ class ShowRuntimeManager:
                 verified_existing_command,
                 replacement_required=False,
             )
-        archive_path = self._resolve_manifest_archive(archive, offline=offline)
+        archive_path = self._resolve_manifest_archive(
+            archive,
+            offline=offline,
+            provenance=("packaged" if manifest.source == _PACKAGED_RUNTIME_MANIFEST_SOURCE else "configured"),
+        )
         if not archive_path:
             return self._managed_install_operation_command(
                 verified_existing_command,
@@ -2839,8 +2870,12 @@ class ShowRuntimeManager:
                 source = self.manifest_url
             except Exception as exc:
                 logger.exception("Failed to download Show Runtime manifest from %s", self.manifest_url)
-                self._install_reason = "runtime_manifest_download_failed"
-                self._download_error = _runtime_download_error(exc, self.manifest_url)
+                self._record_download_failure(
+                    "runtime_manifest_download_failed",
+                    exc,
+                    self.manifest_url,
+                    provenance="configured",
+                )
                 return None
         else:
             try:
@@ -2902,7 +2937,13 @@ class ShowRuntimeManager:
             return None
         return archive
 
-    def _resolve_manifest_archive(self, archive: ShowRuntimeArchive, *, offline: bool | None = None) -> Path | None:
+    def _resolve_manifest_archive(
+        self,
+        archive: ShowRuntimeArchive,
+        *,
+        offline: bool | None = None,
+        provenance: str,
+    ) -> Path | None:
         cached = self.runtime_dir / "downloads" / f"{archive.sha256}.tgz"
         if cached.exists() and self._downloaded_archive_matches(cached, archive):
             self._download_error = None
@@ -2932,8 +2973,12 @@ class ShowRuntimeManager:
         except Exception as exc:
             logger.exception("Failed to download Show Runtime archive from %s", archive.url)
             tmp_path.unlink(missing_ok=True)
-            self._install_reason = "runtime_archive_download_failed"
-            self._download_error = _runtime_download_error(exc, archive.url)
+            self._record_download_failure(
+                "runtime_archive_download_failed",
+                exc,
+                archive.url,
+                provenance=provenance,
+            )
             return None
 
     def _downloaded_archive_matches(self, path: Path, archive: ShowRuntimeArchive) -> bool:
@@ -3155,7 +3200,10 @@ class ShowRuntimeManager:
         if self.offline if offline is None else offline:
             self._install_reason = "runtime_archive_unavailable_offline"
             return None
-        return self._download_runtime_archive(self.archive_url)
+        return self._download_runtime_archive(
+            self.archive_url,
+            provenance=self._archive_url_provenance,
+        )
 
     def _copy_packaged_runtime_archive(self) -> Path | None:
         try:
@@ -3170,7 +3218,7 @@ class ShowRuntimeManager:
             shutil.copyfileobj(source, destination)
         return target
 
-    def _download_runtime_archive(self, archive_url: str) -> Path | None:
+    def _download_runtime_archive(self, archive_url: str, *, provenance: str) -> Path | None:
         target = self.runtime_dir / "downloads" / _runtime_archive_name()
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -3183,8 +3231,12 @@ class ShowRuntimeManager:
             self._download_error = None
         except Exception as exc:
             logger.exception("Failed to download prebuilt Show Runtime from %s", archive_url)
-            self._install_reason = "runtime_archive_download_failed"
-            self._download_error = _runtime_download_error(exc, archive_url)
+            self._record_download_failure(
+                "runtime_archive_download_failed",
+                exc,
+                archive_url,
+                provenance=provenance,
+            )
             return None
         return target
 

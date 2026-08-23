@@ -560,16 +560,33 @@ process restart are existing behavior tracked separately in issue #1657. This
 boundary is independent of the deleted retry machinery.
 
 **Failure classification is declared data and published by the evidence owner.**
-Each `(reason, provenance)` pair has one declaration carrying its dimension,
-owning artifact, class, and user ownership. Classification and recovery action are
-total lookups over that declaration. A configured manifest and the packaged
+Each `(reason, provenance, retryable)` key has one declaration carrying its
+dimension, owning artifact, class, and user ownership. Provenance and retryability
+are optional evidence discriminators; lookup prefers the fully measured key and
+falls back to a less-specific declaration, while an undeclared outcome remains
+unclassified and repairable. Classification and recovery action are total lookups
+over that declaration. A configured manifest and the packaged
 manifest may publish the same failure reason, but their provenance keeps the
 user's change-setting obligation distinct from repair of packaged bytes. The same
 rule applies to archives: a missing configured path is a user-owned setting error,
 while absent packaged bytes remain repairable. An AST census derives this set from
 every archive reason emitted under a positive `self.archive_path` guard and requires
 configured and packaged declarations for each one; declaration coverage is not a
-hand-written sibling list. Install admission clears operation-local evidence before
+hand-written sibling list.
+
+Download classification consumes the `retryable` fact already measured by
+`dependency_error_details`. A retryable manifest or archive failure remains
+transient and repairable. A non-retryable failure changes a setting only when its
+URL provenance is configured; the same failure against packaged or default release
+input remains repairable and makes no claim about user ownership. The evidence-key
+census derives every field stored by the shared download-error owner and requires
+each field either to participate in declaration selection or to appear once in the
+explicitly irrelevant set. This census failed on `retryable` before the field was
+plumbed, and it prevents a later discriminator from being silently dropped.
+
+This is the final failure-classification fold change in PR #1640. Any later finding
+in this class is filed and handled in a follow-up PR rather than re-entering this
+branch. Install admission clears operation-local evidence before
 any provider runs, so a later I/O failure cannot inherit an earlier operation's
 reason, provenance, or download detail. A managed
 command that disappears is runtime evidence owned by the managed artifact and is
