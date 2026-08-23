@@ -104,7 +104,12 @@ convergence boundary:
   Runtime specs still default to regular files/directories only. A link-enabled
   spec must validate both `name` and `linkname` against the extraction root and
   extract sequentially in archive order, resolving a link only to content
-  already extracted. Two-pass and parallel extraction are forbidden.
+  already extracted. Two-pass and parallel extraction are forbidden. Extraction
+  filter support is capability-detected, never inferred from `sys.version_info`:
+  attempt the repository's existing `extractall(..., filter="data")` call and
+  use the manually guarded fallback only when the keyword is unavailable. The
+  filtered and fallback paths must have the same archive acceptance and
+  rejection set.
 - Default behavior for git, Memory, and model-hub remains binary-strict:
   `binary_sha256` must be declared and a safe resolved `bin_path` must exist.
   The path may come from the archive entry or the already-declarative
@@ -169,7 +174,7 @@ Legend:
 | `_preview_busy_reason` | **Superset.** Keep the shared in-process lock hold, add a typed `busy` versus `guard_unavailable` result, and accept staging patterns from the spec. | **Shared defect:** an uninspectable lock, an inode mismatch, and real contention all become `*_install_already_running`, so its three consumers publish the wrong cause. **Show defect:** when the lock path was absent, Show does not hold its in-process `RLock` through planning; it relies on a later race check and can inspect a tree while another local thread mutates it. |
 | `_windows_preview_busy_reason` | **Superset.** Move Show's Windows identity/reparse hardening and typed result into the shared preview guard; staging names remain declarative. | **Shared defect:** the shared side does not distinguish an unopenable/replaced guard from contention and does not use the Windows reparse-point test used by Show. **Show requirement:** only the concrete staging names differ. |
 | `_resolve_manifest_archive` | **Superset.** Shared resolution gains a content-addressed cache-key policy, per-call offline override, and source provenance in its result. | **Shared defect:** caching under `archive.name` and never reclaiming old names causes unbounded versioned archive growth in git, Memory, and model-hub. **Show requirement:** source provenance feeds Show's configured-versus-packaged recovery classification. **Show defect:** the cache fast path tests `exists()` rather than `is_file()`, so a directory or special entry at the digest path can escape the normal cache-miss path as an inspection exception. |
-| `_safe_extract_tar` / `safe_extract_tar` | **Superset.** Atomically replace the shared file/directory-only extractor with the explicit type whitelist, root-confined `name`/`linkname` validation, and sequential archive-order extraction described above; retain link denial as the default spec policy. | **Show requirement:** released Darwin/Linux bundles contain 16 symlinks and one esbuild hard link, so a Show-enabled spec must accept both confined link types. **Shared migration blocker, not a current vulnerability:** shared currently rejects the first link and is safe because of that restriction. Removing the restriction without adding `linkname` validation in the same change would make the sole owner weaker than both Show and tmux. Git, Memory, and model-hub keep link members denied by spec. |
+| `_safe_extract_tar` / `safe_extract_tar` | **Superset.** Atomically replace the shared file/directory-only extractor with the explicit type whitelist, root-confined `name`/`linkname` validation, sequential archive-order extraction, and capability-detected filter described above; retain link denial as the default spec policy. | **Show requirement:** released Darwin/Linux bundles contain 16 symlinks and one esbuild hard link, so a Show-enabled spec must accept both confined link types. **Shared migration blocker, not a current vulnerability:** shared currently rejects the first link and is safe because of that restriction. Removing the restriction without adding `linkname` validation in the same change would make the sole owner weaker than both Show and tmux. **Shared defect:** unlike Show, shared uses a Python 3.12 version gate and skips the available `data` filter on Python 3.10.12+ and 3.11.4+. Git, Memory, and model-hub keep link members denied by spec but currently miss that backported filter protection. |
 | `_runtime_platform_tag` / `runtime_platform_tag` | **Subset.** Delete the Show helper. | No behavioral difference; the bodies are identical apart from the name. |
 | `clean` | **Superset.** The shared method owns locking and cleanup; a thin Show wrapper maps the shared report to the existing CLI/Doctor archive payload. | **Shared defect:** shared cleanup omits downloaded archives entirely, so its three consumers have no archive counts, protection result, or reclamation outcome and their caches grow without bound. **Show requirement:** CLI and Doctor retain their existing Show-specific payload wording. **Show defect:** real cleanup deletes staging and version directories before `_clean_downloaded_archives` acquires the install guard, while shared cleanup holds its mutation lock around the whole real operation. |
 | `_write_manifest_install_metadata` | **Different.** Keep a Show metadata compatibility hook, but make the shared atomic writer persist its output and the selected `minimum_node`. Requirement: Show is a directory graph invoked through system Node and must continue reading released `.vibe-show-runtime.json` records whose provider is `manifest-cache` and which have no leaf-binary or Node-requirement fields. | **Show requirement:** legacy filename/provider/field shape and archive-only integrity. **Shared behavior:** `runtime_id`, `bin_path`, and `binary_sha256` support strict single binaries. **Show defect:** direct `Path.write_text` is not atomic, and omitting `minimum_node` makes offline Node compatibility unknowable; a torn or incomplete metadata write can turn a completed install into an uninspectable or compatibility-ambiguous one. |
@@ -243,11 +248,18 @@ out.
    only if Step 3 removes that restriction without atomically adding confined
    `linkname` validation and archive-order extraction. This is not an allegation
    of a vulnerability in the current shared implementation.
+9. **Version-gated extraction filter (git, Memory, model-hub; also tmux).** On
+   Python 3.10.12+ and 3.11.4+, the runtime provides the PEP 706 `data` filter,
+   but shared tests `sys.version_info >= (3, 12)` and calls unfiltered
+   `extractall()` when that test is false. Its file/directory whitelist and path
+   checks still apply, so this is missed available protection rather than the
+   link-escape vulnerability described in item 8. Tmux repeats the same version
+   gate; Show already uses capability detection.
 
-Items 1-7 are live defects in git, Memory, and model-hub, except that the
+Items 1-7 and 9 are live defects in git, Memory, and model-hub, except that the
 durable-claim consequence in item 3 is model-hub-only. Items 6 and 7 should land
-with one protected-set contract. Item 8 is a hard migration prerequisite whose
-relaxation and hardening must be one commit.
+with one protected-set contract. Item 9 also affects tmux. Item 8 is a hard
+migration prerequisite whose relaxation and hardening must be one commit.
 
 ## Uncounterparted Install Code
 
@@ -499,16 +511,20 @@ benign result is exactly `extracted ['hard.bin', 'link.so', 'real.bin']`; both
 links remain inside the root, and the hard-link target exists and is executable.
 For a malicious `linkname="../../../../etc/passwd"`, it raises `ValueError` with
 `link target` in the message. Benign success and malicious rejection must land
-in the same commit. Run both cases through the Python <3.12 fallback as well as
-the >=3.12 path. Existing git, Memory, and model-hub specs still reject a
-missing `binary_sha256`, an absent or unsafe **resolved** binary path, or any
-link member. Any archive entry that omits `bin_path` but has a safe
-`ManagedRuntimeSpec.default_bin_path` remains accepted, and canonical
-metadata/pointer output persists that resolved default; an unsafe explicit or
-default path is rejected. The directory fixture also persists its declared
-runtime prerequisite atomically. Whether to keep the tested <3.12 path or raise
-`requires-python` is an owner decision; the migration may not silently assume a
-higher floor.
+in the same commit. Run both fixtures once with `filter="data"` available and
+once with `extractall` stubbed to raise `TypeError` for the filter keyword,
+forcing the manually guarded fallback without an old-interpreter matrix. The
+two paths must accept the same benign archive and reject the same malicious
+archive; a path-dependent result blocks the step. Existing git, Memory, and
+model-hub specs still reject a missing `binary_sha256`, an absent or unsafe
+**resolved** binary path, or any link member. Any archive entry that omits
+`bin_path` but has a safe `ManagedRuntimeSpec.default_bin_path` remains
+accepted, and canonical metadata/pointer output persists that resolved default;
+an unsafe explicit or default path is rejected. The directory fixture also
+persists its declared runtime prerequisite atomically. Keep the declared Python
+floor at `>=3.10`: Python 3.10/3.11 patch releases without extraction filters
+take the tested fallback, while backported releases use the filtered path by
+capability.
 
 **What breaks:** expected breakage is **none** before Show cuts over. If optional
 leaf checksums or link acceptance become the default, integrity for git,
@@ -519,7 +535,9 @@ builds fail for every non-Windows user. If link rejection is relaxed without
 `linkname` hardening, the migration creates the sole extractor without link
 escape protection. Requiring literal `bin_path` presence would break accepted
 manifests that rely on the shared spec default; weakening safe-path validation
-would make that compatibility path unsafe. Every case blocks Step 5.
+would make that compatibility path unsafe. Retaining the current version gate
+would also make Python 3.10.12+ and 3.11.4+ skip a security filter they provide.
+Every case blocks Step 5.
 
 ### Step 4: Add Shared Content-Addressed Retention
 
@@ -683,6 +701,10 @@ outliers total **4,069 physical lines**: 3,370 in the supplied Show audit plus
   atomic JSON writer; it adds persistent schema/read/fallback handling but
   reuses the snapshot's identity verification.
 
+The resolved extraction-filter decision does not change this estimate: it
+replaces the two version checks with Show's existing capability-detection
+pattern inside the already-budgeted extraction work.
+
 Tmux has **38 functions / 568 function-span lines**. Its measured decomposition
 is 23 common installer functions / 451 lines, eight product helpers / 92 lines,
 three released-layout helpers / 17 lines, four public wrappers / 8 lines, and
@@ -780,9 +802,36 @@ managed_runtime benign    -> extracted ['hard.bin', 'link.so', 'real.bin']
 managed_runtime malicious -> ValueError: <message containing "link target">
 ```
 
-The only residual decision is whether to retain and test the Python 3.10/3.11
-fallback or raise the project minimum to 3.12. Current `requires-python` is
-`>=3.10`, so an unfiltered fallback is a live path until that decision is made.
+### Resolved Extraction-Filter Contract
+
+The previous Python-floor decision is resolved; it was a false choice. Three
+facts determine the contract:
+
+1. The project declares `requires-python = ">=3.10"`.
+2. [PEP 706](https://peps.python.org/pep-0706/) extraction filters were
+   security-backported in
+   [Python 3.10.12](https://docs.python.org/3.10/whatsnew/3.10.html#tarfile)
+   and
+   [Python 3.11.4](https://docs.python.org/3.11/whatsnew/3.11.html#tarfile).
+   Python's own
+   [compatibility guidance](https://docs.python.org/3.12/library/tarfile.html#supporting-older-python-versions)
+   therefore requires capability detection rather than a Python-version test.
+3. Show already uses the required `try: extractall(filter="data")` /
+   `except TypeError` capability pattern. Shared and tmux instead gate the
+   filter on `sys.version_info >= (3, 12)`, so they currently skip protection
+   that is available on supported 3.10.12+ and 3.11.4+ interpreters.
+
+Do not raise the Python floor: that would discard the default interpreters on
+Ubuntu 22.04 and Debian 12 to remove a fallback that the product can test
+hermetically. Step 3 moves Show's capability pattern into the sole shared
+extractor and preserves a manually guarded fallback for patch releases that do
+not support the keyword. Link acceptance, `name`/`linkname` confinement, and
+filter/fallback equivalence are one atomic change. The fallback test stubs the
+filter call to raise `TypeError` and proves that the same malicious fixture has
+the same rejected outcome; no old-interpreter matrix is required. Step 7
+deletes tmux's version-gated branch when tmux adopts the shared extractor.
+
+There is no residual product or release decision for archive extraction.
 
 ## Non-Goals
 
