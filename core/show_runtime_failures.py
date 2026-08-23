@@ -92,6 +92,15 @@ _FAILURE_DECLARATION_ROWS = (
         ShowRuntimeRecoveryAction.REPAIR,
     ),
     ShowRuntimeFailureDeclaration(
+        "runtime_start_process_unavailable",
+        ShowRuntimeFailureDimension.RUNTIME,
+        "explicit-runtime-command",
+        ShowRuntimeFailureClass.CONFIGURED,
+        ShowRuntimeRecoveryAction.CHANGE_SETTING,
+        user_owned=True,
+        provenance="configured",
+    ),
+    ShowRuntimeFailureDeclaration(
         "runtime_start_health_timeout",
         ShowRuntimeFailureDimension.RUNTIME,
         "runtime-start",
