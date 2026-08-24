@@ -1,15 +1,5 @@
 # Memory
 
-## Processing preflight and rebuild recovery
-
-Confirmed embedding identity changes and retained rebuild retries validate the
-candidate with one bounded chat request and one bounded embeddings request
-before the active sidecar is quiesced. When the optional reranking endpoint is
-configured, preflight also makes one bounded reranking request. Provider
-failures identify the side, HTTP status, provider code, and a sanitized
-message; the durable candidate and rebuild intent remain available for Retry.
-Ordinary runtime restart keeps its existing behavior.
-
 Avibe Memory distills eligible Workbench and private-IM messages into a
 per-user profile, episodes, and facts. Open **Settings > Memory** to inspect its
 Processing Record, current profile, search results, and settings.
@@ -115,107 +105,55 @@ field is ignored and is not emitted by new config or API serialization.
 Processing faults are written only to the main Avibe service log. Capture loss
 does not generate administrator messages on IM transports.
 
-## Recovery ladder
+## Runtime status and recovery
 
-Use these actions in order, from least to most destructive:
+The API, CLI, and Settings UI share one runtime state and one short reason. The
+state is one of `disabled`, `starting`, `running`, `degraded`, or
+`needs_repair`. Memory failure never makes Avibe, its Agent, or chat unavailable.
+Conflicting Memory lifecycle operations are rejected by one process-level lease.
 
-Avibe refuses conflicting Memory maintenance requests. Let the current action
-finish before starting another one.
+**Wake** is the ordinary, non-destructive availability operation. It validates
+the admitted `memory-runtime` artifact, reinstalls it when needed, proves the old
+owned process stopped, and starts the same EverOS root. Startup and unexpected
+child exit use the same path. Readiness uses bounded backoff and the native
+EverOS health path. Wake never deletes or recreates Memory data.
 
-1. **Restart engine**: Use it for a temporary engine failure.
-   Memory must be enabled. This restarts the Memory engine without changing
-   settings, rebuilding indexes, or deleting retained data.
-2. **Repair index**: Use it when restarting does not clear index health
-   warnings or pending work. The **Repair index** action is shown only when
-   Memory is enabled and `repair_available` is true (the installed Memory
-   artifact must advertise repair capability and no rebuild or factory-reset
-   marker may be pending). With a loaded health snapshot it appears beside
-   **Processing queue**; an unavailable snapshot moves it beside **Engine
-   status** rather than hiding it. Running Repair also requires the live Memory
-   Runtime and sidecar to be available.
-   Requests while Memory is disabled are refused, and an unavailable runtime or
-   sidecar causes Repair to fail. Repair rescans Markdown memory and drains
-   pending work while keeping the engine available; it preserves the existing
-   index and may use Embedding API quota. **Memory index repair completed with
-   health warnings.** means the repair finished but the returned health is still
-   unhealthy. Address the reported condition, then select **Repair index**
-   again; a failed repair can be retried the same way.
-3. **Rebuild index**: Use it after changing the Embedding endpoint or model,
-   or to recover a pending rebuild. Confirming **Save and rebuild** saves the
-   new settings before rebuilding the local vector index and preserves Markdown
-   memory. If rebuilding fails before settlement, the confirmed change remains
-   saved, the recovery intent and rebuild warning remain, and **Restart engine**
-   stays unavailable. An Embedding endpoint or model correction changes the
-   vector-space identity, so edit it and reconfirm **Save and rebuild**; do not
-   apply that correction through **Retry rebuild**. While the rebuild marker is
-   pending, LLM endpoint or model corrections may be saved normally before
-   selecting **Retry rebuild**; API-key-only corrections for either provider
-   may also be saved under the marker without touching the fenced runtime,
-   after which select **Retry rebuild**. If rebuilding completes but the later
-   engine or sidecar activation fails, the recovery intent may already be
-   cleared. Fix the runtime problem, then select **Restart engine**;
-   **Retry rebuild** may no longer be offered.
+Provider, credential, disk, and permission faults produce `degraded` with a
+sanitized reason. Correct the external condition and use Wake again. These faults
+never enable or route to destructive Repair.
 
-### Clear Memory Data
+**Repair** is offered only in `needs_repair`, when the local native data root is
+unusable or incompatible. Every UI, public API, internal API, client, and
+Controller boundary requires the exact `confirm_loss: true` field. Repair then:
 
-Before Reinitialize Memory, use **Clear Memory Data** when retained Memory data is
-corrupt. Clear Memory Data records a durable intent marker, then resets stable
-identity state at a new epoch and deletes provider data, obsolete diagnostic
-artifacts, and pinned attachments through four idempotent primitives. Clear is
-irreversible; it does not delete
-the `memory` or `state/memory` roots themselves, original Avibe chats, copies
-already sent to providers, or data outside those surfaces (including logs or
-user-created snapshots); it is not a secure wipe.
+1. acquires the Memory operation lease and proves the old owned process tree is
+   stopped;
+2. preserves Memory settings, credentials, stable scope identity, and the
+   project catalog while rotating the provider data generation;
+3. removes only the confined `<effective_home>/memory` root and narrowly named
+   retired recovery residue;
+4. reuses Wake and reports success only after native EverOS readiness succeeds.
 
-Clear drops queued and in-flight volatile capture work. It retains no per-capture
-failure evidence or delivery fence and never replays an ambiguous provider add.
-A copy that may already have reached the provider can remain there.
+If ownership or termination cannot be proved, Repair deletes nothing. If a
+confined deletion is partial or unsafe, the response reports the exact remaining
+surface and stays `needs_repair`. A failed or interrupted Repair has no durable
+stage to resume; the next startup reevaluates the root, and an operator can run a
+new explicitly confirmed Repair from the beginning.
 
-If Clear Memory Data is interrupted, the marker remains durable and Processing Record
-shows its operation, deleting/failed state, timestamp, and error code. Boot automatically
-retries the four idempotent deletion primitives; Memory remains fenced until the marker
-is removed after all surfaces finish. A failed marker can be retried by Clear Memory Data.
-Unreadable markers fail closed without preventing service startup. A retired Clear journal
-is never semantically migrated: an open row or failed bounded probe creates a fresh failed
-marker that asks the user to run Clear again, while terminal residue is removed best effort.
-Retired backup and snapshot residue is also cleaned best effort and never blocks Memory.
+**Delete data** is a separate user intent with its own response and confirmation.
+It uses the same stop-before-delete and confined reset primitive as Repair, but
+does not require a prior `needs_repair` state. It is not a secure wipe and cannot
+remove original Avibe chats or copies already accepted by a remote provider.
 
-4. **Reinitialize Memory**: Use it only as a last resort when the earlier actions
-   cannot recover Memory. It is available on the Memory Runtime card under
-   **Settings > Dependencies** when the
-   pinned, installed Memory artifact is valid. It permanently deletes local
-   Memory data and related operational state from the mixed-purpose `memory`
-   and `state/memory` storage locations. The former may include profiles,
-   facts, indexes, native processing data, and runtime files; the latter may include
-   stable identity, project, and capture-health metadata. Only a
-   successful cutover starts fresh, usable Memory. It
-   preserves Memory settings and credentials, the pinned, installed Memory
-   artifact, original Avibe chats, and data outside those two locations. If engine
-   or sidecar activation fails after deletion, the old contents under `memory`
-   and `state/memory` stay deleted, but construction of the fresh runtime may
-   have recreated empty or partial directories. Reinitialize Memory reports a
-   visible status for each storage location independently: **deleted**, **partially
-   deleted**, **absent**, or **retained**. Settings also shows a generic failure
-   status, not a per-location error or reason; read each location's status independently
-   rather than treating the result as a clean reset. If a root is **retained** or
-   **partially deleted**, inspect the service logs and filesystem permissions
-   for that root and correct the deletion failure. If deletion completed but
-   engine or sidecar activation failed because a persisted LLM or Embedding
-   endpoint, model, or credential is invalid, correct the corresponding
-   processing settings under **Settings > Memory** while the factory-reset
-   recovery intent is pending. Endpoint repair does not fix a retained or
-   partially deleted root. After correcting the applicable cause, select
-   **Retry initialization** to continue recovery.
-   Memory stays fenced and unavailable while the factory-reset recovery intent
-   is pending.
-   Retry is idempotent: it continues any remaining deletion while preserving
-   the truthful outcome reported for each storage location.
+An Embedding identity change invalidates the native root. Saving such a change
+uses the same explicit accepted-loss boundary and unified reset; there is no
+candidate config, rebuild marker, retry stage, or fallback to old settings.
 
-### Reinitialize Memory
-
-When Memory state is corrupt beyond rebuild, use **Reinitialize Memory** beside Repair on the Memory Runtime card in Settings > Dependencies. The action remains visible but unavailable until the pinned `memory-runtime` artifact is installed and ready; repair that artifact first when it is invalid. The confirmation pauses for five seconds and explains that it will delete local Memory data and related operational state before attempting to start a brand-new Memory engine. It also warns that startup can fail after deletion and the old data will not be restored. The mixed-purpose storage locations are labeled **Primary Memory storage** and **Memory state storage**; their technical paths, `<effective_home>/memory` and `<effective_home>/state/memory`, remain available as secondary details.
-
-Reinitialize Memory keeps Memory settings, credentials, and the installed artifact. The request waits for its final result and reports the two storage locations independently, so a partial deletion is shown as partial rather than claimed as a clean success. A durable internal `factory_reset` recovery intent makes retry idempotent after a crash; while that intent is pending, other Memory controls remain disabled and the action is labeled **Retry initialization**. Reinitialize Memory is not a secure wipe and does not remove original chats or copies already sent to remote endpoints.
+Released `recovery_intent`, `embedding_change_pending`, cloud transition, and
+Clear-state shapes are compatibility input only. Their retired stages are not
+serialized or resumed. Unsafe compatibility evidence collapses into an internal
+`repair_required` fence that ordinary saves preserve until a successful
+destructive Repair clears it.
 
 ## Best-effort capture
 

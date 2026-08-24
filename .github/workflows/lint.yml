@@ -139,7 +139,7 @@ jobs:
 
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
-          python-version: "3.12"
+          python-version: "3.12.12"
 
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
         with:
@@ -159,7 +159,7 @@ jobs:
           uv run --frozen --project scripts/memory_runtime \
             --with 'pytest==9.0.3' --with 'pytest-asyncio==1.4.0' \
             python -m pytest \
-            tests/test_memory_sync_bootstrap.py::test_pinned_everos_pathless_sync_scans_and_drains \
+            tests/test_memory_wake.py::test_pinned_everos_runtime_wakes_through_production_sidecar \
             -ra | tee "$output"
           if grep -Eq '(^|[[:space:]])[0-9]+ skipped|SKIPPED' "$output"; then
             echo "Memory Runtime contract tests must not skip."

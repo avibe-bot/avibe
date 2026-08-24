@@ -791,32 +791,6 @@ def test_capture_user_memory_rejects_fresh_runtime_after_reset_gate() -> None:
     asyncio.run(run())
 
 
-def test_capture_paths_reject_a_settled_factory_reset_marker() -> None:
-    controller = _controller()
-    controller.config.memory.recovery_intent = "factory_reset"
-    controller.memory_runtime._config = SimpleNamespace(recovery_intent="factory_reset")
-    controller.memory_runtime._restart_config = SimpleNamespace(recovery_intent="factory_reset")
-
-    direct = asyncio.run(
-        controller.capture_memory(
-            CaptureRequest(
-                source_message_id="direct-source",
-                session_id="stable-session",
-                principal_id="u-" + ("1" * 32),
-                project_id=PROJECT,
-                provenance="agent",
-                text="remember this",
-                occurred_at_ms=1,
-            )
-        )
-    )
-    asyncio.run(controller.capture_user_memory(_context("telegram"), "remember this", "stable-session"))
-
-    assert isinstance(direct, CaptureSkipped)
-    assert direct.reason == "memory_operation_in_progress"
-    assert controller.memory_module.accepted == []
-
-
 def test_memory_session_lifecycle_reuses_capture_scope_and_raw_anchor() -> None:
     controller = _controller()
     operation_calls = []
@@ -1632,11 +1606,9 @@ def _memory_config(
     enabled: bool = True,
     llm_model: str = "chat",
     embedding_model: str = "embed",
-    recovery_intent: str | None = None,
 ) -> MemoryConfig:
     return MemoryConfig(
         enabled=enabled,
-        recovery_intent=recovery_intent,
         processing=MemoryProcessingConfig(
             llm=MemoryEndpointConfig(
                 base_url="https://llm.example.test/v1",
@@ -1684,26 +1656,10 @@ def test_a_failed_memory_reconciliation_does_not_adopt_the_candidate_config() ->
 
 def test_controller_adopts_an_independent_settled_memory_snapshot() -> None:
     controller = Controller.__new__(Controller)
-    controller.config = SimpleNamespace(memory=_memory_config(recovery_intent="rebuild"))
+    controller.config = SimpleNamespace(memory=_memory_config())
     settled = _memory_config(enabled=False)
 
     controller._adopt_settled_memory_config(settled)
 
     assert controller.config.memory == settled
     assert controller.config.memory is not settled
-
-
-def test_settling_a_pending_embedding_change_compares_embedding_identity():
-    """Settlement ignores its marker but never a vector-space identity change."""
-
-    from core.memory.runtime import _same_embedding_identity
-
-    persisted = _memory_config(recovery_intent="rebuild")
-    candidate = _memory_config()
-
-    assert _same_embedding_identity(persisted, candidate) is True
-    assert _same_embedding_identity(persisted, _memory_config(llm_model="chat-2")) is True
-    assert _same_embedding_identity(
-        persisted,
-        _memory_config(embedding_model="embed-v2"),
-    ) is False

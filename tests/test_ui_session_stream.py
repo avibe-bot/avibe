@@ -31,7 +31,7 @@ from storage import message_deliveries, messages_service
 from storage.models import agent_sessions, messages
 from storage.models import scope_settings
 from storage.settings_service import upsert_scope
-from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
+from tests.ui_server_test_helpers import _save_config, csrf_headers, remote_session_cookie
 from vibe import remote_access
 
 
@@ -1371,9 +1371,7 @@ def test_chat_bootstrap_filters_harness_activities_for_viewer(isolated_state, tm
 
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    from tests.test_ui_memory_routes import _save_remote_config
-
-    config = _save_remote_config(tmp_path)
+    config = _save_config(tmp_path, paired=True)
     _, session_id = _make_session(tmp_path)
     client = app.test_client()
     client.set_cookie(
@@ -1441,9 +1439,7 @@ def test_turn_state_route_preserves_harness_activities_for_editor(isolated_state
 
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    from tests.test_ui_memory_routes import _save_remote_config
-
-    config = _save_remote_config(tmp_path)
+    config = _save_config(tmp_path, paired=True)
     _, session_id = _make_session(tmp_path)
     client = app.test_client()
     client.set_cookie(

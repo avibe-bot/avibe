@@ -16,7 +16,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable
 from typing import Any, Protocol, runtime_checkable
 
 from config import paths
@@ -101,6 +101,10 @@ MemoryProviderRootState = ProviderRootState
 
 class MemoryRuntimeActivationError(RuntimeError):
     """Closed failure raised before an unsafe Memory runtime pointer cutover."""
+
+    def __init__(self, message: str, *, repair_required: bool = False) -> None:
+        super().__init__(message)
+        self.repair_required = repair_required
 
 
 MemoryArtifactActivationCoordinator = Callable[
@@ -236,21 +240,6 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         value = pointer.get("artifact_fingerprint") if pointer is not None else None
         return value if _safe_metadata_value(value) else None
 
-    def sync_capability(self) -> bool:
-        """Return true only when the active artifact has the complete sync contract."""
-
-        if self._dev_runtime_configured():
-            return False
-        pointer = self._active_pointer()
-        if pointer is None:
-            return False
-        try:
-            contract = _sync_contract_from_payload(pointer)
-        except ValueError:
-            return False
-        binary = self._admitted_active_pointer_binary(pointer)
-        return contract is not None and binary is not None and self._admit_sync_contract(binary, contract)
-
     def ensure(self, *, force: bool = False) -> dict[str, Any]:
         """Use an explicitly configured development runtime without installing archives."""
 
@@ -271,6 +260,26 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             "reason": None,
             "download_error": None,
         }
+
+    def _failure_for_install_exception(
+        self,
+        error: Exception,
+        *,
+        manifest: ManagedRuntimeManifest,
+        archive: ManagedRuntimeArchive,
+    ) -> dict[str, Any]:
+        if isinstance(error, MemoryRuntimeActivationError) and error.repair_required:
+            return self._failure(
+                "memory_local_data_unusable",
+                manifest=manifest,
+                archive=archive,
+                message=str(error),
+            )
+        return super()._failure_for_install_exception(
+            error,
+            manifest=manifest,
+            archive=archive,
+        )
 
     def _dev_runtime_configured(self) -> bool:
         return _DEV_RUNTIME_ENV in os.environ
@@ -377,11 +386,6 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         ):
             self._install_reason = "memory_runtime_manifest_invalid"
             return False
-        try:
-            _sync_contract_from_payload(manifest.payload)
-        except ValueError:
-            self._install_reason = "memory_runtime_manifest_invalid"
-            return False
         return True
 
     def _prepare_binary_for_manifest(
@@ -389,12 +393,9 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         binary: Path,
         manifest: ManagedRuntimeManifest,
     ) -> dict[str, Any]:
-        """Admit fresh archives against the sync contract they advertise."""
+        """Admit fresh archives against the runtime artifact contract."""
 
-        return self._prepare_binary(
-            binary,
-            sync_contract=_sync_contract_from_payload(manifest.payload),
-        )
+        return self._prepare_binary(binary)
 
     def _reuse_existing_install(
         self,
@@ -408,12 +409,7 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         """Re-admit an existing install before activating it under this contract."""
 
         try:
-            sync_contract = _sync_contract_from_payload(manifest.payload)
-            preparation = (
-                self._prepare_binary(binary)
-                if sync_contract is None
-                else self._prepare_binary(binary, sync_contract=sync_contract)
-            )
+            preparation = self._prepare_binary(binary)
             admission_ok = preparation.get("ok") is True
         except Exception:  # noqa: BLE001
             logger.exception("Failed to admit existing Memory runtime binary")
@@ -459,13 +455,12 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         try:
             root_state = self._provider_root.inspect(candidate)
         except ProviderRootError as error:
-            # A durable factory-reset fence may intentionally leave an old,
-            # incompatible root in place until the retry deletes it. Let the
-            # lifecycle coordinator decide whether pointer-only repair is safe;
-            # ordinary activation still fails closed on ``None`` below.
-            if self._activation_coordinator is None:
-                raise MemoryRuntimeActivationError(str(error)) from error
-            root_state = None
+            # Incompatible or unsafe native data requires explicit Repair. An
+            # artifact install cannot bypass that destructive boundary.
+            raise MemoryRuntimeActivationError(
+                str(error),
+                repair_required=True,
+            ) from error
         previous_pointer = self._active_pointer()
 
         def commit() -> None:
@@ -639,12 +634,7 @@ class MemoryArtifactManager(ManagedRuntimeManager):
                     return binary
                 self._install_reason = "memory_runtime_install_failed"
                 return None
-            sync_contract = _sync_contract_from_payload(current)
-            preparation = (
-                self._prepare_binary(binary)
-                if sync_contract is None
-                else self._prepare_binary(binary, sync_contract=sync_contract)
-            )
+            preparation = self._prepare_binary(binary)
             admission_ok = preparation.get("ok") is True
             admitted_pointer = dict(current)
             admitted_pointer["admission_revision"] = ARTIFACT_ADMISSION_REVISION
@@ -685,7 +675,6 @@ class MemoryArtifactManager(ManagedRuntimeManager):
                 "provider_root_format": candidate.provider_root_format,
                 "compatible_provider_root_formats": sorted(candidate.compatible_provider_root_formats - {candidate.provider_root_format}),
                 "artifact_fingerprint": candidate.artifact_fingerprint,
-                **_sync_contract_pointer_fields(manifest.payload),
             },
         )
 
@@ -722,12 +711,7 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         version = result.stdout.strip()
         return version if version else None
 
-    def _prepare_binary(
-        self,
-        binary: Path,
-        *,
-        sync_contract: tuple[int, tuple[str, ...], str, str] | None = None,
-    ) -> dict[str, Any]:
+    def _prepare_binary(self, binary: Path) -> dict[str, Any]:
         try:
             result = subprocess.run(
                 [str(binary), "-I", "-c", _SMOKE_SCRIPT],
@@ -743,45 +727,12 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             return {"ok": False, "reason": "memory_runtime_install_failed"}
         if not self._admit_error_scrubbers(binary):
             return {"ok": False, "reason": "memory_runtime_install_failed"}
-        if not self._admit_sync_contract(binary, sync_contract):
-            return {"ok": False, "reason": "memory_runtime_install_failed"}
         return {
             "ok": True,
             "everos_version": EVEROS_VERSION,
             "python_version": EMBEDDED_PYTHON_VERSION,
             "lock_sha256": PACKAGE_LOCK_SHA256,
         }
-
-    @staticmethod
-    def _admit_sync_contract(
-        binary: Path,
-        expected: tuple[int, tuple[str, ...], str, str] | None,
-    ) -> bool:
-        """Hash both packaged sync modules when the artifact carries the contract."""
-
-        if expected is None:
-            return True
-
-        try:
-            runtime_root = binary.resolve(strict=True).parent.parent
-            candidates = tuple(runtime_root.glob("lib/python*/site-packages"))
-            if len(candidates) != 1:
-                return False
-            site_packages = candidates[0]
-            bootstrap = site_packages / "avibe_memory_sync_bootstrap.py"
-            scrubbers = site_packages / "avibe_memory_sync_scrubbers.py"
-            marker = site_packages / "avibe_memory_sync_bootstrap.pth"
-            if not all(path.is_file() and not path.is_symlink() for path in (bootstrap, scrubbers, marker)):
-                return False
-            bootstrap_digest = file_sha256(bootstrap)
-            scrubbers_digest = file_sha256(scrubbers)
-            return (
-                bootstrap_digest == expected[2]
-                and scrubbers_digest == expected[3]
-                and marker.read_text(encoding="ascii") == "import avibe_memory_sync_bootstrap\n"
-            )
-        except (OSError, UnicodeError):
-            return False
 
     def _admit_error_scrubbers(self, binary: Path) -> bool:
         """Prove the child can install mandatory diagnostic scrubbers before launch."""
@@ -870,8 +821,6 @@ class MemoryArtifactPort(Protocol):
 
     def artifact_fingerprint(self) -> str | None: ...
 
-    def sync_capability(self) -> bool: ...
-
     def compatible_provider_root_formats(self) -> frozenset[str]: ...
 
     def set_provider_root(self, provider_root: Path | str) -> None: ...
@@ -898,7 +847,6 @@ class FakeMemoryArtifactManager:
     ensure_failure: BaseException | None = None
     root_format: str | None = f"everos-{EVEROS_VERSION}"
     fingerprint: str | None = f"fake-everos-{EVEROS_VERSION}"
-    sync_available: bool = False
     compatible_formats: frozenset[str] = field(default_factory=lambda: frozenset({f"everos-{EVEROS_VERSION}"}))
     provider_root: Path | None = None
     activation_coordinator: MemoryArtifactActivationCoordinator | None = None
@@ -921,9 +869,6 @@ class FakeMemoryArtifactManager:
 
     def artifact_fingerprint(self) -> str | None:
         return self.fingerprint
-
-    def sync_capability(self) -> bool:
-        return self.sync_available
 
     def compatible_provider_root_formats(self) -> frozenset[str]:
         return self.compatible_formats
@@ -957,44 +902,6 @@ def _safe_metadata_value(value: object) -> bool:
         and len(value.encode("utf-8")) <= 128
         and all(character.isascii() and (character.isalnum() or character in {".", "-", "_"}) for character in value)
     )
-
-
-def _sync_contract_from_payload(
-    payload: Mapping[str, Any],
-) -> tuple[int, tuple[str, ...], str, str] | None:
-    keys = (
-        "sync_bootstrap_revision",
-        "sync_argv",
-        "sync_bootstrap_sha256",
-        "sync_scrubbers_sha256",
-    )
-    values = tuple(payload.get(key) for key in keys)
-    if all(value is None for value in values):
-        return None
-    revision, argv, bootstrap_digest, scrubbers_digest = values
-    expected_argv = ("-I", "-m", "everos.entrypoints.cli.main", "cascade", "sync")
-    if (
-        revision != 1
-        or not isinstance(argv, list)
-        or tuple(argv) != expected_argv
-        or not _valid_sha256(bootstrap_digest)
-        or not _valid_sha256(scrubbers_digest)
-    ):
-        raise ValueError("Memory Runtime sync contract is incomplete or invalid")
-    return revision, expected_argv, bootstrap_digest, scrubbers_digest
-
-
-def _sync_contract_pointer_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
-    contract = _sync_contract_from_payload(payload)
-    if contract is None:
-        return {}
-    revision, argv, bootstrap_digest, scrubbers_digest = contract
-    return {
-        "sync_bootstrap_revision": revision,
-        "sync_argv": list(argv),
-        "sync_bootstrap_sha256": bootstrap_digest,
-        "sync_scrubbers_sha256": scrubbers_digest,
-    }
 
 
 def _valid_sha256(value: object) -> bool:

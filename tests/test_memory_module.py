@@ -417,7 +417,7 @@ async def test_attachment_only_pin_failure_preserves_typed_skip(
     [
         ("project_limit", CaptureSkipped(reason="memory_invalid_input")),
         ("timestamp_invalid", CaptureSkipped(reason="memory_invalid_input")),
-        ("clear_in_progress", CaptureSkipped(reason="memory_clear_failed")),
+        ("clear_in_progress", CaptureSkipped(reason="memory_operation_in_progress")),
         ("store_unavailable", OperationFailed(error="memory_store_unavailable")),
     ],
 )
@@ -594,8 +594,6 @@ async def test_startup_cleanup_failure_disables_only_attachments(tmp_path: Path)
     await module.wait_writer_idle_for_tests()
     assert provider.captures[-1].text == "keep the caption"
     assert provider.captures[-1].attachments == ()
-    await module.clear_attachments()
-    assert module._writer.attachments_enabled
 
 
 @pytest.mark.asyncio

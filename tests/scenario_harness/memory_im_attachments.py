@@ -146,7 +146,6 @@ class MemoryIMAttachmentScenarioHarness:
         self.controller.config = SimpleNamespace(
             memory=SimpleNamespace(
                 enabled=True,
-                recovery_intent=None,
                 processing=SimpleNamespace(multimodal=multimodal),
             )
         )

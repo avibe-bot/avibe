@@ -1,6 +1,5 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import { requestMemoryRuntimeRepair } from '../lib/memoryRepair';
 import { useToast } from './ToastContext';
 import { apiFetch, recoverRemoteAuthFromSessionProbe } from '../lib/apiFetch';
 import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
@@ -32,8 +31,6 @@ import {
 } from '../lib/workbenchEventConnection';
 import type { DockDoc } from './dockDoc';
 import { archivedConflictSessionId, selectApiErrorFields } from './apiErrorParse';
-import { parseMemoryFactoryResetResult } from '../lib/memoryFactoryReset';
-import type { MemoryFactoryResetResult } from '../lib/memoryFactoryReset';
 import {
   SessionDraftPersistence,
   type SessionDraftSaveResult,
@@ -586,11 +583,9 @@ export type ApiContextType = {
     options?: { page?: number; cursor?: string | null; limit?: number },
   ) => Promise<MemoryListResult>;
   listMemoryProjects: () => Promise<{ status: 'ok'; projects: Array<{ id: string; kind: 'default' | 'named' | 'all' }> } | { status: 'failed'; error?: string }>;
-  clearMemory: () => Promise<MemoryClearResult>;
-  factoryResetMemory: () => Promise<MemoryFactoryResetResult>;
-  restartMemoryRuntime: () => Promise<MemoryRuntimeRestartResult>;
-  rebuildMemoryRuntime: () => Promise<MemoryRuntimeRebuildResult>;
-  repairMemoryIndex: () => Promise<MemoryRuntimeRepairResult>;
+  deleteMemoryData: (confirmLoss: true) => Promise<MemoryDataOperationResult>;
+  wakeMemory: () => Promise<MemoryWakeResult>;
+  repairMemory: (confirmLoss: true) => Promise<MemoryDataOperationResult>;
   getBackendRuntime: (name: string) => Promise<BackendRuntimeInfo>;
   restartBackend: (name: string) => Promise<BackendRestartResult>;
   getCodexAuth: () => Promise<CodexAuthState>;
@@ -1909,11 +1904,7 @@ export type MemorySettings = {
   transition_notice_pending?: boolean;
   capability_paused?: boolean;
   im_attachment_capture_available?: boolean;
-  repair_available?: boolean;
   processing: MemoryProcessingConfig;
-  rebuild_required?: boolean;
-  /** Derived recovery state; raw durable intent never crosses the UI contract. */
-  factory_reset_required?: boolean;
 };
 
 // Omitting a field keeps its current value; an explicit `api_key: null` clears it.
@@ -1936,7 +1927,7 @@ export type MemorySettingsPatch = {
     rerank?: MemoryEndpointPatch;
     multimodal?: MemoryEndpointPatch;
   };
-  confirm_rebuild?: boolean;
+  confirm_loss?: boolean;
 };
 
 export type MemoryFailureDiagnostic = {
@@ -1949,7 +1940,6 @@ export type MemoryFailure = {
   status: 'failed';
   error: string;
   diagnostic?: MemoryFailureDiagnostic;
-  rebuild_required?: boolean;
 };
 
 export type MemorySettingsResult =
@@ -1958,6 +1948,8 @@ export type MemorySettingsResult =
 
 export type MemoryStatus = {
   status: 'ok';
+  state: 'disabled' | 'starting' | 'running' | 'degraded' | 'needs_repair';
+  reason: string | null;
   source: {
     status: 'available' | 'stale' | 'unknown' | 'unavailable';
     observed_at: string | null;
@@ -1968,7 +1960,6 @@ export type MemoryStatus = {
     version: string | null;
     capabilities: Record<string, unknown>;
     disabled_features: string[];
-    cascade: Record<string, unknown> | null;
   };
   attachment_capture?: {
     status: 'ready' | 'not_configured' | 'unavailable';
@@ -1991,17 +1982,9 @@ export type MemoryFailureLogEntry = {
   request_id: string | null;
 };
 
-export type MemoryClearInProgress = {
-  operation_id: string;
-  state: 'deleting' | 'failed';
-  occurred_at?: string | null;
-  error_code?: string | null;
-};
-
 export type MemoryFailureLog = {
   status: 'ok';
   items: MemoryFailureLogEntry[];
-  clear_in_progress?: MemoryClearInProgress;
 };
 
 export type MemoryFailureLogResult =
@@ -2012,8 +1995,7 @@ export type MemoryFailureLogResult =
 export type MemoryMaintenance = {
   status: 'ok';
   data_exists: boolean;
-  can_clear: boolean;
-  clear_in_progress: MemoryClearInProgress | null;
+  can_delete_data: boolean;
 };
 
 export type MemoryMaintenanceResult = MemoryMaintenance | MemoryFailure | { error: string };
@@ -2032,8 +2014,7 @@ export type MemoryProcessingRecordSummary = {
   maintenance: {
     source: MemoryProcessingSourceStatus;
     data_exists: boolean;
-    can_clear: boolean;
-    clear_in_progress: MemoryClearInProgress | null;
+    can_delete_data: boolean;
   };
 };
 
@@ -2194,41 +2175,24 @@ export type MemoryProcessingRecordDetailResult =
     }
   | MemoryFailure;
 
-export type MemoryClearResult =
-  | { status: 'completed'; operation_id: string; epoch: number }
-  | (MemoryFailure & { clear_in_progress?: MemoryClearInProgress | null });
+export type MemoryWakeResult =
+  | { ok: true; state: 'running' }
+  | { ok: false; state?: MemoryStatus['state']; error?: string };
 
-// Reconciliation answers the controller's ok/error shape rather than the
-// status/error one the read routes use.
-export type MemoryRuntimeRestartResult = { ok: true; state?: string } | { ok: false; error?: string };
-
-export type MemoryRuntimeRebuildResult =
-  | { ok: true; result?: string; state?: string }
-  | { ok: false; error?: string; result?: string; diagnostic?: MemoryFailureDiagnostic };
-
-export type MemoryRuntimeRepairResult =
-  | {
-      ok: true;
-      result: 'completed' | 'completed_with_warnings';
-      health: MemoryCascadeHealth;
-    }
-  | {
-      ok: false;
-      error: string;
-      result: 'failed' | 'interrupted' | 'timed_out';
-    }
-  | MemoryFailure;
-
-export type MemoryCascadeHealth = {
-  healthy: boolean;
-  reasons: string[];
-  pending: number;
-  failed_permanent: number;
-  failed_retryable: number;
-  drain_consecutive_failures: number;
-  unrecoverable_total: number;
-  optimize_failure_streak: number;
-  prune_stale_seconds: number;
+export type MemoryDataOperationResult = {
+  ok: boolean;
+  operation: 'repair' | 'delete_data';
+  state?: MemoryStatus['state'];
+  result?: 'completed' | 'unchanged' | 'partial' | 'deleted_readiness_failed' | 'failed';
+  error?: string;
+  data_deleted?: boolean;
+  data_remaining?: boolean;
+  roots?: Array<{
+    path: string;
+    existed: boolean;
+    deleted: boolean;
+    error?: string;
+  }>;
 };
 
 export type BackendRuntimeInfo = {
@@ -3708,14 +3672,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }, { handleError: false });
     },
     listMemoryProjects: () => getJson('/api/memory/projects', { handleError: false }),
-    clearMemory: () => postJson('/api/memory/clear', { confirm: true }, { handleError: false }),
-    factoryResetMemory: async () => parseMemoryFactoryResetResult(
-      await postJson('/api/memory/runtime/factory-reset', { confirm: true }, { handleError: false }),
-    ),
-    restartMemoryRuntime: () => postJson('/api/memory/runtime/restart', {}, { handleError: false }),
-    rebuildMemoryRuntime: () =>
-      postJson('/api/memory/runtime/rebuild', { confirm: true }, { handleError: false }),
-    repairMemoryIndex: () => requestMemoryRuntimeRepair(postJson),
+    deleteMemoryData: (confirmLoss) => postJson('/api/memory/delete-data', { confirm_loss: confirmLoss }, { handleError: false }),
+    wakeMemory: () => postJson('/api/memory/runtime/wake', {}, { handleError: false }),
+    repairMemory: (confirmLoss) => postJson('/api/memory/repair', { confirm_loss: confirmLoss }, { handleError: false }),
     getBackendRuntime: (name) => getJson(`/api/backend/${encodeURIComponent(name)}/runtime`),
     restartBackend: (name) => postJson(`/api/backend/${encodeURIComponent(name)}/restart`, {}),
     getCodexAuth: () => getJson('/api/backend/codex/auth'),

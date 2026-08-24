@@ -51,9 +51,11 @@ const MEMORY_SOURCE_ERROR_REASONS = new Set([
   'memory_provider_response_invalid',
   'memory_capability_unavailable',
   'memory_processing_failed',
-  'memory_clear_failed',
-  'memory_clear_legacy_state_requires_rerun',
-  'memory_restart_failed',
+  'memory_wake_failed',
+  'memory_local_data_unusable',
+  'memory_legacy_recovery_required',
+  'memory_permission_denied',
+  'memory_disk_unavailable',
 ]);
 
 const RUNTIME_FACT_LABEL_KEYS = {
@@ -66,25 +68,6 @@ const RUNTIME_FACT_LABEL_KEYS = {
     agentic_search: 'memory.processingRecord.runtime.fact.capability.agenticSearch',
     knowledge: 'memory.processingRecord.runtime.fact.capability.knowledge',
   },
-  cascade: {
-    healthy: 'memory.processingRecord.runtime.fact.cascade.healthy',
-    reasons: 'memory.processingRecord.runtime.fact.cascade.reasons',
-    pending: 'memory.processingRecord.runtime.fact.cascade.pending',
-    failed_permanent: 'memory.processingRecord.runtime.fact.cascade.failedPermanent',
-    failed_retryable: 'memory.processingRecord.runtime.fact.cascade.failedRetryable',
-    drain_consecutive_failures: 'memory.processingRecord.runtime.fact.cascade.drainConsecutiveFailures',
-    unrecoverable_total: 'memory.processingRecord.runtime.fact.cascade.unrecoverableTotal',
-    optimize_failure_streak: 'memory.processingRecord.runtime.fact.cascade.optimizeFailureStreak',
-    prune_stale_seconds: 'memory.processingRecord.runtime.fact.cascade.pruneStaleSeconds',
-  },
-} as const;
-
-const CASCADE_REASON_LABEL_KEYS = {
-  drain_failures: 'memory.processingRecord.runtime.fact.cascadeReason.drainFailures',
-  optimize_stuck: 'memory.processingRecord.runtime.fact.cascadeReason.optimizeStuck',
-  prune_stale: 'memory.processingRecord.runtime.fact.cascadeReason.pruneStale',
-  health_probe_failed: 'memory.processingRecord.runtime.fact.cascadeReason.healthProbeFailed',
-  unknown: 'memory.processingRecord.runtime.fact.cascadeReason.unknown',
 } as const;
 
 const PROCESSING_REASON_LABEL_KEYS = {
@@ -169,23 +152,6 @@ export const memoryStatusRuntimeFactLabel = (
   value: string,
 ): string => knownLabel(t, RUNTIME_FACT_LABEL_KEYS[group] as Record<string, string>, value);
 
-const formatSecondsDuration = (t: TFunction, seconds: number): string => {
-  const total = Math.round(seconds);
-  if (total >= 3600) {
-    return t('memory.processingRecord.runtime.fact.duration.hoursMinutes', {
-      hours: Math.floor(total / 3600),
-      minutes: Math.floor((total % 3600) / 60),
-    });
-  }
-  if (total >= 60) {
-    return t('memory.processingRecord.runtime.fact.duration.minutesSeconds', {
-      minutes: Math.floor(total / 60),
-      seconds: total % 60,
-    });
-  }
-  return t('memory.processingRecord.runtime.fact.duration.seconds', { seconds: total });
-};
-
 export const formatMemoryStatusRuntimeFact = (
   t: TFunction,
   group: RuntimeFactGroup,
@@ -196,17 +162,6 @@ export const formatMemoryStatusRuntimeFact = (
   if (!knownField) return formatMemoryStatusFact(value);
   if (typeof value === 'boolean') {
     return t(`memory.processingRecord.runtime.fact.boolean.${value ? 'true' : 'false'}`);
-  }
-  if (group === 'cascade' && name === 'prune_stale_seconds' && typeof value === 'number') {
-    return formatSecondsDuration(t, value);
-  }
-  if (group === 'cascade' && name === 'reasons' && Array.isArray(value)) {
-    if (value.length === 0) return formatMemoryStatusFact(value);
-    return value
-      .map((reason) => typeof reason === 'string'
-        ? knownLabel(t, CASCADE_REASON_LABEL_KEYS, reason)
-        : formatMemoryStatusFact(reason))
-      .join(', ');
   }
   return formatMemoryStatusFact(value);
 };

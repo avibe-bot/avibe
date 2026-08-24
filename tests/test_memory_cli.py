@@ -422,11 +422,8 @@ def test_memory_cli_human_output_uses_configured_i18n(monkeypatch, capsys) -> No
             "status_code": 200,
             "body": {
                 "status": "ok",
-                "source": {
-                    "status": "stale",
-                    "observed_at": "2026-08-08T12:00:00Z",
-                    "reason": "memory_sidecar_unavailable",
-                },
+                "state": "degraded",
+                "reason": "memory_sidecar_unavailable",
                 "health": {
                     "status": "ok",
                     "version": "1.2.3",
@@ -442,7 +439,7 @@ def test_memory_cli_human_output_uses_configured_i18n(monkeypatch, capsys) -> No
 
     assert cli.cmd_memory(args) == 0
     assert capsys.readouterr().out.splitlines() == [
-        "记忆来源：数据已过期",
+        "记忆：已降级",
         "EverOS 1.2.3：正常",
         "IM 附件捕获：可用",
         "来源原因：记忆 sidecar 不可用",
@@ -489,7 +486,8 @@ def test_memory_cli_human_status_uses_localized_fallbacks_for_unknown_tokens(
             "status_code": 200,
             "body": {
                 "status": "ok",
-                "source": {"status": "future_state", "reason": "future_reason"},
+                "state": "future_state",
+                "reason": "future_reason",
                 "health": {"status": "future_health"},
             },
         },
@@ -498,7 +496,7 @@ def test_memory_cli_human_status_uses_localized_fallbacks_for_unknown_tokens(
     assert cli.cmd_memory(args) == 0
     output = capsys.readouterr().out.splitlines()
     assert output == [
-        "记忆来源：未知",
+        "记忆：未知",
         "EverOS 未知版本：未知",
         "来源原因：未知原因",
     ]

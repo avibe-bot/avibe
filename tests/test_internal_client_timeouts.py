@@ -38,17 +38,18 @@ from vibe.internal_client import (
     MEMORY_STATUS_TIMEOUT_SECONDS,
     MEMORY_MAINTENANCE_TIMEOUT_SECONDS,
     memory_archive_session,
-    memory_clear,
+    memory_delete_data,
     memory_profile,
     memory_failures,
     memory_maintenance,
     memory_processing_record,
     memory_profile_sync,
-    memory_restart,
+    memory_repair,
     memory_search,
     memory_search_sync,
     memory_status,
     memory_status_sync,
+    memory_wake,
 )
 
 
@@ -157,12 +158,9 @@ def test_reconcile_client_outlasts_every_bounded_lifecycle_step() -> None:
     assert MEMORY_RECONCILE_TIMEOUT_SECONDS > _reconcile_lifecycle_budget_seconds()
 
 
-def test_restart_client_has_no_reporting_timeout() -> None:
-    assert "timeout" not in inspect.signature(memory_restart).parameters
-
-
-def test_clear_clients_have_no_reporting_timeout() -> None:
-    assert "timeout" not in inspect.signature(memory_clear).parameters
+def test_memory_operations_have_no_reporting_timeout() -> None:
+    for operation in (memory_wake, memory_repair, memory_delete_data):
+        assert "timeout" not in inspect.signature(operation).parameters
 
 
 def test_install_client_covers_the_dependency_job_budget() -> None:

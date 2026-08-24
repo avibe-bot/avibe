@@ -1,8 +1,8 @@
-"""Confined deletion primitive for Memory factory reset.
+"""Confined deletion primitive for destructive Memory data operations.
 
-The Controller owns lifecycle and aggregate replacement.  This module only
-knows the two mutable roots that factory reset is allowed to remove and
-returns one truthful outcome for each root.
+The Controller owns lifecycle and aggregate replacement. This module accepts no
+caller-supplied path: it removes the one mutable data root and narrowly named
+retired recovery residue while preserving the stable identity store.
 """
 
 from __future__ import annotations
@@ -19,8 +19,8 @@ from core.memory.confined_filesystem import (
 
 
 @dataclass(frozen=True, slots=True)
-class FactoryResetRootOutcome:
-    """Deletion result for one exact effective-home-relative root."""
+class MemoryDataRootOutcome:
+    """Deletion result for one exact effective-home-relative surface."""
 
     relative_path: str
     existed: bool
@@ -29,10 +29,10 @@ class FactoryResetRootOutcome:
 
 
 @dataclass(frozen=True, slots=True)
-class FactoryResetDeletionResult:
-    """Truthful result for both mutable Memory roots."""
+class MemoryDataResetResult:
+    """Truthful result for every fixed Memory deletion surface."""
 
-    roots: tuple[FactoryResetRootOutcome, FactoryResetRootOutcome]
+    roots: tuple[MemoryDataRootOutcome, ...]
 
     @property
     def data_deleted(self) -> bool:
@@ -61,7 +61,18 @@ class FactoryResetDeletionResult:
         }
 
 
-_ROOT_RELATIVE_PATHS = ("memory", "state/memory")
+_DATA_ROOT_RELATIVE_PATH = "memory"
+_RETIRED_RECOVERY_RELATIVE_PATHS = (
+    "state/memory/clear-intent.json",
+    "state/memory/clear-journal.sqlite",
+    "state/memory/clear-snapshots",
+    "state/memory/backup-restore-journal.sqlite",
+    "state/memory/backups",
+)
+_RESET_RELATIVE_PATHS = (
+    _DATA_ROOT_RELATIVE_PATH,
+    *_RETIRED_RECOVERY_RELATIVE_PATHS,
+)
 
 
 def _entry_state(path: Path) -> tuple[bool, str | None]:
@@ -79,22 +90,24 @@ def _entry_state(path: Path) -> tuple[bool, str | None]:
     return True, None
 
 
-def delete_memory_roots(effective_home: Path) -> FactoryResetDeletionResult:
-    """Remove exactly ``memory`` and ``state/memory`` beneath *effective_home*.
+def reset_memory_data_roots(effective_home: Path) -> MemoryDataResetResult:
+    """Remove the exact mutable root and retired recovery residue.
 
-    Each root is attempted independently so a failure is represented honestly
-    and a later retry can finish whichever root remains.  ``remove_confined_path``
-    supplies the no-follow, owner-private confinement checks.
+    ``state/memory/memory.sqlite`` is deliberately outside this list because it
+    owns stable scope identity and the project catalog. Each fixed surface is
+    attempted independently so a failure is represented honestly and a later
+    explicit operation can start again. ``remove_confined_path`` supplies the
+    no-follow, owner-private confinement checks.
     """
 
     home = Path(os.path.abspath(os.path.expanduser(os.fspath(effective_home))))
-    outcomes: list[FactoryResetRootOutcome] = []
-    for relative_path in _ROOT_RELATIVE_PATHS:
+    outcomes: list[MemoryDataRootOutcome] = []
+    for relative_path in _RESET_RELATIVE_PATHS:
         path = home / relative_path
         existed, observation_error = _entry_state(path)
         if observation_error is not None:
             outcomes.append(
-                FactoryResetRootOutcome(
+                MemoryDataRootOutcome(
                     relative_path,
                     existed=True,
                     deleted=False,
@@ -107,7 +120,7 @@ def delete_memory_roots(effective_home: Path) -> FactoryResetDeletionResult:
             remove_confined_path(home, path, progress=progress)
         except Exception as error:  # noqa: BLE001
             outcomes.append(
-                FactoryResetRootOutcome(
+                MemoryDataRootOutcome(
                     relative_path,
                     existed=existed,
                     deleted=progress.changed,
@@ -118,7 +131,7 @@ def delete_memory_roots(effective_home: Path) -> FactoryResetDeletionResult:
             remaining, observation_error = _entry_state(path)
             if observation_error is not None:
                 outcomes.append(
-                    FactoryResetRootOutcome(
+                    MemoryDataRootOutcome(
                         relative_path,
                         existed=True,
                         deleted=progress.changed,
@@ -127,7 +140,7 @@ def delete_memory_roots(effective_home: Path) -> FactoryResetDeletionResult:
                 )
             elif remaining:
                 outcomes.append(
-                    FactoryResetRootOutcome(
+                    MemoryDataRootOutcome(
                         relative_path,
                         existed=True,
                         deleted=progress.changed,
@@ -136,29 +149,30 @@ def delete_memory_roots(effective_home: Path) -> FactoryResetDeletionResult:
                 )
             else:
                 outcomes.append(
-                    FactoryResetRootOutcome(
+                    MemoryDataRootOutcome(
                         relative_path,
                         existed=existed,
                         deleted=existed,
                     )
                 )
-    return FactoryResetDeletionResult(tuple(outcomes))  # type: ignore[arg-type]
+    return MemoryDataResetResult(tuple(outcomes))
 
 
-def unchanged_memory_reset_result(
+def unchanged_memory_data_result(
     effective_home: Path | None = None,
     *,
+    operation: str,
     reason: str,
 ) -> dict[str, object]:
     """Return the closed unchanged envelope after admission or retirement stops.
 
     The same lstat-based observation is used for every pre-delete failure so
-    callers receive truthful outcomes for both exact mutable roots.
+    callers receive truthful outcomes for every exact deletion surface.
     """
 
     home = effective_home or paths.get_vibe_remote_dir()
     roots: list[dict[str, object]] = []
-    for relative_path in _ROOT_RELATIVE_PATHS:
+    for relative_path in _RESET_RELATIVE_PATHS:
         existed, observation_error = _entry_state(home / relative_path)
         root: dict[str, object] = {
             "path": relative_path,
@@ -170,7 +184,8 @@ def unchanged_memory_reset_result(
         roots.append(root)
     return {
         "ok": False,
-        "error": "memory_factory_reset_failed",
+        "operation": operation,
+        "error": f"memory_{operation}_failed",
         "result": "failed",
         "reason": reason,
         "data_deleted": False,
@@ -180,8 +195,8 @@ def unchanged_memory_reset_result(
 
 
 __all__ = [
-    "FactoryResetDeletionResult",
-    "FactoryResetRootOutcome",
-    "delete_memory_roots",
-    "unchanged_memory_reset_result",
+    "MemoryDataResetResult",
+    "MemoryDataRootOutcome",
+    "reset_memory_data_roots",
+    "unchanged_memory_data_result",
 ]

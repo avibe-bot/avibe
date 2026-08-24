@@ -6,7 +6,7 @@ export const dependencyHasInstallAction = (
   dependency: Pick<DependencyItem, 'id' | 'status'>,
 ): boolean => dependency.status !== 'unsupported' && INSTALLABLE_DEPENDENCIES.has(dependency.id);
 
-/** A reachable sidecar is the live process Repair must not replace. */
+/** Treat any active or uncertain runtime as unsafe for dependency replacement. */
 export const memoryRuntimeSidecarRunning = (
   status: MemoryStatusResult | null | undefined,
 ): boolean => (
@@ -14,5 +14,5 @@ export const memoryRuntimeSidecarRunning = (
   && typeof status === 'object'
   && 'status' in status
   && status.status === 'ok'
-  && status.source?.status === 'available'
+  && ['starting', 'running', 'degraded'].includes(status.state)
 );

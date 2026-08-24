@@ -1000,11 +1000,6 @@ def create_app(
     def _memory_runtime():
         return getattr(controller, "memory_runtime", None)
 
-    def _memory_factory_reset_running() -> bool:
-        task = getattr(controller, "_memory_factory_reset_task", None)
-        done = getattr(task, "done", None)
-        return task is not None and callable(done) and not done()
-
     @app.post("/internal/reconcile-memory")
     async def _reconcile_memory() -> Any:
         """Hot-apply persisted Memory configuration on the controller loop."""
@@ -1018,184 +1013,159 @@ def create_app(
             result = await controller.reconcile_memory(config.memory)
             return JSONResponse(status_code=200, content=result)
         except MemoryRuntimeActivationError:
-            # Only the runtime install/activation bridge earns the "install
-            # failed" message. Everything else reported it too, which sent an
-            # incident caused by a pause/probe timeout in the wrong direction.
             logger.exception("internal memory runtime activation failed during reconcile")
-            return JSONResponse(status_code=503, content={"ok": False, "error": "memory_runtime_install_failed"})
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "memory_runtime_install_failed"},
+            )
         except Exception:
             logger.exception("internal memory reconcile failed")
-            return JSONResponse(status_code=503, content={"ok": False, "error": "memory_reconcile_failed"})
-
-    @app.post("/internal/memory/restart")
-    async def _memory_restart() -> Any:
-        """Replace the live Memory sidecar through the Runtime lifecycle."""
-
-        if _memory_factory_reset_running():
             return JSONResponse(
-                status_code=409,
-                content={"ok": False, "error": "memory_operation_in_progress"},
+                status_code=503,
+                content={"ok": False, "error": "memory_reconcile_failed"},
             )
+
+    @app.post("/internal/memory/wake")
+    async def _memory_wake() -> Any:
+        """Non-destructively wake the existing admitted Memory root."""
+
         runtime = _memory_runtime()
         if runtime is None:
             return JSONResponse(
                 status_code=503,
-                content={"ok": False, "error": "memory_runtime_missing"},
+                content={"ok": False, "state": "degraded", "error": "memory_runtime_missing"},
             )
         try:
-            result = await runtime.restart()
-            return JSONResponse(status_code=200, content=result)
+            result = await runtime.wake()
         except Exception:
-            logger.exception("internal memory restart failed")
-            return JSONResponse(
-                status_code=503,
-                content={"ok": False, "error": "memory_restart_failed"},
-            )
-
-    @app.post("/internal/memory/rebuild")
-    async def _memory_rebuild(request: Request) -> Any:
-        """Run one retained Memory rebuild and wait for the closed result."""
-
-        if _verified_memory_ui_user_key(request) is None:
-            return JSONResponse(
-                status_code=403,
-                content={"ok": False, "error": "memory_access_denied", "result": "failed"},
-            )
-        payload = await _safe_json(request)
-        if payload != {"confirm": True}:
-            return JSONResponse(
-                status_code=400,
-                content={"ok": False, "error": "memory_invalid_input", "result": "failed"},
-            )
-        if _memory_factory_reset_running():
-            return JSONResponse(
-                status_code=409,
-                content={"ok": False, "error": "memory_operation_in_progress", "result": "failed"},
-            )
-        runtime = _memory_runtime()
-        if runtime is None:
-            return JSONResponse(
-                status_code=503,
-                content={"ok": False, "error": "memory_runtime_missing", "result": "failed"},
-            )
-        if getattr(runtime, "factory_reset_pending", False):
-            return JSONResponse(
-                status_code=409,
-                content={"ok": False, "error": "memory_operation_in_progress", "result": "failed"},
-            )
-        try:
-            result = await runtime.rebuild()
-        except Exception:
-            logger.exception("internal memory rebuild failed")
-            return JSONResponse(
-                status_code=503,
-                content={"ok": False, "error": "memory_rebuild_failed", "result": "failed"},
-            )
-        status_code = 200 if result.get("ok") is True else 409
-        return JSONResponse(status_code=status_code, content=result)
-
-    @app.post("/internal/memory/factory-reset")
-    async def _memory_factory_reset(request: Request) -> Any:
-        """Run the Controller-owned factory reset and await its final result."""
-
-        if _verified_memory_ui_user_key(request) is None:
-            return JSONResponse(
-                status_code=403,
-                content={"ok": False, "error": "memory_access_denied", "result": "failed"},
-            )
-        payload = await _safe_json(request)
-        if payload != {"confirm": True}:
-            return JSONResponse(
-                status_code=400,
-                content={"ok": False, "error": "memory_invalid_input", "result": "failed"},
-            )
-        runtime = _memory_runtime()
-        if runtime is None:
-            return JSONResponse(
-                status_code=503,
-                content={"ok": False, "error": "memory_runtime_missing", "result": "failed"},
-            )
-        rebuild_running = getattr(runtime, "_rebuild_running", None)
-        repair_running = getattr(runtime, "_repair_running", None)
-        if (callable(rebuild_running) and rebuild_running()) or (callable(repair_running) and repair_running()):
-            return JSONResponse(
-                status_code=409,
-                content={"ok": False, "error": "memory_operation_in_progress", "result": "failed"},
-            )
-        reset = getattr(controller, "factory_reset_memory", None)
-        if not callable(reset):
-            return JSONResponse(
-                status_code=503,
-                content={"ok": False, "error": "memory_runtime_missing", "result": "failed"},
-            )
-        try:
-            result = await reset()
-        except Exception:
-            logger.exception("internal memory factory reset failed")
-            return JSONResponse(
-                status_code=503,
-                content={"ok": False, "error": "memory_factory_reset_failed", "result": "failed"},
-            )
+            logger.exception("internal memory wake failed")
+            result = {"ok": False, "state": "degraded", "error": "memory_wake_failed"}
         status_code = 200 if result.get("ok") is True else (
             409 if result.get("error") == "memory_operation_in_progress" else 503
         )
         return JSONResponse(status_code=status_code, content=result)
 
-    @app.post("/internal/memory/repair")
-    async def _memory_repair(request: Request) -> Any:
-        """Run one retained live cascade sync and return its final health."""
-
+    async def _confirmed_memory_data_operation(
+        request: Request,
+        *,
+        operation: str,
+    ) -> Any:
         if _verified_memory_ui_user_key(request) is None:
             return JSONResponse(
                 status_code=403,
-                content={"ok": False, "error": "memory_access_denied", "result": "failed"},
+                content={"ok": False, "operation": operation, "error": "memory_access_denied"},
             )
         payload = await _safe_json(request)
-        if payload != {"confirm": True}:
+        if payload != {"confirm_loss": True}:
             return JSONResponse(
                 status_code=400,
-                content={"ok": False, "error": "memory_invalid_input", "result": "failed"},
+                content={
+                    "ok": False,
+                    "operation": operation,
+                    "error": "memory_loss_confirmation_required",
+                    "result": "unchanged",
+                },
             )
-        if _memory_factory_reset_running():
-            return JSONResponse(
-                status_code=409,
-                content={"ok": False, "error": "memory_operation_in_progress", "result": "failed"},
-            )
-        runtime = _memory_runtime()
-        if runtime is None:
+        handler = (
+            getattr(controller, "repair_memory", None)
+            if operation == "repair"
+            else getattr(controller, "delete_memory_data", None)
+        )
+        if not callable(handler):
             return JSONResponse(
                 status_code=503,
-                content={"ok": False, "error": "memory_runtime_missing", "result": "failed"},
+                content={"ok": False, "operation": operation, "error": "memory_runtime_missing"},
             )
         try:
-            result = await runtime.repair()
+            result = await handler(confirm_loss=True)
         except Exception:
-            logger.exception("internal memory repair failed")
-            return JSONResponse(
-                status_code=503,
-                content={"ok": False, "error": "memory_repair_failed", "result": "failed"},
-            )
+            logger.exception("internal Memory %s failed", operation)
+            result = {
+                "ok": False,
+                "operation": operation,
+                "error": f"memory_{operation}_failed",
+                "result": "failed",
+            }
         if result.get("ok") is True:
             status_code = 200
         elif result.get("error") in {
-            "memory_disabled",
             "memory_operation_in_progress",
-            "memory_runtime_unsupported",
+            "memory_repair_not_required",
         }:
             status_code = 409
         else:
             status_code = 503
         return JSONResponse(status_code=status_code, content=result)
 
+    @app.post("/internal/memory/repair")
+    async def _memory_repair(request: Request) -> Any:
+        return await _confirmed_memory_data_operation(request, operation="repair")
+
+    @app.post("/internal/memory/delete-data")
+    async def _memory_delete_data(request: Request) -> Any:
+        return await _confirmed_memory_data_operation(request, operation="delete_data")
+
+    @app.post("/internal/memory/reconfigure")
+    async def _memory_reconfigure(request: Request) -> Any:
+        if _verified_memory_ui_user_key(request) is None:
+            return JSONResponse(
+                status_code=403,
+                content={"ok": False, "operation": "reconfigure", "error": "memory_access_denied"},
+            )
+        payload = await _safe_json(request)
+        if not isinstance(payload, dict) or set(payload) != {
+            "confirm_loss",
+            "memory",
+            "expected_memory",
+        }:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "operation": "reconfigure",
+                    "error": "memory_loss_confirmation_required",
+                },
+            )
+        if payload.get("confirm_loss") is not True:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "operation": "reconfigure",
+                    "error": "memory_loss_confirmation_required",
+                },
+            )
+        try:
+            from config.v2_config import memory_config_from_payload
+
+            candidate = memory_config_from_payload(payload["memory"])
+            expected = memory_config_from_payload(payload["expected_memory"])
+            result = await controller.reconfigure_memory(
+                candidate,
+                expected_config=expected,
+                confirm_loss=True,
+            )
+        except (TypeError, ValueError):
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "operation": "reconfigure", "error": "memory_invalid_input"},
+            )
+        except Exception:
+            logger.exception("internal Memory reconfigure failed")
+            result = {
+                "ok": False,
+                "operation": "reconfigure",
+                "error": "memory_reconfigure_failed",
+            }
+        status_code = 200 if result.get("ok") is True else (
+            409 if result.get("error") == "memory_operation_in_progress" else 503
+        )
+        return JSONResponse(status_code=status_code, content=result)
+
     @app.post("/internal/memory/install-runtime")
     async def _memory_install_runtime() -> Any:
         """Install or repair the managed runtime on the controller lifecycle."""
 
-        if _memory_factory_reset_running():
-            return JSONResponse(
-                status_code=409,
-                content={"ok": False, "reason": "memory_operation_in_progress"},
-            )
         runtime = _memory_runtime()
         if runtime is None:
             return JSONResponse(status_code=503, content={"ok": False, "reason": "memory_runtime_missing"})
@@ -1221,7 +1191,7 @@ def create_app(
             return JSONResponse(status_code=200, content=await runtime.preflight(config))
         except Exception:
             logger.exception("internal memory preflight failed")
-            return JSONResponse(status_code=503, content={"ok": False, "error": "memory_rebuild_failed"})
+            return JSONResponse(status_code=503, content={"ok": False, "error": "memory_processing_failed"})
 
     def _memory_cli_scope(request: Request) -> tuple[str, str] | None:
         from core.memory.http_headers import CALLER_SESSION_HEADER
@@ -1888,34 +1858,6 @@ def create_app(
             response["error"] = error
         return response
 
-    @app.post("/internal/memory/clear")
-    async def _memory_clear(request: Request) -> Any:
-        user_key = _verified_memory_ui_user_key(request)
-        if user_key is None:
-            return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
-        if _memory_factory_reset_running():
-            return JSONResponse(
-                status_code=409,
-                content={"status": "failed", "error": "memory_operation_in_progress"},
-            )
-        runtime = _memory_runtime()
-        if runtime is None:
-            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
-        payload = await _safe_json(request)
-        if payload != {"confirm": True}:
-            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
-        try:
-            return await runtime.clear(
-                operator_ref=runtime.principal_for_user_key(user_key)
-            )
-        except MemoryStoreUnavailableError:
-            return JSONResponse(
-                status_code=503,
-                content={"status": "failed", "error": "memory_store_unavailable"},
-            )
-        except Exception:
-            logger.warning("internal memory clear failed")
-            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_clear_failed"})
 
     @app.post("/internal/model-hub")
     async def _model_hub(request: Request) -> Any:

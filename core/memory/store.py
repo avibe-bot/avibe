@@ -366,33 +366,22 @@ class MemoryStore:
         meta = self.get_meta()
         return bool(meta and meta.clear_in_progress)
 
-    def begin_clear_fence(self) -> MemoryMeta:
-        now = utc_now_iso()
-        with self._transaction() as conn:
-            self._ensure_meta(conn)
-            conn.execute("UPDATE memory_meta SET clear_in_progress = 1, updated_at = ? WHERE singleton = 1", (now,))
-            return self._ensure_meta(conn)
+    def settle_after_data_loss(self) -> MemoryMeta:
+        """Rotate volatile data authority while preserving stable identity.
 
-    def release_clear_fence(self) -> MemoryMeta:
-        now = utc_now_iso()
-        with self._transaction() as conn:
-            self._ensure_meta(conn)
-            conn.execute("UPDATE memory_meta SET clear_in_progress = 0, updated_at = ? WHERE singleton = 1", (now,))
-            return self._ensure_meta(conn)
+        The released ``clear_in_progress`` column is consumed here only as
+        compatibility input. This is one atomic settlement, not a resumable
+        operation stage.
+        """
 
-    def reset_for_clear(self, *, target_epoch: int | None = None, release_clear_fence: bool = True) -> MemoryMeta:
         with self._transaction() as conn:
             meta = self._ensure_meta(conn)
-            epoch = meta.epoch + 1 if target_epoch is None else target_epoch
-            if epoch not in {meta.epoch, meta.epoch + 1}:
-                raise ValueError("Memory clear target epoch does not match current state")
             now = utc_now_iso()
-            conn.execute("DELETE FROM memory_projects")
             conn.execute(
                 """UPDATE memory_meta SET epoch = ?, clear_in_progress = ?, last_provider_timestamp_ms = 0,
                    missed_count = 0, last_success_at = NULL, last_error = NULL, last_error_at = NULL, updated_at = ?
                    WHERE singleton = 1""",
-                (epoch, 0 if release_clear_fence else 1, now),
+                (meta.epoch + 1, 0, now),
             )
             return self._ensure_meta(conn)
 

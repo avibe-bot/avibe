@@ -1,5 +1,9 @@
 # Memory Factory Reset (#1315)
 
+> Historical design. Superseded by
+> [`memory-unified-recovery-pr3.md`](./memory-unified-recovery-pr3.md); Factory
+> Reset was replaced by Repair and the distinct Delete data intent.
+
 ## Background
 
 Rebuild can recreate projections from Markdown but cannot recover a corrupt

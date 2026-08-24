@@ -1,20 +1,21 @@
 version: 1
 capability: memory_repair
 observations:
-  - id: OBS-MEMORY-REPAIR-001
-    source: issue_contract
-    related_scenarios:
-      - MEMORY-REPAIR-001
-      - MEMORY-REPAIR-002
-      - MEMORY-REPAIR-003
-      - MEMORY-REPAIR-004
-      - MEMORY-REPAIR-005
-      - MEMORY-REPAIR-006
-    summary: Repair is an admitted artifact-sync action that coexists with the live sidecar and settles only from structured cascade health.
-    previous_assumption: A successful child exit was enough to show completion, and a missing artifact could be treated as an older-runtime compatibility path.
-    observed_behavior: The backend exposes repair_available on settings and returns a closed repair result; the frontend must fail closed when the capability is absent and must not parse stdout or poll.
-    required_updates:
-      - keep the action hidden unless repair_available is exactly true
-      - accept only the frozen POST response whitelist
-      - render completed_with_warnings when health.healthy is false
-      - disable conflicting Memory controls for the request lifetime without stopping the sidecar
+  - id: MEMORY-REPAIR-OBS-001
+    scenarios:
+      - MEMORY-WAKE-001
+      - MEMORY-WAKE-002
+      - MEMORY-WAKE-201
+    observation: Startup, explicit Wake, and unexpected child recovery share one volatile non-destructive path; failures never route into Repair.
+  - id: MEMORY-REPAIR-OBS-002
+    scenarios:
+      - MEMORY-REPAIR-201
+      - MEMORY-REPAIR-202
+      - MEMORY-REPAIR-203
+      - MEMORY-REPAIR-206
+    observation: Destructive authority consists only of exact accepted-loss confirmation, process exclusion, proven termination, and fixed confined surfaces; stable identity and project rows remain outside deletion.
+  - id: MEMORY-REPAIR-OBS-003
+    scenarios:
+      - MEMORY-REPAIR-204
+      - MEMORY-REPAIR-205
+    observation: No operation stage is persisted or resumed; startup reevaluates the native root, while ordinary provider and machine faults stay degraded.
