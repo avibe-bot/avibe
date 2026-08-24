@@ -14,11 +14,11 @@ capabilities:
     catalog: tests/scenarios/memory_delete_data/catalog.yaml
     observations: tests/scenarios/memory_delete_data/observations.yaml
     scenario_tests:
-      - tests/test_controller_memory_data_reset.py
+      - tests/test_ui_memory_routes.py
     unit_or_contract_tests:
+      - tests/test_controller_memory_data_reset.py
       - tests/test_internal_client.py
       - tests/test_internal_server.py
-      - tests/test_ui_memory_routes.py
   - id: memory_search
     name: Default Memory project and explicit named projects
     status: active
@@ -87,12 +87,13 @@ capabilities:
     catalog: tests/scenarios/memory_repair/catalog.yaml
     observations: tests/scenarios/memory_repair/observations.yaml
     scenario_tests:
+      - tests/test_ui_memory_routes.py
+    unit_or_contract_tests:
       - tests/test_memory_wake.py
       - tests/test_controller_memory_data_reset.py
-    unit_or_contract_tests:
+      - tests/test_memory_store.py
       - tests/test_internal_client.py
       - tests/test_internal_server.py
-      - tests/test_ui_memory_routes.py
       - ui/src/components/settings/memory/MemoryStatusPanel.test.tsx
   - id: model_hub
     name: Model Hub configured routes and turn outcomes

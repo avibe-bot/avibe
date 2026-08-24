@@ -145,7 +145,7 @@ def test_volatile_admission_preserves_identity_without_payload_tables(tmp_path: 
 def test_data_loss_settlement_preserves_stable_identity_and_rotates_epoch(
     tmp_path: Path,
 ) -> None:
-    """MEMORY-REPAIR-302: destructive reset preserves stable identity."""
+    """MEMORY-REPAIR-206: destructive reset preserves stable identity."""
 
     store = MemoryStore(_store_path(tmp_path), effective_home=tmp_path)
     before = store.ensure_meta()

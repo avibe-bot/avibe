@@ -44,12 +44,14 @@ class MemorySidecarLifecycle:
         effective_home: Path,
         socket_path: Path,
         on_current_sidecar_ready: Callable[[int], Awaitable[None] | None],
+        on_unexpected_sidecar_exit: Callable[[], Awaitable[None] | None] | None = None,
     ) -> None:
         self._process_factory = process_factory
         self._provider_root = provider_root
         self._effective_home = effective_home
         self._socket_path = socket_path
         self._on_current_sidecar_ready = on_current_sidecar_ready
+        self._on_unexpected_sidecar_exit = on_unexpected_sidecar_exit
         self._process: EverOSProcessPort | None = None
         self._generation = 0
         self._launch_token = 0
@@ -97,6 +99,12 @@ class MemorySidecarLifecycle:
             if self._is_current(sidecar, generation):
                 self._schedule_ready(generation, self._launch_token)
 
+        def unexpected_exit() -> Awaitable[None] | None:
+            callback = self._on_unexpected_sidecar_exit
+            if callback is None or not self._is_current(sidecar, generation):
+                return None
+            return callback()
+
         sidecar = self._process_factory(
             python,
             provider_root=self._provider_root,
@@ -106,6 +114,7 @@ class MemorySidecarLifecycle:
             provider_root_guard=provider_root_guard,
             on_ready=ready,
             before_start=before_start,
+            on_unexpected_exit=unexpected_exit,
         )
         self._process = sidecar
         try:

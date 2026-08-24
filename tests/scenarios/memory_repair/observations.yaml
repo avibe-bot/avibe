@@ -5,16 +5,17 @@ observations:
     scenarios:
       - MEMORY-WAKE-001
       - MEMORY-WAKE-002
+      - MEMORY-WAKE-201
     observation: Startup, explicit Wake, and unexpected child recovery share one volatile non-destructive path; failures never route into Repair.
   - id: MEMORY-REPAIR-OBS-002
     scenarios:
-      - MEMORY-REPAIR-001
-      - MEMORY-REPAIR-002
-      - MEMORY-REPAIR-003
-      - MEMORY-REPAIR-006
-    observation: Destructive authority consists only of exact accepted-loss confirmation, process-level exclusion, proven termination, and fixed confined surfaces; stable identity and project rows remain outside deletion.
+      - MEMORY-REPAIR-201
+      - MEMORY-REPAIR-202
+      - MEMORY-REPAIR-203
+      - MEMORY-REPAIR-206
+    observation: Destructive authority consists only of exact accepted-loss confirmation, process exclusion, proven termination, and fixed confined surfaces; stable identity and project rows remain outside deletion.
   - id: MEMORY-REPAIR-OBS-003
     scenarios:
-      - MEMORY-REPAIR-004
-      - MEMORY-REPAIR-005
+      - MEMORY-REPAIR-204
+      - MEMORY-REPAIR-205
     observation: No operation stage is persisted or resumed; startup reevaluates the native root, while ordinary provider and machine faults stay degraded.

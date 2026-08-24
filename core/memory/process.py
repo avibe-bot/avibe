@@ -519,6 +519,7 @@ class EverOSProcess:
         on_ready: Callable[[], Awaitable[None] | None] | None = None,
         before_start: Callable[[], Awaitable[None] | None] | None = None,
         on_reaped: Callable[[], Awaitable[None] | None] | None = None,
+        on_unexpected_exit: Callable[[], Awaitable[None] | None] | None = None,
         _host: _ProcessHost | None = None,
     ) -> None:
         self._python = Path(python)
@@ -569,6 +570,7 @@ class EverOSProcess:
         self._on_ready = on_ready
         self._before_start = before_start
         self._on_reaped = on_reaped
+        self._on_unexpected_exit = on_unexpected_exit
         self._desired_running = False
         self._starting = False
         self._down = False
@@ -937,6 +939,7 @@ class EverOSProcess:
             await self._notify_reaped()
             self._record_start_failure_locked()
             return False
+
     async def _start_with_provider_lock(self) -> bool:
         """Serialize sidecar admission with every rebuild of this provider root."""
 
@@ -1032,6 +1035,7 @@ class EverOSProcess:
                 self._last_error = "memory_sidecar_unavailable"
                 self._desired_running = False
                 self._starting = False
+                self._schedule_unexpected_exit_notification()
                 return
             self._process = None
             self._process_group = None
@@ -1067,7 +1071,13 @@ class EverOSProcess:
                     name="memory-everos-restart",
                 )
                 return
-            self._record_start_failure_locked()
+            if self._on_unexpected_exit is None:
+                self._record_start_failure_locked()
+                return
+            self._desired_running = False
+            self._down = True
+            self._last_error = "memory_sidecar_unavailable"
+        await self._notify_unexpected_exit()
 
     async def _monitor_child(self, process: asyncio.subprocess.Process) -> None:
         """Keep tracking descendants and reject any later TCP listener."""
@@ -1096,6 +1106,7 @@ class EverOSProcess:
         except Exception:
             if not self._desired_running:
                 return
+            notify_unexpected_exit = False
             recorded_stamp = (
                 self._owned_processes.get(process.pid) if process.pid is not None else None
             )
@@ -1127,6 +1138,7 @@ class EverOSProcess:
                     )
                 except Exception:
                     logger.warning("EverOS sidecar safety shutdown did not reap the child tree")
+                    self._schedule_unexpected_exit_notification()
                     return
                 self._process = None
                 self._process_group = None
@@ -1137,6 +1149,9 @@ class EverOSProcess:
                 self._remove_owned_socket()
                 self._ownership.retire_if_group_is_clear(process.pid, process_group)
                 await self._notify_reaped()
+                notify_unexpected_exit = self._on_unexpected_exit is not None
+            if notify_unexpected_exit:
+                await self._notify_unexpected_exit()
 
     def _record_start_failure_locked(self) -> None:
         self._consecutive_failures += 1
@@ -1308,6 +1323,25 @@ class EverOSProcess:
                 await result
         except Exception:
             logger.warning("EverOS sidecar ready callback failed")
+
+    async def _notify_unexpected_exit(self) -> None:
+        callback = self._on_unexpected_exit
+        if callback is None:
+            return
+        try:
+            result = callback()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.warning("EverOS sidecar unexpected-exit callback failed")
+
+    def _schedule_unexpected_exit_notification(self) -> None:
+        if self._on_unexpected_exit is None:
+            return
+        asyncio.create_task(
+            self._notify_unexpected_exit(),
+            name="memory-everos-unexpected-exit-notification",
+        )
 
     async def _notify_before_start(self) -> None:
         callback = self._before_start
@@ -3851,6 +3885,7 @@ class EverOSProcessFactory(Protocol):
         on_ready: Callable[[], Awaitable[None] | None] | None = None,
         before_start: Callable[[], Awaitable[None] | None] | None = None,
         on_reaped: Callable[[], Awaitable[None] | None] | None = None,
+        on_unexpected_exit: Callable[[], Awaitable[None] | None] | None = None,
     ) -> EverOSProcessPort: ...
 
 
@@ -3872,6 +3907,7 @@ class FakeEverOSProcess:
     on_ready: Callable[[], Awaitable[None] | None] | None = None
     before_start: Callable[[], Awaitable[None] | None] | None = None
     on_reaped: Callable[[], Awaitable[None] | None] | None = None
+    on_unexpected_exit: Callable[[], Awaitable[None] | None] | None = None
     # Launch inputs the factory captured, for tests asserting on child settings.
     python: Path | None = None
     provider_root: Path | None = None
@@ -3960,6 +3996,19 @@ class FakeEverOSProcess:
         if inspect.isawaitable(result):
             await result
 
+    async def unexpected_exit(self) -> None:
+        """Simulate a reaped child that the supervisor did not stop."""
+
+        self._running = False
+        self._desired_running = False
+        self._down = True
+        await self._notify_reaped()
+        callback = self.on_unexpected_exit
+        if callback is not None:
+            result = callback()
+            if inspect.isawaitable(result):
+                await result
+
     async def processing_healthy(self) -> bool:
         if self.processing_healthy_results:
             return self.processing_healthy_results.popleft()
@@ -4003,12 +4052,14 @@ class FakeEverOSProcessFactory:
         on_ready: Callable[[], Awaitable[None] | None] | None = None,
         before_start: Callable[[], Awaitable[None] | None] | None = None,
         on_reaped: Callable[[], Awaitable[None] | None] | None = None,
+        on_unexpected_exit: Callable[[], Awaitable[None] | None] | None = None,
     ) -> EverOSProcessPort:
         del effective_home, socket_path
         process = self.template()
         process.on_ready = on_ready
         process.before_start = before_start
         process.on_reaped = on_reaped
+        process.on_unexpected_exit = on_unexpected_exit
         process.python = Path(python)
         process.provider_root = Path(provider_root) if provider_root is not None else None
         process.provider_root_guard = provider_root_guard

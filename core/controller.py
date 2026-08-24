@@ -790,7 +790,6 @@ class Controller:
         target_config: MemoryConfig | None = None,
     ) -> dict[str, Any]:
         from core.memory.data_reset import (
-            reset_memory_data_roots,
             unchanged_memory_data_result,
         )
         from core.memory.runtime import create_memory_runtime
@@ -883,17 +882,23 @@ class Controller:
                     await runtime.close()
                 except BaseException:
                     logger.exception("Memory data reset could not close the owned runtime")
-                    return unchanged_memory_data_result(
+                    runtime.mark_needs_repair(f"memory_{operation}_failed")
+                    failure = unchanged_memory_data_result(
                         runtime.effective_home,
                         operation=operation,
                         reason="runtime_termination_unproved",
                     )
+                    failure["state"] = "needs_repair"
+                    return failure
                 if not runtime.closed:
-                    return unchanged_memory_data_result(
+                    runtime.mark_needs_repair(f"memory_{operation}_failed")
+                    failure = unchanged_memory_data_result(
                         runtime.effective_home,
                         operation=operation,
                         reason="runtime_termination_unproved",
                     )
+                    failure["state"] = "needs_repair"
+                    return failure
 
                 try:
                     await runtime.settle_after_data_loss()
@@ -901,15 +906,17 @@ class Controller:
                     logger.exception(
                         "Memory data reset could not preserve and rotate stable identity"
                     )
-                    return unchanged_memory_data_result(
+                    runtime.mark_needs_repair(f"memory_{operation}_failed")
+                    failure = unchanged_memory_data_result(
                         runtime.effective_home,
                         operation=operation,
                         reason="identity_settlement_failed",
                     )
+                    failure["state"] = "needs_repair"
+                    return failure
 
                 deletion = await asyncio.to_thread(
-                    reset_memory_data_roots,
-                    runtime.effective_home,
+                    runtime.reset_mutable_data,
                 )
                 deletion_payload = deletion.payload()
                 if deletion.data_remaining:
@@ -954,11 +961,15 @@ class Controller:
                     }
                 activation = await fresh.wake(operation_lease_held=True)
                 if activation.get("ok") is not True:
-                    fresh.mark_needs_repair(f"memory_{operation}_failed")
+                    state = activation.get("state")
+                    if state == "needs_repair" and not fresh.needs_repair:
+                        fresh.mark_needs_repair(
+                            str(activation.get("error") or f"memory_{operation}_failed")
+                        )
                     return {
                         "ok": False,
                         "operation": operation,
-                        "state": "needs_repair",
+                        "state": "needs_repair" if fresh.needs_repair else "degraded",
                         "error": activation.get("error", f"memory_{operation}_failed"),
                         "result": "deleted_readiness_failed",
                         **deletion_payload,

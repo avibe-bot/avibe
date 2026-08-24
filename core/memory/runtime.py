@@ -37,6 +37,7 @@ from core.memory.artifact import (
 from core.memory.attachments import IM_ATTACHMENT_CAPTURE_PLATFORMS
 from core.memory.blocking import run_blocking
 from core.memory.confined_filesystem import ConfinedRoot, required_no_follow_flag
+from core.memory.data_reset import MemoryDataResetResult, reset_memory_data_roots
 from core.memory.everos import (
     EverOSPort,
     MemoryProviderFailure,
@@ -109,6 +110,8 @@ MEMORY_LIST_CURSOR_MAX_BYTES = 8192
 _MEMORY_LIST_PROVIDER_PAGE_SIZE = 20
 _MEMORY_LIST_PROVIDER_MAX_PAGE = 1_000_000
 _MEMORY_LIST_AGGREGATE_TIMEOUT_SECONDS = 20.0
+_UNEXPECTED_WAKE_DELAYS_SECONDS = (0.0, 0.5, 1.0)
+_UNEXPECTED_WAKE_WINDOW_SECONDS = 30.0
 
 
 @asynccontextmanager
@@ -355,6 +358,7 @@ class MemoryRuntime:
             self._advance_processing_lifecycle
         )
         self._wake_task: asyncio.Task[dict[str, Any]] | None = None
+        self._unexpected_wake_times: list[float] = []
         self._ready_activation_task: asyncio.Task[None] | None = None
         self._artifact_activation_task: asyncio.Task[None] | None = None
         self._closing = False
@@ -373,6 +377,7 @@ class MemoryRuntime:
             effective_home=self._effective_home,
             socket_path=self._socket_path,
             on_current_sidecar_ready=self._current_sidecar_ready,
+            on_unexpected_sidecar_exit=self._schedule_unexpected_sidecar_wake,
         )
         self._processing_record = MemoryProcessingRecord(
             self._processing_record_port()
@@ -464,7 +469,8 @@ class MemoryRuntime:
 
         self._needs_repair_reason = reason
         self._runtime_error = None
-        self.module.pause_claims()
+        if self._module is not None:
+            self._module.pause_claims()
 
     async def settle_after_data_loss(self) -> None:
         """Rotate data authority after the owned process has stopped.
@@ -476,6 +482,13 @@ class MemoryRuntime:
         if not self._closed or self._store is None:
             raise RuntimeError("Memory runtime must be closed before data settlement")
         await asyncio.to_thread(self._store.settle_after_data_loss)
+
+    def reset_mutable_data(self) -> MemoryDataResetResult:
+        """Reset the fixed mutable roots pinned by this runtime."""
+
+        if not self._closed:
+            raise RuntimeError("Memory runtime must be closed before data reset")
+        return reset_memory_data_roots(self._effective_home)
 
     @property
     def retired(self) -> bool:
@@ -1966,6 +1979,47 @@ class MemoryRuntime:
             if self._wake_task is completed
             else None
         )
+
+    def _schedule_unexpected_sidecar_wake(self) -> None:
+        """Route a child crash through bounded, volatile Wake recovery."""
+
+        if self._closing or self._retired or self.needs_repair:
+            return
+        self.module.pause_claims()
+        self._runtime_error = "memory_sidecar_unavailable"
+        task = self._wake_task
+        if task is not None and not task.done():
+            return
+        now = time.monotonic()
+        self._unexpected_wake_times = [
+            observed
+            for observed in self._unexpected_wake_times
+            if now - observed < _UNEXPECTED_WAKE_WINDOW_SECONDS
+        ]
+        attempt = len(self._unexpected_wake_times)
+        if attempt >= len(_UNEXPECTED_WAKE_DELAYS_SECONDS):
+            return
+        self._unexpected_wake_times.append(now)
+        task = asyncio.create_task(
+            self._wake_after_unexpected_sidecar_exit(
+                _UNEXPECTED_WAKE_DELAYS_SECONDS[attempt]
+            ),
+            name="memory-wake-after-unexpected-sidecar-exit",
+        )
+        self._wake_task = task
+        task.add_done_callback(
+            lambda completed: setattr(self, "_wake_task", None)
+            if self._wake_task is completed
+            else None
+        )
+
+    async def _wake_after_unexpected_sidecar_exit(
+        self,
+        delay_seconds: float,
+    ) -> dict[str, Any]:
+        if delay_seconds:
+            await asyncio.sleep(delay_seconds)
+        return await self._wake_after_writer_close()
 
     async def _wake_after_writer_close(self) -> dict[str, Any]:
         try:

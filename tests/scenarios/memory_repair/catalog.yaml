@@ -3,14 +3,23 @@ capability:
   id: memory_repair
   name: Unified non-destructive Wake and destructive Memory Repair
   canonical_tests:
+    - tests/test_ui_memory_routes.py
     - tests/test_memory_wake.py
     - tests/test_controller_memory_data_reset.py
     - tests/test_internal_server.py
     - tests/test_internal_client.py
-    - tests/test_ui_memory_routes.py
 status_legend:
   covered: executable evidence exists at the declared layer
   partial: contract evidence exists but full packaged runtime regression remains
+retired_scenarios:
+  reason: The released live index-sync Repair protocol was removed rather than repurposed.
+  ids:
+    - MEMORY-REPAIR-001
+    - MEMORY-REPAIR-002
+    - MEMORY-REPAIR-003
+    - MEMORY-REPAIR-004
+    - MEMORY-REPAIR-005
+    - MEMORY-REPAIR-006
 scenarios:
   - id: MEMORY-WAKE-001
     name: Wake reuses the existing admitted Memory root
@@ -18,71 +27,141 @@ scenarios:
     kind: happy_path
     layer: contract
     test: tests/test_memory_wake.py::test_wake_reuses_existing_root_and_proves_native_readiness
+    actor: Memory runtime
+    trigger: Startup or an explicit Wake request
+    conditions:
+      - The artifact is admitted and the existing mutable root is usable
     given: Memory has an admitted artifact and an existing mutable data root
     when: Wake starts the runtime and verifies native readiness with bounded backoff
     then: The existing root remains intact and status becomes running
+    expected_outputs:
+      - Running state with no data deletion
   - id: MEMORY-WAKE-002
     name: Wake failure is degraded and never destructive
     status: covered
     kind: degradation
     layer: contract
     test: tests/test_memory_wake.py::test_wake_artifact_failure_is_degraded_and_non_destructive
-    given: Artifact validation or installation fails
+    related_tests:
+      - tests/test_memory_wake.py::test_wake_never_routes_needs_repair_into_deletion
+    actor: Memory runtime
+    trigger: Wake encounters an artifact or local eligibility failure
+    conditions:
+      - Existing Memory data may still be present
+    given: Artifact validation or installation fails, or the root already needs Repair
     when: Wake is requested
-    then: The runtime reports a short degraded reason and existing Memory data remains intact
-  - id: MEMORY-REPAIR-001
+    then: The runtime reports a bounded reason and existing Memory data remains intact
+    expected_outputs:
+      - Degraded or needs_repair state with no data deletion
+  - id: MEMORY-WAKE-201
+    name: Unexpected child exit re-enters the unified Wake path
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_memory_wake.py::test_unexpected_exit_reenters_wake_and_repairs_the_artifact
+    actor: Memory runtime supervisor
+    trigger: The owned EverOS child exits unexpectedly
+    conditions:
+      - The runtime is not closing or retired and no Repair is required
+    given: A running sidecar exits and the admitted artifact has become invalid
+    when: Volatile bounded recovery schedules Wake
+    then: Wake repairs the artifact, replaces the child, and preserves the existing root
+    expected_outputs:
+      - A replacement running child and intact Memory data
+  - id: MEMORY-REPAIR-201
     name: Repair requires exact accepted-loss confirmation and genuine eligibility
     status: covered
     kind: authorization
-    layer: contract
-    test: tests/test_controller_memory_data_reset.py::test_repair_requires_exact_loss_confirmation
+    layer: scenario
+    test: tests/test_ui_memory_routes.py::test_memory_repair_public_route_requires_exact_loss_confirmation
     related_tests:
+      - tests/test_controller_memory_data_reset.py::test_repair_requires_exact_loss_confirmation
       - tests/test_controller_memory_data_reset.py::test_repair_is_not_offered_for_degraded_runtime
-    given: A caller reaches the destructive Repair boundary
-    when: accepted loss is absent or the local root does not genuinely need repair
+    actor: Memory Settings user
+    trigger: The user submits a Repair request
+    conditions:
+      - Repair is destructive and only genuine needs_repair grants eligibility
+    given: A caller reaches the public destructive Repair boundary
+    when: Exact accepted-loss confirmation is absent or eligibility is false
     then: Repair fails closed and does not touch the runtime or data roots
-  - id: MEMORY-REPAIR-002
+    expected_outputs:
+      - A rejected response and zero destructive controller activity
+  - id: MEMORY-REPAIR-202
     name: Repair proves stop before confined deletion and native readiness after reset
     status: covered
     kind: lifecycle
     layer: contract
     test: tests/test_controller_memory_data_reset.py::test_repair_stops_owned_runtime_before_delete_and_proves_native_readiness
+    actor: Memory controller
+    trigger: An eligible user confirms Repair
+    conditions:
+      - The local root is unusable and the operation lease is available
     given: The confined local root is unusable and Repair is explicitly confirmed
     when: Repair owns both the process lease and controller replacement gate
-    then: Recorded ownership is reaped, the old runtime is proven closed before deletion, and success waits for native readiness
-  - id: MEMORY-REPAIR-003
+    then: Ownership is reaped, close is proven before deletion, and success waits for native readiness
+    expected_outputs:
+      - Stop, identity settlement, confined deletion, and Wake occur in order
+  - id: MEMORY-REPAIR-203
     name: Unproved process termination authorizes no deletion
     status: covered
     kind: safety
     layer: contract
     test: tests/test_controller_memory_data_reset.py::test_repair_deletes_nothing_when_termination_is_unproved
-    given: The old owned runtime cannot prove all writers and process trees stopped
+    actor: Memory controller
+    trigger: Repair cannot prove the old runtime closed
+    conditions:
+      - The owned process tree or writer may still retain the data root
+    given: The old runtime cannot prove all writers and process trees stopped
     when: Repair attempts to cross the destructive boundary
-    then: Both exact roots remain unchanged and the response reports the failed proof
-  - id: MEMORY-REPAIR-004
-    name: Failed post-reset native readiness remains needs repair without a workflow journal
+    then: Both exact roots remain unchanged and the runtime stays needs_repair
+    expected_outputs:
+      - No deletion and a truthful termination-proof failure
+  - id: MEMORY-REPAIR-204
+    name: Post-reset activation truthfully classifies local and external failures
     status: covered
     kind: failure
     layer: contract
-    test: tests/test_controller_memory_data_reset.py::test_failed_post_repair_readiness_remains_needs_repair
-    given: Confined deletion completed but the native data path is not ready
-    when: Repair performs its final readiness check
-    then: It reports deleted data truthfully, remains needs_repair, and a later Repair starts again from root evaluation
-  - id: MEMORY-REPAIR-005
+    test: tests/test_controller_memory_data_reset.py::test_local_post_reset_wake_failure_remains_needs_repair
+    related_tests:
+      - tests/test_controller_memory_data_reset.py::test_external_post_reset_wake_failure_remains_degraded
+    actor: Memory controller
+    trigger: Wake fails after confined deletion completed
+    conditions:
+      - No operation stage or replay instruction is persisted
+    given: Repair has deleted mutable data and created a fresh runtime
+    when: Final native activation reports a local-root or external failure
+    then: Local-root failures remain needs_repair while external failures remain degraded
+    expected_outputs:
+      - Truthful deleted-data response with no persisted recovery workflow
+  - id: MEMORY-REPAIR-205
     name: Provider, credential, disk, and permission faults do not qualify for Repair
     status: covered
     kind: classification
     layer: contract
     test: tests/test_memory_wake.py::test_external_local_faults_are_degraded_not_repair_eligible
-    given: Memory fails outside the unusable-or-incompatible local-root boundary
+    related_tests:
+      - tests/test_controller_memory_data_reset.py::test_external_post_reset_wake_failure_remains_degraded
+    actor: Memory runtime
+    trigger: Memory encounters an external provider or machine fault
+    conditions:
+      - The local native root is not proven unusable or incompatible
+    given: Memory fails outside the local-root Repair boundary
     when: Runtime state is classified
-    then: The state is degraded with a bounded reason and no destructive Repair authority
-  - id: MEMORY-REPAIR-006
+    then: The state is degraded with no destructive Repair authority
+    expected_outputs:
+      - Bounded degraded reason and Repair rejected as not required
+  - id: MEMORY-REPAIR-206
     name: Repair preserves stable identity and the project catalog
     status: covered
     kind: migration
     layer: contract
     test: tests/test_memory_store.py::test_data_loss_settlement_preserves_stable_identity_and_rotates_epoch
-    given: A confirmed destructive reset has stopped the old owned process
-    when: Avibe settles the new provider data generation
-    then: Scope identity, provider-root identity, and project rows survive while volatile data authority rotates
+    actor: Memory identity store
+    trigger: Confirmed Repair settles a new provider-data generation
+    conditions:
+      - The old owned process is proven stopped
+    given: A confirmed destructive reset reaches identity settlement
+    when: The store rotates volatile data authority
+    then: Scope identity, provider-root identity, and project rows survive
+    expected_outputs:
+      - Stable identities and projects with a new data epoch

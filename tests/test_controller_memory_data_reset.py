@@ -56,6 +56,11 @@ class _Runtime:
         assert self.closed is True
         self.events.append("settle")
 
+    def reset_mutable_data(self):
+        assert self.closed is True
+        self.events.append("delete")
+        return reset_memory_data_roots(self.effective_home)
+
     def mark_needs_repair(self, reason: str) -> None:
         self.marked_reason = reason
         self.needs_repair = True
@@ -120,6 +125,8 @@ def test_reset_memory_data_roots_removes_only_named_retired_recovery_residue(
 
 
 def test_reset_memory_data_roots_fails_closed_on_special_entry(tmp_path: Path) -> None:
+    """MEMORY-DELETE-DATA-002: unsafe contents are never deleted recursively."""
+
     _roots(tmp_path)
     unsafe = tmp_path / "memory" / "pipe"
     os.mkfifo(unsafe, mode=0o600)
@@ -134,6 +141,8 @@ def test_reset_memory_data_roots_fails_closed_on_special_entry(tmp_path: Path) -
 
 @pytest.mark.asyncio
 async def test_repair_requires_exact_loss_confirmation(tmp_path: Path) -> None:
+    """MEMORY-REPAIR-201: Repair requires exact accepted-loss authority."""
+
     runtime = _Runtime(tmp_path, needs_repair=True)
     controller = _controller(runtime)
 
@@ -150,6 +159,8 @@ async def test_repair_requires_exact_loss_confirmation(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_repair_is_not_offered_for_degraded_runtime(tmp_path: Path) -> None:
+    """MEMORY-REPAIR-201: degraded state grants no Repair authority."""
+
     runtime = _Runtime(tmp_path, needs_repair=False)
     controller = _controller(runtime)
 
@@ -164,6 +175,8 @@ async def test_repair_stops_owned_runtime_before_delete_and_proves_native_readin
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """MEMORY-REPAIR-202: Repair proves stop, reset, and native readiness."""
+
     _roots(tmp_path)
     runtime = _Runtime(tmp_path, needs_repair=True)
     fresh = _Runtime(tmp_path)
@@ -171,12 +184,6 @@ async def test_repair_stops_owned_runtime_before_delete_and_proves_native_readin
     _persist(monkeypatch, controller)
     events = runtime.events
 
-    def reset(home: Path):
-        assert runtime.closed is True
-        events.append("delete")
-        return reset_memory_data_roots(home)
-
-    monkeypatch.setattr("core.memory.data_reset.reset_memory_data_roots", reset)
     monkeypatch.setattr(
         "core.memory.runtime.create_memory_runtime",
         lambda *args, **kwargs: fresh,
@@ -196,38 +203,79 @@ async def test_repair_deletes_nothing_when_termination_is_unproved(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """MEMORY-REPAIR-203: failed termination proof grants no deletion."""
+
     _roots(tmp_path)
     runtime = _Runtime(tmp_path, needs_repair=True, close_proved=False)
     controller = _controller(runtime)
     _persist(monkeypatch, controller)
-    called = False
-
-    def reset(_home: Path):
-        nonlocal called
-        called = True
-        return reset_memory_data_roots(_home)
-
-    monkeypatch.setattr("core.memory.data_reset.reset_memory_data_roots", reset)
-
     result = await controller.repair_memory(confirm_loss=True)
 
     assert result["ok"] is False
     assert result["reason"] == "runtime_termination_unproved"
+    assert result["state"] == "needs_repair"
     assert result["data_deleted"] is False
-    assert called is False
+    assert "delete" not in runtime.events
+    assert runtime.marked_reason == "memory_repair_failed"
     assert (tmp_path / "memory").is_dir()
 
 
 @pytest.mark.asyncio
-async def test_failed_post_repair_readiness_remains_needs_repair(
+async def test_external_post_reset_wake_failure_remains_degraded(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """MEMORY-REPAIR-205: external activation failures remain degraded."""
+
     _roots(tmp_path)
     runtime = _Runtime(tmp_path, needs_repair=True)
     fresh = _Runtime(
         tmp_path,
-        wake_result={"ok": False, "state": "degraded", "error": "memory_wake_failed"},
+        wake_result={
+            "ok": False,
+            "state": "degraded",
+            "error": "memory_permission_denied",
+        },
+    )
+    controller = _controller(runtime)
+    _persist(monkeypatch, controller)
+    monkeypatch.setattr(
+        "core.memory.runtime.create_memory_runtime",
+        lambda *args, **kwargs: fresh,
+    )
+
+    result = await controller.delete_memory_data(confirm_loss=True)
+
+    assert result["ok"] is False
+    assert result["result"] == "deleted_readiness_failed"
+    assert result["state"] == "degraded"
+    assert result["data_deleted"] is True
+    assert fresh.marked_reason is None
+    assert await controller.repair_memory(confirm_loss=True) == {
+        "ok": False,
+        "operation": "repair",
+        "error": "memory_repair_not_required",
+        "result": "unchanged",
+    }
+
+
+@pytest.mark.asyncio
+async def test_local_post_reset_wake_failure_remains_needs_repair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MEMORY-REPAIR-204: local post-reset failure remains repairable."""
+
+    _roots(tmp_path)
+    runtime = _Runtime(tmp_path, needs_repair=True)
+    fresh = _Runtime(
+        tmp_path,
+        needs_repair=True,
+        wake_result={
+            "ok": False,
+            "state": "needs_repair",
+            "error": "memory_local_data_unusable",
+        },
     )
     controller = _controller(runtime)
     _persist(monkeypatch, controller)
@@ -239,10 +287,9 @@ async def test_failed_post_repair_readiness_remains_needs_repair(
     result = await controller.repair_memory(confirm_loss=True)
 
     assert result["ok"] is False
-    assert result["result"] == "deleted_readiness_failed"
     assert result["state"] == "needs_repair"
-    assert result["data_deleted"] is True
-    assert fresh.marked_reason == "memory_repair_failed"
+    assert result["error"] == "memory_local_data_unusable"
+    assert fresh.marked_reason is None
 
 
 @pytest.mark.asyncio
@@ -250,6 +297,8 @@ async def test_delete_data_has_distinct_intent_but_reuses_reset(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """MEMORY-DELETE-DATA-001: explicit deletion uses the shared reset."""
+
     _roots(tmp_path)
     runtime = _Runtime(tmp_path)
     fresh = _Runtime(tmp_path)
@@ -303,7 +352,7 @@ async def test_reconfigure_keeps_confirmed_identity_when_readiness_fails(
     result = await controller.reconfigure_memory(target, confirm_loss=True)
 
     assert result["ok"] is False
-    assert result["state"] == "needs_repair"
+    assert result["state"] == "degraded"
     assert persisted == [target]
     assert controller.config.memory == target
-    assert fresh.marked_reason == "memory_reconfigure_failed"
+    assert fresh.marked_reason is None

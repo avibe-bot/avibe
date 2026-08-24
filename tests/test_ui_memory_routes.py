@@ -207,14 +207,7 @@ def test_memory_wake_is_non_destructive_and_preserves_closed_result(
     assert calls == [True]
 
 
-@pytest.mark.parametrize(
-    ("path", "client_name", "operation"),
-    [
-        ("/api/memory/repair", "memory_repair", "repair"),
-        ("/api/memory/delete-data", "memory_delete_data", "delete_data"),
-    ],
-)
-def test_memory_destructive_routes_require_csrf_and_exact_loss_confirmation(
+def _assert_memory_destructive_route_contract(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
     path: str,
@@ -279,6 +272,36 @@ def test_memory_destructive_routes_require_csrf_and_exact_loss_confirmation(
     assert accepted.get_json()["data_deleted"] is True
     assert accepted.headers["cache-control"] == "no-store"
     assert calls == [{"confirm_loss": True, "user_key": "avibe:local"}]
+
+
+def test_memory_repair_public_route_requires_exact_loss_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """MEMORY-REPAIR-201: the public Repair boundary fails closed."""
+
+    _assert_memory_destructive_route_contract(
+        monkeypatch,
+        tmp_path,
+        "/api/memory/repair",
+        "memory_repair",
+        "repair",
+    )
+
+
+def test_memory_delete_data_public_route_requires_exact_loss_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """MEMORY-DELETE-DATA-001: Delete data is a distinct confirmed intent."""
+
+    _assert_memory_destructive_route_contract(
+        monkeypatch,
+        tmp_path,
+        "/api/memory/delete-data",
+        "memory_delete_data",
+        "delete_data",
+    )
 
 
 @pytest.mark.parametrize(

@@ -90,6 +90,31 @@ def test_released_recovery_fields_are_one_time_needs_repair_input(
     assert loaded.memory.legacy_needs_repair is False
 
 
+def test_released_recovery_config_fixture_loads_and_saves_canonically(
+    tmp_path: Path,
+) -> None:
+    """A released on-disk recovery shape is one-time compatibility evidence."""
+
+    fixture = (
+        Path(__file__).parent
+        / "fixtures"
+        / "memory"
+        / "released_recovery_protocol.json"
+    )
+    path = tmp_path / "config.json"
+    path.write_bytes(fixture.read_bytes())
+
+    loaded = V2Config.load(path)
+
+    assert loaded.memory.enabled is True
+    assert loaded.memory.legacy_needs_repair is True
+    loaded.save(path)
+    stored = json.loads(path.read_text(encoding="utf-8"))["memory"]
+    assert "recovery_intent" not in stored
+    assert "embedding_change_pending" not in stored
+    assert "transition_rebuild_owned" not in stored["cloud"]
+
+
 @pytest.mark.parametrize("intent", ["unknown", "", True, 1, {}])
 def test_unknown_legacy_recovery_intent_is_rejected_as_malformed_input(
     intent: object,

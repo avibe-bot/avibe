@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 
@@ -33,6 +34,8 @@ async def test_wake_reuses_existing_root_and_proves_native_readiness(
     monkeypatch: pytest.MonkeyPatch,
     memory_runtime_factory,
 ) -> None:
+    """MEMORY-WAKE-001: Wake preserves the existing root."""
+
     artifact = FakeMemoryArtifactManager(python=Path(sys.executable))
     processes = FakeEverOSProcessFactory()
     provider = FakeMemoryProvider(
@@ -69,6 +72,8 @@ async def test_wake_never_routes_needs_repair_into_deletion(
     tmp_path: Path,
     memory_runtime_factory,
 ) -> None:
+    """MEMORY-WAKE-002: local repair eligibility never implies deletion by Wake."""
+
     artifact = FakeMemoryArtifactManager(python=Path(sys.executable))
     runtime = memory_runtime_factory(
         _config(legacy_needs_repair=True),
@@ -95,6 +100,8 @@ async def test_wake_artifact_failure_is_degraded_and_non_destructive(
     tmp_path: Path,
     memory_runtime_factory,
 ) -> None:
+    """MEMORY-WAKE-002: artifact failures degrade without deleting data."""
+
     artifact = FakeMemoryArtifactManager(
         python=None,
         status_payload={
@@ -128,6 +135,55 @@ async def test_wake_artifact_failure_is_degraded_and_non_destructive(
     assert artifact.ensure_calls == [True]
 
 
+@pytest.mark.asyncio
+async def test_unexpected_exit_reenters_wake_and_repairs_the_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    memory_runtime_factory,
+) -> None:
+    """MEMORY-WAKE-201: an unexpected exit reuses the public Wake path."""
+
+    artifact = FakeMemoryArtifactManager(python=Path(sys.executable))
+    processes = FakeEverOSProcessFactory()
+    provider = FakeMemoryProvider(
+        health_snapshot_value=ProviderHealthSnapshot(
+            status="ok",
+            version="test",
+            capabilities={"embed": True},
+            disabled_features=(),
+            cascade={},
+        )
+    )
+    monkeypatch.setattr(runtime_module, "EverOSPort", lambda *args, **kwargs: provider)
+    runtime = memory_runtime_factory(
+        _config(),
+        artifact_manager=artifact,
+        process_factory=processes,
+        effective_home=tmp_path,
+    )
+    sentinel = tmp_path / "memory" / "user-data.txt"
+    sentinel.parent.mkdir(parents=True, exist_ok=True)
+    sentinel.write_text("keep", encoding="utf-8")
+    assert await runtime.wake() == {"ok": True, "state": "running"}
+
+    artifact.status_payload = {
+        "installed": False,
+        "status": "invalid",
+        "reason": "memory_runtime_invalid",
+    }
+    await processes.supervised[0].unexpected_exit()
+    for _ in range(100):
+        await asyncio.sleep(0.01)
+        if len(processes.supervised) == 2 and processes.supervised[1].running:
+            break
+
+    assert artifact.ensure_calls == [True]
+    assert len(processes.supervised) == 2
+    assert processes.supervised[1].running is True
+    assert runtime.runtime_state() == "running"
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
 @pytest.mark.parametrize(
     ("error", "reason"),
     [
@@ -139,5 +195,7 @@ def test_external_local_faults_are_degraded_not_repair_eligible(
     error: Exception,
     reason: str,
 ) -> None:
+    """MEMORY-REPAIR-205: external faults stay degraded."""
+
     assert runtime_module._degraded_runtime_reason(error) == reason
     assert runtime_module._local_data_failure_requires_repair(error) is False

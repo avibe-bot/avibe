@@ -60,9 +60,10 @@ replacement marker, journal, pending stage, or fallback executor is introduced.
 
 ## Scenario contract
 
-- `MEMORY-WAKE-001` and `MEMORY-WAKE-002`: Wake is non-destructive and bounded;
-  external faults remain degraded.
-- `MEMORY-REPAIR-001` through `MEMORY-REPAIR-006`: exact loss confirmation,
+- `MEMORY-WAKE-001`, `MEMORY-WAKE-002`, and `MEMORY-WAKE-201`: Wake is
+  non-destructive and bounded; unexpected exits re-enter Wake and external faults
+  remain degraded.
+- `MEMORY-REPAIR-201` through `MEMORY-REPAIR-206`: exact loss confirmation,
   eligibility, stop-before-delete, native readiness, no stage resume, and
   identity preservation.
 - `MEMORY-DELETE-DATA-001` and `MEMORY-DELETE-DATA-002`: distinct user intent, exact

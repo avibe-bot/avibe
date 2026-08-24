@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import core.memory.runtime as runtime_module
 from config.v2_config import MemoryEndpointConfig, MemoryProcessingConfig
 from core.memory.everos import ProviderHealthSnapshot
 from core.memory.processing_record import RuntimeHealthProjection, SourceObservation
@@ -44,6 +45,24 @@ async def test_runtime_close_drops_volatile_work(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
     await runtime.close()
     assert runtime.closed
+
+
+@pytest.mark.asyncio
+async def test_unavailable_runtime_can_be_marked_needs_repair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unavailable_store(*_args, **_kwargs):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(runtime_module, "MemoryStore", unavailable_store)
+    runtime = MemoryRuntime(MemoryConfig(enabled=True), effective_home=tmp_path)
+
+    runtime.mark_needs_repair("memory_local_data_unusable")
+
+    assert runtime.available is False
+    assert runtime.runtime_state() == "needs_repair"
+    await runtime.close()
 
 
 @pytest.mark.asyncio
