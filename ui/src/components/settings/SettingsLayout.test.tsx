@@ -102,6 +102,19 @@ afterEach(() => {
 });
 
 describe('SettingsLayout', () => {
+  it('keeps the mobile shell constrained so the route pane owns vertical scrolling', () => {
+    renderLayout('/settings/replies');
+
+    const routePane = screen.getByText('replies-body').closest('section');
+    const shell = routePane?.parentElement?.parentElement;
+
+    expect(routePane?.className).toContain('overflow-y-auto');
+    expect(shell?.className).toContain('h-full');
+    expect(shell?.className).toContain('min-h-0');
+    expect(shell?.className).toContain('md:h-auto');
+    expect(shell?.className).not.toContain('min-h-full');
+  });
+
   it('renders the three-group rail and feature-gated owner sections', async () => {
     renderLayout('/settings/replies');
 
