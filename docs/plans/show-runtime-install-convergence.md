@@ -134,9 +134,9 @@ named revision, not a promise about a future implementation.
 | **Step 1:** Model-hub platform alias | Model-hub maps host `linux-x64` to released artifact label `linux-amd64`; its released pointer, metadata, and claim can therefore carry a label different from the host tag. | `2c6fcbe88` |
 | Downloads namespace | Remote manifest caches use `downloads/manifest-<digest>.json` beside archives, so the namespace mixes durable manifest facts with disposable archive bytes. | `2c6fcbe88` |
 | Inspection versus absence | Shared versions-directory preview preserves traversal errors instead of treating them as proof of no install; Show status can still collapse a raised inspection into absent at its consumer boundary. | `2c6fcbe88` |
-| Released Show links | Each v3.0.13 Darwin/Linux archive has 16 symlinks and one esbuild hard link; the four Unix archives have nine forward symlinks total, prior-target hard links, and no finally dangling symlink. Windows archives have no links. | `v3.0.13` manifests and archives; measured 2026-08-23 |
-| Extractor behavior | Shared stops at the first link member. Show and tmux accept the benign regular/symlink/hard-link probe and raise on an escaping `linkname`. | `2c6fcbe88`; hermetic probe 2026-08-23 |
-| Filter capability | The project supports Python 3.10+. Show capability-detects `filter="data"`; shared and tmux use a Python 3.12 version gate even though the filter is backported to 3.10.12 and 3.11.4. | `2c6fcbe88`; Python docs checked 2026-08-23 |
+| **Step 3:** Released Show links | Each v3.0.13 Darwin/Linux archive has 16 symlinks and one esbuild hard link; the four Unix archives have nine forward symlinks total, prior-target hard links, and no finally dangling symlink. Windows archives have no links. | `v3.0.13` manifests and archives; measured 2026-08-23 |
+| **Step 3:** Extractor behavior | Shared stops at the first link member. Show and tmux accept the benign regular/symlink/hard-link probe and raise on an escaping `linkname`. | `2c6fcbe88`; hermetic probe 2026-08-23 |
+| **Step 3:** Filter capability | The project supports Python 3.10+. Show capability-detects `filter="data"`; shared and tmux use a Python 3.12 version gate even though the filter is backported to 3.10.12 and 3.11.4. | `2c6fcbe88`; Python docs checked 2026-08-23 |
 
 ### Measured Backlog Outside Step 1
 
@@ -151,12 +151,8 @@ selected manifest to admitted disk records and artifacts. Status, resolvers,
 and reuse derive installed identity from disk while manifest failure remains a
 separate candidate-operation diagnostic; Show and tmux are unchanged.
 
-The contract author marks normative current-fact rows **Step 1**; all and only
-those rows define corpus membership, which implementation cannot elect. Each has
-a provenance-verified released fixture and executable case, or acceptance fails.
 Every Step 1 shared consumer rejects external or symlink-resolved pointer paths.
 Model-hub claim cases cover schemas 1 and 2 and normalize whole-manifest targets for resume/recovery; acceptance verifies each fixture's released version, digest, and source bytes.
-Unmarked rows contain no `MUST`, `rejects`, or `fails`; no fixture path is named.
 The entrypoint universe is generated from the public operation surface exported
 by the Step 1 manager and adapter code, with a reflection check that fails when
 that surface and its code-owned contract registry differ. The executable
@@ -195,6 +191,22 @@ The following mechanical gates apply to every step:
    consumer overrides it; at least one must inherit it unchanged.
 2. A new public shared-layer symbol with zero production call sites fails the
    step. Test-only call sites do not count.
+3. The contract author marks each normative row of the Measured
+   Current-Behavior Census with its owning step. All and only the census rows
+   marked for a step define that step's corpus membership, which
+   implementation cannot elect. Every marked row has an executable case. A
+   marked row whose own observation cites a released artifact or record
+   additionally requires a fixture provenance-verified against the released
+   version and digest it derives from. A row citing no released bytes — an
+   interpreter capability, a code behavior, or a constructed hostile input —
+   has no released fixture to verify and is covered by its executable case
+   alone; the row text decides this and implementation never classifies rows.
+   An unmarked census row states an observation, so it contains no `MUST`,
+   `rejects`, or `fails`; that prohibition is the whole test, because a
+   path-naming clause cannot distinguish a production path from a fixture path
+   under `rg`. Both halves scope to that census table alone, so the other
+   tables in this document keep describing current behavior in their own
+   words.
 
 ### Step 2: Converge The Mutation Guard
 
