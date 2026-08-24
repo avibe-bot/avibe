@@ -794,6 +794,38 @@ class Controller:
         target_config: MemoryConfig | None = None,
         expected_config: MemoryConfig | None = None,
     ) -> dict[str, Any]:
+        """Finish an accepted destructive request before honoring cancellation."""
+
+        transaction = asyncio.create_task(
+            self._reset_memory_data_transaction(
+                operation=operation,
+                target_config=target_config,
+                expected_config=expected_config,
+            ),
+            name=f"memory-{operation}-transaction",
+        )
+        cancellation: asyncio.CancelledError | None = None
+        while not transaction.done():
+            try:
+                result = await asyncio.shield(transaction)
+            except asyncio.CancelledError as error:
+                cancellation = cancellation or error
+                continue
+            if cancellation is not None:
+                raise cancellation
+            return result
+        result = transaction.result()
+        if cancellation is not None:
+            raise cancellation
+        return result
+
+    async def _reset_memory_data_transaction(
+        self,
+        *,
+        operation: str,
+        target_config: MemoryConfig | None = None,
+        expected_config: MemoryConfig | None = None,
+    ) -> dict[str, Any]:
         from core.memory.data_reset import (
             unchanged_memory_data_result,
         )

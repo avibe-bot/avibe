@@ -48,20 +48,34 @@ async def test_runtime_close_drops_volatile_work(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_unavailable_runtime_can_be_marked_needs_repair(
+async def test_environmental_store_failure_defers_durable_repair_fence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    store_type = runtime_module.MemoryStore
+
     def unavailable_store(*_args, **_kwargs):
         raise PermissionError("denied")
 
     monkeypatch.setattr(runtime_module, "MemoryStore", unavailable_store)
-    runtime = MemoryRuntime(MemoryConfig(enabled=True), effective_home=tmp_path)
+    config = MemoryConfig(enabled=True, legacy_needs_repair=True)
+    runtime = MemoryRuntime(config, effective_home=tmp_path)
 
     runtime.mark_needs_repair("memory_local_data_unusable")
 
     assert runtime.available is False
-    assert runtime.runtime_state() == "needs_repair"
+    assert runtime.needs_repair is False
+    assert runtime.needs_repair_reason == "memory_local_data_unusable"
+    assert runtime.runtime_state() == "degraded"
+    status = await runtime.status_payload()
+    assert status["state"] == "degraded"
+    assert status["reason"] == "memory_permission_denied"
+
+    monkeypatch.setattr(runtime_module, "MemoryStore", store_type)
+    result = await runtime.reconcile(config)
+
+    assert result["state"] == "needs_repair"
+    assert runtime.needs_repair is True
     await runtime.close()
 
 

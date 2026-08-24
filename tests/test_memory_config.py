@@ -129,6 +129,39 @@ def test_released_recovery_config_fixture_loads_and_saves_canonically(
     assert V2Config.load(path).memory.legacy_needs_repair is True
 
 
+@pytest.mark.parametrize("managed", [False, True])
+def test_unreadable_authoritative_cloud_cache_becomes_durable_repair_fence(
+    tmp_path: Path,
+    managed: bool,
+) -> None:
+    memory = {
+        "enabled": False,
+        "mode": "custom" if managed else "platform",
+        "cloud": "unreadable",
+    }
+    payload = _payload(memory)
+    if managed:
+        payload["remote_access"] = {
+            "provider": "vibe_cloud",
+            "vibe_cloud": {
+                "enabled": True,
+                "instance_id": "instance",
+                "instance_kind": "organization",
+                "instance_secret": "secret",
+            },
+        }
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(path)
+
+    assert loaded.memory.legacy_needs_repair is True
+    updated = atomic_update_memory(lambda memory: memory, config_path=path)
+    assert updated.memory.legacy_needs_repair is True
+    stored = json.loads(path.read_text(encoding="utf-8"))["memory"]
+    assert stored["repair_required"] is True
+
+
 @pytest.mark.parametrize("intent", ["unknown", "", True, 1, {}])
 def test_unknown_legacy_recovery_intent_is_rejected_as_malformed_input(
     intent: object,

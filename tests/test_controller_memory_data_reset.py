@@ -462,6 +462,7 @@ async def test_cancelled_reset_joins_deletion_before_releasing_exclusion(
 ) -> None:
     _roots(tmp_path)
     runtime = _Runtime(tmp_path)
+    fresh = _Runtime(tmp_path)
     controller = _controller(runtime, enabled=False)
     _persist(monkeypatch, controller)
     deletion_started = threading.Event()
@@ -479,12 +480,17 @@ async def test_cancelled_reset_joins_deletion_before_releasing_exclusion(
             lease_events.append("release")
 
     def blocking_reset():
+        runtime.events.append("delete")
         deletion_started.set()
         allow_deletion_to_finish.wait(timeout=5)
         return reset_memory_data_roots(tmp_path)
 
     runtime.reset_mutable_data = blocking_reset
     monkeypatch.setattr("core.controller.MemoryOperationLease", Lease)
+    monkeypatch.setattr(
+        "core.memory.runtime.create_memory_runtime",
+        lambda *args, **kwargs: fresh,
+    )
 
     task = asyncio.create_task(controller.delete_memory_data(confirm_loss=True))
     assert await asyncio.to_thread(deletion_started.wait, 2)
@@ -498,3 +504,5 @@ async def test_cancelled_reset_joins_deletion_before_releasing_exclusion(
     with pytest.raises(asyncio.CancelledError):
         await task
     assert lease_events == ["acquire", "release"]
+    assert runtime.events == ["reap", "retire", "close", "settle", "delete"]
+    assert controller.memory_runtime is fresh

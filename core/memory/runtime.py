@@ -464,7 +464,18 @@ class MemoryRuntime:
     def needs_repair(self) -> bool:
         """Whether local mutable data is known unusable or incompatible."""
 
-        return self._needs_repair_reason is not None
+        return (
+            self._needs_repair_reason is not None
+            and not self._environmental_store_failure()
+        )
+
+    def _environmental_store_failure(self) -> bool:
+        if self._store_error is None:
+            return False
+        return _degraded_runtime_reason(self._store_error, default="") in {
+            "memory_permission_denied",
+            "memory_disk_unavailable",
+        }
 
     @property
     def needs_repair_reason(self) -> str | None:
@@ -474,7 +485,8 @@ class MemoryRuntime:
         """Keep a failed destructive operation closed until it is rerun."""
 
         self._needs_repair_reason = reason
-        self._runtime_error = None
+        if not self._environmental_store_failure():
+            self._runtime_error = None
         if self._module is not None:
             self._module.pause_claims()
 

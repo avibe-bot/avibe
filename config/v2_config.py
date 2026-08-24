@@ -1203,6 +1203,8 @@ def _recover_memory_cloud_section(payload: dict, field_name: Optional[str]) -> b
     cloud = memory.get("cloud")
     managed_fence = _memory_cloud_recovery_requires_managed_fence(payload)
     if not isinstance(cloud, dict) or field_name is None:
+        if managed_fence or memory.get("mode") == "platform":
+            memory["repair_required"] = True
         if managed_fence:
             memory["cloud"] = {
                 "scope": "organization",
