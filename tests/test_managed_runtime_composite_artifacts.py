@@ -245,6 +245,79 @@ def _write_ordering_probe(path: Path) -> None:
         archive.addfile(hardlink)
 
 
+def _write_fallback_escape_probe(path: Path) -> None:
+    with tarfile.open(path, "w") as archive:
+        directory_link = tarfile.TarInfo("a")
+        directory_link.type = tarfile.SYMTYPE
+        directory_link.linkname = "."
+        archive.addfile(directory_link)
+        escaping_link = tarfile.TarInfo("a/x")
+        escaping_link.type = tarfile.SYMTYPE
+        escaping_link.linkname = "../victim"
+        archive.addfile(escaping_link)
+        payload = b"OVERWRITTEN\n"
+        regular = tarfile.TarInfo("x")
+        regular.size = len(payload)
+        archive.addfile(regular, io.BytesIO(payload))
+
+
+def test_shared_fallback_refuses_links_before_extraction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive_path = tmp_path / "fallback-escape.tar"
+    _write_fallback_escape_probe(archive_path)
+    case = tmp_path / "fallback"
+    case.mkdir()
+    destination = case / "destination"
+    victim = case / "victim"
+    victim.write_bytes(b"ORIGINAL\n")
+    victim_stat = victim.stat()
+    monkeypatch.delattr(tarfile, "data_filter", raising=False)
+
+    with tarfile.open(archive_path) as archive:
+        with pytest.raises(
+            ValueError,
+            match=r"^Managed runtime archive link requires tarfile\.data_filter: a$",
+        ):
+            managed_runtime.safe_extract_tar(archive, destination)
+
+    assert victim.read_bytes() == b"ORIGINAL\n"
+    assert victim.stat().st_ino == victim_stat.st_ino
+    assert victim.stat().st_nlink == victim_stat.st_nlink
+    assert not destination.exists()
+
+
+def test_shared_fallback_refuses_hardlinks_before_extraction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive_path = tmp_path / "fallback-hardlink.tar"
+    with tarfile.open(archive_path, "w") as archive:
+        payload = b"payload\n"
+        regular = tarfile.TarInfo("root/regular")
+        regular.size = len(payload)
+        archive.addfile(regular, io.BytesIO(payload))
+        hardlink = tarfile.TarInfo("root/hardlink")
+        hardlink.type = tarfile.LNKTYPE
+        hardlink.linkname = "root/regular"
+        archive.addfile(hardlink)
+    destination = tmp_path / "fallback-hardlink"
+    monkeypatch.delattr(tarfile, "data_filter", raising=False)
+
+    with tarfile.open(archive_path) as archive:
+        with pytest.raises(
+            ValueError,
+            match=(
+                r"^Managed runtime archive link requires "
+                r"tarfile\.data_filter: root/hardlink$"
+            ),
+        ):
+            managed_runtime.safe_extract_tar(archive, destination)
+
+    assert not destination.exists()
+
+
 @pytest.mark.parametrize(
     ("_name", "extractor"),
     (
@@ -292,13 +365,21 @@ def test_order_dependent_link_target_stays_confined(
     assert sorted(path.name for path in destination.iterdir()) == expected_members
 
 
-@pytest.mark.parametrize(("_name", "extractor"), EXTRACTORS, ids=[item[0] for item in EXTRACTORS])
+@pytest.mark.parametrize(
+    ("_name", "extractor", "detects_before_extract"),
+    (
+        ("shared", managed_runtime.safe_extract_tar, True),
+        ("show", show_runtime._safe_extract_tar, False),
+        ("tmux", tmux_runtime._safe_extract_tar, False),
+    ),
+)
 @pytest.mark.parametrize("supports_filter", (True, False), ids=("available", "unavailable"))
-def test_filter_capability_is_detected_by_calling_extractall(
+def test_filter_capability_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     _name: str,
     extractor: Extractor,
+    detects_before_extract: bool,
     supports_filter: bool,
 ) -> None:
     archive_path = tmp_path / f"{_name}-{supports_filter}.tar"
@@ -308,6 +389,12 @@ def test_filter_capability_is_detected_by_calling_extractall(
         member.size = len(payload)
         archive.addfile(member, io.BytesIO(payload))
     destination = tmp_path / f"{_name}-{supports_filter}"
+    actual_filter_available = hasattr(tarfile, "data_filter")
+    if detects_before_extract:
+        if supports_filter:
+            monkeypatch.setattr(tarfile, "data_filter", object(), raising=False)
+        else:
+            monkeypatch.delattr(tarfile, "data_filter", raising=False)
     calls: list[object] = []
 
     with tarfile.open(archive_path) as archive:
@@ -315,7 +402,7 @@ def test_filter_capability_is_detected_by_calling_extractall(
 
         def capture_extractall(path, members=None, *, numeric_owner=False, filter=None):
             calls.append(filter)
-            if filter is not None and not supports_filter:
+            if filter is not None and not supports_filter and not detects_before_extract:
                 raise TypeError("filter is unavailable")
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", DeprecationWarning)
@@ -323,11 +410,21 @@ def test_filter_capability_is_detected_by_calling_extractall(
                     path,
                     members=members,
                     numeric_owner=numeric_owner,
-                    **({"filter": filter} if filter is not None else {}),
+                    **(
+                        {"filter": filter}
+                        if filter is not None and actual_filter_available
+                        else {}
+                    ),
                 )
 
         monkeypatch.setattr(archive, "extractall", capture_extractall)
         extractor(archive, destination)
 
-    assert calls == (["data"] if supports_filter else ["data", None])
+    if supports_filter:
+        expected_calls = ["data"]
+    elif detects_before_extract:
+        expected_calls = [None]
+    else:
+        expected_calls = ["data", None]
+    assert calls == expected_calls
     assert (destination / "payload").read_bytes() == payload

@@ -1316,6 +1316,7 @@ def install_lock_for(runtime_id: str) -> threading.Lock:
 
 
 def safe_extract_tar(archive: tarfile.TarFile, destination: Path) -> None:
+    supports_data_filter = hasattr(tarfile, "data_filter")
     destination_resolved = destination.resolve()
     for member in archive.getmembers():
         if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
@@ -1325,6 +1326,10 @@ def safe_extract_tar(archive: tarfile.TarFile, destination: Path) -> None:
         target = (destination / member.name).resolve()
         if target != destination_resolved and destination_resolved not in target.parents:
             raise ValueError(f"Unsafe managed runtime archive path: {member.name}")
+        if (member.issym() or member.islnk()) and not supports_data_filter:
+            raise ValueError(
+                f"Managed runtime archive link requires tarfile.data_filter: {member.name}"
+            )
         if member.issym():
             link_target = (destination / member.name).parent / member.linkname
             link_target_resolved = link_target.resolve()
@@ -1341,9 +1346,9 @@ def safe_extract_tar(archive: tarfile.TarFile, destination: Path) -> None:
                 and destination_resolved not in link_target_resolved.parents
             ):
                 raise ValueError(f"Unsafe managed runtime archive link target: {member.name}")
-    try:
+    if supports_data_filter:
         archive.extractall(destination, filter="data")
-    except TypeError:
+    else:
         archive.extractall(destination)
 
 
