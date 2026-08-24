@@ -261,6 +261,7 @@ from core.memory.provider_root import ProviderRoot, ProviderRootMetadata
 
 async def verify() -> None:
     effective_home = Path(sys.argv[2])
+    socket_path = effective_home / "memory" / ".rt" / "everos.sock"
     provider_root = ProviderRoot(
         effective_home / "memory" / "everos-root",
         effective_home=effective_home,
@@ -279,6 +280,7 @@ async def verify() -> None:
     process = EverOSProcess(
         python=Path(sys.argv[1]),
         effective_home=effective_home,
+        socket_path=socket_path,
         settings=EverOSProcessSettings(
             llm_base_url="https://llm.invalid/v1",
             llm_model="unused",
@@ -297,8 +299,8 @@ async def verify() -> None:
     started = await process.start()
     try:
         if not started:
-            raise RuntimeError(f"sidecar failed to start: {process.last_error}")
-        if not await EverOSPort(process.socket_path, sidecar_timeout_seconds=5).health():
+            raise RuntimeError("sidecar failed to start")
+        if not await EverOSPort(socket_path, sidecar_timeout_seconds=5).health():
             raise RuntimeError("sidecar UDS health endpoint failed")
     finally:
         await process.stop()

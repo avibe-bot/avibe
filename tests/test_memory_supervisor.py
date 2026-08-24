@@ -31,6 +31,7 @@ def _supervisor(
     ready=lambda: None,
     unavailable=lambda: None,
     restart_delays: tuple[float, ...] = (0.0, 0.0),
+    recover_in_child_task: bool = False,
 ) -> EverOSSupervisor:
     home = tmp_path / "home"
     provider_root = home / "memory" / "everos-root"
@@ -41,10 +42,15 @@ def _supervisor(
 
     async def recover() -> bool:
         assert supervisor is not None
-        return await supervisor.wake(
-            Path(sys.executable),
-            _settings(),
+        recovery = supervisor.wake(
+            Path(sys.executable), _settings()
         )
+        if recover_in_child_task:
+            return await asyncio.create_task(
+                recovery,
+                name="memory-artifact-activation-test",
+            )
+        return await recovery
 
     supervisor = EverOSSupervisor(
         provider_root=provider_root,
@@ -87,13 +93,17 @@ async def test_wake_keeps_one_owner_and_fences_stale_callbacks(tmp_path: Path) -
     assert await supervisor.wake(Path(sys.executable), _settings()) is True
     await _settle()
     first = factory.supervised[0]
-    assert ready == 1
+    assert ready == 0
 
     assert await supervisor.wake(Path(sys.executable), _settings()) is True
     await _settle()
     second = factory.supervised[1]
     assert first.stops == 1
-    assert ready == 2
+    assert ready == 0
+
+    await second.ready()
+    await _settle()
+    assert ready == 1
 
     await first.ready()
     await first.unexpected_exit()
@@ -102,7 +112,7 @@ async def test_wake_keeps_one_owner_and_fences_stale_callbacks(tmp_path: Path) -
     assert len(factory.supervised) == 2
     assert supervisor.status.running is True
     assert second.running is True
-    assert ready == 2
+    assert ready == 1
     assert unavailable == 0
     await supervisor.close()
 
@@ -145,6 +155,68 @@ async def test_close_cancels_pending_restart(tmp_path: Path) -> None:
 
     assert len(factory.supervised) == 1
     assert supervisor.status.state == "closed"
+
+
+async def test_close_interrupts_an_in_flight_launch_before_waiting_for_the_lock(
+    tmp_path: Path,
+) -> None:
+    entered = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class BlockingProcess(FakeEverOSProcess):
+        async def start(self) -> bool:
+            self.starts += 1
+            entered.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    factory = FakeEverOSProcessFactory(template=BlockingProcess)
+    supervisor = _supervisor(tmp_path, factory)
+    wake = asyncio.create_task(supervisor.wake(Path(sys.executable), _settings()))
+    await entered.wait()
+
+    await asyncio.wait_for(supervisor.close(), timeout=1)
+
+    assert cancelled.is_set()
+    assert await wake is False
+    assert supervisor.status.state == "closed"
+
+
+async def test_recovery_authority_reaches_an_artifact_activation_task(
+    tmp_path: Path,
+) -> None:
+    start_results = deque((True, False, True))
+    factory = FakeEverOSProcessFactory(
+        template=lambda: FakeEverOSProcess(
+            start_results=deque((start_results.popleft(),))
+        )
+    )
+    supervisor = _supervisor(
+        tmp_path,
+        factory,
+        restart_delays=(0.0, 0.0),
+        recover_in_child_task=True,
+    )
+    assert await supervisor.wake(Path(sys.executable), _settings()) is True
+
+    await factory.supervised[0].unexpected_exit()
+    for _ in range(20):
+        await _settle()
+        if (
+            len(factory.supervised) == 3
+            and factory.supervised[2].running
+            and supervisor._restart_task is None
+        ):
+            break
+
+    assert len(factory.supervised) == 3
+    assert factory.supervised[1].running is False
+    assert factory.supervised[2].running is True
+    assert supervisor.status.running is True
+    await supervisor.close()
 
 
 async def test_unreaped_child_degrades_without_launching_a_replacement(

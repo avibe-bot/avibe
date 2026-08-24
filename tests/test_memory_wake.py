@@ -16,7 +16,9 @@ from config.v2_config import MemoryConfig, MemoryEndpointConfig, MemoryProcessin
 from core.memory.artifact import (
     EVEROS_VERSION,
     FakeMemoryArtifactManager,
+    MemoryArtifactCandidate,
     MemoryArtifactManager,
+    MemoryProviderRootState,
 )
 from core.memory.confined_filesystem import ConfinedFilesystemError
 from core.memory.everos import FakeMemoryProvider, ProviderHealthSnapshot
@@ -444,7 +446,52 @@ async def test_unexpected_exit_reenters_wake_and_repairs_the_artifact(
 ) -> None:
     """MEMORY-WAKE-201: an unexpected exit reuses the public Wake path."""
 
-    artifact = FakeMemoryArtifactManager(python=Path(sys.executable))
+    activation_calls = 0
+
+    class CoordinatedArtifact(FakeMemoryArtifactManager):
+        def ensure(self, *, force: bool = False) -> dict[str, object]:
+            nonlocal activation_calls
+            self.ensure_calls.append(force)
+            coordinator = self.activation_coordinator
+            assert coordinator is not None
+            previous_status = dict(self.status_payload)
+            provider_root_format = self.root_format or f"everos-{EVEROS_VERSION}"
+            candidate = MemoryArtifactCandidate(
+                provider_root_format=provider_root_format,
+                compatible_provider_root_formats=self.compatible_formats,
+                artifact_fingerprint=self.fingerprint or "coordinated-test",
+            )
+
+            def commit() -> None:
+                self.status_payload = {
+                    "installed": True,
+                    "status": "ready",
+                    "reason": None,
+                }
+
+            def rollback() -> None:
+                self.status_payload = previous_status
+
+            activation_calls += 1
+            coordinator(
+                candidate,
+                MemoryProviderRootState(
+                    exists=True,
+                    provider_root_format=provider_root_format,
+                    empty=False,
+                ),
+                commit,
+                rollback,
+            )
+            return {
+                "ok": True,
+                "changed": True,
+                "reason": None,
+                "download_error": None,
+            }
+
+    monkeypatch.setattr(runtime_module, "ARTIFACT_ACTIVATION_TIMEOUT_SECONDS", 1.0)
+    artifact = CoordinatedArtifact(python=Path(sys.executable))
     processes = FakeEverOSProcessFactory()
     provider = FakeMemoryProvider(
         health_snapshot_value=ProviderHealthSnapshot(
@@ -473,14 +520,22 @@ async def test_unexpected_exit_reenters_wake_and_repairs_the_artifact(
         "reason": "memory_runtime_invalid",
     }
     await processes.supervised[0].unexpected_exit()
-    for _ in range(100):
+    for _ in range(200):
         await asyncio.sleep(0.01)
-        if len(processes.supervised) == 2 and processes.supervised[1].running:
+        restart = runtime._supervisor._restart_task
+        if (
+            activation_calls == 1
+            and restart is None
+            and processes.supervised
+            and processes.supervised[-1].running
+            and runtime.runtime_state() == "running"
+        ):
             break
 
     assert artifact.ensure_calls == [True]
-    assert len(processes.supervised) == 2
-    assert processes.supervised[1].running is True
+    assert activation_calls == 1
+    assert len(processes.supervised) >= 2
+    assert processes.supervised[-1].running is True
     assert runtime.runtime_state() == "running"
     assert sentinel.read_text(encoding="utf-8") == "keep"
 

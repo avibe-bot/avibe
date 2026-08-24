@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 import logging
 from pathlib import Path
@@ -23,6 +24,10 @@ logger = logging.getLogger(__name__)
 
 _RESTART_DELAYS_SECONDS = (0.0, 0.5, 1.0)
 _RESTART_WINDOW_SECONDS = 30.0
+_RECOVERY_OWNER: ContextVar[object | None] = ContextVar(
+    "avibe_memory_recovery_owner",
+    default=None,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +114,7 @@ class EverOSSupervisor:
         self._python: Path | None = None
         self._settings: EverOSProcessSettings | None = None
         self._provider_root_guard: Callable[[], None] | None = None
+        self._launch_task: asyncio.Task[bool] | None = None
         self._restart_task: asyncio.Task[None] | None = None
         self._restart_events: list[float] = []
         self._event_tasks: set[asyncio.Task[None]] = set()
@@ -156,6 +162,9 @@ class EverOSSupervisor:
             return
         self._closing = True
         self._epoch += 1
+        launch = self._launch_task
+        if launch is not None:
+            launch.cancel()
         restart = self._restart_task
         if restart is not None:
             restart.cancel()
@@ -174,10 +183,11 @@ class EverOSSupervisor:
         async with self._lock:
             if self._closing or self._closed:
                 return False
-            recovering = self._restart_task is asyncio.current_task()
+            recovering = self._recovery_owned_by_current_context()
             self._epoch += 1
             epoch = self._epoch
-            await self._cancel_restart_locked()
+            if not recovering:
+                await self._cancel_restart_locked()
             await self._stop_child_locked()
             await self._reconcile_orphans_locked()
             self._python = Path(python)
@@ -191,7 +201,7 @@ class EverOSSupervisor:
         """Stop all retained execution and revoke future launch authority."""
 
         async with self._lock:
-            recovering = self._restart_task is asyncio.current_task()
+            recovering = self._recovery_owned_by_current_context()
             if not recovering:
                 self._epoch += 1
                 await self._cancel_restart_locked()
@@ -274,9 +284,10 @@ class EverOSSupervisor:
             return False
 
         child: EverOSProcessPort | None = None
+        launch_in_progress = True
 
         def ready() -> None:
-            if child is not None:
+            if child is not None and not launch_in_progress:
                 self._schedule_event(self._admit_ready(child, epoch), "memory-everos-ready")
 
         def unexpected_exit() -> None:
@@ -303,15 +314,22 @@ class EverOSSupervisor:
         )
         self._child = child
         self._starting = True
+        launch = asyncio.create_task(child.start(), name="memory-everos-launch")
+        self._launch_task = launch
         try:
             try:
-                started = await child.start()
+                started = await launch
             except asyncio.CancelledError:
-                raise
+                if not self._closing and not self._closed:
+                    raise
+                started = False
             except Exception:
                 logger.exception("EverOS launch attempt failed")
                 started = False
         finally:
+            launch_in_progress = False
+            if self._launch_task is launch:
+                self._launch_task = None
             self._starting = False
         if epoch != self._epoch or child is not self._child:
             return False
@@ -382,13 +400,17 @@ class EverOSSupervisor:
                     or self._child is not None
                 ):
                     return
-            recovered = await self._on_recover()
+            recovery_owner = _RECOVERY_OWNER.set(self)
+            try:
+                recovered = await self._on_recover()
+            finally:
+                _RECOVERY_OWNER.reset(recovery_owner)
             async with self._lock:
                 if self._restart_task is asyncio.current_task():
                     self._restart_task = None
                 if recovered and self._child is not None and self._child.running:
                     return
-                self._schedule_restart_locked(epoch)
+                self._schedule_restart_locked(self._epoch)
         except asyncio.CancelledError:
             return
         except Exception:
@@ -396,7 +418,7 @@ class EverOSSupervisor:
             async with self._lock:
                 if self._restart_task is asyncio.current_task():
                     self._restart_task = None
-                self._schedule_restart_locked(epoch)
+                self._schedule_restart_locked(self._epoch)
 
     async def _stop_child_locked(self) -> None:
         child = self._child
@@ -416,6 +438,17 @@ class EverOSSupervisor:
             await restart
         except asyncio.CancelledError:
             pass
+
+    def _recovery_owned_by_current_context(self) -> bool:
+        restart = self._restart_task
+        return bool(
+            restart is not None
+            and not restart.done()
+            and (
+                restart is asyncio.current_task()
+                or _RECOVERY_OWNER.get() is self
+            )
+        )
 
     def _schedule_event(self, coroutine: Awaitable[None], name: str) -> None:
         task = asyncio.create_task(coroutine, name=name)

@@ -135,6 +135,14 @@ def test_memory_runtime_sidecar_smoke_claims_its_provider_root(
         "provider_root_meta",
         "provider_root_metadata",
     ]
+    socket_keyword = next(
+        keyword.value
+        for keyword in process_call.keywords
+        if keyword.arg == "socket_path"
+    )
+    assert ast.unparse(socket_keyword) == "socket_path"
+    assert "process.socket_path" not in captured[3]
+    assert "process.last_error" not in captured[3]
 
 
 def test_github_only_release_runs_memory_runtime_guard_before_uploading_assets() -> None:
