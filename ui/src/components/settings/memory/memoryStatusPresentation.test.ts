@@ -31,19 +31,17 @@ describe('memory status presentation', () => {
       .toContain('errors.memory_capability_unavailable');
   });
 
-  it('localizes best-effort diagnostic source reasons through the closed reason vocabulary', () => {
+  it('localizes native Processing Record source reasons through the closed vocabulary', () => {
     expect([
-      'volatile_delivery_state',
-      'provider_memory_unavailable',
-      'provider_call_log_unavailable',
-      'processing_timeline_unavailable',
+      'native_memcells_unavailable',
+      'native_runs_unavailable',
+      'native_semantic_unavailable',
       'memory_failure_history_unavailable',
     ].map((reason) => memoryStatusSourceReasonLabel(t, reason))).toEqual([
-      'memory.log.reason.volatileDeliveryState',
-      'memory.log.reason.providerMemoryUnavailable',
-      'memory.log.reason.providerCallLogUnavailable',
-      'memory.log.reason.processingTimelineUnavailable',
-      'memory.log.reason.memoryFailureHistoryUnavailable',
+      'memory.processingRecord.reason.native_memcells_unavailable',
+      'memory.processingRecord.reason.native_runs_unavailable',
+      'memory.processingRecord.reason.native_semantic_unavailable',
+      'memory.processingRecord.reason.memory_failure_history_unavailable',
     ]);
   });
 });

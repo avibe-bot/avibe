@@ -1,6 +1,7 @@
 # EverOS Memory Remaining Implementation Spec
 
-Status: implementation contract
+Status: historical; superseded by `memory-best-effort-capture.md` and
+`memory-processing-log-page.md`
 
 This specification implements the remaining PR defined by
 [`everos-memory-adjustment.md`](./everos-memory-adjustment.md). The umbrella plan is the product
@@ -19,8 +20,8 @@ The public Memory seam remains provider-neutral:
 - `MemoryMaintenance` owns the durable clear-intent marker and four idempotent deletion primitives.
   Runtime lifecycle code only establishes the maintenance fence, stops/starts owned processes, and
   invokes this seam.
-- Processing Record directly projects public EverOS `/health`, existing call-log/processing provenance,
-  and confirmed Avibe settlement facts. The outbox and lifecycle do not compose product status.
+- Processing Record directly projects public EverOS `/health` and bounded native EverOS
+  memcells, runs, semantic files, profile state, and index state.
 
 No platform adapter, agent backend, release manifest, private EverOS database, or EverOS source is in
 scope.
@@ -184,7 +185,7 @@ is atomically written through a same-directory temporary file, file fsync, repla
 parent-directory fsync.
 
 The operation fences claims and runs exactly four idempotent deletion primitives: queue
-reset, provider-root recreation, call-log clear, and attachment clear. Completion clears
+reset, provider-root recreation, confined legacy-file cleanup, and attachment clear. Completion clears
 the in-progress flag and removes the marker. An interrupted or failed marker is retried
 automatically on the next reconcile; corrupt or unreadable marker state fails closed for
 Memory projection while service startup continues. An explicit Clear request can replace
@@ -249,8 +250,7 @@ Keep the existing route family but remove `MemoryModule.status()` and the global
     "version": "1.2.3",
     "capabilities": {},
     "disabled_features": [],
-    "cascade": {},
-    "recorder": {}
+    "cascade": {}
   }
 }
 ```
@@ -261,19 +261,18 @@ observation time. A later read failure returns the last successful snapshot as `
 time; no prior snapshot is `unavailable` with `health=null`. Cascade health is a source fact, not a
 global readiness claim. Page reads do not invoke processing probes or provider-root scans.
 
-Processing Record has four independently degradable areas: runtime summary, source availability,
-recent confirmed pipeline provenance, and anomalies/recovery plus bounded diagnostic detail. Existing
-call-log/insight pagination, authorization, redaction, response-size, and detail limits remain. Each
-source section carries `observed_at` or explicit unknown/unavailable. Timeline steps are emitted only
-from provider provenance or immutable add/flush settlement evidence, never inferred from queue state.
+Processing Record has independently degradable runtime, native source, anomaly, maintenance,
+and bounded detail projections. Native pagination, authorization, redaction, response-size,
+and detail limits remain. Each source section carries `observed_at` or explicit
+unknown/unavailable; no queue state is used as fallback evidence.
 
 Anomalies expose only kind, state, operation, time, closed error, attempts, generation, and bounded
 request ID. They include confirmed provider rejection, `manual_required`, boot recovery, clear
-recovery, and recorder degradation. They never expose canonical refs, fence/lease tokens, payloads,
+and recovery. They never expose canonical refs, fence/lease tokens, payloads,
 absolute paths, attachment metadata/hashes, vectors, or raw exceptions. `manual_required` is read-only.
 
-The UI merges status and processing-log tabs into one Processing Record view with explicit Refresh,
-runtime/capabilities, source availability, anomalies/recovery, recent timeline, and existing detail.
+The UI merges status and processing views into one Processing Record view with explicit Refresh,
+runtime/capabilities, native source availability, anomalies/recovery, and native detail.
 It does not poll the composite status every four seconds. Disabled Memory still renders retained local
 recovery/anomaly evidence. Clear recovery is marker-owned and has no user-facing resume/abort
 commands; `manual_required` has no command. Embedding configuration lock reads a separate cheap local

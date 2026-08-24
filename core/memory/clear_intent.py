@@ -11,6 +11,7 @@ import json
 import os
 import secrets
 import sqlite3
+import stat
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -26,6 +27,7 @@ from core.memory.confined_filesystem import (
     remove_confined_path,
     replace_confined,
     create_confined_file,
+    strict_directory_open_flags,
 )
 
 
@@ -50,14 +52,14 @@ class ClearIntentUnreadable(ClearIntentError):
 
 @dataclass(frozen=True, slots=True)
 class ClearSurface:
-    surface: Literal["metadata", "provider", "call_log", "attachments"]
+    surface: Literal["metadata", "provider", "legacy_files", "attachments"]
     relative_path: str
 
 
 DEFAULT_CLEAR_SURFACES: tuple[ClearSurface, ...] = (
     ClearSurface("metadata", "state/memory/memory.sqlite"),
     ClearSurface("provider", "memory/everos-root"),
-    ClearSurface("call_log", "memory/call-log/call-log.db"),
+    ClearSurface("legacy_files", "memory/call-log"),
     ClearSurface("attachments", "memory/attachments"),
 )
 
@@ -225,6 +227,84 @@ def cleanup_legacy_backup_storage(effective_home: Path | str) -> tuple[str, ...]
         if not _best_effort_remove(home, home / relative):
             failures.append(relative)
     return tuple(failures)
+
+
+def cleanup_legacy_provider_call_storage(effective_home: Path | str) -> None:
+    """Remove only the retired provider-call SQLite files."""
+
+    home = Path(os.path.abspath(os.path.expanduser(os.fspath(effective_home))))
+    descriptors: list[int] = []
+    try:
+        root = os.open(home, strict_directory_open_flags())
+        descriptors.append(root)
+        root_info = os.fstat(root)
+        try:
+            memory = os.open(
+                "memory",
+                strict_directory_open_flags(),
+                dir_fd=root,
+            )
+        except FileNotFoundError:
+            return
+        descriptors.append(memory)
+        _require_legacy_cleanup_owner(os.fstat(memory), root_info)
+        try:
+            legacy_info = os.stat(
+                "call-log",
+                dir_fd=memory,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return
+        if not stat.S_ISDIR(legacy_info.st_mode):
+            raise ConfinedFilesystemError(
+                "retired provider-call storage root is not a directory"
+            )
+        legacy = os.open(
+            "call-log",
+            strict_directory_open_flags(),
+            dir_fd=memory,
+        )
+        descriptors.append(legacy)
+        _require_legacy_cleanup_owner(os.fstat(legacy), root_info)
+        for name in (
+            "call-log.db",
+            "call-log.db-wal",
+            "call-log.db-shm",
+            "call-log.db-journal",
+        ):
+            try:
+                entry = os.stat(name, dir_fd=legacy, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISREG(entry.st_mode):
+                raise ConfinedFilesystemError(
+                    "retired provider-call storage contains a non-regular known file"
+                )
+            _require_legacy_cleanup_owner(entry, root_info)
+            os.unlink(name, dir_fd=legacy)
+        os.fsync(legacy)
+        os.rmdir("call-log", dir_fd=memory)
+        os.fsync(memory)
+        os.fsync(root)
+    except OSError as error:
+        raise ConfinedFilesystemError(
+            "retired provider-call storage cannot be removed safely"
+        ) from error
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def _require_legacy_cleanup_owner(entry: os.stat_result, root: os.stat_result) -> None:
+    if entry.st_dev != root.st_dev:
+        raise ConfinedFilesystemError(
+            "retired provider-call storage crosses a filesystem boundary"
+        )
+    if hasattr(os, "getuid") and entry.st_uid != os.getuid():
+        raise ConfinedFilesystemError(
+            "retired provider-call storage owner mismatch"
+        )
 
 
 def _best_effort_remove(home: Path, path: Path) -> bool:

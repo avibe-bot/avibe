@@ -64,9 +64,9 @@ const renderUnobservedSource = (language: 'en' | 'zh') => {
         failures={[]}
         clearInProgress={null}
         logSections={{
-          everos: { status: 'available', observed_at: null },
-          capture: { status: 'unavailable', observed_at: null, reason: 'missing' },
-          calls: { status: 'unavailable', observed_at: null, reason: 'missing' },
+          memcells: { status: 'available', observed_at: null },
+          runs: { status: 'unavailable', observed_at: null, reason: 'native_runs_unavailable' },
+          semantic: { status: 'unavailable', observed_at: null, reason: 'native_semantic_unavailable' },
         }}
         statusLoading={false}
         failuresLoading={false}

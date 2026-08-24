@@ -93,11 +93,11 @@ scenarios:
     layer: contract
     test: tests/test_memory_module.py::test_capture_is_accepted_and_duplicate_is_process_local
   - id: MEMORY-SEARCH-014
-    name: Capture diagnostics are unavailable without durable delivery history
+    name: Failure diagnostics are unavailable without durable delivery history
     status: covered
     kind: diagnostics
     layer: contract
-    test: tests/test_memory_insight.py::test_capture_diagnostics_are_unavailable_without_delivery_history
+    test: tests/test_memory_runtime.py::test_capture_diagnostics_are_unavailable_without_delivery_history
   - id: MEMORY-SEARCH-015
     name: Capture stamps caller-scoped identity and a native dedupe key
     status: covered

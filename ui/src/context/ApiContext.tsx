@@ -1969,7 +1969,6 @@ export type MemoryStatus = {
     capabilities: Record<string, unknown>;
     disabled_features: string[];
     cascade: Record<string, unknown> | null;
-    recorder: Record<string, unknown> | null;
   };
   attachment_capture?: {
     status: 'ready' | 'not_configured' | 'unavailable';
@@ -2027,11 +2026,11 @@ export type MemoryProcessingRecordSummary = {
   };
   sources: MemoryProcessingRecordSources;
   anomalies: {
-    source: MemoryLogSourceStatus;
+    source: MemoryProcessingSourceStatus;
     items: MemoryFailureLogEntry[];
   };
   maintenance: {
-    source: MemoryLogSourceStatus;
+    source: MemoryProcessingSourceStatus;
     data_exists: boolean;
     can_clear: boolean;
     clear_in_progress: MemoryClearInProgress | null;
@@ -2119,16 +2118,16 @@ export type MemoryListResult =
     }
   | MemoryFailure;
 
-export type MemoryLogSourceStatus = {
+export type MemoryProcessingSourceStatus = {
   status: 'available' | 'partial' | 'stale' | 'unknown' | 'unavailable';
   observed_at: string | null;
   reason?: string | null;
 };
 
 export type MemoryProcessingRecordSources = {
-  memcells: MemoryLogSourceStatus;
-  runs: MemoryLogSourceStatus;
-  semantic: MemoryLogSourceStatus;
+  memcells: MemoryProcessingSourceStatus;
+  runs: MemoryProcessingSourceStatus;
+  semantic: MemoryProcessingSourceStatus;
 };
 
 export type MemoryProcessingRecordEntry = {
@@ -2192,109 +2191,6 @@ export type MemoryProcessingRecordDetailResult =
         profile?: { status: 'present' | 'missing'; updated_at_ms: number | null };
         indexing?: { status: string; reason?: string; items?: Array<{ md_path: string; status: string; updated_at: string | null; error: string | null }> };
       };
-    }
-  | MemoryFailure;
-
-export type MemoryLogSections = {
-  everos: MemoryLogSourceStatus;
-  capture: MemoryLogSourceStatus;
-  calls: MemoryLogSourceStatus;
-};
-
-export type MemoryLogEntry = {
-  memcell_id: string;
-  project_id: string;
-  principal_id: string;
-  timestamp_ms: number;
-  preview: string;
-  message_count: number;
-  run_summary: { total: number; statuses: Record<string, number> } | null;
-  authorized_call_count: number | null;
-};
-
-export type MemoryLogListResult =
-  | {
-      status: 'ok';
-      entries: MemoryLogEntry[];
-      next_cursor: string | null;
-      sections: MemoryLogSections;
-    }
-  | MemoryFailure;
-
-export type MemoryLogCapture =
-  | { status: 'available'; delivery_states: string[]; matched_message_count: number }
-  | { status: 'unavailable'; reason: string };
-
-export type MemoryLogStep = {
-  type: 'capture' | 'memcell' | 'strategy';
-  status: string;
-  timestamp_ms?: number;
-  started_at_ms?: number;
-  finished_at_ms?: number | null;
-  memcell_id?: string;
-  run_id?: string;
-  strategy?: string;
-  relation?: 'profile_trigger' | 'run';
-  attempt?: number;
-  error?: string | null;
-  reason?: string;
-};
-
-export type MemoryProviderCall = {
-  id: string;
-  started_at_ms: number;
-  duration_ms: number;
-  kind: string;
-  stage: string;
-  model: string | null;
-  status: string;
-  error: string | null;
-  finish_reason: string | null;
-  prompt_tokens: number | null;
-  completion_tokens: number | null;
-  request: unknown;
-  response: unknown;
-  request_bytes: number | null;
-  response_bytes: number | null;
-  dropped_before: number;
-};
-
-export type MemoryUnlinkedProviderCall = MemoryProviderCall & {
-  principal_id: string;
-  project_id: string;
-};
-
-export type MemoryUnlinkedCallListResult =
-  | {
-      status: 'ok';
-      calls: MemoryUnlinkedProviderCall[];
-      truncated: boolean;
-      sections: MemoryLogSections;
-      recorder: { state: string; reason: string | null };
-      retention: { max_age_ms: number; max_rows: number };
-    }
-  | MemoryFailure;
-
-export type MemoryLogCurrentState =
-  | {
-      status: 'available';
-      profile: { status: 'present' | 'missing'; updated_at_ms: number | null };
-      indexing: { status: string; updated_at_ms?: number; error?: string | null };
-      label: 'current_state';
-    }
-  | { status: 'unavailable'; reason: string };
-
-export type MemoryLogDetailResult =
-  | {
-      status: 'ok';
-      entry: Pick<MemoryLogEntry, 'memcell_id' | 'project_id' | 'principal_id' | 'timestamp_ms' | 'preview' | 'message_count'>;
-      capture: MemoryLogCapture;
-      steps: MemoryLogStep[];
-      calls: MemoryProviderCall[];
-      omitted_call_count: number;
-      omitted_step_count: number;
-      current_state: MemoryLogCurrentState;
-      sections: MemoryLogSections;
     }
   | MemoryFailure;
 

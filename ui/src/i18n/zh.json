@@ -1705,7 +1705,6 @@
     "memory_invalid_input": "该记忆请求无效。",
     "memory_processing_record_entry_not_found": "该记忆处理条目已不可用。",
     "memory_failure_history_unavailable": "详细的记忆失败历史记录不可用。",
-    "memory_log_entry_not_found": "该记忆处理条目已不可用。",
     "memory_access_denied": "该调用方无权读取此记忆数据。",
     "memory_input_too_large": "输入内容对记忆功能来说太大了。",
     "memory_queue_full": "记忆队列目前已满。",
@@ -4196,7 +4195,6 @@
           "boot_recovery": "启动恢复",
           "delivery_abandoned": "发送失败（已放弃）",
           "distillation_rejected": "处理被拒绝",
-          "recorder_degraded": "调用记录异常",
           "result_unknown": "处理结果未知"
         }
       }
@@ -4238,9 +4236,6 @@
         "cascade": "处理队列",
         "cascadeHelp": "消息会先进入队列，再由引擎逐条整理成记忆。这里是队列的处理进度和失败统计；可重试的失败会自动重试，永久失败不会。",
         "cascadeHelpLabel": "关于处理队列",
-        "recorder": "调用记录",
-        "recorderHelp": "调用记录正常时会保存模型调用详情，方便排查问题；记录异常或关闭时，新的调用可能不会被记录。",
-        "recorderHelpLabel": "关于调用记录",
         "noFacts": "暂无相关信息。",
         "fact": {
           "capability": {
@@ -4263,10 +4258,6 @@
             "optimizeFailureStreak": "优化连续失败次数",
             "pruneStaleSeconds": "删除超过此时长的数据"
           },
-          "recorder": {
-            "state": "状态",
-            "reason": "原因"
-          },
           "boolean": {
             "true": "是",
             "false": "否"
@@ -4282,16 +4273,6 @@
             "pruneStale": "旧数据清理卡住",
             "healthProbeFailed": "健康检查失败",
             "unknown": "未知"
-          },
-          "recorderState": {
-            "active": "正常记录中",
-            "degraded": "部分异常",
-            "disabled": "已关闭"
-          },
-          "recorderReason": {
-            "writerFailures": "写入失败",
-            "serializationFailed": "数据保存失败",
-            "callLogCorrupt": "调用记录损坏"
           }
         }
       },
@@ -4309,6 +4290,8 @@
         "unavailable": "不可用"
       },
       "reason": {
+        "busy": "来源数据正忙",
+        "memory_failure_history_unavailable": "捕获失败历史不会持久保留",
         "native_memcells_unavailable": "无法读取原生消息",
         "native_runs_unavailable": "无法读取原生运行记录",
         "native_semantic_unavailable": "无法读取已关联的记忆文件",
@@ -4499,117 +4482,6 @@
         "openDetail": "打开记忆片段：{{title}}"
       }
     },
-    "log": {
-      "description": "查看本安装中所有用户和项目的已创建记忆条目的处理记录。",
-      "loading": "正在加载处理日志…",
-      "loadFailed": "无法加载处理日志。",
-      "detailLoading": "正在加载处理详情…",
-      "detailFailed": "无法加载处理详情。",
-      "detailUnavailable": "处理详情不可用。",
-      "forbidden": "当前连接无法访问处理日志。",
-      "disabledHint": "启用记忆后即可查看处理日志。",
-      "empty": "还没有已处理的记忆条目。",
-      "unlinkedTitle": "未生成记忆条目的调用",
-      "unlinkedLoading": "正在加载保留的调用…",
-      "unlinkedLoadFailed": "无法加载未生成记忆条目的调用。",
-      "unlinkedEmpty": "未找到仍在保留期内且未生成记忆条目的调用。",
-      "unlinkedRecorderIncomplete": "调用记录当前为{{state}}，此列表可能不完整。",
-      "unlinkedRecorderIncompleteWithReason": "调用记录当前为{{state}}（{{reason}}），此列表可能不完整。",
-      "unlinkedRetention": "调用证据会在 {{days}} 天后过期，或在新增调用超过 {{maxRows}} 条时被清理。",
-      "unlinkedTruncated": "这里只显示最新保留的调用。",
-      "refresh": "刷新",
-      "loadMore": "加载更多",
-      "limitReached": "当前显示前 {{count}} 条记录。刷新后可查看最新处理活动。",
-      "back": "返回处理日志",
-      "messages": "{{count}} 条消息",
-      "runs": "{{count}} 次运行",
-      "providerCalls": "{{count}} 次调用",
-      "projectId": "项目 ID",
-      "userId": "用户 ID",
-      "noPreview": "没有可用的文本预览。",
-      "recorderDegraded": "新的模型调用暂时没有被记录，已有记录仍可查看。",
-      "recorderCorrupt": "模型调用记录已损坏，需要先「清理记忆数据」后才能恢复记录。",
-      "clearAction": "打开「清理记忆数据」",
-      "sectionUnavailable": "{{section}}不可用（{{reason}}），其他部分可能仍然完整。",
-      "sectionPartial": "{{section}}部分可用（{{reason}}）。",
-      "sectionStale": "{{section}}的数据已过期（{{reason}}）。",
-      "sectionUnknown": "{{section}}的可用性未知（{{reason}}）。",
-      "section": {
-        "everos": "时间线数据",
-        "capture": "消息追踪",
-        "calls": "模型调用"
-      },
-      "timeline": "处理时间线",
-      "step": {
-        "capture": "收集与发送",
-        "memcell": "已生成记忆片段",
-        "strategy": "记忆策略"
-      },
-      "reason": {
-        "missing": "来源数据缺失",
-        "busy": "来源数据正忙",
-        "malformed": "来源数据格式异常",
-        "expired": "关联信息已过期",
-        "runsMissing": "处理运行记录缺失",
-        "runsBusy": "处理运行记录正忙",
-        "runsMalformed": "处理运行记录格式异常",
-        "volatileDeliveryState": "捕获投递状态仅存在于当前进程",
-        "providerMemoryUnavailable": "提供方记忆数据不可用",
-        "providerCallLogUnavailable": "提供方调用日志不可用",
-        "processingTimelineUnavailable": "处理时间线不可用",
-        "memoryFailureHistoryUnavailable": "捕获失败历史不会持久保留"
-      },
-      "status": {
-        "created": "已创建",
-        "mixed": "多种状态",
-        "pending": "等待中",
-        "processing": "处理中",
-        "delivered": "已投递",
-        "dead": "已停止",
-        "running": "运行中",
-        "ok": "成功",
-        "success": "成功",
-        "failed": "失败",
-        "deadLetter": "重试后停止",
-        "crashed": "已崩溃",
-        "error": "错误",
-        "present": "已存在",
-        "missing": "缺失",
-        "notSeen": "尚未发现",
-        "indexed": "已索引"
-      },
-      "callKind": {
-        "llm": "语言模型",
-        "multimodalLlm": "多模态模型",
-        "embedding": "向量模型",
-        "rerank": "重排序模型"
-      },
-      "callStage": {
-        "processingPreflight": "服务商检查",
-        "boundary": "请求预处理",
-        "strategy": "处理策略",
-        "cascade": "构建记忆",
-        "episodeExtract": "事件提取",
-        "parse": "图片/文件解析"
-      },
-      "callSummary": "{{kind}} · {{status}}",
-      "profileTrigger": "触发画像运行",
-      "unavailable": "不可用：{{reason}}",
-      "omittedSteps": "已省略 {{count}} 个较早的时间线步骤。",
-      "callDetails": "模型调用",
-      "callsNotRecorded": "模型调用未被记录或已过期。",
-      "omittedCalls": "已省略 {{count}} 次较早的模型调用。",
-      "droppedCalls": "此记录之前有 {{count}} 次模型调用未被保留。",
-      "copyCall": "复制请求和响应",
-      "finishReason": "结束原因",
-      "usage": "输入 / 输出 token",
-      "request": "请求",
-      "response": "响应",
-      "currentState": "当前记忆状态",
-      "currentProfile": "画像",
-      "currentIndexing": "索引",
-      "currentStateOnly": "这里显示的是当前状态，不是本次处理运行的历史快照。"
-    },
     "settings": {
       "loading": "正在加载设置…",
       "loadFailed": "无法加载记忆设置。",
@@ -4672,16 +4544,16 @@
         "开启后，你的 Workbench 消息和已授权用户的私聊消息会被提交供记忆捕获。Agent 也可能在未明确要求的情况下提交长期信息供系统尽力捕获，包括偏好、纠偏、决策，以及它从文件、转发或共享内容等非纯文本内容中发现的、关于你的设备或账户的长期事实。",
         "Memory 采集有界且仅由当前进程管理：原始消息不会进入持久队列，临时附件副本会在用后或启动时清理。容量饱和、故障、关机或重启都可能导致数据丢失；结果不明确的模型调用不会重放。",
         "提炼记忆时，消息内容会发送到上面配置的模型接口处理，使用搜索时搜索查询也会发送给相应的服务商。这些接口与 Agent 使用的模型是分开的，对方会按其自身政策处理数据。",
-        "Avibe 的本地 Memory 存储保留在这台机器上，其中包括本安装所有用户和项目的脱敏模型调用诊断。诊断仍可能包含敏感对话内容，最多保留 14 天或 5,000 次调用。发送到模型接口的副本不在此本地存储中。关闭记忆只是暂停记录，不会删除已有数据。",
-        "「清理记忆数据」会删除 Avibe 在本机上管理的记忆数据，涵盖本安装所有用户和项目，包括画像、记忆条目、诊断和临时附件副本。它无法撤回已发送给模型接口的内容，也不会触碰原始聊天记录。",
+        "Avibe 的本地 Memory 存储保留在这台机器上，其中包括尽力保留的原生处理记录：原始提交项、处理状态、尝试次数、时间戳、已脱敏错误，以及直接关联的记忆。记录可能不完整或丢失。发送到模型接口的副本不在此本地存储中。关闭记忆只是暂停记录，不会删除已有数据。",
+        "「清理记忆数据」会删除 Avibe 在本机上管理的记忆数据，涵盖本安装所有用户和项目，包括画像、记忆条目、原生处理数据和临时附件副本。它无法撤回已发送给模型接口的内容，也不会触碰原始聊天记录。",
         "不同平台的账号各自拥有独立的记忆，互不关联。"
       ],
       "cloudDisclosure": [
         "开启后，你的 Workbench 消息和已授权用户的私聊消息会被提交供记忆捕获。Agent 也可能在未明确要求的情况下提交长期信息供系统尽力捕获，包括偏好、纠偏、决策，以及它从文件、转发或共享内容等非纯文本内容中发现的、关于你的设备或账户的长期事实。",
         "Memory 采集有界且仅由当前进程管理：原始消息不会进入持久队列，临时附件副本会在用后或启动时清理。容量饱和、故障、关机或重启都可能导致数据丢失；结果不明确的模型调用不会重放。",
         "提炼记忆时，消息内容会发送到 Avibe 或你的组织选定的云端模型处理，使用搜索时搜索查询也会发送到该云端服务。这些模型与 Agent 使用的模型分开，云端服务会按其政策处理数据。",
-        "Avibe 的本地 Memory 存储保留在这台机器上，其中包括本安装所有用户和项目的脱敏模型调用诊断。诊断仍可能包含敏感对话内容，最多保留 14 天或 5,000 次调用。发送到模型接口的副本不在此本地存储中。关闭记忆只是暂停记录，不会删除已有数据。",
-        "「清理记忆数据」会删除 Avibe 在本机上管理的记忆数据，涵盖本安装所有用户和项目，包括画像、记忆条目、诊断和临时附件副本。它无法撤回已发送给模型接口的内容，也不会触碰原始聊天记录。",
+        "Avibe 的本地 Memory 存储保留在这台机器上，其中包括尽力保留的原生处理记录：原始提交项、处理状态、尝试次数、时间戳、已脱敏错误，以及直接关联的记忆。记录可能不完整或丢失。发送到模型接口的副本不在此本地存储中。关闭记忆只是暂停记录，不会删除已有数据。",
+        "「清理记忆数据」会删除 Avibe 在本机上管理的记忆数据，涵盖本安装所有用户和项目，包括画像、记忆条目、原生处理数据和临时附件副本。它无法撤回已发送给模型接口的内容，也不会触碰原始聊天记录。",
         "不同平台的账号各自拥有独立的记忆，互不关联。"
       ],
       "disclosureAttachment": "配置 IM 附件处理端点后，已绑定私聊中的合规附件也会发送给该服务商。",
@@ -4703,13 +4575,13 @@
     "clear": {
       "button": "清理记忆数据",
       "confirmTitle": "清理本安装的记忆数据？",
-      "confirmDescription": "这会删除 Avibe 在本机上管理的记忆数据，涵盖本安装所有用户和项目，包括画像、已提炼的记忆和诊断日志。",
+      "confirmDescription": "这会删除 Avibe 在本机上管理的记忆数据，涵盖本安装所有用户和项目，包括画像、已提炼的记忆和原生处理数据。",
       "removesTitle": "将会删除：",
       "removes": [
         "本安装所有用户和项目的画像和记忆条目",
         "用于搜索的本地索引和缓存",
         "已保存的记忆项目和捕获健康元数据",
-        "模型调用的诊断记录"
+        "原生处理记录数据"
       ],
       "keepsTitle": "不会删除：",
       "keeps": [
@@ -4737,7 +4609,7 @@
       "roots": {
         "primaryStorage": {
           "label": "主要记忆存储",
-          "description": "可能包含画像、事实、索引、调用诊断和运行文件"
+          "description": "可能包含画像、事实、索引、原生处理数据和运行文件"
         },
         "memoryStateStorage": {
           "label": "记忆状态存储",

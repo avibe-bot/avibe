@@ -16,7 +16,7 @@ import pytest
 
 from core.memory import secret_scrubber
 from core.memory.artifact import EVEROS_VERSION
-from core.memory.everos_insight.recorder import _scrub_text
+from core.memory.secret_scrubber import scrub_text
 from scripts import memory_runtime_sitecustomize as bootstrap
 from scripts import memory_runtime_sync_scrubbers as scrubbers
 
@@ -133,7 +133,7 @@ def test_artifact_scrubber_matches_existing_persistence_redaction(monkeypatch) -
     )
 
     for sample in samples:
-        assert scrubbers._scrub(sample) == _scrub_text(
+        assert scrubbers._scrub(sample) == scrub_text(
             sample,
             base_urls=(base_url,),
             exact_values=(api_key,),

@@ -11,7 +11,7 @@ import { SettingsMemoryPage } from './SettingsMemoryPage';
 const translate = vi.hoisted(() =>
   (key: string, options?: { returnObjects?: boolean }) =>
     options?.returnObjects && key === 'memory.clear.removes'
-      ? ['queue', 'provider', 'call log', 'attachments']
+      ? ['metadata', 'provider', 'native processing data', 'attachments']
       : options?.returnObjects && key === 'memory.clear.keeps'
         ? ['memory root', 'logs']
         : key,

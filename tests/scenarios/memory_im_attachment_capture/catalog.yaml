@@ -26,7 +26,7 @@ scenarios:
     kind: happy_path
     layer: scenario
     delivery_slice: 4
-    test: tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_scenarios.py::test_bound_slack_dm_attachment_reaches_search_with_redacted_call_log
+    test: tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_scenarios.py::test_bound_slack_dm_attachment_reaches_search_with_provider_invocation
   - id: MEMORY-IM-ATTACH-002
     name: Group and unbound events perform no Memory attachment acquisition
     status: covered

@@ -1705,7 +1705,6 @@
     "memory_invalid_input": "That Memory request wasn't valid.",
     "memory_processing_record_entry_not_found": "That Memory processing entry is no longer available.",
     "memory_failure_history_unavailable": "Detailed Memory failure history is unavailable.",
-    "memory_log_entry_not_found": "That Memory processing entry is no longer available.",
     "memory_access_denied": "This caller isn't allowed to read that Memory data.",
     "memory_input_too_large": "That input is too large for Memory.",
     "memory_queue_full": "The Memory queue is full right now.",
@@ -4196,7 +4195,6 @@
           "boot_recovery": "Startup recovery",
           "delivery_abandoned": "Send failed (given up)",
           "distillation_rejected": "Processing rejected",
-          "recorder_degraded": "Call log issue",
           "result_unknown": "Result unknown"
         }
       }
@@ -4238,9 +4236,6 @@
         "cascade": "Processing queue",
         "cascadeHelp": "Messages wait in a queue and the engine turns them into memories one by one. This shows the queue's progress and failure counts; retryable failures retry automatically, while permanently failed items do not.",
         "cascadeHelpLabel": "About the processing queue",
-        "recorder": "Call log",
-        "recorderHelp": "When recording is active, the call log keeps model-call details for troubleshooting. Degraded or off recording may omit new calls.",
-        "recorderHelpLabel": "About the call log",
         "noFacts": "Nothing to show yet.",
         "fact": {
           "capability": {
@@ -4263,10 +4258,6 @@
             "optimizeFailureStreak": "Consecutive optimization failures",
             "pruneStaleSeconds": "Remove data older than"
           },
-          "recorder": {
-            "state": "Status",
-            "reason": "Reason"
-          },
           "boolean": {
             "true": "Yes",
             "false": "No"
@@ -4282,16 +4273,6 @@
             "pruneStale": "Old-data cleanup stuck",
             "healthProbeFailed": "Health check failed",
             "unknown": "Unknown"
-          },
-          "recorderState": {
-            "active": "Recording normally",
-            "degraded": "Partial issues",
-            "disabled": "Off"
-          },
-          "recorderReason": {
-            "writerFailures": "Write failures",
-            "serializationFailed": "Couldn't save data",
-            "callLogCorrupt": "Call log corrupt"
           }
         }
       },
@@ -4309,6 +4290,8 @@
         "unavailable": "Unavailable"
       },
       "reason": {
+        "busy": "Source data is busy",
+        "memory_failure_history_unavailable": "Capture failure history is not retained",
         "native_memcells_unavailable": "Native messages cannot be read",
         "native_runs_unavailable": "Native runs cannot be read",
         "native_semantic_unavailable": "Linked memory files cannot be read",
@@ -4499,117 +4482,6 @@
         "openDetail": "Open episode: {{title}}"
       }
     },
-    "log": {
-      "description": "See the processing history for created Memory entries across every user and project on this installation.",
-      "loading": "Loading processing log…",
-      "loadFailed": "Couldn't load the processing log.",
-      "detailLoading": "Loading processing details…",
-      "detailFailed": "Couldn't load processing details.",
-      "detailUnavailable": "Processing details are unavailable.",
-      "forbidden": "This processing log isn't available on the current connection.",
-      "disabledHint": "Enable Memory to view its processing log.",
-      "empty": "No processed Memory entries yet.",
-      "unlinkedTitle": "Calls without Memory entries",
-      "unlinkedLoading": "Loading retained calls…",
-      "unlinkedLoadFailed": "Couldn't load calls without Memory entries.",
-      "unlinkedEmpty": "No retained calls without a Memory entry were found.",
-      "unlinkedRecorderIncomplete": "Call recording is {{state}}. This list may be incomplete.",
-      "unlinkedRecorderIncompleteWithReason": "Call recording is {{state}} ({{reason}}). This list may be incomplete.",
-      "unlinkedRetention": "Call evidence expires after {{days}} days or when more than {{maxRows}} newer calls are retained.",
-      "unlinkedTruncated": "Only the newest retained calls are shown.",
-      "refresh": "Refresh",
-      "loadMore": "Load more",
-      "limitReached": "Showing the first {{count}} entries. Refresh to see the newest processing activity.",
-      "back": "Back to processing log",
-      "messages": "{{count}} messages",
-      "runs": "{{count}} runs",
-      "providerCalls": "{{count}} calls",
-      "projectId": "Project ID",
-      "userId": "User ID",
-      "noPreview": "No text preview available.",
-      "recorderDegraded": "New model calls aren't being logged right now. Existing entries are still readable.",
-      "recorderCorrupt": "The model call log is corrupt. Use Clear Memory Data to remove it before logging can resume.",
-      "clearAction": "Open Clear Memory Data",
-      "sectionUnavailable": "{{section}} is unavailable ({{reason}}). Other sections may still be complete.",
-      "sectionPartial": "{{section}} is partially available ({{reason}}).",
-      "sectionStale": "{{section}} is stale ({{reason}}).",
-      "sectionUnknown": "{{section}} availability is unknown ({{reason}}).",
-      "section": {
-        "everos": "Timeline data",
-        "capture": "Message tracking",
-        "calls": "Model calls"
-      },
-      "timeline": "Processing timeline",
-      "step": {
-        "capture": "Collected and sent",
-        "memcell": "Memory snippet created",
-        "strategy": "Memory strategy"
-      },
-      "reason": {
-        "missing": "source data is missing",
-        "busy": "source data is busy",
-        "malformed": "source data is malformed",
-        "expired": "attribution has expired",
-        "runsMissing": "processing runs are missing",
-        "runsBusy": "processing runs are busy",
-        "runsMalformed": "processing runs are malformed",
-        "volatileDeliveryState": "capture delivery state is process-local",
-        "providerMemoryUnavailable": "provider Memory data is unavailable",
-        "providerCallLogUnavailable": "provider call log is unavailable",
-        "processingTimelineUnavailable": "processing timeline is unavailable",
-        "memoryFailureHistoryUnavailable": "capture failure history is not retained"
-      },
-      "status": {
-        "created": "Created",
-        "mixed": "Mixed",
-        "pending": "Pending",
-        "processing": "Processing",
-        "delivered": "Delivered",
-        "dead": "Stopped",
-        "running": "Running",
-        "ok": "Succeeded",
-        "success": "Succeeded",
-        "failed": "Failed",
-        "deadLetter": "Stopped after retries",
-        "crashed": "Crashed",
-        "error": "Error",
-        "present": "Present",
-        "missing": "Missing",
-        "notSeen": "Not seen",
-        "indexed": "Indexed"
-      },
-      "callKind": {
-        "llm": "Language model",
-        "multimodalLlm": "Multimodal model",
-        "embedding": "Embedding model",
-        "rerank": "Reranking model"
-      },
-      "callStage": {
-        "processingPreflight": "Provider check",
-        "boundary": "Request preparation",
-        "strategy": "Strategy",
-        "cascade": "Building memories",
-        "episodeExtract": "Episode extraction",
-        "parse": "Image/file parsing"
-      },
-      "callSummary": "{{kind}} · {{status}}",
-      "profileTrigger": "Triggered profile run",
-      "unavailable": "Unavailable: {{reason}}",
-      "omittedSteps": "{{count}} older timeline steps omitted.",
-      "callDetails": "Model calls",
-      "callsNotRecorded": "Model calls weren't logged or have expired.",
-      "omittedCalls": "{{count}} older model calls omitted.",
-      "droppedCalls": "{{count}} model calls before this row weren't kept.",
-      "copyCall": "Copy request and response",
-      "finishReason": "Finish reason",
-      "usage": "Input / output tokens",
-      "request": "Request",
-      "response": "Response",
-      "currentState": "Current Memory state",
-      "currentProfile": "Profile",
-      "currentIndexing": "Indexing",
-      "currentStateOnly": "This is current state, not a historical snapshot of this processing run."
-    },
     "settings": {
       "loading": "Loading settings…",
       "loadFailed": "Couldn't load Memory settings.",
@@ -4672,16 +4544,16 @@
         "When on, your Workbench messages and authorized users' private messages are offered for Memory capture. Your Agent can also submit long-lived notes for best-effort capture without being asked, including preferences, corrections, decisions, and lasting facts about your machine or accounts found in files, forwarded or shared content, or other non-plain content.",
         "Memory capture is bounded and process-local: raw messages are not queued durably, and temporary attachment copies are cleaned after use or at startup. Saturation, failure, shutdown, or restart may lose work; ambiguous provider outcomes are not replayed.",
         "To build memories, message content is sent to the model endpoints configured above, and Search sends queries there too. These endpoints are separate from your Agent's models, and their providers handle the data under their own policies.",
-        "Avibe's local Memory store stays on this machine and includes scrubbed model-call diagnostics for every user and project on this installation. Diagnostics can contain sensitive conversation text and are kept for up to 14 days or 5,000 calls. Copies sent to model endpoints are outside this local store. Turning Memory off pauses it — it doesn't delete anything.",
-        "Clear Memory Data deletes Avibe-managed Memory data for every user and project on this machine, including profiles, memories, diagnostics, and temporary attachment copies. It can't take back content already sent to model endpoints or touch original chat histories.",
+        "Avibe's local Memory store stays on this machine and includes best-effort native Processing Records with original submitted items, processing status, attempts, timestamps, scrubbed errors, and directly linked memories. Records can be incomplete or lost. Copies sent to model endpoints are outside this local store. Turning Memory off pauses it — it doesn't delete anything.",
+        "Clear Memory Data deletes Avibe-managed Memory data for every user and project on this machine, including profiles, memories, native processing data, and temporary attachment copies. It can't take back content already sent to model endpoints or touch original chat histories.",
         "Accounts on different platforms each have their own separate memory; they aren't linked."
       ],
       "cloudDisclosure": [
         "When on, your Workbench messages and authorized users' private messages are offered for Memory capture. Your Agent can also submit long-lived notes for best-effort capture without being asked, including preferences, corrections, decisions, and lasting facts about your machine or accounts found in files, forwarded or shared content, or other non-plain content.",
         "Memory capture is bounded and process-local: raw messages are not queued durably, and temporary attachment copies are cleaned after use or at startup. Saturation, failure, shutdown, or restart may lose work; ambiguous provider outcomes are not replayed.",
         "To build memories, message content is sent to the cloud models selected by Avibe or your organization, and Search sends queries to that cloud service too. These models are separate from your Agent's models, and the cloud service handles data under its policies.",
-        "Avibe's local Memory store stays on this machine and includes scrubbed model-call diagnostics for every user and project on this installation. Diagnostics can contain sensitive conversation text and are kept for up to 14 days or 5,000 calls. Copies sent to model endpoints are outside this local store. Turning Memory off pauses it — it doesn't delete anything.",
-        "Clear Memory Data deletes Avibe-managed Memory data for every user and project on this machine, including profiles, memories, diagnostics, and temporary attachment copies. It can't take back content already sent to model endpoints or touch original chat histories.",
+        "Avibe's local Memory store stays on this machine and includes best-effort native Processing Records with original submitted items, processing status, attempts, timestamps, scrubbed errors, and directly linked memories. Records can be incomplete or lost. Copies sent to model endpoints are outside this local store. Turning Memory off pauses it — it doesn't delete anything.",
+        "Clear Memory Data deletes Avibe-managed Memory data for every user and project on this machine, including profiles, memories, native processing data, and temporary attachment copies. It can't take back content already sent to model endpoints or touch original chat histories.",
         "Accounts on different platforms each have their own separate memory; they aren't linked."
       ],
       "disclosureAttachment": "When the IM attachment processing endpoint is configured, eligible attachments from bound direct messages are also sent to that provider.",
@@ -4703,13 +4575,13 @@
     "clear": {
       "button": "Clear Memory Data",
       "confirmTitle": "Clear Memory Data for this installation?",
-      "confirmDescription": "This deletes Avibe-managed Memory data for every user and project on this machine, including profiles, distilled memories, and diagnostic logs.",
+      "confirmDescription": "This deletes Avibe-managed Memory data for every user and project on this machine, including profiles, distilled memories, and native processing data.",
       "removesTitle": "This deletes:",
       "removes": [
         "Profiles and all memory entries for every user and project",
         "Local search indexes and caches",
         "Saved Memory project and capture-health metadata",
-        "Model-call diagnostic logs"
+        "Native Processing Record data"
       ],
       "keepsTitle": "This does not delete:",
       "keeps": [
@@ -4737,7 +4609,7 @@
       "roots": {
         "primaryStorage": {
           "label": "Primary Memory storage",
-          "description": "May include profiles, facts, indexes, call diagnostics, and runtime files"
+          "description": "May include profiles, facts, indexes, native processing data, and runtime files"
         },
         "memoryStateStorage": {
           "label": "Memory state storage",

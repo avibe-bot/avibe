@@ -177,7 +177,7 @@ def test_memory_config_round_trips_and_hides_keys(tmp_path) -> None:
     assert stored["memory"]["processing"]["llm"]["api_key"] == "llm-key"
     assert stored["memory"]["recovery_intent"] == "rebuild"
     assert "embedding_change_pending" not in stored["memory"]
-    assert stored["memory"]["diagnostics"] == {"log_provider_calls": True}
+    assert "diagnostics" not in stored["memory"]
     assert projected["memory"]["processing"]["llm"] == {
         "base_url": "https://llm.example.test/v1",
         "model": "chat",
@@ -186,7 +186,7 @@ def test_memory_config_round_trips_and_hides_keys(tmp_path) -> None:
     }
     assert "embed-key" not in json.dumps(projected)
     assert "recovery_intent" not in projected["memory"]
-    assert projected["memory"]["diagnostics"] == {"log_provider_calls": True}
+    assert "diagnostics" not in projected["memory"]
 
 
 def test_released_memory_config_without_rerank_loads_and_saves_without_shape_churn(
@@ -860,7 +860,6 @@ def test_memory_config_rejects_unowned_transition_rebuild_state(memory: dict) ->
         ("processing", "memory.processing"),
         ("llm", "memory.processing.llm"),
         ("embedding", "memory.processing.embedding"),
-        ("diagnostics", "memory.diagnostics"),
     ],
 )
 @pytest.mark.parametrize("invalid", [[], False, "", 0, 1.5])
@@ -875,9 +874,6 @@ def test_memory_config_rejects_non_object_sections(
         memory = {"processing": invalid}
     elif field in {"llm", "embedding"}:
         memory = {"processing": {field: invalid}}
-    else:
-        memory = {"diagnostics": invalid}
-
     with pytest.raises(ValueError, match=rf"Config '{expected_name}' must be an object"):
         V2Config.from_payload(_payload(memory))
 
@@ -990,7 +986,7 @@ def test_memory_enable_requires_complete_authenticated_processing_config() -> No
         V2Config.from_payload(_payload({"enabled": True, "processing": processing}))
 
 
-def test_memory_config_defaults_provider_logging_on_for_legacy_payload() -> None:
+def test_memory_config_defaults_without_provider_call_diagnostics() -> None:
     config = V2Config(
         mode="self_host",
         version="v2",
@@ -999,41 +995,38 @@ def test_memory_config_defaults_provider_logging_on_for_legacy_payload() -> None
         agents=AgentsConfig(),
     )
     assert config.memory == MemoryConfig()
-    assert config.memory.diagnostics.log_provider_calls is True
+    assert "diagnostics" not in config_to_payload(config)["memory"]
 
 
-def test_memory_config_upgrades_disabled_provider_logging_to_always_on() -> None:
-    config = V2Config.from_payload(
-        _payload(
-            {
-                "enabled": False,
-                "processing": {},
-                "diagnostics": {"log_provider_calls": False},
-            }
-        )
-    )
-
-    assert config.memory.diagnostics.log_provider_calls is True
-    assert config_to_payload(config)["memory"]["diagnostics"] == {
-        "log_provider_calls": True,
-    }
-
-
-@pytest.mark.parametrize(
-    "diagnostics",
-    [True, [], {"log_provider_calls": "yes"}],
-)
-def test_memory_config_rejects_invalid_diagnostics(diagnostics: object) -> None:
-    with pytest.raises(ValueError, match="memory.diagnostics"):
-        V2Config.from_payload(
+@pytest.mark.parametrize("legacy_value", [True, False])
+def test_memory_config_ignores_legacy_provider_call_diagnostics(
+    tmp_path,
+    legacy_value: bool,
+) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
             _payload(
                 {
                     "enabled": False,
                     "processing": {},
-                    "diagnostics": diagnostics,
+                    "diagnostics": {"log_provider_calls": legacy_value},
                 }
             )
-        )
+        ),
+        encoding="utf-8",
+    )
+
+    config = V2Config.load(config_path)
+
+    projected = config_to_payload(config)
+    assert config.memory.enabled is False
+    assert "diagnostics" not in projected["memory"]
+    assert not hasattr(config.memory, "diagnostics")
+
+    config.save(config_path)
+    stored = json.loads(config_path.read_text(encoding="utf-8"))
+    assert "diagnostics" not in stored["memory"]
 
 
 def test_memory_config_defaults_when_block_is_absent() -> None:
@@ -1056,7 +1049,6 @@ def test_memory_config_rejects_explicit_null_block() -> None:
         {"processing": None},
         {"processing": {"llm": None, "embedding": {"base_url": "x", "model": "m"}}},
         {"processing": {"llm": {"base_url": "x", "model": "m"}, "embedding": None}},
-        {"diagnostics": None},
     ],
 )
 def test_memory_config_rejects_explicit_null_nested_blocks(memory: dict) -> None:

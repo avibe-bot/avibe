@@ -2037,20 +2037,6 @@ class MemoryCloudConfig:
         return self.memory_capability_available() and bool(self.model_access_key)
 
 
-@dataclass
-class MemoryDiagnosticsConfig:
-    # Retained only so older config files continue to load. Provider call
-    # recording is installation-wide and always enabled by the runtime.
-    log_provider_calls: bool = True
-
-    def validate(self) -> None:
-        if not isinstance(self.log_provider_calls, bool):
-            raise ValueError(
-                "Config 'memory.diagnostics.log_provider_calls' must be a boolean"
-            )
-        self.log_provider_calls = True
-
-
 MemoryRecoveryIntent = Literal["rebuild", "factory_reset"]
 MEMORY_RECOVERY_INTENTS = frozenset(get_args(MemoryRecoveryIntent))
 
@@ -2063,7 +2049,6 @@ class MemoryConfig:
     mode: MemoryMode | None = None
     processing: MemoryProcessingConfig = field(default_factory=MemoryProcessingConfig)
     cloud: MemoryCloudConfig = field(default_factory=MemoryCloudConfig)
-    diagnostics: MemoryDiagnosticsConfig = field(default_factory=MemoryDiagnosticsConfig)
     recovery_intent: MemoryRecoveryIntent | None = None
 
     def validate(self) -> None:
@@ -2080,7 +2065,6 @@ class MemoryConfig:
             )
         self.processing.validate()
         self.cloud.validate()
-        self.diagnostics.validate()
         if self.cloud.transition_rebuild_owned and (
             not self.cloud.transition_notice_pending
             or self.recovery_intent != "rebuild"
@@ -2346,9 +2330,6 @@ def memory_config_to_payload(
             "applied_embedding_identity": memory.cloud.applied_embedding_identity,
             "runtime_apply_pending": memory.cloud.runtime_apply_pending,
         },
-        "diagnostics": {
-            "log_provider_calls": memory.diagnostics.log_provider_calls,
-        },
     }
     if include_internal and memory.recovery_intent is not None:
         # This records a candidate that must be rechecked by the controller
@@ -2391,10 +2372,6 @@ def memory_config_from_payload(payload: object) -> MemoryConfig:
             processing_payload["multimodal"],
             name="memory.processing.multimodal",
         )
-    diagnostics_payload = _optional_memory_object(
-        payload.get("diagnostics", {}),
-        name="memory.diagnostics",
-    )
     cloud_payload = _optional_memory_object(
         payload.get("cloud", {}),
         name="memory.cloud",
@@ -2464,12 +2441,6 @@ def memory_config_from_payload(payload: object) -> MemoryConfig:
                         )
                     ),
                 },
-            )
-        ),
-        diagnostics=MemoryDiagnosticsConfig(
-            **_filter_dataclass_fields(
-                MemoryDiagnosticsConfig,
-                diagnostics_payload,
             )
         ),
     )

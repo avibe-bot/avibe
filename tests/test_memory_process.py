@@ -677,22 +677,6 @@ def test_pinned_attachment_uri_matches_process_body_and_sidecar_guard(
     )
 
 
-def test_sidecar_child_environment_includes_only_the_configured_call_log(tmp_path: Path) -> None:
-    call_log = tmp_path / "memory" / "call-log" / "call-log.db"
-    process = EverOSProcess(
-        sys.executable,
-        effective_home=tmp_path,
-        settings=replace(_settings(), call_log_db_path=call_log),
-    )
-
-    _claim_provider_root(process)
-    process._prepare_owned_directories()
-    environment = process._child_environment()
-
-    assert environment["AVIBE_MEMORY_CALL_LOG_DB"] == str(call_log)
-    assert stat.S_IMODE(call_log.parent.stat().st_mode) == 0o700
-
-
 async def test_sidecar_rejects_sun_path_overflow_without_launching_child(tmp_path: Path) -> None:
     socket_path = tmp_path / ("a" * 180) / "everos.sock"
     process = EverOSProcess(
@@ -2881,7 +2865,7 @@ async def test_planned_reap_does_not_restart_a_stopped_supervisor(
 
 
 def test_sidecar_start_failure_after_host_handoff_notifies_reaped(tmp_path: Path) -> None:
-    """A pre-spawn launch failure leaves the host free to reclaim the call log."""
+    """A pre-spawn launch failure releases the controller host handoff."""
 
     reaped = 0
 
@@ -2907,7 +2891,7 @@ async def test_sidecar_restart_releases_process_lock_while_host_handoff_waits(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Stop wins while a restart waits for the controller-owned call-log lock."""
+    """Stop wins while a restart waits for the controller-owned host handoff."""
 
     callback_entered = asyncio.Event()
     release_callback = asyncio.Event()

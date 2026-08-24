@@ -104,7 +104,7 @@ async def test_clear_writes_marker_and_repeats_four_surfaces(tmp_path: Path):
     assert [surface for surface, _epoch in port.deleted] == [
         "metadata",
         "provider",
-        "call_log",
+        "legacy_files",
         "attachments",
     ]
     assert len({epoch for _surface, epoch in port.deleted}) == 1

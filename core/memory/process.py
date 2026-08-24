@@ -151,7 +151,6 @@ class EverOSProcessSettings:
     multimodal_model: str | None = None
     multimodal_api_key: str | None = field(default=None, repr=False)
     timezone: str | None = None
-    call_log_db_path: Path | None = None
 
 
 class _ProcessKind(Enum):
@@ -2478,8 +2477,6 @@ def _prepare_memory_child_directories(
         memory_dir / ".child-home" / ".local" / "state",
         memory_dir / "generated",
     ]
-    if settings.call_log_db_path is not None:
-        directories.append(settings.call_log_db_path.parent)
     for directory in directories:
         _ensure_owner_directory(directory)
     _require_private_provider_root(provider_root)
@@ -2614,8 +2611,6 @@ def _memory_child_environment(
         )
     ):
         env[MULTIMODAL_EXPLICIT_ENV] = "1"
-    if settings.call_log_db_path is not None:
-        env["AVIBE_MEMORY_CALL_LOG_DB"] = str(settings.call_log_db_path)
     if role is not None:
         env["AVIBE_MEMORY_CHILD_ROLE"] = role.value
     return env

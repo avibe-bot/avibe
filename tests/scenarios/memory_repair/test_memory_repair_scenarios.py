@@ -310,7 +310,7 @@ async def test_memory_repair_006_keeps_sidecar_available_during_public_request(
         during = await client.get("/api/memory/status", headers=harness.headers)
         assert during.status_code == 200
         assert during.json()["source"]["status"] == "available"
-        assert during.json()["health"]["recorder"]["state"] == "active"
+        assert "recorder" not in during.json()["health"]
         assert runtime.sidecar_stop_calls == 0
 
         runtime.release_repair.set()

@@ -1,12 +1,13 @@
 # EverOS Memory Integration Adjustment
 
-> Status: implemented / PR review
+> Status: historical; superseded by `memory-best-effort-capture.md` and
+> `memory-processing-log-page.md`
 >
 > Date: 2026-08-08
 >
 > Target branch: Avibe `dev`
 >
-> This document is the source of truth for this implementation and review. It records the
+> This document records the original implementation and review. It preserves the
 > owner-approved scope, the two capabilities already merged into `dev`, and the one remaining
 > implementation PR. This umbrella plan is tracked with that implementation.
 >
@@ -256,12 +257,12 @@ separate status model or a composite global `ready/syncing/degraded` claim.
 The backend contract has four read-only areas:
 
 1. **EverOS runtime summary** — latest successfully read public `GET /health`, including version,
-   declared capabilities, Cascade fields, recorder fields, and `observed_at` when present;
-2. **Recent pipeline** — existing Avibe processing/call-log provenance for directly confirmed
-   `capture -> add/flush -> memcell -> episode -> OME -> profile/skill -> indexing` steps;
+   declared capabilities, Cascade fields, and `observed_at` when present;
+2. **Recent pipeline** — bounded native EverOS memcells, runs, linked semantic files,
+   profile state, and index state;
 3. **Anomalies and recovery** — confirmed add/flush failures, boot recovery, clear-journal recovery,
-   recorder degradation, and terminal `manual_required` evidence;
-4. **Diagnostic detail** — existing bounded, scrubbed, body-redacted processing/call detail with current
+   and terminal `manual_required` evidence;
+4. **Diagnostic detail** — bounded, scrubbed native processing detail with current
    permission, pagination, and response-size limits.
 
 Source rules:
@@ -276,7 +277,7 @@ Source rules:
 - do not implement profile/data rebuild or an index rebuild workflow as part of this page;
 - `manual_required` is visible read-only; no resolution button, decision form, or fence-release action.
 
-Reuse existing Avibe processing/call-log interfaces and UI data shapes where possible. If an existing
+Reuse the native Processing Record adapter and UI data shapes where possible. If an existing
 adapter cannot read a source safely, return `unknown`/`unavailable` rather than inventing a complete
 status. Do not expand a pinned-runtime adapter into a new global state machine.
 
@@ -417,7 +418,7 @@ Delivery rules:
 - The page contains runtime summary, source availability, recent pipeline, anomalies/recovery, and
   diagnostic detail without a separate Memory status console.
 - Runtime summary is sourced from public EverOS `/health` and includes `observed_at`.
-- Pipeline history reuses existing Avibe processing/call-log provenance.
+- Pipeline history reads bounded native EverOS provenance.
 - Missing/stale/locked/unreadable sources show local `unknown`/`unavailable` states.
 - `/health` success is not presented as global pipeline readiness.
 - `manual_required` is visible but has no resolution control.
@@ -446,7 +447,7 @@ Delivery rules:
 | Manual resolution | No `operate`, decision rows, or resolution UI in this scope |
 | Attachments | Pin/copy before recoverable acceptance; include in backup scope |
 | Clear | Destructive, journaled two-phase operation; never a manual-resolution shortcut |
-| Processing Record source | Public EverOS `/health` plus existing Avibe processing/call logs and directly confirmed outbox facts |
+| Processing Record source | Public EverOS `/health` plus bounded native EverOS memcells, runs, semantic files, profile state, and index state |
 | Processing Record UI | Implement directly; no separate mockup approval round |
 | Global readiness | Not derived or claimed from partial sources |
 | Search | Single-run `keyword/vector/hybrid/agentic`; hybrid default; agentic explicit and fail-closed |
@@ -468,12 +469,12 @@ Delivery rules:
 - `core/memory/worker.py` — current durable `/add` delivery path;
 - `core/memory/everos.py` — public UDS `/add`, `/flush`, `/health`, `/search`, and `/get` adapter;
 - `core/memory/module.py` and `core/memory/runtime.py` — Memory interface and managed lifecycle;
-- `core/memory/everos_insight/` — existing processing/call-log provenance adapter;
+- `core/memory/everos_insight/` — native Processing Record adapter;
 - `ui/` — existing Processing Record UI, primitives, layout, and i18n;
 - `docs/MEMORY.md` — user-facing Memory behavior and recovery notes.
 
 ### EverOS
 
 Use the pinned runtime contract and public interfaces already consumed by Avibe. The remaining PR must
-not assume new EverOS source changes or private database semantics beyond what the existing Avibe
-processing/call-log adapter can safely confirm.
+not assume new EverOS source changes or private database semantics beyond what the native adapter
+can safely confirm.

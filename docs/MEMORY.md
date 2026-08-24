@@ -108,9 +108,9 @@ unattributed; it is not reconstructed historical state for that run.
 Each source is read independently. Missing, busy, malformed, or retained-away
 data is shown as unavailable while other sections continue to render. This is a
 best-effort diagnostic: Avibe keeps no durable per-call observer, replay queue,
-or Provider Call Log, and records may be incomplete or lost. The legacy
-`memory.diagnostics.log_provider_calls` config field remains load-compatible but
-does not restore the removed log routes.
+or Provider Call Log, and records may be incomplete or lost. Released config
+files containing `memory.diagnostics.log_provider_calls` still load, but the
+field is ignored and is not emitted by new config or API serialization.
 
 Processing faults are written only to the main Avibe service log. Capture loss
 does not generate administrator messages on IM transports.
@@ -186,7 +186,7 @@ Retired backup and snapshot residue is also cleaned best effort and never blocks
    pinned, installed Memory artifact is valid. It permanently deletes local
    Memory data and related operational state from the mixed-purpose `memory`
    and `state/memory` storage locations. The former may include profiles,
-   facts, indexes, call diagnostics, and runtime files; the latter may include
+   facts, indexes, native processing data, and runtime files; the latter may include
    stable identity, project, and capture-health metadata. Only a
    successful cutover starts fresh, usable Memory. It
    preserves Memory settings and credentials, the pinned, installed Memory

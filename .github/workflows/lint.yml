@@ -159,7 +159,6 @@ jobs:
           uv run --frozen --project scripts/memory_runtime \
             --with 'pytest==9.0.3' --with 'pytest-asyncio==1.4.0' \
             python -m pytest \
-            tests/test_memory_everos_insight_patches.py::test_pinned_everos_patch_contract \
             tests/test_memory_sync_bootstrap.py::test_pinned_everos_pathless_sync_scans_and_drains \
             -ra | tee "$output"
           if grep -Eq '(^|[[:space:]])[0-9]+ skipped|SKIPPED' "$output"; then

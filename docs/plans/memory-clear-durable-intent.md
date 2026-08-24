@@ -15,7 +15,8 @@ primitives; it does not replace them with raw directory deletion:
 
 1. queue: clear queue tables and call `store.reset_for_clear(target_epoch=...)`
 2. provider: call `ProviderRootOwner.recreate_empty()`
-3. call log: call `clear_call_log()`
+3. legacy files: remove the retired `memory/call-log` directory with the confined
+   filesystem helper, without opening or interpreting its SQLite files
 4. attachments: call `MemoryModule.clear_attachments()`
 
 The confined filesystem primitives remain shared infrastructure for Clear,

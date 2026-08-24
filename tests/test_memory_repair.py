@@ -81,7 +81,6 @@ def _runtime(
             capabilities={"embed": True},
             disabled_features=(),
             cascade=_cascade_health(healthy=healthy),
-            recorder={"state": "active", "reason": None},
         )
     )
     runtime._provider = provider
@@ -346,7 +345,6 @@ async def test_repair_requires_enabled_live_sidecar_and_final_cascade_health(
         capabilities={"embed": True},
         disabled_features=(),
         cascade=None,
-        recorder={"state": "active", "reason": None},
     )
     assert await runtime.repair() == {
         "ok": False,
