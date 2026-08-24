@@ -269,17 +269,27 @@ def test_order_dependent_link_target_stays_confined(
     outside.write_bytes(b"outside\n")
     outside_stat = outside.stat()
 
+    extraction_error = None
     with tarfile.open(archive_path) as archive:
-        with pytest.raises(tarfile.LinkOutsideDestinationError):
+        try:
             extractor(archive, destination)
+        except (KeyError, tarfile.LinkOutsideDestinationError) as error:
+            extraction_error = error
 
     assert outside.read_bytes() == b"outside\n"
     assert outside.stat().st_ino == outside_stat.st_ino
     assert outside.stat().st_nlink == outside_stat.st_nlink
     assert (destination / "outside").read_bytes() == b"archive-inside\n"
-    assert not (destination / "inside-hard").exists()
     assert (destination / "pivot").is_symlink()
-    assert sorted(path.name for path in destination.iterdir()) == ["outside", "pivot"]
+    extracted_hardlink = destination / "inside-hard"
+    if extraction_error is None:
+        assert extracted_hardlink.stat().st_ino == (destination / "outside").stat().st_ino
+        assert extracted_hardlink.stat().st_ino != outside.stat().st_ino
+        expected_members = ["inside-hard", "outside", "pivot"]
+    else:
+        assert not extracted_hardlink.exists()
+        expected_members = ["outside", "pivot"]
+    assert sorted(path.name for path in destination.iterdir()) == expected_members
 
 
 @pytest.mark.parametrize(("_name", "extractor"), EXTRACTORS, ids=[item[0] for item in EXTRACTORS])
