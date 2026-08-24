@@ -1173,6 +1173,56 @@ def test_memory_data_operations_return_distinct_final_result(
     handler.assert_awaited_once_with(confirm_loss=True)
 
 
+def test_memory_reconfigure_forwards_the_cas_snapshot() -> None:
+    from config.v2_config import MemoryConfig, memory_config_to_payload
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    path = "/internal/memory/reconfigure"
+    candidate = MemoryConfig(enabled=False, mode="custom")
+    expected = MemoryConfig(enabled=False)
+    controller = _build_controller_double()
+    controller.reconfigure_memory = AsyncMock(
+        return_value={"ok": True, "operation": "reconfigure"}
+    )
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+    headers = {
+        MEMORY_USER_KEY_HEADER: "avibe:local",
+        MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+            secret,
+            method="POST",
+            path=path,
+            user_key="avibe:local",
+        ),
+    }
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                path,
+                headers=headers,
+                json={
+                    "confirm_loss": True,
+                    "memory": memory_config_to_payload(candidate, include_secrets=True),
+                    "expected_memory": memory_config_to_payload(
+                        expected,
+                        include_secrets=True,
+                    ),
+                },
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    controller.reconfigure_memory.assert_awaited_once_with(
+        candidate,
+        expected_config=expected,
+        confirm_loss=True,
+    )
+
+
 @pytest.mark.parametrize(
     ("result", "expected_status"),
     [

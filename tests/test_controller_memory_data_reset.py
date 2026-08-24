@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import stat
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -349,10 +351,95 @@ async def test_reconfigure_keeps_confirmed_identity_when_readiness_fails(
         lambda *args, **kwargs: fresh,
     )
 
-    result = await controller.reconfigure_memory(target, confirm_loss=True)
+    result = await controller.reconfigure_memory(
+        target,
+        expected_config=controller.config.memory,
+        confirm_loss=True,
+    )
 
     assert result["ok"] is False
     assert result["state"] == "degraded"
     assert persisted == [target]
     assert controller.config.memory == target
     assert fresh.marked_reason is None
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_rejects_a_stale_memory_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _Runtime(tmp_path)
+    controller = _controller(runtime)
+    expected = controller.config.memory
+    target = MemoryConfig(enabled=True)
+    target.processing.embedding = MemoryEndpointConfig(
+        base_url="https://embedding.example.test/v1",
+        model="embed-v2",
+        api_key="secret",
+    )
+
+    def update(transform):
+        concurrent = MemoryConfig(enabled=False)
+        return SimpleNamespace(memory=transform(concurrent))
+
+    monkeypatch.setattr("core.controller.atomic_update_memory", update)
+
+    result = await controller.reconfigure_memory(
+        target,
+        expected_config=expected,
+        confirm_loss=True,
+    )
+
+    assert result == {
+        "ok": False,
+        "operation": "reconfigure",
+        "error": "memory_operation_in_progress",
+        "result": "unchanged",
+    }
+    assert runtime.events == ["reap"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_reset_joins_deletion_before_releasing_exclusion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _roots(tmp_path)
+    runtime = _Runtime(tmp_path)
+    controller = _controller(runtime, enabled=False)
+    _persist(monkeypatch, controller)
+    deletion_started = threading.Event()
+    allow_deletion_to_finish = threading.Event()
+    lease_events: list[str] = []
+
+    class Lease:
+        def __init__(self, _home: Path) -> None:
+            pass
+
+        def acquire(self) -> None:
+            lease_events.append("acquire")
+
+        def release(self) -> None:
+            lease_events.append("release")
+
+    def blocking_reset():
+        deletion_started.set()
+        allow_deletion_to_finish.wait(timeout=5)
+        return reset_memory_data_roots(tmp_path)
+
+    runtime.reset_mutable_data = blocking_reset
+    monkeypatch.setattr("core.controller.MemoryOperationLease", Lease)
+
+    task = asyncio.create_task(controller.delete_memory_data(confirm_loss=True))
+    assert await asyncio.to_thread(deletion_started.wait, 2)
+    task.cancel()
+    await asyncio.sleep(0.05)
+
+    assert task.done() is False
+    assert lease_events == ["acquire"]
+
+    allow_deletion_to_finish.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert lease_events == ["acquire", "release"]

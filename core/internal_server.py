@@ -1088,7 +1088,11 @@ def create_app(
                 content={"ok": False, "operation": "reconfigure", "error": "memory_access_denied"},
             )
         payload = await _safe_json(request)
-        if not isinstance(payload, dict) or set(payload) != {"confirm_loss", "memory"}:
+        if not isinstance(payload, dict) or set(payload) != {
+            "confirm_loss",
+            "memory",
+            "expected_memory",
+        }:
             return JSONResponse(
                 status_code=400,
                 content={
@@ -1110,8 +1114,10 @@ def create_app(
             from config.v2_config import memory_config_from_payload
 
             candidate = memory_config_from_payload(payload["memory"])
+            expected = memory_config_from_payload(payload["expected_memory"])
             result = await controller.reconfigure_memory(
                 candidate,
+                expected_config=expected,
                 confirm_loss=True,
             )
         except (TypeError, ValueError):

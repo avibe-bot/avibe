@@ -6,6 +6,8 @@ import pytest
 
 from config.v2_config import (
     AgentsConfig,
+    MemoryCloudCapabilities,
+    MemoryCloudConfig,
     MemoryConfig,
     MemoryEndpointConfig,
     MemoryProcessingConfig,
@@ -101,6 +103,40 @@ def test_memory_settings_patch_uses_loss_explicit_confirmation() -> None:
     assert target["processing"]["embedding"]["model"] == "embed-v2"
     with pytest.raises(ValueError, match="invalid_memory_patch"):
         ui_memory_routes._memory_settings_patch(current, {"confirm": True})
+
+
+def test_platform_embedding_transition_accepts_confirmed_data_loss() -> None:
+    current = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=MemoryConfig(
+            enabled=True,
+            mode="platform",
+            cloud=MemoryCloudConfig(
+                scope="platform",
+                capabilities=MemoryCloudCapabilities(chat=True, embedding=True),
+                embedding_identity="emb-v2",
+                applied_embedding_identity="emb-v1",
+                transition_notice_pending=True,
+                model_access_key="mak-current",
+                proxy_base_url="https://backend.example.test/v1/model",
+                source_instance_id="instance-1",
+            ),
+        ),
+    )
+
+    target, confirm_loss = ui_memory_routes._memory_settings_patch(
+        current,
+        {"acknowledge_transition": True, "confirm_loss": True},
+    )
+
+    assert confirm_loss is True
+    assert target["cloud"]["applied_embedding_identity"] == "emb-v2"
+    assert target["cloud"]["transition_notice_pending"] is False
+    assert target["cloud"]["organization_attached"] is False
 
 
 def test_memory_settings_get_is_no_store_and_never_projects_secrets(
@@ -398,11 +434,12 @@ def test_confirmed_embedding_identity_change_uses_unified_reconfigure(
         preflights.append({"payload": payload, "user_key": user_key})
         return {"status_code": 200, "body": {"ok": True}}
 
-    async def reconfigure(*, confirm_loss, memory, user_key):
+    async def reconfigure(*, confirm_loss, memory, expected_memory, user_key):
         reconfigures.append(
             {
                 "confirm_loss": confirm_loss,
                 "memory": memory,
+                "expected_memory": expected_memory,
                 "user_key": user_key,
             }
         )
@@ -438,6 +475,10 @@ def test_confirmed_embedding_identity_change_uses_unified_reconfigure(
     assert len(reconfigures) == 1
     assert reconfigures[0]["confirm_loss"] is True
     assert reconfigures[0]["memory"]["processing"]["embedding"]["model"] == "embed-v2"
+    assert (
+        reconfigures[0]["expected_memory"]["processing"]["embedding"]["model"]
+        == "embed-v1"
+    )
 
 
 def test_processing_record_routes_remain_native_and_provider_log_free(

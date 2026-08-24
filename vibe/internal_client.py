@@ -482,6 +482,7 @@ async def memory_reconfigure(
     *,
     confirm_loss: bool,
     memory: dict[str, Any],
+    expected_memory: dict[str, Any],
     user_key: str,
     socket_path: Optional[Path] = None,
 ) -> dict[str, Any]:
@@ -489,7 +490,11 @@ async def memory_reconfigure(
     return await _memory_request(
         "POST",
         path,
-        payload={"confirm_loss": confirm_loss, "memory": memory},
+        payload={
+            "confirm_loss": confirm_loss,
+            "memory": memory,
+            "expected_memory": expected_memory,
+        },
         headers=_memory_user_key_headers("POST", path, user_key),
         socket_path=socket_path,
         timeout=None,

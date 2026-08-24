@@ -18,6 +18,7 @@ from config.v2_config import (
     DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
     DEFAULT_AGENT_PROGRESS_STYLE,
     MemoryConfig,
+    MemoryConfigStaleWrite,
     atomic_update_memory,
 )
 from modules.im import BaseIMClient, MessageContext, IMFactory
@@ -757,6 +758,7 @@ class Controller:
         self,
         memory_config: MemoryConfig,
         *,
+        expected_config: MemoryConfig,
         confirm_loss: bool,
     ) -> dict[str, Any]:
         """Apply an identity-changing config only through an accepted reset."""
@@ -769,7 +771,7 @@ class Controller:
                 "result": "unchanged",
             }
         if (
-            self.config.memory.runtime_embedding_identity()
+            expected_config.runtime_embedding_identity()
             == memory_config.runtime_embedding_identity()
         ):
             return {
@@ -781,6 +783,7 @@ class Controller:
         return await self._reset_memory_data(
             operation="reconfigure",
             target_config=memory_config,
+            expected_config=expected_config,
         )
 
     async def _reset_memory_data(
@@ -788,6 +791,7 @@ class Controller:
         *,
         operation: str,
         target_config: MemoryConfig | None = None,
+        expected_config: MemoryConfig | None = None,
     ) -> dict[str, Any]:
         from core.memory.data_reset import (
             unchanged_memory_data_result,
@@ -853,15 +857,26 @@ class Controller:
                     deepcopy(target_config or self.config.memory),
                     legacy_needs_repair=False,
                 )
+
+                def persist_confirmed_config(current: MemoryConfig) -> MemoryConfig:
+                    if operation == "reconfigure":
+                        if expected_config is None or current != expected_config:
+                            raise MemoryConfigStaleWrite("memory candidate changed")
+                        return target
+                    return replace(current, legacy_needs_repair=False)
+
                 try:
                     persisted = await asyncio.to_thread(
                         atomic_update_memory,
-                        lambda current: (
-                            target
-                            if operation == "reconfigure"
-                            else replace(current, legacy_needs_repair=False)
-                        ),
+                        persist_confirmed_config,
                     )
+                except MemoryConfigStaleWrite:
+                    return {
+                        "ok": False,
+                        "operation": operation,
+                        "error": "memory_operation_in_progress",
+                        "result": "unchanged",
+                    }
                 except Exception:
                     logger.exception(
                         "Memory data reset could not persist its confirmed configuration"
@@ -915,7 +930,7 @@ class Controller:
                     failure["state"] = "needs_repair"
                     return failure
 
-                deletion = await asyncio.to_thread(
+                deletion = await run_blocking(
                     runtime.reset_mutable_data,
                 )
                 deletion_payload = deletion.payload()

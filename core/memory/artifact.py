@@ -102,6 +102,10 @@ MemoryProviderRootState = ProviderRootState
 class MemoryRuntimeActivationError(RuntimeError):
     """Closed failure raised before an unsafe Memory runtime pointer cutover."""
 
+    def __init__(self, message: str, *, repair_required: bool = False) -> None:
+        super().__init__(message)
+        self.repair_required = repair_required
+
 
 MemoryArtifactActivationCoordinator = Callable[
     [MemoryArtifactCandidate, MemoryProviderRootState | None, Callable[[], None], Callable[[], None]],
@@ -256,6 +260,26 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             "reason": None,
             "download_error": None,
         }
+
+    def _failure_for_install_exception(
+        self,
+        error: Exception,
+        *,
+        manifest: ManagedRuntimeManifest,
+        archive: ManagedRuntimeArchive,
+    ) -> dict[str, Any]:
+        if isinstance(error, MemoryRuntimeActivationError) and error.repair_required:
+            return self._failure(
+                "memory_local_data_unusable",
+                manifest=manifest,
+                archive=archive,
+                message=str(error),
+            )
+        return super()._failure_for_install_exception(
+            error,
+            manifest=manifest,
+            archive=archive,
+        )
 
     def _dev_runtime_configured(self) -> bool:
         return _DEV_RUNTIME_ENV in os.environ
@@ -433,7 +457,10 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         except ProviderRootError as error:
             # Incompatible or unsafe native data requires explicit Repair. An
             # artifact install cannot bypass that destructive boundary.
-            raise MemoryRuntimeActivationError(str(error)) from error
+            raise MemoryRuntimeActivationError(
+                str(error),
+                repair_required=True,
+            ) from error
         previous_pointer = self._active_pointer()
 
         def commit() -> None:

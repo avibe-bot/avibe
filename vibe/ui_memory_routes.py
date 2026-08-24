@@ -214,14 +214,16 @@ def _memory_settings_patch(
         target["mode"] = mode
         adopt_cloud_identity = mode == "platform"
     if "acknowledge_transition" in patch_payload:
+        cloud_scope = current.memory.cloud.scope
         if (
             patch_payload["acknowledge_transition"] is not True
             or not current.memory.cloud.transition_notice_pending
-            or current.memory.cloud.scope != "organization"
+            or cloud_scope not in {"organization", "platform"}
             or not current.memory.cloud.memory_capability_available()
         ):
             raise ValueError("invalid_memory_patch")
-        target["cloud"]["organization_attached"] = True
+        if cloud_scope == "organization":
+            target["cloud"]["organization_attached"] = True
         target["cloud"]["transition_notice_pending"] = False
         adopt_cloud_identity = True
     if adopt_cloud_identity:
@@ -471,6 +473,10 @@ async def _apply_memory_settings_patch(
                     confirm_loss=confirm_loss,
                     memory=memory_config_to_payload(
                         candidate.memory,
+                        include_secrets=True,
+                    ),
+                    expected_memory=memory_config_to_payload(
+                        current.memory,
                         include_secrets=True,
                     ),
                     user_key=user_key,

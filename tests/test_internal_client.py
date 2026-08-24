@@ -735,6 +735,46 @@ def test_memory_wake_posts_and_passes_through_the_runtime_result(socket_path):
     }
 
 
+def test_memory_reconfigure_forwards_candidate_and_expected_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    socket_path,
+) -> None:
+    from core.memory import ui_access
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(ui_access, "_process_secret", "test-ui-controller-secret")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(200, json={"ok": True, "operation": "reconfigure"})
+
+    async def _go():
+        with patch(
+            "vibe.internal_client.httpx.AsyncHTTPTransport",
+            return_value=httpx.MockTransport(handler),
+        ):
+            return await internal_client.memory_reconfigure(
+                confirm_loss=True,
+                memory={"enabled": True},
+                expected_memory={"enabled": False},
+                user_key="avibe:local",
+                socket_path=socket_path,
+            )
+
+    result = asyncio.run(_go())
+
+    assert result["status_code"] == 200
+    assert captured == {
+        "path": "/internal/memory/reconfigure",
+        "payload": {
+            "confirm_loss": True,
+            "memory": {"enabled": True},
+            "expected_memory": {"enabled": False},
+        },
+    }
+
+
 @pytest.mark.parametrize(
     "transport_error",
     [

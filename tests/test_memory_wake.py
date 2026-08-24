@@ -18,6 +18,7 @@ from core.memory.artifact import (
     MemoryArtifactManager,
 )
 from core.memory.everos import FakeMemoryProvider, ProviderHealthSnapshot
+from core.memory.operation_lock import MemoryOperationBusy
 from core.memory.process import FakeEverOSProcessFactory
 
 
@@ -89,7 +90,12 @@ async def test_pinned_everos_runtime_wakes_through_production_sidecar(
         pytest.skip("managed EverOS runtime is not installed")
     assert importlib.metadata.version("everos") == EVEROS_VERSION
 
-    monkeypatch.setenv("AVIBE_MEMORY_DEV_RUNTIME", sys.executable)
+    runtime_python = Path.cwd() / "scripts" / "memory_runtime" / ".venv" / "bin" / "python"
+    if not runtime_python.is_file():
+        if required:
+            pytest.fail("provisioned Memory runtime interpreter is missing")
+        pytest.skip("provisioned Memory runtime interpreter is missing")
+    monkeypatch.setenv("AVIBE_MEMORY_DEV_RUNTIME", str(runtime_python))
     with tempfile.TemporaryDirectory(prefix="avw-", dir="/tmp") as temporary:
         effective_home = Path(temporary).resolve()
         artifact = MemoryArtifactManager(
@@ -177,6 +183,132 @@ async def test_wake_artifact_failure_is_degraded_and_non_destructive(
     }
     assert sentinel.read_text(encoding="utf-8") == "keep"
     assert artifact.ensure_calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_wake_classifies_incompatible_local_root_as_repairable(
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    artifact = FakeMemoryArtifactManager(
+        python=None,
+        status_payload={
+            "installed": False,
+            "status": "invalid",
+            "reason": "memory_runtime_install_failed",
+        },
+        ensure_payload={
+            "ok": False,
+            "reason": "memory_local_data_unusable",
+            "download_error": None,
+        },
+    )
+    runtime = memory_runtime_factory(
+        _config(),
+        artifact_manager=artifact,
+        effective_home=tmp_path,
+    )
+    sentinel = tmp_path / "memory" / "user-data.txt"
+    sentinel.parent.mkdir(parents=True, exist_ok=True)
+    sentinel.write_text("keep", encoding="utf-8")
+
+    result = await runtime.wake()
+
+    assert result == {
+        "ok": False,
+        "state": "needs_repair",
+        "error": "memory_local_data_unusable",
+    }
+    assert runtime.needs_repair is True
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
+@pytest.mark.asyncio
+async def test_wake_retries_short_operation_lease_contention(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    memory_runtime_factory,
+) -> None:
+    artifact = FakeMemoryArtifactManager(python=Path(sys.executable))
+    processes = FakeEverOSProcessFactory()
+    provider = FakeMemoryProvider(
+        health_snapshot_value=ProviderHealthSnapshot(
+            status="ok",
+            version="test",
+            capabilities={"embed": True},
+            disabled_features=(),
+            cascade={},
+        )
+    )
+    attempts = 0
+    releases = 0
+
+    class Lease:
+        def __init__(self, _home: Path) -> None:
+            pass
+
+        def acquire(self) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                raise MemoryOperationBusy("busy")
+
+        def release(self) -> None:
+            nonlocal releases
+            releases += 1
+
+    monkeypatch.setattr(runtime_module, "EverOSPort", lambda *args, **kwargs: provider)
+    monkeypatch.setattr(runtime_module, "MemoryOperationLease", Lease)
+    monkeypatch.setattr(runtime_module, "_WAKE_LEASE_RETRY_DELAYS_SECONDS", (0.0, 0.0, 0.0))
+    runtime = memory_runtime_factory(
+        _config(),
+        artifact_manager=artifact,
+        process_factory=processes,
+        effective_home=tmp_path,
+    )
+
+    result = await runtime.wake()
+
+    assert result == {"ok": True, "state": "running"}
+    assert attempts == 3
+    assert releases == 1
+
+
+@pytest.mark.asyncio
+async def test_disabled_wake_reaps_orphans_without_installing_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    memory_runtime_factory,
+) -> None:
+    artifact = FakeMemoryArtifactManager(
+        python=None,
+        status_payload={"installed": False, "status": "missing"},
+        ensure_payload={"ok": True},
+    )
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=False),
+        artifact_manager=artifact,
+        effective_home=tmp_path,
+    )
+    reaped = 0
+
+    async def reap(*, fail_closed: bool = False) -> bool:
+        nonlocal reaped
+        assert fail_closed is False
+        reaped += 1
+        return True
+
+    monkeypatch.setattr(runtime, "_reap_recorded_sidecar_if_unowned", reap)
+
+    result = await runtime.wake()
+
+    assert result == {
+        "ok": False,
+        "state": "disabled",
+        "error": "memory_disabled",
+    }
+    assert reaped == 1
+    assert artifact.ensure_calls == []
 
 
 @pytest.mark.asyncio

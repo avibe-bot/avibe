@@ -267,17 +267,32 @@ class ManagedRuntimeManager:
                 }
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Failed to install managed %s runtime", self.spec.runtime_id)
-                return self._failure(
-                    self._reason("install_failed"),
+                return self._failure_for_install_exception(
+                    exc,
                     manifest=manifest,
                     archive=archive,
-                    message=str(exc),
                 )
             finally:
                 if staging_dir.exists():
                     shutil.rmtree(staging_dir, ignore_errors=True)
         finally:
             self._release_mutation_lock(file_lock)
+
+    def _failure_for_install_exception(
+        self,
+        error: Exception,
+        *,
+        manifest: ManagedRuntimeManifest,
+        archive: ManagedRuntimeArchive,
+    ) -> dict[str, Any]:
+        """Map a failed activation while preserving subclass classifications."""
+
+        return self._failure(
+            self._reason("install_failed"),
+            manifest=manifest,
+            archive=archive,
+            message=str(error),
+        )
 
     def resolve_binary(self) -> Path | None:
         """Resolve an already installed runtime without performing network I/O."""

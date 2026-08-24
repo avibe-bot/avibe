@@ -112,6 +112,7 @@ _MEMORY_LIST_PROVIDER_MAX_PAGE = 1_000_000
 _MEMORY_LIST_AGGREGATE_TIMEOUT_SECONDS = 20.0
 _UNEXPECTED_WAKE_DELAYS_SECONDS = (0.0, 0.5, 1.0)
 _UNEXPECTED_WAKE_WINDOW_SECONDS = 30.0
+_WAKE_LEASE_RETRY_DELAYS_SECONDS = (0.0, 0.25, 0.5, 1.0, 2.0)
 
 
 @asynccontextmanager
@@ -1912,16 +1913,54 @@ class MemoryRuntime:
     ) -> dict[str, Any]:
         """Validate the artifact and non-destructively wake the existing root."""
 
-        if self._closing or self._retired or self.needs_repair:
+        if self._closing or self._retired:
             return {
                 "ok": False,
                 "state": self.runtime_state(),
                 "error": self._needs_repair_reason or "memory_operation_in_progress",
             }
         lease = MemoryOperationLease(self._effective_home)
+        lease_acquired = operation_lease_held
         try:
             if not operation_lease_held:
-                await run_blocking(lease.acquire)
+                for delay_seconds in _WAKE_LEASE_RETRY_DELAYS_SECONDS:
+                    if delay_seconds:
+                        await asyncio.sleep(delay_seconds)
+                    if self._closing or self._retired:
+                        return {
+                            "ok": False,
+                            "state": self.runtime_state(),
+                            "error": "memory_operation_in_progress",
+                        }
+                    try:
+                        await run_blocking(lease.acquire)
+                    except MemoryOperationBusy:
+                        continue
+                    lease_acquired = True
+                    break
+                if not lease_acquired:
+                    self._runtime_error = "memory_operation_in_progress"
+                    return {
+                        "ok": False,
+                        "state": "degraded",
+                        "error": self._runtime_error,
+                    }
+
+            # Even disabled or repair-fenced startup must stop a sidecar recorded
+            # by the previous Avibe process before returning.
+            await self._reap_recorded_sidecar_if_unowned()
+            if self.needs_repair:
+                return {
+                    "ok": False,
+                    "state": self.runtime_state(),
+                    "error": self._needs_repair_reason,
+                }
+            if not self._wake_config.enabled:
+                return {
+                    "ok": False,
+                    "state": "disabled",
+                    "error": "memory_disabled",
+                }
             if not self.artifact_admitted():
                 if self.available:
                     async with self._reconcile_lock, self.module.lifecycle():
@@ -1946,6 +1985,13 @@ class MemoryRuntime:
                     self._runtime_error = str(
                         installed.get("reason") or "memory_wake_failed"
                     )
+                    if self._runtime_error == "memory_local_data_unusable":
+                        self.mark_needs_repair(self._runtime_error)
+                        return {
+                            "ok": False,
+                            "state": "needs_repair",
+                            "error": self._needs_repair_reason,
+                        }
                     return {
                         "ok": False,
                         "state": "degraded",
@@ -1960,7 +2006,7 @@ class MemoryRuntime:
             self._runtime_error = _degraded_runtime_reason(exc, default="memory_wake_failed")
             return {"ok": False, "state": "degraded", "error": self._runtime_error}
         finally:
-            if not operation_lease_held:
+            if not operation_lease_held and lease_acquired:
                 await run_blocking(lease.release)
 
     def _defer_wake_until_writer_closed(self) -> None:
