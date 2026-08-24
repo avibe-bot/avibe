@@ -2,6 +2,7 @@
 
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 
 import { SettingsLayout } from './SettingsLayout';
@@ -25,12 +26,26 @@ vi.mock('@/context/InstanceAuthorizationContext', () => ({
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }));
+vi.mock('../LanguageSwitcher', () => ({
+  LanguageSwitcher: ({ openUpward }: { openUpward?: boolean }) => (
+    <div data-testid="language-switcher" data-open-upward={String(openUpward)} />
+  ),
+}));
+vi.mock('../ThemeToggle', () => ({ ThemeToggle: () => <div data-testid="theme-toggle" /> }));
+vi.mock('../AccountMenu', () => ({
+  AccountMenu: ({ openUpward }: { openUpward?: boolean }) => (
+    <div data-testid="account-menu" data-open-upward={String(openUpward)} />
+  ),
+}));
 
 const renderLayout = (path: string) => render(
   <MemoryRouter initialEntries={[path]}>
     <Routes>
       <Route path="/settings" element={<SettingsLayout />}>
         <Route path="replies" element={<div>replies-body</div>} />
+        <Route path="platforms" element={<div>platforms-body</div>} />
+        <Route path="platforms/users" element={<div>users-body</div>} />
+        <Route path="platforms/groups" element={<div>groups-body</div>} />
       </Route>
     </Routes>
   </MemoryRouter>,
@@ -70,6 +85,41 @@ describe('SettingsLayout', () => {
       expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
       expect(screen.getByRole('link', { name: 'settings.sections.memory' })).toBeTruthy();
     });
+  });
+
+  it('keeps messaging destinations nested under a collapsed Platforms section', async () => {
+    const user = userEvent.setup();
+    renderLayout('/settings/replies');
+
+    const platforms = screen.getByRole('button', { name: 'settings.sections.platforms' });
+    expect(platforms.getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByRole('link', { name: 'nav.users' })).toBeNull();
+    expect(screen.queryByRole('link', { name: 'nav.channels' })).toBeNull();
+
+    await user.click(platforms);
+
+    expect(platforms.getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByRole('link', { name: 'settings.sections.platformConnections' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'nav.users' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'nav.channels' })).toBeTruthy();
+  });
+
+  it('auto-expands Platforms and selects the matching nested destination', () => {
+    renderLayout('/settings/platforms/groups');
+
+    expect(screen.getByText('groups-body')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'settings.sections.platforms' }).getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByRole('link', { name: 'nav.channels' }).className).toContain('bg-mint/[0.09]');
+    expect(screen.getByRole('link', { name: 'settings.sections.platformConnections' }).className).not.toContain('bg-mint/[0.09]');
+    expect(screen.getByRole('link', { name: 'settings.sections.platformConnections' }).getAttribute('aria-current')).toBeNull();
+  });
+
+  it('keeps language, theme, and account preferences in the Settings rail', () => {
+    renderLayout('/settings/replies');
+
+    expect(screen.getByTestId('language-switcher').getAttribute('data-open-upward')).toBe('true');
+    expect(screen.getByTestId('theme-toggle')).toBeTruthy();
+    expect(screen.getByTestId('account-menu').getAttribute('data-open-upward')).toBe('true');
   });
 
   it('keeps member preferences, Replies, and Access while preserving the phase-2 permission gate', () => {

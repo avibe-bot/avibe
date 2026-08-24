@@ -10,9 +10,6 @@ import { useApi } from '../context/ApiContext';
 import { useStatus } from '../context/StatusContext';
 import { useWorkbenchInbox } from '../context/WorkbenchInboxContext';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
-import { AccountMenu } from './AccountMenu';
-import { LanguageSwitcher } from './LanguageSwitcher';
-import { ThemeToggle } from './ThemeToggle';
 import { VersionBadge } from './VersionBadge';
 import { WorkbenchSidebar } from './workbench/WorkbenchSidebar';
 import { AppsLauncher } from './AppsLauncher';
@@ -389,18 +386,12 @@ export const AppShell: React.FC = () => {
             {isDesktop && <WorkbenchSidebar onOpenSearch={() => setSearchOpen(true)} />}
           </div>
 
-          {/* Bottom (design.pen NbPMq): persistent preferences, Apps + Settings,
-              then run state + version. The whole bottom cluster sits at the
+          {/* Bottom (design.pen NbPMq): Apps + Settings, then run state + version.
+              Preferences now live with the rest of Settings. The whole bottom cluster sits at the
               sidebar's level (z-10) and is covered by a maximized window. The
               outer container no longer owns padding (the brand band is flush to
               the top edge), so this cluster carries its own px-4 + bottom pad. */}
           <div className="relative flex flex-col gap-3 px-4 pb-4">
-            <div className="flex items-center gap-2">
-              <LanguageSwitcher openUpward />
-              <ThemeToggle />
-              <AccountMenu openUpward />
-            </div>
-
             <div className="flex items-stretch gap-2">
               {canUseApps && <AppsLauncher />}
               <Link

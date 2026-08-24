@@ -279,6 +279,7 @@
       "memory": "Memory",
       "replies": "Replies",
       "platforms": "Platforms",
+      "platformConnections": "Platform Connections",
       "remoteAccess": "Remote Access",
       "service": "Service",
       "dependencies": "Dependencies",

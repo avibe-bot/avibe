@@ -230,7 +230,7 @@ describe('AppShell persistent Workbench chrome', () => {
     'personal',
     null,
     'organization',
-  ] as const)('keeps Settings and preferences in the Workbench sidebar for %s instances', async (instanceKind) => {
+  ] as const)('keeps Settings in the Workbench sidebar without preference controls for %s instances', async (instanceKind) => {
     viewport.isDesktop = true;
     instanceAuth.instanceKind = instanceKind;
 
@@ -248,12 +248,9 @@ describe('AppShell persistent Workbench chrome', () => {
     expect(screen.getByRole('link', { name: 'appShell.openControlPanel' }).getAttribute('href')).toBe(
       '/settings/replies',
     );
-    expect(screen.getByTestId('language-switcher')).toBeTruthy();
-    expect(screen.getByTestId('theme-toggle')).toBeTruthy();
-    expect(screen.getByTestId('account-menu')).toBeTruthy();
-    const preferencesRow = screen.getByTestId('language-switcher').parentElement!;
-    const appsRow = screen.getByTestId('apps-launcher').parentElement!;
-    expect(preferencesRow.compareDocumentPosition(appsRow) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByTestId('language-switcher')).toBeNull();
+    expect(screen.queryByTestId('theme-toggle')).toBeNull();
+    expect(screen.queryByTestId('account-menu')).toBeNull();
   });
 
   it('uses the Settings button to close an open Settings surface', async () => {
