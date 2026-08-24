@@ -1,0 +1,47 @@
+{
+  "archives": {
+    "darwin-arm64": {
+      "name": "vibe-show-runtime-node-darwin-arm64.tgz",
+      "sha256": "5899da2bb7ff25ae16657fb6bae45298a0a140bc54757a36e398349959da5669",
+      "size": 22310544,
+      "url": "https://github.com/avibe-bot/avibe/releases/download/v3.0.13/vibe-show-runtime-node-darwin-arm64.tgz"
+    },
+    "darwin-x64": {
+      "name": "vibe-show-runtime-node-darwin-x64.tgz",
+      "sha256": "15429f0aa181ddef692faeaa9589f680f8ecf44d0f0a543f3e80fe5ab0ae7b99",
+      "size": 23215818,
+      "url": "https://github.com/avibe-bot/avibe/releases/download/v3.0.13/vibe-show-runtime-node-darwin-x64.tgz"
+    },
+    "linux-arm64": {
+      "name": "vibe-show-runtime-node-linux-arm64.tgz",
+      "sha256": "69026d325f84bee8a96ed41522d59f248b1ad5621377d88746b0aa1f80f89e6b",
+      "size": 22308471,
+      "url": "https://github.com/avibe-bot/avibe/releases/download/v3.0.13/vibe-show-runtime-node-linux-arm64.tgz"
+    },
+    "linux-x64": {
+      "name": "vibe-show-runtime-node-linux-x64.tgz",
+      "sha256": "808d1fe357b9468e2445f023a35ca9e12652d1a6b239f870812d5dd4b905eda8",
+      "size": 23256781,
+      "url": "https://github.com/avibe-bot/avibe/releases/download/v3.0.13/vibe-show-runtime-node-linux-x64.tgz"
+    },
+    "win32-arm64": {
+      "name": "vibe-show-runtime-node-win32-arm64.tgz",
+      "sha256": "56f4a7b38e84ebfa9a1f7398b6113edbc30464615c1c6539effc4d04b14ef8c3",
+      "size": 22220122,
+      "url": "https://github.com/avibe-bot/avibe/releases/download/v3.0.13/vibe-show-runtime-node-win32-arm64.tgz"
+    },
+    "win32-x64": {
+      "name": "vibe-show-runtime-node-win32-x64.tgz",
+      "sha256": "c7be802e7ef0a06a36df101cbbaf451610ab121841d87aa444687718997ffa89",
+      "size": 24138106,
+      "url": "https://github.com/avibe-bot/avibe/releases/download/v3.0.13/vibe-show-runtime-node-win32-x64.tgz"
+    }
+  },
+  "minimum_node": "^20.19.0 || >=22.12.0",
+  "runtime_source": {
+    "ref": "64e2e610e4107304bdc8ce2f2d387d76be6f0a0b",
+    "repo": "avibe-bot/vibe-show-runtime"
+  },
+  "runtime_version": "64e2e610e4107304bdc8ce2f2d387d76be6f0a0b",
+  "schema_version": 1
+}
