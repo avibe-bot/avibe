@@ -2865,7 +2865,7 @@ async def test_planned_reap_does_not_restart_a_stopped_supervisor(
 
 
 def test_sidecar_start_failure_after_host_handoff_notifies_reaped(tmp_path: Path) -> None:
-    """A pre-spawn launch failure leaves the host free to reclaim the call log."""
+    """A pre-spawn launch failure releases the controller host handoff."""
 
     reaped = 0
 
@@ -2891,7 +2891,7 @@ async def test_sidecar_restart_releases_process_lock_while_host_handoff_waits(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Stop wins while a restart waits for the controller-owned call-log lock."""
+    """Stop wins while a restart waits for the controller-owned host handoff."""
 
     callback_entered = asyncio.Event()
     release_callback = asyncio.Event()

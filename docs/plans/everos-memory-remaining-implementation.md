@@ -1,6 +1,7 @@
 # EverOS Memory Remaining Implementation Spec
 
-Status: implementation contract
+Status: historical; superseded by `memory-best-effort-capture.md` and
+`memory-processing-log-page.md`
 
 This specification implements the remaining PR defined by
 [`everos-memory-adjustment.md`](./everos-memory-adjustment.md). The umbrella plan is the product

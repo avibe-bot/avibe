@@ -175,6 +175,21 @@ async def test_processing_record_uses_native_sources_without_call_log(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_capture_diagnostics_are_unavailable_without_delivery_history(
+    tmp_path: Path,
+) -> None:
+    """MEMORY-SEARCH-014: absent durable history is unavailable, not empty."""
+
+    runtime = _runtime(tmp_path)
+
+    observation = await runtime._processing_record_failure_log(None)
+
+    assert observation.items == ()
+    assert observation.unavailable_reason == "memory_failure_history_unavailable"
+    await runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_disabled_attachment_intake_is_unavailable_in_every_readiness_projection(
     tmp_path: Path,
 ) -> None:

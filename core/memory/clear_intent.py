@@ -230,7 +230,7 @@ def cleanup_legacy_backup_storage(effective_home: Path | str) -> tuple[str, ...]
 
 
 def cleanup_legacy_provider_call_storage(effective_home: Path | str) -> None:
-    """Remove the retired provider-call directory without interpreting its files."""
+    """Remove only the retired provider-call SQLite files."""
 
     home = Path(os.path.abspath(os.path.expanduser(os.fspath(effective_home))))
     descriptors: list[int] = []
@@ -257,9 +257,9 @@ def cleanup_legacy_provider_call_storage(effective_home: Path | str) -> None:
         except FileNotFoundError:
             return
         if not stat.S_ISDIR(legacy_info.st_mode):
-            os.unlink("call-log", dir_fd=memory)
-            os.fsync(memory)
-            return
+            raise ConfinedFilesystemError(
+                "retired provider-call storage root is not a directory"
+            )
         legacy = os.open(
             "call-log",
             strict_directory_open_flags(),
@@ -274,9 +274,15 @@ def cleanup_legacy_provider_call_storage(effective_home: Path | str) -> None:
             "call-log.db-journal",
         ):
             try:
-                os.unlink(name, dir_fd=legacy)
+                entry = os.stat(name, dir_fd=legacy, follow_symlinks=False)
             except FileNotFoundError:
-                pass
+                continue
+            if not stat.S_ISREG(entry.st_mode):
+                raise ConfinedFilesystemError(
+                    "retired provider-call storage contains a non-regular known file"
+                )
+            _require_legacy_cleanup_owner(entry, root_info)
+            os.unlink(name, dir_fd=legacy)
         os.fsync(legacy)
         os.rmdir("call-log", dir_fd=memory)
         os.fsync(memory)

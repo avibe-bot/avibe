@@ -1003,23 +1003,30 @@ def test_memory_config_ignores_legacy_provider_call_diagnostics(
     tmp_path,
     legacy_value: bool,
 ) -> None:
-    config = V2Config.from_payload(
-        _payload(
-            {
-                "enabled": False,
-                "processing": {},
-                "diagnostics": {"log_provider_calls": legacy_value},
-            }
-        )
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            _payload(
+                {
+                    "enabled": False,
+                    "processing": {},
+                    "diagnostics": {"log_provider_calls": legacy_value},
+                }
+            )
+        ),
+        encoding="utf-8",
     )
 
-    config.save(tmp_path / "config.json")
+    config = V2Config.load(config_path)
 
     projected = config_to_payload(config)
-    stored = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert config.memory.enabled is False
     assert "diagnostics" not in projected["memory"]
+    assert not hasattr(config.memory, "diagnostics")
+
+    config.save(config_path)
+    stored = json.loads(config_path.read_text(encoding="utf-8"))
     assert "diagnostics" not in stored["memory"]
-    assert not hasattr(V2Config.load(tmp_path / "config.json").memory, "diagnostics")
 
 
 def test_memory_config_defaults_when_block_is_absent() -> None:

@@ -84,7 +84,7 @@ replacement nor same-inode modification can substitute bytes after acquisition.
 
 The message handler materializes before scheduling Memory capture. Agent delivery
 and Memory retain independent lease references, so Agent cleanup, retry, or
-durable-delivery failure cannot race the Memory pin. Downloads are sequential or
+Memory capture failure cannot race the Memory pin. Downloads are sequential or
 at most two concurrent and keep the existing 30-second per-file timeout.
 
 Slack, Discord, and Feishu/Lark use their existing authenticated streaming path
@@ -118,10 +118,10 @@ manifest v1 and the store schema do not change.
 Prepared captures use the existing path:
 
 ```text
-MemoryModule -> durable outbox -> coordinator -> EverOSPort.add(ContentItem[]) -> flush
+MemoryModule -> bounded writer -> EverOSPort.add(ContentItem[]) -> flush
 ```
 
-The outbox and logs may contain only sanitized display name, closed content kind
+Writer inputs and logs may contain only sanitized display name, closed content kind
 and extension, byte count, bundle-relative metadata, keyed source digests, and
 closed skip reasons. They must not contain native URLs, credentials, encryption
 material, raw attachment bytes, absolute source paths, filenames supplied for
@@ -167,7 +167,7 @@ embeddings or restart Avibe.
 `MemoryPreflightDiagnostic.side` adds `multimodal`. Its real compatibility probe is
 a generated 64x64 PNG request with no user data. Missing optional configuration does
 not block Memory enablement. Insight-reader and preflight redaction include the
-    independent multimodal URL and key; an unconfigured skip produces no provider add.
+independent multimodal URL and key; an unconfigured skip produces no provider add.
 
 The settings API carries the optional Multimodal endpoint with the same write-only-key
 and clear semantics as rerank. Either optional endpoint can be cleared while Memory
@@ -255,7 +255,7 @@ Slack until slice 5 adds contract evidence for the other four adapters.
 - The retained reference lives until the asynchronous Memory capture finishes.
   The Memory module pins through the descriptor-backed lease before enqueueing;
   the ordinary Agent consumer independently adopts its source files. This keeps
-  one native download while preventing Agent cleanup or durable-delivery failure
+  one native download while preventing Agent cleanup or Memory capture failure
   from racing the Memory pin.
 - Capture reads current attachment readiness only after the closed DM admission
   gates pass. `not_configured` and `unavailable` retain eligible text but produce
@@ -265,8 +265,8 @@ Slack until slice 5 adds contract evidence for the other four adapters.
   sibling does not remove eligible text or valid siblings. Attachment telemetry
   reports only the attempt's total, captured, and dropped counts; it does not
   attribute reasons to individual files.
-- The hermetic Slack scenario drives the shared materializer, admission, durable
-  pin/outbox worker, fake EverOS add/flush, a test-only invocation observation, and
+- The hermetic Slack scenario drives the shared materializer, admission, volatile
+  pin/writer, fake EverOS add/flush, a test-only invocation observation, and
   `vibe memory search`. It proves a single adapter download and zero temp or
   Memory-bundle residue after successful processing.
 

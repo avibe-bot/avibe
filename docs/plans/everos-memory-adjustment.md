@@ -1,12 +1,13 @@
 # EverOS Memory Integration Adjustment
 
-> Status: implemented / PR review
+> Status: historical; superseded by `memory-best-effort-capture.md` and
+> `memory-processing-log-page.md`
 >
 > Date: 2026-08-08
 >
 > Target branch: Avibe `dev`
 >
-> This document is the source of truth for this implementation and review. It records the
+> This document records the original implementation and review. It preserves the
 > owner-approved scope, the two capabilities already merged into `dev`, and the one remaining
 > implementation PR. This umbrella plan is tracked with that implementation.
 >

@@ -17,6 +17,7 @@ from core.memory.clear_intent import (
     cleanup_legacy_backup_storage,
     cleanup_legacy_provider_call_storage,
 )
+from core.memory.confined_filesystem import ConfinedFilesystemError
 
 
 def _write_legacy_journal(home: Path, *, open_slot: object = None) -> Path:
@@ -259,10 +260,56 @@ def test_legacy_provider_call_cleanup_does_not_follow_directory_symlink(
     legacy_root.parent.mkdir(parents=True)
     legacy_root.symlink_to(outside, target_is_directory=True)
 
-    cleanup_legacy_provider_call_storage(tmp_path)
+    with pytest.raises(ConfinedFilesystemError):
+        cleanup_legacy_provider_call_storage(tmp_path)
 
-    assert not legacy_root.exists()
+    assert legacy_root.is_symlink()
     assert survivor.read_text(encoding="utf-8") == "keep"
+
+
+def test_legacy_provider_call_cleanup_rejects_foreign_root_file(
+    tmp_path: Path,
+) -> None:
+    legacy_root = tmp_path / "memory" / "call-log"
+    legacy_root.parent.mkdir(parents=True)
+    legacy_root.write_bytes(b"foreign")
+
+    with pytest.raises(ConfinedFilesystemError):
+        cleanup_legacy_provider_call_storage(tmp_path)
+
+    assert legacy_root.read_bytes() == b"foreign"
+
+
+def test_legacy_provider_call_cleanup_preserves_foreign_directory_contents(
+    tmp_path: Path,
+) -> None:
+    legacy_root = tmp_path / "memory" / "call-log"
+    legacy_root.mkdir(parents=True)
+    (legacy_root / "call-log.db").write_bytes(b"retired")
+    foreign = legacy_root / "foreign.txt"
+    foreign.write_bytes(b"foreign")
+
+    with pytest.raises(ConfinedFilesystemError):
+        cleanup_legacy_provider_call_storage(tmp_path)
+
+    assert foreign.read_bytes() == b"foreign"
+
+
+def test_legacy_provider_call_cleanup_rejects_known_name_symlink(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside.db"
+    outside.write_bytes(b"foreign")
+    legacy_root = tmp_path / "memory" / "call-log"
+    legacy_root.mkdir(parents=True)
+    legacy_file = legacy_root / "call-log.db"
+    legacy_file.symlink_to(outside)
+
+    with pytest.raises(ConfinedFilesystemError):
+        cleanup_legacy_provider_call_storage(tmp_path)
+
+    assert legacy_file.is_symlink()
+    assert outside.read_bytes() == b"foreign"
 
 
 def test_marker_disappearance_during_open_is_treated_as_absent(
