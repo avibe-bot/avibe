@@ -36,7 +36,8 @@
     {"method": "GET", "path": "/api/models/turns/<turn_id>/provenance", "response_schema": "ProvenanceResponse", "exercise": {"path": "/api/models/turns/turn_contract01/provenance", "status": 200}},
     {"method": "GET", "path": "/api/models/runtime/status", "response_schema": "RuntimeResponse", "exercise": {"path": "/api/models/runtime/status", "status": 200}},
     {"method": "POST", "path": "/api/models/runtime/install", "response_schema": "RuntimeResponse", "exercise": {"path": "/api/models/runtime/install", "status": 200}},
-    {"method": "POST", "path": "/api/models/runtime/start", "response_schema": "RuntimeResponse", "exercise": {"path": "/api/models/runtime/start", "status": 200}}
+    {"method": "POST", "path": "/api/models/runtime/start", "response_schema": "RuntimeResponse", "exercise": {"path": "/api/models/runtime/start", "status": 200}},
+    {"method": "POST", "path": "/api/models/runtime/stop", "response_schema": "RuntimeResponse", "exercise": {"path": "/api/models/runtime/stop", "status": 200}}
   ],
   "definitions": {
     "SourceApi": {

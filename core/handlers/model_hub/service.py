@@ -209,6 +209,9 @@ class UnavailableEngineAdapter:
     async def start(self) -> EngineStatus:
         raise EngineUnavailableError
 
+    async def stop_runtime(self) -> EngineStatus:
+        return await self.status()
+
     async def stop(self) -> None:
         return None
 
@@ -4523,6 +4526,29 @@ class ModelHubService:
         await self._prepare_engine_for_demand()
         status = await self._engine_call(self.adapter.start())
         return _runtime_payload(status)
+
+    async def runtime_stop(self) -> dict:
+        await self.reconcile_runtime_installation()
+        async with self._mutation_lock:
+            config = self.store.load()
+            hub_backends = sorted(
+                backend
+                for backend, agent in config.agents.items()
+                if agent.mode == "hub"
+            )
+            if hub_backends:
+                raise ModelHubError(
+                    "runtime_in_use",
+                    status=409,
+                    data={"backends": hub_backends},
+                )
+            stop_runtime = getattr(self.adapter, "stop_runtime", None)
+            if not callable(stop_runtime):
+                raise ModelHubError("engine_down", status=503)
+            status = await self._engine_call(stop_runtime())
+            if status.health is EngineHealth.INSTALLING:
+                raise ModelHubError("runtime_busy", status=409)
+            return _runtime_payload(status)
 
     def migration_scan(self) -> dict:
         config = self.store.load()
