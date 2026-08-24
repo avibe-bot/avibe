@@ -3,7 +3,12 @@ import { isIosDevice, isStandalonePwa } from './platform';
 export const REMOTE_AUTH_REQUIRED_EVENT = 'avibe.remote-auth-required';
 export const REMOTE_AUTH_STATE_EVENT = 'avibe.remote-auth-state';
 const REMOTE_LOGIN_PATH = '/auth/login';
-const SETUP_CHECK_BYPASS_PATHS = new Set(['/admin/logs', '/admin/settings/diagnostics']);
+const SETUP_CHECK_BYPASS_PATHS = new Set([
+  '/settings/diagnostics',
+  '/settings/diagnostics/logs',
+  '/admin/logs',
+  '/admin/settings/diagnostics',
+]);
 
 type PwaContext = {
   ios: boolean;

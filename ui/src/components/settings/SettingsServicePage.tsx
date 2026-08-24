@@ -25,7 +25,7 @@ export const SettingsServicePage: React.FC = () => {
   // former in-page anchor (#remote-access) land here, so forward them.
   useEffect(() => {
     if (window.location.hash === '#remote-access') {
-      navigate('/admin/remote-access', { replace: true });
+      navigate('/settings/remote-access', { replace: true });
     }
   }, [navigate]);
   const [config, setConfig] = useState<any>(null);

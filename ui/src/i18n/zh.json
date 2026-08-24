@@ -268,6 +268,29 @@
     }
   },
   "settings": {
+    "groups": {
+      "agents": "Agent",
+      "connections": "连接",
+      "system": "系统"
+    },
+    "sections": {
+      "backends": "后端",
+      "models": "模型",
+      "memory": "记忆",
+      "replies": "回复",
+      "platforms": "通讯平台",
+      "remoteAccess": "远程访问",
+      "service": "服务",
+      "dependencies": "依赖",
+      "diagnostics": "诊断与日志",
+      "access": "访问"
+    },
+    "navigationLabel": "设置分区",
+    "backToSections": "全部设置",
+    "close": "关闭设置",
+    "diagnosticsTab": "诊断",
+    "logsTab": "日志",
+    "diagnosticsNavigationLabel": "诊断与日志",
     "tabs": {
       "service": "服务",
       "platforms": "平台",
@@ -278,7 +301,7 @@
       "serviceRoot": "设置"
     },
     "serviceTitle": "服务",
-    "serviceSubtitle": "把运行状态、控制台服务配置和远程访问统一收拢到一个页面。",
+    "serviceSubtitle": "在一个页面管理运行健康、进程控制和控制台服务配置。",
     "logFileLabel": "日志文件",
     "serviceRuntimeTitle": "运行控制",
     "serviceRuntimeSubtitle": "查看本地 Avibe 进程状态，并执行启动、停止和重启。",
@@ -2713,14 +2736,14 @@
     "autoUpdateHint": "系统空闲时自动安装更新",
     "usageTips": "快速上手",
     "tipStartCommand": "使用 /start 开始",
-    "tipStartCommandDesc": "在任意已启用的会话中输入 /start 打开控制面板。",
+    "tipStartCommandDesc": "在任意已启用的会话中输入 /start 打开工作台。",
     "tipAgentSwitch": "即时切换 Agent",
     "tipAgentSwitchDesc": "在消息前加 AgentName: 前缀即可路由到指定 Agent，如 \"Plan: 设计 API\"",
     "tipThread": "Thread = 会话",
     "tipThreadDesc": "每个 Thread 是独立会话，可开多个 Thread 并行执行任务。",
     "finishAndStart": "完成并启动",
     "serviceRunning": "Avibe 已启动！",
-    "goToDashboard": "前往控制台",
+    "goToDashboard": "打开工作台",
     "bindCodeTitle": "您的首个绑定码",
     "bindCodeDesc": "在私聊中向机器人发送以下命令，成为第一个管理员：",
     "bindCodeCommand": "bind",

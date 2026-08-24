@@ -1,0 +1,224 @@
+import React, { useEffect, useMemo, useState } from 'react';
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
+import {
+  Bot,
+  Brain,
+  ChevronLeft,
+  Cpu,
+  Globe,
+  MessageSquare,
+  Package,
+  PlugZap,
+  Server,
+  Settings,
+  ShieldCheck,
+  Stethoscope,
+  X,
+} from 'lucide-react';
+import { useTranslation } from 'react-i18next';
+import clsx from 'clsx';
+
+import { useApi } from '@/context/ApiContext';
+import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
+import { memoryNavShouldBeVisible } from '@/lib/memorySettings';
+import { rememberSettingsPath, settingsLandingPath } from '@/lib/adminNavigation';
+import { useIsDesktop } from '@/lib/useIsDesktop';
+import { modelHubEnabledFromConfig } from './models/featureFlags';
+
+type SettingsItem = {
+  path: string;
+  labelKey: string;
+  icon: React.ComponentType<{ className?: string }>;
+  ownerOnly?: boolean;
+  feature?: 'models' | 'memory';
+};
+
+type SettingsGroup = {
+  labelKey: string;
+  items: SettingsItem[];
+};
+
+const SETTINGS_GROUPS: SettingsGroup[] = [
+  {
+    labelKey: 'settings.groups.agents',
+    items: [
+      { path: '/settings/backends', labelKey: 'settings.sections.backends', icon: Bot, ownerOnly: true },
+      { path: '/settings/models', labelKey: 'settings.sections.models', icon: Cpu, ownerOnly: true, feature: 'models' },
+      { path: '/settings/memory', labelKey: 'settings.sections.memory', icon: Brain, ownerOnly: true, feature: 'memory' },
+      { path: '/settings/replies', labelKey: 'settings.sections.replies', icon: MessageSquare },
+    ],
+  },
+  {
+    labelKey: 'settings.groups.connections',
+    items: [
+      { path: '/settings/platforms', labelKey: 'settings.sections.platforms', icon: PlugZap, ownerOnly: true },
+      { path: '/settings/remote-access', labelKey: 'settings.sections.remoteAccess', icon: Globe, ownerOnly: true },
+    ],
+  },
+  {
+    labelKey: 'settings.groups.system',
+    items: [
+      { path: '/settings/service', labelKey: 'settings.sections.service', icon: Server, ownerOnly: true },
+      { path: '/settings/dependencies', labelKey: 'settings.sections.dependencies', icon: Package, ownerOnly: true },
+      { path: '/settings/diagnostics', labelKey: 'settings.sections.diagnostics', icon: Stethoscope, ownerOnly: true },
+      { path: '/settings/access', labelKey: 'settings.sections.access', icon: ShieldCheck },
+    ],
+  },
+];
+
+const pathMatches = (pathname: string, itemPath: string): boolean =>
+  pathname === itemPath || pathname.startsWith(`${itemPath}/`);
+
+export const SettingsLayout: React.FC = () => {
+  const { t } = useTranslation();
+  const api = useApi();
+  const { capabilities } = useInstanceAuthorization();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const isDesktop = useIsDesktop();
+  const [modelHubVisible, setModelHubVisible] = useState(false);
+  const [memoryVisible, setMemoryVisible] = useState(false);
+  const atRoot = location.pathname === '/settings' || location.pathname === '/settings/';
+
+  useEffect(() => {
+    if (!capabilities.can_manage_instance) return;
+    let cancelled = false;
+    let memoryRequest = 0;
+    const refreshMemoryVisibility = () => {
+      const request = ++memoryRequest;
+      void api.getMemorySettings()
+        .then((memory) => {
+          if (!cancelled && request === memoryRequest) {
+            setMemoryVisible(memoryNavShouldBeVisible(memory));
+          }
+        })
+        .catch(() => {
+          if (!cancelled && request === memoryRequest) setMemoryVisible(false);
+        });
+    };
+    void api.getConfig()
+      .then((config) => {
+        if (!cancelled) setModelHubVisible(modelHubEnabledFromConfig(config));
+      })
+      .catch(() => {
+        if (!cancelled) setModelHubVisible(false);
+      });
+    refreshMemoryVisibility();
+    window.addEventListener('avibe:memory-settings-changed', refreshMemoryVisibility);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('avibe:memory-settings-changed', refreshMemoryVisibility);
+    };
+  }, [api, capabilities.can_manage_instance]);
+
+  const visibleGroups = useMemo(
+    () => SETTINGS_GROUPS.map((group) => ({
+      ...group,
+      items: group.items.filter((item) => {
+        if (item.ownerOnly && !capabilities.can_manage_instance) return false;
+        if (item.feature === 'models') return modelHubVisible;
+        if (item.feature === 'memory') return memoryVisible;
+        return true;
+      }),
+    })).filter((group) => group.items.length > 0),
+    [capabilities.can_manage_instance, memoryVisible, modelHubVisible],
+  );
+
+  useEffect(() => {
+    if (atRoot || !location.pathname.startsWith('/settings/')) return;
+    rememberSettingsPath(location.pathname);
+  }, [atRoot, location.pathname]);
+
+  useEffect(() => {
+    if (!atRoot || !isDesktop) return;
+    navigate(settingsLandingPath(capabilities.can_manage_instance), { replace: true });
+  }, [atRoot, capabilities.can_manage_instance, isDesktop, navigate]);
+
+  return (
+    <div className="flex min-h-full flex-col bg-background md:min-h-screen">
+      <header className="flex h-[calc(3.5rem+env(safe-area-inset-top))] shrink-0 items-center justify-between border-b border-border bg-surface px-4 pt-[env(safe-area-inset-top)] md:h-14 md:pt-0">
+        <div className="flex min-w-0 items-center gap-2 text-[13px] font-semibold text-foreground">
+          <Settings className="size-4 text-mint-ink" />
+          <span>{t('nav.settings')}</span>
+          {!atRoot && (
+            <>
+              <span className="text-border-strong">/</span>
+              <span className="truncate font-normal text-muted">
+                {t(
+                  visibleGroups.flatMap((group) => group.items)
+                    .find((item) => pathMatches(location.pathname, item.path))?.labelKey ?? 'nav.settings',
+                )}
+              </span>
+            </>
+          )}
+        </div>
+        <NavLink
+          to="/"
+          aria-label={t('settings.close')}
+          className="grid size-8 place-items-center rounded-lg text-muted transition hover:bg-foreground/[0.05] hover:text-foreground"
+        >
+          <X className="size-4" />
+        </NavLink>
+      </header>
+
+      <div className="flex min-h-0 flex-1">
+        <nav
+          aria-label={t('settings.navigationLabel')}
+          className={clsx(
+            'min-h-0 shrink-0 overflow-y-auto border-r border-border bg-surface/70 px-2 pb-[calc(0.75rem+env(safe-area-inset-bottom))] pt-3 md:pb-3',
+            'w-full md:flex md:w-14 md:flex-col lg:w-[196px]',
+            !atRoot && 'hidden',
+          )}
+        >
+          {visibleGroups.map((group) => (
+            <div key={group.labelKey} className="mb-2 last:mb-0">
+              <div className="px-2 pb-1 pt-1 font-mono text-[9px] font-bold uppercase tracking-[0.16em] text-muted md:hidden lg:block">
+                {t(group.labelKey)}
+              </div>
+              <div className="flex flex-col gap-0.5">
+                {group.items.map((item) => {
+                  const Icon = item.icon;
+                  return (
+                    <NavLink
+                      key={item.path}
+                      to={item.path}
+                      title={t(item.labelKey)}
+                      className={({ isActive }) => clsx(
+                        'flex items-center gap-2 rounded-lg px-2 py-2 text-[12.5px] font-medium transition-colors',
+                        'md:justify-center lg:justify-start',
+                        isActive || pathMatches(location.pathname, item.path)
+                          ? 'bg-mint/[0.09] text-foreground'
+                          : 'text-muted hover:bg-foreground/[0.04] hover:text-foreground',
+                      )}
+                    >
+                      <Icon className={clsx(
+                        'size-4 shrink-0',
+                        pathMatches(location.pathname, item.path) ? 'text-mint-ink' : 'text-muted',
+                      )} />
+                      <span className="truncate md:hidden lg:block">{t(item.labelKey)}</span>
+                    </NavLink>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </nav>
+
+        <section className={clsx('min-w-0 flex-1 overflow-y-auto', atRoot && 'hidden md:block')}>
+          <div className="mx-auto w-full max-w-[1180px] px-4 pb-[calc(1.25rem+env(safe-area-inset-bottom))] pt-5 md:px-6 md:pb-7 md:pt-7 lg:px-8">
+            {!atRoot && (
+              <NavLink
+                to="/settings"
+                className="mb-4 inline-flex items-center gap-1.5 text-[12px] font-medium text-muted hover:text-foreground md:hidden"
+              >
+                <ChevronLeft className="size-3.5" />
+                {t('settings.backToSections')}
+              </NavLink>
+            )}
+            <Outlet />
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+};
