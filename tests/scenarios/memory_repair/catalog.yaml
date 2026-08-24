@@ -27,6 +27,8 @@ scenarios:
     kind: happy_path
     layer: contract
     test: tests/test_memory_wake.py::test_wake_reuses_existing_root_and_proves_native_readiness
+    related_tests:
+      - tests/test_memory_wake.py::test_pinned_everos_runtime_wakes_through_production_sidecar
     actor: Memory runtime
     trigger: Startup or an explicit Wake request
     conditions:

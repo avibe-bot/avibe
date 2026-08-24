@@ -1,14 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
+import importlib.util
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
 
 import core.memory.runtime as runtime_module
 from config.v2_config import MemoryConfig, MemoryEndpointConfig, MemoryProcessingConfig
-from core.memory.artifact import FakeMemoryArtifactManager
+from core.memory.artifact import (
+    EVEROS_VERSION,
+    FakeMemoryArtifactManager,
+    MemoryArtifactManager,
+)
 from core.memory.everos import FakeMemoryProvider, ProviderHealthSnapshot
 from core.memory.process import FakeEverOSProcessFactory
 
@@ -65,6 +73,42 @@ async def test_wake_reuses_existing_root_and_proves_native_readiness(
     assert artifact.ensure_calls == []
     assert len(processes.supervised) == 1
     assert processes.supervised[0].running
+
+
+@pytest.mark.asyncio
+async def test_pinned_everos_runtime_wakes_through_production_sidecar(
+    monkeypatch: pytest.MonkeyPatch,
+    memory_runtime_factory,
+) -> None:
+    """MEMORY-WAKE-001: the pinned wheel satisfies production Wake and health."""
+
+    required = os.environ.get("AVIBE_REQUIRE_MEMORY_RUNTIME_CONTRACT") == "1"
+    if importlib.util.find_spec("everos") is None:
+        if required:
+            pytest.fail("managed EverOS runtime is required for this contract")
+        pytest.skip("managed EverOS runtime is not installed")
+    assert importlib.metadata.version("everos") == EVEROS_VERSION
+
+    monkeypatch.setenv("AVIBE_MEMORY_DEV_RUNTIME", sys.executable)
+    with tempfile.TemporaryDirectory(prefix="avw-", dir="/tmp") as temporary:
+        effective_home = Path(temporary).resolve()
+        artifact = MemoryArtifactManager(
+            runtime_dir=effective_home / "runtime",
+            offline=True,
+            provider_root=effective_home / "memory" / "everos-root",
+        )
+        runtime = memory_runtime_factory(
+            _config(),
+            artifact_manager=artifact,
+            effective_home=effective_home,
+        )
+        try:
+            result = await asyncio.wait_for(runtime.wake(), timeout=60)
+
+            assert result == {"ok": True, "state": "running"}
+            assert runtime.runtime_state() == "running"
+        finally:
+            await memory_runtime_factory.close(runtime)
 
 
 @pytest.mark.asyncio
