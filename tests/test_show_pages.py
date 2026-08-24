@@ -96,6 +96,7 @@ def test_show_without_subcommand_prints_help(capsys):
     assert "{list,path,status,update,mark,reply,marks,unmark,event,annotate} ..." in " ".join(captured.out.split())
     assert "vibe show list" in captured.out
     assert "vibe show path --session-id sesk8m4q2p7x" in captured.out
+    assert "Accept: text/markdown" in captured.out
 
 
 def test_show_path_help_uses_explicit_session_id(capsys):

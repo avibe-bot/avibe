@@ -90,6 +90,36 @@ def test_show_live_015_transport_failure_is_transient(monkeypatch, tmp_path):
     assert outcome is ShowRuntimeContextCapability.TRANSIENT_UNKNOWN
 
 
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        (httpx.Response(404), False),
+        (httpx.Response(200, json={"protocol": 1}), False),
+        (httpx.Response(200, json={"protocol": 1, "render_markdown": False}), False),
+        (httpx.Response(200, json={"protocol": 1, "render_markdown": True}), True),
+        (httpx.Response(200, json={"protocol": 2, "render_markdown": True}), False),
+        (httpx.Response(503), None),
+        (httpx.Response(200, content=b'{"protocol":1'), None),
+    ],
+)
+def test_render_markdown_capability_requires_explicit_protocol_evidence(
+    monkeypatch,
+    tmp_path,
+    response,
+    expected,
+):
+    manager = _manager(tmp_path)
+    monkeypatch.setattr(
+        show_runtime.httpx,
+        "AsyncClient",
+        lambda **_kwargs: _CapabilityClient(response=response),
+    )
+
+    outcome = asyncio.run(manager._probe_render_markdown_capability("http://127.0.0.1:4173"))
+
+    assert outcome is expected
+
+
 def test_show_live_015_transient_probe_keeps_shared_request_live_and_retries(
     monkeypatch,
     tmp_path,
@@ -142,15 +172,23 @@ def test_show_live_015_transient_probe_keeps_shared_request_live_and_retries(
         second = await manager.request("GET", "/sessions/ses/app/src/main.tsx", envelope=envelope)
         clock["now"] = 101.0
         third = await manager.request("GET", "/sessions/ses/app/src/App.tsx", envelope=envelope)
-        return first, second, third
+        fourth = await manager.request(
+            "GET",
+            "/sessions/ses/render-markdown",
+            envelope=envelope,
+            headers={"X-Vibe-Show-Base": "/still-untrusted/"},
+            base_path="/p/public-share/",
+        )
+        return first, second, third, fourth
 
     responses = asyncio.run(exercise())
 
-    assert [response.status_code for response in responses] == [200, 200, 200]
+    assert [response.status_code for response in responses] == [200, 200, 200, 200]
     assert probes == [manager._base_url, manager._base_url]
     assert all(call[2][SHOW_RUNTIME_PROTOCOL_HEADER] == "1" for call in requests)
     assert all(call[2][SHOW_RUNTIME_CONTEXT_HEADER] == "shared" for call in requests)
-    assert all(call[2][SHOW_RUNTIME_BASE_HEADER] == "/show/ses/" for call in requests)
+    assert all(call[2][SHOW_RUNTIME_BASE_HEADER] == "/show/ses/" for call in requests[:3])
+    assert requests[3][2][SHOW_RUNTIME_BASE_HEADER] == "/p/public-share/"
     assert all("X-Vibe-Show-Base" not in call[2] for call in requests)
 
 
@@ -210,7 +248,39 @@ def test_show_live_014_capability_cache_resets_with_process_base_and_manager_lif
 
     replacement = _manager(tmp_path)
     assert replacement._context_key_capability is None
+    assert replacement._render_markdown_capability is None
     assert replacement._capability_retry_deadline == 0.0
+
+
+def test_render_markdown_capability_cache_is_bound_to_runtime_identity(monkeypatch, tmp_path):
+    manager = _manager(tmp_path)
+    manager._base_url = "http://127.0.0.1:4173"
+    manager._process = SimpleNamespace(pid=101, poll=lambda: None)
+    probes = []
+    outcomes = iter([True, False])
+
+    async def ensure():
+        return ShowRuntimeResult(True, manager._base_url)
+
+    async def probe(base_url):
+        probes.append((base_url, manager._process.pid))
+        return next(outcomes)
+
+    monkeypatch.setattr(manager, "ensure", ensure)
+    monkeypatch.setattr(manager, "_probe_render_markdown_capability", probe)
+
+    async def exercise():
+        assert await manager.supports_render_markdown() is True
+        assert await manager.supports_render_markdown() is True
+        manager._process = SimpleNamespace(pid=102, poll=lambda: None)
+        assert await manager.supports_render_markdown() is False
+
+    asyncio.run(exercise())
+
+    assert probes == [
+        ("http://127.0.0.1:4173", 101),
+        ("http://127.0.0.1:4173", 102),
+    ]
 
 
 def test_show_live_017_protocol_envelope_is_total_and_strips_untrusted_values():

@@ -33,6 +33,7 @@ from core.show_pages import (
     show_public_event_write_token,
 )
 from core.show_runtime import (
+    SHOW_RUNTIME_BASE_HEADER,
     ShowRuntimeContext,
     ShowRuntimeManager,
     ShowRuntimeWebSocketTarget,
@@ -93,6 +94,7 @@ class _FakeShowRuntimeManager:
         headers_by_path: dict[str, dict[str, str]] | None = None,
         bodies_by_path: dict[str, bytes] | None = None,
         status_by_path: dict[str, int] | None = None,
+        render_markdown_supported: bool = False,
     ):
         self.body = body
         self.fail = fail
@@ -101,15 +103,20 @@ class _FakeShowRuntimeManager:
         self.headers_by_path = headers_by_path or {}
         self.bodies_by_path = bodies_by_path or {}
         self.status_by_path = status_by_path or {}
+        self.render_markdown_supported = render_markdown_supported
+        self.render_markdown_capability_calls = 0
         self.calls = []
         self.websocket_paths = []
         self.websocket_headers = []
         self.stopped = False
 
-    async def request(self, method, path, *, envelope, headers=None, body=None):
+    async def request(self, method, path, *, envelope, headers=None, body=None, base_path=None):
         import httpx
 
-        self.calls.append((method, path, envelope.headers(headers), body))
+        request_headers = envelope.headers(headers)
+        if base_path is not None:
+            request_headers[SHOW_RUNTIME_BASE_HEADER] = base_path
+        self.calls.append((method, path, request_headers, body))
         if self.fail:
             raise RuntimeError("runtime unavailable")
         headers = {
@@ -122,6 +129,12 @@ class _FakeShowRuntimeManager:
             content=self.bodies_by_path.get(path, self.body),
             headers=headers,
         )
+
+    async def supports_render_markdown(self):
+        self.render_markdown_capability_calls += 1
+        if self.fail:
+            raise RuntimeError("runtime unavailable")
+        return self.render_markdown_supported
 
     async def request_global(self, method, path, *, headers=None, body=None):
         import httpx
@@ -1715,6 +1728,556 @@ def test_private_show_page_uses_runtime_when_available(monkeypatch, tmp_path):
     assert "authorization" not in manager.calls[0][2]
     assert "cookie" not in manager.calls[0][2]
     assert "x-vibe-csrf-token" not in manager.calls[0][2]
+
+
+def _markdown_runtime_manager(
+    *,
+    body: bytes = b"# Runtime page\n",
+    status_code: int = 200,
+    content_type: str = "text/markdown; charset=utf-8",
+) -> _FakeShowRuntimeManager:
+    path = "/sessions/ses123/render-markdown"
+    return _FakeShowRuntimeManager(
+        render_markdown_supported=True,
+        status_by_path={path: status_code},
+        bodies_by_path={path: body},
+        headers_by_path={
+            path: {
+                "content-type": content_type,
+                "x-avibe-render-cache": "miss",
+            }
+        },
+    )
+
+
+def _assert_markdown_response_headers(response, *, success: bool) -> None:
+    vary = {item.strip().lower() for item in response.headers["vary"].split(",")}
+    assert "accept" in vary
+    assert response.headers["cache-control"] == "no-store"
+    if success:
+        assert response.headers["content-type"] == "text/markdown; charset=utf-8"
+        assert response.headers["x-avibe-render-cache"] == "miss"
+    else:
+        assert response.headers["content-type"].startswith("application/json")
+
+
+@pytest.mark.parametrize(
+    ("accept", "expected_path"),
+    [
+        ("text/markdown", "/sessions/ses123/render-markdown"),
+        ("text/markdown;q=1, text/html;q=0.5", "/sessions/ses123/render-markdown"),
+        ("text/markdown;q=0.8, text/html;q=0.8", "/sessions/ses123/render-markdown"),
+        ("text/markdown;q=0.5, text/html;q=0.9", "/sessions/ses123/app/"),
+        ("text/html,application/xhtml+xml,*/*;q=0.8", "/sessions/ses123/app/"),
+        ("*/*", "/sessions/ses123/app/"),
+    ],
+)
+def test_show_page_markdown_negotiation_respects_accept_quality(
+    monkeypatch,
+    tmp_path,
+    accept,
+    expected_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    manager = _markdown_runtime_manager()
+    manager.bodies_by_path["/sessions/ses123/app/"] = b"<h1>HTML page</h1>"
+    manager.headers_by_path["/sessions/ses123/app/"] = {
+        "content-type": "text/html; charset=utf-8"
+    }
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            "/show/ses123/",
+            base_url="http://127.0.0.1:5123",
+            headers={"Accept": accept},
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    assert manager.calls[0][1] == expected_path
+    if expected_path.endswith("render-markdown"):
+        assert response.content == b"# Runtime page\n"
+        _assert_markdown_response_headers(response, success=True)
+        assert manager.render_markdown_capability_calls == 1
+    else:
+        assert b"HTML page" in response.content
+        assert response.headers["content-type"] == "text/html; charset=utf-8"
+        assert manager.render_markdown_capability_calls == 0
+
+
+@pytest.mark.parametrize("route_path", ["reports/daily", "users/alice@example.com", "releases/v1.2"])
+def test_show_page_markdown_negotiates_spa_history_routes(monkeypatch, tmp_path, route_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    manager = _markdown_runtime_manager()
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            f"/show/ses123/{route_path}",
+            base_url="http://127.0.0.1:5123",
+            headers={"Accept": "text/markdown"},
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    assert [call[1] for call in manager.calls] == ["/sessions/ses123/render-markdown"]
+    _assert_markdown_response_headers(response, success=True)
+
+
+def test_private_show_page_markdown_requires_auth_then_strips_identity_headers(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    manager = _markdown_runtime_manager()
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        _active_org_cookie(config, "editor@example.com", "editor-1"),
+        domain="alex.avibe.bot",
+    )
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = client.get(
+            "/show/ses123/",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers={
+                "Accept": "text/markdown",
+                "Authorization": "Bearer caller-secret",
+                "X-Vibe-CSRF-Token": "caller-secret",
+                "X-Avibe-Show-Protocol": "999",
+                "X-Avibe-Show-Context": "shared",
+                "X-Vibe-Show-Base": "/untrusted/",
+            },
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    _assert_markdown_response_headers(response, success=True)
+    method, path, headers, body = manager.calls[0]
+    assert (method, path, body) == ("GET", "/sessions/ses123/render-markdown", None)
+    assert headers["X-Avibe-Show-Protocol"] == "1"
+    assert headers["X-Avibe-Show-Context"] == "private"
+    assert headers[SHOW_RUNTIME_BASE_HEADER] == "/show/ses123/"
+    assert "authorization" not in headers
+    assert "cookie" not in headers
+    assert "x-vibe-csrf-token" not in headers
+
+
+def test_public_show_page_markdown_is_anonymous_and_uses_public_base(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    share_id = _create_show_page("ses123", "public")
+    manager = _markdown_runtime_manager()
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            f"/p/{share_id}/",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers={"Accept": "text/markdown"},
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    _assert_markdown_response_headers(response, success=True)
+    assert manager.calls[0][2]["X-Avibe-Show-Context"] == "shared"
+    assert manager.calls[0][2][SHOW_RUNTIME_BASE_HEADER] == f"/p/{share_id}/"
+
+
+def test_limited_guest_show_page_markdown_reuses_existing_admission(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    _configure_show_identity(config)
+    share_id = _create_show_page("ses123", "limited")
+    client = app.test_client()
+    client.set_cookie(
+        show_identity.show_guest_cookie_name(share_id),
+        show_identity.make_show_guest_lease(
+            config,
+            page_id="ses123",
+            share_id=share_id,
+            normalized_email="viewer@example.com",
+        ),
+        domain="alex.avibe.bot",
+        path=show_identity.show_guest_cookie_path(share_id),
+    )
+    manager = _markdown_runtime_manager()
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = client.get(
+            f"/p/{share_id}/",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers={"Accept": "text/markdown"},
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    _assert_markdown_response_headers(response, success=True)
+    assert manager.calls[0][2]["X-Avibe-Show-Context"] == "shared"
+    assert manager.calls[0][2][SHOW_RUNTIME_BASE_HEADER] == f"/p/{share_id}/"
+
+
+def test_limited_show_page_markdown_unauthenticated_is_json_not_identity_redirect(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    _configure_show_identity(config)
+    share_id = _create_show_page("ses123", "limited")
+
+    response = app.test_client().get(
+        f"/p/{share_id}/",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers={"Accept": "text/markdown"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 401
+    assert "location" not in response.headers
+    assert response.get_json()["error"]["code"] == "authentication_required"
+    _assert_markdown_response_headers(response, success=False)
+
+
+def test_private_show_page_markdown_unauthenticated_is_json_not_redirect(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    manager = _markdown_runtime_manager()
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            "/show/ses123/",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers={"Accept": "text/markdown"},
+            follow_redirects=False,
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 401
+    assert "location" not in response.headers
+    assert response.get_json()["error"]["code"] == "authentication_required"
+    _assert_markdown_response_headers(response, success=False)
+    assert manager.calls == []
+
+
+def test_limited_show_page_markdown_forbidden_is_machine_readable(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    _configure_show_identity(config)
+    share_id = _create_show_page("ses123", "limited")
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(
+            config,
+            "other@example.com",
+            "viewer-1",
+            role="viewer",
+        ),
+        domain="alex.avibe.bot",
+    )
+
+    response = client.get(
+        f"/p/{share_id}/",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers={"Accept": "text/markdown"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 403
+    assert "location" not in response.headers
+    assert response.get_json()["error"]["code"] == "forbidden"
+    _assert_markdown_response_headers(response, success=False)
+
+
+@pytest.mark.parametrize("surface", ["private", "public"])
+def test_offline_show_page_markdown_maps_to_page_offline(monkeypatch, tmp_path, surface):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    share_id = _create_show_page("ses123", "offline")
+    if surface == "private":
+        url = "/show/ses123/"
+        request_kwargs = {"base_url": "http://127.0.0.1:5123"}
+    else:
+        url = f"/p/{share_id}/"
+        request_kwargs = {
+            "base_url": "https://alex.avibe.bot",
+            "environ_base": _remote_peer(),
+        }
+
+    response = app.test_client().get(url, headers={"Accept": "text/markdown"}, **request_kwargs)
+
+    assert response.status_code == 404
+    assert response.get_json()["error"]["code"] == "page_offline"
+    _assert_markdown_response_headers(response, success=False)
+
+
+@pytest.mark.parametrize(
+    ("status_code", "code"),
+    [
+        (404, "session_unknown"),
+        (503, "renderer_unavailable"),
+        (504, "render_timeout"),
+        (502, "output_too_large"),
+        (502, "render_failed"),
+    ],
+)
+def test_show_page_markdown_preserves_runtime_contract_errors(
+    monkeypatch,
+    tmp_path,
+    status_code,
+    code,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    message = f"runtime {code} hint"
+    manager = _markdown_runtime_manager(
+        status_code=status_code,
+        content_type="application/json",
+        body=json.dumps({"error": {"code": code, "message": message}}).encode(),
+    )
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            "/show/ses123/",
+            base_url="http://127.0.0.1:5123",
+            headers={"Accept": "text/markdown"},
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == status_code
+    assert response.get_json() == {"error": {"code": code, "message": message}}
+    _assert_markdown_response_headers(response, success=False)
+
+
+@pytest.mark.parametrize("failure", ["capability_missing", "route_missing", "unreachable"])
+def test_show_page_markdown_unavailable_never_falls_back_to_html(
+    monkeypatch,
+    tmp_path,
+    failure,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    if failure == "capability_missing":
+        manager = _FakeShowRuntimeManager(render_markdown_supported=False)
+    elif failure == "route_missing":
+        manager = _markdown_runtime_manager(
+            status_code=404,
+            content_type="application/json",
+            body=b'{"detail":"Not Found"}',
+        )
+    else:
+        manager = _FakeShowRuntimeManager(fail=True, render_markdown_supported=True)
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            "/show/ses123/",
+            base_url="http://127.0.0.1:5123",
+            headers={"Accept": "text/markdown"},
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 503
+    payload = response.get_json()
+    assert payload["error"]["code"] == "renderer_unavailable"
+    assert "Upgrade the Show Runtime" in payload["error"]["message"]
+    assert b"Show Page" not in response.content
+    _assert_markdown_response_headers(response, success=False)
+    if failure == "capability_missing":
+        assert manager.calls == []
+
+
+@pytest.mark.parametrize(
+    ("request_failure", "status_code", "code"),
+    [
+        ("timeout", 504, "render_timeout"),
+        ("unreachable", 503, "renderer_unavailable"),
+    ],
+)
+def test_show_page_markdown_maps_runtime_request_failures(
+    monkeypatch,
+    tmp_path,
+    request_failure,
+    status_code,
+    code,
+):
+    import httpx
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    manager = _markdown_runtime_manager()
+
+    async def fail_request(*_args, **_kwargs):
+        if request_failure == "timeout":
+            runtime_request = httpx.Request(
+                "GET",
+                "http://127.0.0.1:4173/sessions/ses123/render-markdown",
+            )
+            raise httpx.ReadTimeout("render timed out", request=runtime_request)
+        raise RuntimeError("runtime disconnected")
+
+    manager.request = fail_request
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            "/show/ses123/",
+            base_url="http://127.0.0.1:5123",
+            headers={"Accept": "text/markdown"},
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == status_code
+    assert response.get_json()["error"]["code"] == code
+    _assert_markdown_response_headers(response, success=False)
+
+
+def test_show_page_markdown_rejects_html_success_from_runtime(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    manager = _markdown_runtime_manager(
+        body=b"<h1>not markdown</h1>",
+        content_type="text/html; charset=utf-8",
+    )
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            "/show/ses123/",
+            base_url="http://127.0.0.1:5123",
+            headers={"Accept": "text/markdown"},
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 502
+    assert response.get_json()["error"]["code"] == "render_failed"
+    assert b"not markdown" not in response.content
+    _assert_markdown_response_headers(response, success=False)
+
+
+def test_show_page_markdown_head_uses_runtime_get_without_a_body(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    manager = _markdown_runtime_manager()
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().request(
+            "HEAD",
+            "/show/ses123/",
+            base_url="http://127.0.0.1:5123",
+            headers={"Accept": "text/markdown"},
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    assert response.content == b""
+    assert manager.calls[0][0] == "GET"
+    _assert_markdown_response_headers(response, success=True)
+
+
+@pytest.mark.parametrize("surface", ["private", "public"])
+@pytest.mark.parametrize("asset_path", ["app.js", "api/data", "__vite_hmr"])
+def test_show_page_assets_never_negotiate_markdown(
+    monkeypatch,
+    tmp_path,
+    surface,
+    asset_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    share_id = _create_show_page("ses123", "public" if surface == "public" else "private")
+    runtime_path = f"/sessions/ses123/app/{asset_path}"
+    content_type = "application/json" if asset_path.startswith("api/") else "text/javascript"
+    manager = _FakeShowRuntimeManager(
+        render_markdown_supported=True,
+        bodies_by_path={runtime_path: b'{"ok":true}' if asset_path.startswith("api/") else b"window.ok = true"},
+        headers_by_path={runtime_path: {"content-type": content_type}},
+    )
+    if surface == "private":
+        url = f"/show/ses123/{asset_path}"
+        request_kwargs = {"base_url": "http://127.0.0.1:5123"}
+    else:
+        url = f"/p/{share_id}/{asset_path}"
+        request_kwargs = {
+            "base_url": "https://alex.avibe.bot",
+            "environ_base": _remote_peer(),
+        }
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            url,
+            headers={"Accept": "text/markdown"},
+            **request_kwargs,
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    assert manager.render_markdown_capability_calls == 0
+    assert [call[1] for call in manager.calls] == [runtime_path]
+
+
+@pytest.mark.parametrize("surface", ["private", "public"])
+@pytest.mark.parametrize("event_path", ["__events", "__show/events"])
+def test_show_page_event_routes_never_negotiate_markdown(
+    monkeypatch,
+    tmp_path,
+    surface,
+    event_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    share_id = _create_show_page("ses123", "public" if surface == "public" else "private")
+    manager = _FakeShowRuntimeManager(render_markdown_supported=True)
+    if surface == "private":
+        url = f"/show/ses123/{event_path}"
+        request_kwargs = {"base_url": "http://127.0.0.1:5123"}
+    else:
+        url = f"/p/{share_id}/{event_path}"
+        request_kwargs = {
+            "base_url": "https://alex.avibe.bot",
+            "environ_base": _remote_peer(),
+        }
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            url,
+            headers={"Accept": "text/markdown"},
+            **request_kwargs,
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/json")
+    assert manager.render_markdown_capability_calls == 0
+    assert manager.calls == []
 
 
 @pytest.mark.parametrize("surface", ["private", "public"])
