@@ -28,18 +28,25 @@ class _Runtime:
         self.closed = False
         self.retired = False
         self.module = object()
-        self.artifact_manager = object()
-        self.process_factory = object()
         self._artifact_installing = False
         self._close_proved = close_proved
         self._wake_result = wake_result or {"ok": True, "state": "running"}
         self.events: list[str] = []
         self.marked_reason: str | None = None
+        self.replacement_runtime: _Runtime | None = None
+        self.replacement_configs: list[MemoryConfig] = []
 
-    async def _reap_recorded_sidecar_if_unowned(self, *, fail_closed: bool) -> bool:
-        assert fail_closed is True
+    async def prepare_data_reset(self) -> None:
         self.events.append("reap")
-        return True
+
+    def replacement(self, config: MemoryConfig) -> _Runtime:
+        self.replacement_configs.append(config)
+        if self.replacement_runtime is not None:
+            return self.replacement_runtime
+        return _Runtime(
+            self.effective_home,
+            needs_repair=config.legacy_needs_repair,
+        )
 
     def retire(self) -> None:
         self.events.append("retire")
@@ -182,14 +189,10 @@ async def test_repair_stops_owned_runtime_before_delete_and_proves_native_readin
     _roots(tmp_path)
     runtime = _Runtime(tmp_path, needs_repair=True)
     fresh = _Runtime(tmp_path)
+    runtime.replacement_runtime = fresh
     controller = _controller(runtime)
     _persist(monkeypatch, controller)
     events = runtime.events
-
-    monkeypatch.setattr(
-        "core.memory.runtime.create_memory_runtime",
-        lambda *args, **kwargs: fresh,
-    )
 
     result = await controller.repair_memory(confirm_loss=True)
 
@@ -239,13 +242,9 @@ async def test_external_post_reset_wake_failure_remains_degraded(
             "error": "memory_permission_denied",
         },
     )
+    runtime.replacement_runtime = fresh
     controller = _controller(runtime)
     _persist(monkeypatch, controller)
-    monkeypatch.setattr(
-        "core.memory.runtime.create_memory_runtime",
-        lambda *args, **kwargs: fresh,
-    )
-
     result = await controller.delete_memory_data(confirm_loss=True)
 
     assert result["ok"] is False
@@ -279,13 +278,9 @@ async def test_local_post_reset_wake_failure_remains_needs_repair(
             "error": "memory_local_data_unusable",
         },
     )
+    runtime.replacement_runtime = fresh
     controller = _controller(runtime)
     _persist(monkeypatch, controller)
-    monkeypatch.setattr(
-        "core.memory.runtime.create_memory_runtime",
-        lambda *args, **kwargs: fresh,
-    )
-
     result = await controller.repair_memory(confirm_loss=True)
 
     assert result["ok"] is False
@@ -304,13 +299,9 @@ async def test_delete_data_has_distinct_intent_but_reuses_reset(
     _roots(tmp_path)
     runtime = _Runtime(tmp_path)
     fresh = _Runtime(tmp_path)
+    runtime.replacement_runtime = fresh
     controller = _controller(runtime, enabled=False)
     _persist(monkeypatch, controller)
-    monkeypatch.setattr(
-        "core.memory.runtime.create_memory_runtime",
-        lambda *args, **kwargs: fresh,
-    )
-
     result = await controller.delete_memory_data(confirm_loss=True)
 
     assert result["ok"] is True
@@ -330,23 +321,12 @@ async def test_partial_deletion_persists_repair_fence(
     runtime = _Runtime(tmp_path)
     controller = _controller(runtime, enabled=False)
     _persist(monkeypatch, controller)
-    replacement_configs: list[MemoryConfig] = []
-
-    def create_runtime(config: MemoryConfig, **_kwargs) -> _Runtime:
-        replacement_configs.append(config)
-        return _Runtime(tmp_path, needs_repair=config.legacy_needs_repair)
-
-    monkeypatch.setattr(
-        "core.memory.runtime.create_memory_runtime",
-        create_runtime,
-    )
-
     result = await controller.delete_memory_data(confirm_loss=True)
 
     assert result["result"] == "partial"
     assert result["state"] == "needs_repair"
     assert controller.config.memory.legacy_needs_repair is True
-    assert replacement_configs[0].legacy_needs_repair is True
+    assert runtime.replacement_configs[0].legacy_needs_repair is True
 
 
 @pytest.mark.asyncio
@@ -360,6 +340,7 @@ async def test_reconfigure_keeps_confirmed_identity_when_readiness_fails(
         tmp_path,
         wake_result={"ok": False, "state": "degraded", "error": "memory_wake_failed"},
     )
+    runtime.replacement_runtime = fresh
     controller = _controller(runtime)
     target = MemoryConfig(enabled=True)
     target.processing.embedding = MemoryEndpointConfig(
@@ -378,11 +359,6 @@ async def test_reconfigure_keeps_confirmed_identity_when_readiness_fails(
         return SimpleNamespace(memory=value)
 
     monkeypatch.setattr("core.controller.atomic_update_memory", update)
-    monkeypatch.setattr(
-        "core.memory.runtime.create_memory_runtime",
-        lambda *args, **kwargs: fresh,
-    )
-
     result = await controller.reconfigure_memory(
         target,
         expected_config=controller.config.memory,
@@ -444,6 +420,7 @@ async def test_reconfigure_does_not_overwrite_a_change_racing_with_deletion(
     _roots(tmp_path)
     runtime = _Runtime(tmp_path)
     fresh = _Runtime(tmp_path)
+    runtime.replacement_runtime = fresh
     controller = _controller(runtime)
     expected = controller.config.memory
     target = MemoryConfig(enabled=True)
@@ -467,11 +444,6 @@ async def test_reconfigure_does_not_overwrite_a_change_racing_with_deletion(
         "core.controller.V2Config.load",
         classmethod(lambda cls: SimpleNamespace(memory=concurrent)),
     )
-    monkeypatch.setattr(
-        "core.memory.runtime.create_memory_runtime",
-        lambda *args, **kwargs: fresh,
-    )
-
     result = await controller.reconfigure_memory(
         target,
         expected_config=expected,
@@ -495,6 +467,7 @@ async def test_cancelled_reset_joins_deletion_before_releasing_exclusion(
     _roots(tmp_path)
     runtime = _Runtime(tmp_path)
     fresh = _Runtime(tmp_path)
+    runtime.replacement_runtime = fresh
     controller = _controller(runtime, enabled=False)
     _persist(monkeypatch, controller)
     deletion_started = threading.Event()
@@ -519,11 +492,6 @@ async def test_cancelled_reset_joins_deletion_before_releasing_exclusion(
 
     runtime.reset_mutable_data = blocking_reset
     monkeypatch.setattr("core.controller.MemoryOperationLease", Lease)
-    monkeypatch.setattr(
-        "core.memory.runtime.create_memory_runtime",
-        lambda *args, **kwargs: fresh,
-    )
-
     task = asyncio.create_task(controller.delete_memory_data(confirm_loss=True))
     assert await asyncio.to_thread(deletion_started.wait, 2)
     task.cancel()

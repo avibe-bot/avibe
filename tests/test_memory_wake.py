@@ -16,7 +16,9 @@ from config.v2_config import MemoryConfig, MemoryEndpointConfig, MemoryProcessin
 from core.memory.artifact import (
     EVEROS_VERSION,
     FakeMemoryArtifactManager,
+    MemoryArtifactCandidate,
     MemoryArtifactManager,
+    MemoryProviderRootState,
 )
 from core.memory.confined_filesystem import ConfinedFilesystemError
 from core.memory.everos import FakeMemoryProvider, ProviderHealthSnapshot
@@ -346,7 +348,7 @@ async def test_disabled_wake_reaps_orphans_without_installing_artifact(
         reaped += 1
         return True
 
-    monkeypatch.setattr(runtime, "_reap_recorded_sidecar_if_unowned", reap)
+    monkeypatch.setattr(runtime._supervisor, "reconcile_orphans", reap)
 
     result = await runtime.wake()
 
@@ -357,39 +359,6 @@ async def test_disabled_wake_reaps_orphans_without_installing_artifact(
     }
     assert reaped == 1
     assert artifact.ensure_calls == []
-
-
-@pytest.mark.asyncio
-async def test_orphan_recovery_reaps_released_sync_before_sidecar(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    memory_runtime_factory,
-) -> None:
-    events: list[str] = []
-
-    class SyncReaper:
-        def __init__(self, **_kwargs) -> None:
-            pass
-
-        async def reconcile_orphan(self) -> None:
-            events.append("sync")
-
-    class SidecarReaper:
-        def __init__(self, **_kwargs) -> None:
-            pass
-
-        async def reconcile_orphan(self) -> None:
-            events.append("sidecar")
-
-    monkeypatch.setattr(runtime_module, "RecordedSyncReaper", SyncReaper)
-    monkeypatch.setattr(runtime_module, "RecordedSidecarReaper", SidecarReaper)
-    runtime = memory_runtime_factory(
-        MemoryConfig(enabled=False),
-        effective_home=tmp_path,
-    )
-
-    assert await runtime._reap_recorded_sidecar_if_unowned() is True
-    assert events == ["sync", "sidecar"]
 
 
 @pytest.mark.asyncio
@@ -406,16 +375,20 @@ async def test_orphan_recovery_degrades_without_no_follow_but_reset_fails_closed
     def unsupported() -> int:
         raise ConfinedFilesystemError("no-follow unavailable")
 
-    def unexpected_reaper(**_kwargs):
-        pytest.fail("orphan reapers must not touch paths without no-follow support")
+    async def unexpected_reaper(*, fail_closed: bool = False) -> bool:
+        del fail_closed
+        pytest.fail("orphan recovery must not touch paths without no-follow support")
 
     monkeypatch.setattr(runtime_module, "required_no_follow_flag", unsupported)
-    monkeypatch.setattr(runtime_module, "RecordedSyncReaper", unexpected_reaper)
-    monkeypatch.setattr(runtime_module, "RecordedSidecarReaper", unexpected_reaper)
+    monkeypatch.setattr(runtime._supervisor, "reconcile_orphans", unexpected_reaper)
 
-    assert await runtime._reap_recorded_sidecar_if_unowned() is False
+    assert await runtime.wake() == {
+        "ok": False,
+        "state": "disabled",
+        "error": "memory_disabled",
+    }
     with pytest.raises(ConfinedFilesystemError, match="no-follow unavailable"):
-        await runtime._reap_recorded_sidecar_if_unowned(fail_closed=True)
+        await runtime.prepare_data_reset()
 
 
 @pytest.mark.asyncio
@@ -473,7 +446,52 @@ async def test_unexpected_exit_reenters_wake_and_repairs_the_artifact(
 ) -> None:
     """MEMORY-WAKE-201: an unexpected exit reuses the public Wake path."""
 
-    artifact = FakeMemoryArtifactManager(python=Path(sys.executable))
+    activation_calls = 0
+
+    class CoordinatedArtifact(FakeMemoryArtifactManager):
+        def ensure(self, *, force: bool = False) -> dict[str, object]:
+            nonlocal activation_calls
+            self.ensure_calls.append(force)
+            coordinator = self.activation_coordinator
+            assert coordinator is not None
+            previous_status = dict(self.status_payload)
+            provider_root_format = self.root_format or f"everos-{EVEROS_VERSION}"
+            candidate = MemoryArtifactCandidate(
+                provider_root_format=provider_root_format,
+                compatible_provider_root_formats=self.compatible_formats,
+                artifact_fingerprint=self.fingerprint or "coordinated-test",
+            )
+
+            def commit() -> None:
+                self.status_payload = {
+                    "installed": True,
+                    "status": "ready",
+                    "reason": None,
+                }
+
+            def rollback() -> None:
+                self.status_payload = previous_status
+
+            activation_calls += 1
+            coordinator(
+                candidate,
+                MemoryProviderRootState(
+                    exists=True,
+                    provider_root_format=provider_root_format,
+                    empty=False,
+                ),
+                commit,
+                rollback,
+            )
+            return {
+                "ok": True,
+                "changed": True,
+                "reason": None,
+                "download_error": None,
+            }
+
+    monkeypatch.setattr(runtime_module, "ARTIFACT_ACTIVATION_TIMEOUT_SECONDS", 1.0)
+    artifact = CoordinatedArtifact(python=Path(sys.executable))
     processes = FakeEverOSProcessFactory()
     provider = FakeMemoryProvider(
         health_snapshot_value=ProviderHealthSnapshot(
@@ -502,29 +520,45 @@ async def test_unexpected_exit_reenters_wake_and_repairs_the_artifact(
         "reason": "memory_runtime_invalid",
     }
     await processes.supervised[0].unexpected_exit()
-    for _ in range(100):
+    for _ in range(200):
         await asyncio.sleep(0.01)
-        if len(processes.supervised) == 2 and processes.supervised[1].running:
+        restart = runtime._supervisor._restart_task
+        if (
+            activation_calls == 1
+            and restart is None
+            and processes.supervised
+            and processes.supervised[-1].running
+            and runtime.runtime_state() == "running"
+        ):
             break
 
     assert artifact.ensure_calls == [True]
-    assert len(processes.supervised) == 2
-    assert processes.supervised[1].running is True
+    assert activation_calls == 1
+    assert len(processes.supervised) >= 2
+    assert processes.supervised[-1].running is True
     assert runtime.runtime_state() == "running"
     assert sentinel.read_text(encoding="utf-8") == "keep"
 
 
 @pytest.mark.asyncio
-async def test_unexpected_exit_retries_when_replacement_crashes_during_wake(
+async def test_unexpected_exit_bounds_failed_artifact_recovery(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     memory_runtime_factory,
 ) -> None:
-    artifact = FakeMemoryArtifactManager(python=Path(sys.executable))
+    class FailingArtifact(FakeMemoryArtifactManager):
+        def ensure(self, *, force: bool = False) -> dict[str, object]:
+            self.ensure_calls.append(force)
+            return {
+                "ok": False,
+                "reason": "memory_runtime_install_failed",
+                "download_error": None,
+            }
+
+    artifact = FailingArtifact(python=Path(sys.executable))
     processes = FakeEverOSProcessFactory()
     provider = FakeMemoryProvider()
     monkeypatch.setattr(runtime_module, "EverOSPort", lambda *args, **kwargs: provider)
-    monkeypatch.setattr(runtime_module, "_UNEXPECTED_WAKE_DELAYS_SECONDS", (0.0, 0.0, 0.0))
     runtime = memory_runtime_factory(
         _config(),
         artifact_manager=artifact,
@@ -532,30 +566,63 @@ async def test_unexpected_exit_retries_when_replacement_crashes_during_wake(
         effective_home=tmp_path,
     )
     assert await runtime.wake() == {"ok": True, "state": "running"}
-    original_health_snapshot = provider.health_snapshot
-    crashed_replacement = False
+    runtime._supervisor._restart_delays = (0.0, 0.0)
+    artifact.status_payload = {
+        "installed": False,
+        "status": "invalid",
+        "reason": "memory_runtime_invalid",
+    }
 
-    async def health_snapshot():
-        nonlocal crashed_replacement
-        current = processes.supervised[-1]
-        if len(processes.supervised) == 2 and not crashed_replacement:
-            crashed_replacement = True
-            await current.unexpected_exit()
-        if not current.running:
-            raise RuntimeError("replacement exited")
-        return await original_health_snapshot()
-
-    monkeypatch.setattr(provider, "health_snapshot", health_snapshot)
     await processes.supervised[0].unexpected_exit()
-    for _ in range(200):
+    for _ in range(100):
         await asyncio.sleep(0.01)
-        if len(processes.supervised) == 3 and runtime.runtime_state() == "running":
+        if len(artifact.ensure_calls) == 2:
             break
 
-    assert crashed_replacement is True
-    assert len(processes.supervised) == 3
-    assert processes.supervised[-1].running is True
-    assert runtime.runtime_state() == "running"
+    assert artifact.ensure_calls == [True, True]
+    assert len(processes.supervised) == 1
+    assert runtime.runtime_state() == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_processing_record_rejects_a_health_read_across_sidecar_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    memory_runtime_factory,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingProvider(FakeMemoryProvider):
+        block_next_health = False
+
+        async def health_snapshot(self) -> ProviderHealthSnapshot:
+            if self.block_next_health:
+                self.block_next_health = False
+                entered.set()
+                await release.wait()
+            return await super().health_snapshot()
+
+    provider = BlockingProvider()
+    processes = FakeEverOSProcessFactory()
+    monkeypatch.setattr(runtime_module, "EverOSPort", lambda *args, **kwargs: provider)
+    runtime = memory_runtime_factory(
+        _config(),
+        artifact_manager=FakeMemoryArtifactManager(python=Path(sys.executable)),
+        process_factory=processes,
+        effective_home=tmp_path,
+    )
+    assert await runtime.wake() == {"ok": True, "state": "running"}
+
+    provider.block_next_health = True
+    observation = asyncio.create_task(runtime._processing_record_health(None))
+    await entered.wait()
+    assert await runtime.wake() == {"ok": True, "state": "running"}
+    release.set()
+
+    result = await observation
+    assert result.snapshot is None
+    assert result.unavailable_reason == "memory_sidecar_unavailable"
 
 
 @pytest.mark.parametrize(

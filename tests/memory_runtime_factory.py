@@ -13,6 +13,7 @@ from core.memory.artifact import MemoryArtifactPort
 from core.memory.everos_insight.reader import MemoryInsightReader
 from core.memory.process import EverOSProcessFactory
 from core.memory.runtime import MemoryRuntime
+from core.memory.supervisor import EverOSSupervisor
 from core.memory.store import MemoryStore
 from core.memory.runtime import ProcessingEvent
 
@@ -42,11 +43,19 @@ class MemoryRuntimeFactory:
         insight_reader: MemoryInsightReader | None = None,
         on_config_settled: Callable[[MemoryConfig], None] | None = None,
     ) -> MemoryRuntime:
+        supervisor_factory = None
+        if process_factory is not None:
+
+            def create_supervisor(**kwargs):
+                return EverOSSupervisor(process_factory=process_factory, **kwargs)
+
+            supervisor_factory = create_supervisor
+
         runtime = MemoryRuntime(
             config,
             store=store,
             artifact_manager=artifact_manager,
-            process_factory=process_factory,
+            supervisor_factory=supervisor_factory,
             effective_home=effective_home,
             processing_event=processing_event,
             insight_reader=insight_reader,

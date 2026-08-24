@@ -50,15 +50,12 @@ from core.memory.everos import (
 from core.memory.everos_insight import MemoryInsightPaths, MemoryInsightReader
 from core.memory.module import MemoryModule, MemorySessionLifecycleBusyError
 from core.memory.operation_lock import MemoryOperationBusy, MemoryOperationLease
-from core.memory.process import (
-    EverOSProcess,
-    EverOSProcessFactory,
-    EverOSProcessPort,
-    EverOSProcessSettings,
-    RecordedSidecarReaper,
-    RecordedSyncReaper,
+from core.memory.process import EverOSProcessSettings
+from core.memory.supervisor import (
+    EverOSSupervisor,
+    EverOSSupervisorFactory,
+    EverOSSupervisorStatus,
 )
-from core.memory.sidecar_lifecycle import MemorySidecarLifecycle, SidecarSnapshot
 from core.memory.processing_record import (
     AnomalyProjection,
     FailureLogObservation,
@@ -115,8 +112,6 @@ MEMORY_LIST_CURSOR_MAX_BYTES = 8192
 _MEMORY_LIST_PROVIDER_PAGE_SIZE = 20
 _MEMORY_LIST_PROVIDER_MAX_PAGE = 1_000_000
 _MEMORY_LIST_AGGREGATE_TIMEOUT_SECONDS = 20.0
-_UNEXPECTED_WAKE_DELAYS_SECONDS = (0.0, 0.5, 1.0)
-_UNEXPECTED_WAKE_WINDOW_SECONDS = 30.0
 _WAKE_LEASE_RETRY_DELAYS_SECONDS = (0.0, 0.25, 0.5, 1.0, 2.0)
 
 
@@ -136,15 +131,13 @@ async def _concurrent_episode_lists(
 
 @dataclass(frozen=True, slots=True)
 class _ProcessingRuntimeSnapshot:
-    generation: int
+    revision: int
     transition_active: bool
     enabled: bool
     store_available: bool
     retired: bool
     closing: bool
-    process: EverOSProcessPort | None
-    launch_token: int
-    process_running: bool
+    supervisor: EverOSSupervisorStatus
     runtime_error: str | None
 
     def unavailable_reason(self, maintenance_reason: str | None) -> str | None:
@@ -156,7 +149,7 @@ class _ProcessingRuntimeSnapshot:
             return maintenance_reason
         if self.retired or self.transition_active or self.closing:
             return "busy"
-        if self.process is None or not self.process_running:
+        if not self.supervisor.running:
             return self.runtime_error or "memory_sidecar_unavailable"
         return None
 
@@ -176,15 +169,13 @@ class _ProcessingRuntimeSnapshot:
 
     def same_lifecycle(self, other: _ProcessingRuntimeSnapshot) -> bool:
         return (
-            self.generation == other.generation
+            self.revision == other.revision
             and self.transition_active == other.transition_active
             and self.enabled == other.enabled
             and self.store_available == other.store_available
             and self.retired == other.retired
             and self.closing == other.closing
-            and self.process is other.process
-            and self.launch_token == other.launch_token
-            and self.process_running == other.process_running
+            and self.supervisor == other.supervisor
             and self.runtime_error == other.runtime_error
         )
 
@@ -298,7 +289,7 @@ def create_memory_runtime(
     config: MemoryConfig,
     *,
     artifact_manager: MemoryArtifactPort | None = None,
-    process_factory: EverOSProcessFactory | None = None,
+    supervisor_factory: EverOSSupervisorFactory | None = None,
     effective_home: Path | None = None,
     processing_event: ProcessingEvent | None = None,
     insight_reader: MemoryInsightReader | None = None,
@@ -313,7 +304,7 @@ def create_memory_runtime(
     return MemoryRuntime(
         config,
         artifact_manager=artifact_manager,
-        process_factory=process_factory,
+        supervisor_factory=supervisor_factory,
         effective_home=effective_home,
         processing_event=processing_event,
         insight_reader=insight_reader,
@@ -330,7 +321,7 @@ class MemoryRuntime:
         *,
         store: MemoryStore | None = None,
         artifact_manager: MemoryArtifactPort | None = None,
-        process_factory: EverOSProcessFactory | None = None,
+        supervisor_factory: EverOSSupervisorFactory | None = None,
         effective_home: Path | None = None,
         processing_event: ProcessingEvent | None = None,
         insight_reader: MemoryInsightReader | None = None,
@@ -347,7 +338,9 @@ class MemoryRuntime:
             self._provider_root,
             effective_home=self._effective_home,
         )
-        self._process_factory: EverOSProcessFactory = process_factory or EverOSProcess
+        self._supervisor_factory: EverOSSupervisorFactory = (
+            supervisor_factory or EverOSSupervisor
+        )
         self._processing_event = processing_event
         self._on_config_settled = on_config_settled
         # The controller-side port only talks to the private UDS. Credentials
@@ -359,13 +352,9 @@ class MemoryRuntime:
             if config.legacy_needs_repair
             else None
         )
-        self._processing_lifecycle_generation = 0
-        self._reconcile_lock = _LifecycleGenerationLock(
-            self._advance_processing_lifecycle
-        )
+        self._lifecycle_revision = 0
+        self._reconcile_lock = _LifecycleGenerationLock(self._advance_lifecycle_revision)
         self._wake_task: asyncio.Task[dict[str, Any]] | None = None
-        self._unexpected_wake_times: list[float] = []
-        self._ready_activation_task: asyncio.Task[None] | None = None
         self._artifact_activation_task: asyncio.Task[None] | None = None
         self._closing = False
         self._activation_loop: asyncio.AbstractEventLoop | None = None
@@ -377,13 +366,13 @@ class MemoryRuntime:
         self._store_error: Exception | None = None
         self._insight_reader_override = insight_reader
         self._insight_reader: MemoryInsightReader | None = None
-        self._sidecar = MemorySidecarLifecycle(
-            self._process_factory,
+        self._supervisor = self._supervisor_factory(
             provider_root=self._provider_root,
             effective_home=self._effective_home,
             socket_path=self._socket_path,
-            on_current_sidecar_ready=self._current_sidecar_ready,
-            on_unexpected_sidecar_exit=self._schedule_unexpected_sidecar_wake,
+            on_ready=self._current_sidecar_ready,
+            on_unavailable=self._current_sidecar_unavailable,
+            on_recover=self._recover_current_sidecar,
         )
         self._processing_record = MemoryProcessingRecord(
             self._processing_record_port()
@@ -530,23 +519,28 @@ class MemoryRuntime:
 
         return self._effective_home
 
-    @property
-    def artifact_manager(self) -> MemoryArtifactPort:
-        return self._artifact_manager
+    def replacement(self, config: MemoryConfig) -> MemoryRuntime:
+        """Construct the next aggregate without exposing owned dependencies."""
 
-    @property
-    def process_factory(self) -> EverOSProcessFactory:
-        return self._process_factory
+        return create_memory_runtime(
+            config,
+            artifact_manager=self._artifact_manager,
+            supervisor_factory=self._supervisor_factory,
+            effective_home=self._effective_home,
+            processing_event=self._processing_event,
+            insight_reader=self._insight_reader_override,
+            on_config_settled=self._on_config_settled,
+        )
 
     def retire(self) -> None:
         """Tombstone this aggregate and its module before mutable roots die."""
 
         self._retired = True
         self._closing = True
-        self._sidecar.close_ready_admission()
+        self._supervisor.begin_close()
         if self._module is not None:
             self._module.retire()
-        self._advance_processing_lifecycle()
+        self._advance_lifecycle_revision()
 
     def artifact_admitted(self) -> bool:
         """Return whether the pinned artifact is valid for a reset admission."""
@@ -607,16 +601,6 @@ class MemoryRuntime:
     def _socket_path(self) -> Path:
         return self._memory_dir / ".rt" / "everos.sock"
 
-    # Remaining Runtime paths still read these projections while their own
-    # lifecycle work is migrated. Ownership remains in ``_sidecar``.
-    @property
-    def _process(self) -> EverOSProcessPort | None:
-        return self._sidecar.snapshot().process
-
-    @_process.setter
-    def _process(self, process: EverOSProcessPort | None) -> None:
-        self._sidecar._replace_for_runtime(process)
-
     def _processing_record_port(self) -> MemoryProcessingRecordPort:
         return MemoryProcessingRecordPort(
             resolve_operator=self._processing_record_operator,
@@ -632,23 +616,19 @@ class MemoryRuntime:
             raise self._unavailable()
         return await run_blocking(self._store.principal_for_user_key, user_key)
 
-    def _advance_processing_lifecycle(self) -> None:
-        self._processing_lifecycle_generation += 1
+    def _advance_lifecycle_revision(self) -> None:
+        self._lifecycle_revision += 1
 
     def _processing_runtime_snapshot(self) -> _ProcessingRuntimeSnapshot:
-        sidecar = self._sidecar.snapshot()
-        process = sidecar.process
         module = self._module
         return _ProcessingRuntimeSnapshot(
-            generation=self._processing_lifecycle_generation,
+            revision=self._lifecycle_revision,
             transition_active=self._reconcile_lock.locked(),
             enabled=self._config.enabled,
             store_available=module is not None,
             retired=bool(module and module.retired),
             closing=self._closing,
-            process=process,
-            launch_token=sidecar.launch_token,
-            process_running=bool(process and process.running),
+            supervisor=self._supervisor.status,
             runtime_error=self._runtime_error,
         )
 
@@ -689,78 +669,23 @@ class MemoryRuntime:
             exact_redaction_values=exact_redaction_values,
         )
 
-    async def _reap_recorded_sidecar_if_unowned(self, *, fail_closed: bool = False) -> bool:
-        """Reap a previous run's sidecar when this runtime supervises none.
-
-        ``EverOSProcess`` reaps a recorded orphan on its way to spawning a
-        replacement, which covers every boot that gets as far as spawning one. It
-        is the boots that do not that leave an orphan running forever: Memory
-        persisted as disabled, a runtime artifact that will not resolve, a
-        credential probe that fails, a store that will not open. None of those
-        constructs a supervisor, so none of them used to reach the reap.
-
-        This takes ``_reconcile_lock`` itself, as its own acquisition released
-        before the reconciliation below takes it again -- sequential, never
-        nested, so never call this while already holding that lock. The lock is
-        what keeps a reap and a launch from overlapping: a reap runs for up to
-        two stop-timeout rounds and retires the record when it finishes, so an
-        unserialized one could delete a record a concurrent launch had written in
-        the meantime and leave that live child untracked -- the very state an
-        unwritable record is already made to fail a start over.
-
-        Holding it also upgrades the self-reap guard from an argument about
-        await points to plain mutual exclusion: under this lock,
-        ``self._process is None`` means no child of ours exists and none can
-        appear before the reap finishes. The record names a child of ours only
-        from inside ``_start_locked``, and ``_reconcile_locked`` assigns the
-        supervisor before calling ``start``, so a runtime that holds a child --
-        starting, running, or retained after a failed cleanup -- never gets here.
-        The claim rules do the rest: the short-lived processing probe carries our
-        environment but not our ``--uds``, and our own pid is excluded outright.
-
-        A reap that cannot finish does not fail the reconcile. On the disabled
-        path there is no replacement to protect: nothing else will touch the
-        provider root, and refusing to apply a disable the user has already saved
-        would report a failure they cannot act on. On the enabled path the launch
-        runs the same reap again moments later and fails closed there, so the
-        guarantee is kept where it means something. Either way the record is
-        retained, so the recovery stays available to the next attempt. A caller
-        that is about to delete the provider root may pass ``fail_closed=True``
-        to stop on that recovery failure instead.
-        """
+    async def prepare_data_reset(self) -> None:
+        """Fail closed unless released ownership is safely reconciled."""
 
         async with self._reconcile_lock:
-            if self._process is not None:
-                return False
+            required_no_follow_flag()
+            await self._supervisor.reconcile_orphans(fail_closed=True)
+
+    async def _reconcile_released_ownership(self) -> bool:
+        """Best-effort compatibility cleanup for ordinary non-destructive flows."""
+
+        async with self._reconcile_lock:
             try:
                 required_no_follow_flag()
             except ConfinedFilesystemError as exc:
                 logger.warning("Recorded EverOS recovery is unavailable: %s", exc)
-                if fail_closed:
-                    raise
                 return False
-            try:
-                legacy_sync = RecordedSyncReaper(
-                    effective_home=self._effective_home,
-                    provider_root=self._provider_root,
-                )
-                await legacy_sync.reconcile_orphan()
-            except Exception:
-                logger.exception("Released EverOS sync recovery did not finish")
-                raise
-            try:
-                recovery = RecordedSidecarReaper(
-                    effective_home=self._effective_home,
-                    provider_root=self._provider_root,
-                )
-                await recovery.reconcile_orphan()
-            except Exception as exc:
-                logger.warning("Recorded EverOS sidecar recovery did not finish: %s", exc)
-                if fail_closed:
-                    raise
-                return False
-            return True
-
+            return await self._supervisor.reconcile_orphans()
 
     async def reconcile(self, config: MemoryConfig) -> dict[str, Any]:
         """Apply persisted config without restarting the Avibe service."""
@@ -776,7 +701,7 @@ class MemoryRuntime:
         # sidecar is exactly the boot that may face one from the run before it.
         # Takes and releases the reconcile lock itself; the lock this method
         # acquires later is a separate, sequential acquisition.
-        await self._reap_recorded_sidecar_if_unowned()
+        await self._reconcile_released_ownership()
         if not self.available:
             # A transient store failure must not close Memory forever: every
             # reconciliation is another chance to open it.
@@ -811,9 +736,7 @@ class MemoryRuntime:
         self._provider = EverOSPort(self._socket_path)
         self.module.replace_provider(self._provider)
         await self._close_writer()
-        if self._process is not None:
-            await self._process.stop()
-            self._process = None
+        await self._supervisor.stop()
         self._runtime_error = None
         return {"ok": True, "state": "disabled"}
 
@@ -830,7 +753,7 @@ class MemoryRuntime:
         if self.needs_repair:
             self.module.pause_claims()
             await self._close_writer()
-            await self._sidecar.stop()
+            await self._supervisor.stop()
             self._config = deepcopy(config)
             self._wake_config = deepcopy(config)
             self._runtime_error = self._needs_repair_reason
@@ -850,7 +773,7 @@ class MemoryRuntime:
         if cloud_identity_changed:
             self.module.pause_claims()
             await self._close_writer()
-            await self._sidecar.stop()
+            await self._supervisor.stop()
             self._config = deepcopy(config)
             self._wake_config = deepcopy(config)
             self._runtime_error = "memory_loss_confirmation_required"
@@ -866,7 +789,7 @@ class MemoryRuntime:
             # keep queuing while claims and the old sidecar stay fenced.
             self.module.pause_claims()
             await self._close_writer()
-            await self._sidecar.stop()
+            await self._supervisor.stop()
             self._config = deepcopy(config)
             self._wake_config = deepcopy(config)
             self._configure_insight_reader(config)
@@ -919,7 +842,7 @@ class MemoryRuntime:
         python = await asyncio.to_thread(self._artifact_manager.resolve_python)
         if python is None:
             error = _runtime_error_for_status(await asyncio.to_thread(self._artifact_manager.status))
-            if not self._sidecar.snapshot().retains_active_config:
+            if not self._supervisor.status.retains_configuration:
                 # No retained supervisor can run now or relaunch with the prior
                 # settings, including one that exhausted its wake budget.
                 # Retain the desired config so a first artifact install can
@@ -931,7 +854,7 @@ class MemoryRuntime:
             return {"ok": False, "error": error}
         if not await self._probe_processing(python, config):
             error = "memory_processing_failed"
-            if not (self._process and self._process.running):
+            if not self._supervisor.status.running:
                 self._runtime_error = error
             if claims_paused and resume_claims_on_failure:
                 await self._restore_provisional_claims(previous_config)
@@ -946,7 +869,7 @@ class MemoryRuntime:
             self._runtime_error = "memory_runtime_busy"
             return {"ok": False, "state": "degraded", "error": self._runtime_error}
         await self._close_writer()
-        await self._sidecar.stop()
+        await self._supervisor.stop()
 
         self._config = config
         self._configure_insight_reader(config)
@@ -973,7 +896,7 @@ class MemoryRuntime:
 
         settings = _process_settings(config)
         try:
-            started = await self._sidecar.start(
+            started = await self._supervisor.wake(
                 python,
                 settings,
                 provider_root_guard=lambda: self._provider_root_owner.require_owned(
@@ -1043,7 +966,7 @@ class MemoryRuntime:
                 return FailureLogObservation((), "busy")
             acquired = self._processing_runtime_snapshot()
             reason = acquired.local_observation_reason(maintenance_reason)
-            if acquired.generation != before.generation or reason is not None:
+            if not acquired.same_lifecycle(before) or reason is not None:
                 return FailureLogObservation((), reason or "busy")
             # Per-call durable failure history was retired with the delivery
             # protocol. Keep the diagnostics capability explicit: unavailable
@@ -1072,7 +995,7 @@ class MemoryRuntime:
         observation = await run_blocking(reader.source_observation)
         after = self._processing_runtime_snapshot()
         current_reason = after.local_observation_reason(maintenance_reason)
-        if after.generation != before.generation or current_reason is not None:
+        if not after.same_lifecycle(before) or current_reason is not None:
             unavailable = SourceObservation(
                 "unavailable",
                 reason=current_reason or "busy",
@@ -1142,7 +1065,7 @@ class MemoryRuntime:
             return "disabled"
         if self._artifact_installing or self._reconcile_lock.locked():
             return "starting"
-        if self._process is not None and self._process.running and self._runtime_error is None:
+        if self._supervisor.status.running and self._runtime_error is None:
             return "running"
         if self._runtime_error is None:
             return "starting"
@@ -1174,7 +1097,7 @@ class MemoryRuntime:
             or not self._module.attachment_intake_enabled
         ):
             return None
-        return snapshot.generation
+        return self._lifecycle_revision
 
     async def failure_log_payload(
         self,
@@ -1905,7 +1828,7 @@ class MemoryRuntime:
                     "reason": "memory_operation_in_progress",
                     "download_error": None,
                 }
-            if self._process is not None:
+            if self._supervisor.status.retains_configuration:
                 return {
                     "ok": False,
                     "reason": "memory_runtime_install_requires_stopped_memory",
@@ -1987,7 +1910,7 @@ class MemoryRuntime:
 
             # Even disabled or repair-fenced startup must stop a sidecar recorded
             # by the previous Avibe process before returning.
-            await self._reap_recorded_sidecar_if_unowned()
+            await self._reconcile_released_ownership()
             if (
                 self._wake_config.enabled
                 and not self.available
@@ -2023,7 +1946,7 @@ class MemoryRuntime:
                             }
                         await self._close_writer()
                         try:
-                            await self._sidecar.stop()
+                            await self._supervisor.stop()
                         except Exception:
                             return {
                                 "ok": False,
@@ -2076,62 +1999,19 @@ class MemoryRuntime:
             else None
         )
 
-    def _schedule_unexpected_sidecar_wake(self) -> None:
-        """Route a child crash through bounded, volatile Wake recovery."""
+    def _current_sidecar_unavailable(self) -> None:
+        """Project supervisor-owned crash state into Memory policy."""
 
         if self._closing or self._retired or self.needs_repair:
             return
         self.module.pause_claims()
         self._runtime_error = "memory_sidecar_unavailable"
-        task = self._wake_task
-        if task is not None and not task.done():
-            return
-        delay = self._next_unexpected_wake_delay()
-        if delay is None:
-            return
-        task = asyncio.create_task(
-            self._wake_after_unexpected_sidecar_exit(delay),
-            name="memory-wake-after-unexpected-sidecar-exit",
-        )
-        self._wake_task = task
-        task.add_done_callback(
-            lambda completed: setattr(self, "_wake_task", None)
-            if self._wake_task is completed
-            else None
-        )
 
-    def _next_unexpected_wake_delay(self) -> float | None:
-        now = time.monotonic()
-        self._unexpected_wake_times = [
-            observed
-            for observed in self._unexpected_wake_times
-            if now - observed < _UNEXPECTED_WAKE_WINDOW_SECONDS
-        ]
-        attempt = len(self._unexpected_wake_times)
-        if attempt >= len(_UNEXPECTED_WAKE_DELAYS_SECONDS):
-            return None
-        self._unexpected_wake_times.append(now)
-        return _UNEXPECTED_WAKE_DELAYS_SECONDS[attempt]
+    async def _recover_current_sidecar(self) -> bool:
+        """Run one supervisor-budgeted crash attempt through public Wake policy."""
 
-    async def _wake_after_unexpected_sidecar_exit(
-        self,
-        delay_seconds: float,
-    ) -> dict[str, Any]:
-        while True:
-            if delay_seconds:
-                await asyncio.sleep(delay_seconds)
-            result = await self._wake_after_writer_close()
-            if (
-                result.get("ok") is True
-                or self._closing
-                or self._retired
-                or self.needs_repair
-                or self._sidecar.snapshot().running
-            ):
-                return result
-            delay_seconds = self._next_unexpected_wake_delay()
-            if delay_seconds is None:
-                return result
+        result = await self._wake_after_writer_close()
+        return result.get("ok") is True
 
     async def _wake_after_writer_close(self) -> dict[str, Any]:
         try:
@@ -2223,7 +2103,7 @@ class MemoryRuntime:
                 return {"ok": False, "state": "degraded", "error": self._runtime_error}
 
             try:
-                await self._sidecar.stop()
+                await self._supervisor.stop()
             except Exception:
                 logger.exception("Memory wake could not prove the old sidecar stopped")
                 self._runtime_error = "memory_wake_failed"
@@ -2255,7 +2135,7 @@ class MemoryRuntime:
                 return {"ok": False, "state": state, "error": self._runtime_error}
 
             try:
-                started = await self._sidecar.start(
+                started = await self._supervisor.wake(
                     python,
                     _process_settings(replay),
                     provider_root_guard=lambda: self._provider_root_owner.require_owned(
@@ -2297,9 +2177,9 @@ class MemoryRuntime:
 
     async def close(self) -> None:
         self._closing = True
-        self._sidecar.close_ready_admission()
+        self._supervisor.begin_close()
         self._activation_loop = None
-        self._advance_processing_lifecycle()
+        self._advance_lifecycle_revision()
 
         cancellation: asyncio.CancelledError | None = None
         wake = self._wake_task
@@ -2355,7 +2235,7 @@ class MemoryRuntime:
         """Finish ordinary shutdown after runtime ownership is released."""
 
         cleanup_error: BaseException | None = None
-        for task in (self._artifact_activation_task, self._ready_activation_task):
+        for task in (self._artifact_activation_task,):
             if task is None or task is asyncio.current_task():
                 continue
             try:
@@ -2383,14 +2263,14 @@ class MemoryRuntime:
                 except BaseException as error:
                     cleanup_error = cleanup_error or error
         try:
-            await self._sidecar.close()
+            await self._supervisor.close()
         except BaseException as error:
             cleanup_error = cleanup_error or error
         self._artifact_manager.set_activation_coordinator(None)
         if cleanup_error is not None:
             raise cleanup_error
         self._closed = True
-        self._advance_processing_lifecycle()
+        self._advance_lifecycle_revision()
 
     def _active_provider_root_metadata(self) -> ProviderRootMetadata:
         provider_root_format = (
@@ -2508,9 +2388,7 @@ class MemoryRuntime:
                     root_rollback: ProviderRootRollback | None = None
                     try:
                         await self._close_writer()
-                        if self._process is not None:
-                            await self._process.stop()
-                            self._process = None
+                        await self._supervisor.stop()
                         if root_state.exists:
                             meta = await asyncio.to_thread(self._store.get_meta)
                             if meta is None:
@@ -2537,7 +2415,7 @@ class MemoryRuntime:
                                 # its desired config cannot activate immediately.
                                 # Publish wake authority only when the failed
                                 # start retained a supervisor carrying that config.
-                                if self._sidecar.snapshot().supervisor_can_restart:
+                                if self._supervisor.status.retains_configuration:
                                     self._wake_config = deepcopy(self._config)
                                 return
                             raise MemoryRuntimeActivationError("candidate runtime reconciliation failed")
@@ -2564,41 +2442,20 @@ class MemoryRuntime:
                             raise
                         raise MemoryRuntimeActivationError("memory runtime activation failed") from activation_error
 
-    async def _current_sidecar_ready(self, generation: int) -> None:
-        """Accept the lifecycle module's semantic current-sidecar event."""
+    async def _current_sidecar_ready(self) -> None:
+        """Admit only the supervisor's current running configuration."""
 
         async with self._reconcile_lock:
             async with self.module.lifecycle():
-                snapshot = self._sidecar.snapshot()
-                if not self._sidecar_ready_is_current(snapshot, generation):
-                    return
-                if not self._sidecar_ready_is_current(self._sidecar.snapshot(), generation):
+                if not self._sidecar_ready_is_current():
                     return
                 self._runtime_error = None
                 self.module.resume_claims()
                 self._resume_writer()
 
-    def _schedule_sidecar_ready(self, process: EverOSProcessPort) -> None:
-        """Compatibility bridge for legacy direct-supervisor test fixtures."""
-
-        if self._closing:
-            return
-        snapshot = self._sidecar.snapshot()
-        if process is not snapshot.process:
-            return
-        self._ready_activation_task = asyncio.create_task(
-            self._current_sidecar_ready(snapshot.generation),
-            name="memory-ready-activation",
-        )
-
-    def _sidecar_ready_is_current(
-        self,
-        snapshot: SidecarSnapshot,
-        generation: int,
-    ) -> bool:
+    def _sidecar_ready_is_current(self) -> bool:
         return bool(
-            snapshot.generation == generation
-            and snapshot.running
+            self._supervisor.status.running
             and self._config.enabled
             and self._wake_config.enabled
             and not self.needs_repair
@@ -2609,7 +2466,7 @@ class MemoryRuntime:
     async def _processing_healthy(self) -> bool:
         """Answer processing health without waiting on a peer probe."""
 
-        return await self._sidecar.processing_healthy()
+        return await self._supervisor.processing_healthy()
 
     async def _probe_processing(self, python: Path, config: MemoryConfig) -> bool:
         """Probe a candidate configuration on a throwaway child.
@@ -2620,7 +2477,7 @@ class MemoryRuntime:
         wait on each other while holding lifecycle authority needed by reads.
         """
 
-        return await self._sidecar.probe(python, _process_settings(config))
+        return await self._supervisor.probe(python, _process_settings(config))
 
     def _resume_writer(self) -> None:
         self.module.resume_claims()
@@ -2628,7 +2485,7 @@ class MemoryRuntime:
     async def _settle_ambiguous_provider_outcome(self, recover: bool) -> bool:
         """Prove old ownership ended and reuse the settled runtime when requested."""
 
-        await self._sidecar.stop()
+        await self._supervisor.stop()
         if recover and not self._closing and not self._retired:
             self._defer_wake_until_writer_closed()
         return True
