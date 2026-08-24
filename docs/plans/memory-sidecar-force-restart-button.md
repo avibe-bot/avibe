@@ -1,5 +1,9 @@
 # Add a forced Memory sidecar restart action (rev21)
 
+> Historical design. Superseded by
+> [`memory-unified-recovery-pr3.md`](./memory-unified-recovery-pr3.md); Wake is
+> now the sole non-destructive availability operation.
+
 > Rev21 keeps one public recovery action and one linear Runtime lifecycle while
 > closing the replay-marker, delayed-readiness, and UI timeout races. The Runtime,
 > Module, Worker, and Process interfaces stay deep: callers see

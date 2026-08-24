@@ -393,16 +393,8 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
     controller.watch_service = _WatchStopper("watch")
     controller.runtime_command_watcher = _Stopper("runtime")
     controller.message_handler = _MessageHandler()
-    old_memory_runtime = _MemoryRuntime()
-    fresh_memory_runtime = _MemoryRuntime()
-    controller.memory_runtime = old_memory_runtime
-
-    async def retained_factory_reset() -> None:
-        await asyncio.sleep(0)
-        stop_order.append("factory-reset")
-        controller.memory_runtime = fresh_memory_runtime
-
-    controller._memory_factory_reset_task = loop.create_task(retained_factory_reset())
+    memory_runtime = _MemoryRuntime()
+    controller.memory_runtime = memory_runtime
 
     loop.run_until_complete(asyncio.sleep(0))
     controller.update_checker = type("UpdateChecker", (), {"stop": lambda self: None})()
@@ -421,52 +413,15 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
     assert stopped["runtime"] is True
     assert stopped["capture"] is True
     assert stopped["capture-registration"] is True
-    assert old_memory_runtime.closed is False
-    assert fresh_memory_runtime.closed is True
-    runtime_work_order = [
-        event for event in stop_order if event != "factory-reset"
-    ]
-    assert runtime_work_order[0] == "quiesce"
-    assert set(runtime_work_order[1:3]) == {"tasks", "watch"}
-    assert runtime_work_order[3] == "supervisor"
-    assert stop_order.index("factory-reset") < stop_order.index("capture")
+    assert memory_runtime.closed is True
+    assert stop_order[0] == "quiesce"
+    assert set(stop_order[1:3]) == {"tasks", "watch"}
+    assert stop_order[3] == "supervisor"
     assert stop_order[-3:] == [
         "capture-registration",
         "capture",
         "memory-runtime",
     ]
-
-
-@pytest.mark.asyncio
-async def test_controller_joins_retained_factory_reset_task() -> None:
-    controller = Controller.__new__(Controller)
-    entered = asyncio.Event()
-    release = asyncio.Event()
-
-    async def retained_reset() -> None:
-        entered.set()
-        await release.wait()
-
-    task = asyncio.create_task(retained_reset())
-    controller._memory_factory_reset_task = task
-    await entered.wait()
-
-    joining = asyncio.create_task(controller._join_memory_factory_reset_task())
-    await asyncio.sleep(0)
-    assert joining.done() is False
-
-    joining.cancel()
-    await asyncio.sleep(0)
-    assert task.done() is False
-
-    release.set()
-    with pytest.raises(asyncio.CancelledError):
-        await joining
-
-    assert task.done() is True
-    assert controller._memory_factory_reset_task is None
-
-
 @pytest.mark.anyio
 async def test_runtime_work_stack_stops_supervisor_after_service_failure() -> None:
     controller = Controller.__new__(Controller)

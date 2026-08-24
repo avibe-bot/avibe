@@ -112,7 +112,11 @@ for enabled in (False, True):
     assert runtime.available is False
     result = asyncio.run(runtime.reconcile(MemoryConfig(enabled=enabled)))
     if enabled:
-        assert result == {"ok": False, "error": "memory_store_unavailable"}
+        assert result == {
+            "ok": False,
+            "state": "degraded",
+            "error": "memory_sidecar_unavailable",
+        }
     else:
         assert result == {"ok": True, "state": "disabled"}
     asyncio.run(runtime.close())

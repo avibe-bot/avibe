@@ -15,11 +15,9 @@ import { Card, CardContent } from '../../ui/card';
 import { ConfirmDialog } from '../../ui/confirm-dialog';
 import { InfoHint } from '../../ui/info-hint';
 import type {
-  MemoryClearInProgress,
   MemoryFailureLogEntry,
   MemoryProcessingRecordSources,
   MemoryProcessingSourceStatus,
-  MemoryCascadeHealth,
   MemoryStatus,
 } from '../../../context/ApiContext';
 import { memoryErrorMessage } from '../../../lib/memoryRead';
@@ -141,51 +139,9 @@ const FailureRow: React.FC<{ entry: MemoryFailureLogEntry }> = ({ entry }) => {
   );
 };
 
-const ClearInProgressCard: React.FC<{
-  clearInProgress: MemoryClearInProgress;
-}> = ({ clearInProgress }) => {
-  const { t } = useTranslation();
-  return (
-    <div className="flex flex-col gap-3 rounded-md border border-gold/40 bg-gold/[0.06] px-4 py-3">
-      <div className="flex min-w-0 items-start gap-2.5">
-        <Clock3 className="mt-0.5 size-4 shrink-0 text-gold-ink" />
-        <div className="min-w-0">
-          <div className="text-[12.5px] font-semibold text-foreground">{t('memory.processingRecord.clearInProgress.title')}</div>
-          <div className="mt-0.5 text-[11px] text-muted">
-            {t(
-              clearInProgress.state === 'failed'
-                ? 'memory.processingRecord.clearInProgress.explicitRetryDescription'
-                : 'memory.processingRecord.clearInProgress.description',
-            )}
-          </div>
-        </div>
-      </div>
-      <div className="grid min-w-0 gap-1.5 text-[11px] sm:grid-cols-2">
-        <Field label={t('memory.processingRecord.field.operationId')} value={clearInProgress.operation_id} />
-        <Field
-          label={t('memory.processingRecord.field.state')}
-          value={clearInProgress.state === 'failed'
-            ? t('memory.processingRecord.clearInProgress.failed')
-            : t('memory.processingRecord.clearInProgress.deleting')}
-        />
-        {clearInProgress.occurred_at ? (
-          <Field label={t('memory.processingRecord.field.occurredAt')} value={formatMemoryStatusTimestamp(clearInProgress.occurred_at)} />
-        ) : null}
-        {clearInProgress.error_code ? (
-          <Field
-            label={t('memory.processingRecord.field.errorCode')}
-            value={memoryErrorMessage(t, clearInProgress.error_code)}
-          />
-        ) : null}
-      </div>
-    </div>
-  );
-};
-
 export const MemoryStatusPanel: React.FC<{
   status: MemoryStatus | null;
   failures: MemoryFailureLogEntry[];
-  clearInProgress: MemoryClearInProgress | null;
   logSections: MemoryProcessingRecordSources | null;
   statusLoading: boolean;
   failuresLoading: boolean;
@@ -197,12 +153,10 @@ export const MemoryStatusPanel: React.FC<{
   repairBusy?: boolean;
   mutationBusy?: boolean;
   repairError?: string | null;
-  repairHealth?: MemoryCascadeHealth | null;
   onRepair?: () => void;
 }> = ({
   status,
   failures,
-  clearInProgress,
   logSections,
   statusLoading,
   failuresLoading,
@@ -214,7 +168,6 @@ export const MemoryStatusPanel: React.FC<{
   repairBusy = false,
   mutationBusy = false,
   repairError = null,
-  repairHealth = null,
   onRepair = () => undefined,
 }) => {
   const { t } = useTranslation();
@@ -237,8 +190,8 @@ export const MemoryStatusPanel: React.FC<{
     >
       {repairBusy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
       {repairBusy
-        ? t('memory.processingRecord.repair.running')
-        : t('memory.processingRecord.repair.action')}
+        ? t('memory.repair.running')
+        : t('memory.repair.button')}
     </Button>
   ) : null;
 
@@ -266,10 +219,17 @@ export const MemoryStatusPanel: React.FC<{
             label={t('memory.processingRecord.runtime.helpLabel')}
             content={t('memory.processingRecord.runtime.help')}
           />
-          {!health ? repairButton : null}
+          {repairButton}
         </div>
         <Card>
           <CardContent className="flex flex-col gap-4 py-4">
+            {status ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant={status.state === 'running' ? 'success' : status.state === 'needs_repair' ? 'destructive' : 'warning'}>
+                  {t(`memory.runtimeState.${status.state}`)}
+                </Badge>
+              </div>
+            ) : null}
             {statusError ? (
               <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] text-destructive-ink">
                 {statusError}
@@ -323,25 +283,6 @@ export const MemoryStatusPanel: React.FC<{
                       </div>
                     )}
                   </div>
-                  <div className="min-w-0 border-t border-border pt-3 lg:col-span-2">
-                    <div className="min-w-0">
-                      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                        <div className="flex items-center gap-1.5 text-[11.5px] font-semibold text-foreground">
-                          {t('memory.processingRecord.runtime.cascade')}
-                          <InfoHint
-                            label={t('memory.processingRecord.runtime.cascadeHelpLabel')}
-                            content={t('memory.processingRecord.runtime.cascadeHelp')}
-                          />
-                        </div>
-                        {repairButton}
-                      </div>
-                      <FactList
-                        facts={health.cascade}
-                        emptyLabel={t('memory.processingRecord.runtime.noFacts')}
-                        group="cascade"
-                      />
-                    </div>
-                  </div>
                 </div>
               </>
             ) : (
@@ -350,20 +291,14 @@ export const MemoryStatusPanel: React.FC<{
                 {t('memory.processingRecord.runtime.unavailable')}
               </div>
             )}
+            {status?.reason ? (
+              <div className="rounded-md border border-border bg-surface-2 px-3 py-2 text-[11.5px] text-muted">
+                {memoryErrorMessage(t, status.reason)}
+              </div>
+            ) : null}
             {repairError ? (
               <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[11.5px] text-destructive-ink">
                 {repairError}
-              </div>
-            ) : null}
-            {repairHealth ? (
-              <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted">
-                <CheckCircle2 className={repairHealth.healthy ? 'size-3.5 text-mint-ink' : 'size-3.5 text-gold-ink'} />
-                <span>{t('memory.processingRecord.repair.healthResult')}</span>
-                <Badge variant={repairHealth.healthy ? 'success' : 'warning'}>
-                  {repairHealth.healthy
-                    ? t('memory.processingRecord.repair.healthy')
-                    : t('memory.processingRecord.repair.completedWithWarnings')}
-                </Badge>
               </div>
             ) : null}
           </CardContent>
@@ -401,9 +336,6 @@ export const MemoryStatusPanel: React.FC<{
           </div>
           <p className="mt-0.5 text-[11.5px] text-muted">{t('memory.processingRecord.anomalies.description')}</p>
         </div>
-        {clearInProgress ? (
-          <ClearInProgressCard clearInProgress={clearInProgress} />
-        ) : null}
         <Card>
           <CardContent className="py-2">
             {failuresError ? (
@@ -427,9 +359,11 @@ export const MemoryStatusPanel: React.FC<{
       <ConfirmDialog
         open={repairConfirmOpen}
         onOpenChange={setRepairConfirmOpen}
-        title={t('memory.processingRecord.repair.confirmTitle')}
-        description={t('memory.processingRecord.repair.confirmDescription')}
-        confirmLabel={t('memory.processingRecord.repair.confirmLabel')}
+        destructive
+        holdSeconds={5}
+        title={t('memory.repair.confirmTitle')}
+        description={t('memory.repair.confirmDescription')}
+        confirmLabel={t('memory.repair.confirmLabel')}
         onConfirm={() => {
           setRepairConfirmOpen(false);
           if (!mutationBusy) onRepair();

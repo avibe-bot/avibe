@@ -21,9 +21,9 @@ describe('memory status presentation', () => {
     expect(memoryStatusHealthLabel(t, 'ok')).toContain('healthStatus.ok');
   });
 
-  it('localizes legacy rerun source reasons through memory errors', () => {
-    expect(memoryStatusSourceReasonLabel(t, 'memory_clear_legacy_state_requires_rerun'))
-      .toContain('errors.memory_clear_legacy_state_requires_rerun');
+  it('localizes the unified repair classification through memory errors', () => {
+    expect(memoryStatusSourceReasonLabel(t, 'memory_local_data_unusable'))
+      .toContain('errors.memory_local_data_unusable');
   });
 
   it('localizes a cloud capability pause through the closed Memory error vocabulary', () => {

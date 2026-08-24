@@ -1,5 +1,9 @@
 # Memory Clear Durable Intent
 
+> Historical design. Superseded by
+> [`memory-unified-recovery-pr3.md`](./memory-unified-recovery-pr3.md); no active
+> Clear intent is written or resumed.
+
 This document consolidates issue #1392 Rev 2 and the owner-approved Rev 2.1
 amendment. It is the implementation contract for Memory Clear.
 

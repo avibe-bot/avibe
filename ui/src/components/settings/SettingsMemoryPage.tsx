@@ -18,7 +18,6 @@ import { useApi } from '../../context/ApiContext';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import type {
   MemoryMaintenanceResult,
-  MemoryCascadeHealth,
   MemoryProcessingRecordResult,
   MemorySettingsResult,
   MemoryStatus,
@@ -27,7 +26,6 @@ import { useToast } from '../../context/ToastContext';
 import { memoryErrorMessage } from '../../lib/memoryRead';
 
 type MemoryTab = 'processingRecord' | 'profile' | 'search' | 'settings';
-
 type MemorySettingsOk = Extract<MemorySettingsResult, { status: 'ok' }>;
 type MemoryMaintenanceOk = Extract<MemoryMaintenanceResult, { status: 'ok' }>;
 type MemoryProcessingRecordOk = Extract<MemoryProcessingRecordResult, { status: 'ok' }>;
@@ -40,22 +38,24 @@ export const SettingsMemoryPage: React.FC = () => {
   const canAdminister = capabilities.can_manage_instance;
 
   const [tab, setTab] = useState<MemoryTab>('processingRecord');
-  const [clearOpen, setClearOpen] = useState(false);
-  const [clearing, setClearing] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [waking, setWaking] = useState(false);
+  const [repairing, setRepairing] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
   const [dependencyReady, setDependencyReady] = useState(true);
   const [runtimeInstalled, setRuntimeInstalled] = useState<boolean | null>(null);
-  const [restarting, setRestarting] = useState(false);
-  const [rebuildBusy, setRebuildBusy] = useState(false);
-  const [repairBusy, setRepairBusy] = useState(false);
-  const [settingsSaving, setSettingsSaving] = useState(false);
   const [repairError, setRepairError] = useState<string | null>(null);
-  const [repairHealth, setRepairHealth] = useState<MemoryCascadeHealth | null>(null);
   const [logGeneration, setLogGeneration] = useState(0);
   const [logRefreshToken, setLogRefreshToken] = useState(0);
 
   const settingsRead = useMemoryResource<MemorySettingsOk>({
     read: api.getMemorySettings,
     failureMessageKey: 'memory.settings.loadFailed',
+  });
+  const statusRead = useMemoryResource<MemoryStatus>({
+    read: api.getMemoryStatus,
+    failureMessageKey: 'memory.status.loadFailed',
   });
   const processingRecordRead = useMemoryResource<MemoryProcessingRecordOk>({
     read: api.getMemoryProcessingRecord,
@@ -66,30 +66,18 @@ export const SettingsMemoryPage: React.FC = () => {
     failureMessageKey: 'memory.settings.maintenanceLoadFailed',
   });
 
-  const { reload: loadSettings, setData: setSettings } = settingsRead;
-  const { reload: loadProcessingRecord } = processingRecordRead;
-  const { reload: loadMaintenance } = maintenanceRead;
   const settings = settingsRead.data;
   const processingRecord = processingRecordRead.data;
-  const status: MemoryStatus | null = processingRecord ? {
-    status: 'ok',
-    source: processingRecord.runtime.source,
-    health: processingRecord.runtime.health,
-  } : null;
-  // Forbidden is the backend's "this is not a direct-loopback browser" verdict, and it is
-  // sticky per resource, so the static state never flickers away on a later request.
-  const remoteUnavailable =
-    settingsRead.forbidden || processingRecordRead.forbidden || maintenanceRead.forbidden;
-  const repairMutationBusy =
-    restarting || rebuildBusy || clearing || clearOpen || settingsSaving || settings?.factory_reset_required === true;
+  const mutationBusy = deleting || waking || repairing || settingsSaving;
+  const remoteUnavailable = settingsRead.forbidden
+    || statusRead.forbidden
+    || processingRecordRead.forbidden
+    || maintenanceRead.forbidden;
 
-  // Dependency readiness comes from the authoritative Dependencies source. Processing Record
-  // health is observational and never doubles as installation or enablement state.
   const loadDependency = useCallback(async () => {
     try {
       const res = await api.listDependencies();
-      const dep = res.deps?.find((d) => d.id === 'memory-runtime');
-      // Absent row (older backend) → don't block enablement; only a present, non-ready row does.
+      const dep = res.deps?.find((item) => item.id === 'memory-runtime');
       if (dep) {
         setRuntimeInstalled(dep.installed);
         setDependencyReady(dep.installed && dep.status === 'ready');
@@ -97,142 +85,115 @@ export const SettingsMemoryPage: React.FC = () => {
         setRuntimeInstalled(true);
       }
     } catch {
-      // Older/unavailable dependency APIs must not leave the whole page in its
-      // initial loading state. Fail open like the absent-row compatibility path.
       setRuntimeInstalled(true);
       setDependencyReady(true);
     }
   }, [api]);
 
-  useEffect(() => {
-    void loadSettings();
-    void loadProcessingRecord();
-    void loadMaintenance();
+  const refreshAll = useCallback(() => {
+    void settingsRead.reload();
+    void statusRead.reload();
+    void processingRecordRead.reload();
+    void maintenanceRead.reload();
     void loadDependency();
-  }, [loadSettings, loadProcessingRecord, loadMaintenance, loadDependency]);
+  }, [settingsRead.reload, statusRead.reload, processingRecordRead.reload, maintenanceRead.reload, loadDependency]);
 
-  const confirmClear = async () => {
-    if (repairBusy || restarting || rebuildBusy || clearing || settingsSaving) return;
-    setClearing(true);
-    // Clear can delete provider payloads before a failed receipt or a lost
-    // response, so purge cached payloads for every confirmed attempt.
-    setLogGeneration((generation) => generation + 1);
+  useEffect(() => {
+    refreshAll();
+  }, [refreshAll]);
+
+  const wakeMemory = async () => {
+    if (mutationBusy) return;
+    setWaking(true);
     try {
-      const res = await api.clearMemory();
-      if (res.status === 'completed') {
-        showToast(t('memory.clear.cleared'), 'success');
-        setClearOpen(false);
-        void loadProcessingRecord();
-        void loadMaintenance();
-        void loadSettings();
+      const result = await api.wakeMemory();
+      showToast(
+        result.ok ? t('memory.wake.completed') : memoryErrorMessage(t, result.error),
+        result.ok ? 'success' : 'error',
+      );
+    } catch {
+      showToast(t('memory.wake.failed'), 'error');
+    } finally {
+      setWaking(false);
+      refreshAll();
+    }
+  };
+
+  const repairMemory = async () => {
+    if (mutationBusy || statusRead.data?.state !== 'needs_repair') return;
+    setRepairing(true);
+    setRepairError(null);
+    try {
+      const result = await api.repairMemory(true);
+      if (result.ok) {
+        setLogGeneration((generation) => generation + 1);
+        showToast(t('memory.repair.completed'), 'success');
       } else {
-        void loadProcessingRecord();
-        void loadMaintenance();
-        showToast(memoryErrorMessage(t, 'error' in res ? res.error : undefined), 'error');
+        setRepairError(memoryErrorMessage(t, result.error));
       }
     } catch {
-      void loadProcessingRecord();
-      void loadMaintenance();
-      showToast(t('memory.clear.failed'), 'error');
+      setRepairError(t('memory.repair.failed'));
     } finally {
-      setClearing(false);
+      setRepairing(false);
+      refreshAll();
+    }
+  };
+
+  const deleteMemoryData = async () => {
+    if (mutationBusy) return;
+    setDeleting(true);
+    setLogGeneration((generation) => generation + 1);
+    try {
+      const result = await api.deleteMemoryData(true);
+      if (result.ok) {
+        setDeleteOpen(false);
+        showToast(t('memory.deleteData.completed'), 'success');
+      } else {
+        showToast(memoryErrorMessage(t, result.error), 'error');
+      }
+    } catch {
+      showToast(t('memory.deleteData.failed'), 'error');
+    } finally {
+      setDeleting(false);
+      refreshAll();
     }
   };
 
   const refreshProcessingRecord = () => {
-    void loadProcessingRecord();
-    void loadMaintenance();
+    void statusRead.reload();
+    void processingRecordRead.reload();
+    void maintenanceRead.reload();
     setLogRefreshToken((token) => token + 1);
   };
 
-
-  const restartEngine = async () => {
-    if (repairBusy || rebuildBusy || clearing || clearOpen || settingsSaving) return;
-    setRestarting(true);
-    try {
-      const res = await api.restartMemoryRuntime();
-      if ('ok' in res && res.ok === true) {
-        showToast(t('memory.status.engineRestartCompleted'), 'success');
-        void loadProcessingRecord();
-      } else {
-        showToast(memoryErrorMessage(t, res.error), 'error');
-      }
-    } catch {
-      showToast(t('memory.status.engineRestartFailed'), 'error');
-    } finally {
-      setRestarting(false);
-    }
-  };
-
-  const repairIndex = async () => {
-    if (settings?.enabled !== true || repairBusy || repairMutationBusy) return;
-    setRepairBusy(true);
-    setRepairError(null);
-    setRepairHealth(null);
-    try {
-      const res = await api.repairMemoryIndex();
-      if ('ok' in res && res.ok === true) {
-        setRepairHealth(res.health);
-        showToast(
-          res.result === 'completed'
-            ? t('memory.processingRecord.repair.completed')
-            : t('memory.processingRecord.repair.completedWithWarnings'),
-          res.result === 'completed' ? 'success' : 'warning',
-        );
-        await loadProcessingRecord();
-      } else {
-        setRepairError(memoryErrorMessage(t, 'error' in res ? res.error : undefined));
-        await loadProcessingRecord();
-      }
-    } catch {
-      setRepairError(t('memory.processingRecord.repair.failed'));
-      await loadProcessingRecord();
-    } finally {
-      setRepairBusy(false);
-    }
-  };
-
-  const tabs = useMemo(
-    () => [
-      { id: 'processingRecord' as const, label: t('memory.tabs.processingRecord') },
-      { id: 'profile' as const, label: t('memory.tabs.profile') },
-      { id: 'search' as const, label: t('memory.tabs.search') },
-      ...(canAdminister
-        ? [{ id: 'settings' as const, label: t('memory.tabs.settings') }]
-        : []),
-    ],
-    [canAdminister, t],
-  );
+  const tabs = useMemo(() => [
+    { id: 'processingRecord' as const, label: t('memory.tabs.processingRecord') },
+    { id: 'profile' as const, label: t('memory.tabs.profile') },
+    { id: 'search' as const, label: t('memory.tabs.search') },
+    ...(canAdminister ? [{ id: 'settings' as const, label: t('memory.tabs.settings') }] : []),
+  ], [canAdminister, t]);
   const activeTab = tabs.some((entry) => entry.id === tab) ? tab : 'processingRecord';
 
-  const rebuildRequired = settings?.rebuild_required === true;
   const settingsPanel = settings ? (
     <MemorySettingsPanel
       settings={settings}
       maintenance={maintenanceRead.data}
       maintenanceError={maintenanceRead.error}
       dependencyReady={dependencyReady}
-      rebuildBusy={rebuildBusy}
-      repairBusy={repairBusy}
-      mutationBusy={restarting}
-      onRebuildBusyChange={setRebuildBusy}
+      mutationBusy={waking || repairing || deleting}
       onSavingChange={setSettingsSaving}
       onSaved={(next) => {
-        setSettings(next);
+        settingsRead.setData(next);
         window.dispatchEvent(new Event('avibe:memory-settings-changed'));
-        void loadProcessingRecord();
-        void loadMaintenance();
-        void loadDependency();
+        refreshAll();
       }}
-      onReloadSettings={() => {
-        void loadSettings();
-      }}
+      onReloadSettings={() => void settingsRead.reload()}
       onReloadMaintenance={() => {
-        void loadMaintenance();
+        void maintenanceRead.reload();
         void loadDependency();
       }}
-      onClearAll={() => setClearOpen(true)}
-      clearing={clearing}
+      onDeleteData={() => setDeleteOpen(true)}
+      deleting={deleting}
     />
   ) : null;
 
@@ -242,14 +203,9 @@ export const SettingsMemoryPage: React.FC = () => {
       title={t('memory.title')}
       subtitle={t('memory.subtitle')}
       actions={!remoteUnavailable && canAdminister && settings?.enabled === true ? (
-        <Button
-          variant="secondary"
-          size="xs"
-          onClick={() => void restartEngine()}
-          disabled={restarting || rebuildRequired || rebuildBusy || repairBusy || repairMutationBusy}
-        >
-          {restarting ? <Loader2 className="animate-spin" /> : <RotateCw />}
-          {t('memory.status.restartEngine')}
+        <Button variant="secondary" size="xs" onClick={() => void wakeMemory()} disabled={mutationBusy}>
+          {waking ? <Loader2 className="animate-spin" /> : <RotateCw />}
+          {waking ? t('memory.wake.running') : t('memory.wake.button')}
         </Button>
       ) : null}
     >
@@ -261,9 +217,7 @@ export const SettingsMemoryPage: React.FC = () => {
         </div>
       ) : !settings ? (
         settingsRead.error ? (
-          <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">
-            {settingsRead.error}
-          </div>
+          <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">{settingsRead.error}</div>
         ) : (
           <div className="flex items-center gap-2 px-1 text-sm text-muted">
             <Loader2 className="size-4 animate-spin" />
@@ -296,100 +250,48 @@ export const SettingsMemoryPage: React.FC = () => {
           {activeTab === 'processingRecord' ? (
             <div className="flex flex-col gap-6">
               <MemoryStatusPanel
-                status={status}
+                status={statusRead.data}
                 failures={processingRecord?.anomalies.items ?? []}
-                clearInProgress={processingRecord?.maintenance.clear_in_progress ?? null}
                 logSections={processingRecord?.sources ?? null}
-                statusLoading={!processingRecordRead.loaded || processingRecordRead.loading}
+                statusLoading={!statusRead.loaded || statusRead.loading}
                 failuresLoading={!processingRecordRead.loaded || processingRecordRead.loading}
-                statusError={processingRecordRead.error}
-                failuresError={
-                  processingRecord?.anomalies.source.status === 'unavailable'
-                    ? memoryErrorMessage(t, processingRecord.anomalies.source.reason)
-                    : processingRecordRead.error
-                }
-                refreshPending={processingRecordRead.loading}
+                statusError={statusRead.error}
+                failuresError={processingRecord?.anomalies.source.status === 'unavailable'
+                  ? memoryErrorMessage(t, processingRecord.anomalies.source.reason)
+                  : processingRecordRead.error}
+                refreshPending={statusRead.loading || processingRecordRead.loading}
                 onRefresh={refreshProcessingRecord}
-                repairSupported={canAdminister && settings.enabled === true && settings.repair_available === true}
-                repairBusy={repairBusy}
-                mutationBusy={repairMutationBusy}
+                repairSupported={canAdminister && statusRead.data?.state === 'needs_repair'}
+                repairBusy={repairing}
+                mutationBusy={mutationBusy}
                 repairError={repairError}
-                repairHealth={repairHealth}
-                onRepair={() => void repairIndex()}
+                onRepair={() => void repairMemory()}
               />
               <section className="flex flex-col gap-2" aria-labelledby="memory-timeline-title">
                 <div className="flex items-center gap-1.5">
-                  <h3 id="memory-timeline-title" className="text-[13px] font-semibold text-foreground">
-                    {t('memory.processingRecord.timeline.title')}
-                  </h3>
-                  <InfoHint
-                    label={t('memory.processingRecord.timeline.helpLabel')}
-                    content={t('memory.processingRecord.timeline.help')}
-                  />
+                  <h3 id="memory-timeline-title" className="text-[13px] font-semibold text-foreground">{t('memory.processingRecord.timeline.title')}</h3>
+                  <InfoHint label={t('memory.processingRecord.timeline.helpLabel')} content={t('memory.processingRecord.timeline.help')} />
                 </div>
-                <MemoryProcessingRecordPanel
-                  key={logGeneration}
-                  refreshToken={logRefreshToken}
-                />
+                <MemoryProcessingRecordPanel key={logGeneration} refreshToken={logRefreshToken} />
               </section>
             </div>
           ) : null}
-
-          {activeTab === 'profile' && <MemoryProfilePanel enabled={!!settings?.enabled} />}
-
-          {activeTab === 'search' && <MemorySearchPanel enabled={!!settings?.enabled} />}
-
-          {canAdminister && activeTab === 'settings' &&
-            (!settingsRead.loaded && !settings ? (
-              <div className="flex items-center gap-2 px-1 text-sm text-muted">
-                <Loader2 className="size-4 animate-spin" />
-                {t('memory.settings.loading')}
-              </div>
-            ) : settingsRead.error && !settings ? (
-              <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">
-                {settingsRead.error}
-              </div>
-            ) : (
-              settingsPanel
-            ))}
+          {activeTab === 'profile' && <MemoryProfilePanel enabled={settings.enabled} />}
+          {activeTab === 'search' && <MemorySearchPanel enabled={settings.enabled} />}
+          {canAdminister && activeTab === 'settings' ? settingsPanel : null}
         </>
       )}
 
       <ConfirmDialog
-        open={clearOpen}
-        onOpenChange={setClearOpen}
+        open={deleteOpen}
+        onOpenChange={setDeleteOpen}
         destructive
         holdSeconds={5}
-        title={t('memory.clear.confirmTitle')}
-        description={t('memory.clear.confirmDescription')}
-        confirmLabel={t('memory.clear.confirmLabel')}
-        onConfirm={confirmClear}
-      >
-        <div className="flex flex-col gap-3 text-[12.5px] leading-snug">
-          <div className="rounded-[10px] border border-border bg-surface-2 px-3 py-2.5">
-            <div className="mb-1 font-semibold text-foreground">{t('memory.clear.removesTitle')}</div>
-            <ul className="flex flex-col gap-1">
-              {(t('memory.clear.removes', { returnObjects: true }) as string[]).map((line, idx) => (
-                <li key={idx} className="flex gap-2 text-muted">
-                  <span className="mt-1 size-1 shrink-0 rounded-full bg-muted" />
-                  {line}
-                </li>
-              ))}
-            </ul>
-          </div>
-          <div className="rounded-[10px] border border-gold/30 bg-gold/5 px-3 py-2.5">
-            <div className="mb-1 font-semibold text-foreground">{t('memory.clear.keepsTitle')}</div>
-            <ul className="flex flex-col gap-1">
-              {(t('memory.clear.keeps', { returnObjects: true }) as string[]).map((line, idx) => (
-                <li key={idx} className="flex gap-2 text-muted">
-                  <span className="mt-1 size-1 shrink-0 rounded-full bg-muted" />
-                  {line}
-                </li>
-              ))}
-            </ul>
-          </div>
-        </div>
-      </ConfirmDialog>
+        title={t('memory.deleteData.confirmTitle')}
+        description={t('memory.deleteData.confirmDescription')}
+        confirmLabel={t('memory.deleteData.confirmLabel')}
+        onConfirm={deleteMemoryData}
+      />
     </SettingsPageShell>
   );
 };

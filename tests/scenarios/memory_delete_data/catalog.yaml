@@ -1,0 +1,30 @@
+version: 1
+capability:
+  id: memory_delete_data
+  name: Explicit confirmed deletion of confined Memory data
+  canonical_tests:
+    - tests/test_controller_memory_data_reset.py
+    - tests/test_internal_server.py
+    - tests/test_internal_client.py
+    - tests/test_ui_memory_routes.py
+status_legend:
+  covered: executable evidence exists at the declared layer
+scenarios:
+  - id: MEMORY-DELETE-DATA-001
+    name: Explicit Delete data is distinct from Repair and uses the shared reset primitive
+    status: covered
+    kind: happy_path
+    layer: contract
+    test: tests/test_controller_memory_data_reset.py::test_delete_data_has_distinct_intent_but_reuses_reset
+    given: The user explicitly accepts deletion of Memory data
+    when: Delete data owns the controller gate and operation lease
+    then: The response identifies delete_data, resets only fixed confined data surfaces, and preserves settings and stable identity
+  - id: MEMORY-DELETE-DATA-002
+    name: Unsafe contents fail closed without recursive escape
+    status: covered
+    kind: safety
+    layer: contract
+    test: tests/test_controller_memory_data_reset.py::test_reset_memory_data_roots_fails_closed_on_special_entry
+    given: A mutable root contains an unsafe foreign or special entry
+    when: The shared confined deletion primitive inspects it
+    then: The entry remains, the exact root reports failure, and no path outside the root is touched

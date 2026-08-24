@@ -30,10 +30,6 @@ EXPECTED_PLATFORMS = {
     "linux-arm64",
     "linux-x64",
 }
-SYNC_BOOTSTRAP_REVISION = 1
-SYNC_ARGV = ("-I", "-m", "everos.entrypoints.cli.main", "cascade", "sync")
-SYNC_BOOTSTRAP_SOURCE = Path(__file__).with_name("memory_runtime_sitecustomize.py")
-SYNC_SCRUBBERS_SOURCE = Path(__file__).parents[1] / "core" / "memory" / "secret_scrubber.py"
 SMOKE_SCRIPT = (
     "from importlib.metadata import version\n"
     "import platform\n"
@@ -234,26 +230,6 @@ def prune_runtime(runtime_root: Path) -> None:
             writer.writerows(retained)
 
 
-def install_sync_bootstrap(runtime_root: Path) -> tuple[str, str]:
-    """Install the gated sitecustomize and return its source digest."""
-
-    source = SYNC_BOOTSTRAP_SOURCE.read_bytes()
-    scrubbers = SYNC_SCRUBBERS_SOURCE.read_bytes()
-    site_packages = runtime_root / "lib" / "python3.12" / "site-packages"
-    site_packages.mkdir(parents=True, exist_ok=True)
-    module = site_packages / "avibe_memory_sync_bootstrap.py"
-    module.write_bytes(source)
-    module.chmod(0o644)
-    scrubber_module = site_packages / "avibe_memory_sync_scrubbers.py"
-    scrubber_module.write_bytes(scrubbers)
-    scrubber_module.chmod(0o644)
-    (site_packages / "avibe_memory_sync_bootstrap.pth").write_text(
-        "import avibe_memory_sync_bootstrap\n",
-        encoding="ascii",
-    )
-    return hashlib.sha256(source).hexdigest(), hashlib.sha256(scrubbers).hexdigest()
-
-
 def _run(command: list[str], *, cwd: Path, capture_output: bool = False) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command,
@@ -434,7 +410,6 @@ def build_runtime(
         shutil.move(str(runtime_root), str(relocated_root))
         _smoke(relocated_root / BIN_PATH, cwd=temporary)
         prune_runtime(relocated_root)
-        bootstrap_sha256, scrubbers_sha256 = install_sync_bootstrap(relocated_root)
         _smoke(relocated_root / BIN_PATH, cwd=temporary)
 
         archive = output_dir / f"memory-runtime-{EVEROS_VERSION}-{platform}.tar.gz"
@@ -447,10 +422,6 @@ def build_runtime(
         ).stdout.strip()
         metadata["lock_sha256"] = lock_sha256
         metadata["uv_version"] = UV_VERSION
-        metadata["sync_bootstrap_revision"] = SYNC_BOOTSTRAP_REVISION
-        metadata["sync_bootstrap_sha256"] = bootstrap_sha256
-        metadata["sync_scrubbers_sha256"] = scrubbers_sha256
-        metadata["sync_argv"] = list(SYNC_ARGV)
     return archive, metadata
 
 

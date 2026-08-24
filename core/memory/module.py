@@ -161,7 +161,7 @@ class MemorySessionLifecycleBusyError(RuntimeError):
 
 
 class MemoryModule:
-    """Own local capture, direct reads, status, and clear without exposing internals."""
+    """Own local capture and direct reads without exposing storage internals."""
 
     def __init__(
         self,
@@ -171,7 +171,6 @@ class MemoryModule:
         enabled: bool | Callable[[], bool] = False,
         disk_free_bytes: Callable[[], int] | None = None,
         provider_root: Path | None = None,
-        maintenance_open: Callable[[], bool] | None = None,
         provider_root_owner: ProviderRoot | None = None,
         processing_event: Callable[..., Awaitable[bool]] | None = None,
         ambiguous_stop_reap: Callable[[], Awaitable[bool] | bool] | None = None,
@@ -194,7 +193,6 @@ class MemoryModule:
             self._provider_root,
             effective_home=self._effective_home,
         )
-        self._maintenance_open = maintenance_open or (lambda: False)
         self._lifecycle_lock = asyncio.Lock()
         self._capture_admission_locks: weakref.WeakValueDictionary[
             tuple[str, str, str], asyncio.Lock
@@ -203,7 +201,6 @@ class MemoryModule:
             tuple[str, str, str], _CaptureReservation
         ] = {}
         self._invalid_capture_admission_lock = asyncio.Lock()
-        self._clear_active = False
         self._retired = False
         attachments_available = False
         self._attachment_store: AttachmentPinStore | None = None
@@ -235,12 +232,6 @@ class MemoryModule:
             self._writer.disable_attachment_intake()
 
     @property
-    def maintenance_active(self) -> bool:
-        """Whether Runtime-owned maintenance currently fences module work."""
-
-        return self._clear_active
-
-    @property
     def attachment_intake_enabled(self) -> bool:
         """Whether new attachment captures can enter the volatile writer."""
 
@@ -256,18 +247,7 @@ class MemoryModule:
         """Permanently close this module to stale callers before root deletion."""
 
         self._retired = True
-        self._clear_active = True
         self._writer.pause_intake()
-
-    def enter_maintenance(self) -> None:
-        """Fence capture and reads before a maintenance transition begins."""
-
-        self._clear_active = True
-
-    def leave_maintenance(self) -> None:
-        """Reopen capture and reads after maintenance ownership is released."""
-
-        self._clear_active = False
 
     @asynccontextmanager
     async def lifecycle(self) -> AsyncIterator[None]:
@@ -318,7 +298,7 @@ class MemoryModule:
             timeout_seconds=30.0 if timeout_seconds is None else timeout_seconds
         )
 
-    async def quiesce_claims_for_clear(self) -> bool:
+    async def quiesce_claims_for_destructive_reset(self) -> bool:
         """Fence claims using the module's configured destructive-work budget."""
 
         return await self._writer.quiesce(timeout_seconds=5.0)
@@ -328,11 +308,6 @@ class MemoryModule:
 
         self._writer.resume_intake()
 
-    def reset_capture_generation(self) -> None:
-        """Forget volatile duplicate claims after Clear rotates the epoch."""
-
-        self._writer.reset_duplicate_generation()
-
     async def close_writer(self) -> None:
         """Drop volatile work during shutdown or runtime replacement."""
 
@@ -340,17 +315,6 @@ class MemoryModule:
 
     async def wait_writer_idle_for_tests(self, *, timeout_seconds: float = 5.0) -> None:
         await self._writer.wait_idle_for_tests(timeout_seconds=timeout_seconds)
-
-    async def clear_attachments(self) -> None:
-        """Remove every module-owned pinned attachment during destructive clear."""
-
-        if self._attachment_store is None:
-            raise AttachmentPinError(
-                "memory_store_unavailable",
-                "attachment storage is unavailable",
-            )
-        await run_blocking(self._attachment_store.clear_all)
-        self._writer.enable_attachment_intake()
 
     def offer_barrier(self, raw_session_id: str) -> str:
         """Offer a provider barrier without waiting for capture delivery."""
@@ -381,8 +345,8 @@ class MemoryModule:
             return CaptureSkipped(reason="memory_operation_in_progress")
         if not self._is_enabled():
             return CaptureSkipped(reason="memory_disabled")
-        if self._clear_active or self._is_maintenance_open():
-            return CaptureSkipped(reason="memory_clear_failed")
+        if self._retired:
+            return CaptureSkipped(reason="memory_operation_in_progress")
 
         admission_lock = self._capture_lock_for_request(request)
         if admission is None:
@@ -534,8 +498,8 @@ class MemoryModule:
                 return CaptureSkipped(reason="memory_operation_in_progress")
             if not self._is_enabled():
                 return CaptureSkipped(reason="memory_disabled")
-            if self._clear_active or self._is_maintenance_open():
-                return CaptureSkipped(reason="memory_clear_failed")
+            if self._retired:
+                return CaptureSkipped(reason="memory_operation_in_progress")
             if not isinstance(request, CaptureRequest):
                 return await self._skipped_with_missed("memory_invalid_input")
 
@@ -709,7 +673,7 @@ class MemoryModule:
         if admission.outcome in {"project_limit", "timestamp_invalid"}:
             return CaptureSkipped(reason="memory_invalid_input")
         if admission.outcome == "clear_in_progress":
-            return CaptureSkipped(reason="memory_clear_failed")
+            return CaptureSkipped(reason="memory_operation_in_progress")
         return OperationFailed(error="memory_store_unavailable")
 
     async def _offer_admitted_capture(
@@ -839,8 +803,8 @@ class MemoryModule:
         if len(query_bytes) > MAX_QUERY_BYTES:
             return OperationFailed(error="memory_input_too_large")
 
-        if self._clear_active or self._is_maintenance_open():
-            return OperationFailed(error="memory_clear_failed")
+        if self._retired:
+            return OperationFailed(error="memory_operation_in_progress")
 
         agentic_started = (
             monotonic()
@@ -915,7 +879,7 @@ class MemoryModule:
             except Exception:
                 return OperationFailed(error="memory_store_unavailable")
             if meta.clear_in_progress:
-                return OperationFailed(error="memory_clear_failed")
+                return OperationFailed(error="memory_operation_in_progress")
             owner_ids = (
                 principal_id,
                 derive_assistant_memory_owner_id(principal_id),
@@ -1095,8 +1059,8 @@ class MemoryModule:
             return OperationFailed(error="memory_access_denied")
         if not is_new_stored_memory_project_id(project_id):
             return OperationFailed(error="memory_access_denied")
-        if self._clear_active or self._is_maintenance_open():
-            return OperationFailed(error="memory_clear_failed")
+        if self._retired:
+            return OperationFailed(error="memory_operation_in_progress")
 
         async with self._lifecycle_lock:
             if not self._is_enabled():
@@ -1106,7 +1070,7 @@ class MemoryModule:
             except Exception:
                 return OperationFailed(error="memory_store_unavailable")
             if meta.clear_in_progress:
-                return OperationFailed(error="memory_clear_failed")
+                return OperationFailed(error="memory_operation_in_progress")
             owner_ids = (
                 principal_id,
                 derive_assistant_memory_owner_id(principal_id),
@@ -1181,8 +1145,8 @@ class MemoryModule:
 
             return result
 
-        if self._clear_active or self._is_maintenance_open():
-            yield unavailable("memory_clear_failed")
+        if self._retired:
+            yield unavailable("memory_operation_in_progress")
             return
         remaining = deadline - monotonic()
         if remaining <= 0:
@@ -1197,8 +1161,8 @@ class MemoryModule:
             yield unavailable("memory_provider_timeout")
             return
         try:
-            if self._clear_active or self._is_maintenance_open():
-                yield unavailable("memory_clear_failed")
+            if self._retired:
+                yield unavailable("memory_operation_in_progress")
                 return
             try:
                 meta = await self._store_call(self._store.ensure_meta)
@@ -1206,7 +1170,7 @@ class MemoryModule:
                 yield unavailable("memory_store_unavailable")
                 return
             if meta.clear_in_progress:
-                yield unavailable("memory_clear_failed")
+                yield unavailable("memory_operation_in_progress")
                 return
             if monotonic() >= deadline:
                 yield unavailable("memory_provider_timeout")
@@ -1238,8 +1202,8 @@ class MemoryModule:
             or not 1 <= page_size <= MAX_LIST_PAGE_SIZE
         ):
             return OperationFailed(error="memory_invalid_input")
-        if self._clear_active or self._is_maintenance_open():
-            return OperationFailed(error="memory_clear_failed")
+        if self._retired:
+            return OperationFailed(error="memory_operation_in_progress")
         return None
 
     async def _list_episodes_under_lifecycle(
@@ -1263,7 +1227,7 @@ class MemoryModule:
         except Exception:
             return OperationFailed(error="memory_store_unavailable")
         if meta.clear_in_progress:
-            return OperationFailed(error="memory_clear_failed")
+            return OperationFailed(error="memory_operation_in_progress")
         return await self._list_episodes_after_store_check(
             principal_id=principal_id,
             project_id=project_id,
@@ -1559,12 +1523,6 @@ class MemoryModule:
         except Exception:
             return False
         return bool(value)
-
-    def _is_maintenance_open(self) -> bool:
-        try:
-            return bool(self._maintenance_open())
-        except Exception:
-            return True
 
     def _root_lifecycle_lock(self) -> asyncio.Lock:
         return _ROOT_LIFECYCLE_LOCKS.setdefault(self._provider_root_key, asyncio.Lock())

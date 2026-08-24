@@ -11,11 +11,6 @@ from typing import Any, Literal, TypeVar
 
 from core.memory.everos import ProviderHealthSnapshot
 from core.memory.confined_filesystem import PRIVATE_SQLITE_BUSY_TIMEOUT_SECONDS
-from core.memory.maintenance import (
-    ClearInProgressResult,
-    MaintenanceObservation,
-    MaintenanceResult,
-)
 from core.memory.module import PROVIDER_READ_TIMEOUT_SECONDS
 from core.memory.types import MemoryFailureLogEntry
 
@@ -90,11 +85,23 @@ class FailureLogObservation:
 
 
 @dataclass(frozen=True, slots=True)
+class MaintenanceObservation:
+    block_reason: str | None
+    can_delete_data: bool
+
+
+@dataclass(frozen=True, slots=True)
+class MaintenanceResult:
+    data_exists: bool
+    can_delete_data: bool
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class MaintenanceProjection:
     source: SourceObservation
     data_exists: bool
-    can_clear: bool
-    clear_in_progress: ClearInProgressResult | None
+    can_delete_data: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,8 +328,7 @@ class MemoryProcessingRecord:
         except Exception:
             return MaintenanceObservation(
                 block_reason="memory_store_unavailable",
-                clear_in_progress=None,
-                can_clear=False,
+                can_delete_data=False,
             )
 
     async def _read_health(
@@ -431,8 +437,7 @@ class MemoryProcessingRecord:
                     reason="memory_store_unavailable",
                 ),
                 data_exists=True,
-                can_clear=False,
-                clear_in_progress=None,
+                can_delete_data=False,
             )
         unavailable_reason = result.error
         if (
@@ -448,8 +453,7 @@ class MemoryProcessingRecord:
         return MaintenanceProjection(
             source=source,
             data_exists=result.data_exists,
-            can_clear=result.can_clear,
-            clear_in_progress=result.clear_in_progress,
+            can_delete_data=result.can_delete_data,
         )
 
 def _utc_observed_at() -> str:

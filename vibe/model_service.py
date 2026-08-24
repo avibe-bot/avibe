@@ -183,7 +183,6 @@ def _runtime_state_signature(memory: MemoryConfig) -> tuple[object, ...]:
 
     return (
         memory.enabled,
-        memory.recovery_intent,
         memory.runtime_source(),
         memory.runtime_processing(),
         memory.effective_multimodal_available(),
@@ -191,17 +190,11 @@ def _runtime_state_signature(memory: MemoryConfig) -> tuple[object, ...]:
 
 
 def _cancel_organization_transition(memory: MemoryConfig) -> bool:
-    """Cancel only the rebuild fence owned by a pending org transition."""
+    """Cancel a pending organization transition notice."""
 
     if not memory.cloud.transition_notice_pending:
         return False
     memory.cloud.transition_notice_pending = False
-    if (
-        memory.cloud.transition_rebuild_owned
-        and memory.recovery_intent == "rebuild"
-    ):
-        memory.recovery_intent = None
-    memory.cloud.transition_rebuild_owned = False
     return True
 
 
@@ -218,10 +211,11 @@ def _adopt_cloud_embedding_identity(
     """Record one cloud target while checking the prior runtime baseline."""
 
     baseline = previous.cloud.applied_embedding_identity
-    first_activation = baseline is None and previous.recovery_intent is None
+    first_activation = baseline is None
     if previous.cloud_runtime_selected() and _cloud_embedding_identity_changed(previous, identity):
-        candidate.arm_rebuild_if_idle()
-    candidate.cloud.applied_embedding_identity = identity
+        candidate.cloud.transition_notice_pending = True
+    else:
+        candidate.cloud.applied_embedding_identity = identity
     return first_activation
 
 
@@ -267,12 +261,9 @@ def _resolved_memory(
                     if first_managed_activation:
                         candidate.enabled = True
             elif candidate.cloud.transition_notice_pending:
-                if candidate.arm_rebuild_if_idle():
-                    candidate.cloud.transition_rebuild_owned = True
+                pass
             elif candidate.mode == "custom" and previous.custom_processing_complete():
                 candidate.cloud.transition_notice_pending = True
-                if candidate.arm_rebuild_if_idle():
-                    candidate.cloud.transition_rebuild_owned = True
             else:
                 candidate.cloud.organization_attached = True
                 if candidate.cloud.model_access_key:
@@ -308,11 +299,11 @@ def _resolved_memory(
                 candidate.enabled = True
         elif was_organization_cloud:
             if candidate.mode != "platform":
-                candidate.arm_rebuild_if_idle()
+                candidate.cloud.transition_notice_pending = True
             elif status.memory_available():
                 assert status.embedding_identity is not None
                 if _cloud_embedding_identity_changed(previous, status.embedding_identity):
-                    candidate.arm_rebuild_if_idle()
+                    candidate.cloud.transition_notice_pending = True
             # The applied identity is also the durable "not fresh" baseline.
             # Keep it across an unavailable release so later capability recovery
             # can compare identities without overriding an explicit user opt-out.
@@ -405,7 +396,6 @@ def _persist_candidate(current: MemoryConfig, candidate: MemoryConfig) -> V2Conf
 
     return api.save_memory_config(
         memory_config_to_payload(candidate, include_secrets=True),
-        recovery_intent=candidate.recovery_intent,
         expected=current,
     )
 
@@ -434,9 +424,6 @@ def _reconcile_candidate(candidate: MemoryConfig) -> bool:
     if not isinstance(body, dict):
         return False
     if body.get("ok") is True:
-        _clear_apply_pending(candidate)
-        return True
-    if candidate.recovery_intent == "rebuild" and body.get("error") == "memory_embedding_rebuild_required":
         _clear_apply_pending(candidate)
         return True
     return False

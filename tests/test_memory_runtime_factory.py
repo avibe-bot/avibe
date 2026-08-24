@@ -286,7 +286,7 @@ async def test_factory_settles_runtime_tasks_and_sidecar_before_scope_exit(
         )
         assert await runtime.reconcile(runtime._config) == {
             "ok": True,
-            "state": "ready",
+            "state": "running",
         }
         runtime.module._writer._ensure_worker()
         writer_task = runtime.module._writer._worker_task

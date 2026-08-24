@@ -1194,15 +1194,8 @@ def _memory_cloud_recovery_requires_managed_fence(payload: dict) -> bool:
     )
 
 
-def _arm_memory_cloud_recovery(memory: dict) -> None:
-    """Keep an unknown cloud identity behind the existing rebuild ladder."""
-
-    if memory.get("recovery_intent") is None:
-        memory["recovery_intent"] = "rebuild"
-
-
 def _recover_memory_cloud_section(payload: dict, field_name: Optional[str]) -> bool:
-    """Recover one cloud-cache member without losing valid runtime ownership."""
+    """Recover one cloud-cache member without inventing recovery workflow state."""
 
     memory = payload.get("memory")
     if not isinstance(memory, dict):
@@ -1216,11 +1209,8 @@ def _recover_memory_cloud_section(payload: dict, field_name: Optional[str]) -> b
                 "organization_attached": True,
                 "runtime_apply_pending": True,
             }
-            _arm_memory_cloud_recovery(memory)
         else:
             memory["cloud"] = {}
-            if memory.get("mode") == "platform":
-                _arm_memory_cloud_recovery(memory)
         return True
 
     cloud.pop(field_name, None)
@@ -1237,14 +1227,11 @@ def _recover_memory_cloud_section(payload: dict, field_name: Optional[str]) -> b
         live_identity = cloud.get("embedding_identity")
         if isinstance(live_identity, str) and live_identity.strip():
             cloud["applied_embedding_identity"] = live_identity
-        else:
-            _arm_memory_cloud_recovery(memory)
     elif field_name == "source_instance_id":
         cloud["capabilities"] = {}
         cloud["embedding_identity"] = None
         cloud["model_access_key"] = None
         cloud["proxy_base_url"] = None
-        _arm_memory_cloud_recovery(memory)
 
     if managed_fence and field_name in {
         "scope",
@@ -1254,8 +1241,6 @@ def _recover_memory_cloud_section(payload: dict, field_name: Optional[str]) -> b
         cloud["scope"] = "organization"
         cloud["organization_attached"] = True
         cloud["transition_notice_pending"] = False
-        cloud["transition_rebuild_owned"] = False
-        _arm_memory_cloud_recovery(memory)
     return True
 
 
@@ -1955,7 +1940,6 @@ class MemoryCloudConfig:
     source_instance_id: str = ""
     organization_attached: bool = False
     transition_notice_pending: bool = False
-    transition_rebuild_owned: bool = False
     applied_embedding_identity: str | None = None
     runtime_apply_pending: bool = False
 
@@ -2003,7 +1987,6 @@ class MemoryCloudConfig:
             ("quota_enforced", self.quota_enforced),
             ("organization_attached", self.organization_attached),
             ("transition_notice_pending", self.transition_notice_pending),
-            ("transition_rebuild_owned", self.transition_rebuild_owned),
             ("runtime_apply_pending", self.runtime_apply_pending),
         ):
             if not isinstance(value, bool):
@@ -2037,10 +2020,6 @@ class MemoryCloudConfig:
         return self.memory_capability_available() and bool(self.model_access_key)
 
 
-MemoryRecoveryIntent = Literal["rebuild", "factory_reset"]
-MEMORY_RECOVERY_INTENTS = frozenset(get_args(MemoryRecoveryIntent))
-
-
 @dataclass
 class MemoryConfig:
     """Persisted local EverOS configuration; credentials are API-write-only."""
@@ -2049,29 +2028,19 @@ class MemoryConfig:
     mode: MemoryMode | None = None
     processing: MemoryProcessingConfig = field(default_factory=MemoryProcessingConfig)
     cloud: MemoryCloudConfig = field(default_factory=MemoryCloudConfig)
-    recovery_intent: MemoryRecoveryIntent | None = None
+    # Released recovery markers are consumed at load time only. This transient
+    # flag is deliberately omitted from persisted and public projections.
+    legacy_needs_repair: bool = field(default=False, repr=False, compare=False)
 
     def validate(self) -> None:
         if not isinstance(self.enabled, bool):
             raise ValueError("Config 'memory.enabled' must be a boolean")
         if self.mode is not None and self.mode not in get_args(MemoryMode):
             raise ValueError("Config 'memory.mode' must be 'platform', 'custom', or null")
-        if self.recovery_intent is not None and (
-            not isinstance(self.recovery_intent, str)
-            or self.recovery_intent not in MEMORY_RECOVERY_INTENTS
-        ):
-            raise ValueError(
-                "Config 'memory.recovery_intent' must be 'rebuild', 'factory_reset', or null"
-            )
+        if not isinstance(self.legacy_needs_repair, bool):
+            raise ValueError("Config 'memory' legacy repair state must be a boolean")
         self.processing.validate()
         self.cloud.validate()
-        if self.cloud.transition_rebuild_owned and (
-            not self.cloud.transition_notice_pending
-            or self.recovery_intent != "rebuild"
-        ):
-            raise ValueError(
-                "Config 'memory.cloud.transition_rebuild_owned' requires a pending transition rebuild"
-            )
         if (
             self.enabled
             and not self.cloud_runtime_selected()
@@ -2082,18 +2051,10 @@ class MemoryConfig:
     def custom_processing_complete(self) -> bool:
         return self.processing.llm.complete() and self.processing.embedding.complete()
 
-    def arm_rebuild_if_idle(self) -> bool:
-        """Request an embedding rebuild without downgrading a stronger recovery."""
-
-        if self.recovery_intent is not None:
-            return False
-        self.recovery_intent = "rebuild"
-        return True
-
     def cloud_runtime_selected(self) -> bool:
         if self.cloud.scope == "organization":
             # A pending enterprise transition is deliberately fenced on the
-            # last applied custom identity until the user confirms the rebuild.
+            # last applied custom identity until the user accepts a data reset.
             return self.cloud.organization_attached
         # Mode owns the runtime source. A missing or recovered cloud cache must
         # pause platform Memory, never expose saved custom endpoints as fallback.
@@ -2131,7 +2092,13 @@ class MemoryConfig:
             return MemoryProcessingConfig()
         base_url = self.cloud.proxy_base_url
         key = self.cloud.model_access_key
-        embedding_identity = self.cloud.embedding_identity
+        # A changed managed embedding identity is not admitted until the user
+        # accepts local data loss. Keep the last applied identity as the
+        # sidecar-facing baseline while the control plane reports the change.
+        embedding_identity = (
+            self.cloud.applied_embedding_identity
+            or self.cloud.embedding_identity
+        )
         multimodal = None
         if self.cloud.capabilities.multimodal:
             multimodal = MemoryEndpointConfig(
@@ -2160,8 +2127,8 @@ class MemoryConfig:
             # applied value remains the comparison baseline for a checked resume.
             return (
                 "cloud",
-                self.cloud.embedding_identity
-                or self.cloud.applied_embedding_identity,
+                self.cloud.applied_embedding_identity
+                or self.cloud.embedding_identity,
                 None,
             )
         return (
@@ -2326,15 +2293,10 @@ def memory_config_to_payload(
             "source_instance_id": memory.cloud.source_instance_id,
             "organization_attached": memory.cloud.organization_attached,
             "transition_notice_pending": memory.cloud.transition_notice_pending,
-            "transition_rebuild_owned": memory.cloud.transition_rebuild_owned,
             "applied_embedding_identity": memory.cloud.applied_embedding_identity,
             "runtime_apply_pending": memory.cloud.runtime_apply_pending,
         },
     }
-    if include_internal and memory.recovery_intent is not None:
-        # This records a candidate that must be rechecked by the controller
-        # after a crash. It is never part of the settings response.
-        payload["recovery_intent"] = memory.recovery_intent
     return payload
 
 
@@ -2345,7 +2307,7 @@ def _optional_memory_object(value: object, *, name: str) -> dict[str, object]:
 
 
 def memory_config_from_payload(payload: object) -> MemoryConfig:
-    """Parse the persisted Memory block, including the legacy rebuild marker."""
+    """Parse Memory config and consume released recovery fields once."""
 
     payload = _optional_memory_object(payload, name="memory")
     processing_payload = _optional_memory_object(
@@ -2381,29 +2343,30 @@ def memory_config_from_payload(payload: object) -> MemoryConfig:
         name="memory.cloud.capabilities",
     )
 
-    legacy_present = "embedding_change_pending" in payload
     legacy_pending = payload.get("embedding_change_pending", False)
     if not isinstance(legacy_pending, bool):
         raise ValueError("Config 'memory.embedding_change_pending' must be a boolean")
-    legacy_intent = "rebuild" if legacy_pending else None
-    if "recovery_intent" in payload:
-        recovery_intent = payload.get("recovery_intent")
-        if recovery_intent is not None and (
-            not isinstance(recovery_intent, str)
-            or recovery_intent not in MEMORY_RECOVERY_INTENTS
-        ):
-            raise ValueError(
-                "Config 'memory.recovery_intent' must be 'rebuild', 'factory_reset', or null"
-            )
-        if legacy_present and recovery_intent != legacy_intent:
-            raise ValueError("Config 'memory' contains conflicting recovery intent fields")
-    else:
-        recovery_intent = legacy_intent
+    legacy_intent = payload.get("recovery_intent")
+    if legacy_intent is not None and (
+        not isinstance(legacy_intent, str)
+        or legacy_intent not in {"rebuild", "factory_reset"}
+    ):
+        raise ValueError(
+            "Config 'memory.recovery_intent' must be 'rebuild', 'factory_reset', or null"
+        )
+    transition_rebuild_owned = cloud_payload.get("transition_rebuild_owned", False)
+    if not isinstance(transition_rebuild_owned, bool):
+        raise ValueError(
+            "Config 'memory.cloud.transition_rebuild_owned' must be a boolean"
+        )
+    legacy_needs_repair = bool(
+        legacy_pending or legacy_intent is not None or transition_rebuild_owned
+    )
 
     memory = MemoryConfig(
         enabled=payload.get("enabled", False),
         mode=payload.get("mode"),
-        recovery_intent=recovery_intent,
+        legacy_needs_repair=legacy_needs_repair,
         processing=MemoryProcessingConfig(
             llm=MemoryEndpointConfig(
                 **_filter_dataclass_fields(MemoryEndpointConfig, llm_payload)

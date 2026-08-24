@@ -1,5 +1,9 @@
 # Memory best-effort capture (Phase 1)
 
+> Recovery operations in this document are historical. The current lifecycle
+> and destructive-operation contract is
+> [`memory-unified-recovery-pr3.md`](./memory-unified-recovery-pr3.md).
+
 > Status: implementation contract
 >
 > Scope: replace Avibe's durable Memory outbox with a bounded process-local writer.

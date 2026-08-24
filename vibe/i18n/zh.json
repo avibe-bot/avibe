@@ -726,14 +726,16 @@
         "json": "输出机器可读格式"
       },
       "error": "记忆 {operation} 失败：{code}",
-      "status": "记忆来源：{state}",
+      "status": "记忆：{state}",
       "provider": "EverOS {version}：{state}",
       "attachmentCapture": "IM 附件捕获：{state}",
       "sourceReason": "来源原因：{reason}",
-      "sourceState": {
-        "available": "可用",
-        "stale": "数据已过期",
-        "unavailable": "不可用",
+      "runtimeState": {
+        "disabled": "已停用",
+        "starting": "正在启动",
+        "running": "运行中",
+        "degraded": "已降级",
+        "needsRepair": "需要修复",
         "unknown": "未知"
       },
       "providerState": {
@@ -759,14 +761,17 @@
         "runtimeUnsupported": "记忆运行时不受支持",
         "runtimeInstallFailed": "记忆运行时安装失败",
         "reconcileFailed": "记忆协调失败",
-        "restartFailed": "记忆重启失败",
+        "wakeFailed": "记忆唤醒失败，未删除数据",
+        "runtimeBusy": "记忆无法安全停止",
+        "permissionDenied": "记忆数据路径权限不足",
+        "diskUnavailable": "记忆磁盘不可用",
+        "localDataUnusable": "本地记忆数据需要修复",
+        "legacyRecoveryRequired": "旧版恢复状态需要明确修复",
         "sidecarUnavailable": "记忆 sidecar 不可用",
         "providerTimeout": "记忆服务请求超时",
         "providerResponseInvalid": "记忆服务响应无效",
         "capabilityUnavailable": "记忆能力不可用",
         "processingFailed": "记忆处理失败",
-        "clearFailed": "清除记忆失败",
-        "factoryResetFailed": "记忆初始化失败",
         "unknown": "未知原因"
       },
       "fault": {

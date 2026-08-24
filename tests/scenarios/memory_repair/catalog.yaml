@@ -1,160 +1,88 @@
 version: 1
 capability:
   id: memory_repair
-  name: Live Memory index repair via admitted artifact sync
+  name: Unified non-destructive Wake and destructive Memory Repair
   canonical_tests:
-    - tests/scenarios/memory_repair/test_memory_repair_scenarios.py
-    - tests/test_memory_repair.py
-    - tests/test_memory_sync_bootstrap.py
-    - ui/src/lib/memoryRepair.test.ts
-    - ui/src/components/settings/SettingsMemoryPage.test.tsx
-    - ui/src/components/settings/memory/MemoryStatusPanel.test.tsx
-  shared_harness:
-    - tests/conftest.py::memory_runtime_factory
-    - tests/scenario_harness/memory_repair.py::MemoryRepairScenarioHarness
+    - tests/test_memory_wake.py
+    - tests/test_controller_memory_data_reset.py
+    - tests/test_internal_server.py
+    - tests/test_internal_client.py
+    - tests/test_ui_memory_routes.py
 status_legend:
-  covered: every named output has direct executable evidence at the declared layer
-  partial: executable evidence exists, but at least one named output layer remains unproved
-  manual: requires a running Memory runtime
+  covered: executable evidence exists at the declared layer
+  partial: contract evidence exists but full packaged runtime regression remains
 scenarios:
-  - id: MEMORY-REPAIR-001
-    name: Admitted artifact repair completes with a healthy cascade projection
+  - id: MEMORY-WAKE-001
+    name: Wake reuses the existing admitted Memory root
     status: covered
     kind: happy_path
-    layer: scenario
-    test: tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_001_completes_through_public_route
-    actor: Memory Settings user
-    trigger: The user confirms Repair index while the advertised repair capability is available
-    conditions:
-      - Memory is enabled with a running sidecar and an admitted artifact sync executable
-      - The sync child completes and the final cascade health is healthy
-    given: The public settings projection advertises Repair and the internal runtime boundary is healthy
-    when: The user confirms one Repair index request
-    then: The request closes as completed with the exact final healthy cascade projection
-    expected_outputs:
-      - One POST /api/memory/runtime/repair request with confirm set to true
-      - A completed result containing the frozen nine-field healthy projection
-      - A follow-up public status read that remains available and healthy
-    ui_contract:
-      test: ui/src/lib/memoryRepair.test.ts
-      case: posts the exact confirmed Repair contract and parses the response
+    layer: contract
+    test: tests/test_memory_wake.py::test_wake_reuses_existing_root_and_proves_native_readiness
+    given: Memory has an admitted artifact and an existing mutable data root
+    when: Wake starts the runtime and verifies native readiness with bounded backoff
+    then: The existing root remains intact and status becomes running
+  - id: MEMORY-WAKE-002
+    name: Wake failure is degraded and never destructive
+    status: covered
+    kind: degradation
+    layer: contract
+    test: tests/test_memory_wake.py::test_wake_artifact_failure_is_degraded_and_non_destructive
+    given: Artifact validation or installation fails
+    when: Wake is requested
+    then: The runtime reports a short degraded reason and existing Memory data remains intact
+  - id: MEMORY-REPAIR-001
+    name: Repair requires exact accepted-loss confirmation and genuine eligibility
+    status: covered
+    kind: authorization
+    layer: contract
+    test: tests/test_controller_memory_data_reset.py::test_repair_requires_exact_loss_confirmation
     related_tests:
-      - tests/test_memory_sync_bootstrap.py::test_artifact_bootstrap_pathless_sync_acceptance_boundary
-      - tests/test_memory_sync_bootstrap.py::test_pinned_everos_pathless_sync_scans_and_drains
-      - tests/test_internal_server.py::test_memory_repair_maps_runtime_status
-      - tests/test_internal_client.py::test_memory_repair_signs_owner_and_posts_exact_confirmation
-      - tests/test_memory_repair.py::test_repair_runs_sync_beside_live_sidecar_and_projects_health
-      - ui/src/components/settings/memory/MemoryStatusPanel.test.tsx
+      - tests/test_controller_memory_data_reset.py::test_repair_is_not_offered_for_degraded_runtime
+    given: A caller reaches the destructive Repair boundary
+    when: accepted loss is absent or the local root does not genuinely need repair
+    then: Repair fails closed and does not touch the runtime or data roots
   - id: MEMORY-REPAIR-002
-    name: Repair completion with warnings remains truthful to unhealthy cascade health
-    status: covered
-    kind: health_projection
-    layer: scenario
-    test: tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_002_preserves_warning_health_through_public_route
-    actor: Memory Settings user
-    trigger: The user confirms Repair index and the closed response reports unhealthy cascade health
-    conditions:
-      - The backend returns completed_with_warnings with health.healthy set to false
-      - The response satisfies the frozen Repair parser contract
-    given: The public settings projection advertises Repair and current cascade health is healthy
-    when: The user confirms Repair and the request settles with unhealthy cascade health
-    then: The public route preserves the warning result and unhealthy projection without reporting success
-    expected_outputs:
-      - A completed-with-warnings response containing the frozen unhealthy projection
-      - A follow-up public status read that remains available and reports degraded cascade health
-    related_tests:
-      - tests/test_memory_repair.py::test_repair_runs_sync_beside_live_sidecar_and_projects_health
-      - ui/src/components/settings/SettingsMemoryPage.test.tsx
-  - id: MEMORY-REPAIR-003
-    name: A second Repair request is disabled while the first request is running
-    status: covered
-    kind: concurrency
-    layer: scenario
-    test: tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_003_retains_owner_and_rejects_conflicting_mutation
-    actor: Memory Settings user
-    trigger: The user starts Repair and attempts to invoke Repair again before completion
-    conditions:
-      - The first Repair request remains pending
-      - The Repair capability remains advertised
-    given: Public Memory status is available and no mutation owns the retained request slot
-    when: One caller abandons a pending Repair, another caller joins it, and the user triggers Clear
-    then: Repair retains one internal owner, Clear conflicts, and the joined caller receives completion
-    expected_outputs:
-      - Exactly one internal Repair invocation across both public Repair requests
-      - A 409 memory_operation_in_progress response without invoking internal Clear
-      - A completed joined response and available follow-up status
-    related_tests:
-      - tests/test_memory_repair.py::test_repair_is_retained_joined_and_holds_lease_after_caller_cancel
-      - ui/src/components/settings/SettingsMemoryPage.test.tsx
-      - tests/test_memory_repair.py::test_repair_gates_other_runtime_mutations
-  - id: MEMORY-REPAIR-004
-    name: A failed Repair is shown as a closed error and can be retried manually
-    status: partial
-    kind: recovery
-    layer: scenario
-    test: tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_004_failure_closes_and_service_retry_succeeds
-    actor: Memory Settings user
-    trigger: The confirmed Repair child closes as interrupted, timed out, failed, or already running
-    conditions:
-      - The backend maps the child terminal state into the frozen closed failure envelope
-      - No executable UI journey currently proves error presentation followed by a manual retry
-    given: Repair is publicly available and the next internal result is a closed timeout
-    when: The user posts Repair, observes the closed failure, and explicitly posts Repair again
-    then: The service remains available for retry and the second request completes normally
-    expected_outputs:
-      - A frozen timed-out failure envelope with HTTP 503
-      - A still-available Repair capability followed by a successful explicit retry
-      - A healthy follow-up public status result
-    coverage_gap: The closed service failure and explicit service retry are executable; browser-level error presentation and the manual retry interaction remain unproved
-    ui_contract:
-      test: ui/src/lib/memoryRepair.test.ts
-      case: accepts the declared failure %s with result %s
-      inputs:
-        - memory_repair_failed
-        - timed_out
-    related_tests:
-      - tests/test_memory_repair.py::test_repair_maps_closed_child_results
-      - ui/src/lib/memoryRepair.test.ts
-  - id: MEMORY-REPAIR-005
-    name: Repair action is hidden when artifact sync capability is disabled
-    status: covered
-    kind: capability_gate
-    layer: scenario
-    test: tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_005_fails_closed_when_capability_is_unavailable
-    actor: Memory Settings user
-    trigger: The user opens Processing Record on an installation without admitted artifact sync
-    conditions:
-      - The backend settings projection does not advertise repair_available as exactly true
-    given: Memory can be inspected but the installed artifact has no sync capability
-    when: The settings projection is read and a confirmed Repair POST is attempted directly
-    then: Capability stays absent and the public mutation fails closed while Memory status remains available
-    expected_outputs:
-      - repair_available remains exactly false before and after the attempted mutation
-      - A 409 memory_runtime_unsupported failure from the public Repair route
-      - An available follow-up Memory status result
-    related_tests:
-      - tests/test_ui_memory_routes.py::test_memory_settings_are_direct_loopback_only_and_write_only
-      - tests/test_ui_memory_routes.py::test_memory_settings_projects_only_admitted_repair_capability
-      - tests/test_memory_repair.py::test_repair_rejects_artifact_without_sync_capability
-      - ui/src/components/settings/memory/MemoryStatusPanel.test.tsx
-  - id: MEMORY-REPAIR-006
-    name: Repair leaves the live sidecar and writer action path untouched
+    name: Repair proves stop before confined deletion and native readiness after reset
     status: covered
     kind: lifecycle
-    layer: scenario
-    test: tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_006_keeps_sidecar_available_during_public_request
-    actor: Memory Settings user
-    trigger: The user confirms Repair while the live Memory sidecar is running
-    conditions:
-      - The admitted sync child runs beside the live sidecar
-      - The volatile writer remains available and intake is not paused
-    given: A public Memory status read reports the sidecar source available
-    when: A confirmed public Repair request remains pending at the internal runtime boundary
-    then: Status stays available during and after Repair without pausing writer intake or stopping the sidecar
-    expected_outputs:
-      - The internal Repair boundary observes the sidecar and writer live with intake unpaused
-      - A public status read remains available while Repair is pending
-      - The sidecar stop count remains zero and status remains available after Repair settles
-    related_tests:
-      - tests/test_memory_repair.py::test_repair_runs_sync_beside_live_sidecar_and_projects_health
-      - tests/test_memory_repair.py::test_sync_orphan_reconciliation_does_not_stop_sidecar
+    layer: contract
+    test: tests/test_controller_memory_data_reset.py::test_repair_stops_owned_runtime_before_delete_and_proves_native_readiness
+    given: The confined local root is unusable and Repair is explicitly confirmed
+    when: Repair owns both the process lease and controller replacement gate
+    then: Recorded ownership is reaped, the old runtime is proven closed before deletion, and success waits for native readiness
+  - id: MEMORY-REPAIR-003
+    name: Unproved process termination authorizes no deletion
+    status: covered
+    kind: safety
+    layer: contract
+    test: tests/test_controller_memory_data_reset.py::test_repair_deletes_nothing_when_termination_is_unproved
+    given: The old owned runtime cannot prove all writers and process trees stopped
+    when: Repair attempts to cross the destructive boundary
+    then: Both exact roots remain unchanged and the response reports the failed proof
+  - id: MEMORY-REPAIR-004
+    name: Failed post-reset native readiness remains needs repair without a workflow journal
+    status: covered
+    kind: failure
+    layer: contract
+    test: tests/test_controller_memory_data_reset.py::test_failed_post_repair_readiness_remains_needs_repair
+    given: Confined deletion completed but the native data path is not ready
+    when: Repair performs its final readiness check
+    then: It reports deleted data truthfully, remains needs_repair, and a later Repair starts again from root evaluation
+  - id: MEMORY-REPAIR-005
+    name: Provider, credential, disk, and permission faults do not qualify for Repair
+    status: covered
+    kind: classification
+    layer: contract
+    test: tests/test_memory_wake.py::test_external_local_faults_are_degraded_not_repair_eligible
+    given: Memory fails outside the unusable-or-incompatible local-root boundary
+    when: Runtime state is classified
+    then: The state is degraded with a bounded reason and no destructive Repair authority
+  - id: MEMORY-REPAIR-006
+    name: Repair preserves stable identity and the project catalog
+    status: covered
+    kind: migration
+    layer: contract
+    test: tests/test_memory_store.py::test_data_loss_settlement_preserves_stable_identity_and_rotates_epoch
+    given: A confirmed destructive reset has stopped the old owned process
+    when: Avibe settles the new provider data generation
+    then: Scope identity, provider-root identity, and project rows survive while volatile data authority rotates

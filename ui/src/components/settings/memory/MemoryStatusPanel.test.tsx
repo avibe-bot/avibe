@@ -1,62 +1,76 @@
 /* @vitest-environment jsdom */
 
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
 
-import type { MemoryClearInProgress, MemoryStatus } from '../../../context/ApiContext';
+import type { MemoryStatus } from '../../../context/ApiContext';
 import { MemoryStatusPanel } from './MemoryStatusPanel';
 
 vi.mock('react-i18next', () => ({
-  useTranslation: () => ({
-    t: (key: string) => key,
-  }),
+  useTranslation: () => ({ t: (key: string) => key }),
 }));
 
-const status: MemoryStatus = {
+vi.mock('../../ui/confirm-dialog', () => ({
+  ConfirmDialog: ({ open, onConfirm }: { open: boolean; onConfirm: () => void }) => (
+    open ? <button type="button" onClick={onConfirm}>confirm-loss</button> : null
+  ),
+}));
+
+const status = (state: MemoryStatus['state'], reason: string | null = null): MemoryStatus => ({
   status: 'ok',
-  source: { status: 'available', observed_at: '2026-08-13T00:00:00Z', reason: null },
+  state,
+  reason,
+  source: { status: 'available', observed_at: '2026-08-24T00:00:00Z', reason: null },
   health: {
     status: 'ok',
     version: '1.2.3',
     capabilities: {},
     disabled_features: [],
-    cascade: null,
   },
-};
+});
 
-const baseProps: React.ComponentProps<typeof MemoryStatusPanel> = {
-  status,
+const props = (runtime: MemoryStatus): React.ComponentProps<typeof MemoryStatusPanel> => ({
+  status: runtime,
   failures: [],
-  clearInProgress: null,
   logSections: null,
-  providerChecks: [],
-  providerChecksSource: null,
   statusLoading: false,
   failuresLoading: false,
   statusError: null,
   failuresError: null,
   refreshPending: false,
   onRefresh: vi.fn(),
-};
+});
 
-afterEach(() => cleanup());
+afterEach(cleanup);
 
 describe('MemoryStatusPanel', () => {
-  it('renders runtime facts without recovery actions', () => {
-    render(<MemoryStatusPanel {...baseProps} />);
-    expect(screen.getByText('1.2.3')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /resume|abort/i })).toBeNull();
+  it.each(['disabled', 'starting', 'running', 'degraded', 'needs_repair'] as const)(
+    'renders the coherent %s runtime state',
+    (state) => {
+      render(<MemoryStatusPanel {...props(status(state))} />);
+      expect(screen.getByText(`memory.runtimeState.${state}`)).toBeTruthy();
+    },
+  );
+
+  it('offers destructive Repair only when the caller marks it supported', () => {
+    const onRepair = vi.fn();
+    render(
+      <MemoryStatusPanel
+        {...props(status('needs_repair', 'memory_local_data_unusable'))}
+        repairSupported
+        onRepair={onRepair}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'memory.repair.button' }));
+    fireEvent.click(screen.getByRole('button', { name: 'confirm-loss' }));
+    expect(onRepair).toHaveBeenCalledOnce();
   });
 
-  it('renders a failed clear projection as read-only state', () => {
-    const clearInProgress: MemoryClearInProgress = {
-      state: 'failed',
-      operation_id: 'op-1',
-      occurred_at: '2026-08-13T00:00:00Z',
-      error_code: 'memory_clear_failed',
-    };
-    render(<MemoryStatusPanel {...baseProps} clearInProgress={clearInProgress} />);
-    expect(screen.getByText('op-1')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /resume|abort/i })).toBeNull();
+  it('does not expose Restart, Rebuild, or live index Repair controls', () => {
+    render(<MemoryStatusPanel {...props(status('degraded', 'memory_provider_timeout'))} />);
+
+    expect(screen.queryByText(/restart|rebuild|repair index/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'memory.repair.button' })).toBeNull();
   });
 });

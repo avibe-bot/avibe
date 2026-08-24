@@ -13,23 +13,19 @@ import {
   ShieldCheck,
   SquareTerminal,
   Terminal,
-  Trash2,
   WandSparkles,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
-import { ConfirmDialog } from '../ui/confirm-dialog';
 import { SettingsPageShell } from './SettingsPageShell';
 import { SettingsResourceRow } from './SettingsPrimitives';
 import { useApi } from '@/context/ApiContext';
-import type { DependencyItem, InstallResult, MemorySettings, MemoryStatusResult } from '@/context/ApiContext';
+import type { DependencyItem, InstallResult, MemoryStatusResult } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
 import { dependencyHasInstallAction, memoryRuntimeSidecarRunning } from './SettingsDependenciesPage.logic';
 import { errorMessage } from '@/lib/errorMessage';
-import type { MemoryFactoryResetResult } from '@/lib/memoryFactoryReset';
-import { memoryErrorMessage } from '@/lib/memoryRead';
 
 // Mirrors design.pen "vibe-remote — Settings · Dependencies": one card per
 // required local runtime (icon tile + name/REQUIRED + detail + status pill +
@@ -49,11 +45,6 @@ const DEP_META: Record<string, DepMeta> = {
   node: { icon: Hexagon, tileCls: 'bg-violet-soft', iconCls: 'text-violet-ink' },
 };
 
-const MEMORY_ROOT_COPY = {
-  memory: 'primaryStorage',
-  'state/memory': 'memoryStateStorage',
-} as const;
-
 export const SettingsDependenciesPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
@@ -61,12 +52,8 @@ export const SettingsDependenciesPage: React.FC = () => {
 
   const [deps, setDeps] = useState<DependencyItem[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [memorySettings, setMemorySettings] = useState<MemorySettings | null>(null);
   const [memoryStatus, setMemoryStatus] = useState<MemoryStatusResult | null>(null);
   const [memoryStatusLoaded, setMemoryStatusLoaded] = useState(false);
-  const [reinitializeOpen, setReinitializeOpen] = useState(false);
-  const [reinitializeBusy, setReinitializeBusy] = useState(false);
-  const [reinitializeResult, setReinitializeResult] = useState<MemoryFactoryResetResult | null>(null);
 
   const refreshDependencies = useCallback(async () => {
     try {
@@ -74,15 +61,6 @@ export const SettingsDependenciesPage: React.FC = () => {
       setDeps(res.deps ?? []);
     } catch {
       setDeps([]);
-    }
-  }, [api]);
-
-  const refreshMemorySettings = useCallback(async () => {
-    try {
-      const res = await api.getMemorySettings();
-      setMemorySettings(res.status === 'ok' ? res : null);
-    } catch {
-      setMemorySettings(null);
     }
   }, [api]);
 
@@ -97,8 +75,8 @@ export const SettingsDependenciesPage: React.FC = () => {
   }, [api]);
 
   const refreshAll = useCallback(async () => {
-    await Promise.all([refreshDependencies(), refreshMemorySettings(), refreshMemoryStatus()]);
-  }, [refreshDependencies, refreshMemorySettings, refreshMemoryStatus]);
+    await Promise.all([refreshDependencies(), refreshMemoryStatus()]);
+  }, [refreshDependencies, refreshMemoryStatus]);
 
   useEffect(() => {
     void refreshAll();
@@ -117,7 +95,7 @@ export const SettingsDependenciesPage: React.FC = () => {
   };
 
   const install = async (dep: DependencyItem) => {
-    if (busy !== null || reinitializeBusy) return;
+    if (busy !== null) return;
     setBusy(dep.id);
     try {
       const res = await api.installDependency(dep.id);
@@ -132,30 +110,6 @@ export const SettingsDependenciesPage: React.FC = () => {
       showToast(errorMessage(e) || t('settings.dependencies.installFailed'), 'error');
     } finally {
       setBusy(null);
-    }
-  };
-
-  const reinitializeMemory = async () => {
-    if (reinitializeBusy || busy !== null) return;
-    setReinitializeBusy(true);
-    setReinitializeResult(null);
-    try {
-      const res = await api.factoryResetMemory();
-      setReinitializeResult(res);
-      setReinitializeOpen(false);
-      showToast(
-        res.ok
-          ? t('memory.factoryReset.completed')
-          : memoryErrorMessage(t, res.error || 'memory_factory_reset_failed'),
-        res.ok ? 'success' : 'error',
-      );
-    } catch {
-      setReinitializeOpen(false);
-      showToast(t('memory.factoryReset.failed'), 'error');
-    } finally {
-      await refreshAll();
-      window.dispatchEvent(new Event('avibe:memory-settings-changed'));
-      setReinitializeBusy(false);
     }
   };
 
@@ -202,14 +156,9 @@ export const SettingsDependenciesPage: React.FC = () => {
             const installing = busy === d.id;
             const showAction = dependencyHasInstallAction(d);
             const isMemoryRuntime = d.id === 'memory-runtime';
-            const memoryRuntimeReady = isMemoryRuntime && d.installed && d.status === 'ready';
             const sidecarRunning = isMemoryRuntime && memoryRuntimeSidecarRunning(memoryStatus);
             const repairBlockedBySidecar = isMemoryRuntime && (!memoryStatusLoaded || sidecarRunning);
             const dependencyOperationBusy = busy !== null;
-            const reinitializeDisabled = !memoryRuntimeReady
-              || memorySettings === null
-              || dependencyOperationBusy
-              || reinitializeBusy;
             return (
               <SettingsResourceRow
                 key={d.id}
@@ -242,7 +191,7 @@ export const SettingsDependenciesPage: React.FC = () => {
                       <Button
                         variant={d.installed ? 'secondary' : 'brand'}
                         size="xs"
-                        disabled={dependencyOperationBusy || reinitializeBusy || repairBlockedBySidecar}
+                        disabled={dependencyOperationBusy || repairBlockedBySidecar}
                         onClick={() => void install(d)}
                       >
                         {installing ? (
@@ -263,72 +212,9 @@ export const SettingsDependenciesPage: React.FC = () => {
                     )}
                   </>
                 }
-                footer={isMemoryRuntime ? (
-                  <div className="flex flex-col gap-3 border-t border-destructive/25 pt-3">
-                    {sidecarRunning ? (
-                      <div className="text-[11px] leading-snug text-muted">
-                        {t('settings.dependencies.memoryRuntimeDisableBeforeRepair')}
-                      </div>
-                    ) : null}
-                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                      <div className="min-w-0">
-                        <div className="text-[12px] font-semibold text-foreground">
-                          {t('memory.factoryReset.button')}
-                        </div>
-                        <div className="mt-0.5 text-[11px] leading-snug text-muted">
-                          {memoryRuntimeReady
-                            ? memorySettings === null
-                              ? t('memory.factoryReset.settingsUnavailable')
-                              : t('memory.factoryReset.dependenciesHint')
-                            : t('memory.factoryReset.artifactRepairRequired')}
-                        </div>
-                      </div>
-                      <Button
-                        variant="destructive"
-                        size="xs"
-                        disabled={reinitializeDisabled}
-                        onClick={() => {
-                          setReinitializeResult(null);
-                          setReinitializeOpen(true);
-                        }}
-                      >
-                        {reinitializeBusy ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
-                        {memorySettings?.factory_reset_required
-                          ? t('memory.factoryReset.retry')
-                          : t('memory.factoryReset.button')}
-                      </Button>
-                    </div>
-                    {reinitializeResult ? (
-                      <div role="status" className="text-[12px] text-foreground">
-                        <div className="font-semibold">{t('memory.factoryReset.resultTitle')}</div>
-                        <div className="mt-1 text-muted">
-                          {reinitializeResult.ok
-                            ? t('memory.factoryReset.resultCompleted')
-                            : memoryErrorMessage(t, reinitializeResult.error || 'memory_factory_reset_failed')}
-                        </div>
-                        {reinitializeResult.roots ? (
-                          <ul className="mt-2 flex flex-col gap-1 text-muted">
-                            {reinitializeResult.roots.map((root) => (
-                              <li key={root.path} className="flex flex-col">
-                                <span>{t('memory.factoryReset.rootOutcome', {
-                                  label: t(`memory.factoryReset.roots.${MEMORY_ROOT_COPY[root.path]}.label`),
-                                  deleted: root.deleted
-                                    ? root.error
-                                      ? t('memory.factoryReset.partial')
-                                      : t('memory.factoryReset.deleted')
-                                    : root.existed === false
-                                      ? t('memory.factoryReset.absent')
-                                      : t('memory.factoryReset.retained'),
-                                })}</span>
-                                <span className="font-mono text-[10px] text-muted">
-                                  {t('memory.factoryReset.technicalPath', { path: root.path })}
-                                </span>
-                              </li>
-                            ))}
-                          </ul>
-                        ) : null}
-                      </div>
-                    ) : null}
+                footer={isMemoryRuntime && sidecarRunning ? (
+                  <div className="border-t border-border pt-3 text-[11px] leading-snug text-muted">
+                    {t('settings.dependencies.memoryRuntimeDisableBeforeRepair')}
                   </div>
                 ) : undefined}
               />
@@ -353,48 +239,6 @@ export const SettingsDependenciesPage: React.FC = () => {
           />
         </div>
       )}
-      <ConfirmDialog
-        open={reinitializeOpen}
-        onOpenChange={setReinitializeOpen}
-        destructive
-        holdSeconds={5}
-        title={t('memory.factoryReset.confirmTitle')}
-        description={t('memory.factoryReset.confirmDescription')}
-        confirmLabel={t('memory.factoryReset.confirmLabel')}
-        confirmDisabled={memorySettings === null || reinitializeBusy || busy !== null || !deps?.some(
-          (dep) => dep.id === 'memory-runtime' && dep.installed && dep.status === 'ready',
-        )}
-        onConfirm={reinitializeMemory}
-      >
-        <div className="flex flex-col gap-3 text-[12.5px] leading-snug">
-          <div className="rounded-[10px] border border-border bg-surface-2 px-3 py-2.5">
-            <div className="mb-1 font-semibold text-foreground">{t('memory.factoryReset.deletesTitle')}</div>
-            <ul className="flex flex-col gap-1">
-              {(Object.entries(MEMORY_ROOT_COPY) as Array<[keyof typeof MEMORY_ROOT_COPY, typeof MEMORY_ROOT_COPY[keyof typeof MEMORY_ROOT_COPY]]>).map(([path, copyKey]) => (
-                <li key={path} className="flex gap-2 text-muted">
-                  <span className="mt-1 size-1 shrink-0 rounded-full bg-muted" />
-                  <span className="flex flex-col">
-                    <span className="font-medium text-foreground">{t(`memory.factoryReset.roots.${copyKey}.label`)}</span>
-                    <span>{t(`memory.factoryReset.roots.${copyKey}.description`)}</span>
-                    <span className="font-mono text-[10px]">{t('memory.factoryReset.technicalPath', { path })}</span>
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </div>
-          <div className="rounded-[10px] border border-gold/30 bg-gold/5 px-3 py-2.5">
-            <div className="mb-1 font-semibold text-foreground">{t('memory.factoryReset.retainsTitle')}</div>
-            <ul className="flex flex-col gap-1">
-              {(t('memory.factoryReset.retains', { returnObjects: true }) as string[]).map((line, idx) => (
-                <li key={idx} className="flex gap-2 text-muted">
-                  <span className="mt-1 size-1 shrink-0 rounded-full bg-muted" />
-                  {line}
-                </li>
-              ))}
-            </ul>
-          </div>
-        </div>
-      </ConfirmDialog>
     </SettingsPageShell>
   );
 };

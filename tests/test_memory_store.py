@@ -142,16 +142,32 @@ def test_volatile_admission_preserves_identity_without_payload_tables(tmp_path: 
     assert store.has_provider_data_history()
 
 
-def test_clear_preserves_scope_key_and_rotates_epoch(tmp_path: Path) -> None:
-    """MEMORY-CLEAR-201 / MEMORY-SEARCH-012: Clear rotates only the epoch."""
+def test_data_loss_settlement_preserves_stable_identity_and_rotates_epoch(
+    tmp_path: Path,
+) -> None:
+    """MEMORY-REPAIR-302: destructive reset preserves stable identity."""
 
     store = MemoryStore(_store_path(tmp_path), effective_home=tmp_path)
     before = store.ensure_meta()
-    store.reset_for_clear()
+    principal = store.principal_for_user_key("slack:U123")
+    store.admit_volatile_capture(
+        source_message_id="source-1",
+        session_id="session-1",
+        principal_id=principal,
+        project_ref="project-slug",
+        provenance="user_input",
+        occurred_at_ms=1_000,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+
+    store.settle_after_data_loss()
+
     after = store.ensure_meta()
     assert after.epoch == before.epoch + 1
     assert after.scope_key == before.scope_key
+    assert after.provider_root_id == before.provider_root_id
     assert after.last_success_at is None
+    assert store.list_memory_projects(principal) == ("default", "project-slug")
 
 
 def test_released_v2_migration_discards_delivery_tables_and_derives_projects(tmp_path: Path) -> None:

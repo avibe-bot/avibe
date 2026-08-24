@@ -1,5 +1,10 @@
 # Memory Embedding Rebuild Recovery
 
+> Historical design. Superseded by
+> [`memory-unified-recovery-pr3.md`](./memory-unified-recovery-pr3.md); an
+> identity-changing save now uses the confirmed unified reset without a rebuild
+> marker or retry workflow.
+
 > Status: implementation review
 >
 > Issue: #1314

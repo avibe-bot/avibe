@@ -1,51 +1,155 @@
 /* @vitest-environment jsdom */
 
-import { describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { MemoryRouter } from 'react-router-dom';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { InstanceAuthorizationContext } from '../../context/InstanceAuthorizationContext';
 import { ToastProvider } from '../../context/ToastProvider';
 import { OWNER_INSTANCE_CAPABILITIES } from '../../lib/sessionInfo';
 import { SettingsMemoryPage } from './SettingsMemoryPage';
 
-const translate = vi.hoisted(() =>
-  (key: string, options?: { returnObjects?: boolean }) =>
-    options?.returnObjects && key === 'memory.clear.removes'
-      ? ['metadata', 'provider', 'native processing data', 'attachments']
-      : options?.returnObjects && key === 'memory.clear.keeps'
-        ? ['memory root', 'logs']
-        : key,
-);
+const api = vi.hoisted(() => ({
+  deleteMemoryData: vi.fn(),
+  getMemoryMaintenance: vi.fn(),
+  getMemoryProcessingRecord: vi.fn(),
+  getMemorySettings: vi.fn(),
+  getMemoryStatus: vi.fn(),
+  listDependencies: vi.fn(),
+  repairMemory: vi.fn(),
+  wakeMemory: vi.fn(),
+}));
+const translate = vi.hoisted(() => (key: string) => key);
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: translate }),
 }));
-vi.mock('../../context/ApiContext', () => ({
-  useApi: (() => {
-    const api = {
-      getMemorySettings: vi.fn().mockResolvedValue({ status: 'failed', error: 'unavailable' }),
-      getMemoryProcessingRecord: vi.fn().mockResolvedValue({ status: 'failed', error: 'unavailable' }),
-      getMemoryMaintenance: vi.fn().mockResolvedValue({ status: 'failed', error: 'unavailable' }),
-      listDependencies: vi.fn().mockResolvedValue({ deps: [] }),
-    };
-    return () => api;
-  })(),
+
+vi.mock('../../context/ApiContext', async (loadOriginal) => {
+  const original = await loadOriginal<typeof import('../../context/ApiContext')>();
+  return { ...original, useApi: () => api };
+});
+
+vi.mock('./memory/MemoryProcessingRecordPanel', () => ({
+  MemoryProcessingRecordPanel: () => null,
+}));
+vi.mock('./memory/MemoryProfilePanel', () => ({ MemoryProfilePanel: () => null }));
+vi.mock('./memory/MemorySearchPanel', () => ({ MemorySearchPanel: () => null }));
+vi.mock('./memory/MemorySettingsPanel', () => ({ MemorySettingsPanel: () => null }));
+
+vi.mock('./memory/MemoryStatusPanel', () => ({
+  MemoryStatusPanel: ({ repairSupported, onRepair }: { repairSupported?: boolean; onRepair?: () => void }) => (
+    <div>
+      <span>{repairSupported ? 'repair-supported' : 'repair-hidden'}</span>
+      {repairSupported ? <button type="button" onClick={onRepair}>run-repair</button> : null}
+    </div>
+  ),
 }));
 
+const settings = {
+  status: 'ok' as const,
+  enabled: true,
+  mode: 'custom' as const,
+  processing: {
+    llm: { base_url: null, model: null, api_key: null, has_api_key: false },
+    embedding: { base_url: null, model: null, api_key: null, has_api_key: false },
+  },
+};
+
+const status = (state: 'running' | 'degraded' | 'needs_repair') => ({
+  status: 'ok' as const,
+  state,
+  reason: state === 'needs_repair' ? 'memory_local_data_unusable' : null,
+  source: { status: 'unavailable' as const, observed_at: null, reason: null },
+  health: null,
+});
+
+const renderPage = () => render(
+  <MemoryRouter>
+    <InstanceAuthorizationContext.Provider value={{
+      remote: false,
+      instanceKind: null,
+      instanceRole: 'owner',
+      capabilities: OWNER_INSTANCE_CAPABILITIES,
+    }}>
+      <ToastProvider>
+        <SettingsMemoryPage />
+      </ToastProvider>
+    </InstanceAuthorizationContext.Provider>
+  </MemoryRouter>,
+);
+
+beforeEach(() => {
+  api.getMemorySettings.mockResolvedValue(settings);
+  api.getMemoryStatus.mockResolvedValue(status('needs_repair'));
+  api.getMemoryProcessingRecord.mockResolvedValue({
+    status: 'ok',
+    runtime: { source: status('running').source, health: null },
+    sources: {
+      memcells: { status: 'unknown', observed_at: null },
+      runs: { status: 'unknown', observed_at: null },
+      semantic: { status: 'unknown', observed_at: null },
+    },
+    anomalies: { source: { status: 'available', observed_at: null }, items: [] },
+    maintenance: {
+      source: { status: 'available', observed_at: null },
+      data_exists: true,
+      can_delete_data: true,
+    },
+  });
+  api.getMemoryMaintenance.mockResolvedValue({
+    status: 'ok',
+    data_exists: true,
+    can_delete_data: true,
+  });
+  api.listDependencies.mockResolvedValue({
+    deps: [{ id: 'memory-runtime', installed: true, status: 'ready' }],
+  });
+  api.wakeMemory.mockResolvedValue({ ok: true, operation: 'wake', state: 'running' });
+  api.repairMemory.mockResolvedValue({
+    ok: true,
+    operation: 'repair',
+    result: 'completed',
+    data_deleted: true,
+    data_remaining: false,
+    roots: [],
+  });
+  api.deleteMemoryData.mockResolvedValue({
+    ok: true,
+    operation: 'delete_data',
+    result: 'completed',
+    data_deleted: true,
+    data_remaining: false,
+    roots: [],
+  });
+});
+
+afterEach(() => {
+  cleanup();
+  vi.clearAllMocks();
+});
+
 describe('SettingsMemoryPage', () => {
-  it('mounts the memory settings surface for an instance owner', () => {
-    render(
-      <InstanceAuthorizationContext.Provider value={{
-        remote: false,
-        instanceKind: null,
-        instanceRole: 'owner',
-        capabilities: OWNER_INSTANCE_CAPABILITIES,
-      }}>
-        <ToastProvider>
-          <SettingsMemoryPage />
-        </ToastProvider>
-      </InstanceAuthorizationContext.Provider>,
-    );
-    expect(screen.getByRole('heading', { name: 'memory.title' })).toBeTruthy();
+  it('uses Wake for the non-destructive runtime action', async () => {
+    renderPage();
+    await userEvent.click(await screen.findByRole('button', { name: 'memory.wake.button' }));
+    await waitFor(() => expect(api.wakeMemory).toHaveBeenCalledOnce());
+    expect(api.repairMemory).not.toHaveBeenCalled();
+    expect(api.deleteMemoryData).not.toHaveBeenCalled();
+  });
+
+  it('offers Repair only for needs_repair and passes literal accepted loss', async () => {
+    renderPage();
+    expect(await screen.findByText('repair-supported')).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: 'run-repair' }));
+    await waitFor(() => expect(api.repairMemory).toHaveBeenCalledWith(true));
+  });
+
+  it('does not offer Repair for provider degradation', async () => {
+    api.getMemoryStatus.mockResolvedValue(status('degraded'));
+    renderPage();
+    expect(await screen.findByText('repair-hidden')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'run-repair' })).toBeNull();
   });
 });
