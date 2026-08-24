@@ -36,6 +36,14 @@ describe('Memory UI copy contracts', () => {
     );
   });
 
+  it.each(['en', 'zh'] as const)('keeps model identity transition copy scope-neutral in %s', (language) => {
+    const settings = bundles[language].memory.settings;
+    const transitionCopy = `${settings.organizationTransitionTitle}\n${settings.organizationTransitionDescription}`;
+
+    expect(transitionCopy).not.toMatch(language === 'en' ? /organization/i : /组织/);
+    expect(transitionCopy).toMatch(language === 'en' ? /model identity/i : /模型身份/);
+  });
+
   it.each(['en', 'zh'] as const)('does not expose removed recovery copy in %s', (language) => {
     const memory = bundles[language].memory as Record<string, unknown>;
     const processingRecord = memory.processingRecord as Record<string, unknown>;

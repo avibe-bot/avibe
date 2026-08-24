@@ -66,6 +66,19 @@ async def test_unavailable_runtime_can_be_marked_needs_repair(
 
 
 @pytest.mark.asyncio
+async def test_disabled_legacy_recovery_remains_visible_as_needs_repair(
+    tmp_path: Path,
+) -> None:
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=False, legacy_needs_repair=True),
+        effective_home=tmp_path,
+    )
+
+    assert runtime.runtime_state() == "needs_repair"
+    await runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_runtime_close_cancels_pending_automatic_wake(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

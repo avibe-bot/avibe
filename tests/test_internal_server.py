@@ -1005,6 +1005,38 @@ def test_memory_wake_uses_non_destructive_runtime_operation() -> None:
     runtime.wake.assert_awaited_once_with()
 
 
+def test_reconcile_memory_hot_applies_the_persisted_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from config.v2_config import MemoryConfig, V2Config
+
+    memory = MemoryConfig(enabled=False)
+    monkeypatch.setattr(
+        V2Config,
+        "load",
+        classmethod(lambda cls: SimpleNamespace(memory=memory)),
+    )
+    controller = _build_controller_double()
+    controller.reconcile_memory = AsyncMock(
+        return_value={"ok": True, "state": "disabled"}
+    )
+    app = internal_server.create_app(controller, memory_ui_secret="test-secret")
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.post("/internal/reconcile-memory", json={})
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "state": "disabled"}
+    controller.reconcile_memory.assert_awaited_once_with(memory)
+
+
 def test_memory_preflight_requires_signed_ui_operator() -> None:
     runtime = SimpleNamespace(preflight=AsyncMock())
     controller = _build_controller_double()

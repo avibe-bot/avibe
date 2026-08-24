@@ -36,9 +36,10 @@ from storage.background import (
     SWEEP_REASON_TRANSPORT_UNAVAILABLE,
 )
 from vibe.cli import (
+    _MEMORY_CLI_ATTACHMENT_STATE_I18N_KEYS,
     _MEMORY_CLI_PROVIDER_STATE_I18N_KEYS,
     _MEMORY_CLI_REASON_I18N_KEYS,
-    _MEMORY_CLI_SOURCE_STATE_I18N_KEYS,
+    _MEMORY_CLI_RUNTIME_STATE_I18N_KEYS,
 )
 from vibe.i18n import get_supported_languages, t
 
@@ -78,11 +79,13 @@ def test_no_backend_translation_is_blank() -> None:
     "key",
     sorted(
         {
-            *_MEMORY_CLI_SOURCE_STATE_I18N_KEYS.values(),
+            *_MEMORY_CLI_RUNTIME_STATE_I18N_KEYS.values(),
             *_MEMORY_CLI_PROVIDER_STATE_I18N_KEYS.values(),
+            *_MEMORY_CLI_ATTACHMENT_STATE_I18N_KEYS.values(),
             *_MEMORY_CLI_REASON_I18N_KEYS.values(),
-            "memory.cli.sourceState.unknown",
+            "memory.cli.runtimeState.unknown",
             "memory.cli.providerState.unknown",
+            "memory.cli.attachmentCaptureState.unknown",
             "memory.cli.reason.unknown",
             "memory.cli.unknownVersion",
         }

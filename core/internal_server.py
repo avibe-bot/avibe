@@ -1000,6 +1000,31 @@ def create_app(
     def _memory_runtime():
         return getattr(controller, "memory_runtime", None)
 
+    @app.post("/internal/reconcile-memory")
+    async def _reconcile_memory() -> Any:
+        """Hot-apply persisted Memory configuration on the controller loop."""
+
+        from core.memory.artifact import MemoryRuntimeActivationError
+
+        try:
+            from config.v2_config import V2Config
+
+            config = await asyncio.to_thread(V2Config.load)
+            result = await controller.reconcile_memory(config.memory)
+            return JSONResponse(status_code=200, content=result)
+        except MemoryRuntimeActivationError:
+            logger.exception("internal memory runtime activation failed during reconcile")
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "memory_runtime_install_failed"},
+            )
+        except Exception:
+            logger.exception("internal memory reconcile failed")
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "memory_reconcile_failed"},
+            )
+
     @app.post("/internal/memory/wake")
     async def _memory_wake() -> Any:
         """Non-destructively wake the existing admitted Memory root."""

@@ -343,6 +343,9 @@ async def test_reconfigure_keeps_confirmed_identity_when_readiness_fails(
     def update(transform):
         value = transform(controller.config.memory)
         persisted.append(value)
+        runtime.events.append(
+            "persist" if value.runtime_embedding_identity() == target.runtime_embedding_identity() else "verify"
+        )
         return SimpleNamespace(memory=value)
 
     monkeypatch.setattr("core.controller.atomic_update_memory", update)
@@ -359,7 +362,8 @@ async def test_reconfigure_keeps_confirmed_identity_when_readiness_fails(
 
     assert result["ok"] is False
     assert result["state"] == "degraded"
-    assert persisted == [target]
+    assert persisted == [MemoryConfig(enabled=True), target]
+    assert runtime.events.index("delete") < runtime.events.index("persist")
     assert controller.config.memory == target
     assert fresh.marked_reason is None
 
@@ -398,6 +402,57 @@ async def test_reconfigure_rejects_a_stale_memory_snapshot(
         "result": "unchanged",
     }
     assert runtime.events == ["reap"]
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_does_not_overwrite_a_change_racing_with_deletion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _roots(tmp_path)
+    runtime = _Runtime(tmp_path)
+    fresh = _Runtime(tmp_path)
+    controller = _controller(runtime)
+    expected = controller.config.memory
+    target = MemoryConfig(enabled=True)
+    target.processing.embedding = MemoryEndpointConfig(
+        base_url="https://embedding.example.test/v1",
+        model="embed-v2",
+        api_key="secret",
+    )
+    concurrent = MemoryConfig(enabled=False)
+    updates = 0
+
+    def update(transform):
+        nonlocal updates
+        updates += 1
+        runtime.events.append("verify" if updates == 1 else "persist")
+        current = expected if updates == 1 else concurrent
+        return SimpleNamespace(memory=transform(current))
+
+    monkeypatch.setattr("core.controller.atomic_update_memory", update)
+    monkeypatch.setattr(
+        "core.controller.V2Config.load",
+        classmethod(lambda cls: SimpleNamespace(memory=concurrent)),
+    )
+    monkeypatch.setattr(
+        "core.memory.runtime.create_memory_runtime",
+        lambda *args, **kwargs: fresh,
+    )
+
+    result = await controller.reconfigure_memory(
+        target,
+        expected_config=expected,
+        confirm_loss=True,
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "memory_operation_in_progress"
+    assert result["result"] == "deleted_config_not_applied"
+    assert result["data_deleted"] is True
+    assert controller.config.memory == concurrent
+    assert runtime.events.index("delete") < runtime.events.index("persist")
+    assert fresh.events == []
 
 
 @pytest.mark.asyncio

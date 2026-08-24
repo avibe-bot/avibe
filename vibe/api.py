@@ -17,6 +17,7 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from http.client import HTTPSConnection
 from pathlib import Path
@@ -1079,7 +1080,12 @@ def save_memory_config(
     def replace_memory(current: MemoryConfig) -> MemoryConfig:
         if expected is not None and current != expected:
             raise MemoryConfigStaleWrite("memory candidate changed")
-        return candidate
+        return replace(
+            candidate,
+            legacy_needs_repair=(
+                current.legacy_needs_repair or candidate.legacy_needs_repair
+            ),
+        )
 
     lease = MemoryOperationLease()
     lease.acquire()

@@ -52,6 +52,7 @@ from core.memory.process import (
     EverOSProcessPort,
     EverOSProcessSettings,
     RecordedSidecarReaper,
+    RecordedSyncReaper,
 )
 from core.memory.sidecar_lifecycle import MemorySidecarLifecycle, SidecarSnapshot
 from core.memory.processing_record import (
@@ -712,6 +713,15 @@ class MemoryRuntime:
             if self._process is not None:
                 return False
             try:
+                legacy_sync = RecordedSyncReaper(
+                    effective_home=self._effective_home,
+                    provider_root=self._provider_root,
+                )
+                await legacy_sync.reconcile_orphan()
+            except Exception:
+                logger.exception("Released EverOS sync recovery did not finish")
+                raise
+            try:
                 required_no_follow_flag()
                 recovery = RecordedSidecarReaper(
                     effective_home=self._effective_home,
@@ -1100,10 +1110,10 @@ class MemoryRuntime:
     def runtime_state(self) -> Literal[
         "disabled", "starting", "running", "degraded", "needs_repair"
     ]:
-        if not self._config.enabled:
-            return "disabled"
         if self.needs_repair:
             return "needs_repair"
+        if not self._config.enabled:
+            return "disabled"
         if self._artifact_installing or self._reconcile_lock.locked():
             return "starting"
         if self._process is not None and self._process.running and self._runtime_error is None:
@@ -1878,7 +1888,7 @@ class MemoryRuntime:
             self._artifact_installing = True
 
         try:
-            payload = await asyncio.to_thread(self._artifact_manager.ensure, force=True)
+            payload = await run_blocking(self._artifact_manager.ensure, force=True)
         except asyncio.CancelledError:
             raise
         except Exception:

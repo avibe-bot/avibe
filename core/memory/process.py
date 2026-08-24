@@ -124,6 +124,13 @@ _SIDECAR_RECORD_MAX_BYTES = 4 * 1024
 _SIDECAR_ENTRYPOINT_MODULE = "core.memory.sidecar"
 _REBUILD_ENTRYPOINT_MODULE = "core.memory.rebuild_child"
 _REBUILD_LOCK_PREFIX = "cascade-rebuild-"
+_SYNC_RECORD_PREFIX = "cascade-sync-"
+_SYNC_RECORD_MAX_BYTES = 16 * 1024
+_SYNC_NONCE_ENV = "AVIBE_MEMORY_SYNC_NONCE"
+_SYNC_PARENT_PID_ENV = "AVIBE_MEMORY_SYNC_PARENT_PID"
+_SYNC_PARENT_CREATE_TIME_ENV = "AVIBE_MEMORY_SYNC_PARENT_CREATE_TIME"
+_SYNC_PARENT_UID_ENV = "AVIBE_MEMORY_SYNC_PARENT_UID"
+_SYNC_ARGV = ("-I", "-m", "everos.entrypoints.cli.main", "cascade", "sync")
 _REBUILD_LOCK_DIRECTORY = ".avibe-memory-locks"
 _PROVIDER_LOCK_RETRY_INTERVAL_SECONDS = 0.05
 _REBUILD_HANDSHAKE_TIMEOUT_SECONDS = 30.0
@@ -475,6 +482,14 @@ class _ProcessHost(Protocol):
         *,
         provider_root: Path,
         python: Path | None,
+    ) -> dict[int, float]: ...
+
+    def find_syncs(
+        self,
+        *,
+        provider_root: Path,
+        python: Path,
+        nonce: str,
     ) -> dict[int, float]: ...
 
     def live(self, identities: Mapping[int, float]) -> dict[int, float]: ...
@@ -2247,6 +2262,309 @@ class SidecarOwnership:
         return False, sorted(foreign)
 
 
+def legacy_sync_record_path(provider_root: Path | str) -> Path:
+    """Return the released provider-root-scoped sync ownership path."""
+
+    return _provider_root_coordination_path(
+        provider_root=provider_root,
+        prefix=_SYNC_RECORD_PREFIX,
+        suffix=".json",
+    )
+
+
+class RecordedSyncReaper:
+    """Consume released sync ownership without restoring sync orchestration."""
+
+    def __init__(
+        self,
+        *,
+        provider_root: Path | str,
+        effective_home: Path | str,
+        stop_timeout_seconds: float = _STOP_TIMEOUT_SECONDS,
+        _host: _ProcessHost | None = None,
+    ) -> None:
+        filesystem_root = ConfinedRoot.from_home(effective_home)
+        self._effective_home = filesystem_root.physical_home
+        self._memory_dir = self._effective_home / "memory"
+        self._provider_root = filesystem_root.confine(provider_root)
+        self._socket_path = self._memory_dir / ".rt" / "everos.sock"
+        self._host = _SystemProcessHost() if _host is None else _host
+        self._record_path = legacy_sync_record_path(self._provider_root)
+        self._stop_timeout_seconds = _positive_timeout(
+            stop_timeout_seconds,
+            _STOP_TIMEOUT_SECONDS,
+        )
+
+    async def reconcile_orphan(self) -> None:
+        _ensure_owner_directory(self._memory_dir)
+        _require_provider_root_access_path(self._provider_root)
+        lock_path = _provider_rebuild_lock_path(provider_root=self._provider_root)
+        lock = _ProviderRootLock(confinement_root=lock_path.parent.parent, path=lock_path)
+        lock.acquire()
+        try:
+            record = _read_sidecar_record(
+                self._record_path,
+                max_bytes=_SYNC_RECORD_MAX_BYTES,
+            )
+            if record is None:
+                if _sidecar_record_exists(self._record_path):
+                    raise RuntimeError("released sync ownership record is unsafe")
+                return
+            validated = _validate_legacy_sync_record(
+                record,
+                provider_root=self._provider_root,
+                socket_path=self._socket_path,
+            )
+            if self._recorded_parent_is_live(validated):
+                raise RuntimeError("released sync is still owned by a live parent")
+            interrupted = await _finish_cleanup_despite_cancellation(
+                self._reconcile_exclusive(validated)
+            )
+            if interrupted:
+                raise asyncio.CancelledError
+        finally:
+            lock.release()
+
+    def _recorded_parent_is_live(self, record: Mapping[str, Any]) -> bool:
+        identity = self._host.inspect_identity(int(record["parent_pid"]))
+        if identity is None or record.get("cleanup_failed") is True:
+            return False
+        expected_uid = record.get("parent_uid")
+        if expected_uid is not None:
+            if identity.uid is None:
+                raise RuntimeError("released sync parent identity is unavailable")
+            if identity.uid != expected_uid:
+                return False
+        if "parent_starttime_ticks" in record:
+            if not _is_identity_stamp(identity.stamp):
+                raise RuntimeError("released sync parent identity is unavailable")
+            return float(identity.stamp) == float(record["parent_starttime_ticks"])
+        if not _is_identity_stamp(identity.wall_create_time):
+            raise RuntimeError("released sync parent identity is unavailable")
+        return float(identity.wall_create_time) == float(record["parent_create_time"])
+
+    async def _reconcile_exclusive(self, record: Mapping[str, Any]) -> None:
+        identities: dict[int, float] = {}
+        if record["state"] == "pending":
+            candidates = self._host.find_syncs(
+                provider_root=self._provider_root,
+                python=Path(record["argv"][0]),
+                nonce=str(record["nonce"]),
+            )
+            if not candidates:
+                _remove_legacy_sync_record(self._record_path)
+                return
+            if len(candidates) != 1:
+                raise RuntimeError("released pending sync ownership is ambiguous")
+            pid, created_at = next(iter(candidates.items()))
+            identity = self._host.inspect_identity(pid)
+            _validate_legacy_sync_identity(
+                identity,
+                record,
+                created_at=created_at,
+                provider_root=self._provider_root,
+                require_argv=True,
+            )
+            group = self._host.process_group(pid)
+            if group is None:
+                raise RuntimeError("released pending sync process group is unavailable")
+            identities[pid] = created_at
+        else:
+            pid = int(record["pid"])
+            group = int(record["process_group"])
+            identity = self._host.inspect_identity(pid)
+            if identity is not None:
+                verdict = _classify_recorded_child(
+                    record,
+                    identity,
+                    socket_path=self._socket_path,
+                    provider_root=self._provider_root,
+                    role=_MemoryChildRole.CASCADE_SYNC,
+                )
+                if verdict is _RecordedSidecar.NOT_OURS:
+                    _remove_legacy_sync_record(self._record_path)
+                    return
+                if verdict is _RecordedSidecar.UNVERIFIABLE:
+                    raise RuntimeError("released finalized sync identity is unavailable")
+                if not _is_identity_stamp(identity.stamp):
+                    raise RuntimeError("released finalized sync identity is unavailable")
+                _validate_legacy_sync_identity(
+                    identity,
+                    record,
+                    created_at=float(identity.stamp),
+                    provider_root=self._provider_root,
+                    require_argv=True,
+                )
+                identities[pid] = float(identity.stamp)
+
+        if hasattr(os, "getpgrp") and group == os.getpgrp():
+            raise RuntimeError("released sync process group is unsafe")
+        self._merge_validated_group(record, group, identities)
+        await self._terminate_group(record, group, identities)
+        remaining: dict[int, float] = {}
+        self._merge_validated_group(record, group, remaining)
+        if self._host.live(remaining):
+            raise RuntimeError("released sync process group did not exit")
+        _remove_legacy_sync_record(self._record_path)
+
+    def _merge_validated_group(
+        self,
+        record: Mapping[str, Any],
+        group: int,
+        identities: dict[int, float],
+    ) -> None:
+        claimed, foreign = self._host.recorded_group_members(
+            group,
+            socket_path=self._socket_path,
+            provider_root=self._provider_root,
+            role=_MemoryChildRole.CASCADE_SYNC,
+        )
+        if foreign:
+            raise RuntimeError("released sync process group is unverifiable")
+        for pid, created_at in claimed.items():
+            identity = self._host.inspect_identity(pid)
+            if identity is None:
+                continue
+            _validate_legacy_sync_identity(
+                identity,
+                record,
+                created_at=created_at,
+                provider_root=self._provider_root,
+                require_argv=pid == record.get("pid"),
+            )
+            identities.setdefault(pid, created_at)
+
+    async def _terminate_group(
+        self,
+        record: Mapping[str, Any],
+        group: int,
+        identities: dict[int, float],
+    ) -> None:
+        rounds = (
+            (signal.SIGTERM, self._stop_timeout_seconds),
+            (
+                getattr(signal, "SIGKILL", signal.SIGTERM),
+                min(self._stop_timeout_seconds, 3.0),
+            ),
+        )
+        for signum, timeout_seconds in rounds:
+            if self._host.live(identities):
+                self._merge_validated_group(record, group, identities)
+            self._host.signal(identities, signum, process_group=group)
+            if await self._host.wait_for_exit(identities, timeout_seconds):
+                return
+        raise RuntimeError("released sync process group did not exit")
+
+
+def _validate_legacy_sync_record(
+    record: object,
+    *,
+    provider_root: Path,
+    socket_path: Path,
+) -> Mapping[str, Any]:
+    if not isinstance(record, dict):
+        raise RuntimeError("released sync ownership record is invalid")
+    if (
+        record.get("role") != _MemoryChildRole.CASCADE_SYNC.value
+        or not _provider_roots_match(record.get("provider_root"), provider_root)
+        or not _paths_match(record.get("socket_path"), socket_path)
+        or record.get("state") not in {"pending", "finalized"}
+    ):
+        raise RuntimeError("released sync ownership record is invalid")
+    nonce = record.get("nonce")
+    argv = record.get("argv")
+    cleanup_failed = record.get("cleanup_failed", False)
+    if (
+        not isinstance(cleanup_failed, bool)
+        or not isinstance(nonce, str)
+        or len(nonce) != 64
+        or any(character not in "0123456789abcdef" for character in nonce)
+        or not isinstance(argv, list)
+        or len(argv) != len(_SYNC_ARGV) + 1
+        or not isinstance(argv[0], str)
+        or not Path(argv[0]).is_absolute()
+        or tuple(argv[1:]) != _SYNC_ARGV
+    ):
+        raise RuntimeError("released sync ownership record is invalid")
+    parent_pid = record.get("parent_pid")
+    parent_uid = record.get("parent_uid")
+    create_time = record.get("create_time")
+    if (
+        not isinstance(parent_pid, int)
+        or isinstance(parent_pid, bool)
+        or parent_pid <= 1
+        or not _is_identity_stamp(record.get("parent_create_time"))
+        or (create_time is not None and not _is_identity_stamp(create_time))
+        or (
+            parent_uid is not None
+            and (
+                not isinstance(parent_uid, int)
+                or isinstance(parent_uid, bool)
+                or parent_uid < 0
+            )
+        )
+        or (
+            "parent_starttime_ticks" in record
+            and not _is_identity_stamp(record.get("parent_starttime_ticks"))
+        )
+    ):
+        raise RuntimeError("released sync ownership record is invalid")
+    if record["state"] == "finalized" and (
+        not isinstance(record.get("pid"), int)
+        or isinstance(record.get("pid"), bool)
+        or int(record["pid"]) <= 1
+        or not isinstance(record.get("process_group"), int)
+        or isinstance(record.get("process_group"), bool)
+        or int(record["process_group"]) <= 1
+        or (
+            "starttime_ticks" not in record
+            and not _is_identity_stamp(record.get("create_time"))
+        )
+    ):
+        raise RuntimeError("released sync ownership record is invalid")
+    if "starttime_ticks" in record and not _is_identity_stamp(
+        record.get("starttime_ticks")
+    ):
+        raise RuntimeError("released sync ownership record is invalid")
+    return record
+
+
+def _validate_legacy_sync_identity(
+    identity: _ProcessIdentity | None,
+    record: Mapping[str, Any],
+    *,
+    created_at: float,
+    provider_root: Path,
+    require_argv: bool,
+) -> None:
+    if (
+        identity is None
+        or not _is_identity_stamp(created_at)
+        or identity.stamp != created_at
+    ):
+        raise RuntimeError("released sync identity is unavailable")
+    if require_argv and identity.cmdline != tuple(record["argv"]):
+        raise RuntimeError("released sync identity is unavailable")
+    expected_uid = record.get("parent_uid")
+    if expected_uid is not None and identity.uid != expected_uid:
+        raise RuntimeError("released sync identity is unavailable")
+    environment = identity.environment
+    if environment is None:
+        raise RuntimeError("released sync identity is unavailable")
+    expected_parent_uid = "" if expected_uid is None else str(expected_uid)
+    if (
+        not _provider_roots_match(environment.get("EVEROS_ROOT"), provider_root)
+        or environment.get("AVIBE_MEMORY_CHILD_ROLE")
+        != _MemoryChildRole.CASCADE_SYNC.value
+        or environment.get(_SYNC_NONCE_ENV) != record["nonce"]
+        or environment.get(_SYNC_PARENT_PID_ENV) != str(record["parent_pid"])
+        or environment.get(_SYNC_PARENT_CREATE_TIME_ENV)
+        != float(record["parent_create_time"]).hex()
+        or environment.get(_SYNC_PARENT_UID_ENV) != expected_parent_uid
+    ):
+        raise RuntimeError("released sync identity is unavailable")
+
+
 def _settings_complete(settings: EverOSProcessSettings) -> bool:
     return all(
         isinstance(value, str) and bool(value.strip())
@@ -2752,7 +3070,18 @@ def _recorded_child_python(record: object) -> Path | None:
     if not isinstance(record, dict):
         return None
     value = record.get("python")
-    return Path(value) if isinstance(value, str) and value else None
+    if isinstance(value, str) and value:
+        return Path(value)
+    argv = record.get("argv")
+    if (
+        record.get("role") == _MemoryChildRole.CASCADE_SYNC.value
+        and isinstance(argv, list)
+        and len(argv) == len(_SYNC_ARGV) + 1
+        and isinstance(argv[0], str)
+        and tuple(argv[1:]) == _SYNC_ARGV
+    ):
+        return Path(argv[0])
+    return None
 
 
 def _record_for_this_installation(
@@ -3166,12 +3495,16 @@ def _classify_recorded_sidecar(
     )
 
 
-def _read_sidecar_record(path: Path) -> object | None:
+def _read_sidecar_record(
+    path: Path,
+    *,
+    max_bytes: int = _SIDECAR_RECORD_MAX_BYTES,
+) -> object | None:
     try:
         info = path.lstat()
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
             return None
-        if info.st_size > _SIDECAR_RECORD_MAX_BYTES:
+        if info.st_size > max_bytes:
             return None
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError):
@@ -3191,6 +3524,21 @@ def _sidecar_record_exists(path: Path) -> bool:
     except OSError:
         return False
     return True
+
+
+def _remove_legacy_sync_record(path: Path) -> None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise RuntimeError("released sync ownership record cannot be inspected") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise RuntimeError("released sync ownership record is unsafe")
+    try:
+        path.unlink()
+    except OSError as exc:
+        raise RuntimeError("released sync ownership record cannot be retired") from exc
 
 
 def _processes_serving_owned_socket(*, socket_path: Path) -> dict[int, float]:
@@ -3320,6 +3668,77 @@ def _processes_rebuilding_owned_root(
             )
             or environment.get("AVIBE_MEMORY_CHILD_ROLE")
             != _MemoryChildRole.CASCADE_REBUILD.value
+        ):
+            continue
+        claimed[candidate.pid] = float(created_at)
+    return claimed
+
+
+def _processes_syncing_owned_root(
+    *,
+    provider_root: Path,
+    python: Path,
+    nonce: str,
+) -> dict[int, float]:
+    """Discover one exact released nonce-bearing sync child."""
+
+    claimed: dict[int, float] = {}
+    own_pid = os.getpid()
+    getuid = getattr(os, "getuid", None)
+    own_uid = getuid() if callable(getuid) else None
+    for candidate in psutil.process_iter():
+        if candidate.pid == own_pid:
+            continue
+        try:
+            uid = _process_real_uid(candidate)
+            if own_uid is not None and uid is not None and uid != own_uid:
+                continue
+            cmdline = _disclosed_identity_field(candidate.cmdline)
+        except psutil.NoSuchProcess:
+            continue
+        except psutil.Error as exc:
+            raise RuntimeError(
+                f"sync child identity could not be verified (pid {candidate.pid})"
+            ) from exc
+        if cmdline is None:
+            raise RuntimeError(
+                f"sync child command line could not be verified (pid {candidate.pid})"
+            )
+        rendered = tuple(str(value) for value in cmdline)
+        if not _cmdline_matches_role(
+            rendered,
+            role=_MemoryChildRole.CASCADE_SYNC,
+            socket_path=Path(),
+            python=python,
+        ):
+            continue
+        try:
+            created_at = _disclosed_identity_field(
+                lambda: _process_creation_stamp(candidate)
+            )
+            environment = _disclosed_process_environment(candidate)
+        except psutil.NoSuchProcess:
+            continue
+        except psutil.Error as exc:
+            raise RuntimeError(
+                f"sync child identity could not be verified (pid {candidate.pid})"
+            ) from exc
+        if own_uid is not None and uid is None:
+            raise RuntimeError(
+                f"sync child uid could not be verified (pid {candidate.pid})"
+            )
+        if created_at is None or environment is None:
+            raise RuntimeError(
+                f"sync child identity could not be verified (pid {candidate.pid})"
+            )
+        if (
+            not _provider_roots_match(
+                environment.get("EVEROS_ROOT"),
+                provider_root,
+            )
+            or environment.get("AVIBE_MEMORY_CHILD_ROLE")
+            != _MemoryChildRole.CASCADE_SYNC.value
+            or environment.get(_SYNC_NONCE_ENV) != nonce
         ):
             continue
         claimed[candidate.pid] = float(created_at)
@@ -3771,6 +4190,19 @@ class _SystemProcessHost:
         return _processes_rebuilding_owned_root(
             provider_root=provider_root,
             python=python,
+        )
+
+    def find_syncs(
+        self,
+        *,
+        provider_root: Path,
+        python: Path,
+        nonce: str,
+    ) -> dict[int, float]:
+        return _processes_syncing_owned_root(
+            provider_root=provider_root,
+            python=python,
+            nonce=nonce,
         )
 
     def live(self, identities: Mapping[int, float]) -> dict[int, float]:

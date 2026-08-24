@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from config.v2_config import MemoryConfig, MemoryEndpointConfig, V2Config, atomic_update_memory
-from vibe.api import config_to_payload
+from config import paths
+from config.v2_config import (
+    MemoryConfig,
+    MemoryEndpointConfig,
+    V2Config,
+    atomic_update_memory,
+    memory_config_to_payload,
+)
+from vibe.api import config_to_payload, save_memory_config
 
 
 def _payload(memory: object) -> dict:
@@ -58,6 +66,8 @@ def test_memory_config_round_trips_without_recovery_protocol_or_secret_projectio
     for field in ("recovery_intent", "embedding_change_pending"):
         assert field not in stored["memory"]
         assert field not in projected["memory"]
+    assert "repair_required" not in stored["memory"]
+    assert "repair_required" not in projected["memory"]
     assert "transition_rebuild_owned" not in stored["memory"]["cloud"]
 
 
@@ -70,7 +80,7 @@ def test_memory_config_round_trips_without_recovery_protocol_or_secret_projectio
         {"cloud": {"transition_rebuild_owned": True}},
     ],
 )
-def test_released_recovery_fields_are_one_time_needs_repair_input(
+def test_released_recovery_fields_become_a_durable_internal_repair_fence(
     tmp_path: Path,
     legacy: dict,
 ) -> None:
@@ -86,14 +96,16 @@ def test_released_recovery_fields_are_one_time_needs_repair_input(
     assert "recovery_intent" not in stored
     assert "embedding_change_pending" not in stored
     assert "transition_rebuild_owned" not in stored["cloud"]
+    assert stored["repair_required"] is True
+    assert "repair_required" not in config_to_payload(config)["memory"]
     loaded = V2Config.load(path)
-    assert loaded.memory.legacy_needs_repair is False
+    assert loaded.memory.legacy_needs_repair is True
 
 
 def test_released_recovery_config_fixture_loads_and_saves_canonically(
     tmp_path: Path,
 ) -> None:
-    """A released on-disk recovery shape is one-time compatibility evidence."""
+    """Released recovery evidence stays fenced without retaining its old stages."""
 
     fixture = (
         Path(__file__).parent
@@ -113,6 +125,8 @@ def test_released_recovery_config_fixture_loads_and_saves_canonically(
     assert "recovery_intent" not in stored
     assert "embedding_change_pending" not in stored
     assert "transition_rebuild_owned" not in stored["cloud"]
+    assert stored["repair_required"] is True
+    assert V2Config.load(path).memory.legacy_needs_repair is True
 
 
 @pytest.mark.parametrize("intent", ["unknown", "", True, 1, {}])
@@ -170,7 +184,50 @@ def test_atomic_memory_update_writes_only_canonical_shape(
         config_path=path,
     )
 
-    assert result.memory.legacy_needs_repair is False
+    assert result.memory.legacy_needs_repair is True
     stored = json.loads(path.read_text(encoding="utf-8"))["memory"]
     assert "recovery_intent" not in stored
     assert "embedding_change_pending" not in stored
+    assert stored["repair_required"] is True
+
+
+def test_successful_repair_can_clear_the_durable_compatibility_fence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    path = tmp_path / "config" / "config.json"
+    path.parent.mkdir(parents=True)
+    V2Config.from_payload(
+        _payload({"enabled": False, "recovery_intent": "rebuild"})
+    ).save(path)
+
+    result = atomic_update_memory(
+        lambda memory: replace(memory, legacy_needs_repair=False),
+        config_path=path,
+    )
+
+    assert result.memory.legacy_needs_repair is False
+    stored = json.loads(path.read_text(encoding="utf-8"))["memory"]
+    assert "repair_required" not in stored
+
+
+def test_public_memory_save_cannot_drop_the_durable_repair_fence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = V2Config.from_payload(
+        _payload({"enabled": False, "recovery_intent": "rebuild"})
+    )
+    config.save()
+    current = V2Config.load().memory
+
+    saved = save_memory_config(
+        memory_config_to_payload(current, include_secrets=True),
+        expected=current,
+    )
+
+    assert saved.memory.legacy_needs_repair is True
+    stored = json.loads(paths.get_config_path().read_text(encoding="utf-8"))["memory"]
+    assert stored["repair_required"] is True

@@ -2028,8 +2028,9 @@ class MemoryConfig:
     mode: MemoryMode | None = None
     processing: MemoryProcessingConfig = field(default_factory=MemoryProcessingConfig)
     cloud: MemoryCloudConfig = field(default_factory=MemoryCloudConfig)
-    # Released recovery markers are consumed at load time only. This transient
-    # flag is deliberately omitted from persisted and public projections.
+    # Released recovery markers collapse into one durable repair fence. It is
+    # persisted internally until a successful destructive Repair clears it,
+    # but never exposed through public config projections.
     legacy_needs_repair: bool = field(default=False, repr=False, compare=False)
 
     def validate(self) -> None:
@@ -2297,6 +2298,8 @@ def memory_config_to_payload(
             "runtime_apply_pending": memory.cloud.runtime_apply_pending,
         },
     }
+    if include_internal and memory.legacy_needs_repair:
+        payload["repair_required"] = True
     return payload
 
 
@@ -2307,7 +2310,7 @@ def _optional_memory_object(value: object, *, name: str) -> dict[str, object]:
 
 
 def memory_config_from_payload(payload: object) -> MemoryConfig:
-    """Parse Memory config and consume released recovery fields once."""
+    """Parse Memory config and collapse released recovery fields into one fence."""
 
     payload = _optional_memory_object(payload, name="memory")
     processing_payload = _optional_memory_object(
@@ -2343,6 +2346,9 @@ def memory_config_from_payload(payload: object) -> MemoryConfig:
         name="memory.cloud.capabilities",
     )
 
+    repair_required = payload.get("repair_required", False)
+    if not isinstance(repair_required, bool):
+        raise ValueError("Config 'memory.repair_required' must be a boolean")
     legacy_pending = payload.get("embedding_change_pending", False)
     if not isinstance(legacy_pending, bool):
         raise ValueError("Config 'memory.embedding_change_pending' must be a boolean")
@@ -2360,7 +2366,10 @@ def memory_config_from_payload(payload: object) -> MemoryConfig:
             "Config 'memory.cloud.transition_rebuild_owned' must be a boolean"
         )
     legacy_needs_repair = bool(
-        legacy_pending or legacy_intent is not None or transition_rebuild_owned
+        repair_required
+        or legacy_pending
+        or legacy_intent is not None
+        or transition_rebuild_owned
     )
 
     memory = MemoryConfig(

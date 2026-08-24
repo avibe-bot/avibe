@@ -19,6 +19,7 @@ from config.v2_config import (
     DEFAULT_AGENT_PROGRESS_STYLE,
     MemoryConfig,
     MemoryConfigStaleWrite,
+    V2Config,
     atomic_update_memory,
 )
 from modules.im import BaseIMClient, MessageContext, IMFactory
@@ -865,33 +866,34 @@ class Controller:
                         return target
                     return replace(current, legacy_needs_repair=False)
 
-                try:
-                    persisted = await asyncio.to_thread(
-                        atomic_update_memory,
-                        persist_confirmed_config,
-                    )
-                except MemoryConfigStaleWrite:
-                    return {
-                        "ok": False,
-                        "operation": operation,
-                        "error": "memory_operation_in_progress",
-                        "result": "unchanged",
-                    }
-                except Exception:
-                    logger.exception(
-                        "Memory data reset could not persist its confirmed configuration"
-                    )
-                    return unchanged_memory_data_result(
-                        runtime.effective_home,
-                        operation=operation,
-                        reason="config_persist_failed",
-                    )
-                target = persisted.memory
-                self.config.memory = target
                 if operation == "reconfigure":
-                    # The confirmed identity is now authoritative. Fence the
-                    # old root even if later termination or deletion fails.
-                    runtime.mark_needs_repair("memory_local_data_unusable")
+                    def verify_expected_config(current: MemoryConfig) -> MemoryConfig:
+                        if expected_config is None or current != expected_config:
+                            raise MemoryConfigStaleWrite("memory candidate changed")
+                        return current
+
+                    try:
+                        await run_blocking(
+                            atomic_update_memory,
+                            verify_expected_config,
+                        )
+                    except MemoryConfigStaleWrite:
+                        return {
+                            "ok": False,
+                            "operation": operation,
+                            "error": "memory_operation_in_progress",
+                            "result": "unchanged",
+                        }
+                    except Exception:
+                        logger.exception(
+                            "Memory data reset could not verify its confirmed configuration"
+                        )
+                        return unchanged_memory_data_result(
+                            runtime.effective_home,
+                            operation=operation,
+                            reason="config_persist_failed",
+                        )
+
                 runtime.retire()
                 try:
                     await runtime.close()
@@ -936,7 +938,10 @@ class Controller:
                 deletion_payload = deletion.payload()
                 if deletion.data_remaining:
                     failed = create_memory_runtime(
-                        replace(target, legacy_needs_repair=True),
+                        replace(
+                            deepcopy(expected_config or self.config.memory),
+                            legacy_needs_repair=True,
+                        ),
                         artifact_manager=runtime.artifact_manager,
                         process_factory=runtime.process_factory,
                         effective_home=runtime.effective_home,
@@ -954,6 +959,58 @@ class Controller:
                         **deletion_payload,
                     }
 
+                try:
+                    persisted = await run_blocking(
+                        atomic_update_memory,
+                        persist_confirmed_config,
+                    )
+                except Exception as exc:
+                    stale = isinstance(exc, MemoryConfigStaleWrite)
+                    if not stale:
+                        logger.exception(
+                            "Memory data reset deleted data but could not persist configuration"
+                        )
+                    try:
+                        live_config = (await run_blocking(V2Config.load)).memory
+                    except Exception:
+                        logger.exception(
+                            "Memory data reset could not reload configuration after deletion"
+                        )
+                        live_config = deepcopy(expected_config or self.config.memory)
+                    fallback = create_memory_runtime(
+                        live_config,
+                        artifact_manager=runtime.artifact_manager,
+                        process_factory=runtime.process_factory,
+                        effective_home=runtime.effective_home,
+                        processing_event=self._log_memory_processing_event,
+                        on_config_settled=self._adopt_settled_memory_config,
+                    )
+                    self.memory_runtime = fallback
+                    self.memory_module = fallback.module
+                    self.config.memory = live_config
+                    fallback_state = "disabled"
+                    if live_config.enabled:
+                        fallback_activation = await fallback.wake(
+                            operation_lease_held=True
+                        )
+                        fallback_state = str(
+                            fallback_activation.get("state") or "degraded"
+                        )
+                    return {
+                        "ok": False,
+                        "operation": operation,
+                        "state": fallback_state,
+                        "error": (
+                            "memory_operation_in_progress"
+                            if stale
+                            else f"memory_{operation}_failed"
+                        ),
+                        "result": "deleted_config_not_applied",
+                        **deletion_payload,
+                    }
+
+                target = persisted.memory
+                self.config.memory = target
                 fresh = create_memory_runtime(
                     target,
                     artifact_manager=runtime.artifact_manager,

@@ -6,6 +6,7 @@ import importlib.util
 import os
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 import pytest
@@ -309,6 +310,86 @@ async def test_disabled_wake_reaps_orphans_without_installing_artifact(
     }
     assert reaped == 1
     assert artifact.ensure_calls == []
+
+
+@pytest.mark.asyncio
+async def test_orphan_recovery_reaps_released_sync_before_sidecar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    memory_runtime_factory,
+) -> None:
+    events: list[str] = []
+
+    class SyncReaper:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def reconcile_orphan(self) -> None:
+            events.append("sync")
+
+    class SidecarReaper:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def reconcile_orphan(self) -> None:
+            events.append("sidecar")
+
+    monkeypatch.setattr(runtime_module, "RecordedSyncReaper", SyncReaper)
+    monkeypatch.setattr(runtime_module, "RecordedSidecarReaper", SidecarReaper)
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=False),
+        effective_home=tmp_path,
+    )
+
+    assert await runtime._reap_recorded_sidecar_if_unowned() is True
+    assert events == ["sync", "sidecar"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_artifact_install_joins_before_releasing_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    memory_runtime_factory,
+) -> None:
+    install_started = threading.Event()
+    finish_install = threading.Event()
+    lease_events: list[str] = []
+
+    class BlockingArtifact(FakeMemoryArtifactManager):
+        def ensure(self, *, force: bool = False) -> dict[str, object]:
+            self.ensure_calls.append(force)
+            install_started.set()
+            finish_install.wait(timeout=5)
+            return {"ok": True, "reason": None, "download_error": None}
+
+    class Lease:
+        def __init__(self, _home: Path) -> None:
+            pass
+
+        def acquire(self) -> None:
+            lease_events.append("acquire")
+
+        def release(self) -> None:
+            lease_events.append("release")
+
+    monkeypatch.setattr(runtime_module, "MemoryOperationLease", Lease)
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=False),
+        artifact_manager=BlockingArtifact(),
+        effective_home=tmp_path,
+    )
+    task = asyncio.create_task(runtime.install_artifact())
+    assert await asyncio.to_thread(install_started.wait, 2)
+
+    task.cancel()
+    await asyncio.sleep(0.05)
+
+    assert task.done() is False
+    assert lease_events == ["acquire"]
+    finish_install.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert lease_events == ["acquire", "release"]
 
 
 @pytest.mark.asyncio

@@ -106,7 +106,7 @@ def test_cloud_identity_change_keeps_last_applied_runtime_identity() -> None:
             capabilities=MemoryCloudCapabilities(chat=True, embedding=True),
             embedding_identity="emb-v1",
             applied_embedding_identity="emb-v1",
-            model_access_key="mak-first",
+            model_access_key="mak_first",
             proxy_base_url="https://backend.example.test/v1/model",
             source_instance_id="instance-1",
         ),
@@ -121,6 +121,34 @@ def test_cloud_identity_change_keeps_last_applied_runtime_identity() -> None:
     assert changed.cloud.runtime_apply_pending is True
 
 
+def test_cloud_identity_notice_alone_requires_live_reconciliation() -> None:
+    current = MemoryConfig(
+        enabled=True,
+        mode="platform",
+        cloud=MemoryCloudConfig(
+            scope="platform",
+            capabilities=MemoryCloudCapabilities(
+                chat=True,
+                embedding=True,
+                memory_llm=True,
+            ),
+            memory_llm_source="chat_fallback",
+            embedding_identity="emb-v1",
+            applied_embedding_identity="emb-v1",
+            revision=1,
+            model_access_key="mak_first",
+            proxy_base_url="https://backend.example.test/v1/model",
+            source_instance_id="instance-1",
+        ),
+    )
+
+    changed = _resolved(current, _status(identity="emb-v2", revision=1))
+
+    assert changed.runtime_processing() == current.runtime_processing()
+    assert changed.cloud.transition_notice_pending is True
+    assert changed.cloud.runtime_apply_pending is True
+
+
 def test_same_cloud_identity_resumes_without_destructive_authority() -> None:
     current = MemoryConfig(
         enabled=True,
@@ -130,7 +158,7 @@ def test_same_cloud_identity_resumes_without_destructive_authority() -> None:
             capabilities=MemoryCloudCapabilities(),
             embedding_identity=None,
             applied_embedding_identity="emb-v1",
-            model_access_key="mak-first",
+            model_access_key="mak_first",
             proxy_base_url="https://backend.example.test/v1/model",
             source_instance_id="instance-1",
         ),
@@ -152,7 +180,7 @@ def test_provider_capability_fault_pauses_without_marking_repair() -> None:
             capabilities=MemoryCloudCapabilities(chat=True, embedding=True),
             embedding_identity="emb-v1",
             applied_embedding_identity="emb-v1",
-            model_access_key="mak-first",
+            model_access_key="mak_first",
             proxy_base_url="https://backend.example.test/v1/model",
             source_instance_id="instance-1",
         ),
@@ -177,7 +205,7 @@ def test_unpairing_fences_cloud_egress_and_retains_identity_baseline() -> None:
             capabilities=MemoryCloudCapabilities(chat=True, embedding=True),
             embedding_identity="emb-v1",
             applied_embedding_identity="emb-v1",
-            model_access_key="mak-first",
+            model_access_key="mak_first",
             proxy_base_url="https://backend.example.test/v1/model",
             source_instance_id="instance-1",
         ),
@@ -194,7 +222,7 @@ def test_unpairing_fences_cloud_egress_and_retains_identity_baseline() -> None:
 def test_first_cloud_activation_records_identity_without_recovery_state() -> None:
     current = MemoryConfig(enabled=False, mode="platform")
 
-    activated = _resolved(current, _status(identity="emb-v1"), key="mak-first")
+    activated = _resolved(current, _status(identity="emb-v1"), key="mak_first")
 
     assert activated.enabled is True
     assert activated.cloud.applied_embedding_identity == "emb-v1"
