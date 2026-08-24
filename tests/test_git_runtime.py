@@ -74,7 +74,8 @@ def test_manifest_parses_and_exposes_archive(tmp_path: Path, monkeypatch: pytest
 
     status = GitRuntimeManager(manifest_path=manifest).status()
 
-    assert status["version"] == "2.55.0"
+    assert status["version"] is None
+    assert status["selected_version"] == "2.55.0"
     assert status["manifest"]["git_version"] == "2.55.0"
     assert status["archive"]["sha256"] == hashlib.sha256(archive.read_bytes()).hexdigest()
     assert status["archive"]["binary_sha256"] == json.loads(manifest.read_text(encoding="utf-8"))[
@@ -351,9 +352,9 @@ def test_clean_preserves_current_install_and_removes_stale_version(
     first = manager.ensure()
     assert first["ok"] is True
 
-    payload = json.loads(manifest.read_text(encoding="utf-8"))
-    payload["build_revision"] = 2
-    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    second_archive = _write_git_archive(tmp_path / "second", version="2.56.0")
+    second_manifest = _write_manifest(tmp_path / "second", second_archive, version="2.56.0")
+    manager.manifest_path = second_manifest
     second = manager.ensure()
     assert second["ok"] is True
     assert second["install_dir"] != first["install_dir"]
@@ -402,7 +403,11 @@ def test_offline_manifest_upgrade_fails_closed_instead_of_trusting_previous_inst
     next_manifest = _write_manifest(tmp_path / "next", next_archive, version="2.56.0")
     upgraded = GitRuntimeManager(manifest_path=next_manifest, offline=True)
 
-    assert upgraded.resolve_git_path() is None
+    assert upgraded.resolve_git_path() == Path(first["path"])
+    status = upgraded.status()
+    assert status["version"] == "2.55.0"
+    assert status["selected_version"] == "2.56.0"
+    assert status["matches_manifest"] is False
     result = upgraded.ensure()
     assert result["ok"] is False
     assert result["reason"] == "git_archive_unavailable_offline"

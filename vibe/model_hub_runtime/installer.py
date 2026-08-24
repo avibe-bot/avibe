@@ -35,20 +35,23 @@ _ENGINE_PLATFORM_MAP = {
     "linux-arm64": "linux-arm64",
 }
 _ENGINE_ASSET_PLATFORMS = frozenset(_ENGINE_PLATFORM_MAP.values())
-_INSTALL_STATE_SCHEMA_VERSION = 2
-_INSTALL_STATE_SUPPORTED_SCHEMA_VERSIONS = frozenset({1, _INSTALL_STATE_SCHEMA_VERSION})
+_INSTALL_STATE_SCHEMA_VERSION = 3
+_INSTALL_STATE_RELEASED_SCHEMA_VERSIONS = frozenset({1, 2})
+_INSTALL_STATE_SUPPORTED_SCHEMA_VERSIONS = frozenset(
+    {*_INSTALL_STATE_RELEASED_SCHEMA_VERSIONS, _INSTALL_STATE_SCHEMA_VERSION}
+)
 _INSTALL_FAILURE_KEY = "settings.models.install.fail.detail"
 _INSTALL_CLAIM_INVALID_REASON = "model_hub_engine_install_claim_invalid"
 _INSTALL_GENERATION_RE = re.compile(r"^[0-9a-f]{32}$")
 _INSTALL_TARGET_FIELDS = frozenset(
     {
-        "manifest_sha256",
         "runtime_version",
         "platform",
         "archive_sha256",
         "binary_sha256",
     }
 )
+_RELEASED_INSTALL_TARGET_FIELDS = frozenset({*_INSTALL_TARGET_FIELDS, "manifest_sha256"})
 _INSTALL_STATE_UNSET = object()
 _ENGINE_SPEC = ManagedRuntimeSpec(
     runtime_id="model_hub_engine",
@@ -57,6 +60,7 @@ _ENGINE_SPEC = ManagedRuntimeSpec(
     default_bin_path="cli-proxy-api",
     archives_field="assets",
     archive_size_field="size_bytes",
+    platform_aliases=tuple(_ENGINE_PLATFORM_MAP.items()),
 )
 
 
@@ -117,7 +121,10 @@ class EngineRuntimeManager(ManagedRuntimeManager):
         return self.runtime_dir / ".install-state.lock"
 
     def host_platform(self) -> str:
-        platform_tag = managed_runtime.runtime_platform_tag()
+        return self._normalize_engine_platform(managed_runtime.runtime_platform_tag())
+
+    @staticmethod
+    def _normalize_engine_platform(platform_tag: str) -> str:
         return _ENGINE_PLATFORM_MAP.get(platform_tag, platform_tag)
 
     def install_failure_reasons(self) -> frozenset[str]:
@@ -249,7 +256,10 @@ class EngineRuntimeManager(ManagedRuntimeManager):
         if state == "installing" and error_key is not None:
             logger.warning("Ignoring contradictory Model Hub runtime install state")
             return None
-        target = self._validated_install_target(payload.get("target"))
+        target = self._validated_install_target(
+            payload.get("target"),
+            schema_version=int(payload["schema_version"]),
+        )
         generation = payload.get("generation")
         if generation is not None and (
             not isinstance(generation, str) or not _INSTALL_GENERATION_RE.fullmatch(generation)
@@ -309,9 +319,18 @@ class EngineRuntimeManager(ManagedRuntimeManager):
         else:
             self._install_state_override = _INSTALL_STATE_UNSET
 
-    @staticmethod
-    def _validated_install_target(value: object) -> dict[str, str] | None:
-        if not isinstance(value, Mapping) or set(value) != _INSTALL_TARGET_FIELDS:
+    def _validated_install_target(
+        self,
+        value: object,
+        *,
+        schema_version: int = _INSTALL_STATE_SCHEMA_VERSION,
+    ) -> dict[str, str] | None:
+        expected_fields = (
+            _RELEASED_INSTALL_TARGET_FIELDS
+            if schema_version in _INSTALL_STATE_RELEASED_SCHEMA_VERSIONS
+            else _INSTALL_TARGET_FIELDS
+        )
+        if not isinstance(value, Mapping) or set(value) != expected_fields:
             return None
         target: dict[str, str] = {}
         for field in _INSTALL_TARGET_FIELDS:
@@ -319,7 +338,12 @@ class EngineRuntimeManager(ManagedRuntimeManager):
             if not isinstance(item, str) or not item:
                 return None
             target[field] = item
-        return target
+        return self._normalized_install_target(target)
+
+    def _normalized_install_target(self, target: Mapping[str, str]) -> dict[str, str]:
+        normalized = super()._normalized_install_target(target)
+        normalized["platform"] = self._normalize_engine_platform(normalized["platform"])
+        return normalized
 
     @staticmethod
     def _failed_install_state(

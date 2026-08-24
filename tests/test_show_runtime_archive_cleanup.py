@@ -535,9 +535,15 @@ def test_install_guard_unavailable_falls_back_to_verified_install(tmp_path: Path
     real_open = os.open
     monkeypatch.setattr(os, "open", _unwritable_open)
 
-    command = manager._install_manifest_runtime()
+    availability, operation = manager._attempt_managed_install(
+        force=False,
+        offline=True,
+        automatic=False,
+    )
+    command = availability.command
 
     assert command is not None and command[-1].endswith("cli.js")
+    assert operation.ok is True
 
 
 def test_partial_removal_reports_removed_and_failed_counts(monkeypatch, capsys) -> None:
@@ -670,17 +676,24 @@ def test_forced_prepare_fails_structured_when_guard_unavailable(tmp_path: Path, 
 
     monkeypatch.setattr("os.open", _unwritable_open)
 
-    command = manager._install_manifest_runtime()
+    availability, operation = manager._attempt_managed_install(
+        force=True,
+        offline=True,
+        automatic=False,
+    )
+    command = availability.command
 
     assert command is None
+    assert operation.ok is False
     assert manager._install_reason == "runtime_install_guard_unavailable"
 
 
-def test_lock_fallback_enforces_manifest_node_requirement(tmp_path: Path, monkeypatch) -> None:
+def test_installed_manifest_command_enforces_node_requirement(tmp_path: Path, monkeypatch) -> None:
     from core import show_runtime as module
 
     monkeypatch.setattr(module, "_runtime_platform_tag", lambda: "test")
     monkeypatch.setattr(module, "_resolve_node_command", lambda: ["node"])
+    monkeypatch.setattr(module, "_node_version", lambda _command: "18.0.0")
     manifest_payload = {
         "schema_version": 1,
         "runtime_version": "v2",
@@ -717,18 +730,33 @@ def test_lock_fallback_enforces_manifest_node_requirement(tmp_path: Path, monkey
     cli_path.parent.mkdir(parents=True, exist_ok=True)
     cli_path.write_text("runtime", encoding="utf-8")
 
-    from storage.lock import MigrationFileLock
-
-    def _unwritable_lock(self, *args, **kwargs):
-        raise OSError("read-only filesystem")
-
-    monkeypatch.setattr(MigrationFileLock, "acquire", _unwritable_lock)
-
-    command = manager._reuse_verified_manifest_command()
+    command = manager._installed_manifest_runtime_command(offline=True)
 
     # The installed files verify, but Node is below the manifest minimum, so
-    # the fallback must not hand back an unusable command.
+    # the installed-command resolver must not hand back an unusable command.
     assert command is None
+
+
+@pytest.mark.parametrize("failure_type", [OSError, ValueError])
+def test_policy_skip_normalizes_installed_command_resolution_errors(
+    tmp_path: Path,
+    monkeypatch,
+    failure_type: type[Exception],
+) -> None:
+    manager = ShowRuntimeManager(
+        runtime_dir=tmp_path / "show-runtime",
+        runtime_source="archive",
+    )
+
+    def _fail(*, offline: bool):
+        raise failure_type(f"cannot resolve installed command (offline={offline})")
+
+    monkeypatch.setattr(manager, "_installed_managed_runtime_command", _fail)
+
+    availability = manager._publish_policy_skip("VIBE_SHOW_RUNTIME_AUTO_INSTALL")
+
+    assert availability.command is None
+    assert availability.policy_reason == "VIBE_SHOW_RUNTIME_AUTO_INSTALL"
 
 
 def test_dry_run_planning_failure_returns_structured_report(tmp_path: Path, monkeypatch) -> None:

@@ -34,6 +34,7 @@ from config.v2_config import (
     MemoryConfigStaleWrite,
     V2Config,
     atomic_update_memory,
+    config_file_lock,
     memory_config_from_payload,
 )
 from config.v2_settings import (
@@ -705,13 +706,95 @@ def _config_recovery_message() -> Optional[str]:
     return config_recovery_notice(config)
 
 
+_LIST_OPS_PAYLOAD_KEY = "__avibe_list_ops"
+
+
+_LIST_OPS_ALLOWED_PATHS = frozenset({"platforms.enabled"})
+
+
+def _apply_list_ops(base: dict, list_ops: dict) -> dict:
+    """Apply add/remove operations to list-valued config paths.
+
+    ``{"platforms.enabled": {"add": ["wechat"], "remove": ["discord"]}}``
+    mutates the lock-fresh base's list instead of replacing it wholesale,
+    so a stale browser snapshot of the list cannot drop entries another
+    process added (#1458 stage ③: lists are replace-on-merge otherwise).
+    Only whitelisted paths are accepted: resolving arbitrary dotted paths
+    would let a client mutate lists whose owners need service-mediated
+    synchronization (e.g. ``model_hub.sources`` must go through
+    ModelHubService) — anything outside the whitelist raises.
+    """
+    import copy as _copy
+
+    merged = _copy.deepcopy(base)
+
+    def _resolve(container: dict, dotted: str):
+        current = container
+        for part in dotted.split("."):
+            if not isinstance(current, dict):
+                return None
+            current = current.get(part)
+        return current
+
+    if not isinstance(list_ops, dict):
+        raise ValueError("Config list operations must be an object")
+
+    def _validated_operands(ops: dict, name: str) -> list[str]:
+        if name not in ops:
+            return []
+        values = ops[name]
+        if not isinstance(values, list) or any(
+            not isinstance(value, str) or not value.strip() for value in values
+        ):
+            raise ValueError(
+                f"Config list operation '{name}' must be an array of non-empty strings"
+            )
+        return values
+
+    for dotted, ops in list_ops.items():
+        if not isinstance(dotted, str) or dotted not in _LIST_OPS_ALLOWED_PATHS:
+            raise ValueError(
+                f"Config list operation path '{dotted}' is not supported"
+            )
+        if not isinstance(ops, dict):
+            raise ValueError(f"Config list operation '{dotted}' must be an object")
+        unknown = set(ops) - {"add", "remove"}
+        if unknown:
+            names = ", ".join(sorted(str(name) for name in unknown))
+            raise ValueError(f"Config list operation '{dotted}' has unknown keys: {names}")
+        target = _resolve(merged, dotted)
+        if not isinstance(target, list):
+            raise ValueError(f"Config list operation target '{dotted}' is not a list")
+        additions = _validated_operands(ops, "add")
+        removals = _validated_operands(ops, "remove")
+        next_list = [item for item in target if item not in removals]
+        for item in additions:
+            if item not in next_list:
+                next_list.append(item)
+        # Write back through the dotted path.
+        parts = dotted.split(".")
+        node = merged
+        for part in parts[:-1]:
+            node = node[part]
+        node[parts[-1]] = next_list
+    return merged
+
+
 def _deep_merge_dicts(base: dict, patch: dict) -> dict:
+    list_ops = None
+    if isinstance(patch, dict):
+        raw_ops = patch.get(_LIST_OPS_PAYLOAD_KEY)
+        if isinstance(raw_ops, dict):
+            list_ops = raw_ops
+            patch = {k: v for k, v in patch.items() if k != _LIST_OPS_PAYLOAD_KEY}
     merged = dict(base)
     for key, value in patch.items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
             merged[key] = _deep_merge_dicts(merged[key], value)
         else:
             merged[key] = value
+    if list_ops is not None:
+        merged = _apply_list_ops(merged, list_ops)
     return merged
 
 
@@ -963,12 +1046,28 @@ def save_config(
     payload = _strip_agent_auth_fields(payload)
     payload = _strip_preserved_config_secrets(payload)
     payload = _mark_explicit_audio_asr_enabled(payload)
+    # The list-operations verb is a merge instruction, never config
+    # state: pull it out before anything treats the payload as data —
+    # but remember whether it touched the enabled list: credential
+    # validation and runtime reconciliation gate on a ``platforms``
+    # marker in the payload, and a bare operation payload must not
+    # bypass them.
+    raw_list_ops = payload.pop(_LIST_OPS_PAYLOAD_KEY, None)
+    if raw_list_ops is not None and not isinstance(raw_list_ops, dict):
+        raise ValueError("Config list operations must be an object")
+    list_ops_touches_platforms = isinstance(raw_list_ops, dict) and any(
+        str(key) in ("platforms.enabled", "platforms.primary") for key in raw_list_ops
+    )
 
-    # Preserve the established in-process read -> merge -> validate -> write
-    # transaction. V2Config.save() nests the same RLock before taking Memory's
-    # cross-process file lock, so generic writers remain linearizable without
-    # changing the Memory transaction's lock order.
-    with CONFIG_LOCK:
+    # Serialize the WHOLE read-merge-write cycle across processes
+    # (#1458 stage ③): the base load, merge, validation, and write all
+    # happen under the config file lock, so a controller commit between
+    # our load and our write can no longer be overwritten. The in-lock
+    # A lock-fresh base prevents overlapping read-modify-write cycles from
+    # losing one another. It cannot identify stale fields a client explicitly
+    # resubmits, so UI callers still declare field mutations instead of sending
+    # config snapshots.
+    with config_file_lock():
         base_payload: dict = {}
         base_config: Optional[V2Config] = None
         try:
@@ -995,7 +1094,20 @@ def save_config(
                 base_payload.pop("platforms", None)
                 base_payload.pop("platform", None)
 
-        merged_payload = _deep_merge_dicts(base_payload, payload) if base_payload else payload
+        if base_payload:
+            merged_payload = _deep_merge_dicts(base_payload, payload)
+            if isinstance(raw_list_ops, dict) and raw_list_ops:
+                merged_payload = _apply_list_ops(merged_payload, raw_list_ops)
+        else:
+            merged_payload = payload
+        if list_ops_touches_platforms and isinstance(merged_payload.get("platforms"), dict):
+            # Credential validation and runtime reconciliation gate on a
+            # ``platforms`` marker in the payload; surface the FINAL
+            # post-operation enabled list so a bare list-op payload is
+            # validated and reconciled exactly like an explicit list save.
+            final_platforms = dict(merged_payload["platforms"])
+            if "enabled" in final_platforms or "primary" in final_platforms:
+                payload["platforms"] = final_platforms
         merged_payload = _merge_legacy_discord_guild_scope_fields(merged_payload, payload, base_config)
         sanitized_payload, guild_scope_update = _extract_settings_scopes_from_config_payload(merged_payload)
         config = V2Config.from_payload(sanitized_payload)
@@ -1222,6 +1334,7 @@ def config_to_payload(
         "runtime": {
             "default_cwd": config.runtime.default_cwd,
             "log_level": config.runtime.log_level,
+            "show_page_api_timeout_seconds": config.runtime.show_page_api_timeout_seconds,
             "resource_governance": config.runtime.resource_governance,
             # The config-only Harness knobs have no UI, but this payload IS the
             # deep-merge base every ``/api/config`` save builds on: a key omitted here
@@ -1234,6 +1347,10 @@ def config_to_payload(
             "harness_run_orphan_grace_seconds": config.runtime.harness_run_orphan_grace_seconds,
             "harness_run_queued_ttl_seconds": config.runtime.harness_run_queued_ttl_seconds,
             "harness_run_hold_ttl_seconds": config.runtime.harness_run_hold_ttl_seconds,
+            # Same round-trip contract as the Harness knobs above: omitting these
+            # here would revert a user's retention opt-out on unrelated saves.
+            "agent_events_trace_retention_enabled": config.runtime.agent_events_trace_retention_enabled,
+            "agent_events_trace_retention_days": config.runtime.agent_events_trace_retention_days,
         },
         "agents": {
             "opencode": config.agents.opencode.__dict__,
@@ -6955,27 +7072,35 @@ def _run_install_command(
             # config entries, so they must not touch V2Config bookkeeping.
             if installed_path and is_agent_backend(name):
                 try:
-                    with CONFIG_LOCK:
-                        try:
-                            cfg = load_config()
-                        except FileNotFoundError:
-                            logger.debug(
-                                "install_agent: config is not initialized; skipping cli_path persistence for %s",
-                                name,
-                            )
-                        else:
+                    from config.v2_config import update_config_fields
+                    from config import paths as _paths
+
+                    if not _paths.get_config_path().exists():
+                        logger.debug(
+                            "install_agent: config is not initialized; skipping cli_path persistence for %s",
+                            name,
+                        )
+                    else:
+
+                        def _persist_cli_path(cfg) -> None:
+                            # Read-decide-write INSIDE the transaction (#1458
+                            # stage ③): the comparison runs on the
+                            # lock-fresh config, so a concurrent save cannot
+                            # be reverted by a stale snapshot.
                             target = getattr(getattr(cfg, "agents", None), name, None)
-                            if target is not None:
-                                previous = getattr(target, "cli_path", "") or ""
-                                if previous != installed_path:
-                                    target.cli_path = installed_path
-                                    cfg.save()
-                                    logger.info(
-                                        "install_agent: updated V2Config cli_path for %s: %s -> %s",
-                                        name,
-                                        previous or "<unset>",
-                                        installed_path,
-                                    )
+                            if target is None:
+                                return
+                            previous = getattr(target, "cli_path", "") or ""
+                            if previous != installed_path:
+                                target.cli_path = installed_path
+                                logger.info(
+                                    "install_agent: updated V2Config cli_path for %s: %s -> %s",
+                                    name,
+                                    previous or "<unset>",
+                                    installed_path,
+                                )
+
+                        update_config_fields(_persist_cli_path)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "install_agent: failed to persist cli_path for %s: %s",
@@ -7242,17 +7367,20 @@ def _persist_avault_cli_path(path: str) -> None:
             load_config()
         except FileNotFoundError:
             save_config({})
-        with CONFIG_LOCK:
-            cfg = load_config()
+        from config.v2_config import update_config_fields
+
+        def _apply_avault_cli_path(cfg) -> None:
+            # Read-decide-write INSIDE the transaction (#1458 stage ③).
             previous = getattr(cfg.agents.avault, "cli_path", "") or ""
             if previous != path:
                 cfg.agents.avault.cli_path = path
-                cfg.save()
                 logger.info(
                     "install_avault: updated V2Config cli_path: %s -> %s",
                     previous or "<unset>",
                     path,
                 )
+
+        update_config_fields(_apply_avault_cli_path)
     except Exception as exc:
         logger.warning("install_avault: failed to persist cli_path: %s", exc)
         raise
@@ -8313,16 +8441,25 @@ def dependencies_status(*, offline: bool = False) -> dict:
         srt_manager = ShowRuntimeManager(offline=True) if offline else get_show_runtime_manager()
         srt = srt_manager.status()
     except Exception as exc:  # noqa: BLE001
-        srt = {"installed": False, "node_available": None, "node_version": None, "reason": str(exc)}
+        srt = {
+            "install": {"state": "absent", "runtime_version": None, "matches_manifest": None},
+            "node_available": None,
+            "node_version": None,
+            "reason": str(exc),
+        }
     manifest = srt.get("manifest") if isinstance(srt.get("manifest"), dict) else {}
-    srt_installed = bool(srt.get("installed"))
+    install = srt.get("install") if isinstance(srt.get("install"), dict) else {}
+    srt_installed = install.get("state") == "installed"
+    installed_matches_manifest = install.get("matches_manifest")
     deps.append(
         {
             "id": "show-runtime",
             "kind": "runtime",
             "required": True,
             "installed": srt_installed,
-            "version": manifest.get("runtime_version"),
+            "version": install.get("runtime_version"),
+            "latest_version": manifest.get("runtime_version"),
+            "has_update": bool(srt_installed and installed_matches_manifest is False),
             "status": "ready" if srt_installed else "missing",
             "reason": srt.get("reason"),
             "download_error": srt.get("download_error"),
@@ -8353,7 +8490,12 @@ def dependencies_status(*, offline: bool = False) -> dict:
             "kind": "runtime",
             "required": memory_required,
             "installed": bool(memory_runtime.get("installed")),
-            "version": memory_manifest.get("everos_version"),
+            "version": memory_runtime.get("version"),
+            "latest_version": memory_runtime.get("selected_version"),
+            "has_update": bool(
+                memory_runtime.get("installed")
+                and memory_runtime.get("matches_manifest") is False
+            ),
             "status": _memory_runtime_dependency_status(memory_runtime),
             "reason": memory_runtime.get("reason"),
             "release_state": release_state if release_state in {"published", "unavailable"} else None,
@@ -8423,18 +8565,25 @@ def _memory_runtime_dependency_status(memory_runtime: dict) -> str:
 def _prepare_show_runtime_job() -> dict:
     try:
         from core.show_runtime import get_show_runtime_manager
+        from vibe.i18n import t as i18n_t
 
         payload = get_show_runtime_manager().prepare(force=True)
+        install = payload.get("install") if isinstance(payload.get("install"), dict) else {}
         ok = bool(payload.get("ok"))
+        reason = payload.get("reason") or install.get("reason")
         result = {
             "ok": ok,
-            "message": "Show Runtime ready." if ok else (payload.get("reason") or "Show Runtime prepare failed"),
+            "message": (
+                i18n_t("runtime.prepare.prepared")
+                if ok
+                else i18n_t("runtime.prepare.failed", reason=reason or "unknown")
+            ),
             "output": None,
         }
         if not ok:
             status = payload.get("status") if isinstance(payload.get("status"), dict) else {}
             download_error = status.get("download_error") if isinstance(status.get("download_error"), dict) else None
-            result["reason"] = payload.get("reason")
+            result["reason"] = reason
             result["download_error"] = download_error
             if download_error:
                 result["message"] = dependency_error_message(download_error, label="Show Runtime download")
@@ -8600,10 +8749,10 @@ def reconcile_startup_dependencies() -> dict:
         result["avault"] = avault
 
         try:
-            from core.show_runtime import get_show_runtime_manager
+            from core.show_runtime import ShowRuntimeAvailability, get_show_runtime_manager
 
             manager = get_show_runtime_manager()
-            status = manager.status()
+            status = manager.status(offline=True)
             node_available = bool(status.get("node_available"))
             node_supported = status.get("node_supported") is not False
             node_ok = node_available and node_supported
@@ -8615,19 +8764,26 @@ def reconcile_startup_dependencies() -> dict:
                 "status": node_status,
                 "version": status.get("node_version"),
             }
-
             if node_ok:
-                result["show_runtime"] = {
-                    "ok": True,
-                    "status": "pending_prewarm",
-                    "reason": None,
-                }
+                prepared = manager.prepare(force=False, automatic=True)
+                status = prepared.get("status") if isinstance(prepared.get("status"), dict) else status
             else:
-                result["show_runtime"] = {
-                    "ok": False,
-                    "status": "skipped",
-                    "reason": "runtime_node_unsupported" if node_available else "runtime_node_missing",
-                }
+                reason = "runtime_node_unsupported" if node_available else "runtime_node_missing"
+                prepared = ShowRuntimeAvailability.from_install(install_reason=reason).as_payload()
+                prepared["status"] = status
+
+            policy = prepared.get("policy") if isinstance(prepared.get("policy"), dict) else {}
+            install = prepared.get("install") if isinstance(prepared.get("install"), dict) else {}
+            policy_state = policy.get("state")
+            install_state = install.get("state")
+            dependency_ok = install_state == "installed" or policy_state == "skipped"
+            prepared["ok"] = dependency_ok
+            prepared["status"] = (
+                "pending_prewarm"
+                if policy_state == "allowed" and install_state == "installed"
+                else ("skipped" if policy_state == "skipped" else "failed")
+            )
+            result["show_runtime"] = prepared
         except Exception as exc:  # noqa: BLE001
             logger.warning("Startup dependency reconcile failed to prepare Show Runtime: %s", exc, exc_info=True)
             result["show_runtime"] = {"ok": False, "status": "failed", "reason": str(exc)}
@@ -9744,36 +9900,36 @@ def remove_backend_api_key(backend: str) -> dict:
 
     # Clear V2Config api_key for both backends.
     try:
-        with CONFIG_LOCK:
-            try:
-                config = load_config()
-            except FileNotFoundError:
-                config = V2Config()
-            target = getattr(getattr(config, "agents", None), backend, None)
-            if target is not None:
-                target.auth_mode = "oauth"
-                target.api_key = None
-                # Drop base_url for both backends, not just Codex: a
-                # stale Claude relay URL stored in V2Config gets
-                # injected into the subprocess as ``ANTHROPIC_BASE_URL``
-                # on every launch via ``build_claude_subprocess_env``.
-                # After removing an API key (intent: fall back to
-                # OAuth), the OAuth credentials would still be routed
-                # to the api-key-only relay and silently 401.
-                target.base_url = None
-                # Remove key is an explicit OAuth choice — the relay
-                # marker goes with it, or a later refresh would
-                # repopulate the abandoned relay and reroute a freshly
-                # entered official key to it (Codex-only field).
-                if backend == "codex":
-                    target.oauth_relay_marker = None
-                # User explicitly chose OAuth by clicking Remove key —
-                # mark the flag so legacy env-var fallback in
-                # ``build_claude_subprocess_env`` is bypassed and the
-                # inherited ``ANTHROPIC_*`` env actually gets stripped.
-                if backend == "claude":
-                    target.auth_mode_set = True
-                config.save()
+        from config.v2_config import update_config_fields
+
+        def _clear_auth_fields(cfg: V2Config) -> None:
+            target = getattr(getattr(cfg, "agents", None), backend, None)
+            if target is None:
+                return
+            target.auth_mode = "oauth"
+            target.api_key = None
+            # Drop base_url for both backends, not just Codex: a
+            # stale Claude relay URL stored in V2Config gets
+            # injected into the subprocess as ``ANTHROPIC_BASE_URL``
+            # on every launch via ``build_claude_subprocess_env``.
+            # After removing an API key (intent: fall back to
+            # OAuth), the OAuth credentials would still be routed
+            # to the api-key-only relay and silently 401.
+            target.base_url = None
+            # Remove key is an explicit OAuth choice — the relay
+            # marker goes with it, or a later refresh would
+            # repopulate the abandoned relay and reroute a freshly
+            # entered official key to it (Codex-only field).
+            if backend == "codex":
+                target.oauth_relay_marker = None
+            # User explicitly chose OAuth by clicking Remove key —
+            # mark the flag so legacy env-var fallback in
+            # ``build_claude_subprocess_env`` is bypassed and the
+            # inherited ``ANTHROPIC_*`` env actually gets stripped.
+            if backend == "claude":
+                target.auth_mode_set = True
+
+        update_config_fields(_clear_auth_fields)
     except Exception as exc:  # noqa: BLE001
         logger.warning("V2Config clear during remove-key failed for %s: %s", backend, exc)
         # The disk key is already gone (the user-visible truth — report
@@ -10192,42 +10348,38 @@ def save_codex_auth(payload: dict) -> dict:
         logger.error("Failed to write Codex auth files: %s", exc, exc_info=True)
         return {"ok": False, "message": f"Failed to write Codex config: {exc}"}
 
-    with CONFIG_LOCK:
-        try:
-            config = load_config()
-        except FileNotFoundError:
-            config = V2Config()
-        config.agents.codex.auth_mode = auth_mode
-        config.agents.codex.api_key = api_key if auth_mode == "api_key" else None
-        config.agents.codex.base_url = effective_base_url
+    from config.v2_config import update_config_fields
+
+    def _apply_codex_auth(cfg: V2Config) -> None:
+        cfg.agents.codex.auth_mode = auth_mode
+        cfg.agents.codex.api_key = api_key if auth_mode == "api_key" else None
+        cfg.agents.codex.base_url = effective_base_url
         # Marker lifecycle on save: an explicit API-key save consumes
         # the OAuth-transition marker (the user just chose their
         # endpoint — restored, typed fresh, or official-only); an OAuth
         # save applies the same retention semantics as the controller
         # path (#1449): fresh capture overwrites, the official-key
         # transition clears, a repeated pure-OAuth save retains.
-        # A failed save here only loses the V2Config mirror — the
-        # durable marker state was already recorded by the pre-persist
-        # above, and the on-disk codex files are authoritative.
         if auth_mode == "api_key":
-            config.agents.codex.oauth_relay_marker = None
+            cfg.agents.codex.oauth_relay_marker = None
         elif captured_oauth_relay is not None:
-            config.agents.codex.oauth_relay_marker = captured_oauth_relay
+            cfg.agents.codex.oauth_relay_marker = captured_oauth_relay
         elif observed_api_key_auth:
-            config.agents.codex.oauth_relay_marker = None
-        try:
-            config.save()
-        except Exception:
-            # The on-disk codex files are authoritative and the durable
-            # marker state was pre-persisted, but the V2Config mirror
-            # (auth_mode / base_url intent the controller reloads via
-            # ``_load_backend_runtime_config``) did NOT land — surface a
-            # partial-failure notice instead of silently reporting
-            # success while runtime reconciliation sees stale config.
-            logger.warning("V2Config mirror write failed during codex auth save", exc_info=True)
-            notices = notices + [
-                {"code": "v2_mirror_save_failed", "detail": "saved to codex files but not to Avibe config"}
-            ]
+            cfg.agents.codex.oauth_relay_marker = None
+
+    try:
+        update_config_fields(_apply_codex_auth)
+    except Exception:
+        # The on-disk codex files are authoritative and the durable
+        # marker state was pre-persisted, but the V2Config mirror
+        # (auth_mode / base_url intent the controller reloads via
+        # ``_load_backend_runtime_config``) did NOT land — surface a
+        # partial-failure notice instead of silently reporting
+        # success while runtime reconciliation sees stale config.
+        logger.warning("V2Config mirror write failed during codex auth save", exc_info=True)
+        notices = notices + [
+            {"code": "v2_mirror_save_failed", "detail": "saved to codex files but not to Avibe config"}
+        ]
 
     restart_result = restart_backend(
         "codex",
@@ -10510,23 +10662,22 @@ def save_claude_auth(payload: dict) -> dict:
         logger.error("Failed to write Claude settings.json: %s", exc, exc_info=True)
         return {"ok": False, "message": f"Failed to write Claude settings: {exc}"}
 
-    with CONFIG_LOCK:
-        try:
-            config = load_config()
-        except FileNotFoundError:
-            config = V2Config()
-        config.agents.claude.auth_mode = auth_mode
+    from config.v2_config import update_config_fields
+
+    def _apply_claude_auth(cfg: V2Config) -> None:
+        cfg.agents.claude.auth_mode = auth_mode
         # Flip the explicit marker so ``build_claude_subprocess_env``
         # honors ``auth_mode`` strictly (strip inherited env in OAuth
         # mode) for this and subsequent launches. Legacy installs that
         # have never been through this save path keep the flag at its
         # ``False`` default and continue to inherit shell env vars.
-        config.agents.claude.auth_mode_set = True
+        cfg.agents.claude.auth_mode_set = True
         # Secrets and endpoint overrides live in Claude's own settings.json.
         # Clear legacy cache fields so future reads do not have two writers.
-        config.agents.claude.api_key = None
-        config.agents.claude.base_url = None
-        config.save()
+        cfg.agents.claude.api_key = None
+        cfg.agents.claude.base_url = None
+
+    update_config_fields(_apply_claude_auth)
 
     oauth_cleanup_result: dict | None = None
     if auth_mode == "api_key":
@@ -11909,20 +12060,26 @@ async def _delete_opencode_provider_auth_async(provider_id: str) -> dict:
 def _clear_opencode_default_provider_if(provider_id: str) -> None:
     """Clear the saved OpenCode default if it points at ``provider_id``."""
 
-    with CONFIG_LOCK:
-        try:
-            cfg = load_config()
-        except FileNotFoundError:
-            return
+    from config import paths as _paths
+    from config.v2_config import update_config_fields
+
+    if not _paths.get_config_path().exists():
+        return
+
+    def _clear_if_matching(cfg) -> None:
+        # Compare-and-clear INSIDE the transaction on the lock-fresh
+        # config (#1458 stage ③): a concurrent default switch to another
+        # provider must not be cleared by a stale comparison.
         opencode_cfg = getattr(getattr(cfg, "agents", None), "opencode", None)
         current_default = getattr(opencode_cfg, "default_provider", None)
         if isinstance(current_default, str) and current_default.strip() == provider_id:
             opencode_cfg.default_provider = None
-            cfg.save()
             logger.info(
                 "clear_opencode_default_provider: cleared default_provider after removing %s",
                 provider_id,
             )
+
+    update_config_fields(_clear_if_matching)
 
 
 def delete_opencode_provider_auth(provider_id: str) -> dict:

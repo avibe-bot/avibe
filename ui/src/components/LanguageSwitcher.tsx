@@ -3,14 +3,18 @@ import { useTranslation } from 'react-i18next';
 import { Check } from 'lucide-react';
 import clsx from 'clsx';
 import { useApi } from '../context/ApiContext';
+import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
+import { setConfigField } from '../lib/configMutations';
 
 export const LanguageSwitcher: React.FC<{ openUpward?: boolean }> = ({ openUpward = false }) => {
   const { i18n, t } = useTranslation();
-  const { getConfig, saveConfig } = useApi();
+  const { getConfig, mutateConfig } = useApi();
+  const { capabilities } = useInstanceAuthorization();
   const [isOpen, setIsOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    if (!capabilities.can_manage_instance) return;
     const loadConfig = async () => {
       try {
         const cfg = await getConfig();
@@ -22,7 +26,7 @@ export const LanguageSwitcher: React.FC<{ openUpward?: boolean }> = ({ openUpwar
       }
     };
     loadConfig();
-  }, []);
+  }, [capabilities.can_manage_instance, getConfig, i18n]);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -53,8 +57,9 @@ export const LanguageSwitcher: React.FC<{ openUpward?: boolean }> = ({ openUpwar
     setIsOpen(false);
     if (code === i18n.language) return;
     i18n.changeLanguage(code);
+    if (!capabilities.can_manage_instance) return;
     try {
-      await saveConfig({ language: code });
+      await mutateConfig([setConfigField(['language'], code)]);
     } catch {
       // Ignore save errors - language change already applied locally
     }

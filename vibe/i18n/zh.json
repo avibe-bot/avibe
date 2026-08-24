@@ -29,6 +29,33 @@
       "heading": "你无权访问此页面",
       "message": "请联系页面所有者，将你的邮箱加入允许访问名单。",
       "back": "返回首页"
+    },
+    "runtimeRecovery": {
+      "title": "Show Runtime 暂时不可用",
+      "loading": "正在加载 Show Page",
+      "eyebrow": "Show Page",
+      "heading": "Show Runtime 暂时不可用",
+      "downloadMessage": "Avibe 无法下载运行此 Show Page 所需的文件。",
+      "offlineMessage": "Avibe 当前处于离线模式，且没有可用的已验证 Show Runtime 归档。",
+      "nodeMessage": "Node.js 未安装，或当前版本不受支持。",
+      "platformMessage": "当前 Show Runtime 版本不支持此平台。",
+      "verificationMessage": "Show Runtime 文件未通过完整性校验。",
+      "configurationMessage": "当前配置的 Show Runtime 来源不可用。请移除 VIBE_SHOW_RUNTIME_SOURCE 以使用随 Avibe 发布的运行时，或将 VIBE_SHOW_RUNTIME_BIN 指向你自行构建的运行时。",
+      "policyMessage": "配置已关闭 Show Runtime 自动安装。",
+      "installMessage": "Avibe 无法安装 Show Runtime。",
+      "startMessage": "Show Runtime 已安装，但无法启动。",
+      "unavailableMessage": "Avibe 无法启动用于渲染此 Show Page 的服务。",
+      "repairHeading": "修复 Show Runtime",
+      "repairMessage": "请在终端运行以下命令：",
+      "settingsHeading": "修改 Show Runtime 设置",
+      "settingsMessage": "请修改下方所示的设置或前置条件，然后重新加载此页面。实例所有者也可以点击“立即重试”，发起一次显式尝试。",
+      "unsupportedHeading": "此处没有可用操作",
+      "unsupportedMessage": "原因记录如下；这台机器上的任何操作都无法改变这一结果。",
+      "ownerActionHeading": "需要实例所有者处理",
+      "ownerActionMessage": "请重新加载此页面，再次尝试请求；若仍然失败，请联系 Avibe 实例所有者执行可用的恢复操作。",
+      "reasonLabel": "原因",
+      "sessionLabel": "会话",
+      "retryNow": "立即重试"
     }
   },
   "harness": {
@@ -925,6 +952,12 @@
     }
   },
   "runtime": {
+    "prepare": {
+      "prepared": "Show Runtime 已准备完成。",
+      "skipped": "Show Runtime 准备已跳过：{reason}",
+      "failed": "Show Runtime 准备失败：{reason}",
+      "unsupportedSource": "Show Runtime 准备失败：{reason}。请移除 VIBE_SHOW_RUNTIME_SOURCE 以使用随 Avibe 发布的运行时，或将 VIBE_SHOW_RUNTIME_BIN 指向你自行构建的运行时。"
+    },
     "clean": {
       "dryRunHelp": "\u4ec5\u62a5\u544a\u53ef\u6e05\u7406\u7684\u5f52\u6863\u4e0e\u7f13\u5b58\u6761\u76ee\uff0c\u4e0d\u5220\u9664\u4efb\u4f55\u5185\u5bb9\u3002",
       "wouldRemoveItems": "\u5c06\u6e05\u7406 {count} \u9879 Show Runtime \u7f13\u5b58\u3002",
@@ -946,7 +979,48 @@
       "archiveCacheClean": "Show Runtime \u5f52\u6863\u7f13\u5b58\u6ca1\u6709\u53ef\u56de\u6536\u5f52\u6863",
       "archiveCacheSkipped": "未能检查 Show Runtime 归档缓存（{reason}）；其中可能仍有可回收归档。",
       "archiveCacheSkippedAction": "等待正在进行的安装或清理结束后，重新运行 Doctor。",
-      "archiveCacheSkippedInspectionAction": "\u8bf7\u68c0\u67e5\u8fd0\u884c\u76ee\u5f55\u6743\u9650\u548c Avibe \u65e5\u5fd7\uff0c\u4fee\u590d\u540e\u91cd\u8bd5 Doctor\u3002"
+      "archiveCacheSkippedInspectionAction": "\u8bf7\u68c0\u67e5\u8fd0\u884c\u76ee\u5f55\u6743\u9650\u548c Avibe \u65e5\u5fd7\uff0c\u4fee\u590d\u540e\u91cd\u8bd5 Doctor\u3002",
+      "providerUnsupportedAction": "请移除 VIBE_SHOW_RUNTIME_SOURCE 以使用随 Avibe 发布的运行时，或将 VIBE_SHOW_RUNTIME_BIN 指向你自行构建的运行时。",
+      "repairHealthy": "Show Runtime \u53ef\u4ee5\u6b63\u5e38\u542f\u52a8\uff0c\u65e0\u9700\u4fee\u590d\u3002",
+      "repairExplicitCommandFailed": "VIBE_SHOW_RUNTIME_BIN \u6307\u5b9a\u7684 Show Runtime \u547d\u4ee4\u65e0\u6cd5\u542f\u52a8\uff1a{reason}\u3002\u8bf7\u4fee\u590d\u6216\u79fb\u9664\u8be5\u8986\u76d6\u540e\u91cd\u65b0\u8fd0\u884c Doctor\u3002",
+      "repairInstalled": "\u5df2\u5b89\u88c5\u5e76\u6210\u529f\u542f\u52a8 Show Runtime\u3002",
+      "repairReinstalled": "\u5df2\u91cd\u65b0\u5b89\u88c5\u5e76\u6210\u529f\u542f\u52a8 Show Runtime\u3002",
+      "repairInstallStartFailed": "Show Runtime \u5df2\u5b89\u88c5\uff0c\u4f46\u65e0\u6cd5\u542f\u52a8\uff1a{reason}",
+      "repairReinstallStartFailed": "Show Runtime \u5df2\u91cd\u65b0\u5b89\u88c5\uff0c\u4f46\u4ecd\u65e0\u6cd5\u542f\u52a8\uff1a{reason}",
+      "repairVerificationFailed": "\u65e0\u6cd5\u9a8c\u8bc1 Show Runtime \u662f\u5426\u53ef\u542f\u52a8\uff0c\u56e0\u6b64\u672a\u5c1d\u8bd5\u91cd\u65b0\u5b89\u88c5\uff1a{detail}",
+      "repairPostVerificationFailed": "Show Runtime \u51c6\u5907\u5df2\u5b8c\u6210\uff0c\u4f46\u65e0\u6cd5\u9a8c\u8bc1\u662f\u5426\u53ef\u542f\u52a8\uff1a{detail}",
+      "repairPrepareFailed": "Show Runtime \u51c6\u5907\u5931\u8d25\uff1a{detail}",
+      "repairLegacyArchiveUnavailable": "\u6253\u5305\u7684 Show Runtime \u6e05\u5355\u4e0d\u53ef\u7528\uff0c\u65e7\u7248\u4e0a\u6e38\u5f52\u6863\u5730\u5740\u4e5f\u6ca1\u6709\u53d1\u5e03\u8d44\u4ea7\u3002\u8bf7\u5347\u7ea7\u6216\u91cd\u65b0\u5b89\u88c5\u5b98\u65b9 Avibe \u8f6f\u4ef6\u5305\uff0c\u6216\u79fb\u9664\u8fc7\u671f\u7684 runtime \u6765\u6e90\u8986\u76d6\u914d\u7f6e\u3002"
+    }
+  },
+  "data": {
+    "helpCommand": "\u67e5\u770b Avibe \u6570\u636e,\u6216\u6267\u884c\u663e\u5f0f\u7684 trace \u4fdd\u7559\u7ef4\u62a4",
+    "helpDescription": "\u901a\u8fc7\u53d7\u4fdd\u62a4\u7684\u53ea\u8bfb SQL \u67e5\u770b\u672c\u5730 Avibe SQLite \u72b6\u6001,\u6216\u6267\u884c\u663e\u5f0f\u7ef4\u62a4:`query` \u4e3a\u53ea\u8bfb;`retention --run` \u4f1a\u5220\u9664\u65e7\u7684\u5185\u90e8 trace \u4e8b\u4ef6\u5e76\u53ef\u80fd\u538b\u5b9e\u6570\u636e\u5e93\u3002",
+    "retention": {
+      "invalidDays": "--days \u5fc5\u987b\u5728 {minimum} \u5230 {maximum} \u4e4b\u95f4;\u62d2\u7edd\u8fd0\u884c\u800c\u4e0d\u662f\u9759\u9ed8\u6536\u7a84\u7a97\u53e3\u3002",
+      "helpCommand": "\u67e5\u770b\u6216\u6267\u884c\u5185\u90e8 agent trace \u4e8b\u4ef6\u7684\u6709\u754c\u4fdd\u7559",
+      "helpDescription": "agent_events trace \u4fdd\u7559\u7b56\u7565\u7684\u72b6\u6001\u4e0e\u624b\u52a8\u63a7\u5236:\u8d85\u8fc7\u4fdd\u7559\u7a97\u53e3\u7684 tool_call trace \u4f1a\u88ab\u5220\u9664;\u804a\u5929\u6d88\u606f\u3001\u975e trace \u4e8b\u4ef6\u4e0e\u8f83\u65b0\u7684 trace \u6c38\u8fdc\u4e0d\u4f1a\u88ab\u89e6\u78b0\u3002",
+      "helpRun": "\u7acb\u5373\u6267\u884c\u4e00\u6b21\u4fdd\u7559\u6e05\u7406(\u7ed5\u8fc7\u6bcf\u65e5\u8282\u6d41,\u4ecd\u9075\u5b88\u79df\u7ea6)\u3002",
+      "helpDays": "以天为单位的保留窗口覆盖值(默认:配置值,当前为 {current})。",
+      "helpCompact": "\u5728\u5b89\u5168\u65f6\u540c\u65f6\u7269\u7406\u538b\u5b9e\u6570\u636e\u5e93(VACUUM);\u8574\u542b --run\u3002\u9ed8\u8ba4\u5173\u95ed:VACUUM \u4f1a\u6301\u6709\u6570\u636e\u5e93\u552f\u4e00\u5199\u9501\u5e76\u53ef\u80fd\u963b\u585e\u8fd0\u884c\u4e2d\u670d\u52a1\u7684\u5199\u5165;\u8bf7\u5728\u7ef4\u62a4\u7a97\u53e3\u6216\u670d\u52a1\u505c\u6b62\u65f6\u6267\u884c\u3002",
+      "configRecovered": "Avibe \u914d\u7f6e\u65e0\u6cd5\u8bfb\u53d6\uff08\u5904\u4e8e\u6062\u590d\u9ed8\u8ba4\u72b6\u6001\uff09\uff1b\u4fdd\u7559\u7b56\u7565\u672a\u77e5\u3002\u5982\u9700\u5220\u9664\uff0c\u8bf7\u4f7f\u7528\u663e\u5f0f --days \u7a97\u53e3\u91cd\u65b0\u8fd0\u884c\u3002",
+      "compactionReasonCheckpointBusy": "\u6570\u636e\u5e93\u6b63\u88ab\u5e76\u53d1\u8bfb\u5199\u5360\u7528",
+      "compactionReasonFreeSpace": "\u78c1\u76d8\u7a7a\u95f2\u7a7a\u95f4\u4e0d\u8db3\u4ee5\u5b89\u5168\u91cd\u5199\u6570\u636e\u5e93",
+      "compactionReasonOther": "\u5f53\u524d\u4e0d\u6ee1\u8db3\u5b89\u5168\u538b\u5b9e\u6761\u4ef6",
+      "error": "trace \u4fdd\u7559\u547d\u4ee4\u6267\u884c\u5931\u8d25:{error}",
+      "plan": "\u6709 {count} \u6761\u65e9\u4e8e {days} \u5929\u7684 trace \u8bb0\u5f55\u5f85\u6e05\u7406\uff08\u8f7d\u8377\u6587\u672c\u7ea6 {size}\uff09\u3002",
+      "lastRun": "\u4e0a\u6b21\u4fdd\u7559\u6e05\u7406\uff1a{at}\uff0c\u5220\u9664 {rows} \u6761\u3002",
+      "neverRun": "\u5c1a\u672a\u6267\u884c\u8fc7\u4fdd\u7559\u6e05\u7406\u3002",
+      "disabled": "trace \u4fdd\u7559\u7b56\u7565\u5df2\u5728\u8fd0\u884c\u914d\u7f6e\u4e2d\u5173\u95ed\uff1b\u6bcf\u65e5\u4efb\u52a1\u4e0d\u4f1a\u5220\u9664\u4efb\u4f55\u5185\u5bb9\u3002",
+      "compaction": "\u6570\u636e\u5e93\u5185\u90e8\u5f53\u524d\u53ef\u56de\u6536\u7a7a\u95f4\uff1a{size}\u3002",
+      "ran": "\u672c\u6b21\u4fdd\u7559\u6e05\u7406\u5220\u9664\u4e86 {rows} \u6761 trace \u8bb0\u5f55\u3002",
+      "compacted": "\u6570\u636e\u5e93\u5df2\u538b\u5b9e\uff1b\u5411\u78c1\u76d8\u5f52\u8fd8 {size}\u3002",
+      "compactionDeferred": "\u538b\u5b9e\u5df2\u63a8\u8fdf\uff08{reason}\uff09\uff1b\u884c\u5df2\u5220\u9664\uff0c\u78c1\u76d8\u7a7a\u95f4\u5c06\u5728\u4e0b\u6b21\u5b89\u5168\u901a\u8fc7\u65f6\u5f52\u8fd8\u3002",
+      "compactionSkipped": "\u538b\u5b9e\u5df2\u8df3\u8fc7\uff1a\u53ef\u56de\u6536\u7a7a\u95f4\u8fc7\u5c0f\u3002",
+      "leaseLost": "\u672c\u6b21\u8fd0\u884c\u5c06\u79df\u7ea6\u4e22\u5931\u7ed9\u4e86\u53e6\u4e00\u4e2a\u4fdd\u7559\u6e05\u7406\uff1b\u5220\u9664\u4e2d\u9014\u505c\u6b62\u4e14\u672a\u8bb0\u5f55\u5b8c\u6210\u3002\u8bf7\u5728\u53e6\u4e00\u8fd0\u884c\u7ed3\u675f\u540e\u91cd\u8bd5\u3002",
+      "notDue": "\u4fdd\u7559\u6e05\u7406\u5728\u6700\u8fd1\u4e00\u5929\u5185\u5df2\u8fd0\u884c\u8fc7\uff0c\u65e0\u9700\u91cd\u590d\u3002",
+      "busy": "\u53e6\u4e00\u4e2a\u4fdd\u7559\u6e05\u7406\u6b63\u5728\u8fd0\u884c\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002",
+      "cancelled": "\u4fdd\u7559\u6e05\u7406\u5df2\u5728\u6279\u6b21\u8fb9\u754c\u505c\u6b62\uff1b\u672a\u8bb0\u5f55\u5b8c\u6210\u72b6\u6001\u3002"
     }
   }
 }

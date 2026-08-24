@@ -1,0 +1,13 @@
+{
+  "provider": "manifest",
+  "runtime_id": "memory-runtime",
+  "runtime_version": "1.2.3",
+  "platform": "__PLATFORM__",
+  "install_dir": "__INSTALL_DIR__",
+  "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "archive_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "bin_path": "bin/python",
+  "provider_root_format": "everos-1.2.3",
+  "compatible_provider_root_formats": [],
+  "artifact_fingerprint": "released-artifact"
+}

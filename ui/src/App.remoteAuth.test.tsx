@@ -140,7 +140,7 @@ const CapabilityProbe = () => {
 
 const OwnerOnlyGate = () => {
   const { capabilities } = useInstanceAuthorization();
-  if (isOwnerOnlyPath('/admin/settings/diagnostics') && !capabilities.can_manage_instance) {
+  if (isOwnerOnlyPath('/settings/diagnostics') && !capabilities.can_manage_instance) {
     return <Navigate to="/" replace />;
   }
   return <div>diagnostics-page</div>;
@@ -154,7 +154,7 @@ describe('AuthGuard setup-bypass authorization', () => {
     capabilities: OWNER_INSTANCE_CAPABILITIES,
   };
 
-  it.each(['/admin/settings/diagnostics', '/admin/logs'])(
+  it.each(['/settings/diagnostics', '/settings/diagnostics/logs'])(
     'keeps the instance owner on %s instead of treating the setup bypass as denied',
     async (path) => {
       api.getAuthSession.mockResolvedValue(localOwnerSession);
@@ -176,7 +176,7 @@ describe('AuthGuard setup-bypass authorization', () => {
     },
   );
 
-  it('lets an owner open Diagnostics from Advanced Settings without bouncing home', async () => {
+  it('lets an owner open Diagnostics without bouncing home', async () => {
     api.getAuthSession.mockResolvedValue(localOwnerSession);
     api.getConfig.mockResolvedValue({
       mode: 'v2',
@@ -184,10 +184,10 @@ describe('AuthGuard setup-bypass authorization', () => {
     });
 
     render(
-      <MemoryRouter initialEntries={['/admin/settings/diagnostics']}>
+      <MemoryRouter initialEntries={['/settings/diagnostics']}>
         <AuthGuard>
           <Routes>
-            <Route path="/admin/settings/diagnostics" element={<OwnerOnlyGate />} />
+            <Route path="/settings/diagnostics" element={<OwnerOnlyGate />} />
             <Route path="/" element={<div>workbench-home</div>} />
           </Routes>
         </AuthGuard>

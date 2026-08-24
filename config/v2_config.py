@@ -41,6 +41,7 @@ from config.platform_registry import (
 from modules.agents.catalog import DEFAULT_AGENT_BACKEND
 from modules.im.base import BaseIMConfig
 from vibe.i18n import normalize_language
+from vibe.trace_retention_policy import validate_retention_days
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +116,7 @@ def config_write_transaction(config_path: Optional[Path] = None) -> Iterator["V2
     from config import paths as _paths
 
     path = config_path or _paths.get_config_path()
-    with _memory_config_transaction(path):
+    with config_file_lock(path):
         try:
             config = V2Config.load(path)
         except FileNotFoundError:
@@ -160,6 +161,7 @@ def _contains_model_hub_credential_material(value: object) -> bool:
     return any(pattern.search(rendered) for pattern in _MODEL_HUB_CREDENTIAL_PATTERNS)
 
 DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS = 600
+DEFAULT_SHOW_PAGE_API_TIMEOUT_SECONDS = 90.0
 
 # Harness run staleness sweep (``docs/plans/agent-run-zombie-settlement.md`` §4.4).
 # How often the sweep may run at all — it rides the scheduler's existing 2 s tick, so
@@ -1027,6 +1029,16 @@ def _refuse_values_naming_nothing(section: str, instance: object) -> None:
 # ``_reset_recoverable_config_section``.
 _FIELD_SCOPED_RECOVERY_SECTIONS = ("ui", "audio_asr")
 
+# Retention is optional and destructive: a malformed field must disable only
+# that policy while preserving the rest of the runtime settings (cwd, logging,
+# resource governance, and Harness timeouts).
+_RUNTIME_RETENTION_FIELDS = frozenset(
+    {
+        "agent_events_trace_retention_enabled",
+        "agent_events_trace_retention_days",
+    }
+)
+
 # The switch that decides whether an optional feature runs at all. Named once
 # because recovery has to tell it apart from every other switch in a section:
 # the rest describe how a feature behaves, this one decides whether it happens.
@@ -1108,6 +1120,16 @@ def _recovery_field_for_error(section: Optional[str], error: BaseException) -> O
         if not path.startswith(prefix):
             return None
         return path[len(prefix) :].split(".", 1)[0]
+    if section == "runtime":
+        match = re.search(r"Config '([^']+)'", str(error))
+        if not match:
+            return None
+        path = match.group(1)
+        prefix = "runtime."
+        if not path.startswith(prefix):
+            return None
+        field_name = path[len(prefix) :].split(".", 1)[0]
+        return field_name if field_name in _RUNTIME_RETENTION_FIELDS else None
     if section not in _FIELD_SCOPED_RECOVERY_SECTIONS:
         return None
     match = re.search(r"Config '([^']+)'", str(error))
@@ -1273,6 +1295,25 @@ def _recover_memory_cloud_section(payload: dict, field_name: Optional[str]) -> b
     return True
 
 
+def _recover_runtime_field(payload: dict, field_name: Optional[str]) -> bool:
+    """Repair one retention field without discarding the runtime section."""
+
+    if field_name not in _RUNTIME_RETENTION_FIELDS:
+        return False
+    runtime = payload.get("runtime")
+    if not isinstance(runtime, dict):
+        return False
+    # A recovered policy is disabled even if the other retention field looked
+    # valid. The warning attached by ``V2Config.load`` keeps all automatic and
+    # status consumers fail-closed until the operator repairs the file.
+    runtime["agent_events_trace_retention_enabled"] = False
+    if field_name == "agent_events_trace_retention_days":
+        runtime[field_name] = 30
+    else:
+        runtime[field_name] = False
+    return True
+
+
 def _reset_recoverable_config_section(
     payload: dict, section: str, field_name: Optional[str] = None
 ) -> bool:
@@ -1283,6 +1324,9 @@ def _reset_recoverable_config_section(
     loss-avoiding recovery path, and the original file is backed up first.
     """
 
+    if section == "runtime" and field_name is not None:
+        if _recover_runtime_field(payload, field_name):
+            return True
     if section in _FIELD_SCOPED_RECOVERY_SECTIONS:
         return _recover_switch_section_field(payload, section, field_name)
     if section == "memory.rerank":
@@ -2453,6 +2497,10 @@ def memory_config_from_payload(payload: object) -> MemoryConfig:
 class RuntimeConfig:
     default_cwd: str
     log_level: str = "INFO"
+    # Synchronous handlers under /show/*/api and /p/*/api may depend on slower
+    # operational systems. Keep this separate from ordinary Runtime asset
+    # requests, which retain their shorter transport timeout.
+    show_page_api_timeout_seconds: float = DEFAULT_SHOW_PAGE_API_TIMEOUT_SECONDS
     # Linux/cgroup v2 best-effort resource governance for aggregate agent
     # workload. "auto" enables it only when Avibe can create and write the
     # delegated cgroup; unsupported systems silently fall back to legacy spawn.
@@ -2474,6 +2522,38 @@ class RuntimeConfig:
     # arrived as an answer to a question nobody in the channel could see. Off means
     # today's behavior (result only).
     harness_prompt_echo: bool = True
+    # Bounded retention for internal agent trace events (``agent_events`` rows
+    # with ``event_type='tool_call'`` and ``visibility='trace'``). These are
+    # debug/diagnostic material, never chat messages; without a bound an active
+    # installation grows ``vibe.sqlite`` without limit. Default-on: the first
+    # controller startup after upgrading runs a pass that permanently deletes
+    # tool_call traces older than the window — set ``enabled=False`` BEFORE
+    # upgrading to preserve old diagnostics. User docs (en+zh): the
+    # ``vibe data retention`` section of the CLI reference (avibe-docs).
+    agent_events_trace_retention_enabled: bool = True
+    agent_events_trace_retention_days: int = 30
+
+    def __post_init__(self) -> None:
+        self.show_page_api_timeout_seconds = _named_value(
+            "runtime.show_page_api_timeout_seconds",
+            float,
+            self.show_page_api_timeout_seconds,
+        )
+        if self.show_page_api_timeout_seconds <= 0:
+            raise ValueError(
+                "Config 'runtime.show_page_api_timeout_seconds' must be greater than zero"
+            )
+        # These values control irreversible deletion.  Dataclass annotations do
+        # not validate JSON payloads, and coercing a string/bool here could turn
+        # a malformed config into a shorter retention window.
+        if not isinstance(self.agent_events_trace_retention_enabled, bool):
+            raise ValueError(
+                "Config 'runtime.agent_events_trace_retention_enabled' must be a boolean"
+            )
+        validate_retention_days(
+            self.agent_events_trace_retention_days,
+            field="Config 'runtime.agent_events_trace_retention_days'",
+        )
 
 
 @dataclass
@@ -4097,7 +4177,7 @@ class V2Config:
             )
         paths.ensure_data_dirs()
         path = config_path or paths.get_config_path()
-        with _memory_config_transaction(path):
+        with config_file_lock(path):
             try:
                 memory = type(self).load(path).memory
             except FileNotFoundError:
@@ -4131,12 +4211,15 @@ class V2Config:
             "runtime": {
                 "default_cwd": self.runtime.default_cwd,
                 "log_level": self.runtime.log_level,
+                "show_page_api_timeout_seconds": self.runtime.show_page_api_timeout_seconds,
                 "resource_governance": self.runtime.resource_governance,
                 "harness_run_sweep_interval_seconds": self.runtime.harness_run_sweep_interval_seconds,
                 "harness_run_orphan_grace_seconds": self.runtime.harness_run_orphan_grace_seconds,
                 "harness_run_queued_ttl_seconds": self.runtime.harness_run_queued_ttl_seconds,
                 "harness_run_hold_ttl_seconds": self.runtime.harness_run_hold_ttl_seconds,
                 "harness_prompt_echo": self.runtime.harness_prompt_echo,
+                "agent_events_trace_retention_enabled": self.runtime.agent_events_trace_retention_enabled,
+                "agent_events_trace_retention_days": self.runtime.agent_events_trace_retention_days,
             },
             "agents": {
                 "opencode": self.agents.opencode.__dict__,
@@ -4213,7 +4296,7 @@ def atomic_update_memory(
 
     paths.ensure_data_dirs()
     path = config_path or paths.get_config_path()
-    with _memory_config_transaction(path):
+    with config_file_lock(path):
         config = V2Config.load(path)
         memory = mutator(deepcopy(config.memory))
         if not isinstance(memory, MemoryConfig):

@@ -181,7 +181,7 @@ export const SettingsDependenciesPage: React.FC = () => {
                     </Badge>
                     {isMemoryRuntime && d.installed && (
                       <Button asChild variant="secondary" size="xs">
-                        <Link to="/admin/settings/memory">
+                        <Link to="/settings/memory">
                           {t('common.configure')}
                           <ArrowUpRight className="size-3.5" />
                         </Link>
@@ -230,7 +230,7 @@ export const SettingsDependenciesPage: React.FC = () => {
             detail={t('settings.dependencies.backendsDetail')}
             actions={
               <Button asChild variant="secondary" size="xs">
-                <Link to="/admin/settings/backends">
+                <Link to="/settings/backends">
                   {t('settings.dependencies.manageBackends')}
                   <ArrowUpRight className="size-3.5" />
                 </Link>

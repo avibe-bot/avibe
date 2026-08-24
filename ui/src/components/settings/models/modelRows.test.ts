@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { collapsedModelRows, listedModelIds, modelChainKey, modelChainRequests, modelSupplyState, NOMINAL_MODEL_BASELINE } from './modelRows';
+import { COLLAPSED_MODEL_LIMIT, collapsedModelRows, listedModelIds, modelChainKey, modelChainRequests, modelSupplyState } from './modelRows';
 import type { AgentSupply } from './types';
 
 const agent: AgentSupply = {
@@ -33,20 +33,18 @@ describe('collapsedModelRows', () => {
     model_supply: menu.map((modelId, index) => ({ model_id: modelId, chain_length: index < count ? 0 : 1, has_runnable_hop: index >= count })),
   });
 
-  it.each([0, 2, 5, menu.length])('keeps every unsupplied row plus the nominal baseline (%i unsupplied)', (unsupplied) => {
-    const result = collapsedModelRows(withEmptyRoutes(unsupplied));
-    const nominalCount = Math.min(NOMINAL_MODEL_BASELINE, menu.length - unsupplied);
-
-    expect(result.visible).toHaveLength(unsupplied + nominalCount);
-    expect(result.hidden).toHaveLength(menu.length - unsupplied - nominalCount);
-    expect(result.visible).toEqual(menu.filter((_, index) => index < unsupplied + nominalCount));
+  it.each([0, 2, 5, menu.length])('shows at most the first six rows regardless of supply state (%i unsupplied)', (unsupplied) => {
+    expect(collapsedModelRows(withEmptyRoutes(unsupplied))).toEqual({
+      visible: menu.slice(0, COLLAPSED_MODEL_LIMIT),
+      hidden: menu.slice(COLLAPSED_MODEL_LIMIT),
+    });
   });
 
   it('preserves the backend menu order and reveals every row when expanded', () => {
     expect(collapsedModelRows(withEmptyRoutes(2), true)).toEqual({ visible: menu, hidden: [] });
   });
 
-  it('keeps a nonempty but wholly unrunnable Route visible after the nominal baseline', () => {
+  it('keeps a nonempty but wholly unrunnable Route classified while folding it beyond the limit', () => {
     const paused = {
       ...withEmptyRoutes(0),
       model_supply: menu.map((modelId, index) => ({
@@ -57,16 +55,16 @@ describe('collapsedModelRows', () => {
     };
 
     expect(modelSupplyState(paused, menu.at(-1) as string)).toBe('paused');
-    expect(collapsedModelRows(paused).visible).toContain(menu.at(-1));
+    expect(collapsedModelRows(paused).hidden).toContain(menu.at(-1));
   });
 
   it('classifies structural emptiness before the forced unrunnable reading', () => {
     expect(modelSupplyState(withEmptyRoutes(1), menu[0])).toBe('unconfigured');
   });
 
-  it('treats direct rows as nominal because direct mode has no model_supply projection', () => {
+  it('uses the same fixed row limit for direct projections', () => {
     const result = collapsedModelRows({ ...withEmptyRoutes(0), mode: 'direct', model_supply: null });
 
-    expect(result.visible).toEqual(menu.slice(0, NOMINAL_MODEL_BASELINE));
+    expect(result.visible).toEqual(menu.slice(0, COLLAPSED_MODEL_LIMIT));
   });
 });

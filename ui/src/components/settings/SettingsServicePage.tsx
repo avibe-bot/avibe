@@ -10,6 +10,7 @@ import { apiFetch } from '@/lib/apiFetch';
 import { SettingsPageShell } from './SettingsPageShell';
 import { CompactField, SettingsPanel, SettingsRow } from './SettingsPrimitives';
 import { Button } from '@/components/ui/button';
+import { setConfigField } from '@/lib/configMutations';
 import { applyAppTitle } from '@/lib/documentTitle';
 
 // Mirrors design.pen mHUcm (VR/CM/Service): two cards.
@@ -24,7 +25,7 @@ export const SettingsServicePage: React.FC = () => {
   // former in-page anchor (#remote-access) land here, so forward them.
   useEffect(() => {
     if (window.location.hash === '#remote-access') {
-      navigate('/admin/remote-access', { replace: true });
+      navigate('/settings/remote-access', { replace: true });
     }
   }, [navigate]);
   const [config, setConfig] = useState<any>(null);
@@ -64,7 +65,10 @@ export const SettingsServicePage: React.FC = () => {
       // would persist any unsaved instance_name draft the user typed but
       // didn't Save on that row. The backend deep-merges config saves, so
       // instance_name and chat_message_font_size are preserved regardless.
-      await api.saveConfig({ ui: uiPayload });
+      await api.mutateConfig([
+        setConfigField(['ui', 'setup_host'], uiPayload.setup_host),
+        setConfigField(['ui', 'setup_port'], uiPayload.setup_port),
+      ]);
       await apiFetch('/api/ui/reload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -144,7 +148,7 @@ export const SettingsServicePage: React.FC = () => {
       // handleUiSaveRestart performs — so the running UI keeps the old bind
       // while the next restart silently moves to the unsaved address. The
       // backend deep-merges config saves, so host/port are preserved.
-      await api.saveConfig({ ui: { instance_name: instanceName } });
+      await api.mutateConfig([setConfigField(['ui', 'instance_name'], instanceName)]);
       // Reflect the new title immediately. default_instance_name is the
       // read-only, server-computed fallback (unaffected by host/port edits).
       applyAppTitle({

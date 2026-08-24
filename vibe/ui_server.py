@@ -23,11 +23,11 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Mapping
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlsplit, urlunsplit
 
 import psutil
-from aiohttp import ClientSession, WSMsgType
+from aiohttp import ClientConnectionError, ClientSession, WSMsgType
 from fastapi import Request as FastAPIRequest, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response as FastAPIResponse
 from starlette.datastructures import UploadFile as StarletteUploadFile
@@ -80,6 +80,9 @@ from vibe.runtime import get_ui_dist_path, get_working_dir
 from vibe.sentry_integration import init_sentry
 from storage.delivery_states import ADMITTED_DELIVERY_STATES
 from vibe.ui_memory_routes import register_memory_routes
+
+if TYPE_CHECKING:
+    from core.show_runtime import ShowRuntimeUnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -1527,7 +1530,20 @@ def _platform_runtime_fields_changed(previous: V2Config | None, current: V2Confi
     if previous is None:
         return False
     platform_config_keys = {descriptor.config_key for descriptor in im_platform_descriptors()}
-    if "platforms" not in payload and "platform" not in payload and not any(key in payload for key in platform_config_keys):
+    # The list-operations verb mutates the enabled list without carrying a
+    # literal ``platforms`` section. Treat it as a platforms edit so
+    # enable/disable toggles still reach the comparison below, but do not
+    # infer a runtime change from the verb alone: Finish may replay an
+    # already-applied operation.
+    from vibe.api import _LIST_OPS_PAYLOAD_KEY
+
+    has_list_ops = _LIST_OPS_PAYLOAD_KEY in payload
+    if (
+        not has_list_ops
+        and "platforms" not in payload
+        and "platform" not in payload
+        and not any(key in payload for key in platform_config_keys)
+    ):
         return False
     return (
         set(previous.platforms.enabled) != set(current.platforms.enabled)
@@ -4374,17 +4390,23 @@ async def _proxy_show_runtime_websocket(
     runtime_path = f"{external_prefix.rstrip('/')}/__vite_hmr"
     if websocket.url.query:
         runtime_path = f"{runtime_path}?{websocket.url.query}"
-    upstream = await get_show_runtime_manager().websocket_target(
+    manager = get_show_runtime_manager()
+    target = await manager.websocket_target(
         runtime_path,
         envelope=ShowRuntimeProtocolEnvelope(context),
     )
     async with ClientSession() as session:
-        async with session.ws_connect(
-            upstream.url,
-            headers=upstream.headers,
-            protocols=["vite-hmr"],
-            autoping=True,
-        ) as upstream:
+        try:
+            upstream = await session.ws_connect(
+                target.url,
+                headers=target.headers,
+                protocols=["vite-hmr"],
+                autoping=True,
+            )
+        except (asyncio.TimeoutError, ClientConnectionError):
+            await manager.invalidate_websocket_target(target)
+            raise
+        async with upstream:
             async def client_to_upstream():
                 try:
                     while True:
@@ -7520,29 +7542,40 @@ def _persist_wechat_qr_credentials(result: dict) -> None:
     if not isinstance(token, str) or not token.strip():
         return
 
+    from config.v2_config import config_file_lock
     from vibe import api as vibe_api
-    from core.services import settings as settings_service
 
-    config = settings_service.load_config(default_factory=settings_service.default_config)
-    current = vibe_api.config_to_payload(config, include_secrets=True)
-    wechat = dict(current.get("wechat") or {})
-    wechat["bot_token"] = token.strip()
+    new_bot_token = token.strip()
+    new_base_url = None
     if isinstance(result.get("base_url"), str) and result["base_url"].strip():
-        wechat["base_url"] = result["base_url"].strip()
-    elif not wechat.get("base_url"):
-        wechat["base_url"] = "https://ilinkai.weixin.qq.com"
-    current["wechat"] = wechat
+        new_base_url = result["base_url"].strip()
 
-    platforms = dict(current.get("platforms") or {})
-    enabled = list(platforms.get("enabled") or [])
-    if "wechat" not in enabled:
-        enabled.append("wechat")
-    platforms["enabled"] = enabled
-    if not platforms.get("primary") or platforms.get("primary") == "avibe":
-        platforms["primary"] = "wechat"
-    current["platforms"] = platforms
+    # Patch-write shape (#1458 stage ③): the whole compute-and-save runs
+    # under the config transaction — the wechat fields and the
+    # enabled-list mutation are derived from the lock-fresh snapshot, so
+    # a concurrent wechat/platform save between an earlier read and this
+    # write can no longer be overwritten by stale section values.
+    with config_file_lock():
+        try:
+            base = vibe_api.load_config()
+        except FileNotFoundError:
+            # Fresh install: seed the same default the settings loader
+            # uses, exactly like the previous default_factory path.
+            from core.services import settings as settings_service
 
-    vibe_api.save_config(current)
+            base = settings_service.default_config()
+        wechat = {"bot_token": new_bot_token}
+        if new_base_url:
+            wechat["base_url"] = new_base_url
+        elif not base.wechat.base_url:
+            wechat["base_url"] = "https://ilinkai.weixin.qq.com"
+
+        vibe_api.save_config(
+            {
+                "wechat": wechat,
+                "__avibe_list_ops": {"platforms.enabled": {"add": ["wechat"]}},
+            }
+        )
 
 
 WECHAT_QR_LOGIN_BASE_URL = "https://ilinkai.weixin.qq.com"
@@ -7583,7 +7616,11 @@ async def wechat_qr_login_poll():
         user_id = result["user_id"]
 
         try:
-            _persist_wechat_qr_credentials(result)
+            # The persistence helper takes the cross-process config
+            # lock and does synchronous file/DB work — keep it off the
+            # ASGI event loop so other UI requests don't stall while it
+            # waits on the lock.
+            await asyncio.to_thread(_persist_wechat_qr_credentials, result)
         except Exception as exc:
             logger.error("Failed to persist WeChat QR credentials: %s", exc)
             return jsonify({"ok": False, "error": "failed_to_persist_wechat_credentials"}), 500
@@ -12637,10 +12674,11 @@ if os.environ.get("E2E_TEST_MODE", "").lower() in ("true", "1", "yes"):
                 # Merge CWD into existing config (load → modify → save)
                 from vibe import api as vibe_api
 
-                current = vibe_api.config_to_payload(vibe_api.load_config())
-                current.setdefault("runtime", {})
-                current["runtime"]["default_cwd"] = modal_values.get("cwd", "/tmp")
-                result = vibe_api.save_config(current)
+                # Patch-write shape (#1458 stage ③): only the field
+                # this modal owns.
+                result = vibe_api.save_config(
+                    {"runtime": {"default_cwd": modal_values.get("cwd", "/tmp")}}
+                )
                 return jsonify({"ok": True, "action": action})
 
             elif action == "routing_submit":
@@ -12866,19 +12904,43 @@ def _show_page_file_not_found_response():
     return response
 
 
-def _show_page_runtime_unavailable_response():
-    return jsonify({"error": "show_runtime_unavailable"}), 503
+def _show_page_runtime_unavailable_response(reason: str):
+    return jsonify({"error": "show_runtime_unavailable", "reason": reason}), 503
+
+
+def _show_page_runtime_timeout_response():
+    return jsonify({"error": "show_runtime_request_timeout"}), 504
+
+
+def _is_show_page_api_handler_path(asset_path: str) -> bool:
+    relative = (asset_path or "").strip("/")
+    return relative == "api" or relative.startswith("api/")
 
 
 def _is_show_api_asset(asset_path: str) -> bool:
     relative = (asset_path or "").strip("/")
+    if _is_show_page_api_handler_path(asset_path):
+        return True
     if relative == "__show/annotation.js":
         return False
-    return relative == "api" or relative.startswith("api/") or relative == "__show" or relative.startswith("__show/")
+    return relative == "__show" or relative.startswith("__show/")
 
 
 def _is_show_annotation_asset(asset_path: str) -> bool:
     return (asset_path or "").strip("/") == "__show/annotation.js"
+
+
+def _show_page_runtime_error_response(asset_path: str, exc: Exception):
+    from core.show_runtime import ShowRuntimeRequestTimeoutError, ShowRuntimeUnavailableError
+
+    if _is_show_page_api_handler_path(asset_path) and isinstance(
+        exc,
+        ShowRuntimeRequestTimeoutError,
+    ):
+        return _show_page_runtime_timeout_response()
+    if not isinstance(exc, ShowRuntimeUnavailableError):
+        raise AssertionError("Show Runtime error response requires owner-published evidence")
+    return _show_page_runtime_unavailable_response(exc.reason)
 
 
 def _is_show_page_entry_asset(asset_path: str) -> bool:
@@ -13046,10 +13108,50 @@ def _is_denied_show_page_at_fs_path(decoded: str, *, session_id: str, confine_to
     return any(part.startswith(".") for part in workspace_relative.parts)
 
 
-def _show_page_recovery_response(session_id: str):
+def _show_page_runtime_failure_evidence(exc: "ShowRuntimeUnavailableError"):
+    return (
+        exc.reason,
+        exc.failure_class,
+        exc.recovery_action,
+    )
+
+
+def _log_show_runtime_unavailable(reason: str, *, public: bool, fallback: bool) -> None:
+    if fallback:
+        target = "fallback public Show Page response" if public else "fallback Show Page response"
+    else:
+        target = "static public Show Page" if public else "static Show Page"
+    message = f"Show runtime unavailable (%s); serving {target}"
+    logger.warning(message, reason, exc_info=True)
+
+
+def _show_page_recovery_response(
+    session_id: str,
+    *,
+    reason: str,
+    failure_class,
+    recovery_action,
+    retry_authorized: bool,
+):
     from core.show_pages import show_page_runtime_recovery_html
 
-    return Response(show_page_runtime_recovery_html(session_id), status=200, mimetype="text/html; charset=utf-8")
+    response = Response(
+        show_page_runtime_recovery_html(
+            session_id,
+            reason=reason,
+            failure_class=failure_class,
+            recovery_action=recovery_action,
+            retry_authorized=retry_authorized,
+            language=_request_ui_language(),
+        ),
+        status=200,
+        mimetype="text/html; charset=utf-8",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Avibe-Show-Recovery"] = "1"
+    response.headers["X-Avibe-Show-Recovery-Reason"] = reason
+    response.headers["X-Avibe-Show-Recovery-Class"] = failure_class.value
+    return response
 
 
 def _show_page_file_response(root: Path, asset_path: str):
@@ -13080,6 +13182,11 @@ def _show_page_runtime_failure_response(
     session_id: str,
     asset_path: str,
     starlette_request: FastAPIRequest,
+    *,
+    reason: str,
+    failure_class,
+    recovery_action,
+    retry_authorized: bool,
 ):
     if not _is_show_page_spa_route_request(asset_path, starlette_request):
         return None
@@ -13087,7 +13194,13 @@ def _show_page_runtime_failure_response(
         static_response = _show_page_file_response(page_dir, asset_path)
         if static_response.status_code != 404:
             return static_response
-    return _show_page_recovery_response(session_id)
+    return _show_page_recovery_response(
+        session_id,
+        reason=reason,
+        failure_class=failure_class,
+        recovery_action=recovery_action,
+        retry_authorized=retry_authorized,
+    )
 
 
 def _show_session_event_error_response(exc: Exception):
@@ -14087,7 +14200,7 @@ async def show_runtime_vendor_asset(vendor_path: str):
     runtime_path = f"{_SHOW_RUNTIME_VENDOR_PREFIX}/{quote(vendor_path, safe='/@:-._~')}"
     if request._request.url.query:
         runtime_path = f"{runtime_path}?{request._request.url.query}"
-    from core.show_runtime import get_show_runtime_manager
+    from core.show_runtime import ShowRuntimeUnavailableError, get_show_runtime_manager
 
     forwarded_headers = _show_runtime_forwarded_headers(request._request.headers)
     try:
@@ -14097,8 +14210,8 @@ async def show_runtime_vendor_asset(vendor_path: str):
             headers=forwarded_headers,
             body=None,
         )
-    except Exception:
-        return _show_page_runtime_unavailable_response()
+    except ShowRuntimeUnavailableError as exc:
+        return _show_page_runtime_unavailable_response(exc.reason)
     response_headers = {
         key: value
         for key, value in proxied.headers.items()
@@ -14215,6 +14328,7 @@ async def _show_page_runtime_response(
     external_prefix: str | None = None,
     inject_show_config: bool = False,
     show_authenticated: bool = False,
+    runtime_retry_authorized: bool = False,
     show_config_session_id: str | None = None,
     include_annotation_bootstrap: bool = True,
 ):
@@ -14250,12 +14364,23 @@ async def _show_page_runtime_response(
     body = await starlette_request.body()
     request_started = time.monotonic()
     manager = get_show_runtime_manager()
+    request_options: dict[str, float] = {}
+    if _is_show_page_api_handler_path(asset_path):
+        from core.services import settings as settings_service
+
+        config = await asyncio.to_thread(settings_service.load_config_or_default)
+        request_options["timeout_seconds"] = config.runtime.show_page_api_timeout_seconds
     proxied = await manager.request(
         starlette_request.method,
         runtime_path,
         envelope=envelope,
         headers=forwarded_headers,
         body=body or None,
+        automatic=not (
+            runtime_retry_authorized
+            and starlette_request.headers.get("X-Avibe-Show-Recovery-Retry") == "1"
+        ),
+        **request_options,
     )
     proxy_duration_ms = int((time.monotonic() - request_started) * 1000)
     if (
@@ -14836,12 +14961,14 @@ def redirect_private_show_page_to_canonical_path(session_id):
 async def serve_private_show_page(session_id, asset_path):
     from core.show_pages import ShowPageError, ShowPageStore, ensure_show_page_dir
 
+    authorization_context = _request_authorization_context()
+    runtime_retry_authorized = _has_runtime_owner_access(authorization_context)
     store = ShowPageStore()
     try:
         try:
             page = store.require_access(
                 session_id,
-                user_context=_request_authorization_context(),
+                user_context=authorization_context,
             )
         except ShowPageError as exc:
             if exc.code == "resource_access_forbidden":
@@ -14872,7 +14999,7 @@ async def serve_private_show_page(session_id, asset_path):
         # §3.2: /show reads admit every Instance Viewer, but the route forwards
         # mutation methods straight to Show Runtime — keep Viewers read-only.
         if request.method not in {"GET", "HEAD"} and not _show_page_mutation_allowed(
-            _request_authorization_context()
+            authorization_context
         ):
             return _show_page_access_forbidden_response()
         if asset_path.strip("/") == "__show/me":
@@ -14888,6 +15015,11 @@ async def serve_private_show_page(session_id, asset_path):
         page_dir = ensure_show_page_dir(page.session_id)
         response = None
         if request.method in {"GET", "HEAD"} or _is_show_api_asset(asset_path):
+            from core.show_runtime import (
+                ShowRuntimeRequestTimeoutError,
+                ShowRuntimeUnavailableError,
+            )
+
             try:
                 starlette_request = request._request
                 response = await _show_page_runtime_response(
@@ -14896,20 +15028,25 @@ async def serve_private_show_page(session_id, asset_path):
                     starlette_request,
                     inject_show_config=request.method == "GET" and not _is_show_api_asset(asset_path),
                     show_authenticated=can_annotate,
+                    runtime_retry_authorized=runtime_retry_authorized,
                 )
-            except Exception:
+            except (ShowRuntimeUnavailableError, ShowRuntimeRequestTimeoutError) as exc:
+                if isinstance(exc, ShowRuntimeRequestTimeoutError):
+                    return _show_page_runtime_error_response(asset_path, exc)
+                reason, failure_class, recovery_action = _show_page_runtime_failure_evidence(exc)
                 if _is_show_api_asset(asset_path) or _is_show_annotation_asset(asset_path):
-                    return _show_page_runtime_unavailable_response()
+                    return _show_page_runtime_error_response(asset_path, exc)
                 response = _show_page_runtime_failure_response(
                     page_dir,
                     page.session_id,
                     asset_path,
                     request._request,
+                    reason=reason,
+                    failure_class=failure_class,
+                    recovery_action=recovery_action,
+                    retry_authorized=runtime_retry_authorized,
                 )
-                if response is not None:
-                    logger.debug("Show runtime unavailable; serving fallback Show Page response", exc_info=True)
-                else:
-                    logger.debug("Show runtime unavailable; serving static Show Page", exc_info=True)
+                _log_show_runtime_unavailable(reason, public=False, fallback=response is not None)
         if response is None:
             response = _show_page_file_response(page_dir, asset_path)
         if request.method in {"GET", "HEAD"}:
@@ -15383,6 +15520,11 @@ async def serve_public_show_page(share_id, asset_path):
         page_dir = ensure_show_page_dir(page.session_id)
         response = None
         if request.method in {"GET", "HEAD"} or _is_show_api_asset(asset_path):
+            from core.show_runtime import (
+                ShowRuntimeRequestTimeoutError,
+                ShowRuntimeUnavailableError,
+            )
+
             try:
                 starlette_request = request._request
                 show_authenticated = False
@@ -15395,22 +15537,27 @@ async def serve_public_show_page(share_id, asset_path):
                     external_prefix=f"/p/{quote(share_id, safe='')}",
                     inject_show_config=request.method == "GET" and not _is_show_api_asset(asset_path),
                     show_authenticated=show_authenticated,
+                    runtime_retry_authorized=False,
                     show_config_session_id=share_id,
                     include_annotation_bootstrap=not limited_guest,
                 )
-            except Exception:
+            except (ShowRuntimeUnavailableError, ShowRuntimeRequestTimeoutError) as exc:
+                if isinstance(exc, ShowRuntimeRequestTimeoutError):
+                    return _show_page_runtime_error_response(asset_path, exc)
+                reason, failure_class, recovery_action = _show_page_runtime_failure_evidence(exc)
                 if _is_show_api_asset(asset_path) or _is_show_annotation_asset(asset_path):
-                    return _show_page_runtime_unavailable_response()
+                    return _show_page_runtime_error_response(asset_path, exc)
                 response = _show_page_runtime_failure_response(
                     page_dir,
                     page.session_id,
                     asset_path,
                     request._request,
+                    reason=reason,
+                    failure_class=failure_class,
+                    recovery_action=recovery_action,
+                    retry_authorized=False,
                 )
-                if response is not None:
-                    logger.debug("Show runtime unavailable; serving fallback public Show Page response", exc_info=True)
-                else:
-                    logger.debug("Show runtime unavailable; serving static public Show Page", exc_info=True)
+                _log_show_runtime_unavailable(reason, public=True, fallback=response is not None)
         if response is None:
             response = _show_page_file_response(page_dir, asset_path)
         if limited_guest:
@@ -15573,7 +15720,9 @@ async def _reconcile_startup_dependencies_task() -> None:
 
         result = await asyncio.to_thread(api.reconcile_startup_dependencies)
         show_runtime = result.get("show_runtime") if isinstance(result.get("show_runtime"), dict) else {}
-        if show_runtime.get("ok"):
+        policy = show_runtime.get("policy") if isinstance(show_runtime.get("policy"), dict) else {}
+        install = show_runtime.get("install") if isinstance(show_runtime.get("install"), dict) else {}
+        if policy.get("state") == "allowed" and install.get("state") == "installed":
             from core.show_runtime import (
                 ShowRuntimeContext,
                 prewarm_show_page_session,

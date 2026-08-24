@@ -7,6 +7,7 @@ import { ToggleSwitch } from './settings/SettingsPrimitives';
 import { Button } from './ui/button';
 import { badgeVariants } from './ui/badge-variants';
 import { cn } from '@/lib/utils';
+import { setConfigField } from '@/lib/configMutations';
 import { scheduleUpgradeReload } from '../lib/upgradeReload';
 
 // Dev / regression builds carry long versions like
@@ -62,7 +63,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   const handleAutoUpdateToggle = async (enabled: boolean) => {
     setSavingAutoUpdate(true);
     try {
-      await api.saveConfig({ update: { auto_update: enabled } });
+      await api.mutateConfig([setConfigField(['update', 'auto_update'], enabled)]);
       setAutoUpdate(enabled);
     } catch (e) {
       console.error('Failed to save auto-update setting:', e);

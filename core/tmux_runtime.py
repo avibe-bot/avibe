@@ -591,6 +591,7 @@ def _tmux_binary_version(binary: Path | None) -> str | None:
 
 
 def _safe_extract_tar(tar: tarfile.TarFile, destination: Path) -> None:
+    supports_data_filter = hasattr(tarfile, "data_filter")
     destination_resolved = destination.resolve()
     for member in tar.getmembers():
         if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
@@ -612,7 +613,7 @@ def _safe_extract_tar(tar: tarfile.TarFile, destination: Path) -> None:
             resolved_link = (destination / link_target).resolve()
             if resolved_link != destination_resolved and destination_resolved not in resolved_link.parents:
                 raise ValueError(f"Unsafe tmux archive link target: {member.name}")
-    if sys.version_info >= (3, 12):
+    if supports_data_filter:
         tar.extractall(destination, filter="data")
     else:
         tar.extractall(destination)

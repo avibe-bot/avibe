@@ -37,7 +37,7 @@ export const StatusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       const res = await fetch('/status');
       if (res.ok) {
         const data = await res.json();
-        // Set a fresh object every poll ON PURPOSE. Consumers (notably Dashboard)
+        // Set a fresh object every poll ON PURPOSE. Relative-time consumers
         // recompute "started … ago" / "last updated … ago" relative-time labels
         // from Date.now() during render and have no timer of their own, so they
         // rely on this per-poll re-render to keep those labels ticking. Do NOT

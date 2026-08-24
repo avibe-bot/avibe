@@ -447,7 +447,7 @@ export const MemorySettingsPanel: React.FC<{
               <ShieldAlert className="size-3.5 shrink-0" />
               {t('memory.settings.dependencyNotReady')}
               <Button asChild variant="secondary" size="xs">
-                <Link to="/admin/settings/dependencies">
+                <Link to="/settings/dependencies">
                   {t('memory.settings.goToDependencies')}
                   <ArrowUpRight className="size-3.5" />
                 </Link>

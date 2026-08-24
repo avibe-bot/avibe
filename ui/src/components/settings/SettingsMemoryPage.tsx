@@ -241,7 +241,7 @@ export const SettingsMemoryPage: React.FC = () => {
               </div>
               <p className="text-[12.5px] text-muted">{t('memory.setup.runtimeRequiredHint')}</p>
               <Button asChild variant="secondary" size="sm">
-                <Link to="/admin/settings/dependencies">
+                <Link to="/settings/dependencies">
                   {t('memory.settings.goToDependencies')}
                   <ArrowUpRight className="size-3.5" />
                 </Link>

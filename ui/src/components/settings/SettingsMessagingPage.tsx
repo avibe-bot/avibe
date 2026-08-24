@@ -25,42 +25,7 @@ import {
   MIN_CHAT_MESSAGE_FONT_SIZE,
   normalizeChatMessageFontSize,
 } from '@/lib/chatDisplay';
-
-const OWNER_SAVE_KEYS = [
-  'platforms',
-  'ack_mode',
-  'show_duration',
-  'include_time_info',
-  'include_user_info',
-  'reply_enhancements',
-  'show_pages_prompt',
-  'agent_progress_style',
-  'audio_asr',
-  'slack',
-  'discord',
-  'telegram',
-  'lark',
-  'wechat',
-  'agents',
-] as const;
-
-function buildMessagePatch(
-  config: any,
-  extraPatch: Record<string, unknown> = {},
-  { fieldSpecific }: { fieldSpecific: boolean },
-) {
-  // Owners still send the existing messaging snapshot so a first-time save of
-  // an older page does not drop sibling fields. Editors send only the changed
-  // field so an unrelated autosave cannot overwrite a newer ASR value.
-  if (fieldSpecific) {
-    return extraPatch;
-  }
-  const patch: Record<string, unknown> = {};
-  for (const key of OWNER_SAVE_KEYS) {
-    patch[key] = config?.[key];
-  }
-  return { ...patch, ...extraPatch };
-}
+import { configChanges } from '@/lib/configMutations';
 
 function formatSavedAt(value: number | null, t: (key: string) => string) {
   if (!value) return t('settings.messagingStatusIdle');
@@ -104,20 +69,17 @@ export const SettingsMessagingPage: React.FC = () => {
   );
 
   const persist = async (nextConfig: any, extraPatch?: Record<string, unknown>) => {
-    const fieldSpecific = !canUseSystem;
-    // A field-specific save carries only what the control passes, so a control
-    // without an explicit patch would post ``{}``: a silent success that drops
-    // the change on reload. Controls that write owner-only fields have no
-    // Editor patch by design and must be gated out below; reaching here means
-    // one was rendered anyway, so fail visibly instead of pretending to save.
-    if (fieldSpecific && !extraPatch) {
+    // Field-specific for everyone (#1458 stage ③): the save carries only
+    // the control's patch. A control without an explicit patch would post
+    // ``{}`` (silent no-op success) — fail visibly instead.
+    if (!extraPatch) {
       setSaveError(t('common.saveFailed'));
       return;
     }
     setConfig(nextConfig);
     setSaveError(null);
     try {
-      await api.saveConfig(buildMessagePatch(nextConfig, extraPatch, { fieldSpecific }));
+      await api.mutateConfig(configChanges({}, extraPatch));
       setSavedAt(Date.now());
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : t('common.saveFailed'));
@@ -411,16 +373,23 @@ export const SettingsMessagingPage: React.FC = () => {
                   value={config.agents?.opencode?.error_retry_limit ?? 1}
                   onChange={(event) => {
                     const limit = Math.max(0, Math.min(10, Number(event.target.value) || 0));
-                    void persist({
-                      ...config,
-                      agents: {
-                        ...(config.agents || {}),
-                        opencode: {
-                          ...(config.agents?.opencode || {}),
-                          error_retry_limit: limit,
+                    void persist(
+                      {
+                        ...config,
+                        agents: {
+                          ...(config.agents || {}),
+                          opencode: {
+                            ...(config.agents?.opencode || {}),
+                            error_retry_limit: limit,
+                          },
                         },
                       },
-                    });
+                      {
+                        agents: {
+                          opencode: { error_retry_limit: limit },
+                        },
+                      },
+                    );
                   }}
                   className="w-24 text-center font-mono"
                 />
@@ -443,16 +412,23 @@ export const SettingsMessagingPage: React.FC = () => {
                       0,
                       Math.min(1440, Number(event.target.value) || 0)
                     );
-                    void persist({
-                      ...config,
-                      agents: {
-                        ...(config.agents || {}),
-                        opencode: {
-                          ...(config.agents?.opencode || {}),
-                          active_turn_timeout_seconds: Math.round(minutes * 60),
+                    void persist(
+                      {
+                        ...config,
+                        agents: {
+                          ...(config.agents || {}),
+                          opencode: {
+                            ...(config.agents?.opencode || {}),
+                            active_turn_timeout_seconds: Math.round(minutes * 60),
+                          },
                         },
                       },
-                    });
+                      {
+                        agents: {
+                          opencode: { active_turn_timeout_seconds: Math.round(minutes * 60) },
+                        },
+                      },
+                    );
                   }}
                   className="w-24 text-center font-mono"
                 />
@@ -508,10 +484,13 @@ export const SettingsMessagingPage: React.FC = () => {
               <ToggleSwitch
                 enabled={config.show_pages_prompt !== false}
                 onClick={() =>
-                  void persist({
-                    ...config,
-                    show_pages_prompt: !(config.show_pages_prompt !== false),
-                  })
+                  void persist(
+                    {
+                      ...config,
+                      show_pages_prompt: !(config.show_pages_prompt !== false),
+                    },
+                    { show_pages_prompt: !(config.show_pages_prompt !== false) },
+                  )
                 }
               />
             }
@@ -640,7 +619,7 @@ export const SettingsMessagingPage: React.FC = () => {
           description={t('settings.messagingGroupsHint')}
           control={
             <Link
-              to="/admin/groups"
+              to="/settings/platforms/groups"
               className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-border bg-foreground/[0.04] px-3 text-[12px] font-medium text-foreground transition hover:border-border-strong"
             >
               {t('common.manageChannels')}

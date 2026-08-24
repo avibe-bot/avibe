@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from config import paths
+from scripts import incus_regression
 from vibe import runtime
 
 # The supervisor lives in scripts/ (not an installed package); load it the same
@@ -24,6 +27,75 @@ def _write_restart_status(status: dict) -> None:
     path = runtime.get_restart_status_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     runtime.write_json(path, status)
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        ("github", "archive"),
+        ("github-source", "archive"),
+        ("archive", "archive"),
+        ("manifest-cache", "manifest-cache"),
+        ("npm", "npm"),
+    ],
+)
+def test_supervisor_normalizes_preserved_runtime_source_without_touching_other_env(
+    monkeypatch,
+    configured,
+    expected,
+):
+    monkeypatch.setenv("VIBE_SHOW_RUNTIME_SOURCE", configured)
+    monkeypatch.delenv("VIBE_SHOW_RUNTIME_ARCHIVE_PATH", raising=False)
+    monkeypatch.setenv("REGRESSION_UNRELATED_SETTING", "preserved")
+
+    supervisor._normalize_show_runtime_source_environment()
+
+    assert os.environ["VIBE_SHOW_RUNTIME_SOURCE"] == expected
+    if expected == "archive":
+        assert os.environ["VIBE_SHOW_RUNTIME_ARCHIVE_PATH"] == (
+            "/home/avibe/.cache/avibe-regression/vibe-show-runtime-node.tgz"
+        )
+    else:
+        assert "VIBE_SHOW_RUNTIME_ARCHIVE_PATH" not in os.environ
+    assert os.environ["REGRESSION_UNRELATED_SETTING"] == "preserved"
+
+
+def test_preserved_custom_archive_path_cannot_split_build_and_supervisor(
+    monkeypatch,
+):
+    custom_path = "/srv/custom/show-runtime.tgz"
+    monkeypatch.setenv("VIBE_SHOW_RUNTIME_SOURCE", "archive")
+    monkeypatch.setenv("VIBE_SHOW_RUNTIME_ARCHIVE_PATH", custom_path)
+    monkeypatch.setenv("REGRESSION_SHOW_RUNTIME_ARCHIVE_PATH", custom_path)
+
+    supervisor._normalize_show_runtime_source_environment()
+    supervisor_path = os.environ["VIBE_SHOW_RUNTIME_ARCHIVE_PATH"]
+
+    commands = []
+
+    class RecordingRunner:
+        def run(self, command, **kwargs):
+            joined = " ".join(command)
+            commands.append(joined)
+            if 'printf "%s" "${VIBE_SHOW_RUNTIME_SOURCE:-}"' in joined:
+                return subprocess.CompletedProcess(command, 0, stdout="archive")
+            return subprocess.CompletedProcess(command, 0)
+
+    target = incus_regression.RegressionTarget(
+        target="master",
+        slug="master",
+        project="avr-master",
+        instance="avibe-master",
+        host_port=15130,
+        ui_host="127.0.0.1",
+        ui_port=5123,
+    )
+
+    incus_regression.prepare_show_runtime(RecordingRunner(), target, remote=None)
+
+    build_command = next(command for command in commands if "git clone --depth 1" in command)
+    assert custom_path not in build_command
+    assert f"export VIBE_SHOW_RUNTIME_ARCHIVE_PATH={supervisor_path}" in build_command
 
 
 def test_restart_in_progress_true_while_job_pid_alive(monkeypatch, tmp_path):

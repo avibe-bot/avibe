@@ -28,3 +28,9 @@ observations:
     affects:
       - MH-AC29-001
       - MH-MIG-001
+  - id: MH-OBS-005
+    source: local-incus-cold-start-2026-08-23
+    summary: A first CLIProxyAPI process remained alive when Avibe ended the fixed 10-second readiness window; the next start reached both health surfaces in 7.4 seconds.
+    affects:
+      - MH-RUNTIME-005
+      - MH-RUNTIME-006

@@ -9,12 +9,10 @@ export type ShowToast = (
 
 /**
  * Surface server-side ``notices`` (from a save / remove response) as
- * warning toasts. Today the only code-driven notice is
- * ``cleared_custom_relay_pointer`` (Codex relay-URL cleanup when
- * switching to OAuth), but the helper is shaped to accept arbitrary
- * future codes — unknown codes fall through to a generic
- * ``codexNoticeGeneric``-style toast so the user at least sees that
- * the server reported a notable side-effect.
+ * warning toasts. Known notices get user-facing copy here so every
+ * provider page presents the same meaning; unknown codes fall through to
+ * a generic ``codexNoticeGeneric``-style toast so the user at least sees
+ * that the server reported a notable side-effect.
  *
  * Previously each provider page duplicated this switch inline.
  */
@@ -25,6 +23,15 @@ export function surfaceBackendNotices(
 ): void {
   if (!notices || notices.length === 0) return;
   for (const notice of notices) {
+    if (notice.code === 'v2_clear_failed') {
+      showToast(
+        t('settings.backends.backendNoticeV2ClearFailed', {
+          detail: notice.detail || t('settings.backends.backendNoticeDetailUnknown'),
+        }),
+        'warning',
+      );
+      continue;
+    }
     if (notice.code === 'cleared_custom_relay_pointer') {
       showToast(
         t('settings.backends.codexNoticeClearedRelayPointer', {

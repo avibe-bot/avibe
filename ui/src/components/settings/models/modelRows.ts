@@ -71,7 +71,7 @@ export function listedModelIds(agent: AgentSupply): string[] {
   });
 }
 
-export const NOMINAL_MODEL_BASELINE = 3;
+export const COLLAPSED_MODEL_LIMIT = 6;
 
 export type CollapsedModelRows = {
   visible: string[];
@@ -88,21 +88,14 @@ export function modelSupplyState(agent: AgentSupply, modelId: string): ModelSupp
   return supply.has_runnable_hop ? 'available' : 'paused';
 }
 
-/**
- * Keep every structurally unsupplied model plus a small nominal baseline.
- * This reads only AgentSupply, so late or failed per-model chain reads cannot
- * reorganize the group under the user's pointer.
- */
+/** Keep the backend menu order stable while bounding each collapsed group. */
 export function collapsedModelRows(agent: AgentSupply, expanded = false): CollapsedModelRows {
   const models = listedModelIds(agent);
   if (expanded) return { visible: models, hidden: [] };
-  const needsAttention = new Set(models.filter((modelId) => modelSupplyState(agent, modelId) !== 'available'));
-  const baseline = new Set(
-    models.filter((modelId) => !needsAttention.has(modelId)).slice(0, NOMINAL_MODEL_BASELINE),
-  );
-  const visible = models.filter((modelId) => needsAttention.has(modelId) || baseline.has(modelId));
-  const visibleSet = new Set(visible);
-  return { visible, hidden: models.filter((modelId) => !visibleSet.has(modelId)) };
+  return {
+    visible: models.slice(0, COLLAPSED_MODEL_LIMIT),
+    hidden: models.slice(COLLAPSED_MODEL_LIMIT),
+  };
 }
 
 /** One chain read per backend/model pair, even if a duplicated Agent row reaches the page. */

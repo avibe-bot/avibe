@@ -21,7 +21,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from pathlib import Path
 from textwrap import dedent
 from typing import Any, Callable, Mapping, NamedTuple, Optional
@@ -358,6 +360,27 @@ def _cli_payload(kind: str, **fields) -> dict:
 
 def _print_cli_payload(kind: str, **fields) -> None:
     print(json.dumps(_cli_payload(kind, **fields), indent=2))
+
+
+def _configured_trace_retention_days(language: str) -> int:
+    """Read the persisted window for help text without loading/migrating config."""
+    from storage import agent_events_retention as _retention
+
+    try:
+        config_path = paths.get_config_path()
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+        runtime = payload.get("runtime") if isinstance(payload, dict) else None
+        value = runtime.get("agent_events_trace_retention_days") if isinstance(runtime, dict) else None
+        from vibe.trace_retention_policy import validate_retention_days
+
+        try:
+            return validate_retention_days(value)
+        except ValueError:
+            pass
+    except Exception:
+        pass
+    del language
+    return _retention.DEFAULT_RETENTION_DAYS
 
 
 def _configured_cli_language() -> str:
@@ -6777,6 +6800,174 @@ def cmd_runs_cancel(args):
     return 0
 
 
+def _format_byte_size(size: int) -> str:
+    if size < 1024:
+        return f"{size} B"
+    for unit in ("KiB", "MiB", "GiB", "TiB"):
+        size /= 1024
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+    return f"{size:.1f} PiB"
+
+
+def cmd_data_retention(args):
+    from storage import agent_events_retention
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+
+    try:
+        ensure_sqlite_state()
+        engine = create_sqlite_engine()
+        language = _configured_cli_language()
+        days_override = getattr(args, "days", None)
+        # The configured window is the default; --days overrides for this call.
+        # A recovered/unreadable config must not silently run with substituted
+        # defaults: deletion is irreversible, so the run refuses unless the
+        # user supplies an explicit --days window.
+        policy = agent_events_retention.RetentionPolicy(
+            enabled=False,
+            days=agent_events_retention.DEFAULT_RETENTION_DAYS,
+            recovered=True,
+        )
+        try:
+            config = V2Config.load()
+            policy = agent_events_retention.resolve_policy(config)
+        except Exception:
+            # Unreadable/missing config: the controller disables the
+            # automatic pass, so the status must not claim it is enabled.
+            policy = agent_events_retention.RetentionPolicy(
+                enabled=False,
+                days=agent_events_retention.DEFAULT_RETENTION_DAYS,
+                recovered=True,
+            )
+        retention_days = policy.days
+        enabled = policy.enabled
+        config_recovered = policy.recovered
+        if days_override is not None:
+            retention_days = int(days_override)
+            try:
+                agent_events_retention.validate_retention_days(retention_days)
+            except ValueError:
+                # Never silently clamp an explicit window: --days 0 would
+                # delete everything older than one day after normalization.
+                print(
+                    i18n_t(
+                        "data.retention.invalidDays",
+                        language,
+                        minimum=agent_events_retention.MIN_RETENTION_DAYS,
+                        maximum=agent_events_retention.MAX_RETENTION_DAYS,
+                    ),
+                    file=sys.stderr,
+                )
+                return 1
+            config_recovered = False
+        should_run = bool(getattr(args, "run", False)) or bool(getattr(args, "compact", False))
+        if config_recovered and should_run:
+            print(
+                i18n_t("data.retention.configRecovered", language),
+                file=sys.stderr,
+            )
+            return 1
+
+        exit_code = 0
+        if should_run:
+            payload = agent_events_retention.run_once(
+                engine,
+                retention_days=retention_days,
+                force=True,
+                compact=bool(getattr(args, "compact", False)),
+            )
+            run_status = str(payload.get("status"))
+            if run_status in {"busy", "lease_lost", "cancelled"}:
+                # busy: nothing deleted; lease_lost: partial deletion without
+                # completion marker — automation must retry both, not record
+                # success.
+                exit_code = 1
+            # ok_with_contested_compaction keeps exit 0: deletion completed
+            # and its marker is written; only the compaction was contested.
+        else:
+            payload = {"mode": "plan", "enabled": enabled, **agent_events_retention.retention_status(engine, retention_days=retention_days)}
+        if getattr(args, "json", False):
+            print(json.dumps(payload, indent=2))
+        else:
+            _print_data_retention_human(payload, language)
+        return exit_code
+    except Exception as exc:  # noqa: BLE001
+        print(i18n_t("data.retention.error", _configured_cli_language(), error=str(exc)), file=sys.stderr)
+        return 1
+
+
+_COMPACTION_REASON_KEYS = {
+    "checkpoint_busy": "data.retention.compactionReasonCheckpointBusy",
+    "post_checkpoint_busy": "data.retention.compactionReasonCheckpointBusy",
+    "insufficient_free_space": "data.retention.compactionReasonFreeSpace",
+    "free_space_unknown": "data.retention.compactionReasonFreeSpace",
+}
+
+
+def _print_data_retention_human(payload: dict, language: str) -> None:
+    from storage import agent_events_retention as _retention
+
+    mode = str(payload.get("mode") or "run")
+    if mode == "plan":
+        plan = payload.get("plan") or {}
+        print(
+            i18n_t(
+                "data.retention.plan",
+                language,
+                count=int(plan.get("eligible_count") or 0),
+                size=_format_byte_size(int(plan.get("eligible_logical_bytes") or 0)),
+                days=int(plan.get("retention_days") or _retention.DEFAULT_RETENTION_DAYS),
+            )
+        )
+        last = payload.get("last_run") or {}
+        if last:
+            print(i18n_t("data.retention.lastRun", language, at=str(last.get("finished_at")), rows=int(last.get("deleted_rows") or 0)))
+        else:
+            print(i18n_t("data.retention.neverRun", language))
+        if payload.get("enabled") is False:
+            print(i18n_t("data.retention.disabled", language))
+        compaction = payload.get("compaction") or {}
+        print(
+            i18n_t(
+                "data.retention.compaction",
+                language,
+                size=_format_byte_size(int(compaction.get("reclaimable_bytes") or 0)),
+            )
+        )
+        return
+    status = str(payload.get("status") or "unknown")
+    if status == "ok":
+        print(i18n_t("data.retention.ran", language, rows=int(payload.get("deleted_rows") or 0)))
+        compaction = payload.get("compaction") or {}
+        compaction_status = str(compaction.get("status") or "not_attempted")
+        if compaction_status == "vacuumed":
+            print(i18n_t("data.retention.compacted", language, size=_format_byte_size(int(compaction.get("reclaimed_bytes") or 0))))
+        elif compaction_status == "deferred":
+            print(
+                i18n_t(
+                    "data.retention.compactionDeferred",
+                    language,
+                    reason=i18n_t(_COMPACTION_REASON_KEYS.get(str(compaction.get("reason")), "data.retention.compactionReasonOther"), language),
+                )
+            )
+        elif compaction_status == "skipped":
+            print(i18n_t("data.retention.compactionSkipped", language))
+    elif status == "not_due":
+        print(i18n_t("data.retention.notDue", language))
+    elif status == "busy":
+        print(i18n_t("data.retention.busy", language))
+    elif status == "lease_lost":
+        print(i18n_t("data.retention.leaseLost", language))
+    elif status == "cancelled":
+        print(i18n_t("data.retention.cancelled", language))
+    elif status == "ok_with_contested_compaction":
+        print(i18n_t("data.retention.ran", language, rows=int(payload.get("deleted_rows") or 0)))
+        print(i18n_t("data.retention.compactionDeferred", language, reason=i18n_t("data.retention.compactionReasonOther", language)))
+    else:
+        print(f"retention status: {status}")
+
+
 def cmd_data_query(args):
     try:
         sql = getattr(args, "sql", None)
@@ -10838,6 +11029,11 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
     return items
 
 
+def _show_runtime_install(payload: dict) -> dict:
+    install = payload.get("install")
+    return install if isinstance(install, dict) else {}
+
+
 def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
     from core.show_runtime import ShowRuntimeManager
 
@@ -10898,10 +11094,12 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
             code="show_runtime.archive_cache_clean",
         )
 
+    install = _show_runtime_install(status)
+    installed = install.get("state") == "installed"
     provider = str(status.get("provider") or "unknown")
     explicit_command = status.get("explicit_command")
     if explicit_command:
-        if status.get("installed"):
+        if installed:
             _add_doctor_item(items, "pass", f"Show Runtime explicit command is available: {explicit_command}")
         else:
             _add_doctor_item(
@@ -10969,7 +11167,7 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
                 "Prefer the manifest-cache provider for official installations.",
                 code="show_runtime.unpinned_archive_provider",
             )
-    elif provider in {"github", "npm"}:
+    elif provider == "npm":
         _add_doctor_item(
             items,
             "warn",
@@ -10983,11 +11181,11 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
             items,
             "fail",
             f"Show Runtime provider is unsupported: {provider}",
-            "Remove the provider override and reinstall the official Avibe package.",
+            i18n_t("runtime.doctor.providerUnsupportedAction", doctor_language),
             code="show_runtime.provider_unsupported",
         )
 
-    if status.get("installed"):
+    if installed:
         _add_doctor_item(
             items,
             "pass",
@@ -11837,6 +12035,39 @@ def _doctor_repair_result(target: str, status: str, message: str, **details) -> 
     return payload
 
 
+class _ShowRuntimeStartabilityState(str, Enum):
+    STARTABLE = "startable"
+    NOT_STARTABLE = "not_startable"
+    UNDETERMINED = "undetermined"
+
+
+@dataclass(frozen=True)
+class _ShowRuntimeStartability:
+    state: _ShowRuntimeStartabilityState
+    reason: str | None = None
+    detail: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.state is _ShowRuntimeStartabilityState.STARTABLE and (self.reason or self.detail):
+            raise ValueError("startable outcome cannot carry failure evidence")
+        if self.state is _ShowRuntimeStartabilityState.NOT_STARTABLE and (not self.reason or self.detail):
+            raise ValueError("not-startable outcome requires only a reason")
+        if self.state is _ShowRuntimeStartabilityState.UNDETERMINED and (self.reason or not self.detail):
+            raise ValueError("undetermined outcome requires only a detail")
+
+    @classmethod
+    def startable(cls) -> "_ShowRuntimeStartability":
+        return cls(_ShowRuntimeStartabilityState.STARTABLE)
+
+    @classmethod
+    def not_startable(cls, reason: str) -> "_ShowRuntimeStartability":
+        return cls(_ShowRuntimeStartabilityState.NOT_STARTABLE, reason=reason)
+
+    @classmethod
+    def undetermined(cls, detail: str) -> "_ShowRuntimeStartability":
+        return cls(_ShowRuntimeStartabilityState.UNDETERMINED, detail=detail)
+
+
 def _write_refreshed_runtime_status() -> None:
     # Asked, not re-derived. A repair that wrote its own idea of the state word
     # would be the second place deciding one fact -- and the one that persists
@@ -12142,8 +12373,73 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
 
     manager = ShowRuntimeManager()
     before = manager.status()
-    if before.get("installed"):
-        return _doctor_repair_result(target, "skipped", "Show Runtime is already ready.")
+    before_install = _show_runtime_install(before)
+    before_installed = before_install.get("state") == "installed"
+    before_install_dir = before_install.get("install_dir")
+
+    def verify_startability(command_value: Any) -> _ShowRuntimeStartability:
+        command = command_value if isinstance(command_value, list) else []
+        if not command:
+            return _ShowRuntimeStartability.not_startable("runtime_command_missing")
+        try:
+            with tempfile.TemporaryDirectory(prefix="avibe-show-runtime-doctor-") as verification_root_value:
+                verification_root = Path(verification_root_value)
+                verifier = ShowRuntimeManager(
+                    command=shlex.join(str(part) for part in command),
+                    workspace_root=verification_root / "show",
+                    runtime_dir=verification_root / "runtime",
+                    auto_install=False,
+                )
+                try:
+                    result = asyncio.run(verifier.ensure())
+                finally:
+                    verifier.stop()
+        except Exception as exc:  # noqa: BLE001
+            detail = str(exc).strip() or type(exc).__name__
+            return _ShowRuntimeStartability.undetermined(detail)
+        if result.available:
+            return _ShowRuntimeStartability.startable()
+        return _ShowRuntimeStartability.not_startable(result.reason or "runtime_start_failed")
+
+    language = _configured_cli_language()
+    if before_installed:
+        startability = verify_startability(before.get("command"))
+        if startability.state is _ShowRuntimeStartabilityState.UNDETERMINED:
+            return _doctor_repair_result(
+                target,
+                "failed",
+                i18n_t("runtime.doctor.repairVerificationFailed", language, detail=startability.detail),
+                provider=before.get("provider"),
+                platform=before.get("platform"),
+                install_dir=before_install_dir,
+                installed=True,
+                reason="runtime_start_verification_failed",
+                start_error=startability.detail,
+            )
+        if startability.state is _ShowRuntimeStartabilityState.STARTABLE:
+            return _doctor_repair_result(
+                target,
+                "skipped",
+                i18n_t("runtime.doctor.repairHealthy", language),
+                provider=before.get("provider"),
+                platform=before.get("platform"),
+                install_dir=before_install_dir,
+            )
+        if startability.state is not _ShowRuntimeStartabilityState.NOT_STARTABLE:
+            raise AssertionError(f"Unhandled Show Runtime startability: {startability.state}")
+        if before.get("explicit_command"):
+            reason = startability.reason or "runtime_start_failed"
+            return _doctor_repair_result(
+                target,
+                "failed",
+                i18n_t("runtime.doctor.repairExplicitCommandFailed", language, reason=reason),
+                provider=before.get("provider"),
+                platform=before.get("platform"),
+                install_dir=before_install_dir,
+                installed=True,
+                reason=reason,
+                explicit_command=before.get("explicit_command"),
+            )
 
     archive = before.get("archive") if isinstance(before.get("archive"), dict) else {}
     archive_url = str(archive.get("url") or "")
@@ -12154,23 +12450,65 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
         return _doctor_repair_result(
             target,
             "failed",
-            "The packaged Show Runtime manifest is unavailable and the legacy upstream archive URL has no release asset. "
-            "Upgrade or reinstall the official Avibe package, or remove stale runtime source overrides.",
+            i18n_t("runtime.doctor.repairLegacyArchiveUnavailable", language),
             provider=before.get("provider"),
             archive_url=archive_url,
         )
 
-    result = manager.prepare(force=False)
+    result = manager.prepare(force=before_installed)
     status = result.get("status") if isinstance(result.get("status"), dict) else {}
+    status_install = _show_runtime_install(status)
+    install_dir = status_install.get("install_dir")
+    status_installed = status_install.get("state") == "installed"
     if result.get("ok"):
-        return _doctor_repair_result(
-            target,
-            "repaired",
-            "Prepared the manifest-selected Show Runtime.",
-            provider=result.get("provider"),
-            platform=result.get("platform"),
-            install_dir=status.get("install_dir"),
-        )
+        startability = verify_startability(result.get("command"))
+        if startability.state is _ShowRuntimeStartabilityState.STARTABLE:
+            return _doctor_repair_result(
+                target,
+                "repaired",
+                i18n_t(
+                    (
+                        "runtime.doctor.repairReinstalled"
+                        if before_installed
+                        else "runtime.doctor.repairInstalled"
+                    ),
+                    language,
+                ),
+                provider=result.get("provider"),
+                platform=result.get("platform"),
+                install_dir=install_dir,
+            )
+        if startability.state is _ShowRuntimeStartabilityState.NOT_STARTABLE:
+            reason = startability.reason or "runtime_start_failed"
+            return _doctor_repair_result(
+                target,
+                "failed",
+                i18n_t(
+                    (
+                        "runtime.doctor.repairReinstallStartFailed"
+                        if before_installed
+                        else "runtime.doctor.repairInstallStartFailed"
+                    ),
+                    language,
+                    reason=reason,
+                ),
+                provider=result.get("provider"),
+                platform=result.get("platform"),
+                install_dir=install_dir,
+                reason=reason,
+            )
+        if startability.state is _ShowRuntimeStartabilityState.UNDETERMINED:
+            return _doctor_repair_result(
+                target,
+                "failed",
+                i18n_t("runtime.doctor.repairPostVerificationFailed", language, detail=startability.detail),
+                provider=result.get("provider"),
+                platform=result.get("platform"),
+                install_dir=install_dir,
+                reason="runtime_start_verification_failed",
+                start_error=startability.detail,
+            )
+        raise AssertionError(f"Unhandled Show Runtime startability: {startability.state}")
 
     reason = str(result.get("reason") or "runtime_prepare_failed")
     download_error = status.get("download_error") if isinstance(status.get("download_error"), dict) else None
@@ -12180,12 +12518,15 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
             detail = f"{detail}: {download_error['url']}"
     else:
         detail = reason
+    message = i18n_t("runtime.doctor.repairPrepareFailed", language, detail=detail)
     return _doctor_repair_result(
         target,
         "failed",
-        f"Show Runtime preparation failed: {detail}",
+        message,
         provider=result.get("provider"),
         platform=result.get("platform"),
+        install_dir=install_dir,
+        installed=status_installed,
         reason=reason,
         download_error=download_error,
     )
@@ -14133,9 +14474,10 @@ def _print_runtime_status(payload: dict) -> None:
     if archive:
         print(f"  Archive: {archive.get('name')}")
         print(f"  Archive sha256: {archive.get('sha256')}")
-    print(f"  Installed: {'yes' if payload.get('installed') else 'no'}")
-    if payload.get("install_dir"):
-        print(f"  Install dir: {payload.get('install_dir')}")
+    install = _show_runtime_install(payload)
+    print(f"  Installed: {'yes' if install.get('state') == 'installed' else 'no'}")
+    if install.get("install_dir"):
+        print(f"  Install dir: {install.get('install_dir')}")
     if payload.get("reason"):
         print(f"  Reason: {payload.get('reason')}")
     git = payload.get("git") or {}
@@ -14176,17 +14518,42 @@ def cmd_runtime(args) -> int:
         payload["avault"] = avault
         payload["tmux"] = tmux
         payload["git"] = git
+        install = payload.get("install") if isinstance(payload.get("install"), dict) else {}
+        policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else {}
+        runtime_prepared = bool(payload.get("ok"))
         if getattr(args, "json", False):
             print(json.dumps(payload, indent=2))
         else:
-            if payload.get("ok"):
-                print("Show Runtime ready.")
+            language = _configured_cli_language()
+            if runtime_prepared:
+                print(i18n_t("runtime.prepare.prepared", language))
                 status = payload.get("status") or {}
-                if status.get("install_dir"):
-                    print(f"Install dir: {status['install_dir']}")
+                status_install = _show_runtime_install(status)
+                if status_install.get("install_dir"):
+                    print(f"Install dir: {status_install['install_dir']}")
+            elif policy.get("state") == "skipped":
+                print(
+                    i18n_t(
+                        "runtime.prepare.skipped",
+                        language,
+                        reason=policy.get("reason") or "unknown",
+                    ),
+                    file=sys.stderr,
+                )
             else:
-                reason = payload.get("reason") or "unknown"
-                print(f"Show Runtime prepare failed: {reason}", file=sys.stderr)
+                reason = payload.get("reason") or install.get("reason") or "unknown"
+                print(
+                    i18n_t(
+                        (
+                            "runtime.prepare.unsupportedSource"
+                            if reason == "runtime_source_unsupported"
+                            else "runtime.prepare.failed"
+                        ),
+                        language,
+                        reason=reason,
+                    ),
+                    file=sys.stderr,
+                )
             if askill.get("skipped"):
                 print(f"askill: skipped ({askill.get('reason') or 'skipped'}).")
             elif askill.get("ok"):
@@ -14214,7 +14581,7 @@ def cmd_runtime(args) -> int:
                     f"git runtime not ready: {git.get('message') or git.get('reason') or 'install failed'}",
                     file=sys.stderr,
                 )
-        strict_ok = bool(payload.get("ok")) and _git_prepare_satisfies_strict(git)
+        strict_ok = runtime_prepared and _git_prepare_satisfies_strict(git)
         return 1 if getattr(args, "strict", False) and not strict_ok else 0
     if command == "clean":
         dry_run = bool(getattr(args, "dry_run", False))
@@ -14667,7 +15034,7 @@ def build_parser():
     def add_runtime_provider_args(runtime_command_parser):
         runtime_command_parser.add_argument(
             "--source",
-            choices=("manifest-cache", "manifest", "archive", "prebuilt", "github", "github-source", "npm"),
+            choices=("manifest-cache", "manifest", "archive", "prebuilt", "npm"),
             help="Runtime provider override. Defaults to the packaged manifest cache.",
         )
         manifest_group = runtime_command_parser.add_mutually_exclusive_group()
@@ -15493,14 +15860,15 @@ def build_parser():
     _add_pagination_args(show_list_parser, help_command="vibe show list --help")
     show_list_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
 
+    _data_help_lang = _configured_cli_language()
     data_parser = subparsers.add_parser(
         "data",
-        help="Run read-only queries against Avibe data",
-        description="Inspect local Avibe SQLite state with guarded read-only SQL.",
+        help=i18n_t("data.helpCommand", _data_help_lang),
+        description=i18n_t("data.helpDescription", _data_help_lang),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe data --help",
     )
-    data_subparsers = data_parser.add_subparsers(dest="data_command", metavar="{query}")
+    data_subparsers = data_parser.add_subparsers(dest="data_command", metavar="{query,retention}")
     data_subparsers.required = True
     data_query_parser = data_subparsers.add_parser(
         "query",
@@ -15514,6 +15882,35 @@ def build_parser():
     sql_group.add_argument("--sql-file", help="Read SQL from a UTF-8 file, or '-' for stdin.")
     _add_pagination_args(data_query_parser, help_command="vibe data query --help")
     _add_json_noop(data_query_parser)
+    _retention_help_lang = _configured_cli_language()
+    data_retention_parser = data_subparsers.add_parser(
+        "retention",
+        help=i18n_t("data.retention.helpCommand", _retention_help_lang),
+        description=i18n_t("data.retention.helpDescription", _retention_help_lang),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe data retention --help",
+    )
+    data_retention_parser.add_argument(
+        "--run",
+        action="store_true",
+        help=i18n_t("data.retention.helpRun", _retention_help_lang),
+    )
+    data_retention_parser.add_argument(
+        "--days",
+        type=int,
+        default=None,
+        help=i18n_t(
+            "data.retention.helpDays",
+            _retention_help_lang,
+            current=_configured_trace_retention_days(_retention_help_lang),
+        ),
+    )
+    data_retention_parser.add_argument(
+        "--compact",
+        action="store_true",
+        help=i18n_t("data.retention.helpCompact", _retention_help_lang),
+    )
+    _add_json_noop(data_retention_parser)
 
     show_path_parser = show_subparsers.add_parser(
         "path",
@@ -16375,6 +16772,8 @@ def main():
     if args.command == "data":
         if args.data_command == "query":
             sys.exit(cmd_data_query(args))
+        if args.data_command == "retention":
+            sys.exit(cmd_data_retention(args))
         parser.error("data command is required")
     if args.command == "task":
         if args.task_command == "add":
