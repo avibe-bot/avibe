@@ -230,6 +230,11 @@ def test_extractor_behavior_accepts_composite_members_and_rejects_escape(
 
 def _write_ordering_probe(path: Path) -> None:
     with tarfile.open(path, "w") as archive:
+        payload = b"archive-inside\n"
+        regular = tarfile.TarInfo("outside")
+        regular.size = len(payload)
+        regular.mode = 0o644
+        archive.addfile(regular, io.BytesIO(payload))
         directory_link = tarfile.TarInfo("pivot")
         directory_link.type = tarfile.SYMTYPE
         directory_link.linkname = "."
@@ -271,9 +276,10 @@ def test_order_dependent_link_target_stays_confined(
     assert outside.read_bytes() == b"outside\n"
     assert outside.stat().st_ino == outside_stat.st_ino
     assert outside.stat().st_nlink == outside_stat.st_nlink
+    assert (destination / "outside").read_bytes() == b"archive-inside\n"
     assert not (destination / "inside-hard").exists()
     assert (destination / "pivot").is_symlink()
-    assert list(destination.iterdir()) == [destination / "pivot"]
+    assert sorted(path.name for path in destination.iterdir()) == ["outside", "pivot"]
 
 
 @pytest.mark.parametrize(("_name", "extractor"), EXTRACTORS, ids=[item[0] for item in EXTRACTORS])
