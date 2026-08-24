@@ -137,6 +137,7 @@ export type ModelsApi = {
   /** Start the contract-owned client installation transaction. */
   installRuntime(): Promise<RuntimeDependency>;
   startRuntime(): Promise<RuntimeDependency>;
+  stopRuntime(): Promise<RuntimeDependency>;
   startOAuth(vendor: string, channel: SupplyChannel, clientNonce?: string): Promise<OAuthFlow>;
   getOAuthStatus(flowId: string): Promise<OAuthResult>;
   submitOAuth(flowId: string, value: string): Promise<OAuthResult>;
@@ -468,6 +469,7 @@ export const modelsApi: ModelsApi = {
   getRuntimeStatus: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/status').then((r) => (r.runtime ?? r) as RuntimeDependency),
   installRuntime: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/install', jsonInit('POST')).then((r) => (r.runtime ?? r) as RuntimeDependency),
   startRuntime: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/start', jsonInit('POST')).then((r) => (r.runtime ?? r) as RuntimeDependency),
+  stopRuntime: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/stop', jsonInit('POST')).then((r) => (r.runtime ?? r) as RuntimeDependency),
   startOAuth: (vendor, channel, clientNonce) =>
     call<{ flow?: OAuthFlow } & OAuthFlow>(
       '/api/models/oauth/start',

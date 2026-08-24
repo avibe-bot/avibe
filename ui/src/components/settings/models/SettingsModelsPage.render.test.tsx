@@ -242,7 +242,7 @@ describe('SettingsModelsPage surface branches', () => {
     expect(screen.queryByText(/^All 3 backends are direct$|^3 个后端均为直连$/i)).toBeNull();
   });
 
-  it('keeps the stopped runtime action visible on the direct-only surface', async () => {
+  it('gates all internal configuration behind the stopped runtime switch', async () => {
     const stopped = { ...runtime, status: { ...runtime.status, health: 'down' as const } };
     vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
     vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([
@@ -251,6 +251,7 @@ describe('SettingsModelsPage surface branches', () => {
       directAgent('opencode'),
     ]);
     vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(stopped);
+    const start = vi.spyOn(modelsApi, 'startRuntime').mockResolvedValue(runtime);
     vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
 
     render(
@@ -261,8 +262,52 @@ describe('SettingsModelsPage surface branches', () => {
       </ToastProvider>,
     );
 
-    expect(await screen.findByRole('button', { name: /Gateway stopped|网关已停止/i })).toBeTruthy();
+    const toggle = await screen.findByRole('switch', { name: /Turn model gateway on|开启模型网关/i });
+    expect(toggle.getAttribute('aria-checked')).toBe('false');
+    expect(await screen.findByText(/^Model gateway is off$|^模型网关已关闭$/i)).toBeTruthy();
+    expect(screen.queryAllByRole('tab')).toHaveLength(0);
     expect(screen.queryByText(/^All 3 backends are direct$|^3 个后端均为直连$/i)).toBeNull();
+
+    await userEvent.click(toggle);
+
+    await waitFor(() => expect(start).toHaveBeenCalledOnce());
+    expect(await screen.findAllByRole('tab')).toHaveLength(3);
+  });
+
+  it('stops an unused running gateway and hides its retained configuration', async () => {
+    renderPage([retainedSource]);
+    const stopped = { ...runtime, status: { ...runtime.status, health: 'not_started' as const } };
+    const stop = vi.spyOn(modelsApi, 'stopRuntime').mockResolvedValue(stopped);
+
+    await screen.findByText('Retained source');
+    await userEvent.click(screen.getByRole('switch', { name: /Turn model gateway off|关闭模型网关/i }));
+
+    await waitFor(() => expect(stop).toHaveBeenCalledOnce());
+    expect(await screen.findByText(/^Model gateway is off$|^模型网关已关闭$/i)).toBeTruthy();
+    expect(screen.queryByText('Retained source')).toBeNull();
+    expect(screen.queryAllByRole('tab')).toHaveLength(0);
+  });
+
+  it('does not turn the runtime off while a backend still uses the gateway', async () => {
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([retainedSource]);
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([takeoverAgent]);
+    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
+    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+    const stop = vi.spyOn(modelsApi, 'stopRuntime').mockResolvedValue(runtime);
+
+    render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <SettingsModelsPage />
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    const toggle = await screen.findByRole('switch', { name: /Switch codex to Direct|请先将 codex 切换为直连/i });
+    expect((toggle as HTMLButtonElement).disabled).toBe(true);
+    await userEvent.click(toggle);
+    expect(stop).not.toHaveBeenCalled();
+    expect(await screen.findByText('Retained source')).toBeTruthy();
   });
 
   it('renders Frame 01 with tabs when retained sources remain under all-direct backends', async () => {

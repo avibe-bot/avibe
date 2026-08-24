@@ -268,6 +268,51 @@
   background: currentColor;
 }
 
+.model-hub-runtime-closed {
+  display: flex;
+  min-height: 360px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border-block: 1px solid var(--border);
+  padding: 56px 24px;
+  text-align: center;
+}
+
+.model-hub-runtime-closed-icon {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  margin-bottom: 16px;
+  place-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--model-hub-wash-05);
+  color: var(--muted);
+}
+
+.model-hub-runtime-closed-icon > svg {
+  width: 18px;
+  height: 18px;
+}
+
+.model-hub-runtime-closed h2 {
+  color: var(--foreground);
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: 0;
+  line-height: 1.35;
+}
+
+.model-hub-runtime-closed p {
+  max-width: 440px;
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 12.5px;
+  letter-spacing: 0;
+  line-height: 1.65;
+}
+
 .model-hub-takeover-pill {
   display: inline-flex;
   width: fit-content;

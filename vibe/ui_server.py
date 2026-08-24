@@ -4962,6 +4962,16 @@ async def model_hub_runtime_start():
         return _model_hub_error(exc)
 
 
+@app.route("/api/models/runtime/stop", methods=["POST"])
+async def model_hub_runtime_stop():
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        return _model_hub_success(runtime=await _model_hub_service().runtime_stop())
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
 @app.route("/api/platforms", methods=["GET"])
 def platforms_get():
     from vibe import api

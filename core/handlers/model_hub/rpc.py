@@ -132,4 +132,6 @@ async def dispatch_model_hub_rpc(
         return await service.runtime_install()
     if operation == "runtime_start":
         return await service.runtime_start()
+    if operation == "runtime_stop":
+        return await service.runtime_stop()
     raise ModelHubError("source_not_found", status=404)

@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { ArrowLeft, Gauge, LoaderCircle, Route, ScrollText } from 'lucide-react';
+import { ArrowLeft, Gauge, LoaderCircle, Power, Route, ScrollText } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Badge } from '@/components/ui/badge';
@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover';
 import { useToast } from '@/context/ToastContext';
 import { cn } from '@/lib/utils';
+import { ToggleSwitch } from '../SettingsPrimitives';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
 import { EnableGatewayDialog } from './EnableGatewayDialog';
@@ -57,7 +58,7 @@ import {
   unreadRegion,
   type RegionRead,
 } from './regionRead';
-import { freshRuntimeProjection, pollRuntimeStatus, runtimeCanAttemptInstall, startRuntimeWithStatusRefresh } from './runtimeLifecycle';
+import { freshRuntimeProjection, pollRuntimeStatus, runtimeCanAttemptInstall, runtimeIsRunning, startRuntimeWithStatusRefresh } from './runtimeLifecycle';
 import { createRouteProjectionReconciler, type RouteProjectionStatus } from './routeProjectionReconciliation';
 import { useSourceMutationReport } from './useSourceMutationReport';
 import { backendVisual } from './vendorMeta';
@@ -148,10 +149,9 @@ type AuthorizedSurfaceLanding = {
 export const RuntimePill: React.FC<{
   read: RegionRead<RuntimeDependency>;
   starting: boolean;
-  onStart: () => void;
-  onInstall: () => void;
+  stopping?: boolean;
   directCount?: number;
-}> = ({ read, starting, onStart, onInstall, directCount }) => {
+}> = ({ read, starting, stopping = false, directCount }) => {
   const { t } = useTranslation();
   const projection = foldRegionRead<RuntimeDependency, { runtime: RuntimeDependency; authoritative: boolean } | null>(read, {
     loading: () => null,
@@ -167,9 +167,11 @@ export const RuntimePill: React.FC<{
   const health = runtime.status.health;
   const unread = read.kind === 'degraded' && read.cause === 'read_failed';
   const canInstall = health === 'not_installed' && runtimeCanAttemptInstall(runtime);
-  const allDirect = authoritative && !starting && health === 'ok' && directCount !== undefined && directCount > 0;
+  const allDirect = authoritative && !starting && !stopping && health === 'ok' && directCount !== undefined && directCount > 0;
   const key = unread
     ? 'unread'
+    : stopping
+    ? 'stopping'
     : starting
     ? 'starting'
     : health === 'installing'
@@ -185,20 +187,47 @@ export const RuntimePill: React.FC<{
             : canInstall
               ? 'notInstalled'
               : 'unsupported';
-  const action = authoritative && !starting && health !== 'installing' && (health === 'down' || health === 'not_started')
-    ? onStart
-    : authoritative && !starting && canInstall
-      ? onInstall
-      : null;
   const className = cn(
     'model-hub-runtime-pill',
     (health === 'down' || health === 'degraded' || unread) && 'model-hub-runtime-pill--error',
     allDirect && 'model-hub-runtime-pill--direct',
   );
-  const content = <><span className="model-hub-runtime-dot" />{(starting || health === 'installing') && <LoaderCircle className="animate-spin" />}{t(`settings.models.shell.${key}`, allDirect ? { count: directCount } : undefined)}</>;
-  return action
-    ? <button type="button" className={className} onClick={action}>{content}</button>
-    : <span className={className}>{content}</span>;
+  return <span className={className}><span className="model-hub-runtime-dot" />{(starting || stopping || health === 'installing') && <LoaderCircle className="animate-spin" />}{t(`settings.models.shell.${key}`, allDirect ? { count: directCount } : undefined)}</span>;
+};
+
+const RuntimeClosedState: React.FC<{
+  read: RegionRead<RuntimeDependency>;
+  runtime: RuntimeDependency | null;
+  starting: boolean;
+  stopping: boolean;
+}> = ({ read, runtime, starting, stopping }) => {
+  const { t } = useTranslation();
+  const health = runtime?.status.health ?? null;
+  const key = stopping
+    ? 'stopping'
+    : starting
+      ? 'starting'
+      : read.kind === 'unread'
+        ? 'unread'
+        : health === 'installing'
+          ? 'installing'
+          : health === 'not_installed' && runtime?.manifest.resolution === 'unsupported'
+            ? 'unsupported'
+            : health === 'not_installed'
+              ? 'notInstalled'
+              : health === 'down'
+                ? 'down'
+                : 'off';
+  const busy = starting || stopping || health === 'installing';
+  return (
+    <section className="model-hub-runtime-closed" aria-live="polite">
+      <span className="model-hub-runtime-closed-icon" aria-hidden="true">
+        {busy ? <LoaderCircle className="animate-spin" /> : <Power />}
+      </span>
+      <h2>{t(`settings.models.shell.closed.${key}.title`)}</h2>
+      <p>{t(`settings.models.shell.closed.${key}.body`)}</p>
+    </section>
+  );
 };
 
 const ModelHubShell: React.FC<{ actions?: React.ReactNode; detailBack?: () => void; children: React.ReactNode; rootRef?: React.Ref<HTMLDivElement> }> = ({ actions, detailBack, children, rootRef }) => {
@@ -299,6 +328,7 @@ export const SettingsModelsPage: React.FC = () => {
   const [usageRead, setUsageRead] = React.useState<RegionRead<UsageSummary>>(loadingRegion);
   const [usageWindow, setUsageWindow] = React.useState<UsageWindowOption>(USAGE_DEFAULT_WINDOW_DAYS);
   const [startingRuntime, setStartingRuntime] = React.useState(false);
+  const [stoppingRuntime, setStoppingRuntime] = React.useState(false);
   const [runtimeRecoveryPending, setRuntimeRecoveryPending] = React.useState(false);
   const [installOpen, setInstallOpen] = React.useState(false);
   const [apiKeyOpen, setApiKeyOpen] = React.useState(false);
@@ -395,6 +425,10 @@ export const SettingsModelsPage: React.FC = () => {
     degraded: (staleData) => staleData,
   });
   const runtimeHealth = retainedRuntime?.status.health ?? null;
+  const runtimeSurfaceEnabled = retainedRuntime !== null
+    && runtimeIsRunning(retainedRuntime)
+    && runtimeRead.kind !== 'unread';
+  const runtimeConfigurationVisible = runtimeSurfaceEnabled && !stoppingRuntime;
   React.useEffect(() => {
     const runtimeCanRecover = runtimeRead.kind === 'unread'
       || (runtimeRead.kind === 'degraded' && runtimeRead.cause === 'read_failed')
@@ -757,7 +791,7 @@ export const SettingsModelsPage: React.FC = () => {
     }
   }, [feed, showToast, t]);
   const startRuntime = async () => {
-    if (startingRuntime) return;
+    if (startingRuntime || stoppingRuntime) return;
     setStartingRuntime(true);
     try {
       const result = await startRuntimeWithStatusRefresh(modelsApi);
@@ -770,11 +804,55 @@ export const SettingsModelsPage: React.FC = () => {
       setStartingRuntime(false);
     }
   };
+  const stopRuntime = async () => {
+    if (startingRuntime || stoppingRuntime) return;
+    setStoppingRuntime(true);
+    try {
+      const stopped = await modelsApi.stopRuntime();
+      setRuntimeRead(readyRegion(stopped));
+      setRuntimeRecoveryPending(false);
+      setSelectedSourceId(null);
+      setTab('sources');
+    } catch {
+      const observed = await modelsApi.getRuntimeStatus().catch(() => null);
+      setRuntimeRead((previous) => observed ? readyRegion(observed) : failRegionRead(previous));
+      showToast(t('settings.models.errors.stopFailed') as string, 'error');
+    } finally {
+      setStoppingRuntime(false);
+    }
+  };
   const landingLoading = sourcesRead.kind === 'loading'
     && supplyRead.kind === 'loading'
     && runtimeRead.kind === 'loading';
   const directEmpty = modelsSurfaceKindFromReads(supplyRead, sourcesRead) === 'direct_empty';
   const installedAgents = agents.filter((agent) => agent.cli_present);
+  const hubBackends = agents.filter((agent) => agent.mode === 'hub').map((agent) => agent.backend);
+  const stopBlocked = runtimeSurfaceEnabled && (supplyRead.kind !== 'ready' || hubBackends.length > 0);
+  const runtimeSwitchUnsupported = runtimeHealth === 'not_installed'
+    && retainedRuntime?.manifest.resolution === 'unsupported';
+  const runtimeSwitchDisabled = startingRuntime
+    || stoppingRuntime
+    || runtimeRead.kind !== 'ready'
+    || runtimeHealth === 'installing'
+    || runtimeSwitchUnsupported
+    || stopBlocked;
+  const runtimeSwitchLabel = stopBlocked
+    ? supplyRead.kind === 'ready'
+      ? t('settings.models.shell.toggle.stopBlocked', { names: hubBackends.join(', ') })
+      : t('settings.models.shell.toggle.stopUnavailable')
+    : runtimeSurfaceEnabled
+      ? t('settings.models.shell.toggle.turnOff')
+      : t('settings.models.shell.toggle.turnOn');
+  const toggleRuntime = () => {
+    if (runtimeSwitchDisabled) return;
+    if (runtimeSurfaceEnabled) {
+      void stopRuntime();
+    } else if (runtimeHealth === 'not_installed') {
+      setInstallOpen(true);
+    } else {
+      void startRuntime();
+    }
+  };
   const installedSupplyRead = foldRegionRead<AgentSupply[], RegionRead<AgentSupply[]>>(supplyRead, {
     loading: () => loadingRegion(),
     ready: () => readyRegion(installedAgents),
@@ -1036,23 +1114,30 @@ export const SettingsModelsPage: React.FC = () => {
   return (
     <ModelHubShell
       rootRef={pageRef}
-      detailBack={selectedSourceId ? () => selectSource(null) : undefined}
+      detailBack={runtimeConfigurationVisible && selectedSourceId ? () => selectSource(null) : undefined}
       actions={!landingLoading
-        ? directEmpty && installedAgents.length === 0
-          ? undefined
-          : <span className="flex items-center gap-2">
+        ? <span className="flex items-center gap-2">
               <RuntimePill
                 read={runtimeRead}
                 starting={startingRuntime}
-                onStart={() => void startRuntime()}
-                onInstall={() => setInstallOpen(true)}
+                stopping={stoppingRuntime}
                 directCount={directEmpty ? installedAgents.length : undefined}
               />
-              {!directEmpty && <TakeoverPill count={takeoverCount} />}
+              {runtimeConfigurationVisible && !directEmpty && <TakeoverPill count={takeoverCount} />}
+              <span title={runtimeSwitchLabel}>
+                <ToggleSwitch
+                  enabled={runtimeSurfaceEnabled}
+                  disabled={runtimeSwitchDisabled}
+                  label={runtimeSwitchLabel}
+                  onClick={toggleRuntime}
+                />
+              </span>
             </span>
         : undefined}
     >
       {landingLoading ? <div className="text-[13px] text-muted">{t('common.loading')}</div>
+        : !runtimeConfigurationVisible
+          ? <RuntimeClosedState read={runtimeRead} runtime={retainedRuntime} starting={startingRuntime} stopping={stoppingRuntime} />
         : selectedSourceId
           ? selectedSource
             ? <SourceDetailPanel
@@ -1169,6 +1254,7 @@ export const SettingsModelsPage: React.FC = () => {
                     </div>
                   </div>}
                 </div>}
+      {runtimeConfigurationVisible && <>
       <SourceMutationReport
         report={sourceMutationReport.report}
         onComplete={() => { void sourceMutationReport.complete(); }}
@@ -1257,6 +1343,7 @@ export const SettingsModelsPage: React.FC = () => {
           trackWrite={(work) => agentWriteRegistry.track(adoptAgent.backend, work)}
         />
       )}
+      </>}
       {installOpen && retainedRuntime && (
         <InstallGatewayDialog
           runtime={retainedRuntime}

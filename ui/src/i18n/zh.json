@@ -665,15 +665,56 @@
       "shell": {
         "title": "模型",
         "running": "网关运行中",
-        "stopped": "网关已停止 · 点击启动",
+        "stopped": "网关已关闭",
         "degraded": "网关降级运行",
         "unread": "网关状态未读到",
-        "notStarted": "网关未启动 · 点击启动",
-        "notInstalled": "网关组件未安装 · 点击安装",
+        "notStarted": "网关已关闭",
+        "notInstalled": "网关组件未安装",
         "allDirect_one": "{{count}} 个后端都在直连",
         "allDirect_other": "{{count}} 个后端都在直连",
         "starting": "正在启动…",
+        "stopping": "正在关闭…",
         "unsupported": "这个平台还没有网关组件",
+        "toggle": {
+          "turnOn": "开启模型网关",
+          "turnOff": "关闭模型网关",
+          "stopBlocked": "请先将 {{names}} 切换为直连，再关闭模型网关",
+          "stopUnavailable": "暂时无法读取 Agent 路由状态，当前不能关闭模型网关"
+        },
+        "closed": {
+          "off": {
+            "title": "模型网关已关闭",
+            "body": "开启后才会显示和编辑来源、路由与网关模型。"
+          },
+          "down": {
+            "title": "模型网关已关闭",
+            "body": "上一次启动没有就绪。开启网关即可重试。"
+          },
+          "notInstalled": {
+            "title": "模型网关尚未安装",
+            "body": "开启后会安装由 Avibe 管理的网关组件。"
+          },
+          "unsupported": {
+            "title": "模型网关不可用",
+            "body": "当前平台没有兼容的托管网关组件。"
+          },
+          "installing": {
+            "title": "正在安装模型网关",
+            "body": "安装并启动完成后才会显示来源与路由。"
+          },
+          "starting": {
+            "title": "正在启动模型网关",
+            "body": "网关就绪后才会显示来源与路由。"
+          },
+          "stopping": {
+            "title": "正在关闭模型网关",
+            "body": "运行时停止期间会隐藏网关配置。"
+          },
+          "unread": {
+            "title": "暂时无法读取网关状态",
+            "body": "确认运行状态前不会显示网关配置。"
+          }
+        },
         "gatewayInfo": {
           "label": "什么是网关",
           "body": "网关是本机的一层调度：它持有你添加的来源，按你配置的顺序供给各个 Agent。"
@@ -1023,7 +1064,8 @@
       },
       "errors": {
         "engineDown": "模型引擎未就绪,请稍后重试",
-        "startFailed": "模型引擎启动失败"
+        "startFailed": "模型引擎启动失败",
+        "stopFailed": "模型网关关闭失败"
       },
       "runtime": {
         "notStarted": "未启动 · 首次使用时自动启动",

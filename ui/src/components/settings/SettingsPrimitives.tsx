@@ -119,15 +119,17 @@ export const SearchField: React.FC<SearchFieldProps> = ({
 // fill --mint, blur 8 #5BFFA055 glow, 38×22 with knob inset 3.
 // Off state mirrors fcMl6 (Switch/Unchecked): fill + stroke = --border-strong
 // (14% white dark / 14% black light) for sufficient contrast against bg-background.
-export const ToggleSwitch: React.FC<{ enabled: boolean; onClick: () => void; disabled?: boolean }> = ({
+export const ToggleSwitch: React.FC<{ enabled: boolean; onClick: () => void; disabled?: boolean; label?: string }> = ({
   enabled,
   onClick,
   disabled,
+  label,
 }) => (
   <button
     type="button"
     role="switch"
     aria-checked={enabled}
+    aria-label={label}
     disabled={disabled}
     onClick={onClick}
     className={clsx(
