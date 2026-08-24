@@ -10,7 +10,6 @@ import platform
 import re
 import shutil
 import stat
-import sys
 import tarfile
 import tempfile
 import threading
@@ -267,7 +266,7 @@ class ManagedRuntimeManager:
                     install_dir = replacement
                 shutil.move(str(staging_dir), str(install_dir))
                 candidate_install_dir = install_dir
-                installed_binary = install_dir / archive.bin_path
+                installed_binary = (install_dir / archive.bin_path).resolve(strict=True)
                 self._write_manifest_install_metadata(
                     install_dir,
                     manifest,
@@ -1036,8 +1035,16 @@ class ManagedRuntimeManager:
         bin_path = metadata.get("bin_path", self.spec.default_bin_path)
         if not isinstance(bin_path, str) or archive_path_is_unsafe(bin_path):
             return None
-        binary = install_dir / bin_path
-        if not binary.is_file() or not os.access(binary, os.X_OK):
+        try:
+            install_dir_resolved = install_dir.resolve(strict=True)
+            binary = (install_dir_resolved / bin_path).resolve(strict=True)
+        except (OSError, RuntimeError):
+            return None
+        if (
+            install_dir_resolved not in binary.parents
+            or not binary.is_file()
+            or not os.access(binary, os.X_OK)
+        ):
             return None
         target = self._install_target_identity(manifest, archive)
         target_platform = target.pop("platform")
@@ -1311,16 +1318,32 @@ def install_lock_for(runtime_id: str) -> threading.Lock:
 def safe_extract_tar(archive: tarfile.TarFile, destination: Path) -> None:
     destination_resolved = destination.resolve()
     for member in archive.getmembers():
-        if not (member.isfile() or member.isdir()):
+        if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
             raise ValueError(f"Unsupported managed runtime archive member: {member.name}")
         if archive_path_is_unsafe(member.name):
             raise ValueError(f"Unsafe managed runtime archive path: {member.name}")
         target = (destination / member.name).resolve()
         if target != destination_resolved and destination_resolved not in target.parents:
             raise ValueError(f"Unsafe managed runtime archive path: {member.name}")
-    if sys.version_info >= (3, 12):
+        if member.issym():
+            link_target = (destination / member.name).parent / member.linkname
+            link_target_resolved = link_target.resolve()
+            if (
+                link_target_resolved != destination_resolved
+                and destination_resolved not in link_target_resolved.parents
+            ):
+                raise ValueError(f"Unsafe managed runtime archive link target: {member.name}")
+        elif member.islnk():
+            link_target = destination / member.linkname
+            link_target_resolved = link_target.resolve()
+            if (
+                link_target_resolved != destination_resolved
+                and destination_resolved not in link_target_resolved.parents
+            ):
+                raise ValueError(f"Unsafe managed runtime archive link target: {member.name}")
+    try:
         archive.extractall(destination, filter="data")
-    else:
+    except TypeError:
         archive.extractall(destination)
 
 

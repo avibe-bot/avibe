@@ -612,9 +612,9 @@ def _safe_extract_tar(tar: tarfile.TarFile, destination: Path) -> None:
             resolved_link = (destination / link_target).resolve()
             if resolved_link != destination_resolved and destination_resolved not in resolved_link.parents:
                 raise ValueError(f"Unsafe tmux archive link target: {member.name}")
-    if sys.version_info >= (3, 12):
+    try:
         tar.extractall(destination, filter="data")
-    else:
+    except TypeError:
         tar.extractall(destination)
 
 

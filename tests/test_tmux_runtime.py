@@ -6,6 +6,7 @@ import stat
 import io
 import tarfile
 import urllib.error
+import warnings
 from pathlib import Path
 
 import pytest
@@ -237,40 +238,41 @@ def test_macos_codesign_path_is_used(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert calls[0][4].endswith("/tmux")
 
 
-def test_safe_extract_tar_omits_filter_before_python_312(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_safe_extract_tar_falls_back_when_data_filter_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     archive = _write_tmux_archive(tmp_path)
     destination = tmp_path / "extract"
     destination.mkdir()
     calls: list[object] = []
-
-    class VersionInfo(tuple):
-        major = 3
-        minor = 11
 
     with tarfile.open(archive, "r:gz") as tar:
         original_extractall = tar.extractall
 
         def capture_extractall(path, members=None, *, numeric_owner=False, filter=None):
             calls.append(filter)
-            return original_extractall(path, members=members, numeric_owner=numeric_owner)
+            if filter is not None:
+                raise TypeError("filter is unavailable")
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                return original_extractall(path, members=members, numeric_owner=numeric_owner)
 
-        monkeypatch.setattr(tmux_runtime.sys, "version_info", VersionInfo((3, 11, 0)))
         monkeypatch.setattr(tar, "extractall", capture_extractall)
         tmux_runtime._safe_extract_tar(tar, destination)
 
-    assert calls == [None]
+    assert calls == ["data", None]
     assert (destination / "tmux").is_file()
 
 
-def test_safe_extract_tar_uses_data_filter_on_python_312_plus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_safe_extract_tar_uses_available_data_filter_before_python_312(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     archive = _write_tmux_archive(tmp_path)
     destination = tmp_path / "extract"
     destination.mkdir()
     calls: list[object] = []
-
-    class VersionInfo(tuple):
-        major = 3
-        minor = 12
 
     with tarfile.open(archive, "r:gz") as tar:
         original_extractall = tar.extractall
@@ -279,7 +281,7 @@ def test_safe_extract_tar_uses_data_filter_on_python_312_plus(tmp_path: Path, mo
             calls.append(filter)
             return original_extractall(path, members=members, numeric_owner=numeric_owner, filter=filter)
 
-        monkeypatch.setattr(tmux_runtime.sys, "version_info", VersionInfo((3, 12, 0)))
+        monkeypatch.setattr(tmux_runtime.sys, "version_info", (3, 10, 12))
         monkeypatch.setattr(tar, "extractall", capture_extractall)
         tmux_runtime._safe_extract_tar(tar, destination)
 
