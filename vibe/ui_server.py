@@ -4445,8 +4445,6 @@ def doctor_get():
 
 @app.route("/api/config", methods=["GET"])
 def config_get():
-    from vibe import api
-    from config.v2_config import is_model_hub_enabled
     from core.services import settings as settings_service
 
     # On a truly fresh install no config file exists yet, but the setup
@@ -4457,8 +4455,7 @@ def config_get():
     # (``save_config``) already creates the file on the first real save.
     config = settings_service.load_config_or_default()
     authorization_context = getattr(g, "authorization_context", None)
-    payload = _config_payload_for_context(config, authorization_context)
-    payload["capabilities"] = {"model_hub": {"enabled": is_model_hub_enabled()}}
+    payload = _config_api_payload_for_context(config, authorization_context)
     return jsonify(payload)
 
 
@@ -4470,6 +4467,16 @@ def _config_payload_for_context(config: Any, authorization_context: Any) -> dict
     if authorization_context is None or authorization_context.can_manage_instance:
         return api.client_config_payload(config)
     return api.non_owner_config_payload(config)
+
+
+def _config_api_payload_for_context(config: Any, authorization_context: Any) -> dict[str, Any]:
+    """Return the complete payload exposed by the config API."""
+
+    from config.v2_config import is_model_hub_enabled
+
+    payload = _config_payload_for_context(config, authorization_context)
+    payload["capabilities"] = {"model_hub": {"enabled": is_model_hub_enabled()}}
+    return payload
 
 
 _MODEL_HUB_SERVICE = None
@@ -6760,7 +6767,7 @@ async def config_post():
             else:
                 agent_backend_runtime["apply_on_next_start"] = True
     authorization_context = getattr(g, "authorization_context", None)
-    response_payload = _config_payload_for_context(config, authorization_context)
+    response_payload = _config_api_payload_for_context(config, authorization_context)
     if remote_access_runtime is not None:
         response_payload["remote_access_runtime"] = remote_access_runtime
     if platform_runtime is not None:

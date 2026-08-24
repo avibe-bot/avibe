@@ -8,25 +8,10 @@ import { setConfigField } from '../lib/configMutations';
 
 export const LanguageSwitcher: React.FC<{ openUpward?: boolean }> = ({ openUpward = false }) => {
   const { i18n, t } = useTranslation();
-  const { getConfig, mutateConfig } = useApi();
+  const { mutateConfig } = useApi();
   const { capabilities } = useInstanceAuthorization();
   const [isOpen, setIsOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!capabilities.can_manage_instance) return;
-    const loadConfig = async () => {
-      try {
-        const cfg = await getConfig();
-        if (cfg.language && cfg.language !== i18n.language) {
-          i18n.changeLanguage(cfg.language);
-        }
-      } catch {
-        // Ignore errors on config load
-      }
-    };
-    loadConfig();
-  }, [capabilities.can_manage_instance, getConfig, i18n]);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {

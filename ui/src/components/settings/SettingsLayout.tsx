@@ -3,9 +3,12 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
   Bot,
   Brain,
+  ChevronDown,
   ChevronLeft,
   Cpu,
   Globe,
+  Hash,
+  MessageCircle,
   MessageSquare,
   Package,
   PlugZap,
@@ -22,7 +25,11 @@ import { useApi } from '@/context/ApiContext';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { memoryNavShouldBeVisible } from '@/lib/memorySettings';
 import { rememberSettingsPath, settingsLandingPath } from '@/lib/adminNavigation';
+import { getEnabledPlatforms, platformSupportsChannels } from '@/lib/platforms';
 import { useIsDesktop } from '@/lib/useIsDesktop';
+import { AccountMenu } from '../AccountMenu';
+import { LanguageSwitcher } from '../LanguageSwitcher';
+import { ThemeToggle } from '../ThemeToggle';
 import { modelHubEnabledFromConfig } from './models/featureFlags';
 
 type SettingsItem = {
@@ -30,7 +37,10 @@ type SettingsItem = {
   labelKey: string;
   icon: React.ComponentType<{ className?: string }>;
   ownerOnly?: boolean;
-  feature?: 'models' | 'memory';
+  feature?: 'models' | 'memory' | 'channels';
+  children?: SettingsItem[];
+  defaultOpen?: boolean;
+  exact?: boolean;
 };
 
 type SettingsGroup = {
@@ -51,7 +61,28 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
   {
     labelKey: 'settings.groups.connections',
     items: [
-      { path: '/settings/platforms', labelKey: 'settings.sections.platforms', icon: PlugZap, ownerOnly: true },
+      {
+        path: '/settings/platforms',
+        labelKey: 'nav.messagingPlatforms',
+        icon: PlugZap,
+        ownerOnly: true,
+        defaultOpen: true,
+        children: [
+          {
+            path: '/settings/platforms',
+            labelKey: 'settings.sections.platformConnections',
+            icon: PlugZap,
+            exact: true,
+          },
+          { path: '/settings/platforms/users', labelKey: 'nav.users', icon: MessageCircle },
+          {
+            path: '/settings/platforms/groups',
+            labelKey: 'nav.channels',
+            icon: Hash,
+            feature: 'channels',
+          },
+        ],
+      },
       { path: '/settings/remote-access', labelKey: 'settings.sections.remoteAccess', icon: Globe, ownerOnly: true },
     ],
   },
@@ -69,6 +100,79 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
 const pathMatches = (pathname: string, itemPath: string): boolean =>
   pathname === itemPath || pathname.startsWith(`${itemPath}/`);
 
+const itemMatches = (pathname: string, item: SettingsItem): boolean =>
+  item.exact ? pathname === item.path : pathMatches(pathname, item.path);
+
+const SettingsNavLink: React.FC<{ item: SettingsItem }> = ({ item }) => {
+  const { t } = useTranslation();
+  const location = useLocation();
+  const active = itemMatches(location.pathname, item);
+  const Icon = item.icon;
+
+  return (
+    <NavLink
+      to={item.path}
+      end={item.exact}
+      title={t(item.labelKey)}
+      className={clsx(
+        'flex items-center gap-2 rounded-lg px-2 py-2 text-[12.5px] font-medium transition-colors',
+        'md:justify-center lg:justify-start',
+        active
+          ? 'bg-mint/[0.09] text-foreground'
+          : 'text-muted hover:bg-foreground/[0.04] hover:text-foreground',
+      )}
+    >
+      <Icon className={clsx('size-4 shrink-0', active ? 'text-mint-ink' : 'text-muted')} />
+      <span className="truncate md:hidden lg:block">{t(item.labelKey)}</span>
+    </NavLink>
+  );
+};
+
+const SettingsNavGroup: React.FC<{ item: SettingsItem }> = ({ item }) => {
+  const { t } = useTranslation();
+  const location = useLocation();
+  const children = item.children ?? [];
+  const childActive = children.some((child) => itemMatches(location.pathname, child));
+  const [manualOpen, setManualOpen] = useState<boolean | null>(null);
+  const open = manualOpen ?? item.defaultOpen ?? childActive;
+  const Icon = item.icon;
+
+  return (
+    <div className="flex flex-col gap-0.5">
+      <button
+        type="button"
+        title={t(item.labelKey)}
+        aria-expanded={open}
+        onClick={() => setManualOpen(!open)}
+        className={clsx(
+          'flex w-full items-center gap-2 rounded-lg px-2 py-2 text-[12.5px] font-medium transition-colors',
+          'md:justify-center lg:justify-start',
+          childActive
+            ? 'text-foreground'
+            : 'text-muted hover:bg-foreground/[0.04] hover:text-foreground',
+        )}
+      >
+        <Icon className={clsx('size-4 shrink-0', childActive ? 'text-mint-ink' : 'text-muted')} />
+        <span className="min-w-0 flex-1 truncate text-left md:hidden lg:block">{t(item.labelKey)}</span>
+        <ChevronDown
+          className={clsx(
+            'size-3.5 shrink-0 text-muted transition-transform md:hidden lg:block',
+            open && 'rotate-180',
+          )}
+        />
+      </button>
+      {open && (
+        <div className="ml-3 flex flex-col gap-0.5 border-l border-border pl-2 md:ml-0 md:border-l-0 md:pl-0 lg:ml-3 lg:border-l lg:pl-2">
+          {children.map((child) => <SettingsNavLink key={child.path} item={child} />)}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const SettingsNavItem: React.FC<{ item: SettingsItem }> = ({ item }) =>
+  item.children?.length ? <SettingsNavGroup item={item} /> : <SettingsNavLink item={item} />;
+
 export const SettingsLayout: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
@@ -78,12 +182,25 @@ export const SettingsLayout: React.FC = () => {
   const isDesktop = useIsDesktop();
   const [modelHubVisible, setModelHubVisible] = useState(false);
   const [memoryVisible, setMemoryVisible] = useState(false);
+  const [channelSettingsVisible, setChannelSettingsVisible] = useState(false);
   const atRoot = location.pathname === '/settings' || location.pathname === '/settings/';
 
   useEffect(() => {
     if (!capabilities.can_manage_instance) return;
     let cancelled = false;
     let memoryRequest = 0;
+    let configVersion = 0;
+    const applyConfigVisibility = (config: unknown) => {
+      setModelHubVisible(modelHubEnabledFromConfig(config));
+      setChannelSettingsVisible(
+        getEnabledPlatforms(config).some((platform) => platformSupportsChannels(config, platform)),
+      );
+    };
+    const stopConfigChanges = api.onConfigChanged((config) => {
+      if (cancelled) return;
+      configVersion += 1;
+      applyConfigVisibility(config);
+    });
     const refreshMemoryVisibility = () => {
       const request = ++memoryRequest;
       void api.getMemorySettings()
@@ -96,17 +213,22 @@ export const SettingsLayout: React.FC = () => {
           if (!cancelled && request === memoryRequest) setMemoryVisible(false);
         });
     };
+    const requestedConfigVersion = configVersion;
     void api.getConfig()
       .then((config) => {
-        if (!cancelled) setModelHubVisible(modelHubEnabledFromConfig(config));
+        if (!cancelled && requestedConfigVersion === configVersion) applyConfigVisibility(config);
       })
       .catch(() => {
-        if (!cancelled) setModelHubVisible(false);
+        if (!cancelled && requestedConfigVersion === configVersion) {
+          setModelHubVisible(false);
+          setChannelSettingsVisible(false);
+        }
       });
     refreshMemoryVisibility();
     window.addEventListener('avibe:memory-settings-changed', refreshMemoryVisibility);
     return () => {
       cancelled = true;
+      stopConfigChanges();
       window.removeEventListener('avibe:memory-settings-changed', refreshMemoryVisibility);
     };
   }, [api, capabilities.can_manage_instance]);
@@ -114,15 +236,30 @@ export const SettingsLayout: React.FC = () => {
   const visibleGroups = useMemo(
     () => SETTINGS_GROUPS.map((group) => ({
       ...group,
-      items: group.items.filter((item) => {
-        if (item.ownerOnly && !capabilities.can_manage_instance) return false;
-        if (item.feature === 'models') return modelHubVisible;
-        if (item.feature === 'memory') return memoryVisible;
-        return true;
+      items: group.items.flatMap((item) => {
+        if (item.ownerOnly && !capabilities.can_manage_instance) return [];
+        if (item.feature === 'models' && !modelHubVisible) return [];
+        if (item.feature === 'memory' && !memoryVisible) return [];
+        return [{
+          ...item,
+          children: item.children?.filter((child) =>
+            child.feature !== 'channels' || channelSettingsVisible),
+        }];
       }),
     })).filter((group) => group.items.length > 0),
-    [capabilities.can_manage_instance, memoryVisible, modelHubVisible],
+    [capabilities.can_manage_instance, channelSettingsVisible, memoryVisible, modelHubVisible],
   );
+
+  const activeTrail = useMemo(() => {
+    for (const group of visibleGroups) {
+      for (const item of group.items) {
+        const child = item.children?.find((candidate) => itemMatches(location.pathname, candidate));
+        if (child) return [item, child];
+        if (pathMatches(location.pathname, item.path)) return [item];
+      }
+    }
+    return [];
+  }, [location.pathname, visibleGroups]);
 
   useEffect(() => {
     if (atRoot || !location.pathname.startsWith('/settings/')) return;
@@ -144,10 +281,7 @@ export const SettingsLayout: React.FC = () => {
             <>
               <span className="text-border-strong">/</span>
               <span className="truncate font-normal text-muted">
-                {t(
-                  visibleGroups.flatMap((group) => group.items)
-                    .find((item) => pathMatches(location.pathname, item.path))?.labelKey ?? 'nav.settings',
-                )}
+                {activeTrail.map((item) => t(item.labelKey)).join(' / ') || t('nav.settings')}
               </span>
             </>
           )}
@@ -165,43 +299,35 @@ export const SettingsLayout: React.FC = () => {
         <nav
           aria-label={t('settings.navigationLabel')}
           className={clsx(
-            'min-h-0 shrink-0 overflow-y-auto border-r border-border bg-surface/70 px-2 pb-[calc(0.75rem+env(safe-area-inset-bottom))] pt-3 md:pb-3',
-            'w-full md:flex md:w-14 md:flex-col lg:w-[196px]',
-            !atRoot && 'hidden',
+            'min-h-0 shrink-0 border-r border-border bg-surface/70 px-2 pb-[calc(0.75rem+env(safe-area-inset-bottom))] pt-3 md:pb-3',
+            'w-full flex-col md:w-14 lg:w-[196px]',
+            atRoot ? 'flex' : 'hidden md:flex',
           )}
         >
-          {visibleGroups.map((group) => (
-            <div key={group.labelKey} className="mb-2 last:mb-0">
-              <div className="px-2 pb-1 pt-1 font-mono text-[9px] font-bold uppercase tracking-[0.16em] text-muted md:hidden lg:block">
-                {t(group.labelKey)}
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            {visibleGroups.map((group) => (
+              <div key={group.labelKey} className="mb-2 last:mb-0">
+                <div className="px-2 pb-1 pt-1 font-mono text-[9px] font-bold uppercase tracking-[0.16em] text-muted md:hidden lg:block">
+                  {t(group.labelKey)}
+                </div>
+                <div className="flex flex-col gap-0.5">
+                  {/* A manual disclosure choice belongs to this route visit only. */}
+                  {group.items.map((item) => (
+                    <SettingsNavItem
+                      key={item.children?.length ? `${item.path}:${location.pathname}` : item.path}
+                      item={item}
+                    />
+                  ))}
+                </div>
               </div>
-              <div className="flex flex-col gap-0.5">
-                {group.items.map((item) => {
-                  const Icon = item.icon;
-                  return (
-                    <NavLink
-                      key={item.path}
-                      to={item.path}
-                      title={t(item.labelKey)}
-                      className={({ isActive }) => clsx(
-                        'flex items-center gap-2 rounded-lg px-2 py-2 text-[12.5px] font-medium transition-colors',
-                        'md:justify-center lg:justify-start',
-                        isActive || pathMatches(location.pathname, item.path)
-                          ? 'bg-mint/[0.09] text-foreground'
-                          : 'text-muted hover:bg-foreground/[0.04] hover:text-foreground',
-                      )}
-                    >
-                      <Icon className={clsx(
-                        'size-4 shrink-0',
-                        pathMatches(location.pathname, item.path) ? 'text-mint-ink' : 'text-muted',
-                      )} />
-                      <span className="truncate md:hidden lg:block">{t(item.labelKey)}</span>
-                    </NavLink>
-                  );
-                })}
-              </div>
-            </div>
-          ))}
+            ))}
+          </div>
+
+          <div className="mt-3 flex shrink-0 items-center gap-2 border-t border-border px-2 pt-3 md:flex-col lg:flex-row">
+            <LanguageSwitcher openUpward />
+            <ThemeToggle />
+            <AccountMenu openUpward />
+          </div>
         </nav>
 
         <section className={clsx('min-w-0 flex-1 overflow-y-auto', atRoot && 'hidden md:block')}>

@@ -2,14 +2,23 @@
 
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import userEvent from '@testing-library/user-event';
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 
 import { SettingsLayout } from './SettingsLayout';
 
-const api = vi.hoisted(() => ({
-  getConfig: vi.fn(),
-  getMemorySettings: vi.fn(),
-}));
+const api = vi.hoisted(() => {
+  const configChangedHandlers = new Set<(config: unknown) => void>();
+  return {
+    configChangedHandlers,
+    getConfig: vi.fn(),
+    getMemorySettings: vi.fn(),
+    onConfigChanged: vi.fn((handler: (config: unknown) => void) => {
+      configChangedHandlers.add(handler);
+      return () => configChangedHandlers.delete(handler);
+    }),
+  };
+});
 const authorization = vi.hoisted(() => ({
   capabilities: { can_manage_instance: true },
 }));
@@ -25,12 +34,45 @@ vi.mock('@/context/InstanceAuthorizationContext', () => ({
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }));
+vi.mock('../LanguageSwitcher', () => ({
+  LanguageSwitcher: ({ openUpward }: { openUpward?: boolean }) => (
+    <div data-testid="language-switcher" data-open-upward={String(openUpward)} />
+  ),
+}));
+vi.mock('../ThemeToggle', () => ({ ThemeToggle: () => <div data-testid="theme-toggle" /> }));
+vi.mock('../AccountMenu', () => ({
+  AccountMenu: ({ openUpward }: { openUpward?: boolean }) => (
+    <div data-testid="account-menu" data-open-upward={String(openUpward)} />
+  ),
+}));
+
+const NavigationProbe = () => {
+  const navigate = useNavigate();
+  return (
+    <div>
+      <button type="button" onClick={() => navigate('/settings/service')}>go-service</button>
+      <button type="button" onClick={() => navigate('/settings/platforms/groups')}>go-groups</button>
+      <button type="button" onClick={() => navigate(-1)}>go-back</button>
+    </div>
+  );
+};
+
+const SettingsLayoutHarness = () => (
+  <>
+    <SettingsLayout />
+    <NavigationProbe />
+  </>
+);
 
 const renderLayout = (path: string) => render(
   <MemoryRouter initialEntries={[path]}>
     <Routes>
-      <Route path="/settings" element={<SettingsLayout />}>
+      <Route path="/settings" element={<SettingsLayoutHarness />}>
         <Route path="replies" element={<div>replies-body</div>} />
+        <Route path="service" element={<div>service-body</div>} />
+        <Route path="platforms" element={<div>platforms-body</div>} />
+        <Route path="platforms/users" element={<div>users-body</div>} />
+        <Route path="platforms/groups" element={<div>groups-body</div>} />
       </Route>
     </Routes>
   </MemoryRouter>,
@@ -41,6 +83,7 @@ beforeEach(() => {
   authorization.capabilities.can_manage_instance = true;
   media.matches = false;
   media.listeners.clear();
+  api.configChangedHandlers.clear();
   api.getConfig.mockResolvedValue({ capabilities: { model_hub: { enabled: true } } });
   api.getMemorySettings.mockResolvedValue({ status: 'ok', enabled: true });
   vi.stubGlobal('matchMedia', vi.fn().mockReturnValue({
@@ -70,6 +113,105 @@ describe('SettingsLayout', () => {
       expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
       expect(screen.getByRole('link', { name: 'settings.sections.memory' })).toBeTruthy();
     });
+  });
+
+  it('opens Messaging Platforms by default and still allows manual collapse', async () => {
+    const user = userEvent.setup();
+    renderLayout('/settings/service');
+
+    const platforms = screen.getByRole('button', { name: 'nav.messagingPlatforms' });
+    expect(platforms.getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByRole('link', { name: 'settings.sections.platformConnections' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'nav.users' })).toBeTruthy();
+    await waitFor(() => expect(screen.getByRole('link', { name: 'nav.channels' })).toBeTruthy());
+
+    await user.click(platforms);
+    expect(platforms.getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByRole('link', { name: 'settings.sections.platformConnections' })).toBeNull();
+
+    await user.click(platforms);
+    expect(platforms.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('auto-expands Platforms and selects the matching nested destination', async () => {
+    renderLayout('/settings/platforms/groups');
+
+    expect(screen.getByText('groups-body')).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'nav.messagingPlatforms' }).getAttribute('aria-expanded')).toBe('true');
+    });
+    expect(screen.getByRole('link', { name: 'nav.channels' }).className).toContain('bg-mint/[0.09]');
+    expect(screen.getByRole('link', { name: 'settings.sections.platformConnections' }).className).not.toContain('bg-mint/[0.09]');
+    expect(screen.getByRole('link', { name: 'settings.sections.platformConnections' }).getAttribute('aria-current')).toBeNull();
+  });
+
+  it('hides Groups when no enabled platform supports group settings', async () => {
+    api.getConfig.mockResolvedValue({
+      capabilities: { model_hub: { enabled: true } },
+      platforms: { enabled: ['wechat'] },
+    });
+    renderLayout('/settings/replies');
+
+    expect(screen.getByRole('link', { name: 'settings.sections.platformConnections' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'nav.users' })).toBeTruthy();
+    await waitFor(() => expect(screen.queryByRole('link', { name: 'nav.channels' })).toBeNull());
+  });
+
+  it('refreshes Groups visibility after successful platform config changes', async () => {
+    api.getConfig.mockResolvedValue({
+      capabilities: { model_hub: { enabled: true } },
+      platforms: { enabled: ['wechat'] },
+    });
+    renderLayout('/settings/replies');
+
+    await waitFor(() => expect(screen.queryByRole('link', { name: 'nav.channels' })).toBeNull());
+    expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
+
+    act(() => {
+      api.configChangedHandlers.forEach((handler) => handler({
+        capabilities: { model_hub: { enabled: true } },
+        platforms: { enabled: ['slack'] },
+      }));
+    });
+    expect(screen.getByRole('link', { name: 'nav.channels' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
+
+    act(() => {
+      api.configChangedHandlers.forEach((handler) => handler({
+        capabilities: { model_hub: { enabled: true } },
+        platforms: { enabled: ['wechat'] },
+      }));
+    });
+    expect(screen.queryByRole('link', { name: 'nav.channels' })).toBeNull();
+    expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
+  });
+
+  it('restores the default expanded disclosure after navigation', async () => {
+    const user = userEvent.setup();
+    renderLayout('/settings/replies');
+
+    expect(screen.getByRole('button', { name: 'nav.messagingPlatforms' }).getAttribute('aria-expanded')).toBe('true');
+    await user.click(screen.getByRole('button', { name: 'nav.messagingPlatforms' }));
+    expect(screen.getByRole('button', { name: 'nav.messagingPlatforms' }).getAttribute('aria-expanded')).toBe('false');
+    await user.click(screen.getByRole('button', { name: 'go-service' }));
+    await user.click(screen.getByRole('button', { name: 'go-back' }));
+    expect(screen.getByRole('button', { name: 'nav.messagingPlatforms' }).getAttribute('aria-expanded')).toBe('true');
+
+    await user.click(screen.getByRole('button', { name: 'go-groups' }));
+    expect(screen.getByRole('button', { name: 'nav.messagingPlatforms' }).getAttribute('aria-expanded')).toBe('true');
+    await user.click(screen.getByRole('button', { name: 'nav.messagingPlatforms' }));
+    expect(screen.getByRole('button', { name: 'nav.messagingPlatforms' }).getAttribute('aria-expanded')).toBe('false');
+    await user.click(screen.getByRole('button', { name: 'go-service' }));
+    await user.click(screen.getByRole('button', { name: 'go-back' }));
+    expect(screen.getByRole('button', { name: 'nav.messagingPlatforms' }).getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('keeps language, theme, and account preferences in the Settings rail', () => {
+    renderLayout('/settings/replies');
+
+    expect(screen.getByTestId('language-switcher').getAttribute('data-open-upward')).toBe('true');
+    expect(screen.getByTestId('theme-toggle')).toBeTruthy();
+    expect(screen.getByTestId('account-menu').getAttribute('data-open-upward')).toBe('true');
   });
 
   it('keeps member preferences, Replies, and Access while preserving the phase-2 permission gate', () => {

@@ -279,6 +279,7 @@
       "memory": "记忆",
       "replies": "回复",
       "platforms": "通讯平台",
+      "platformConnections": "平台接入",
       "remoteAccess": "远程访问",
       "service": "服务",
       "dependencies": "依赖",
