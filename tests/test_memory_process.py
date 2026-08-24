@@ -168,6 +168,37 @@ def _sidecar_identity(home: Path, record: dict[str, object]) -> _ProcessIdentity
     )
 
 
+def _released_rebuild_record(home: Path) -> tuple[Path, dict[str, object]]:
+    path, record = _sidecar_record(home)
+    record["role"] = "cascade_rebuild"
+    path.write_text(json.dumps(record), encoding="utf-8")
+    path.chmod(0o600)
+    return path, record
+
+
+def _released_rebuild_identity(
+    home: Path,
+    record: dict[str, object],
+) -> _ProcessIdentity:
+    return _ProcessIdentity(
+        stamp=10.5,
+        cmdline=(
+            str(record["python"]),
+            "-m",
+            "core.memory.rebuild_child",
+            "cascade",
+            "rebuild",
+            "--yes",
+        ),
+        uid=os.getuid() if hasattr(os, "getuid") else None,
+        environment={
+            "EVEROS_ROOT": str(home / "memory" / "everos-root"),
+            "AVIBE_MEMORY_CHILD_ROLE": "cascade_rebuild",
+        },
+        wall_create_time=10.5,
+    )
+
+
 def _released_sync_record(home: Path, *, state: str) -> tuple[Path, dict[str, object]]:
     provider_root = home / "memory" / "everos-root"
     path = legacy_sync_record_path(provider_root)
@@ -309,6 +340,27 @@ async def test_sidecar_reaper_verifies_identity_before_signalling(tmp_path: Path
     path, record = _sidecar_record(home)
     identity = _sidecar_identity(home, record)
     host = _SidecarHost({451: identity})
+    reaper = ReleasedEverOSOrphanReconciler(
+        provider_root=provider_root,
+        effective_home=home,
+        _host=host,
+    )
+
+    await reaper.reconcile_orphans()
+
+    assert host.signals[0] == {451: 10.5}
+    assert not path.exists()
+
+
+@pytest.mark.asyncio
+async def test_reaper_consumes_released_rebuild_ownership(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    provider_root = home / "memory" / "everos-root"
+    provider_root.mkdir(mode=0o700, parents=True)
+    home.chmod(0o700)
+    (home / "memory").chmod(0o700)
+    path, record = _released_rebuild_record(home)
+    host = _SidecarHost({451: _released_rebuild_identity(home, record)})
     reaper = ReleasedEverOSOrphanReconciler(
         provider_root=provider_root,
         effective_home=home,

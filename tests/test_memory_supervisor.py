@@ -31,6 +31,7 @@ def _supervisor(
     ready=lambda: None,
     unavailable=lambda: None,
     restart_delays: tuple[float, ...] = (0.0, 0.0),
+    restart_window_seconds: float = 30.0,
     recover_in_child_task: bool = False,
 ) -> EverOSSupervisor:
     home = tmp_path / "home"
@@ -61,6 +62,7 @@ def _supervisor(
         on_recover=recover,
         process_factory=factory,
         restart_delays=restart_delays,
+        restart_window_seconds=restart_window_seconds,
     )
     return supervisor
 
@@ -138,6 +140,118 @@ async def test_crash_recovery_is_bounded(tmp_path: Path) -> None:
     assert len(factory.supervised) == 3
     assert supervisor.status.state == "degraded"
     assert supervisor.status.retains_configuration is False
+    await supervisor.close()
+
+
+async def test_slow_recovery_attempts_keep_one_bounded_budget(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    provider_root = home / "memory" / "everos-root"
+    provider_root.mkdir(mode=0o700, parents=True)
+    home.chmod(0o700)
+    (home / "memory").chmod(0o700)
+    recovery_calls = 0
+
+    async def recover() -> bool:
+        nonlocal recovery_calls
+        recovery_calls += 1
+        await asyncio.sleep(0.02)
+        return False
+
+    factory = FakeEverOSProcessFactory()
+    supervisor = EverOSSupervisor(
+        provider_root=provider_root,
+        effective_home=home,
+        socket_path=home / "memory" / ".rt" / "everos.sock",
+        on_ready=lambda: None,
+        on_unavailable=lambda: None,
+        on_recover=recover,
+        process_factory=factory,
+        restart_delays=(0.0, 0.0),
+        restart_window_seconds=0.005,
+    )
+    assert await supervisor.wake(Path(sys.executable), _settings()) is True
+
+    await factory.supervised[0].unexpected_exit()
+    for _ in range(100):
+        await asyncio.sleep(0.005)
+        if recovery_calls == 2 and supervisor._restart_task is None:
+            break
+    await asyncio.sleep(0.05)
+
+    assert recovery_calls == 2
+    assert supervisor.status.state == "degraded"
+    await supervisor.close()
+
+
+async def test_stable_recovery_starts_a_new_crash_budget(tmp_path: Path) -> None:
+    factory = FakeEverOSProcessFactory()
+    supervisor = _supervisor(
+        tmp_path,
+        factory,
+        restart_delays=(0.0,),
+        restart_window_seconds=0.01,
+    )
+    assert await supervisor.wake(Path(sys.executable), _settings()) is True
+
+    await factory.supervised[0].unexpected_exit()
+    for _ in range(20):
+        await _settle()
+        if len(factory.supervised) == 2 and supervisor._restart_task is None:
+            break
+    await asyncio.sleep(0.02)
+    await factory.supervised[1].unexpected_exit()
+    for _ in range(20):
+        await _settle()
+        if len(factory.supervised) == 3:
+            break
+
+    assert len(factory.supervised) == 3
+    assert factory.supervised[2].running is True
+    await supervisor.close()
+
+
+async def test_recovery_replaces_a_running_child_that_failed_admission(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    provider_root = home / "memory" / "everos-root"
+    provider_root.mkdir(mode=0o700, parents=True)
+    home.chmod(0o700)
+    (home / "memory").chmod(0o700)
+    factory = FakeEverOSProcessFactory()
+    supervisor: EverOSSupervisor | None = None
+    recovery_calls = 0
+
+    async def recover() -> bool:
+        nonlocal recovery_calls
+        recovery_calls += 1
+        assert supervisor is not None
+        started = await supervisor.wake(Path(sys.executable), _settings())
+        return bool(started and recovery_calls == 2)
+
+    supervisor = EverOSSupervisor(
+        provider_root=provider_root,
+        effective_home=home,
+        socket_path=home / "memory" / ".rt" / "everos.sock",
+        on_ready=lambda: None,
+        on_unavailable=lambda: None,
+        on_recover=recover,
+        process_factory=factory,
+        restart_delays=(0.0, 0.0),
+    )
+    assert await supervisor.wake(Path(sys.executable), _settings()) is True
+
+    await factory.supervised[0].unexpected_exit()
+    for _ in range(100):
+        await _settle()
+        if recovery_calls == 2 and supervisor._restart_task is None:
+            break
+
+    assert recovery_calls == 2
+    assert len(factory.supervised) == 3
+    assert factory.supervised[1].stops == 1
+    assert factory.supervised[2].running is True
+    assert supervisor.status.running is True
     await supervisor.close()
 
 

@@ -128,7 +128,9 @@ _SYNC_ARGV = ("-I", "-m", "everos.entrypoints.cli.main", "cascade", "sync")
 _PROVIDER_LOCK_DIRECTORY = ".avibe-memory-locks"
 _PROVIDER_LOCK_RETRY_INTERVAL_SECONDS = 0.05
 _SIDECAR_ROLE = "sidecar"
+_RELEASED_REBUILD_ROLE = "cascade_rebuild"
 _RELEASED_SYNC_ROLE = "cascade_sync"
+_RELEASED_REBUILD_ENTRYPOINT_MODULE = "core.memory.rebuild_child"
 
 _IdentityFieldT = TypeVar("_IdentityFieldT")
 
@@ -1332,7 +1334,7 @@ class SidecarOwnership:
             _remove_sidecar_record(self.record_path)
             return
         recorded_role = _recorded_child_role(record)
-        if recorded_role != _SIDECAR_ROLE:
+        if recorded_role not in {_SIDECAR_ROLE, _RELEASED_REBUILD_ROLE}:
             raise RuntimeError(
                 "recorded EverOS child role could not be verified "
                 f"(pid {pid}, record {self.record_path})"
@@ -1379,7 +1381,10 @@ class SidecarOwnership:
                 f"(pid {pid}, record {self.record_path})"
             )
 
-        logger.warning("Reaping an orphaned EverOS sidecar left by a previous Avibe run")
+        logger.warning(
+            "Reaping an orphaned EverOS %s left by a previous Avibe run",
+            recorded_role,
+        )
         terminated = await self._terminate_orphan_tree(
             pid,
             confirmed_create_time,
@@ -2525,7 +2530,11 @@ def _recorded_child_role(record: object) -> str | None:
     if role is None:
         # Records written before role-aware ownership always describe a sidecar.
         return _SIDECAR_ROLE
-    return role if role in {_SIDECAR_ROLE, _RELEASED_SYNC_ROLE} else None
+    return (
+        role
+        if role in {_SIDECAR_ROLE, _RELEASED_REBUILD_ROLE, _RELEASED_SYNC_ROLE}
+        else None
+    )
 
 
 def _recorded_child_python(record: object) -> Path | None:
@@ -2761,6 +2770,14 @@ def _cmdline_matches_role(
             "everos.entrypoints.cli.main",
             "cascade",
             "sync",
+        )
+    if role == _RELEASED_REBUILD_ROLE:
+        return cmdline[1:] == (
+            "-m",
+            _RELEASED_REBUILD_ENTRYPOINT_MODULE,
+            "cascade",
+            "rebuild",
+            "--yes",
         )
     return False
 

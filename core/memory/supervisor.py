@@ -116,7 +116,8 @@ class EverOSSupervisor:
         self._provider_root_guard: Callable[[], None] | None = None
         self._launch_task: asyncio.Task[bool] | None = None
         self._restart_task: asyncio.Task[None] | None = None
-        self._restart_events: list[float] = []
+        self._restart_attempts = 0
+        self._restart_stable_since: float | None = None
         self._event_tasks: set[asyncio.Task[None]] = set()
         self._epoch = 0
         self._starting = False
@@ -194,7 +195,8 @@ class EverOSSupervisor:
             self._settings = settings
             self._provider_root_guard = provider_root_guard
             if not recovering:
-                self._restart_events.clear()
+                self._restart_attempts = 0
+                self._restart_stable_since = None
             return await self._start_attempt_locked(epoch)
 
     async def stop(self) -> None:
@@ -361,6 +363,16 @@ class EverOSSupervisor:
             if self._closing or epoch != self._epoch or child is not self._child:
                 return
             if not child.retains_active_config:
+                # Slow recovery does not earn a fresh budget. Only a replacement
+                # that stayed admitted for the full window starts a new episode.
+                stable_since = self._restart_stable_since
+                if (
+                    stable_since is not None
+                    and time.monotonic() - stable_since
+                    >= self._restart_window_seconds
+                ):
+                    self._restart_attempts = 0
+                self._restart_stable_since = None
                 self._child = None
                 should_restart = True
         await self._notify(self._on_unavailable, "unexpected-exit")
@@ -373,16 +385,10 @@ class EverOSSupervisor:
             return
         if self._restart_task is not None and not self._restart_task.done():
             return
-        now = time.monotonic()
-        self._restart_events = [
-            observed
-            for observed in self._restart_events
-            if now - observed < self._restart_window_seconds
-        ]
-        attempt = len(self._restart_events)
+        attempt = self._restart_attempts
         if attempt >= len(self._restart_delays):
             return
-        self._restart_events.append(now)
+        self._restart_attempts += 1
         self._restart_task = asyncio.create_task(
             self._restart_after(epoch, self._restart_delays[attempt]),
             name="memory-everos-restart",
@@ -397,7 +403,6 @@ class EverOSSupervisor:
                     self._closing
                     or self._closed
                     or epoch != self._epoch
-                    or self._child is not None
                 ):
                     return
             recovery_owner = _RECOVERY_OWNER.set(self)
@@ -409,6 +414,7 @@ class EverOSSupervisor:
                 if self._restart_task is asyncio.current_task():
                     self._restart_task = None
                 if recovered and self._child is not None and self._child.running:
+                    self._restart_stable_since = time.monotonic()
                     return
                 self._schedule_restart_locked(self._epoch)
         except asyncio.CancelledError:
