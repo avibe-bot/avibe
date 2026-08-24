@@ -886,7 +886,10 @@ def test_clean_retains_current_plus_requested_previous_regardless_of_mtime_rank(
     assert {path for path in previous if path.is_dir()} == expected_remaining
 
 
-@pytest.mark.parametrize("pointer_state", ["corrupt", "unreadable", "absent"])
+@pytest.mark.parametrize(
+    "pointer_state",
+    ["corrupt", "unreadable", "wrong-root", "absent"],
+)
 @pytest.mark.parametrize("keep_previous", [0, 1])
 @pytest.mark.parametrize("dry_run", [True, False])
 @pytest.mark.parametrize("runtime_kind", ["git", "memory", "model-hub"])
@@ -914,6 +917,14 @@ def test_clean_pointer_failure_or_absence_plans_no_install_deletion(
         staging_dir.mkdir()
     elif pointer_state == "unreadable":
         pointer_path.chmod(0)
+        staging_dir = manager.runtime_dir / "install-pending"
+        staging_dir.mkdir()
+    elif pointer_state == "wrong-root":
+        pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+        damaged_child = current / "damaged-child"
+        damaged_child.mkdir()
+        pointer["install_dir"] = str(damaged_child)
+        pointer_path.write_text(json.dumps(pointer), encoding="utf-8")
         staging_dir = manager.runtime_dir / "install-pending"
         staging_dir.mkdir()
     else:

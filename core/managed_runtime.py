@@ -744,6 +744,32 @@ class ManagedRuntimeManager:
             removed = []
         versions_dir = self.runtime_dir / "versions"
         current = self._current_install_dir(versions_dir)
+        try:
+            versions_is_dir = stat.S_ISDIR(versions_dir.stat().st_mode)
+        except FileNotFoundError:
+            versions_is_dir = False
+        except OSError as exc:
+            # An uninspectable versions tree must not silently preview as
+            # empty (misleading "0 entries") — surface an inspection failure.
+            raise OSError(f"versions directory cannot be inspected: {versions_dir}") from exc
+
+        install_dirs = (
+            {
+                metadata_path.parent
+                for metadata_path in self._rglob_install_metadata(versions_dir)
+                if metadata_path.parent.is_dir()
+            }
+            if versions_is_dir
+            else set()
+        )
+        resolved_install_dirs = {path.resolve() for path in install_dirs}
+        if current is not None and current not in resolved_install_dirs:
+            raise OSError("current.json is unreadable")
+        protected = (
+            {current}
+            if current is not None
+            else resolved_install_dirs
+        )
 
         for staging_dir in self.runtime_dir.glob("install-*"):
             if staging_dir.is_dir():
@@ -751,27 +777,8 @@ class ManagedRuntimeManager:
                     shutil.rmtree(staging_dir, ignore_errors=True)
                 removed.append(str(staging_dir))
 
-        try:
-            versions_is_dir = stat.S_ISDIR(versions_dir.stat().st_mode)
-        except FileNotFoundError:
-            return {"ok": True, "removed": removed}
-        except OSError as exc:
-            # An uninspectable versions tree must not silently preview as
-            # empty (misleading "0 entries") — surface an inspection failure.
-            raise OSError(f"versions directory cannot be inspected: {versions_dir}") from exc
         if not versions_is_dir:
             return {"ok": True, "removed": removed}
-
-        install_dirs = {
-            metadata_path.parent
-            for metadata_path in self._rglob_install_metadata(versions_dir)
-            if metadata_path.parent.is_dir()
-        }
-        protected = (
-            {current}
-            if current is not None
-            else {path.resolve() for path in install_dirs}
-        )
         candidates = sorted(
             (path for path in install_dirs if path.resolve() not in protected),
             key=lambda path: path.stat().st_mtime,
