@@ -301,6 +301,32 @@ async def test_session_lifecycle_barrier_is_non_blocking_for_admitted_turn_captu
 
 
 @pytest.mark.anyio
+async def test_session_lifecycle_does_not_join_queued_capture_admission(managers) -> None:
+    manager, _other, _engine, _engine_b, _starts = managers
+    state = manager._session_lifecycle_state("ses_fsm")
+    holder = await manager.acquire_lifecycle_admission("ses_fsm")
+    queued = asyncio.create_task(manager.acquire_lifecycle_admission("ses_fsm"))
+    while state.admission_waiters != 1:
+        await asyncio.sleep(0)
+
+    holder.release()
+    assert state.admission_lock.locked() is False
+
+    assert await asyncio.wait_for(
+        manager.run_session_lifecycle("ses_fsm", lambda: _completed("reset")),
+        timeout=1.0,
+    ) == "reset"
+
+    queued.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await queued
+
+
+async def _completed(value: str) -> str:
+    return value
+
+
+@pytest.mark.anyio
 async def test_session_lifecycle_invalidates_snapshot_after_operation(managers) -> None:
     manager, _other, _engine, _engine_b, _starts = managers
     snapshot = manager.snapshot_session_lifecycle("ses_fsm")

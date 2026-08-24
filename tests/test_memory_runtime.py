@@ -93,6 +93,31 @@ async def test_disabled_legacy_recovery_remains_visible_as_needs_repair(
 
 
 @pytest.mark.asyncio
+async def test_disabling_repair_fenced_runtime_stops_without_clearing_fence(
+    tmp_path: Path,
+) -> None:
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True, legacy_needs_repair=True),
+        effective_home=tmp_path,
+    )
+
+    result = await runtime.reconcile(
+        MemoryConfig(enabled=False, legacy_needs_repair=True),
+    )
+
+    assert result == {
+        "ok": True,
+        "state": "needs_repair",
+        "error": "memory_legacy_recovery_required",
+    }
+    assert runtime._config.enabled is False
+    assert runtime.runtime_state() == "needs_repair"
+    assert runtime.needs_repair_reason == "memory_legacy_recovery_required"
+    assert runtime._supervisor.status.running is False
+    await runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_unreadable_released_clear_state_fails_closed_as_needs_repair(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

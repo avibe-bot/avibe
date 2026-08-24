@@ -103,6 +103,7 @@ class _SessionLifecycleState:
 
     admission_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    admission_waiters: int = 0
     epoch: int = 0
 
 
@@ -716,7 +717,13 @@ class SessionTurnManager:
         """
 
         state = self._session_lifecycle_state(raw_session_id)
-        await state.admission_lock.acquire()
+        state.admission_waiters += 1
+        try:
+            await state.admission_lock.acquire()
+        except BaseException:
+            state.admission_waiters -= 1
+            raise
+        state.admission_waiters -= 1
         return TurnLifecycleAdmission(state)
 
     def _advance_session_lifecycle(
@@ -756,7 +763,7 @@ class SessionTurnManager:
             # advance the generation immediately; the capture will revalidate
             # its snapshot and drop without provider I/O. An uncontended lock
             # acquisition completes synchronously on this event loop.
-            if state.admission_lock.locked():
+            if state.admission_lock.locked() or state.admission_waiters:
                 self._advance_session_lifecycle(
                     raw_session_id,
                     state,

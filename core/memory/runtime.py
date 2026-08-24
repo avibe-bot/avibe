@@ -751,6 +751,18 @@ class MemoryRuntime:
         """Reconcile while both controller and module lifecycle locks are held."""
 
         if self.needs_repair:
+            if not config.enabled:
+                result = await self._disable_locked(config)
+                # Disabling is non-destructive and must remain available while
+                # the repair fence is active. Keep the fence visible after the
+                # child is stopped so a later Wake cannot resume implicitly.
+                reason = self._needs_repair_reason
+                self._runtime_error = reason
+                return {
+                    **result,
+                    "state": "needs_repair",
+                    "error": reason,
+                }
             self.module.pause_claims()
             await self._close_writer()
             await self._supervisor.stop()
