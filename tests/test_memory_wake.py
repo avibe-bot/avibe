@@ -346,7 +346,7 @@ async def test_disabled_wake_reaps_orphans_without_installing_artifact(
         reaped += 1
         return True
 
-    monkeypatch.setattr(runtime, "_reap_recorded_sidecar_if_unowned", reap)
+    monkeypatch.setattr(runtime._supervisor, "reconcile_orphans", reap)
 
     result = await runtime.wake()
 
@@ -357,39 +357,6 @@ async def test_disabled_wake_reaps_orphans_without_installing_artifact(
     }
     assert reaped == 1
     assert artifact.ensure_calls == []
-
-
-@pytest.mark.asyncio
-async def test_orphan_recovery_reaps_released_sync_before_sidecar(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    memory_runtime_factory,
-) -> None:
-    events: list[str] = []
-
-    class SyncReaper:
-        def __init__(self, **_kwargs) -> None:
-            pass
-
-        async def reconcile_orphan(self) -> None:
-            events.append("sync")
-
-    class SidecarReaper:
-        def __init__(self, **_kwargs) -> None:
-            pass
-
-        async def reconcile_orphan(self) -> None:
-            events.append("sidecar")
-
-    monkeypatch.setattr(runtime_module, "RecordedSyncReaper", SyncReaper)
-    monkeypatch.setattr(runtime_module, "RecordedSidecarReaper", SidecarReaper)
-    runtime = memory_runtime_factory(
-        MemoryConfig(enabled=False),
-        effective_home=tmp_path,
-    )
-
-    assert await runtime._reap_recorded_sidecar_if_unowned() is True
-    assert events == ["sync", "sidecar"]
 
 
 @pytest.mark.asyncio
@@ -406,16 +373,20 @@ async def test_orphan_recovery_degrades_without_no_follow_but_reset_fails_closed
     def unsupported() -> int:
         raise ConfinedFilesystemError("no-follow unavailable")
 
-    def unexpected_reaper(**_kwargs):
-        pytest.fail("orphan reapers must not touch paths without no-follow support")
+    async def unexpected_reaper(*, fail_closed: bool = False) -> bool:
+        del fail_closed
+        pytest.fail("orphan recovery must not touch paths without no-follow support")
 
     monkeypatch.setattr(runtime_module, "required_no_follow_flag", unsupported)
-    monkeypatch.setattr(runtime_module, "RecordedSyncReaper", unexpected_reaper)
-    monkeypatch.setattr(runtime_module, "RecordedSidecarReaper", unexpected_reaper)
+    monkeypatch.setattr(runtime._supervisor, "reconcile_orphans", unexpected_reaper)
 
-    assert await runtime._reap_recorded_sidecar_if_unowned() is False
+    assert await runtime.wake() == {
+        "ok": False,
+        "state": "disabled",
+        "error": "memory_disabled",
+    }
     with pytest.raises(ConfinedFilesystemError, match="no-follow unavailable"):
-        await runtime._reap_recorded_sidecar_if_unowned(fail_closed=True)
+        await runtime.prepare_data_reset()
 
 
 @pytest.mark.asyncio
@@ -466,12 +437,12 @@ async def test_cancelled_artifact_install_joins_before_releasing_lease(
 
 
 @pytest.mark.asyncio
-async def test_unexpected_exit_reenters_wake_and_repairs_the_artifact(
+async def test_unexpected_exit_restarts_owned_sidecar_without_artifact_rebuild(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     memory_runtime_factory,
 ) -> None:
-    """MEMORY-WAKE-201: an unexpected exit reuses the public Wake path."""
+    """MEMORY-WAKE-201: an unexpected exit uses supervisor-owned recovery."""
 
     artifact = FakeMemoryArtifactManager(python=Path(sys.executable))
     processes = FakeEverOSProcessFactory()
@@ -507,55 +478,11 @@ async def test_unexpected_exit_reenters_wake_and_repairs_the_artifact(
         if len(processes.supervised) == 2 and processes.supervised[1].running:
             break
 
-    assert artifact.ensure_calls == [True]
+    assert artifact.ensure_calls == []
     assert len(processes.supervised) == 2
     assert processes.supervised[1].running is True
     assert runtime.runtime_state() == "running"
     assert sentinel.read_text(encoding="utf-8") == "keep"
-
-
-@pytest.mark.asyncio
-async def test_unexpected_exit_retries_when_replacement_crashes_during_wake(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    memory_runtime_factory,
-) -> None:
-    artifact = FakeMemoryArtifactManager(python=Path(sys.executable))
-    processes = FakeEverOSProcessFactory()
-    provider = FakeMemoryProvider()
-    monkeypatch.setattr(runtime_module, "EverOSPort", lambda *args, **kwargs: provider)
-    monkeypatch.setattr(runtime_module, "_UNEXPECTED_WAKE_DELAYS_SECONDS", (0.0, 0.0, 0.0))
-    runtime = memory_runtime_factory(
-        _config(),
-        artifact_manager=artifact,
-        process_factory=processes,
-        effective_home=tmp_path,
-    )
-    assert await runtime.wake() == {"ok": True, "state": "running"}
-    original_health_snapshot = provider.health_snapshot
-    crashed_replacement = False
-
-    async def health_snapshot():
-        nonlocal crashed_replacement
-        current = processes.supervised[-1]
-        if len(processes.supervised) == 2 and not crashed_replacement:
-            crashed_replacement = True
-            await current.unexpected_exit()
-        if not current.running:
-            raise RuntimeError("replacement exited")
-        return await original_health_snapshot()
-
-    monkeypatch.setattr(provider, "health_snapshot", health_snapshot)
-    await processes.supervised[0].unexpected_exit()
-    for _ in range(200):
-        await asyncio.sleep(0.01)
-        if len(processes.supervised) == 3 and runtime.runtime_state() == "running":
-            break
-
-    assert crashed_replacement is True
-    assert len(processes.supervised) == 3
-    assert processes.supervised[-1].running is True
-    assert runtime.runtime_state() == "running"
 
 
 @pytest.mark.parametrize(

@@ -869,8 +869,6 @@ class Controller:
         from core.memory.data_reset import (
             unchanged_memory_data_result,
         )
-        from core.memory.runtime import create_memory_runtime
-
         async with self._memory_replacement_lock():
             runtime = getattr(self, "memory_runtime", None)
             if runtime is None:
@@ -913,9 +911,7 @@ class Controller:
                         "result": "unchanged",
                     }
                 try:
-                    await runtime._reap_recorded_sidecar_if_unowned(
-                        fail_closed=True,
-                    )
+                    await runtime.prepare_data_reset()
                 except Exception:
                     logger.exception(
                         "Memory data reset could not prove recorded sidecar ownership ended"
@@ -1012,14 +1008,7 @@ class Controller:
                 )
                 deletion_payload = deletion.payload()
                 if deletion.data_remaining:
-                    failed = create_memory_runtime(
-                        fenced_config,
-                        artifact_manager=runtime.artifact_manager,
-                        process_factory=runtime.process_factory,
-                        effective_home=runtime.effective_home,
-                        processing_event=self._log_memory_processing_event,
-                        on_config_settled=self._adopt_settled_memory_config,
-                    )
+                    failed = runtime.replacement(fenced_config)
                     self.memory_runtime = failed
                     self.memory_module = failed.module
                     return {
@@ -1049,14 +1038,7 @@ class Controller:
                             "Memory data reset could not reload configuration after deletion"
                         )
                         live_config = deepcopy(expected_config or self.config.memory)
-                    fallback = create_memory_runtime(
-                        live_config,
-                        artifact_manager=runtime.artifact_manager,
-                        process_factory=runtime.process_factory,
-                        effective_home=runtime.effective_home,
-                        processing_event=self._log_memory_processing_event,
-                        on_config_settled=self._adopt_settled_memory_config,
-                    )
+                    fallback = runtime.replacement(live_config)
                     self.memory_runtime = fallback
                     self.memory_module = fallback.module
                     self.config.memory = live_config
@@ -1083,14 +1065,7 @@ class Controller:
 
                 target = persisted.memory
                 self.config.memory = target
-                fresh = create_memory_runtime(
-                    target,
-                    artifact_manager=runtime.artifact_manager,
-                    process_factory=runtime.process_factory,
-                    effective_home=runtime.effective_home,
-                    processing_event=self._log_memory_processing_event,
-                    on_config_settled=self._adopt_settled_memory_config,
-                )
+                fresh = runtime.replacement(target)
                 self.memory_runtime = fresh
                 self.memory_module = fresh.module
                 self.config.memory = target
