@@ -531,10 +531,62 @@ async def test_cancelled_reset_joins_deletion_before_releasing_exclusion(
 
     assert task.done() is False
     assert lease_events == ["acquire"]
+    assert len(controller._memory_destructive_tasks) == 1
 
     allow_deletion_to_finish.set()
     with pytest.raises(asyncio.CancelledError):
         await task
     assert lease_events == ["acquire", "release"]
+    assert controller._memory_destructive_tasks == set()
     assert runtime.events == ["reap", "retire", "close", "settle", "delete"]
     assert controller.memory_runtime is fresh
+
+
+@pytest.mark.asyncio
+async def test_shutdown_join_settles_accepted_destructive_transactions() -> None:
+    controller = Controller.__new__(Controller)
+    controller._memory_destructive_quiescing = False
+    controller._memory_destructive_tasks = set()
+    controller._shutdown_tainted = False
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def transaction() -> dict[str, object]:
+        started.set()
+        await release.wait()
+        return {"ok": True}
+
+    task = asyncio.create_task(transaction())
+    controller._memory_destructive_tasks.add(task)
+    joining = asyncio.create_task(controller._join_memory_destructive_transactions())
+    await started.wait()
+    await asyncio.sleep(0)
+
+    assert joining.done() is False
+    assert controller._memory_destructive_quiescing is True
+
+    release.set()
+    await joining
+
+    assert task.done() is True
+    assert controller._memory_destructive_tasks == set()
+    assert controller._shutdown_tainted is False
+
+
+@pytest.mark.asyncio
+async def test_shutdown_quiesce_rejects_new_destructive_transactions(
+    tmp_path: Path,
+) -> None:
+    runtime = _Runtime(tmp_path)
+    controller = _controller(runtime)
+    controller._memory_destructive_quiescing = True
+
+    result = await controller.delete_memory_data(confirm_loss=True)
+
+    assert result == {
+        "ok": False,
+        "operation": "delete_data",
+        "error": "memory_operation_in_progress",
+        "result": "unchanged",
+    }
+    assert runtime.events == []

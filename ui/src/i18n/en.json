@@ -4145,7 +4145,14 @@
       "confirmDescription": "This permanently deletes the confined local Memory data roots for every user and project on this installation. Settings, credentials, stable identity, the installed runtime, and original chats are kept.",
       "confirmLabel": "Accept loss and delete",
       "completed": "Memory data was deleted.",
-      "failed": "Memory data could not be deleted safely."
+      "failed": "Memory data could not be deleted safely.",
+      "rootResultsTitle": "Deletion result by data root",
+      "rootStatus": {
+        "deleted": "Deleted",
+        "remaining": "Still present",
+        "absent": "Not present",
+        "failed": "Not deleted"
+      }
     },
     "origin": {
       "user": "User memory",

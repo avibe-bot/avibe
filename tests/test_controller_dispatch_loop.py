@@ -860,10 +860,18 @@ def test_cleanup_sync_cancels_memory_reconcile_before_closing_runtime() -> None:
 
     reconcile_task = loop.create_task(never_returns())
     controller._memory_reconcile_task = reconcile_task
+    cleanup_order: list[str] = []
+
+    async def join_destructive_transactions() -> None:
+        cleanup_order.append("destructive-transactions")
+
+    controller._join_memory_destructive_transactions = join_destructive_transactions
 
     class _MemoryRuntime:
         async def close(self) -> None:
             assert reconcile_task.cancelled()
+            assert cleanup_order == ["destructive-transactions"]
+            cleanup_order.append("runtime")
 
     controller.memory_runtime = _MemoryRuntime()
 
@@ -874,3 +882,4 @@ def test_cleanup_sync_cancels_memory_reconcile_before_closing_runtime() -> None:
 
     assert reconcile_task.cancelled()
     assert controller._memory_reconcile_task is None
+    assert cleanup_order == ["destructive-transactions", "runtime"]

@@ -2,6 +2,7 @@
 
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import type { ReactNode } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -31,12 +32,27 @@ vi.mock('../../context/ApiContext', async (loadOriginal) => {
   return { ...original, useApi: () => api };
 });
 
+vi.mock('../ui/confirm-dialog', () => ({
+  ConfirmDialog: ({ open, onConfirm, children }: { open: boolean; onConfirm: () => void; children?: ReactNode }) => (
+    open ? (
+      <div role="dialog">
+        {children}
+        <button type="button" onClick={onConfirm}>confirm-delete</button>
+      </div>
+    ) : null
+  ),
+}));
+
 vi.mock('./memory/MemoryProcessingRecordPanel', () => ({
   MemoryProcessingRecordPanel: () => null,
 }));
 vi.mock('./memory/MemoryProfilePanel', () => ({ MemoryProfilePanel: () => null }));
 vi.mock('./memory/MemorySearchPanel', () => ({ MemorySearchPanel: () => null }));
-vi.mock('./memory/MemorySettingsPanel', () => ({ MemorySettingsPanel: () => null }));
+vi.mock('./memory/MemorySettingsPanel', () => ({
+  MemorySettingsPanel: ({ onDeleteData }: { onDeleteData: () => void }) => (
+    <button type="button" onClick={onDeleteData}>open-delete</button>
+  ),
+}));
 
 vi.mock('./memory/MemoryStatusPanel', () => ({
   MemoryStatusPanel: ({ repairSupported, onRepair }: { repairSupported?: boolean; onRepair?: () => void }) => (
@@ -151,5 +167,41 @@ describe('SettingsMemoryPage', () => {
     renderPage();
     expect(await screen.findByText('repair-hidden')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'run-repair' })).toBeNull();
+  });
+
+  it('keeps bounded per-root outcomes visible after deletion fails', async () => {
+    api.deleteMemoryData.mockResolvedValueOnce({
+      ok: false,
+      operation: 'delete_data',
+      result: 'partial',
+      error: 'memory_delete_data_failed',
+      data_deleted: false,
+      data_remaining: true,
+      roots: [
+        {
+          path: 'memory',
+          existed: true,
+          deleted: false,
+          error: 'ConfinedFilesystemError',
+        },
+        {
+          path: 'state/memory/clear-intent.json',
+          existed: false,
+          deleted: false,
+        },
+      ],
+    });
+    renderPage();
+
+    await userEvent.click(await screen.findByRole('radio', { name: 'memory.tabs.settings' }));
+    await userEvent.click(screen.getByRole('button', { name: 'open-delete' }));
+    await userEvent.click(screen.getByRole('button', { name: 'confirm-delete' }));
+
+    await waitFor(() => expect(api.deleteMemoryData).toHaveBeenCalledWith(true));
+    expect(await screen.findByText('memory.deleteData.rootResultsTitle')).toBeTruthy();
+    expect(screen.getByText('memory')).toBeTruthy();
+    expect(screen.getByText('ConfinedFilesystemError')).toBeTruthy();
+    expect(screen.getByText('state/memory/clear-intent.json')).toBeTruthy();
+    expect(screen.getByText('memory.deleteData.rootStatus.absent')).toBeTruthy();
   });
 });

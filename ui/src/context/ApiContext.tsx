@@ -2188,7 +2188,7 @@ export type MemoryDataOperationResult = {
   data_deleted?: boolean;
   data_remaining?: boolean;
   roots?: Array<{
-    path: 'memory' | 'state/memory';
+    path: string;
     existed: boolean;
     deleted: boolean;
     error?: string;

@@ -359,6 +359,8 @@ class Controller:
         self.cleanup_task: Optional[asyncio.Task] = None
         self._memory_reconcile_task: Optional[asyncio.Task] = None
         self._memory_replacement_gate = asyncio.Lock()
+        self._memory_destructive_tasks: set[asyncio.Task[dict[str, Any]]] = set()
+        self._memory_destructive_quiescing = False
 
         # Initialize update checker (use default config if not present)
         from config.v2_config import UpdateConfig
@@ -796,6 +798,13 @@ class Controller:
     ) -> dict[str, Any]:
         """Finish an accepted destructive request before honoring cancellation."""
 
+        if getattr(self, "_memory_destructive_quiescing", False):
+            return {
+                "ok": False,
+                "operation": operation,
+                "error": "memory_operation_in_progress",
+                "result": "unchanged",
+            }
         transaction = asyncio.create_task(
             self._reset_memory_data_transaction(
                 operation=operation,
@@ -804,20 +813,51 @@ class Controller:
             ),
             name=f"memory-{operation}-transaction",
         )
-        cancellation: asyncio.CancelledError | None = None
-        while not transaction.done():
-            try:
-                result = await asyncio.shield(transaction)
-            except asyncio.CancelledError as error:
-                cancellation = cancellation or error
-                continue
+        transactions = getattr(self, "_memory_destructive_tasks", None)
+        if transactions is None:
+            transactions = set()
+            self._memory_destructive_tasks = transactions
+        transactions.add(transaction)
+        try:
+            cancellation: asyncio.CancelledError | None = None
+            while not transaction.done():
+                try:
+                    result = await asyncio.shield(transaction)
+                except asyncio.CancelledError as error:
+                    cancellation = cancellation or error
+                    continue
+                if cancellation is not None:
+                    raise cancellation
+                return result
+            result = transaction.result()
             if cancellation is not None:
                 raise cancellation
             return result
-        result = transaction.result()
-        if cancellation is not None:
-            raise cancellation
-        return result
+        finally:
+            transactions.discard(transaction)
+
+    async def _join_memory_destructive_transactions(self) -> None:
+        """Stop admission and settle accepted data-loss operations before shutdown."""
+
+        self._memory_destructive_quiescing = True
+        transactions = getattr(self, "_memory_destructive_tasks", None)
+        if not transactions:
+            return
+        tasks = tuple(transactions)
+        results = await asyncio.gather(
+            *(asyncio.shield(task) for task in tasks),
+            return_exceptions=True,
+        )
+        for task in tasks:
+            if task.done():
+                transactions.discard(task)
+        errors = [result for result in results if isinstance(result, BaseException)]
+        if errors:
+            self._shutdown_tainted = True
+            logger.error(
+                "Memory destructive transaction failed while shutdown joined it",
+                exc_info=(type(errors[0]), errors[0], errors[0].__traceback__),
+            )
 
     async def _reset_memory_data_transaction(
         self,
@@ -2881,6 +2921,7 @@ class Controller:
         """Join passive recovery owners before allowing the loop to stop."""
 
         logger.info("Controller shutdown started: %s", reason)
+        self._memory_destructive_quiescing = True
         try:
             stop_task = self._begin_runtime_work_stack_shutdown()
             grace = max(
@@ -3125,6 +3166,7 @@ class Controller:
     def cleanup_sync(self):
         """Best-effort synchronous cleanup without cross-loop awaits"""
         logger.info("Cleaning up controller resources (sync, best-effort)...")
+        self._memory_destructive_quiescing = True
 
         def _stop_loop_coroutine(coro, label: str, *, timeout: float | None = 5) -> None:
             try:
@@ -3220,6 +3262,11 @@ class Controller:
         _stop_loop_coroutine(
             _cancel_memory_capture_tasks(),
             "Memory capture tasks",
+            timeout=None,
+        )
+        _stop_loop_coroutine(
+            self._join_memory_destructive_transactions(),
+            "Memory destructive transactions",
             timeout=None,
         )
         memory_runtime = getattr(self, "memory_runtime", None)

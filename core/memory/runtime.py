@@ -441,8 +441,12 @@ class MemoryRuntime:
             if store.clear_in_progress():
                 return True
         except Exception as exc:
-            self._runtime_error = _degraded_runtime_reason(exc)
-            return False
+            logger.warning(
+                "Released Clear state could not be read; keeping Memory repair-fenced",
+                exc_info=True,
+            )
+            self._runtime_error = "memory_legacy_recovery_required"
+            return True
         return any(
             os.path.lexists(self._effective_home / relative_path)
             for relative_path in (

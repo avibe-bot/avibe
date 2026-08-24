@@ -17,6 +17,7 @@ import { useMemoryResource } from './memory/useMemoryResource';
 import { useApi } from '../../context/ApiContext';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import type {
+  MemoryDataOperationResult,
   MemoryMaintenanceResult,
   MemoryProcessingRecordResult,
   MemorySettingsResult,
@@ -46,6 +47,7 @@ export const SettingsMemoryPage: React.FC = () => {
   const [dependencyReady, setDependencyReady] = useState(true);
   const [runtimeInstalled, setRuntimeInstalled] = useState<boolean | null>(null);
   const [repairError, setRepairError] = useState<string | null>(null);
+  const [deleteResult, setDeleteResult] = useState<MemoryDataOperationResult | null>(null);
   const [logGeneration, setLogGeneration] = useState(0);
   const [logRefreshToken, setLogRefreshToken] = useState(0);
 
@@ -146,9 +148,11 @@ export const SettingsMemoryPage: React.FC = () => {
     try {
       const result = await api.deleteMemoryData(true);
       if (result.ok) {
+        setDeleteResult(null);
         setDeleteOpen(false);
         showToast(t('memory.deleteData.completed'), 'success');
       } else {
+        setDeleteResult(result);
         showToast(memoryErrorMessage(t, result.error), 'error');
       }
     } catch {
@@ -192,7 +196,10 @@ export const SettingsMemoryPage: React.FC = () => {
         void maintenanceRead.reload();
         void loadDependency();
       }}
-      onDeleteData={() => setDeleteOpen(true)}
+      onDeleteData={() => {
+        setDeleteResult(null);
+        setDeleteOpen(true);
+      }}
       deleting={deleting}
     />
   ) : null;
@@ -284,14 +291,43 @@ export const SettingsMemoryPage: React.FC = () => {
 
       <ConfirmDialog
         open={deleteOpen}
-        onOpenChange={setDeleteOpen}
+        onOpenChange={(open) => {
+          setDeleteOpen(open);
+          if (!open) setDeleteResult(null);
+        }}
         destructive
         holdSeconds={5}
         title={t('memory.deleteData.confirmTitle')}
         description={t('memory.deleteData.confirmDescription')}
         confirmLabel={t('memory.deleteData.confirmLabel')}
         onConfirm={deleteMemoryData}
-      />
+      >
+        {deleteResult?.roots?.length ? (
+          <div role="alert" className="flex flex-col gap-2 border-t border-border pt-3 text-xs">
+            <p className="font-semibold text-foreground">{t('memory.deleteData.rootResultsTitle')}</p>
+            <ul className="flex max-h-48 flex-col gap-2 overflow-y-auto">
+              {deleteResult.roots.map((root) => {
+                const statusKey = root.error
+                  ? 'failed'
+                  : root.deleted
+                    ? 'deleted'
+                    : root.existed
+                      ? 'remaining'
+                      : 'absent';
+                return (
+                  <li key={root.path} className="flex min-w-0 items-start justify-between gap-3">
+                    <code className="min-w-0 break-all text-foreground">{root.path}</code>
+                    <span className="flex shrink-0 flex-col items-end gap-0.5 text-right text-muted">
+                      <span>{t(`memory.deleteData.rootStatus.${statusKey}`)}</span>
+                      {root.error ? <code className="text-destructive-ink">{root.error}</code> : null}
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        ) : null}
+      </ConfirmDialog>
     </SettingsPageShell>
   );
 };

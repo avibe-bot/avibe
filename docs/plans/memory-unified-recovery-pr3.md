@@ -53,10 +53,11 @@ request owners, or cascade sync/rebuild children. Standalone Restart, Rebuild,
 Clear, and Factory Reset routes, clients, controls, types, and scenario harnesses
 are removed.
 
-Released config fields are one-time compatibility input for initial
-`needs_repair` and disappear on the next canonical save. Released Clear state is
-only classified; it never authorizes deletion or resumes a workflow. No
-replacement marker, journal, pending stage, or fallback executor is introduced.
+Released workflow fields collapse on load into the durable `repair_required`
+compatibility fence. Ordinary saves preserve that fence until a successful
+destructive reset clears it. Released Clear state is only classified; it never
+authorizes deletion or resumes a workflow. No workflow journal, pending stage,
+or fallback executor is introduced.
 
 ## Scenario contract
 

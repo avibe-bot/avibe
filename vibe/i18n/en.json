@@ -772,6 +772,16 @@
         "providerResponseInvalid": "invalid Memory provider response",
         "capabilityUnavailable": "Memory capability unavailable",
         "processingFailed": "Memory processing failed",
+        "lossConfirmationRequired": "Memory data loss confirmation is required",
+        "embeddingUnavailable": "Memory embedding is unavailable",
+        "llmUnavailable": "Memory language model is unavailable",
+        "rerankUnavailable": "Memory reranking is unavailable",
+        "multimodalUnavailable": "Memory multimodal processing is unavailable",
+        "repairFailed": "Memory repair failed",
+        "repairNotRequired": "Memory repair is not required",
+        "deleteDataFailed": "Memory data deletion failed",
+        "reconfigureFailed": "Memory reconfiguration failed",
+        "operationInProgress": "another Memory operation is in progress",
         "unknown": "unknown reason"
       },
       "fault": {

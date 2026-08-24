@@ -414,6 +414,16 @@ _MEMORY_CLI_REASON_I18N_KEYS = {
     "memory_provider_response_invalid": "memory.cli.reason.providerResponseInvalid",
     "memory_capability_unavailable": "memory.cli.reason.capabilityUnavailable",
     "memory_processing_failed": "memory.cli.reason.processingFailed",
+    "memory_loss_confirmation_required": "memory.cli.reason.lossConfirmationRequired",
+    "memory_embedding_unavailable": "memory.cli.reason.embeddingUnavailable",
+    "memory_llm_unavailable": "memory.cli.reason.llmUnavailable",
+    "memory_rerank_unavailable": "memory.cli.reason.rerankUnavailable",
+    "memory_multimodal_unavailable": "memory.cli.reason.multimodalUnavailable",
+    "memory_repair_failed": "memory.cli.reason.repairFailed",
+    "memory_repair_not_required": "memory.cli.reason.repairNotRequired",
+    "memory_delete_data_failed": "memory.cli.reason.deleteDataFailed",
+    "memory_reconfigure_failed": "memory.cli.reason.reconfigureFailed",
+    "memory_operation_in_progress": "memory.cli.reason.operationInProgress",
 }
 
 

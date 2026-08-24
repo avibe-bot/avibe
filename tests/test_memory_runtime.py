@@ -93,6 +93,32 @@ async def test_disabled_legacy_recovery_remains_visible_as_needs_repair(
 
 
 @pytest.mark.asyncio
+async def test_unreadable_released_clear_state_fails_closed_as_needs_repair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = MemoryStore(
+        tmp_path / "state" / "memory" / "memory.sqlite",
+        effective_home=tmp_path,
+    )
+
+    def unreadable_clear_state() -> bool:
+        raise OSError("database is locked")
+
+    monkeypatch.setattr(store, "clear_in_progress", unreadable_clear_state)
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        store=store,
+        effective_home=tmp_path,
+    )
+
+    assert runtime.needs_repair is True
+    assert runtime.needs_repair_reason == "memory_legacy_recovery_required"
+    assert (await runtime.status_payload())["state"] == "needs_repair"
+    await runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_runtime_close_cancels_pending_automatic_wake(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

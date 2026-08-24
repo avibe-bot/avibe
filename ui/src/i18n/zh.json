@@ -4145,7 +4145,14 @@
       "confirmDescription": "这会永久删除此安装中所有用户和项目的受限本地记忆数据根目录。设置、凭据、稳定身份、已安装运行时和原始聊天会保留。",
       "confirmLabel": "接受丢失并删除",
       "completed": "记忆数据已删除。",
-      "failed": "无法安全删除记忆数据。"
+      "failed": "无法安全删除记忆数据。",
+      "rootResultsTitle": "各数据根目录的删除结果",
+      "rootStatus": {
+        "deleted": "已删除",
+        "remaining": "仍然存在",
+        "absent": "原本不存在",
+        "failed": "未删除"
+      }
     },
     "origin": {
       "user": "用户记忆",

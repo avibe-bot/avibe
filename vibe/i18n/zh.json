@@ -772,6 +772,16 @@
         "providerResponseInvalid": "记忆服务响应无效",
         "capabilityUnavailable": "记忆能力不可用",
         "processingFailed": "记忆处理失败",
+        "lossConfirmationRequired": "需要确认接受记忆数据丢失",
+        "embeddingUnavailable": "记忆向量服务不可用",
+        "llmUnavailable": "记忆语言模型不可用",
+        "rerankUnavailable": "记忆重排服务不可用",
+        "multimodalUnavailable": "记忆多模态处理不可用",
+        "repairFailed": "记忆修复失败",
+        "repairNotRequired": "记忆无需修复",
+        "deleteDataFailed": "记忆数据删除失败",
+        "reconfigureFailed": "记忆重新配置失败",
+        "operationInProgress": "另一项记忆操作正在进行",
         "unknown": "未知原因"
       },
       "fault": {
