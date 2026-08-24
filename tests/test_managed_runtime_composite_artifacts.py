@@ -370,7 +370,7 @@ def test_order_dependent_link_target_stays_confined(
     (
         ("shared", managed_runtime.safe_extract_tar, True),
         ("show", show_runtime._safe_extract_tar, False),
-        ("tmux", tmux_runtime._safe_extract_tar, False),
+        ("tmux", tmux_runtime._safe_extract_tar, True),
     ),
 )
 @pytest.mark.parametrize("supports_filter", (True, False), ids=("available", "unavailable"))

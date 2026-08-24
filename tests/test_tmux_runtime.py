@@ -238,7 +238,7 @@ def test_macos_codesign_path_is_used(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert calls[0][4].endswith("/tmux")
 
 
-def test_safe_extract_tar_falls_back_when_data_filter_is_unavailable(
+def test_safe_extract_tar_omits_filter_when_data_filter_is_unavailable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -246,14 +246,13 @@ def test_safe_extract_tar_falls_back_when_data_filter_is_unavailable(
     destination = tmp_path / "extract"
     destination.mkdir()
     calls: list[object] = []
+    monkeypatch.delattr(tarfile, "data_filter", raising=False)
 
     with tarfile.open(archive, "r:gz") as tar:
         original_extractall = tar.extractall
 
         def capture_extractall(path, members=None, *, numeric_owner=False, filter=None):
             calls.append(filter)
-            if filter is not None:
-                raise TypeError("filter is unavailable")
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", DeprecationWarning)
                 return original_extractall(path, members=members, numeric_owner=numeric_owner)
@@ -261,11 +260,11 @@ def test_safe_extract_tar_falls_back_when_data_filter_is_unavailable(
         monkeypatch.setattr(tar, "extractall", capture_extractall)
         tmux_runtime._safe_extract_tar(tar, destination)
 
-    assert calls == ["data", None]
+    assert calls == [None]
     assert (destination / "tmux").is_file()
 
 
-def test_safe_extract_tar_uses_available_data_filter_before_python_312(
+def test_safe_extract_tar_uses_available_data_filter(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -273,6 +272,7 @@ def test_safe_extract_tar_uses_available_data_filter_before_python_312(
     destination = tmp_path / "extract"
     destination.mkdir()
     calls: list[object] = []
+    monkeypatch.setattr(tarfile, "data_filter", object(), raising=False)
 
     with tarfile.open(archive, "r:gz") as tar:
         original_extractall = tar.extractall
@@ -281,7 +281,6 @@ def test_safe_extract_tar_uses_available_data_filter_before_python_312(
             calls.append(filter)
             return original_extractall(path, members=members, numeric_owner=numeric_owner, filter=filter)
 
-        monkeypatch.setattr(tmux_runtime.sys, "version_info", (3, 10, 12))
         monkeypatch.setattr(tar, "extractall", capture_extractall)
         tmux_runtime._safe_extract_tar(tar, destination)
 
@@ -343,7 +342,10 @@ def test_safe_extract_tar_rejects_root_escaping_hard_link(tmp_path: Path) -> Non
     assert victim.stat().st_nlink == original_victim_stat.st_nlink
 
 
-def test_safe_extract_tar_allows_root_relative_in_tree_hard_link(tmp_path: Path) -> None:
+def test_safe_extract_tar_allows_root_relative_in_tree_hard_link(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     source = tmp_path / "source"
     source.mkdir()
     binary = source / "tmux-real"
@@ -352,6 +354,7 @@ def test_safe_extract_tar_allows_root_relative_in_tree_hard_link(tmp_path: Path)
     archive = tmp_path / "tmux-hardlink-safe.tar.gz"
     destination = tmp_path / "extract"
     destination.mkdir()
+    monkeypatch.delattr(tarfile, "data_filter", raising=False)
 
     with tarfile.open(archive, "w:gz") as tar:
         tar.add(binary, arcname="tmux-real")
@@ -366,7 +369,9 @@ def test_safe_extract_tar_allows_root_relative_in_tree_hard_link(tmp_path: Path)
         tar.addfile(hard_link)
 
     with tarfile.open(archive, "r:gz") as tar:
-        tmux_runtime._safe_extract_tar(tar, destination)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            tmux_runtime._safe_extract_tar(tar, destination)
 
     installed = destination / "sub" / "tmux"
     assert installed.read_text(encoding="utf-8") == "#!/bin/sh\necho tmux 3.6b\n"
