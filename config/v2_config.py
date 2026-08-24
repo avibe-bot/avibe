@@ -1229,6 +1229,8 @@ def _recover_memory_cloud_section(payload: dict, field_name: Optional[str]) -> b
         live_identity = cloud.get("embedding_identity")
         if isinstance(live_identity, str) and live_identity.strip():
             cloud["applied_embedding_identity"] = live_identity
+        else:
+            memory["repair_required"] = True
     elif field_name == "source_instance_id":
         cloud["capabilities"] = {}
         cloud["embedding_identity"] = None

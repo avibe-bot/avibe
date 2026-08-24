@@ -891,40 +891,43 @@ class Controller:
                     legacy_needs_repair=False,
                 )
 
-                def persist_confirmed_config(current: MemoryConfig) -> MemoryConfig:
+                def persist_reset_fence(current: MemoryConfig) -> MemoryConfig:
                     if operation == "reconfigure":
                         if expected_config is None or current != expected_config:
                             raise MemoryConfigStaleWrite("memory candidate changed")
-                        return target
-                    return replace(current, legacy_needs_repair=False)
+                    return replace(current, legacy_needs_repair=True)
 
-                if operation == "reconfigure":
-                    def verify_expected_config(current: MemoryConfig) -> MemoryConfig:
-                        if expected_config is None or current != expected_config:
-                            raise MemoryConfigStaleWrite("memory candidate changed")
-                        return current
-
-                    try:
+                try:
+                    fenced_config = (
                         await run_blocking(
                             atomic_update_memory,
-                            verify_expected_config,
+                            persist_reset_fence,
                         )
-                    except MemoryConfigStaleWrite:
-                        return {
-                            "ok": False,
-                            "operation": operation,
-                            "error": "memory_operation_in_progress",
-                            "result": "unchanged",
-                        }
-                    except Exception:
-                        logger.exception(
-                            "Memory data reset could not verify its confirmed configuration"
-                        )
-                        return unchanged_memory_data_result(
-                            runtime.effective_home,
-                            operation=operation,
-                            reason="config_persist_failed",
-                        )
+                    ).memory
+                except MemoryConfigStaleWrite:
+                    return {
+                        "ok": False,
+                        "operation": operation,
+                        "error": "memory_operation_in_progress",
+                        "result": "unchanged",
+                    }
+                except Exception:
+                    logger.exception(
+                        "Memory data reset could not persist its repair fence"
+                    )
+                    return unchanged_memory_data_result(
+                        runtime.effective_home,
+                        operation=operation,
+                        reason="config_persist_failed",
+                    )
+                self.config.memory = fenced_config
+
+                def persist_confirmed_config(current: MemoryConfig) -> MemoryConfig:
+                    if operation == "reconfigure":
+                        if current != fenced_config:
+                            raise MemoryConfigStaleWrite("memory candidate changed")
+                        return target
+                    return replace(current, legacy_needs_repair=False)
 
                 runtime.retire()
                 try:
@@ -970,10 +973,7 @@ class Controller:
                 deletion_payload = deletion.payload()
                 if deletion.data_remaining:
                     failed = create_memory_runtime(
-                        replace(
-                            deepcopy(expected_config or self.config.memory),
-                            legacy_needs_repair=True,
-                        ),
+                        fenced_config,
                         artifact_manager=runtime.artifact_manager,
                         process_factory=runtime.process_factory,
                         effective_home=runtime.effective_home,

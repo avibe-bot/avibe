@@ -162,6 +162,29 @@ def test_unreadable_authoritative_cloud_cache_becomes_durable_repair_fence(
     assert stored["repair_required"] is True
 
 
+def test_unreadable_applied_cloud_identity_without_live_identity_is_fenced(
+    tmp_path: Path,
+) -> None:
+    payload = _payload(
+        {
+            "enabled": False,
+            "mode": "platform",
+            "cloud": {
+                "embedding_identity": None,
+                "applied_embedding_identity": [],
+            },
+        }
+    )
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(path)
+
+    assert loaded.memory.legacy_needs_repair is True
+    updated = atomic_update_memory(lambda memory: memory, config_path=path)
+    assert updated.memory.legacy_needs_repair is True
+
+
 @pytest.mark.parametrize("intent", ["unknown", "", True, 1, {}])
 def test_unknown_legacy_recovery_intent_is_rejected_as_malformed_input(
     intent: object,

@@ -321,6 +321,35 @@ async def test_delete_data_has_distinct_intent_but_reuses_reset(
 
 
 @pytest.mark.asyncio
+async def test_partial_deletion_persists_repair_fence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _roots(tmp_path)
+    os.mkfifo(tmp_path / "memory" / "pipe", mode=0o600)
+    runtime = _Runtime(tmp_path)
+    controller = _controller(runtime, enabled=False)
+    _persist(monkeypatch, controller)
+    replacement_configs: list[MemoryConfig] = []
+
+    def create_runtime(config: MemoryConfig, **_kwargs) -> _Runtime:
+        replacement_configs.append(config)
+        return _Runtime(tmp_path, needs_repair=config.legacy_needs_repair)
+
+    monkeypatch.setattr(
+        "core.memory.runtime.create_memory_runtime",
+        create_runtime,
+    )
+
+    result = await controller.delete_memory_data(confirm_loss=True)
+
+    assert result["result"] == "partial"
+    assert result["state"] == "needs_repair"
+    assert controller.config.memory.legacy_needs_repair is True
+    assert replacement_configs[0].legacy_needs_repair is True
+
+
+@pytest.mark.asyncio
 async def test_reconfigure_keeps_confirmed_identity_when_readiness_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -362,7 +391,10 @@ async def test_reconfigure_keeps_confirmed_identity_when_readiness_fails(
 
     assert result["ok"] is False
     assert result["state"] == "degraded"
-    assert persisted == [MemoryConfig(enabled=True), target]
+    assert persisted == [
+        MemoryConfig(enabled=True, legacy_needs_repair=True),
+        target,
+    ]
     assert runtime.events.index("delete") < runtime.events.index("persist")
     assert controller.config.memory == target
     assert fresh.marked_reason is None

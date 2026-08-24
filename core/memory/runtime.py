@@ -1993,7 +1993,7 @@ class MemoryRuntime:
                     "state": "disabled",
                     "error": "memory_disabled",
                 }
-            if not self.artifact_admitted():
+            if not await run_blocking(self.artifact_admitted):
                 if self.available:
                     async with self._reconcile_lock, self.module.lifecycle():
                         self.module.pause_claims()
@@ -2068,20 +2068,11 @@ class MemoryRuntime:
         task = self._wake_task
         if task is not None and not task.done():
             return
-        now = time.monotonic()
-        self._unexpected_wake_times = [
-            observed
-            for observed in self._unexpected_wake_times
-            if now - observed < _UNEXPECTED_WAKE_WINDOW_SECONDS
-        ]
-        attempt = len(self._unexpected_wake_times)
-        if attempt >= len(_UNEXPECTED_WAKE_DELAYS_SECONDS):
+        delay = self._next_unexpected_wake_delay()
+        if delay is None:
             return
-        self._unexpected_wake_times.append(now)
         task = asyncio.create_task(
-            self._wake_after_unexpected_sidecar_exit(
-                _UNEXPECTED_WAKE_DELAYS_SECONDS[attempt]
-            ),
+            self._wake_after_unexpected_sidecar_exit(delay),
             name="memory-wake-after-unexpected-sidecar-exit",
         )
         self._wake_task = task
@@ -2091,13 +2082,38 @@ class MemoryRuntime:
             else None
         )
 
+    def _next_unexpected_wake_delay(self) -> float | None:
+        now = time.monotonic()
+        self._unexpected_wake_times = [
+            observed
+            for observed in self._unexpected_wake_times
+            if now - observed < _UNEXPECTED_WAKE_WINDOW_SECONDS
+        ]
+        attempt = len(self._unexpected_wake_times)
+        if attempt >= len(_UNEXPECTED_WAKE_DELAYS_SECONDS):
+            return None
+        self._unexpected_wake_times.append(now)
+        return _UNEXPECTED_WAKE_DELAYS_SECONDS[attempt]
+
     async def _wake_after_unexpected_sidecar_exit(
         self,
         delay_seconds: float,
     ) -> dict[str, Any]:
-        if delay_seconds:
-            await asyncio.sleep(delay_seconds)
-        return await self._wake_after_writer_close()
+        while True:
+            if delay_seconds:
+                await asyncio.sleep(delay_seconds)
+            result = await self._wake_after_writer_close()
+            if (
+                result.get("ok") is True
+                or self._closing
+                or self._retired
+                or self.needs_repair
+                or self._sidecar.snapshot().running
+            ):
+                return result
+            delay_seconds = self._next_unexpected_wake_delay()
+            if delay_seconds is None:
+                return result
 
     async def _wake_after_writer_close(self) -> dict[str, Any]:
         try:

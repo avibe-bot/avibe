@@ -47,7 +47,15 @@ async def test_wake_reuses_existing_root_and_proves_native_readiness(
 ) -> None:
     """MEMORY-WAKE-001: Wake preserves the existing root."""
 
-    artifact = FakeMemoryArtifactManager(python=Path(sys.executable))
+    event_loop_thread = threading.get_ident()
+    admission_threads: list[int] = []
+
+    class Artifact(FakeMemoryArtifactManager):
+        def status(self) -> dict[str, object]:
+            admission_threads.append(threading.get_ident())
+            return super().status()
+
+    artifact = Artifact(python=Path(sys.executable))
     processes = FakeEverOSProcessFactory()
     provider = FakeMemoryProvider(
         health_snapshot_value=ProviderHealthSnapshot(
@@ -74,6 +82,7 @@ async def test_wake_reuses_existing_root_and_proves_native_readiness(
     assert result == {"ok": True, "state": "running"}
     assert sentinel.read_text(encoding="utf-8") == "keep"
     assert artifact.ensure_calls == []
+    assert admission_threads and event_loop_thread not in admission_threads
     assert len(processes.supervised) == 1
     assert processes.supervised[0].running
 
@@ -466,6 +475,50 @@ async def test_unexpected_exit_reenters_wake_and_repairs_the_artifact(
     assert processes.supervised[1].running is True
     assert runtime.runtime_state() == "running"
     assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
+@pytest.mark.asyncio
+async def test_unexpected_exit_retries_when_replacement_crashes_during_wake(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    memory_runtime_factory,
+) -> None:
+    artifact = FakeMemoryArtifactManager(python=Path(sys.executable))
+    processes = FakeEverOSProcessFactory()
+    provider = FakeMemoryProvider()
+    monkeypatch.setattr(runtime_module, "EverOSPort", lambda *args, **kwargs: provider)
+    monkeypatch.setattr(runtime_module, "_UNEXPECTED_WAKE_DELAYS_SECONDS", (0.0, 0.0, 0.0))
+    runtime = memory_runtime_factory(
+        _config(),
+        artifact_manager=artifact,
+        process_factory=processes,
+        effective_home=tmp_path,
+    )
+    assert await runtime.wake() == {"ok": True, "state": "running"}
+    original_health_snapshot = provider.health_snapshot
+    crashed_replacement = False
+
+    async def health_snapshot():
+        nonlocal crashed_replacement
+        current = processes.supervised[-1]
+        if len(processes.supervised) == 2 and not crashed_replacement:
+            crashed_replacement = True
+            await current.unexpected_exit()
+        if not current.running:
+            raise RuntimeError("replacement exited")
+        return await original_health_snapshot()
+
+    monkeypatch.setattr(provider, "health_snapshot", health_snapshot)
+    await processes.supervised[0].unexpected_exit()
+    for _ in range(200):
+        await asyncio.sleep(0.01)
+        if len(processes.supervised) == 3 and runtime.runtime_state() == "running":
+            break
+
+    assert crashed_replacement is True
+    assert len(processes.supervised) == 3
+    assert processes.supervised[-1].running is True
+    assert runtime.runtime_state() == "running"
 
 
 @pytest.mark.parametrize(
