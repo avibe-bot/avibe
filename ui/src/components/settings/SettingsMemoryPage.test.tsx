@@ -55,10 +55,22 @@ vi.mock('./memory/MemorySettingsPanel', () => ({
 }));
 
 vi.mock('./memory/MemoryStatusPanel', () => ({
-  MemoryStatusPanel: ({ repairSupported, onRepair }: { repairSupported?: boolean; onRepair?: () => void }) => (
+  MemoryStatusPanel: ({
+    repairSupported,
+    onRepair,
+    failuresError,
+    failuresNotice,
+  }: {
+    repairSupported?: boolean;
+    onRepair?: () => void;
+    failuresError?: string | null;
+    failuresNotice?: string | null;
+  }) => (
     <div>
       <span>{repairSupported ? 'repair-supported' : 'repair-hidden'}</span>
       {repairSupported ? <button type="button" onClick={onRepair}>run-repair</button> : null}
+      <span data-testid="memory-failures-message">{failuresError ?? ''}</span>
+      <span data-testid="memory-failures-notice">{failuresNotice ?? ''}</span>
     </div>
   ),
 }));
@@ -167,6 +179,38 @@ describe('SettingsMemoryPage', () => {
     renderPage();
     expect(await screen.findByText('repair-hidden')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'run-repair' })).toBeNull();
+  });
+
+  it('treats intentionally unretained failure history as an informational notice', async () => {
+    api.getMemoryProcessingRecord.mockResolvedValue({
+      status: 'ok',
+      runtime: { source: status('running').source, health: null },
+      sources: {
+        memcells: { status: 'available', observed_at: '2026-08-24T00:00:00Z' },
+        runs: { status: 'available', observed_at: '2026-08-24T00:00:00Z' },
+        semantic: { status: 'available', observed_at: '2026-08-24T00:00:00Z' },
+      },
+      anomalies: {
+        source: {
+          status: 'unavailable',
+          observed_at: null,
+          reason: 'memory_failure_history_unavailable',
+        },
+        items: [],
+      },
+      maintenance: {
+        source: { status: 'available', observed_at: '2026-08-24T00:00:00Z' },
+        data_exists: true,
+        can_delete_data: true,
+      },
+    });
+
+    renderPage();
+
+    await waitFor(() => expect(screen.getByTestId('memory-failures-message').textContent).toBe(''));
+    expect(screen.getByTestId('memory-failures-notice').textContent).toBe(
+      'memory.processingRecord.reason.memory_failure_history_unavailable',
+    );
   });
 
   it('keeps bounded per-root outcomes visible after deletion fails', async () => {

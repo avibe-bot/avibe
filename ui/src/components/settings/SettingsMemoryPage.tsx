@@ -25,6 +25,10 @@ import type {
 } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import { memoryErrorMessage } from '../../lib/memoryRead';
+import {
+  isMemoryProcessingRecordReason,
+  memoryStatusSourceReasonLabel,
+} from './memory/memoryStatusPresentation';
 
 type MemoryTab = 'processingRecord' | 'profile' | 'search' | 'settings';
 type MemorySettingsOk = Extract<MemorySettingsResult, { status: 'ok' }>;
@@ -70,6 +74,13 @@ export const SettingsMemoryPage: React.FC = () => {
 
   const settings = settingsRead.data;
   const processingRecord = processingRecordRead.data;
+  const anomalySourceReason = processingRecord?.anomalies.source.status === 'unavailable'
+    ? processingRecord.anomalies.source.reason
+    : null;
+  const anomalySourceMessage = anomalySourceReason
+    ? memoryStatusSourceReasonLabel(t, anomalySourceReason)
+    : null;
+  const anomalySourceIsNotice = isMemoryProcessingRecordReason(anomalySourceReason);
   const mutationBusy = deleting || waking || repairing || settingsSaving;
   const remoteUnavailable = settingsRead.forbidden
     || statusRead.forbidden
@@ -263,9 +274,10 @@ export const SettingsMemoryPage: React.FC = () => {
                 statusLoading={!statusRead.loaded || statusRead.loading}
                 failuresLoading={!processingRecordRead.loaded || processingRecordRead.loading}
                 statusError={statusRead.error}
-                failuresError={processingRecord?.anomalies.source.status === 'unavailable'
-                  ? memoryErrorMessage(t, processingRecord.anomalies.source.reason)
+                failuresError={anomalySourceReason
+                  ? anomalySourceIsNotice ? null : anomalySourceMessage
                   : processingRecordRead.error}
+                failuresNotice={anomalySourceIsNotice ? anomalySourceMessage : null}
                 refreshPending={statusRead.loading || processingRecordRead.loading}
                 onRefresh={refreshProcessingRecord}
                 repairSupported={canAdminister && statusRead.data?.state === 'needs_repair'}

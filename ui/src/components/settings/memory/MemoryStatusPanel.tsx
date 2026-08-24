@@ -147,6 +147,7 @@ export const MemoryStatusPanel: React.FC<{
   failuresLoading: boolean;
   statusError: string | null;
   failuresError: string | null;
+  failuresNotice?: string | null;
   refreshPending: boolean;
   onRefresh: () => void;
   repairSupported?: boolean;
@@ -162,6 +163,7 @@ export const MemoryStatusPanel: React.FC<{
   failuresLoading,
   statusError,
   failuresError,
+  failuresNotice = null,
   refreshPending,
   onRefresh,
   repairSupported = false,
@@ -341,7 +343,10 @@ export const MemoryStatusPanel: React.FC<{
             {failuresError ? (
               <div className="py-3 text-[12px] text-destructive-ink">{failuresError}</div>
             ) : null}
-            {failures.length === 0 && !failuresError ? (
+            {failuresNotice ? (
+              <div className="py-3 text-[12px] text-muted" role="status">{failuresNotice}</div>
+            ) : null}
+            {failures.length === 0 && !failuresError && !failuresNotice ? (
               <div className="flex items-center gap-2 py-3 text-[12px] text-muted">
                 {failuresLoading ? <Loader2 className="size-3.5 animate-spin" /> : <CheckCircle2 className="size-3.5 text-mint-ink" />}
                 {failuresLoading ? t('memory.processingRecord.anomalies.loading') : t('memory.processingRecord.anomalies.empty')}

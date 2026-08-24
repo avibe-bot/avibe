@@ -73,4 +73,17 @@ describe('MemoryStatusPanel', () => {
     expect(screen.queryByText(/restart|rebuild|repair index/i)).toBeNull();
     expect(screen.queryByRole('button', { name: 'memory.repair.button' })).toBeNull();
   });
+
+  it('renders an intentionally unavailable source as a neutral notice', () => {
+    render(
+      <MemoryStatusPanel
+        {...props(status('running'))}
+        failuresNotice="memory.processingRecord.reason.memory_failure_history_unavailable"
+      />,
+    );
+
+    const notice = screen.getByRole('status');
+    expect(notice.textContent).toBe('memory.processingRecord.reason.memory_failure_history_unavailable');
+    expect(notice.className).toContain('text-muted');
+  });
 });

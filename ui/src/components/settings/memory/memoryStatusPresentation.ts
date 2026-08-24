@@ -99,6 +99,13 @@ const knownLabel = (t: TFunction, keys: Record<string, string>, value: string): 
   return key ? t(key) : value;
 };
 
+export const isMemoryProcessingRecordReason = (
+  value: string | null | undefined,
+): value is keyof typeof PROCESSING_REASON_LABEL_KEYS => (
+  typeof value === 'string'
+  && Object.prototype.hasOwnProperty.call(PROCESSING_REASON_LABEL_KEYS, value)
+);
+
 export function memoryStatusSourceDisplayState(
   source: { status: SourceState; observed_at: string | null },
 ): SourceState {
