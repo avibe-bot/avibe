@@ -40,6 +40,26 @@ afterEach(() => {
 });
 
 describe('ApiProvider config convergence', () => {
+  it('invalidates a cached config read after a successful mutation', async () => {
+    render(<ApiProvider><CaptureApi /></ApiProvider>);
+    await waitFor(() => expect(capturedApi).not.toBeNull());
+
+    apiFetch
+      .mockResolvedValueOnce(response({ language: 'en' }))
+      .mockResolvedValueOnce(response({ language: 'zh' }))
+      .mockResolvedValueOnce(response({ language: 'zh' }));
+
+    await expect(capturedApi!.getConfig()).resolves.toEqual({ language: 'en' });
+    await capturedApi!.mutateConfig([setConfigField(['language'], 'zh')]);
+    await expect(capturedApi!.getConfig()).resolves.toEqual({ language: 'zh' });
+
+    expect(apiFetch.mock.calls.map(([path]) => path)).toEqual([
+      '/api/config',
+      '/api/config',
+      '/api/config',
+    ]);
+  });
+
   it('publishes the saved config after a successful mutation', async () => {
     render(<ApiProvider><CaptureApi /></ApiProvider>);
     await waitFor(() => expect(capturedApi).not.toBeNull());

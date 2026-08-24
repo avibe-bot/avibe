@@ -2291,16 +2291,25 @@ def test_disabled_model_hub_rest_surface_returns_feature_disabled_without_runtim
     assert supervisor_calls == []
 
 
+@pytest.mark.parametrize("method", ["get", "post"])
 @pytest.mark.parametrize(("env_value", "expected"), [(None, False), ("0", False), ("1", True)])
-def test_config_capability_exactly_projects_backend_model_hub_gate(monkeypatch, env_value, expected):
+def test_config_capability_exactly_projects_backend_model_hub_gate(
+    monkeypatch, tmp_path, method, env_value, expected
+):
     from config.v2_config import is_model_hub_enabled
 
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     if env_value is None:
         monkeypatch.delenv("VIBE_MODEL_HUB_ENABLED", raising=False)
     else:
         monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", env_value)
 
-    response = app.test_client().get("/api/config")
+    client = app.test_client()
+    response = (
+        client.get("/api/config")
+        if method == "get"
+        else client.post("/api/config", json={}, headers=csrf_headers(client))
+    )
 
     assert response.status_code == 200
     enabled = response.get_json()["capabilities"]["model_hub"]["enabled"]

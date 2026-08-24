@@ -4445,8 +4445,6 @@ def doctor_get():
 
 @app.route("/api/config", methods=["GET"])
 def config_get():
-    from vibe import api
-    from config.v2_config import is_model_hub_enabled
     from core.services import settings as settings_service
 
     # On a truly fresh install no config file exists yet, but the setup
@@ -4458,18 +4456,21 @@ def config_get():
     config = settings_service.load_config_or_default()
     authorization_context = getattr(g, "authorization_context", None)
     payload = _config_payload_for_context(config, authorization_context)
-    payload["capabilities"] = {"model_hub": {"enabled": is_model_hub_enabled()}}
     return jsonify(payload)
 
 
 def _config_payload_for_context(config: Any, authorization_context: Any) -> dict[str, Any]:
     """Project configuration by Instance role, independent of request origin."""
 
+    from config.v2_config import is_model_hub_enabled
     from vibe import api
 
     if authorization_context is None or authorization_context.can_manage_instance:
-        return api.client_config_payload(config)
-    return api.non_owner_config_payload(config)
+        payload = api.client_config_payload(config)
+    else:
+        payload = api.non_owner_config_payload(config)
+    payload["capabilities"] = {"model_hub": {"enabled": is_model_hub_enabled()}}
+    return payload
 
 
 _MODEL_HUB_SERVICE = None

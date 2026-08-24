@@ -39,6 +39,7 @@ type SettingsItem = {
   ownerOnly?: boolean;
   feature?: 'models' | 'memory' | 'channels';
   children?: SettingsItem[];
+  defaultOpen?: boolean;
   exact?: boolean;
 };
 
@@ -65,6 +66,7 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
         labelKey: 'nav.messagingPlatforms',
         icon: PlugZap,
         ownerOnly: true,
+        defaultOpen: true,
         children: [
           {
             path: '/settings/platforms',
@@ -132,7 +134,7 @@ const SettingsNavGroup: React.FC<{ item: SettingsItem }> = ({ item }) => {
   const children = item.children ?? [];
   const childActive = children.some((child) => itemMatches(location.pathname, child));
   const [manualOpen, setManualOpen] = useState<boolean | null>(null);
-  const open = manualOpen ?? childActive;
+  const open = manualOpen ?? item.defaultOpen ?? childActive;
   const Icon = item.icon;
 
   return (

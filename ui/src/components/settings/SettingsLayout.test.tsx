@@ -115,21 +115,22 @@ describe('SettingsLayout', () => {
     });
   });
 
-  it('keeps messaging destinations nested under a collapsed Messaging Platforms section', async () => {
+  it('opens Messaging Platforms by default and still allows manual collapse', async () => {
     const user = userEvent.setup();
-    renderLayout('/settings/replies');
+    renderLayout('/settings/service');
 
     const platforms = screen.getByRole('button', { name: 'nav.messagingPlatforms' });
-    expect(platforms.getAttribute('aria-expanded')).toBe('false');
-    expect(screen.queryByRole('link', { name: 'nav.users' })).toBeNull();
-    expect(screen.queryByRole('link', { name: 'nav.channels' })).toBeNull();
-
-    await user.click(platforms);
-
     expect(platforms.getAttribute('aria-expanded')).toBe('true');
     expect(screen.getByRole('link', { name: 'settings.sections.platformConnections' })).toBeTruthy();
     expect(screen.getByRole('link', { name: 'nav.users' })).toBeTruthy();
-    expect(screen.getByRole('link', { name: 'nav.channels' })).toBeTruthy();
+    await waitFor(() => expect(screen.getByRole('link', { name: 'nav.channels' })).toBeTruthy());
+
+    await user.click(platforms);
+    expect(platforms.getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByRole('link', { name: 'settings.sections.platformConnections' })).toBeNull();
+
+    await user.click(platforms);
+    expect(platforms.getAttribute('aria-expanded')).toBe('true');
   });
 
   it('auto-expands Platforms and selects the matching nested destination', async () => {
@@ -149,11 +150,7 @@ describe('SettingsLayout', () => {
       capabilities: { model_hub: { enabled: true } },
       platforms: { enabled: ['wechat'] },
     });
-    const user = userEvent.setup();
     renderLayout('/settings/replies');
-
-    const platforms = screen.getByRole('button', { name: 'nav.messagingPlatforms' });
-    await user.click(platforms);
 
     expect(screen.getByRole('link', { name: 'settings.sections.platformConnections' })).toBeTruthy();
     expect(screen.getByRole('link', { name: 'nav.users' })).toBeTruthy();
@@ -165,32 +162,40 @@ describe('SettingsLayout', () => {
       capabilities: { model_hub: { enabled: true } },
       platforms: { enabled: ['wechat'] },
     });
-    const user = userEvent.setup();
     renderLayout('/settings/replies');
 
-    await user.click(screen.getByRole('button', { name: 'nav.messagingPlatforms' }));
     await waitFor(() => expect(screen.queryByRole('link', { name: 'nav.channels' })).toBeNull());
+    expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
 
     act(() => {
-      api.configChangedHandlers.forEach((handler) => handler({ platforms: { enabled: ['slack'] } }));
+      api.configChangedHandlers.forEach((handler) => handler({
+        capabilities: { model_hub: { enabled: true } },
+        platforms: { enabled: ['slack'] },
+      }));
     });
     expect(screen.getByRole('link', { name: 'nav.channels' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
 
     act(() => {
-      api.configChangedHandlers.forEach((handler) => handler({ platforms: { enabled: ['wechat'] } }));
+      api.configChangedHandlers.forEach((handler) => handler({
+        capabilities: { model_hub: { enabled: true } },
+        platforms: { enabled: ['wechat'] },
+      }));
     });
     expect(screen.queryByRole('link', { name: 'nav.channels' })).toBeNull();
+    expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
   });
 
-  it('discards disclosure overrides when navigation leaves their pathname', async () => {
+  it('restores the default expanded disclosure after navigation', async () => {
     const user = userEvent.setup();
     renderLayout('/settings/replies');
 
-    await user.click(screen.getByRole('button', { name: 'nav.messagingPlatforms' }));
     expect(screen.getByRole('button', { name: 'nav.messagingPlatforms' }).getAttribute('aria-expanded')).toBe('true');
+    await user.click(screen.getByRole('button', { name: 'nav.messagingPlatforms' }));
+    expect(screen.getByRole('button', { name: 'nav.messagingPlatforms' }).getAttribute('aria-expanded')).toBe('false');
     await user.click(screen.getByRole('button', { name: 'go-service' }));
     await user.click(screen.getByRole('button', { name: 'go-back' }));
-    expect(screen.getByRole('button', { name: 'nav.messagingPlatforms' }).getAttribute('aria-expanded')).toBe('false');
+    expect(screen.getByRole('button', { name: 'nav.messagingPlatforms' }).getAttribute('aria-expanded')).toBe('true');
 
     await user.click(screen.getByRole('button', { name: 'go-groups' }));
     expect(screen.getByRole('button', { name: 'nav.messagingPlatforms' }).getAttribute('aria-expanded')).toBe('true');
