@@ -38,7 +38,10 @@ from core.memory.artifact import (
 )
 from core.memory.attachments import IM_ATTACHMENT_CAPTURE_PLATFORMS
 from core.memory.blocking import run_blocking
-from core.memory.clear_intent import ClearSurface
+from core.memory.clear_intent import (
+    ClearSurface,
+    cleanup_legacy_provider_call_storage,
+)
 from core.memory.confined_filesystem import ConfinedRoot, required_no_follow_flag
 from core.memory.everos import (
     EverOSPort,
@@ -46,11 +49,6 @@ from core.memory.everos import (
     ProviderHealthSnapshot,
 )
 from core.memory.everos_insight import MemoryInsightPaths, MemoryInsightReader
-from core.memory.everos_insight.recorder import (
-    call_log_retention_policy,
-    clear_call_log,
-    record_preflight_call,
-)
 from core.memory.module import MemoryModule, MemorySessionLifecycleBusyError
 from core.memory.operation_lock import MemoryOperationBusy, MemoryOperationLease
 from core.memory.maintenance import (
@@ -121,9 +119,6 @@ ProcessingEvent = Callable[
 
 
 ARTIFACT_ACTIVATION_TIMEOUT_SECONDS = 90.0
-_CALL_LOG_RETENTION_INTERVAL_SECONDS = 6 * 60 * 60
-_RECORDER_DISABLED = {"state": "disabled", "reason": None}
-_RECORDER_DEGRADED = {"state": "degraded", "reason": "writer_failures"}
 _MEMORY_LIST_CURSOR_VERSION = 3
 MEMORY_LIST_CURSOR_MAX_BYTES = 8192
 _MEMORY_LIST_PROVIDER_PAGE_SIZE = 20
@@ -409,7 +404,6 @@ class MemoryRuntime:
         self._store_error: Exception | None = None
         self._insight_reader_override = insight_reader
         self._insight_reader: MemoryInsightReader | None = None
-        self._recorder_health: dict[str, str | None] = dict(_RECORDER_DISABLED)
         self._sidecar = MemorySidecarLifecycle(
             self._process_factory,
             provider_root=self._provider_root,
@@ -639,10 +633,6 @@ class MemoryRuntime:
     def _socket_path(self) -> Path:
         return self._memory_dir / ".rt" / "everos.sock"
 
-    @property
-    def _call_log_db_path(self) -> Path:
-        return self._memory_dir / "call-log" / "call-log.db"
-
     # Remaining Runtime paths still read these projections while their own
     # lifecycle work is migrated. Ownership remains in ``_sidecar``.
     @property
@@ -784,11 +774,7 @@ class MemoryRuntime:
             if value
         )
         self._insight_reader = MemoryInsightReader(
-            MemoryInsightPaths(
-                self._provider_root,
-                self._store.path,
-                self._call_log_db_path,
-            ),
+            MemoryInsightPaths(self._provider_root),
             provider_base_urls=base_urls,
             exact_redaction_values=exact_redaction_values,
         )
@@ -961,7 +947,6 @@ class MemoryRuntime:
         if self._process is not None:
             await self._process.stop()
             self._process = None
-        self._reset_recorder_health_unless_corrupt()
         self._runtime_error = None
         return {"ok": True, "state": "disabled"}
 
@@ -1183,8 +1168,6 @@ class MemoryRuntime:
                 snapshot=None,
                 unavailable_reason=current_reason or "memory_sidecar_unavailable",
             )
-        if snapshot is not None:
-            self._update_recorder_health(snapshot.recorder)
         return RuntimeHealthObservation(snapshot=snapshot, unavailable_reason=reason)
 
     async def _processing_record_failure_log(
@@ -1249,18 +1232,6 @@ class MemoryRuntime:
         return await self._require_maintenance().maintenance_payload(
             operator_ref=operator_ref,
             observation=observation,
-        )
-
-    def _update_recorder_health(
-        self,
-        health: dict[str, str | None],
-        *,
-        observed_at: str | None = None,
-    ) -> None:
-        self._recorder_health = dict(health)
-        self._processing_record.observe_recorder(
-            self._recorder_health,
-            observed_at=observed_at,
         )
 
     async def processing_record_payload(
@@ -1985,20 +1956,6 @@ class MemoryRuntime:
             warnings=unique_warnings,
         )
 
-    async def log_unlinked_calls_payload(
-        self,
-        principal_id: str,
-        project_id: str,
-        limit: int,
-    ) -> dict[str, Any]:
-        reader = self._insight_reader
-        if not self.available or reader is None:
-            return {"status": "failed", "error": "memory_store_unavailable"}
-        payload = await self._run_insight_read(
-            lambda: reader.list_unlinked_calls((principal_id, project_id), limit)
-        )
-        return self._with_call_log_coverage(payload)
-
     async def processing_record_entries_payload(
         self,
         principal_id: str,
@@ -2028,74 +1985,6 @@ class MemoryRuntime:
             lambda: reader.processing_record_detail(
                 (principal_id, project_id), memcell_id
             )
-        )
-
-    async def admin_log_unlinked_calls_payload(
-        self,
-        limit: int,
-    ) -> dict[str, Any]:
-        reader = self._insight_reader
-        if not self.available or reader is None:
-            return {"status": "failed", "error": "memory_store_unavailable"}
-        payload = await self._run_insight_read(
-            lambda: reader.list_admin_unlinked_calls(limit)
-        )
-        return self._with_call_log_coverage(payload)
-
-    def _with_call_log_coverage(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if payload.get("status") != "ok":
-            return payload
-        return {
-            **payload,
-            "recorder": dict(self._recorder_health),
-            "retention": call_log_retention_policy(),
-        }
-
-    async def log_entries_payload(
-        self,
-        principal_id: str,
-        project_id: str,
-        cursor: str | None,
-        limit: int,
-    ) -> dict[str, Any]:
-        reader = self._insight_reader
-        if not self.available or reader is None:
-            return {"status": "failed", "error": "memory_store_unavailable"}
-        return await self._run_insight_read(
-            lambda: reader.list_entries((principal_id, project_id), cursor, limit)
-        )
-
-    async def log_entry_payload(
-        self,
-        principal_id: str,
-        project_id: str,
-        memcell_id: str,
-    ) -> dict[str, Any]:
-        reader = self._insight_reader
-        if not self.available or reader is None:
-            return {"status": "failed", "error": "memory_store_unavailable"}
-        return await self._run_insight_read(
-            lambda: reader.entry_detail((principal_id, project_id), memcell_id)
-        )
-
-    async def admin_log_entries_payload(
-        self,
-        cursor: str | None,
-        limit: int,
-    ) -> dict[str, Any]:
-        reader = self._insight_reader
-        if not self.available or reader is None:
-            return {"status": "failed", "error": "memory_store_unavailable"}
-        return await self._run_insight_read(
-            lambda: reader.list_admin_entries(cursor, limit)
-        )
-
-    async def admin_log_entry_payload(self, memcell_id: str) -> dict[str, Any]:
-        reader = self._insight_reader
-        if not self.available or reader is None:
-            return {"status": "failed", "error": "memory_store_unavailable"}
-        return await self._run_insight_read(
-            lambda: reader.admin_entry_detail(memcell_id)
         )
 
     async def _run_insight_read(
@@ -2143,7 +2032,6 @@ class MemoryRuntime:
         if self._process is not None:
             await self._process.stop()
             self._process = None
-        self._set_recorder_health_disabled()
 
     async def _delete_clear_surface(
         self,
@@ -2174,9 +2062,11 @@ class MemoryRuntime:
 
             await run_blocking(reset_provider_root)
             return
-        if surface.surface == "call_log":
-            await run_blocking(clear_call_log, self._call_log_db_path)
-            self._set_recorder_health_disabled()
+        if surface.surface == "legacy_files":
+            await run_blocking(
+                cleanup_legacy_provider_call_storage,
+                self._effective_home,
+            )
             return
         if surface.surface == "attachments":
             await self.module.clear_attachments()
@@ -2482,33 +2372,6 @@ class MemoryRuntime:
             ),
         )
         return (await provider.preflight()).payload()
-
-    def _record_preflight_call(
-        self,
-        *,
-        side,
-        model=None,
-        request,
-        response,
-        failure,
-        base_url=None,
-        api_key=None,
-        started_at_ms,
-        duration_ms,
-    ) -> None:
-        record_preflight_call(
-            self._call_log_db_path,
-            started_at_ms=started_at_ms,
-            duration_ms=duration_ms,
-            kind="multimodal_llm" if side == "multimodal" else side,
-            model=model,
-            request=request,
-            response=response,
-            status="error" if failure is not None else "ok",
-            error=failure.diagnostic.message if failure is not None else None,
-            provider_base_urls=(base_url,) if base_url else (),
-            exact_redaction_values=(api_key,) if api_key else (),
-        )
 
     async def rebuild(self) -> dict[str, Any]:
         """Join or start one retained embedding-index rebuild over the cascade child."""
@@ -3560,13 +3423,6 @@ class MemoryRuntime:
 
     async def _close_writer(self) -> None:
         await self.module.close_writer()
-
-    def _reset_recorder_health_unless_corrupt(self) -> None:
-        if self._recorder_health.get("reason") != "call_log_corrupt":
-            self._set_recorder_health_disabled()
-
-    def _set_recorder_health_disabled(self) -> None:
-        self._update_recorder_health(_RECORDER_DISABLED)
 
     def _data_exists(self) -> bool:
         """Return a conservative status projection of vector-bearing state."""

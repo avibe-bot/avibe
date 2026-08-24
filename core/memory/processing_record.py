@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import secrets
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal, TypeVar
@@ -99,12 +98,6 @@ class MaintenanceProjection:
 
 
 @dataclass(frozen=True, slots=True)
-class ProviderCheckProjection:
-    source: SourceObservation
-    items: tuple[dict[str, Any], ...]
-
-
-@dataclass(frozen=True, slots=True)
 class ProcessingRecordSummary:
     runtime: RuntimeHealthProjection
     sources: ProcessingSourceObservations
@@ -138,12 +131,6 @@ class MemoryProcessingRecord:
         self._runtime = runtime
         self._last_health_snapshot: ProviderHealthSnapshot | None = None
         self._last_health_observed_at: str | None = None
-        self._recorder_health: dict[str, str | None] = {
-            "state": "disabled",
-            "reason": None,
-        }
-        self._recorder_episode_observed_at: str | None = None
-        self._recorder_episode_id: str | None = None
 
     async def read_record(
         self,
@@ -426,16 +413,6 @@ class MemoryProcessingRecord:
             )
         return AnomalyProjection(source=source, items=durable[:50])
 
-    def _merge_recorder_anomaly(
-        self,
-        durable: AnomalyProjection,
-        recorder: MemoryFailureLogEntry | None,
-    ) -> AnomalyProjection:
-        items = list(durable.items)
-        if recorder is not None:
-            items.insert(0, recorder)
-        return AnomalyProjection(source=durable.source, items=tuple(items[:50]))
-
     async def _read_maintenance(
         self,
         operator_ref: str | None,
@@ -474,48 +451,6 @@ class MemoryProcessingRecord:
             can_clear=result.can_clear,
             clear_in_progress=result.clear_in_progress,
         )
-
-    def observe_recorder(
-        self,
-        health: Mapping[str, str | None],
-        *,
-        observed_at: str | None = None,
-    ) -> None:
-        previous = self._recorder_health
-        current = dict(health)
-        if current.get("state") != "degraded":
-            self._recorder_episode_observed_at = None
-            self._recorder_episode_id = None
-        elif (
-            previous.get("state") != "degraded"
-            or previous.get("reason") != current.get("reason")
-            or self._recorder_episode_observed_at is None
-            or self._recorder_episode_id is None
-        ):
-            self._recorder_episode_observed_at = observed_at or _utc_observed_at()
-            self._recorder_episode_id = _new_recorder_episode_id()
-        self._recorder_health = current
-
-    def _recorder_anomaly(self) -> MemoryFailureLogEntry | None:
-        if (
-            self._recorder_health.get("state") != "degraded"
-            or self._recorder_episode_observed_at is None
-            or self._recorder_episode_id is None
-        ):
-            return None
-        return MemoryFailureLogEntry(
-            id=self._recorder_episode_id,
-            kind="recorder_degraded",
-            state="degraded",
-            operation="record",
-            occurred_at=self._recorder_episode_observed_at,
-            error_code="memory_processing_failed",
-        )
-
-
-def _new_recorder_episode_id() -> str:
-    return f"ma_{secrets.token_hex(32)}"
-
 
 def _utc_observed_at() -> str:
     return (

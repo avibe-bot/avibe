@@ -120,7 +120,6 @@ class FakeMemoryRepairRuntime:
                     "capabilities": {"embed": True},
                     "disabled_features": [],
                     "cascade": deepcopy(self.health),
-                    "recorder": {"state": "active", "reason": None},
                 },
             },
         }

@@ -87,12 +87,6 @@ DASHSCOPE_RERANK_PATH = "api/v1/services/rerank/text-rerank/text-rerank"
 _MAX_LIST_PAGE_SIZE = 20
 _EVEROS_EXACT_SORT_WINDOW = 20_000
 _MAX_PROFILE_TIMESTAMP_MS = 4_102_444_800_000
-_RECORDER_HEALTH_FALLBACK = {"state": "degraded", "reason": "writer_failures"}
-_RECORDER_HEALTH_REASONS = {
-    "writer_failures",
-    "serialization_failed",
-    "call_log_corrupt",
-}
 # The pinned EverOS 1.2.3 `/add` route emits these only while ingesting attachment
 # content, before boundary preparation or any durable provider write. Unknown
 # codes stay out: destructive text-only replay requires positive no-write proof.
@@ -113,7 +107,6 @@ class ProviderHealthSnapshot:
     capabilities: dict[str, bool]
     disabled_features: tuple[str, ...]
     cascade: dict[str, object] | None
-    recorder: dict[str, str | None]
 
     def payload(self) -> dict[str, object]:
         return {
@@ -274,7 +267,6 @@ class EverOSPort:
         add_timeout_seconds: float = _ADD_TIMEOUT_SECONDS,
         flush_timeout_seconds: float = _FLUSH_TIMEOUT_SECONDS,
         processing_timeout_seconds: float = _PROCESSING_TIMEOUT_SECONDS,
-        preflight_call_recorder: Callable[..., None] | None = None,
     ) -> None:
         self._socket_path = Path(socket_path)
         self._llm_base_url = _normalized_endpoint_url(llm_base_url)
@@ -302,7 +294,6 @@ class EverOSPort:
             processing_timeout_seconds,
             _PROCESSING_TIMEOUT_SECONDS,
         )
-        self._preflight_call_recorder = preflight_call_recorder
         self._processing_lock = asyncio.Lock()
 
     @property
@@ -613,14 +604,6 @@ class EverOSPort:
             raise MemoryProviderFailure("memory_provider_response_invalid", retryable=False)
         return snapshot
 
-    async def recorder_health(self) -> dict[str, str | None]:
-        """Return the closed recorder state projected by the sidecar health route."""
-        try:
-            snapshot = await self.health_snapshot()
-        except MemoryProviderFailure:
-            return dict(_RECORDER_HEALTH_FALLBACK)
-        return dict(snapshot.recorder)
-
     async def processing_healthy(self) -> bool:
         """Probe configured model endpoints with fixed synthetic requests.
 
@@ -727,8 +710,6 @@ class EverOSPort:
             )
         first_failure = None
         for side, base_url, api_key, path, payload, validator in checks:
-            started_at_ms = int(time.time() * 1000)
-            started = time.monotonic()
             try:
                 failure = await asyncio.wait_for(
                     self._preflight_endpoint(
@@ -738,8 +719,6 @@ class EverOSPort:
                         path,
                         payload,
                         validator,
-                        started_at_ms=started_at_ms,
-                        started=started,
                     ),
                     timeout=_PREFLIGHT_TIMEOUT_SECONDS,
                 )
@@ -748,16 +727,6 @@ class EverOSPort:
                 failure = MemoryPreflightFailure(
                     error_name,
                     MemoryPreflightDiagnostic(side, message="provider_request_timed_out"),
-                )
-                self._record_preflight(
-                    side,
-                    payload,
-                    None,
-                    failure,
-                    base_url=base_url,
-                    api_key=api_key,
-                    started_at_ms=started_at_ms,
-                    duration_ms=_elapsed_ms(started),
                 )
             if failure is not None and first_failure is None:
                 first_failure = failure
@@ -1018,24 +987,11 @@ class EverOSPort:
         path,
         payload,
         validator,
-        *,
-        started_at_ms,
-        started,
     ):
         error_name = _preflight_error_name(side)
         diagnostic = MemoryPreflightDiagnostic(side)
         if not base_url or not api_key or not path:
             failure = MemoryPreflightFailure(error_name, replace(diagnostic, message="endpoint_not_configured"))
-            self._record_preflight(
-                side,
-                payload,
-                None,
-                failure,
-                base_url=base_url,
-                api_key=api_key,
-                started_at_ms=started_at_ms,
-                duration_ms=_elapsed_ms(started),
-            )
             return failure
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(_PREFLIGHT_TIMEOUT_SECONDS, connect=2.0), trust_env=False) as client:
@@ -1052,16 +1008,6 @@ class EverOSPort:
             except (TypeError, ValueError):
                 value = None
             if 200 <= status_code < 300 and validator(value):
-                self._record_preflight(
-                    side,
-                    payload,
-                    value,
-                    None,
-                    base_url=base_url,
-                    api_key=api_key,
-                    started_at_ms=started_at_ms,
-                    duration_ms=_elapsed_ms(started),
-                )
                 return None
             code = None
             if 200 <= status_code < 300:
@@ -1079,94 +1025,19 @@ class EverOSPort:
                 )
                 message = "provider_error"
             failure = MemoryPreflightFailure(error_name, MemoryPreflightDiagnostic(side, status_code, code, message))
-            self._record_preflight(
-                side,
-                payload,
-                value if isinstance(value, dict) else None,
-                failure,
-                base_url=base_url,
-                api_key=api_key,
-                started_at_ms=started_at_ms,
-                duration_ms=_elapsed_ms(started),
-            )
             return failure
         except httpx.TimeoutException:
             failure = MemoryPreflightFailure(error_name, MemoryPreflightDiagnostic(side, message="provider_request_timed_out"))
-            self._record_preflight(
-                side,
-                payload,
-                None,
-                failure,
-                base_url=base_url,
-                api_key=api_key,
-                started_at_ms=started_at_ms,
-                duration_ms=_elapsed_ms(started),
-            )
             return failure
         except MemoryProviderFailure:
             failure = MemoryPreflightFailure(
                 error_name,
                 MemoryPreflightDiagnostic(side, message="provider_response_too_large"),
             )
-            self._record_preflight(
-                side,
-                payload,
-                None,
-                failure,
-                base_url=base_url,
-                api_key=api_key,
-                started_at_ms=started_at_ms,
-                duration_ms=_elapsed_ms(started),
-            )
             return failure
         except (httpx.HTTPError, OSError, TypeError, ValueError):
             failure = MemoryPreflightFailure(error_name, MemoryPreflightDiagnostic(side, message="provider_unavailable"))
-            self._record_preflight(
-                side,
-                payload,
-                None,
-                failure,
-                base_url=base_url,
-                api_key=api_key,
-                started_at_ms=started_at_ms,
-                duration_ms=_elapsed_ms(started),
-            )
             return failure
-
-    def _record_preflight(
-        self,
-        side,
-        request,
-        response,
-        failure,
-        *,
-        base_url,
-        api_key,
-        started_at_ms,
-        duration_ms,
-    ) -> None:
-        if self._preflight_call_recorder is None:
-            return
-        try:
-            model = {
-                "llm": self._llm_model,
-                "embedding": self._embedding_model,
-                "rerank": self._rerank_model,
-                "multimodal": self._multimodal_model,
-            }.get(side)
-            self._preflight_call_recorder(
-                side=side,
-                model=model,
-                request=request,
-                response=response,
-                failure=failure,
-                base_url=base_url,
-                api_key=api_key,
-                started_at_ms=started_at_ms,
-                duration_ms=duration_ms,
-            )
-        except Exception:
-            logger.debug("memory preflight call recorder failed", exc_info=True)
 
 
 def _bounded_preflight_message(
@@ -1908,13 +1779,6 @@ def _provider_health_snapshot(payload: dict[str, Any] | None) -> ProviderHealthS
         or any(not _safe_health_token(item, max_bytes=64) for item in disabled)
     ):
         return None
-    recorder = (
-        {"state": "disabled", "reason": None}
-        if "recorder" not in payload
-        else _project_recorder_health(payload.get("recorder"))
-    )
-    if recorder is None:
-        return None
     cascade = _project_cascade_health(payload.get("cascade"))
     if payload.get("cascade") is not None and cascade is None:
         return None
@@ -1924,21 +1788,7 @@ def _provider_health_snapshot(payload: dict[str, Any] | None) -> ProviderHealthS
         capabilities={key: capabilities[key] for key in sorted(capabilities)},
         disabled_features=tuple(disabled),
         cascade=cascade,
-        recorder=recorder,
     )
-
-
-def _project_recorder_health(value: object) -> dict[str, str | None] | None:
-    if not isinstance(value, dict) or set(value) != {"state", "reason"}:
-        return None
-    state = value.get("state")
-    reason = value.get("reason")
-    valid = (
-        (state == "active" and reason is None)
-        or (state == "degraded" and reason in _RECORDER_HEALTH_REASONS)
-        or (state == "disabled" and reason in {None, "writer_failures"})
-    )
-    return {"state": state, "reason": reason} if valid else None
 
 
 def _project_cascade_health(value: object) -> dict[str, object] | None:
@@ -2070,8 +1920,6 @@ class MemoryProviderPort(Protocol):
 
     async def health_snapshot(self) -> ProviderHealthSnapshot: ...
 
-    async def recorder_health(self) -> dict[str, str | None]: ...
-
     async def processing_healthy(self) -> bool: ...
 
     @property
@@ -2118,9 +1966,6 @@ class FakeMemoryProvider:
     agentic_budget_enforced_flag: bool = False
     agentic_round: Literal["round1", "round2", "unknown"] = "unknown"
     processing_health_failure: BaseException | None = None
-    recorder_health_state: dict[str, str | None] = field(
-        default_factory=lambda: {"state": "disabled", "reason": None}
-    )
     health_snapshot_value: ProviderHealthSnapshot = field(
         default_factory=lambda: ProviderHealthSnapshot(
             status="ok",
@@ -2134,7 +1979,6 @@ class FakeMemoryProvider:
             },
             disabled_features=(),
             cascade=None,
-            recorder={"state": "disabled", "reason": None},
         )
     )
     add_hook: Callable[[ProviderCapture], Awaitable[None]] | None = None
@@ -2232,9 +2076,6 @@ class FakeMemoryProvider:
         if not self.healthy:
             raise MemoryProviderSystemFailure()
         return self.health_snapshot_value
-
-    async def recorder_health(self) -> dict[str, str | None]:
-        return dict(self.recorder_health_state)
 
     async def processing_healthy(self) -> bool:
         """Whether the configured processing (LLM/embedding) endpoints are reachable.

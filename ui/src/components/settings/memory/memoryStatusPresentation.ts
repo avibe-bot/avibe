@@ -1,11 +1,10 @@
 import type { TFunction } from 'i18next';
 
-import type { MemoryLogSourceStatus, MemoryStatus } from '../../../context/ApiContext';
+import type { MemoryProcessingSourceStatus, MemoryStatus } from '../../../context/ApiContext';
 import { memoryErrorMessage } from '../../../lib/memoryRead';
-import { memoryLogEnumLabel } from './memoryLog';
 
 export type RuntimeFactGroup = keyof typeof RUNTIME_FACT_LABEL_KEYS;
-export type SourceState = MemoryStatus['source']['status'] | MemoryLogSourceStatus['status'];
+export type SourceState = MemoryStatus['source']['status'] | MemoryProcessingSourceStatus['status'];
 export type BadgeVariant = 'success' | 'warning' | 'destructive' | 'info' | 'secondary';
 
 type AnomalyLabelGroup = keyof typeof ANOMALY_LABEL_KEYS;
@@ -23,7 +22,6 @@ const ANOMALY_LABEL_KEYS = {
     boot_recovery: 'memory.status.failureLog.kind.boot_recovery',
     delivery_abandoned: 'memory.status.failureLog.kind.delivery_abandoned',
     distillation_rejected: 'memory.status.failureLog.kind.distillation_rejected',
-    recorder_degraded: 'memory.status.failureLog.kind.recorder_degraded',
     result_unknown: 'memory.status.failureLog.kind.result_unknown',
   },
   state: {
@@ -35,7 +33,6 @@ const ANOMALY_LABEL_KEYS = {
   operation: {
     add: 'memory.processingRecord.anomalyOperation.add',
     flush: 'memory.processingRecord.anomalyOperation.flush',
-    record: 'memory.processingRecord.anomalyOperation.record',
   },
 } as const;
 
@@ -80,10 +77,6 @@ const RUNTIME_FACT_LABEL_KEYS = {
     optimize_failure_streak: 'memory.processingRecord.runtime.fact.cascade.optimizeFailureStreak',
     prune_stale_seconds: 'memory.processingRecord.runtime.fact.cascade.pruneStaleSeconds',
   },
-  recorder: {
-    state: 'memory.processingRecord.runtime.fact.recorder.state',
-    reason: 'memory.processingRecord.runtime.fact.recorder.reason',
-  },
 } as const;
 
 const CASCADE_REASON_LABEL_KEYS = {
@@ -94,16 +87,28 @@ const CASCADE_REASON_LABEL_KEYS = {
   unknown: 'memory.processingRecord.runtime.fact.cascadeReason.unknown',
 } as const;
 
-const RECORDER_STATE_LABEL_KEYS = {
-  active: 'memory.processingRecord.runtime.fact.recorderState.active',
-  degraded: 'memory.processingRecord.runtime.fact.recorderState.degraded',
-  disabled: 'memory.processingRecord.runtime.fact.recorderState.disabled',
-} as const;
-
-const RECORDER_REASON_LABEL_KEYS = {
-  writer_failures: 'memory.processingRecord.runtime.fact.recorderReason.writerFailures',
-  serialization_failed: 'memory.processingRecord.runtime.fact.recorderReason.serializationFailed',
-  call_log_corrupt: 'memory.processingRecord.runtime.fact.recorderReason.callLogCorrupt',
+const PROCESSING_REASON_LABEL_KEYS = {
+  busy: 'memory.processingRecord.reason.busy',
+  memory_failure_history_unavailable: 'memory.processingRecord.reason.memory_failure_history_unavailable',
+  native_memcells_unavailable: 'memory.processingRecord.reason.native_memcells_unavailable',
+  native_runs_unavailable: 'memory.processingRecord.reason.native_runs_unavailable',
+  native_semantic_unavailable: 'memory.processingRecord.reason.native_semantic_unavailable',
+  payload_projection_limit: 'memory.processingRecord.reason.payload_projection_limit',
+  payload_unavailable: 'memory.processingRecord.reason.payload_unavailable',
+  payload_malformed: 'memory.processingRecord.reason.payload_malformed',
+  authorized_user_payload_unavailable: 'memory.processingRecord.reason.authorized_user_payload_unavailable',
+  unauthorized_or_bounded_items_omitted: 'memory.processingRecord.reason.unauthorized_or_bounded_items_omitted',
+  native_runs_missing_or_retained: 'memory.processingRecord.reason.native_runs_missing_or_retained',
+  native_run_retention_bounded: 'memory.processingRecord.reason.native_run_retention_bounded',
+  semantic_results_not_user_scoped: 'memory.processingRecord.reason.semantic_results_not_user_scoped',
+  semantic_results_missing_or_retained: 'memory.processingRecord.reason.semantic_results_missing_or_retained',
+  semantic_projection_bounded: 'memory.processingRecord.reason.semantic_projection_bounded',
+  current_state_not_user_scoped: 'memory.processingRecord.reason.current_state_not_user_scoped',
+  current_state_unavailable: 'memory.processingRecord.reason.current_state_unavailable',
+  index_state_unavailable: 'memory.processingRecord.reason.index_state_unavailable',
+  index_state_missing_or_retained: 'memory.processingRecord.reason.index_state_missing_or_retained',
+  index_state_incomplete: 'memory.processingRecord.reason.index_state_incomplete',
+  unknown: 'memory.processingRecord.reason.unknown',
 } as const;
 
 const knownLabel = (t: TFunction, keys: Record<string, string>, value: string): string => {
@@ -138,7 +143,7 @@ export const memoryStatusHealthLabel = (t: TFunction, value: string): string => 
 export const memoryStatusSourceReasonLabel = (t: TFunction, value: string): string => (
   MEMORY_SOURCE_ERROR_REASONS.has(value)
     ? memoryErrorMessage(t, value)
-    : memoryLogEnumLabel(t, 'reason', value)
+    : knownLabel(t, PROCESSING_REASON_LABEL_KEYS, value)
 );
 
 export const formatMemoryStatusTimestamp = (value: string | null | undefined): string => {
@@ -202,12 +207,6 @@ export const formatMemoryStatusRuntimeFact = (
         ? knownLabel(t, CASCADE_REASON_LABEL_KEYS, reason)
         : formatMemoryStatusFact(reason))
       .join(', ');
-  }
-  if (group === 'recorder' && name === 'state' && typeof value === 'string') {
-    return knownLabel(t, RECORDER_STATE_LABEL_KEYS, value);
-  }
-  if (group === 'recorder' && name === 'reason' && typeof value === 'string') {
-    return knownLabel(t, RECORDER_REASON_LABEL_KEYS, value);
   }
   return formatMemoryStatusFact(value);
 };

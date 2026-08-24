@@ -71,17 +71,20 @@ describe('Memory UI copy contracts', () => {
     }
   });
 
-  it.each(['en', 'zh'] as const)('discloses outbound search and diagnostic retention in %s', (language) => {
+  it.each(['en', 'zh'] as const)('discloses outbound search and best-effort native records in %s', (language) => {
     const disclosure = BUNDLES[language].memory.settings.disclosure.join('\n');
 
-    expect(disclosure).toMatch(/5,000/);
     if (language === 'en') {
       expect(disclosure).toMatch(/Search sends queries/);
-      expect(disclosure).toMatch(/14 days/);
+      expect(disclosure).toContain('native Processing Records');
+      expect(disclosure).toContain('scrubbed errors');
+      expect(disclosure).toContain('incomplete or lost');
       expect(disclosure).toContain('Avibe-managed');
     } else {
       expect(disclosure).toContain('搜索查询');
-      expect(disclosure).toContain('14 天');
+      expect(disclosure).toContain('原生处理记录');
+      expect(disclosure).toContain('已脱敏错误');
+      expect(disclosure).toContain('不完整或丢失');
       expect(disclosure).toContain('Avibe 在本机上管理');
     }
   });
@@ -90,18 +93,19 @@ describe('Memory UI copy contracts', () => {
     const settings = BUNDLES[language].memory.settings;
     const disclosure = settings.cloudDisclosure.join('\n');
 
-    expect(disclosure).toMatch(/5,000/);
     if (language === 'en') {
       expect(disclosure).toContain('bounded and process-local');
       expect(disclosure).toContain('not queued durably');
       expect(disclosure).toMatch(/ambiguous provider outcomes are not replayed/i);
       expect(disclosure).toContain('Turning Memory off pauses it');
+      expect(disclosure).toContain('native Processing Records');
       expect(settings.cloudDisclosureAttachment).toContain('cloud model service');
     } else {
       expect(disclosure).toContain('有界且仅由当前进程管理');
       expect(disclosure).toContain('不会进入持久队列');
       expect(disclosure).toContain('不会重放');
       expect(disclosure).toContain('关闭记忆只是暂停记录');
+      expect(disclosure).toContain('原生处理记录');
       expect(settings.cloudDisclosureAttachment).toContain('云端模型服务');
     }
   });
@@ -158,14 +162,13 @@ describe('Memory UI copy contracts', () => {
     }
   });
 
-  it.each(['en', 'zh'] as const)('localizes best-effort diagnostic source reasons in %s', (language) => {
-    const reasons = BUNDLES[language].memory.log.reason;
+  it.each(['en', 'zh'] as const)('localizes native Processing Record reasons in %s', (language) => {
+    const reasons = BUNDLES[language].memory.processingRecord.reason;
     for (const key of [
-      'volatileDeliveryState',
-      'providerMemoryUnavailable',
-      'providerCallLogUnavailable',
-      'processingTimelineUnavailable',
-      'memoryFailureHistoryUnavailable',
+      'native_memcells_unavailable',
+      'native_runs_unavailable',
+      'native_semantic_unavailable',
+      'memory_failure_history_unavailable',
     ] as const) {
       expect(reasons[key]).toBeTruthy();
     }
@@ -174,10 +177,8 @@ describe('Memory UI copy contracts', () => {
   it('keeps processing terminology aligned with the runtime contracts', () => {
     expect(en.memory.processingRecord.runtime.fact.cascade.optimizeFailureStreak).not.toMatch(/cleanup/i);
     expect(en.memory.processingRecord.runtime.fact.cascadeReason.optimizeStuck).toMatch(/Optimization/);
-    expect(en.memory.log.callStage.cascade).not.toMatch(/queue/i);
     expect(zh.memory.processingRecord.runtime.fact.cascade.optimizeFailureStreak).not.toContain('清理');
     expect(zh.memory.processingRecord.runtime.fact.cascadeReason.optimizeStuck).toContain('优化');
-    expect(zh.memory.log.callStage.cascade).not.toContain('队列');
   });
 
   it('presents reinitialization roots as mixed storage locations with secondary technical paths', () => {
@@ -187,7 +188,7 @@ describe('Memory UI copy contracts', () => {
     expect(en.memory.factoryReset.deletesTitle).toBe('This attempts to permanently delete:');
     expect(en.memory.factoryReset.roots.primaryStorage).toEqual({
       label: 'Primary Memory storage',
-      description: 'May include profiles, facts, indexes, call diagnostics, and runtime files',
+      description: 'May include profiles, facts, indexes, native processing data, and runtime files',
     });
     expect(en.memory.factoryReset.roots.memoryStateStorage).toEqual({
       label: 'Memory state storage',
@@ -201,7 +202,7 @@ describe('Memory UI copy contracts', () => {
     expect(zh.memory.factoryReset.deletesTitle).toBe('将尝试永久删除：');
     expect(zh.memory.factoryReset.roots.primaryStorage).toEqual({
       label: '主要记忆存储',
-      description: '可能包含画像、事实、索引、调用诊断和运行文件',
+      description: '可能包含画像、事实、索引、原生处理数据和运行文件',
     });
     expect(zh.memory.factoryReset.roots.memoryStateStorage).toEqual({
       label: '记忆状态存储',
@@ -237,16 +238,13 @@ describe('Memory UI copy contracts', () => {
     }
   });
 
-  it.each(['en', 'zh'] as const)('keeps Search, source timestamps, and processing-log scope accurate in %s', (language) => {
+  it.each(['en', 'zh'] as const)('keeps Search and source timestamp copy accurate in %s', (language) => {
     if (language === 'en') {
       expect(en.memory.search.description).toContain('Default');
       expect(en.memory.search.projectAll).toBe('All my projects');
       expect(en.memory.search.partial).toContain('incomplete');
       expect(en.memory.processingRecord.sources.help).toContain('last checked');
       expect(en.memory.processingRecord.sources.help).not.toContain('last updated');
-      expect(en.memory.log.description).toBe(
-        'See the processing history for created Memory entries across every user and project on this installation.',
-      );
       expect(en.memory.clear.confirmDescription).toContain('Avibe-managed Memory data');
     } else {
       expect(zh.memory.search.description).toContain('Default');
@@ -254,7 +252,6 @@ describe('Memory UI copy contracts', () => {
       expect(zh.memory.search.partial).toContain('不完整');
       expect(zh.memory.processingRecord.sources.help).toContain('最近一次检查');
       expect(zh.memory.processingRecord.sources.help).not.toContain('上次更新');
-      expect(zh.memory.log.description).toBe('查看本安装中所有用户和项目的已创建记忆条目的处理记录。');
       expect(zh.memory.clear.confirmDescription).toContain('Avibe 在本机上管理的记忆数据');
     }
   });

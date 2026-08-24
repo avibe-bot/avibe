@@ -1034,7 +1034,7 @@ def test_active_org_member_memory_patch_rejects_retired_diagnostics_field(
     assert response.status_code == 400
     assert response.get_json() == {"status": "failed", "error": "memory_invalid_input"}
     assert calls == []
-    assert V2Config.load().memory.diagnostics.log_provider_calls is True
+    assert not hasattr(V2Config.load().memory, "diagnostics")
 
 
 def test_memory_diagnostics_patch_is_rejected_for_local_ui(monkeypatch, tmp_path) -> None:
@@ -1059,7 +1059,7 @@ def test_memory_diagnostics_patch_is_rejected_for_local_ui(monkeypatch, tmp_path
     assert response.status_code == 400
     assert response.get_json() == {"status": "failed", "error": "memory_invalid_input"}
     assert calls == []
-    assert V2Config.load().memory.diagnostics.log_provider_calls is True
+    assert not hasattr(V2Config.load().memory, "diagnostics")
 
 
 def test_memory_avibe_cloud_read_still_requires_same_origin(monkeypatch, tmp_path) -> None:
@@ -1528,7 +1528,7 @@ def test_memory_list_rejects_unpaired_surrogate_cursor(monkeypatch, tmp_path) ->
     }
 
 
-def test_processing_record_routes_replace_provider_call_log_routes(monkeypatch, tmp_path) -> None:
+def test_processing_record_routes_exclude_provider_call_log_routes(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     calls: list[tuple[object, ...]] = []
@@ -1573,11 +1573,7 @@ def test_processing_record_routes_replace_provider_call_log_routes(monkeypatch, 
         "/api/memory/processing-record/entries?project=all", **request_options
     )
     invalid_id = client.get("/api/memory/processing-record/entry?memcell_id=../secret", **request_options)
-    removed = [
-        client.get("/api/memory/log", **request_options),
-        client.get("/api/memory/log/unlinked", **request_options),
-        client.get("/api/memory/log/entry?memcell_id=mc_1", **request_options),
-    ]
+    route_paths = {route.path for route in app.routes}
 
     assert listed.status_code == 200
     assert detail.status_code == 200
@@ -1590,7 +1586,11 @@ def test_processing_record_routes_replace_provider_call_log_routes(monkeypatch, 
     for response in (duplicate, invalid_project, invalid_id):
         assert response.status_code == 400
         assert response.get_json() == {"status": "failed", "error": "memory_invalid_input"}
-    assert [response.status_code for response in removed] == [404, 404, 404]
+    assert "/api/memory/processing-record/entries" in route_paths
+    assert "/api/memory/processing-record/entry" in route_paths
+    assert "/api/memory/log" not in route_paths
+    assert "/api/memory/log/unlinked" not in route_paths
+    assert "/api/memory/log/entry" not in route_paths
 
 
 def test_memory_settings_enable_reconciles_through_controller(monkeypatch, tmp_path) -> None:

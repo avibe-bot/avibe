@@ -15,7 +15,6 @@ MemoryFailureKind = Literal[
     "boot_recovery",
     "delivery_abandoned",
     "distillation_rejected",
-    "recorder_degraded",
     "result_unknown",
 ]
 MemoryErrorCode = Literal[

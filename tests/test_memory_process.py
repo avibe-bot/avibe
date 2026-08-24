@@ -677,22 +677,6 @@ def test_pinned_attachment_uri_matches_process_body_and_sidecar_guard(
     )
 
 
-def test_sidecar_child_environment_includes_only_the_configured_call_log(tmp_path: Path) -> None:
-    call_log = tmp_path / "memory" / "call-log" / "call-log.db"
-    process = EverOSProcess(
-        sys.executable,
-        effective_home=tmp_path,
-        settings=replace(_settings(), call_log_db_path=call_log),
-    )
-
-    _claim_provider_root(process)
-    process._prepare_owned_directories()
-    environment = process._child_environment()
-
-    assert environment["AVIBE_MEMORY_CALL_LOG_DB"] == str(call_log)
-    assert stat.S_IMODE(call_log.parent.stat().st_mode) == 0o700
-
-
 async def test_sidecar_rejects_sun_path_overflow_without_launching_child(tmp_path: Path) -> None:
     socket_path = tmp_path / ("a" * 180) / "everos.sock"
     process = EverOSProcess(

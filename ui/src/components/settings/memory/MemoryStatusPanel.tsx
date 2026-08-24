@@ -18,7 +18,7 @@ import type {
   MemoryClearInProgress,
   MemoryFailureLogEntry,
   MemoryProcessingRecordSources,
-  MemoryLogSourceStatus,
+  MemoryProcessingSourceStatus,
   MemoryCascadeHealth,
   MemoryStatus,
 } from '../../../context/ApiContext';
@@ -220,7 +220,7 @@ export const MemoryStatusPanel: React.FC<{
   const { t } = useTranslation();
   const [repairConfirmOpen, setRepairConfirmOpen] = useState(false);
   const health = status?.health ?? null;
-  const emptySource: MemoryLogSourceStatus = { status: 'unknown', observed_at: null };
+  const emptySource: MemoryProcessingSourceStatus = { status: 'unknown', observed_at: null };
   const sources = [
     { key: 'health', label: t('memory.processingRecord.source.health'), value: status?.source ?? emptySource },
     { key: 'memcells', label: t('memory.processingRecord.source.memcells'), value: logSections?.memcells ?? emptySource },

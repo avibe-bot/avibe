@@ -8,6 +8,7 @@ import pytest
 
 from config.v2_config import MemoryEndpointConfig, MemoryProcessingConfig
 from core.memory.artifact import FakeMemoryArtifactManager
+from core.memory.clear_intent import ClearSurface
 from core.memory.everos import (
     FakeMemoryProvider,
     MemoryProviderFailure,
@@ -141,6 +142,24 @@ async def test_clear_completion_rotates_volatile_duplicate_generation(
 
 
 @pytest.mark.asyncio
+async def test_clear_legacy_files_surface_removes_retired_provider_call_storage(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    legacy = tmp_path / "memory" / "call-log"
+    legacy.mkdir(parents=True)
+    (legacy / "call-log.db").write_bytes(b"retired")
+
+    await runtime._delete_clear_surface(
+        ClearSurface("legacy_files", "memory/call-log"),
+        target_epoch=1,
+    )
+
+    assert not legacy.exists()
+    await runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_processing_record_uses_native_sources_without_call_log(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
 
@@ -149,6 +168,9 @@ async def test_processing_record_uses_native_sources_without_call_log(tmp_path: 
     assert projection.memcells.status == "unavailable"
     assert projection.runs.status == "unavailable"
     assert projection.semantic.status == "unavailable"
+    assert not hasattr(runtime, "log_entries_payload")
+    assert not hasattr(runtime, "log_unlinked_calls_payload")
+    assert not hasattr(runtime, "_call_log_db_path")
     await runtime.close()
 
 
@@ -188,7 +210,6 @@ async def test_disabled_attachment_intake_is_unavailable_in_every_readiness_proj
                 capabilities={"multimodal_llm": True, "parser": True},
                 disabled_features=(),
                 cascade={},
-                recorder={"state": "active", "reason": None},
             ),
         )
 

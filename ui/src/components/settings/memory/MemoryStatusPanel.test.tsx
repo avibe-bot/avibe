@@ -21,7 +21,6 @@ const status: MemoryStatus = {
     capabilities: {},
     disabled_features: [],
     cascade: null,
-    recorder: { status: 'active' },
   },
 };
 

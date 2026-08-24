@@ -256,7 +256,7 @@ describe('SettingsDependenciesPage Memory reinitialization', () => {
     api.getMemoryStatus.mockResolvedValue({
       status: 'ok',
       source: { status: 'available', observed_at: '2026-08-18T14:44:35.331Z', reason: null },
-      health: { status: 'ok', version: '1.2.3', capabilities: {}, disabled_features: [], cascade: null, recorder: null },
+      health: { status: 'ok', version: '1.2.3', capabilities: {}, disabled_features: [], cascade: null },
     });
     renderPage();
 

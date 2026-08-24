@@ -7,7 +7,8 @@ Data a marker-owned, idempotent operation.
 
 - `MemoryRuntime` owns lifecycle admission, fences, and boot reconciliation.
 - `MemoryMaintenance` owns the clear-intent marker and calls exactly four deletion
-  primitives: queue reset, provider-root recreation, call-log clear, and attachment clear.
+  primitives: queue reset, provider-root recreation, confined legacy-file cleanup,
+  and attachment clear.
 - `MemoryProcessingRecord` projects the marker as `clear_in_progress`; failures expose
   only the failed marker state and error code.
 - UI routes and the Web UI only forward Clear and display read-only marker state.

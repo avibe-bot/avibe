@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import io
 import json
 import threading
@@ -41,7 +40,7 @@ def _xlsx_bytes() -> bytes:
     return payload.getvalue()
 
 
-def test_bound_slack_dm_attachment_reaches_search_with_redacted_call_log(
+def test_bound_slack_dm_attachment_reaches_search_with_provider_invocation(
     tmp_path,
     monkeypatch,
     capsys,
@@ -64,15 +63,7 @@ def test_bound_slack_dm_attachment_reaches_search_with_redacted_call_log(
     assert len(harness.provider.captures) == 1
     assert harness.provider.flushes == []
     assert harness.provider.observed_payloads == [PNG_BYTES]
-    assert len(harness.provider.call_log) == 1
-
-    call = harness.provider.call_log[0]
-    encoded = base64.b64encode(PNG_BYTES).decode("ascii")
-    assert call.kind == "multimodal_llm"
-    assert "data:image/png" not in call.request_json
-    assert encoded not in call.request_json
-    assert "file://" not in call.request_json
-    assert "[ATTACHMENT_OMITTED]" in call.request_json
+    assert harness.provider.provider_invocations == ["multimodal_llm"]
 
     monkeypatch.setenv(AVIBE_SESSION_ID_ENV, "ses-memory-im-attachment")
 
@@ -145,7 +136,7 @@ def test_denied_slack_scope_never_reaches_memory_provider(
     assert len(harness.downloader.calls) == 1
     assert harness.provider.captures == []
     assert harness.provider.flushes == []
-    assert harness.provider.call_log == []
+    assert harness.provider.provider_invocations == []
     assert harness.memory_bundle_entries == ()
 
 
@@ -172,7 +163,7 @@ def test_missing_multimodal_config_preserves_text_without_attachment_activity(
     assert mixed.provider.captures[0].text == "Remember the accompanying note"
     assert mixed.provider.captures[0].attachments == ()
     assert mixed.provider.flushes == []
-    assert mixed.provider.call_log == []
+    assert mixed.provider.provider_invocations == []
     assert mixed.memory_bundle_entries == ()
 
     attachment_only_root = tmp_path / "attachment-only"
@@ -190,7 +181,7 @@ def test_missing_multimodal_config_preserves_text_without_attachment_activity(
 
     assert attachment_only.provider.captures == []
     assert attachment_only.provider.flushes == []
-    assert attachment_only.provider.call_log == []
+    assert attachment_only.provider.provider_invocations == []
     assert attachment_only.memory_bundle_entries == ()
 
 
@@ -224,7 +215,7 @@ def test_invalid_sibling_preserves_valid_attachment_and_leaves_no_memory_leak(
     assert [item.name for item in harness.provider.captures[0].attachments] == [
         "valid.png"
     ]
-    assert len(harness.provider.call_log) == 1
+    assert harness.provider.provider_invocations == ["multimodal_llm"]
     assert harness.memory_bundle_entries == ()
     assert not tuple(harness.home.rglob("*.part"))
 
@@ -254,7 +245,7 @@ def test_attachment_pin_failure_falls_back_to_caption_only(
     )
     assert harness.provider.captures[0].attachments == ()
     assert harness.provider.observed_payloads == []
-    assert harness.provider.call_log == []
+    assert harness.provider.provider_invocations == []
     assert harness.memory_bundle_entries == ()
 
 
@@ -332,7 +323,7 @@ def test_rejected_attachment_preserves_caption_without_multimodal_provider_call(
         "Keep this caption without the rejected file"
     )
     assert harness.provider.captures[0].attachments == ()
-    assert harness.provider.call_log == []
+    assert harness.provider.provider_invocations == []
     assert harness.memory_bundle_entries == ()
 
 

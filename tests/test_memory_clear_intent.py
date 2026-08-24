@@ -15,6 +15,7 @@ from core.memory.clear_intent import (
     ClearIntentStore,
     ClearIntentUnreadable,
     cleanup_legacy_backup_storage,
+    cleanup_legacy_provider_call_storage,
 )
 
 
@@ -225,6 +226,43 @@ def test_legacy_residue_cleanup_is_best_effort(
     assert backup_journal.exists()
     assert not backup_file.exists()
     assert not snapshot.exists()
+
+
+def test_legacy_provider_call_cleanup_removes_files_without_opening_sqlite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy_root = tmp_path / "memory" / "call-log"
+    legacy_root.mkdir(parents=True)
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        (legacy_root / f"call-log.db{suffix}").write_bytes(b"retired")
+    monkeypatch.setattr(
+        sqlite3,
+        "connect",
+        lambda *_args, **_kwargs: pytest.fail("legacy cleanup opened SQLite"),
+    )
+
+    cleanup_legacy_provider_call_storage(tmp_path)
+
+    assert not legacy_root.exists()
+    assert not (tmp_path / MARKER_RELATIVE_PATH).exists()
+
+
+def test_legacy_provider_call_cleanup_does_not_follow_directory_symlink(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    survivor = outside / "survivor"
+    survivor.write_text("keep", encoding="utf-8")
+    legacy_root = tmp_path / "memory" / "call-log"
+    legacy_root.parent.mkdir(parents=True)
+    legacy_root.symlink_to(outside, target_is_directory=True)
+
+    cleanup_legacy_provider_call_storage(tmp_path)
+
+    assert not legacy_root.exists()
+    assert survivor.read_text(encoding="utf-8") == "keep"
 
 
 def test_marker_disappearance_during_open_is_treated_as_absent(

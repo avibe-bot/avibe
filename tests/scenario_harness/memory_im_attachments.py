@@ -11,11 +11,6 @@ from types import SimpleNamespace
 from core.controller import Controller
 from core.handlers.inbound_attachments import InboundAttachmentMaterializer
 from core.memory.everos import FakeMemoryProvider, ProviderCapture
-from core.memory.everos_insight.recorder import (
-    ProviderCallInput,
-    ProviderCallRow,
-    normalize_provider_call,
-)
 from core.memory.module import MIN_FREE_DISK_BYTES, MemoryModule
 from core.memory.store import MemoryStore
 from core.memory.types import MemoryItem
@@ -81,7 +76,7 @@ class _SettingsManager:
 @dataclass
 class _InspectableProvider(FakeMemoryProvider):
     observed_payloads: list[bytes] = field(default_factory=list)
-    call_log: list[ProviderCallRow] = field(default_factory=list)
+    provider_invocations: list[str] = field(default_factory=list)
 
     async def add(self, capture: ProviderCapture):
         if capture.attachments:
@@ -89,35 +84,7 @@ class _InspectableProvider(FakeMemoryProvider):
             source = Path(attachment.uri.removeprefix("file://"))
             payload = source.read_bytes()
             self.observed_payloads.append(payload)
-            data_uri = "data:image/png;base64," + base64.b64encode(payload).decode("ascii")
-            self.call_log.append(
-                normalize_provider_call(
-                    ProviderCallInput(
-                        id=f"multimodal-{len(self.call_log) + 1}",
-                        started_at_ms=1_700_000_000_000,
-                        duration_ms=1,
-                        kind="multimodal_llm",
-                        stage="boundary",
-                        status="ok",
-                        request={
-                            "messages": [
-                                {
-                                    "role": "user",
-                                    "content": [
-                                        {"type": "text", "text": capture.text},
-                                        {
-                                            "type": "image_url",
-                                            "image_url": {"url": data_uri},
-                                        },
-                                    ],
-                                }
-                            ]
-                        },
-                        response={"content": "attachment parsed"},
-                    ),
-                    exact_redaction_values=(attachment.uri,),
-                )
-            )
+            self.provider_invocations.append("multimodal_llm")
             self.search_items = (
                 MemoryItem(
                     kind="fact",

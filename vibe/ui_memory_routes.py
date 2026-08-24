@@ -133,7 +133,6 @@ def _memory_settings_projection(memory: object) -> dict:
     from config.v2_config import memory_config_to_payload
 
     payload = memory_config_to_payload(memory)
-    payload.pop("diagnostics", None)
     payload.pop("cloud", None)
     payload["mode"] = memory.settings_mode()
     payload["cloud_available"] = memory.cloud.memory_capability_available()
@@ -1287,18 +1286,6 @@ def register_memory_routes(app) -> None:
                     project=project,
                     user_key=user_key,
                 )
-            )
-
-        return await app.dispatch_native_request(starlette_request, handler)
-
-    @app.get("/api/memory/log", include_in_schema=False)
-    @app.get("/api/memory/log/unlinked", include_in_schema=False)
-    @app.get("/api/memory/log/entry", include_in_schema=False)
-    async def memory_provider_call_log_removed(starlette_request: FastAPIRequest):
-        async def handler():
-            return _memory_response(
-                {"status": "failed", "error": "memory_route_removed"},
-                status_code=404,
             )
 
         return await app.dispatch_native_request(starlette_request, handler)
