@@ -437,12 +437,12 @@ async def test_cancelled_artifact_install_joins_before_releasing_lease(
 
 
 @pytest.mark.asyncio
-async def test_unexpected_exit_restarts_owned_sidecar_without_artifact_rebuild(
+async def test_unexpected_exit_reenters_wake_and_repairs_the_artifact(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     memory_runtime_factory,
 ) -> None:
-    """MEMORY-WAKE-201: an unexpected exit uses supervisor-owned recovery."""
+    """MEMORY-WAKE-201: an unexpected exit reuses the public Wake path."""
 
     artifact = FakeMemoryArtifactManager(python=Path(sys.executable))
     processes = FakeEverOSProcessFactory()
@@ -478,11 +478,96 @@ async def test_unexpected_exit_restarts_owned_sidecar_without_artifact_rebuild(
         if len(processes.supervised) == 2 and processes.supervised[1].running:
             break
 
-    assert artifact.ensure_calls == []
+    assert artifact.ensure_calls == [True]
     assert len(processes.supervised) == 2
     assert processes.supervised[1].running is True
     assert runtime.runtime_state() == "running"
     assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
+@pytest.mark.asyncio
+async def test_unexpected_exit_bounds_failed_artifact_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    memory_runtime_factory,
+) -> None:
+    class FailingArtifact(FakeMemoryArtifactManager):
+        def ensure(self, *, force: bool = False) -> dict[str, object]:
+            self.ensure_calls.append(force)
+            return {
+                "ok": False,
+                "reason": "memory_runtime_install_failed",
+                "download_error": None,
+            }
+
+    artifact = FailingArtifact(python=Path(sys.executable))
+    processes = FakeEverOSProcessFactory()
+    provider = FakeMemoryProvider()
+    monkeypatch.setattr(runtime_module, "EverOSPort", lambda *args, **kwargs: provider)
+    runtime = memory_runtime_factory(
+        _config(),
+        artifact_manager=artifact,
+        process_factory=processes,
+        effective_home=tmp_path,
+    )
+    assert await runtime.wake() == {"ok": True, "state": "running"}
+    runtime._supervisor._restart_delays = (0.0, 0.0)
+    artifact.status_payload = {
+        "installed": False,
+        "status": "invalid",
+        "reason": "memory_runtime_invalid",
+    }
+
+    await processes.supervised[0].unexpected_exit()
+    for _ in range(100):
+        await asyncio.sleep(0.01)
+        if len(artifact.ensure_calls) == 2:
+            break
+
+    assert artifact.ensure_calls == [True, True]
+    assert len(processes.supervised) == 1
+    assert runtime.runtime_state() == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_processing_record_rejects_a_health_read_across_sidecar_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    memory_runtime_factory,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingProvider(FakeMemoryProvider):
+        block_next_health = False
+
+        async def health_snapshot(self) -> ProviderHealthSnapshot:
+            if self.block_next_health:
+                self.block_next_health = False
+                entered.set()
+                await release.wait()
+            return await super().health_snapshot()
+
+    provider = BlockingProvider()
+    processes = FakeEverOSProcessFactory()
+    monkeypatch.setattr(runtime_module, "EverOSPort", lambda *args, **kwargs: provider)
+    runtime = memory_runtime_factory(
+        _config(),
+        artifact_manager=FakeMemoryArtifactManager(python=Path(sys.executable)),
+        process_factory=processes,
+        effective_home=tmp_path,
+    )
+    assert await runtime.wake() == {"ok": True, "state": "running"}
+
+    provider.block_next_health = True
+    observation = asyncio.create_task(runtime._processing_record_health(None))
+    await entered.wait()
+    assert await runtime.wake() == {"ok": True, "state": "running"}
+    release.set()
+
+    result = await observation
+    assert result.snapshot is None
+    assert result.unavailable_reason == "memory_sidecar_unavailable"
 
 
 @pytest.mark.parametrize(

@@ -75,6 +75,7 @@ class EverOSSupervisorFactory(Protocol):
         socket_path: Path,
         on_ready: Callable[[], Awaitable[None] | None],
         on_unavailable: Callable[[], Awaitable[None] | None],
+        on_recover: Callable[[], Awaitable[bool]],
     ) -> EverOSSupervisorPort: ...
 
 
@@ -89,6 +90,7 @@ class EverOSSupervisor:
         socket_path: Path,
         on_ready: Callable[[], Awaitable[None] | None],
         on_unavailable: Callable[[], Awaitable[None] | None],
+        on_recover: Callable[[], Awaitable[bool]],
         process_factory: EverOSProcessFactory | None = None,
         restart_delays: tuple[float, ...] = _RESTART_DELAYS_SECONDS,
         restart_window_seconds: float = _RESTART_WINDOW_SECONDS,
@@ -98,6 +100,7 @@ class EverOSSupervisor:
         self._socket_path = socket_path
         self._on_ready = on_ready
         self._on_unavailable = on_unavailable
+        self._on_recover = on_recover
         self._process_factory = process_factory or EverOSProcess
         self._restart_delays = tuple(max(0.0, delay) for delay in restart_delays)
         self._restart_window_seconds = max(0.0, restart_window_seconds)
@@ -171,6 +174,7 @@ class EverOSSupervisor:
         async with self._lock:
             if self._closing or self._closed:
                 return False
+            recovering = self._restart_task is asyncio.current_task()
             self._epoch += 1
             epoch = self._epoch
             await self._cancel_restart_locked()
@@ -179,20 +183,22 @@ class EverOSSupervisor:
             self._python = Path(python)
             self._settings = settings
             self._provider_root_guard = provider_root_guard
-            self._restart_events.clear()
+            if not recovering:
+                self._restart_events.clear()
             return await self._start_attempt_locked(epoch)
 
     async def stop(self) -> None:
         """Stop all retained execution and revoke future launch authority."""
 
         async with self._lock:
-            self._epoch += 1
-            await self._cancel_restart_locked()
+            recovering = self._restart_task is asyncio.current_task()
+            if not recovering:
+                self._epoch += 1
+                await self._cancel_restart_locked()
             await self._stop_child_locked()
             self._python = None
             self._settings = None
             self._provider_root_guard = None
-            self._restart_events.clear()
 
     async def close(self) -> None:
         """Cancel recovery and prove that retained execution has stopped."""
@@ -332,13 +338,17 @@ class EverOSSupervisor:
         child: EverOSProcessPort,
         epoch: int,
     ) -> None:
+        should_restart = False
         async with self._lock:
             if self._closing or epoch != self._epoch or child is not self._child:
                 return
             if not child.retains_active_config:
                 self._child = None
-                self._schedule_restart_locked(epoch)
+                should_restart = True
         await self._notify(self._on_unavailable, "unexpected-exit")
+        if should_restart:
+            async with self._lock:
+                self._schedule_restart_locked(epoch)
 
     def _schedule_restart_locked(self, epoch: int) -> None:
         if self._closing or self._closed or epoch != self._epoch:
@@ -365,8 +375,6 @@ class EverOSSupervisor:
             if delay_seconds:
                 await asyncio.sleep(delay_seconds)
             async with self._lock:
-                if self._restart_task is asyncio.current_task():
-                    self._restart_task = None
                 if (
                     self._closing
                     or self._closed
@@ -374,8 +382,13 @@ class EverOSSupervisor:
                     or self._child is not None
                 ):
                     return
-                await self._reconcile_orphans_locked()
-                await self._start_attempt_locked(epoch)
+            recovered = await self._on_recover()
+            async with self._lock:
+                if self._restart_task is asyncio.current_task():
+                    self._restart_task = None
+                if recovered and self._child is not None and self._child.running:
+                    return
+                self._schedule_restart_locked(epoch)
         except asyncio.CancelledError:
             return
         except Exception:

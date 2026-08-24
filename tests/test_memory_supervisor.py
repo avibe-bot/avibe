@@ -37,15 +37,26 @@ def _supervisor(
     provider_root.mkdir(mode=0o700, parents=True)
     home.chmod(0o700)
     (home / "memory").chmod(0o700)
-    return EverOSSupervisor(
+    supervisor: EverOSSupervisor | None = None
+
+    async def recover() -> bool:
+        assert supervisor is not None
+        return await supervisor.wake(
+            Path(sys.executable),
+            _settings(),
+        )
+
+    supervisor = EverOSSupervisor(
         provider_root=provider_root,
         effective_home=home,
         socket_path=home / "memory" / ".rt" / "everos.sock",
         on_ready=ready,
         on_unavailable=unavailable,
+        on_recover=recover,
         process_factory=factory,
         restart_delays=restart_delays,
     )
+    return supervisor
 
 
 async def _settle() -> None:

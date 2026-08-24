@@ -131,6 +131,7 @@ async def _concurrent_episode_lists(
 
 @dataclass(frozen=True, slots=True)
 class _ProcessingRuntimeSnapshot:
+    revision: int
     transition_active: bool
     enabled: bool
     store_available: bool
@@ -168,7 +169,8 @@ class _ProcessingRuntimeSnapshot:
 
     def same_lifecycle(self, other: _ProcessingRuntimeSnapshot) -> bool:
         return (
-            self.transition_active == other.transition_active
+            self.revision == other.revision
+            and self.transition_active == other.transition_active
             and self.enabled == other.enabled
             and self.store_available == other.store_available
             and self.retired == other.retired
@@ -350,10 +352,8 @@ class MemoryRuntime:
             if config.legacy_needs_repair
             else None
         )
-        self._attachment_config_generation = 0
-        self._reconcile_lock = _LifecycleGenerationLock(
-            self._advance_attachment_config_generation
-        )
+        self._lifecycle_revision = 0
+        self._reconcile_lock = _LifecycleGenerationLock(self._advance_lifecycle_revision)
         self._wake_task: asyncio.Task[dict[str, Any]] | None = None
         self._artifact_activation_task: asyncio.Task[None] | None = None
         self._closing = False
@@ -372,6 +372,7 @@ class MemoryRuntime:
             socket_path=self._socket_path,
             on_ready=self._current_sidecar_ready,
             on_unavailable=self._current_sidecar_unavailable,
+            on_recover=self._recover_current_sidecar,
         )
         self._processing_record = MemoryProcessingRecord(
             self._processing_record_port()
@@ -539,7 +540,7 @@ class MemoryRuntime:
         self._supervisor.begin_close()
         if self._module is not None:
             self._module.retire()
-        self._advance_attachment_config_generation()
+        self._advance_lifecycle_revision()
 
     def artifact_admitted(self) -> bool:
         """Return whether the pinned artifact is valid for a reset admission."""
@@ -615,12 +616,13 @@ class MemoryRuntime:
             raise self._unavailable()
         return await run_blocking(self._store.principal_for_user_key, user_key)
 
-    def _advance_attachment_config_generation(self) -> None:
-        self._attachment_config_generation += 1
+    def _advance_lifecycle_revision(self) -> None:
+        self._lifecycle_revision += 1
 
     def _processing_runtime_snapshot(self) -> _ProcessingRuntimeSnapshot:
         module = self._module
         return _ProcessingRuntimeSnapshot(
+            revision=self._lifecycle_revision,
             transition_active=self._reconcile_lock.locked(),
             enabled=self._config.enabled,
             store_available=module is not None,
@@ -1095,7 +1097,7 @@ class MemoryRuntime:
             or not self._module.attachment_intake_enabled
         ):
             return None
-        return self._attachment_config_generation
+        return self._lifecycle_revision
 
     async def failure_log_payload(
         self,
@@ -2005,6 +2007,12 @@ class MemoryRuntime:
         self.module.pause_claims()
         self._runtime_error = "memory_sidecar_unavailable"
 
+    async def _recover_current_sidecar(self) -> bool:
+        """Run one supervisor-budgeted crash attempt through public Wake policy."""
+
+        result = await self._wake_after_writer_close()
+        return result.get("ok") is True
+
     async def _wake_after_writer_close(self) -> dict[str, Any]:
         try:
             await self._close_writer()
@@ -2171,7 +2179,7 @@ class MemoryRuntime:
         self._closing = True
         self._supervisor.begin_close()
         self._activation_loop = None
-        self._advance_attachment_config_generation()
+        self._advance_lifecycle_revision()
 
         cancellation: asyncio.CancelledError | None = None
         wake = self._wake_task
@@ -2262,7 +2270,7 @@ class MemoryRuntime:
         if cleanup_error is not None:
             raise cleanup_error
         self._closed = True
-        self._advance_attachment_config_generation()
+        self._advance_lifecycle_revision()
 
     def _active_provider_root_metadata(self) -> ProviderRootMetadata:
         provider_root_format = (
