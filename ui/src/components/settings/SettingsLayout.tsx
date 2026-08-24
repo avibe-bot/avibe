@@ -187,6 +187,18 @@ export const SettingsLayout: React.FC = () => {
     if (!capabilities.can_manage_instance) return;
     let cancelled = false;
     let memoryRequest = 0;
+    let configVersion = 0;
+    const applyConfigVisibility = (config: unknown) => {
+      setModelHubVisible(modelHubEnabledFromConfig(config));
+      setChannelSettingsVisible(
+        getEnabledPlatforms(config).some((platform) => platformSupportsChannels(config, platform)),
+      );
+    };
+    const stopConfigChanges = api.onConfigChanged((config) => {
+      if (cancelled) return;
+      configVersion += 1;
+      applyConfigVisibility(config);
+    });
     const refreshMemoryVisibility = () => {
       const request = ++memoryRequest;
       void api.getMemorySettings()
@@ -199,17 +211,13 @@ export const SettingsLayout: React.FC = () => {
           if (!cancelled && request === memoryRequest) setMemoryVisible(false);
         });
     };
+    const requestedConfigVersion = configVersion;
     void api.getConfig()
       .then((config) => {
-        if (!cancelled) {
-          setModelHubVisible(modelHubEnabledFromConfig(config));
-          setChannelSettingsVisible(
-            getEnabledPlatforms(config).some((platform) => platformSupportsChannels(config, platform)),
-          );
-        }
+        if (!cancelled && requestedConfigVersion === configVersion) applyConfigVisibility(config);
       })
       .catch(() => {
-        if (!cancelled) {
+        if (!cancelled && requestedConfigVersion === configVersion) {
           setModelHubVisible(false);
           setChannelSettingsVisible(false);
         }
@@ -218,6 +226,7 @@ export const SettingsLayout: React.FC = () => {
     window.addEventListener('avibe:memory-settings-changed', refreshMemoryVisibility);
     return () => {
       cancelled = true;
+      stopConfigChanges();
       window.removeEventListener('avibe:memory-settings-changed', refreshMemoryVisibility);
     };
   }, [api, capabilities.can_manage_instance]);

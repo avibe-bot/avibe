@@ -513,6 +513,7 @@ export type ApiContextType = {
   getConfig: () => Promise<any>;
   getPlatformCatalog: () => Promise<any>;
   mutateConfig: (mutations: readonly ConfigMutation[]) => Promise<any>;
+  onConfigChanged: (handler: (config: unknown) => void) => () => void;
   getSettings: (platform?: string) => Promise<any>;
   saveSettings: (payload: any, platform?: string) => Promise<any>;
   saveThreadSettings: (platform: string, channelId: string, threadId: string, settings: any) => Promise<any>;
@@ -2651,6 +2652,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const { showToast } = useToast();
   const { t } = useTranslation();
   const readCacheRef = useRef(new Map<string, { expiresAt: number; promise: Promise<any> }>());
+  const configChangedHandlersRef = useRef(new Set<(config: unknown) => void>());
   const eventSourceRef = useRef<EventSource | null>(null);
   const eventHandlersRef = useRef(new Set<WorkbenchEventHandlers>());
   const eventConnectionRef = useRef<{ sub_id: number; source?: 'browser' | 'controller' } | null>(null);
@@ -2759,6 +2761,23 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => {
       sessionArchivedHandlersRef.current.delete(handler);
     };
+  };
+
+  const onConfigChanged = (handler: (config: unknown) => void) => {
+    configChangedHandlersRef.current.add(handler);
+    return () => {
+      configChangedHandlersRef.current.delete(handler);
+    };
+  };
+
+  const convergeConfig = (config: unknown) => {
+    for (const handler of Array.from(configChangedHandlersRef.current)) {
+      try {
+        handler(config);
+      } catch (err) {
+        console.error('[API] config-changed subscriber failed', err);
+      }
+    }
   };
 
   const getJson = async (
@@ -3598,7 +3617,12 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const value: ApiContextType = useMemo(() => ({
     getConfig: () => getCachedJson('/api/config', CONFIG_CACHE_TTL_MS),
     getPlatformCatalog: () => getJson('/api/platforms'),
-    mutateConfig: (mutations) => postJson('/api/config', configMutationsToPayload(mutations)),
+    mutateConfig: async (mutations) => {
+      const config = await postJson('/api/config', configMutationsToPayload(mutations));
+      convergeConfig(config);
+      return config;
+    },
+    onConfigChanged,
     getSettings: (platform) => getJson(platform ? `/api/settings?platform=${encodeURIComponent(platform)}` : '/api/settings'),
     saveSettings: (payload, platform) => postJson('/api/settings', platform ? { ...payload, platform } : payload),
     saveThreadSettings: (platform, channelId, threadId, settings) => postJson('/api/settings/thread', {

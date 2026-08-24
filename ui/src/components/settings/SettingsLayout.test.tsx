@@ -7,10 +7,18 @@ import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 
 import { SettingsLayout } from './SettingsLayout';
 
-const api = vi.hoisted(() => ({
-  getConfig: vi.fn(),
-  getMemorySettings: vi.fn(),
-}));
+const api = vi.hoisted(() => {
+  const configChangedHandlers = new Set<(config: unknown) => void>();
+  return {
+    configChangedHandlers,
+    getConfig: vi.fn(),
+    getMemorySettings: vi.fn(),
+    onConfigChanged: vi.fn((handler: (config: unknown) => void) => {
+      configChangedHandlers.add(handler);
+      return () => configChangedHandlers.delete(handler);
+    }),
+  };
+});
 const authorization = vi.hoisted(() => ({
   capabilities: { can_manage_instance: true },
 }));
@@ -75,6 +83,7 @@ beforeEach(() => {
   authorization.capabilities.can_manage_instance = true;
   media.matches = false;
   media.listeners.clear();
+  api.configChangedHandlers.clear();
   api.getConfig.mockResolvedValue({ capabilities: { model_hub: { enabled: true } } });
   api.getMemorySettings.mockResolvedValue({ status: 'ok', enabled: true });
   vi.stubGlobal('matchMedia', vi.fn().mockReturnValue({
@@ -149,6 +158,28 @@ describe('SettingsLayout', () => {
     expect(screen.getByRole('link', { name: 'settings.sections.platformConnections' })).toBeTruthy();
     expect(screen.getByRole('link', { name: 'nav.users' })).toBeTruthy();
     await waitFor(() => expect(screen.queryByRole('link', { name: 'nav.channels' })).toBeNull());
+  });
+
+  it('refreshes Groups visibility after successful platform config changes', async () => {
+    api.getConfig.mockResolvedValue({
+      capabilities: { model_hub: { enabled: true } },
+      platforms: { enabled: ['wechat'] },
+    });
+    const user = userEvent.setup();
+    renderLayout('/settings/replies');
+
+    await user.click(screen.getByRole('button', { name: 'nav.messagingPlatforms' }));
+    await waitFor(() => expect(screen.queryByRole('link', { name: 'nav.channels' })).toBeNull());
+
+    act(() => {
+      api.configChangedHandlers.forEach((handler) => handler({ platforms: { enabled: ['slack'] } }));
+    });
+    expect(screen.getByRole('link', { name: 'nav.channels' })).toBeTruthy();
+
+    act(() => {
+      api.configChangedHandlers.forEach((handler) => handler({ platforms: { enabled: ['wechat'] } }));
+    });
+    expect(screen.queryByRole('link', { name: 'nav.channels' })).toBeNull();
   });
 
   it('discards disclosure overrides when navigation leaves their pathname', async () => {
