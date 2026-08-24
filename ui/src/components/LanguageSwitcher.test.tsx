@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -51,10 +51,14 @@ describe('LanguageSwitcher role-aware persistence', () => {
     expect(api.mutateConfig).not.toHaveBeenCalled();
   });
 
-  it('loads the instance default for an owner', async () => {
-    api.getConfig.mockResolvedValue({ language: 'zh' });
+  it('persists an owner language change to the instance config', async () => {
+    const user = userEvent.setup();
     render(<LanguageSwitcher />);
 
-    await waitFor(() => expect(i18n.changeLanguage).toHaveBeenCalledWith('zh'));
+    await user.click(screen.getByRole('button', { name: 'language.en' }));
+    await user.click(screen.getByRole('option', { name: 'language.zh' }));
+
+    expect(i18n.changeLanguage).toHaveBeenCalledWith('zh');
+    expect(api.mutateConfig).toHaveBeenCalledOnce();
   });
 });

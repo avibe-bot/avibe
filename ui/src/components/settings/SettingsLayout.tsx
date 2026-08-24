@@ -25,6 +25,7 @@ import { useApi } from '@/context/ApiContext';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { memoryNavShouldBeVisible } from '@/lib/memorySettings';
 import { rememberSettingsPath, settingsLandingPath } from '@/lib/adminNavigation';
+import { getEnabledPlatforms, platformSupportsChannels } from '@/lib/platforms';
 import { useIsDesktop } from '@/lib/useIsDesktop';
 import { AccountMenu } from '../AccountMenu';
 import { LanguageSwitcher } from '../LanguageSwitcher';
@@ -36,7 +37,7 @@ type SettingsItem = {
   labelKey: string;
   icon: React.ComponentType<{ className?: string }>;
   ownerOnly?: boolean;
-  feature?: 'models' | 'memory';
+  feature?: 'models' | 'memory' | 'channels';
   children?: SettingsItem[];
   exact?: boolean;
 };
@@ -61,7 +62,7 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
     items: [
       {
         path: '/settings/platforms',
-        labelKey: 'settings.sections.platforms',
+        labelKey: 'nav.messagingPlatforms',
         icon: PlugZap,
         ownerOnly: true,
         children: [
@@ -72,7 +73,12 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
             exact: true,
           },
           { path: '/settings/platforms/users', labelKey: 'nav.users', icon: MessageCircle },
-          { path: '/settings/platforms/groups', labelKey: 'nav.channels', icon: Hash },
+          {
+            path: '/settings/platforms/groups',
+            labelKey: 'nav.channels',
+            icon: Hash,
+            feature: 'channels',
+          },
         ],
       },
       { path: '/settings/remote-access', labelKey: 'settings.sections.remoteAccess', icon: Globe, ownerOnly: true },
@@ -125,8 +131,8 @@ const SettingsNavGroup: React.FC<{ item: SettingsItem }> = ({ item }) => {
   const location = useLocation();
   const children = item.children ?? [];
   const childActive = children.some((child) => itemMatches(location.pathname, child));
-  const [disclosure, setDisclosure] = useState<{ pathname: string; open: boolean } | null>(null);
-  const open = disclosure?.pathname === location.pathname ? disclosure.open : childActive;
+  const [manualOpen, setManualOpen] = useState<boolean | null>(null);
+  const open = manualOpen ?? childActive;
   const Icon = item.icon;
 
   return (
@@ -135,7 +141,7 @@ const SettingsNavGroup: React.FC<{ item: SettingsItem }> = ({ item }) => {
         type="button"
         title={t(item.labelKey)}
         aria-expanded={open}
-        onClick={() => setDisclosure({ pathname: location.pathname, open: !open })}
+        onClick={() => setManualOpen(!open)}
         className={clsx(
           'flex w-full items-center gap-2 rounded-lg px-2 py-2 text-[12.5px] font-medium transition-colors',
           'md:justify-center lg:justify-start',
@@ -174,6 +180,7 @@ export const SettingsLayout: React.FC = () => {
   const isDesktop = useIsDesktop();
   const [modelHubVisible, setModelHubVisible] = useState(false);
   const [memoryVisible, setMemoryVisible] = useState(false);
+  const [channelSettingsVisible, setChannelSettingsVisible] = useState(false);
   const atRoot = location.pathname === '/settings' || location.pathname === '/settings/';
 
   useEffect(() => {
@@ -194,10 +201,18 @@ export const SettingsLayout: React.FC = () => {
     };
     void api.getConfig()
       .then((config) => {
-        if (!cancelled) setModelHubVisible(modelHubEnabledFromConfig(config));
+        if (!cancelled) {
+          setModelHubVisible(modelHubEnabledFromConfig(config));
+          setChannelSettingsVisible(
+            getEnabledPlatforms(config).some((platform) => platformSupportsChannels(config, platform)),
+          );
+        }
       })
       .catch(() => {
-        if (!cancelled) setModelHubVisible(false);
+        if (!cancelled) {
+          setModelHubVisible(false);
+          setChannelSettingsVisible(false);
+        }
       });
     refreshMemoryVisibility();
     window.addEventListener('avibe:memory-settings-changed', refreshMemoryVisibility);
@@ -210,14 +225,18 @@ export const SettingsLayout: React.FC = () => {
   const visibleGroups = useMemo(
     () => SETTINGS_GROUPS.map((group) => ({
       ...group,
-      items: group.items.filter((item) => {
-        if (item.ownerOnly && !capabilities.can_manage_instance) return false;
-        if (item.feature === 'models') return modelHubVisible;
-        if (item.feature === 'memory') return memoryVisible;
-        return true;
+      items: group.items.flatMap((item) => {
+        if (item.ownerOnly && !capabilities.can_manage_instance) return [];
+        if (item.feature === 'models' && !modelHubVisible) return [];
+        if (item.feature === 'memory' && !memoryVisible) return [];
+        return [{
+          ...item,
+          children: item.children?.filter((child) =>
+            child.feature !== 'channels' || channelSettingsVisible),
+        }];
       }),
     })).filter((group) => group.items.length > 0),
-    [capabilities.can_manage_instance, memoryVisible, modelHubVisible],
+    [capabilities.can_manage_instance, channelSettingsVisible, memoryVisible, modelHubVisible],
   );
 
   const activeTrail = useMemo(() => {
@@ -281,7 +300,13 @@ export const SettingsLayout: React.FC = () => {
                   {t(group.labelKey)}
                 </div>
                 <div className="flex flex-col gap-0.5">
-                  {group.items.map((item) => <SettingsNavItem key={item.path} item={item} />)}
+                  {/* A manual disclosure choice belongs to this route visit only. */}
+                  {group.items.map((item) => (
+                    <SettingsNavItem
+                      key={item.children?.length ? `${item.path}:${location.pathname}` : item.path}
+                      item={item}
+                    />
+                  ))}
                 </div>
               </div>
             ))}

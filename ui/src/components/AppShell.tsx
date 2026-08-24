@@ -156,7 +156,7 @@ const ConfigRecoveryNotice: React.FC<{ config: ConfigRecoveryProjection | null }
 };
 
 export const AppShell: React.FC = () => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const { status } = useStatus();
   // Badge only — the shell is mounted on every route and renders no feed.
   const { totalUnread } = useWorkbenchInbox({ feed: false });
@@ -198,8 +198,11 @@ export const AppShell: React.FC = () => {
     if (!capabilities.can_manage_instance) return;
     api.getConfig().then((c: any) => {
       setConfig(c);
+      if (c.language && c.language !== i18n.language) {
+        void i18n.changeLanguage(c.language);
+      }
     }).catch(() => {});
-  }, [api, capabilities.can_manage_instance]);
+  }, [api, capabilities.can_manage_instance, i18n]);
 
   // Global ⌘K / Ctrl+K toggles the message-search palette. Intercept the chord
   // everywhere (it's a deliberate command, so it wins even from the composer);
