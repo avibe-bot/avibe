@@ -286,6 +286,43 @@ async def test_wake_retries_short_operation_lease_contention(
 
 
 @pytest.mark.asyncio
+async def test_cancelled_wake_releases_a_completed_lease_acquisition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    memory_runtime_factory,
+) -> None:
+    acquire_started = threading.Event()
+    finish_acquire = threading.Event()
+    lease_events: list[str] = []
+
+    class Lease:
+        def __init__(self, _home: Path) -> None:
+            pass
+
+        def acquire(self) -> None:
+            acquire_started.set()
+            finish_acquire.wait(timeout=5)
+            lease_events.append("acquire")
+
+        def release(self) -> None:
+            lease_events.append("release")
+
+    monkeypatch.setattr(runtime_module, "MemoryOperationLease", Lease)
+    runtime = memory_runtime_factory(_config(), effective_home=tmp_path)
+    task = asyncio.create_task(runtime.wake())
+    assert await asyncio.to_thread(acquire_started.wait, 2)
+
+    task.cancel()
+    await asyncio.sleep(0.05)
+    assert task.done() is False
+
+    finish_acquire.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert lease_events == ["acquire", "release"]
+
+
+@pytest.mark.asyncio
 async def test_disabled_wake_reaps_orphans_without_installing_artifact(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -536,3 +573,41 @@ def test_external_local_faults_are_degraded_not_repair_eligible(
 
     assert runtime_module._degraded_runtime_reason(error) == reason
     assert runtime_module._local_data_failure_requires_repair(error) is False
+
+
+@pytest.mark.asyncio
+async def test_wake_reopens_store_after_environmental_fault_is_corrected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    memory_runtime_factory,
+) -> None:
+    store_type = runtime_module.MemoryStore
+
+    def unavailable_store(*_args, **_kwargs):
+        raise PermissionError("denied")
+
+    provider = FakeMemoryProvider(
+        health_snapshot_value=ProviderHealthSnapshot(
+            status="ok",
+            version="test",
+            capabilities={"embed": True},
+            disabled_features=(),
+            cascade={},
+        )
+    )
+    monkeypatch.setattr(runtime_module, "MemoryStore", unavailable_store)
+    monkeypatch.setattr(runtime_module, "EverOSPort", lambda *args, **kwargs: provider)
+    runtime = memory_runtime_factory(
+        _config(),
+        artifact_manager=FakeMemoryArtifactManager(python=Path(sys.executable)),
+        process_factory=FakeEverOSProcessFactory(),
+        effective_home=tmp_path,
+    )
+    assert runtime.available is False
+    assert runtime.runtime_state() == "degraded"
+
+    monkeypatch.setattr(runtime_module, "MemoryStore", store_type)
+    result = await runtime.wake()
+
+    assert result == {"ok": True, "state": "running"}
+    assert runtime.available is True

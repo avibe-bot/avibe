@@ -126,5 +126,5 @@ Embedding 身份变更会使原生数据根失效，因此保存时使用同一�
 系统不再保留候选配置、重建标记、重试阶段，也不会静默回退到旧设置。
 
 已发布的 `recovery_intent`、`embedding_change_pending`、cloud transition 与 Clear 状态仅作
-一次兼容输入：它们可以让首次运行时评估进入 `needs_repair`，但不会再次序列化，也不会续跑
-已退役的 Restart、Rebuild、Clear 或 Factory Reset 协议。
+兼容输入，其已退役阶段不会再次序列化或续跑。不安全的兼容证据会折叠为内部
+`repair_required` 围栏；普通保存会保留该围栏，直到一次成功的破坏性修复将其清除。

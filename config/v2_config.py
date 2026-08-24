@@ -1194,6 +1194,22 @@ def _memory_cloud_recovery_requires_managed_fence(payload: dict) -> bool:
     )
 
 
+def _memory_cloud_recovery_requires_identity_fence(
+    memory: dict,
+    cloud: dict,
+    *,
+    managed_fence: bool,
+) -> bool:
+    """Never select a recovered cloud runtime without an applied identity."""
+
+    applied_identity = cloud.get("applied_embedding_identity")
+    if isinstance(applied_identity, str) and applied_identity.strip():
+        return False
+    return memory.get("mode") == "platform" or bool(
+        managed_fence and cloud.get("organization_attached") is True
+    )
+
+
 def _recover_memory_cloud_section(payload: dict, field_name: Optional[str]) -> bool:
     """Recover one cloud-cache member without inventing recovery workflow state."""
 
@@ -1203,16 +1219,21 @@ def _recover_memory_cloud_section(payload: dict, field_name: Optional[str]) -> b
     cloud = memory.get("cloud")
     managed_fence = _memory_cloud_recovery_requires_managed_fence(payload)
     if not isinstance(cloud, dict) or field_name is None:
-        if managed_fence or memory.get("mode") == "platform":
-            memory["repair_required"] = True
         if managed_fence:
-            memory["cloud"] = {
+            cloud = {
                 "scope": "organization",
                 "organization_attached": True,
                 "runtime_apply_pending": True,
             }
         else:
-            memory["cloud"] = {}
+            cloud = {}
+        memory["cloud"] = cloud
+        if _memory_cloud_recovery_requires_identity_fence(
+            memory,
+            cloud,
+            managed_fence=managed_fence,
+        ):
+            memory["repair_required"] = True
         return True
 
     cloud.pop(field_name, None)
@@ -1229,8 +1250,6 @@ def _recover_memory_cloud_section(payload: dict, field_name: Optional[str]) -> b
         live_identity = cloud.get("embedding_identity")
         if isinstance(live_identity, str) and live_identity.strip():
             cloud["applied_embedding_identity"] = live_identity
-        else:
-            memory["repair_required"] = True
     elif field_name == "source_instance_id":
         cloud["capabilities"] = {}
         cloud["embedding_identity"] = None
@@ -1245,6 +1264,12 @@ def _recover_memory_cloud_section(payload: dict, field_name: Optional[str]) -> b
         cloud["scope"] = "organization"
         cloud["organization_attached"] = True
         cloud["transition_notice_pending"] = False
+    if _memory_cloud_recovery_requires_identity_fence(
+        memory,
+        cloud,
+        managed_fence=managed_fence,
+    ):
+        memory["repair_required"] = True
     return True
 
 

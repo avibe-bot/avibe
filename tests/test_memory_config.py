@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
+from dataclasses import fields, replace
 from pathlib import Path
 
 import pytest
@@ -9,6 +9,7 @@ import pytest
 from config import paths
 from config.v2_config import (
     MemoryConfig,
+    MemoryCloudConfig,
     MemoryEndpointConfig,
     V2Config,
     atomic_update_memory,
@@ -183,6 +184,70 @@ def test_unreadable_applied_cloud_identity_without_live_identity_is_fenced(
     assert loaded.memory.legacy_needs_repair is True
     updated = atomic_update_memory(lambda memory: memory, config_path=path)
     assert updated.memory.legacy_needs_repair is True
+
+
+def test_any_recovered_active_cloud_field_retains_a_baseline_or_fence(
+    tmp_path: Path,
+) -> None:
+    """Cloud recovery cannot create a fresh identity over an existing root."""
+
+    path = tmp_path / "config.json"
+    for field_info in fields(MemoryCloudConfig):
+        payload = _payload(
+            {
+                "enabled": False,
+                "mode": "platform",
+                "cloud": {
+                    "scope": "platform",
+                    "embedding_identity": "emb-v1",
+                    "applied_embedding_identity": None,
+                    field_info.name: [],
+                },
+            }
+        )
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+        loaded = V2Config.load(path)
+
+        assert loaded.load_warnings, field_info.name
+        assert (
+            loaded.memory.cloud.applied_embedding_identity == "emb-v1"
+            or loaded.memory.legacy_needs_repair is True
+        ), field_info.name
+
+
+def test_recovered_managed_attachment_without_applied_identity_is_fenced(
+    tmp_path: Path,
+) -> None:
+    payload = _payload(
+        {
+            "enabled": False,
+            "mode": "custom",
+            "processing": _complete_processing(),
+            "cloud": {
+                "scope": "organization",
+                "embedding_identity": "emb-org",
+                "applied_embedding_identity": None,
+                "organization_attached": [],
+            },
+        }
+    )
+    payload["remote_access"] = {
+        "provider": "vibe_cloud",
+        "vibe_cloud": {
+            "enabled": True,
+            "instance_id": "instance",
+            "instance_kind": "organization",
+            "instance_secret": "secret",
+        },
+    }
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(path)
+
+    assert loaded.memory.cloud.organization_attached is True
+    assert loaded.memory.legacy_needs_repair is True
 
 
 @pytest.mark.parametrize("intent", ["unknown", "", True, 1, {}])

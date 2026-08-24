@@ -1965,7 +1965,10 @@ class MemoryRuntime:
                             "error": "memory_operation_in_progress",
                         }
                     try:
-                        await run_blocking(lease.acquire)
+                        await run_blocking(
+                            lease.acquire,
+                            on_cancel_result=lambda _result: lease.release(),
+                        )
                     except MemoryOperationBusy:
                         continue
                     lease_acquired = True
@@ -1981,6 +1984,17 @@ class MemoryRuntime:
             # Even disabled or repair-fenced startup must stop a sidecar recorded
             # by the previous Avibe process before returning.
             await self._reap_recorded_sidecar_if_unowned()
+            if (
+                self._wake_config.enabled
+                and not self.available
+                and not self.needs_repair
+                and not await run_blocking(self._open_store)
+            ):
+                return {
+                    "ok": False,
+                    "state": "needs_repair" if self.needs_repair else "degraded",
+                    "error": self._runtime_error or "memory_store_unavailable",
+                }
             if self.needs_repair:
                 return {
                     "ok": False,

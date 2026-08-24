@@ -150,9 +150,10 @@ uses the same explicit accepted-loss boundary and unified reset; there is no
 candidate config, rebuild marker, retry stage, or fallback to old settings.
 
 Released `recovery_intent`, `embedding_change_pending`, cloud transition, and
-Clear-state shapes are compatibility input only. They can cause the first
-runtime evaluation to enter `needs_repair`, but are not serialized again and
-never resume the retired Restart/Rebuild/Clear/Factory Reset protocol.
+Clear-state shapes are compatibility input only. Their retired stages are not
+serialized or resumed. Unsafe compatibility evidence collapses into an internal
+`repair_required` fence that ordinary saves preserve until a successful
+destructive Repair clears it.
 
 ## Best-effort capture
 
