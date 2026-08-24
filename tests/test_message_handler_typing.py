@@ -1272,6 +1272,108 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         assert reservation.released == 1
         assert handler._memory_capture_tasks == set()
 
+    async def test_text_memory_terminal_capacity_drops_before_scheduling(self):
+        class Reservation:
+            capacity_blocked = True
+
+            def __init__(self):
+                self.released = 0
+
+            def release(self):
+                self.released += 1
+
+        controller = _StubController(
+            platform="slack",
+            ack_mode="reaction",
+            typing_result=True,
+        )
+        reservation = Reservation()
+        controller.reserve_memory_capture_capacity = Mock(return_value=reservation)
+        controller.capture_user_memory = Mock()
+        handler = MessageHandler(controller)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            message_id="m-memory-terminal-capacity",
+            platform="slack",
+        )
+
+        handler._schedule_text_only_memory_capture(
+            context,
+            "remember this",
+            "base-session",
+            expected_snapshot=0,
+        )
+
+        controller.capture_user_memory.assert_not_called()
+        assert reservation.released == 1
+        assert handler._memory_capture_tasks == set()
+
+    async def test_attachment_memory_terminal_capacity_drops_before_lease_retain(self):
+        from modules.im.base import FileAttachment
+
+        class Reservation:
+            capacity_blocked = True
+
+            def __init__(self):
+                self.released = 0
+
+            def release(self):
+                self.released += 1
+
+        controller = _StubController(
+            platform="slack",
+            ack_mode="reaction",
+            typing_result=True,
+        )
+        controller.session_turns = types.SimpleNamespace(deliver=AsyncMock())
+        reservation = Reservation()
+        controller.reserve_memory_attachment_capture = Mock(return_value=reservation)
+        controller.capture_user_memory = AsyncMock()
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        handler._is_duplicate_human_delivery = Mock(return_value=False)
+        handler._prepend_message_metadata = AsyncMock(return_value="remember this")
+        lease = Mock()
+        attachment = FileAttachment(
+            name="report.pdf",
+            mimetype="application/pdf",
+            local_path="/tmp/leased-report.pdf",
+            size=10,
+        )
+        handler._materialize_file_attachments = AsyncMock(
+            return_value=types.SimpleNamespace(
+                attachments=(attachment,),
+                display_errors=(),
+                errors=(),
+                lease=lease,
+            )
+        )
+
+        async def admit(**_kwargs):
+            lease.adopt()
+            lease.release()
+            return True
+
+        handler._admit_human_delivery = AsyncMock(side_effect=admit)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="D1",
+            message_id="m-memory-terminal-attachment-capacity",
+            platform="slack",
+            platform_specific={"is_dm": True},
+            files=[FileAttachment("report.pdf", "application/pdf", url="private")],
+            is_ordinary_attachment=True,
+        )
+
+        await handler.handle_user_message(context, "remember this")
+        await _wait_capture_tasks(handler)
+
+        lease.retain.assert_not_called()
+        controller.capture_user_memory.assert_not_awaited()
+        assert reservation.released == 1
+        assert handler._memory_capture_tasks == set()
+
     async def test_text_memory_capture_starts_before_agent_route_resolution(self):
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
         captured = asyncio.Event()

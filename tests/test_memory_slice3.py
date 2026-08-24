@@ -303,6 +303,23 @@ def test_attachment_capacity_is_reserved_before_session_or_lease_work() -> None:
     reservation.release()
 
 
+@pytest.mark.parametrize("outcome", ["unavailable", "disabled"])
+def test_capture_capacity_terminal_outcomes_are_propagated(outcome: str) -> None:
+    controller = _controller()
+    controller.memory_module.reserve_capture_capacity = lambda: outcome
+
+    reservation = controller.reserve_memory_capture_capacity(
+        _context("slack"),
+        "remember this",
+        "stable-session",
+    )
+
+    assert reservation is not None
+    assert reservation.capacity_outcome == outcome
+    assert reservation.capacity_blocked is True
+    reservation.release()
+
+
 def test_attachment_reservation_failure_preserves_caption_as_text_only() -> None:
     """Scenario: MEMORY-IM-ATTACH-004."""
 

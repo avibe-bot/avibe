@@ -99,6 +99,12 @@ class _MemoryAttachmentCaptureReservation:
     def capacity_full(self) -> bool:
         return self.capacity_outcome == "full"
 
+    @property
+    def capacity_blocked(self) -> bool:
+        """Whether admission must drop the capture before scheduling it."""
+
+        return self.capacity_outcome in {"full", "unavailable", "disabled"}
+
 
 class _SettingsUserBindings:
     """Answer Memory's binding question from the per-platform settings stores."""
@@ -2143,13 +2149,13 @@ class Controller:
         except Exception:
             return None
         if isinstance(capacity_token, str):
-            if capacity_token != "full":
+            if capacity_token not in {"full", "unavailable", "disabled"}:
                 return None
             return _MemoryAttachmentCaptureReservation(
                 module=module,
                 token=None,
                 config_generation=None,
-                capacity_outcome="full",
+                capacity_outcome=capacity_token,
             )
         try:
             token = reserve(
@@ -2213,13 +2219,13 @@ class Controller:
         except Exception:
             return None
         if isinstance(capacity_token, str):
-            if capacity_token != "full":
+            if capacity_token not in {"full", "unavailable", "disabled"}:
                 return None
             return _MemoryAttachmentCaptureReservation(
                 module=module,
                 token=None,
                 config_generation=None,
-                capacity_outcome="full",
+                capacity_outcome=capacity_token,
             )
         return _MemoryAttachmentCaptureReservation(
             module=module,
@@ -2533,7 +2539,7 @@ class Controller:
         )
         if reservation is not None:
             attachment_config_generation = reservation.config_generation
-            if reservation.capacity_full:
+            if reservation.capacity_blocked:
                 reservation.release()
                 return
         admission = self._memory_admission()

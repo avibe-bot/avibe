@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from copy import deepcopy
+from types import SimpleNamespace
+
 from config.v2_config import (
     MemoryCloudCapabilities,
     MemoryCloudConfig,
@@ -8,6 +11,7 @@ from config.v2_config import (
     MemoryProcessingConfig,
 )
 from vibe import model_service
+from vibe import ui_memory_routes
 
 
 def _status(
@@ -147,6 +151,34 @@ def test_cloud_identity_notice_alone_requires_live_reconciliation() -> None:
     assert changed.runtime_processing() == current.runtime_processing()
     assert changed.cloud.transition_notice_pending is True
     assert changed.cloud.runtime_apply_pending is True
+
+
+def test_scope_release_acknowledgement_compares_applied_cloud_identity() -> None:
+    organization = _resolved(
+        _manual_memory(),
+        _status(scope="organization", identity="emb-org"),
+    )
+    organization.cloud.model_access_key = "mak_org"
+    organization.cloud.organization_attached = True
+    organization.cloud.applied_embedding_identity = "emb-org"
+    organization.cloud.transition_notice_pending = False
+
+    released = _resolved(
+        organization,
+        _status(scope="platform", identity="emb-platform", revision=2),
+    )
+    acknowledged = deepcopy(released)
+    acknowledged.cloud.transition_notice_pending = False
+    acknowledged.cloud.applied_embedding_identity = "emb-platform"
+
+    assert (
+        released.runtime_embedding_identity()
+        == acknowledged.runtime_embedding_identity()
+    )
+    assert ui_memory_routes._memory_embedding_configuration_changed(  # noqa: SLF001
+        SimpleNamespace(memory=released),
+        SimpleNamespace(memory=acknowledged),
+    ) is True
 
 
 def test_same_cloud_identity_resumes_without_destructive_authority() -> None:

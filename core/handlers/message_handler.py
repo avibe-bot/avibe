@@ -257,7 +257,11 @@ class MessageHandler(BaseHandler):
                     exc_info=True,
                 )
                 return
-            if getattr(capacity_reservation, "capacity_full", False):
+            if getattr(
+                capacity_reservation,
+                "capacity_blocked",
+                getattr(capacity_reservation, "capacity_full", False),
+            ):
                 release = getattr(capacity_reservation, "release", None)
                 if callable(release):
                     release()
@@ -1025,8 +1029,8 @@ class MessageHandler(BaseHandler):
                         )
                         if getattr(
                             memory_capture_reservation,
-                            "capacity_full",
-                            False,
+                            "capacity_blocked",
+                            getattr(memory_capture_reservation, "capacity_full", False),
                         ):
                             release = getattr(
                                 memory_capture_reservation,

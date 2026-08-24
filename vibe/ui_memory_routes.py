@@ -289,9 +289,21 @@ def _memory_embedding_configuration_changed(
     current: V2Config,
     candidate: V2Config,
 ) -> bool:
-    return (
+    if (
         current.memory.runtime_embedding_identity()
         != candidate.memory.runtime_embedding_identity()
+    ):
+        return True
+    # A released organization runtime is fenced on its last applied cloud
+    # identity while the saved settings still point at custom processing. The
+    # acknowledgement therefore keeps the visible runtime tuple unchanged, but
+    # must still take the destructive reconfigure path when it advances that
+    # applied identity and clears the notice.
+    return bool(
+        current.memory.cloud.transition_notice_pending
+        and not candidate.memory.cloud.transition_notice_pending
+        and current.memory.cloud.applied_embedding_identity
+        != candidate.memory.cloud.applied_embedding_identity
     )
 
 
