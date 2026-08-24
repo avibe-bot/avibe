@@ -191,19 +191,22 @@ The following mechanical gates apply to every step:
    consumer overrides it; at least one must inherit it unchanged.
 2. A new public shared-layer symbol with zero production call sites fails the
    step. Test-only call sites do not count.
-3. The contract author marks each normative current-fact row with its owning
-   step. All and only the rows marked for a step define that step's corpus
-   membership, which implementation cannot elect. Every marked row has an
-   executable case. A marked row whose own observation cites a released
-   artifact or record additionally requires a fixture provenance-verified
-   against the released version and digest it derives from. A row citing no
-   released bytes — an interpreter capability, a code behavior, or a
-   constructed hostile input — has no released fixture to verify and is
-   covered by its executable case alone; the row text decides this and
-   implementation never classifies rows. An unmarked row states an
-   observation, so it contains no `MUST`, `rejects`, or `fails`; that
-   prohibition is the whole test, because a path-naming clause cannot
-   distinguish a production path from a fixture path under `rg`.
+3. The contract author marks each normative row of the Measured
+   Current-Behavior Census with its owning step. All and only the census rows
+   marked for a step define that step's corpus membership, which
+   implementation cannot elect. Every marked row has an executable case. A
+   marked row whose own observation cites a released artifact or record
+   additionally requires a fixture provenance-verified against the released
+   version and digest it derives from. A row citing no released bytes — an
+   interpreter capability, a code behavior, or a constructed hostile input —
+   has no released fixture to verify and is covered by its executable case
+   alone; the row text decides this and implementation never classifies rows.
+   An unmarked census row states an observation, so it contains no `MUST`,
+   `rejects`, or `fails`; that prohibition is the whole test, because a
+   path-naming clause cannot distinguish a production path from a fixture path
+   under `rg`. Both halves scope to that census table alone, so the other
+   tables in this document keep describing current behavior in their own
+   words.
 
 ### Step 2: Converge The Mutation Guard
 
