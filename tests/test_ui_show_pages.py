@@ -2033,7 +2033,7 @@ def test_show_page_markdown_negotiates_authored_documents(
     expected_target,
 ):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    _save_config(tmp_path)
+    config = _save_config(tmp_path)
     share_id = _create_show_page("ses123", "public" if surface == "public" else "private")
     page_dir = ensure_show_page_dir("ses123")
     if document_path.endswith("/"):
@@ -2043,9 +2043,18 @@ def test_show_page_markdown_negotiates_authored_documents(
     else:
         (page_dir / document_path).write_text("<h1>Authored document</h1>", encoding="utf-8")
     manager = _markdown_runtime_manager()
+    client = app.test_client()
     if surface == "private":
+        client.set_cookie(
+            remote_access.SESSION_COOKIE_NAME,
+            _active_org_cookie(config, "editor@example.com", "editor-1"),
+            domain="alex.avibe.bot",
+        )
         url = f"/show/ses123/{document_path}"
-        request_kwargs = {"base_url": "http://127.0.0.1:5123"}
+        request_kwargs = {
+            "base_url": "https://alex.avibe.bot",
+            "environ_base": _remote_peer(),
+        }
     else:
         url = f"/p/{share_id}/{document_path}"
         request_kwargs = {
@@ -2054,7 +2063,7 @@ def test_show_page_markdown_negotiates_authored_documents(
         }
     set_show_runtime_manager_for_tests(manager)
     try:
-        response = app.test_client().get(
+        response = client.get(
             url,
             headers={"Accept": "text/markdown"},
             **request_kwargs,
@@ -2066,6 +2075,59 @@ def test_show_page_markdown_negotiates_authored_documents(
     assert manager.calls[0][1] == "/sessions/ses123/render-markdown"
     assert manager.calls[0][2][SHOW_RUNTIME_TARGET_HEADER] == expected_target
     _assert_markdown_response_headers(response, success=True)
+
+
+@pytest.mark.parametrize("surface", ["private", "public"])
+def test_show_page_markdown_keeps_extensionless_assets_on_the_app_proxy(
+    monkeypatch,
+    tmp_path,
+    surface,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    share_id = _create_show_page("ses123", "public" if surface == "public" else "private")
+    (ensure_show_page_dir("ses123") / "report").write_text(
+        "extensionless asset",
+        encoding="utf-8",
+    )
+    runtime_path = "/sessions/ses123/app/report"
+    manager = _FakeShowRuntimeManager(
+        render_markdown_supported=True,
+        bodies_by_path={runtime_path: b"extensionless asset"},
+        headers_by_path={runtime_path: {"content-type": "text/plain; charset=utf-8"}},
+    )
+    client = app.test_client()
+    if surface == "private":
+        client.set_cookie(
+            remote_access.SESSION_COOKIE_NAME,
+            _active_org_cookie(config, "editor@example.com", "editor-1"),
+            domain="alex.avibe.bot",
+        )
+        url = "/show/ses123/report"
+        request_kwargs = {
+            "base_url": "https://alex.avibe.bot",
+            "environ_base": _remote_peer(),
+        }
+    else:
+        url = f"/p/{share_id}/report"
+        request_kwargs = {
+            "base_url": "https://alex.avibe.bot",
+            "environ_base": _remote_peer(),
+        }
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = client.get(
+            url,
+            headers={"Accept": "text/markdown"},
+            **request_kwargs,
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    assert response.content == b"extensionless asset"
+    assert manager.render_markdown_capability_calls == 0
+    assert [call[1] for call in manager.calls] == [runtime_path]
 
 
 def test_private_show_page_markdown_requires_auth_then_strips_identity_headers(
@@ -2253,6 +2315,94 @@ def test_private_show_page_markdown_unauthenticated_is_json_not_redirect(monkeyp
     assert response.get_json()["error"]["code"] == "authentication_required"
     _assert_markdown_response_headers(response, success=False)
     assert manager.calls == []
+
+
+def test_private_show_page_markdown_pre_auth_classification_never_probes_filesystem(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    workspace = ensure_show_page_dir("ses123")
+    (workspace.parent / "outside-existing").write_text("secret", encoding="utf-8")
+    probe_calls = []
+    original_asset_exists = ui_server._show_page_runtime_asset_exists
+    original_document_exists = ui_server._show_page_runtime_document_exists
+
+    def record_asset_probe(*args):
+        probe_calls.append(("asset", args))
+        return original_asset_exists(*args)
+
+    def record_document_probe(*args):
+        probe_calls.append(("document", args))
+        return original_document_exists(*args)
+
+    monkeypatch.setattr(ui_server, "_show_page_runtime_asset_exists", record_asset_probe)
+    monkeypatch.setattr(ui_server, "_show_page_runtime_document_exists", record_document_probe)
+    client = app.test_client()
+    responses = [
+        client.get(
+            f"/show/ses123/%252e%252e/{target}",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers={"Accept": "text/markdown"},
+            follow_redirects=False,
+        )
+        for target in ("outside-existing", "outside-missing")
+    ]
+
+    assert [response.status_code for response in responses] == [401, 401]
+    assert responses[0].get_json() == responses[1].get_json()
+    assert responses[0].get_json()["error"]["code"] == "authentication_required"
+    assert all("location" not in response.headers for response in responses)
+    assert probe_calls == []
+    for response in responses:
+        _assert_markdown_response_headers(response, success=False)
+
+
+@pytest.mark.parametrize("surface", ["private", "public"])
+def test_show_page_markdown_denies_traversal_before_filesystem_refinement(
+    monkeypatch,
+    tmp_path,
+    surface,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    share_id = _create_show_page("ses123", "public" if surface == "public" else "private")
+    workspace = ensure_show_page_dir("ses123")
+    (workspace.parent / "outside-existing").write_text("secret", encoding="utf-8")
+
+    def unexpected_refinement(*_args):
+        raise AssertionError("filesystem refinement ran before path confinement")
+
+    monkeypatch.setattr(
+        ui_server,
+        "_show_page_markdown_target_is_document",
+        unexpected_refinement,
+    )
+    client = app.test_client()
+    if surface == "private":
+        client.set_cookie(
+            remote_access.SESSION_COOKIE_NAME,
+            _active_org_cookie(config, "editor@example.com", "editor-1"),
+            domain="alex.avibe.bot",
+        )
+        url = "/show/ses123/%252e%252e/outside-existing"
+    else:
+        url = f"/p/{share_id}/%252e%252e/outside-existing"
+
+    response = client.get(
+        url,
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers={"Accept": "text/markdown"},
+    )
+
+    assert response.status_code == 404
+    assert response.get_json()["error"]["code"] == "session_unknown"
+    assert b"secret" not in response.content
+    _assert_markdown_response_headers(response, success=False)
 
 
 def test_limited_show_page_markdown_forbidden_is_machine_readable(monkeypatch, tmp_path):

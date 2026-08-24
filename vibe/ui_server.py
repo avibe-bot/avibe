@@ -13050,8 +13050,6 @@ def _is_show_page_non_document_path(asset_path: str) -> bool:
 def _is_show_page_markdown_request(
     asset_path: str,
     starlette_request: FastAPIRequest,
-    *,
-    session_id: str | None = None,
 ) -> bool:
     if not _show_page_accepts_markdown_value(starlette_request.headers.get("accept", "")):
         return False
@@ -13059,13 +13057,6 @@ def _is_show_page_markdown_request(
     if fetch_destination and fetch_destination not in {"document", "empty", "iframe"}:
         return False
     if not _is_show_page_entry_asset(asset_path) and _is_show_page_non_document_path(asset_path):
-        return False
-    if (
-        session_id
-        and not _is_show_page_entry_asset(asset_path)
-        and _show_page_runtime_asset_exists(session_id, asset_path)
-        and not _show_page_runtime_document_exists(session_id, asset_path)
-    ):
         return False
     return _is_show_page_spa_route_request(asset_path, starlette_request)
 
@@ -13077,8 +13068,16 @@ def _is_private_show_page_markdown_request() -> bool:
     return _is_show_page_markdown_request(
         match.group(1) or "",
         request._request,
-        session_id=_show_page_id_from_private_route(request.path),
     )
+
+
+def _show_page_markdown_target_is_document(session_id: str, asset_path: str) -> bool:
+    if _is_show_page_entry_asset(asset_path):
+        return True
+    return not _show_page_runtime_asset_exists(
+        session_id,
+        asset_path,
+    ) or _show_page_runtime_document_exists(session_id, asset_path)
 
 
 def _show_page_runtime_asset_exists(session_id: str, asset_path: str) -> bool:
@@ -15260,11 +15259,7 @@ async def serve_private_show_page(session_id, asset_path):
 
     authorization_context = _request_authorization_context()
     runtime_retry_authorized = _has_runtime_owner_access(authorization_context)
-    markdown_requested = _is_show_page_markdown_request(
-        asset_path,
-        request._request,
-        session_id=session_id,
-    )
+    markdown_requested = _is_show_page_markdown_request(asset_path, request._request)
     store = ShowPageStore()
     try:
         try:
@@ -15314,6 +15309,10 @@ async def serve_private_show_page(session_id, asset_path):
             authorization_context
         ):
             return _show_page_access_forbidden_response()
+        markdown_requested = markdown_requested and _show_page_markdown_target_is_document(
+            page.session_id,
+            asset_path,
+        )
         if markdown_requested:
             return await _show_page_markdown_runtime_response(
                 page.session_id,
@@ -15648,11 +15647,6 @@ async def serve_public_show_page(share_id, asset_path):
             if markdown_requested:
                 return _show_page_markdown_error_response("session_unknown", 404)
             return _show_page_not_found_response()
-        markdown_requested = _is_show_page_markdown_request(
-            asset_path,
-            request._request,
-            session_id=page.session_id,
-        )
         limited_guest = (
             lease is not None
             and lease.page_id == page.session_id
@@ -15803,6 +15797,10 @@ async def serve_public_show_page(share_id, asset_path):
             if markdown_requested:
                 return _show_page_markdown_error_response("session_unknown", 404)
             return _show_page_file_not_found_response()
+        markdown_requested = markdown_requested and _show_page_markdown_target_is_document(
+            page.session_id,
+            asset_path,
+        )
         if markdown_requested:
             return await _show_page_markdown_runtime_response(
                 page.session_id,
