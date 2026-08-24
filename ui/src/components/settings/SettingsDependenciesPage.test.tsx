@@ -71,7 +71,7 @@ describe('SettingsDependenciesPage Memory runtime', () => {
     renderPage();
     expect(await screen.findByRole('button', { name: 'settings.dependencies.repair' })).toBeTruthy();
     expect(screen.getByRole('link', { name: /common.configure/ }).getAttribute('href')).toBe(
-      '/admin/settings/memory',
+      '/settings/memory',
     );
     expect(screen.queryByText(/Factory Reset|Reinitialize Memory|memory\.factoryReset/)).toBeNull();
   });
