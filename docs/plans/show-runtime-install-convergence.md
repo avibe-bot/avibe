@@ -132,17 +132,14 @@ named revision, not a promise about a future implementation.
 | Tmux byte phases | Source-leaf verification occurs before preparation; macOS ad-hoc signing can change the installed binary bytes afterward. | `2c6fcbe88` |
 | **Step 1:** Online unrelated-platform edit | `_manifest_install_dir()` hashes the whole manifest digest with the selected archive digest. An online manifest edit for another platform therefore selects a new directory even when this host's archive bytes are unchanged. | `2c6fcbe88` |
 | **Step 1:** Model-hub platform alias | Model-hub maps host `linux-x64` to released artifact label `linux-amd64`; its released pointer, metadata, and claim can therefore carry a label different from the host tag. | `2c6fcbe88` |
-| Downloads namespace | Remote manifest caches use `downloads/manifest-<digest>.json` beside archives, so the namespace mixes durable manifest facts with disposable archive bytes. | `2c6fcbe88` |
+| **Step 4:** Downloads namespace | Remote manifest caches use `downloads/manifest-<digest>.json` beside archives, so the namespace mixes durable manifest facts with disposable archive bytes. | `2c6fcbe88` |
+| **Step 4:** Retention with a readable pointer | Shared and Show both protect the pointer's install unconditionally and rank the remaining installs by mtime, so a requested count of zero, one, or two preserves the current install plus exactly that many previous installs whatever the current install's own mtime rank. | `343a6b4a50`; hermetic probes 2026-08-24 |
+| **Step 4:** Retention after pointer inspection failure | Shared `_current_install_dir()` and Show `_current_manifest_install_dir()` both catch every pointer read/parse/path exception and return `None`, which contributes nothing to the protected set and leaves the live install ranked by mtime alone. With a corrupt, unreadable, or absent pointer both managers plan the live install for deletion at a requested count of zero, and at every requested count once the live install is no longer among the newest that count retains; each case still reports success. Show's archive pass in the same call already refuses instead, raising `current.json is unreadable`. | `343a6b4a50`; hermetic probes 2026-08-24 |
+| **Step 4:** Downloads reclamation | Shared cleanup enumerates staging directories and versioned installs only. At a requested count of zero, a real clean reclaims no bytes from `downloads/` — a superseded archive, the current archive, an orphaned `.tmp` staging file, and a manifest cache all survive — and the result carries only `ok` and `removed`, reporting neither those artifacts nor any size. Show already reclaims content-addressed archives against a protected digest set and reports counts and bytes. | `343a6b4a50`; hermetic probe 2026-08-24 |
 | Inspection versus absence | Shared versions-directory preview preserves traversal errors instead of treating them as proof of no install; Show status can still collapse a raised inspection into absent at its consumer boundary. | `2c6fcbe88` |
 | **Step 3:** Released Show links | Each v3.0.13 Darwin/Linux archive has 16 symlinks and one esbuild hard link; the four Unix archives have nine forward symlinks total, prior-target hard links, and no finally dangling symlink. Windows archives have no links. | `v3.0.13` manifests and archives; measured 2026-08-23 |
 | **Step 3:** Extractor behavior | Shared stops at the first link member. Show and tmux accept the benign regular/symlink/hard-link probe and raise on an escaping `linkname`. | `2c6fcbe88`; hermetic probe 2026-08-23 |
 | **Step 3:** Filter capability | The project supports Python 3.10+. Show capability-detects `filter="data"`; shared and tmux use a Python 3.12 version gate even though the filter is backported to 3.10.12 and 3.11.4. | `2c6fcbe88`; Python docs checked 2026-08-23 |
-
-### Measured Backlog Outside Step 1
-
-| Backlog item | Measured behavior | Unmeasured boundary | Measured at |
-| --- | --- | --- | --- |
-| Cleanup protection after pointer inspection failure | `_current_install_dir()` catches every pointer read/parse/path exception and returns `None`; that result feeds the protected set before version candidates reach `shutil.rmtree()`. This code is byte-identical on the measured baseline and the Step 1 implementation head. | The effective `keep_previous` value and the resulting deletion set were not measured; severity and remediation remain open pending that experiment. | `2c6fcbe88` |
 
 ## Step 1 Executable Acceptance
 
@@ -241,11 +238,36 @@ fallback and no explicit final-tree ownership or POSIX-mode normalization.
 installed versions, protected rollback state, and cleanup reporting under the
 Step 2 guard, exposed through `vibe runtime clean` for every on-layer consumer.
 
-**Gate:** For requested retention counts of zero, one, and more than one, dry-run
-and real cleanup preserve the current install plus exactly that many eligible
-previous installs. Stale owned artifacts become reclaimable, manifest-cache
-facts remain usable offline, and cleanup failure does not overturn a committed
-install; any git/Memory/model-hub loss stops rollout for that dependency.
+**Gate:** Every marked Step 4 census row has an executable case. For requested
+retention counts of zero, one, and more than one, dry-run and real cleanup
+preserve the current install plus exactly that many eligible previous installs.
+A pointer that is present but unreadable or unparseable is an inspection failure
+that plans no deletion and reports that failure rather than reporting success,
+and an absent pointer does not delete an install this manager's own resolver
+would still admit under the Step 1 disk-state model. Protection of the live
+install comes from that ruling and never from its mtime rank, so a requested
+count of zero protects it as strongly as any other count. Superseded archives
+and orphaned staging files become reclaimable and appear in the cleanup report,
+manifest-cache facts remain usable offline, and cleanup failure does not
+overturn a committed install. `vibe runtime clean` invokes cleanup for each of
+git, Memory, and model-hub, not git alone; any git/Memory/model-hub loss stops
+rollout for that dependency.
+
+**Out of scope for this step:** automatic post-install retention. The step
+delivers the command, so `ensure()` gaining its own cleanup call is a separate
+decision and not a gate item.
+
+**Sequencing within the step:** the protected-set correction lands before any
+reclamation is added, because reclamation widens what an empty protected set can
+delete. Where a bound stays imprecise, cleanup errs toward not deleting: an
+uncleaned directory costs disk space, while a deleted live install costs a
+redownload the user cannot undo.
+
+Show carries the same pointer-inspection defect today and is not patched
+separately for it: Step 6 deletes the Show cleanup that holds it, so a Show-side
+fix would be discarded at cutover, and the exposure until then is a redownload
+of a re-obtainable runtime behind a damaged pointer. Show's archive pass is the
+precedent the shared ruling adopts rather than a new policy.
 
 ### Step 5: Cut Over Show's Manifest Provider
 
