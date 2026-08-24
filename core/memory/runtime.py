@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import os
+import sqlite3
 import stat
 import time
 from concurrent.futures import CancelledError as FutureCancelledError
@@ -39,6 +40,8 @@ from core.memory.blocking import run_blocking
 from core.memory.confined_filesystem import (
     ConfinedFilesystemError,
     ConfinedRoot,
+    PrivateSqliteDatabase,
+    remove_confined_path,
     required_no_follow_flag,
 )
 from core.memory.data_reset import MemoryDataResetResult, reset_memory_data_roots
@@ -436,16 +439,55 @@ class MemoryRuntime:
             )
             self._runtime_error = "memory_legacy_recovery_required"
             return True
+        if self._legacy_clear_journal_requires_repair():
+            return True
         return any(
             os.path.lexists(self._effective_home / relative_path)
             for relative_path in (
                 "state/memory/clear-intent.json",
-                "state/memory/clear-journal.sqlite",
                 "state/memory/clear-snapshots",
                 "state/memory/backup-restore-journal.sqlite",
                 "state/memory/backups",
             )
         )
+
+    def _legacy_clear_journal_requires_repair(self) -> bool:
+        """Discard a proven-terminal released Clear journal; fence every other state."""
+
+        journal_path = self._effective_home / "state/memory/clear-journal.sqlite"
+        if not os.path.lexists(journal_path):
+            return False
+        try:
+            connection = PrivateSqliteDatabase(
+                self._effective_home,
+                journal_path,
+            ).connect_read_only()
+            try:
+                row = connection.execute(
+                    "SELECT EXISTS(SELECT 1 FROM clear_operation "
+                    "WHERE open_slot IS NOT NULL LIMIT 1)"
+                ).fetchone()
+                if row is None:
+                    raise sqlite3.DatabaseError("legacy Clear probe returned no row")
+                has_open_operation = bool(row[0])
+            finally:
+                connection.close()
+        except (ConfinedFilesystemError, sqlite3.Error, OSError, TypeError, ValueError):
+            logger.warning(
+                "Released Clear journal could not be read; keeping Memory repair-fenced",
+                exc_info=True,
+            )
+            return True
+        if has_open_operation:
+            return True
+        try:
+            remove_confined_path(self._effective_home, journal_path)
+        except (ConfinedFilesystemError, OSError):
+            logger.warning(
+                "Terminal released Clear journal could not be discarded",
+                exc_info=True,
+            )
+        return False
 
     @property
     def available(self) -> bool:

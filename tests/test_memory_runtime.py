@@ -1,6 +1,7 @@
 """Focused runtime lifecycle tests for best-effort Memory delivery."""
 
 import asyncio
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,23 @@ def _runtime(tmp_path: Path) -> MemoryRuntime:
         store=store,
         effective_home=tmp_path,
     )
+
+
+def _write_legacy_clear_journal(store: MemoryStore, *, open_slot: object = None) -> Path:
+    journal = store.path.with_name("clear-journal.sqlite")
+    connection = sqlite3.connect(journal)
+    connection.execute(
+        "CREATE TABLE clear_operation (operation_id, operator_ref, target_epoch, "
+        "state, resolution, open_slot)"
+    )
+    connection.execute(
+        "INSERT INTO clear_operation VALUES (?, ?, ?, ?, ?, ?)",
+        ("operation", "operator", 1, "completed", "done", open_slot),
+    )
+    connection.commit()
+    connection.close()
+    journal.chmod(0o600)
+    return journal
 
 
 @pytest.mark.asyncio
@@ -140,6 +158,73 @@ async def test_unreadable_released_clear_state_fails_closed_as_needs_repair(
     assert runtime.needs_repair is True
     assert runtime.needs_repair_reason == "memory_legacy_recovery_required"
     assert (await runtime.status_payload())["state"] == "needs_repair"
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_released_clear_journal_is_discarded_without_repair(
+    tmp_path: Path,
+) -> None:
+    store = MemoryStore(
+        tmp_path / "state" / "memory" / "memory.sqlite",
+        effective_home=tmp_path,
+    )
+    journal = _write_legacy_clear_journal(store)
+
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        store=store,
+        effective_home=tmp_path,
+    )
+
+    assert runtime.needs_repair is False
+    assert not journal.exists()
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_open_released_clear_journal_remains_repair_fenced(
+    tmp_path: Path,
+) -> None:
+    store = MemoryStore(
+        tmp_path / "state" / "memory" / "memory.sqlite",
+        effective_home=tmp_path,
+    )
+    journal = _write_legacy_clear_journal(store, open_slot=1)
+
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        store=store,
+        effective_home=tmp_path,
+    )
+
+    assert runtime.needs_repair is True
+    assert runtime.needs_repair_reason == "memory_legacy_recovery_required"
+    assert journal.exists()
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_malformed_released_clear_journal_remains_repair_fenced(
+    tmp_path: Path,
+) -> None:
+    store = MemoryStore(
+        tmp_path / "state" / "memory" / "memory.sqlite",
+        effective_home=tmp_path,
+    )
+    journal = store.path.with_name("clear-journal.sqlite")
+    journal.write_bytes(b"not sqlite")
+    journal.chmod(0o600)
+
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        store=store,
+        effective_home=tmp_path,
+    )
+
+    assert runtime.needs_repair is True
+    assert runtime.needs_repair_reason == "memory_legacy_recovery_required"
+    assert journal.exists()
     await runtime.close()
 
 
