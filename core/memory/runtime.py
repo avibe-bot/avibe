@@ -36,7 +36,11 @@ from core.memory.artifact import (
 )
 from core.memory.attachments import IM_ATTACHMENT_CAPTURE_PLATFORMS
 from core.memory.blocking import run_blocking
-from core.memory.confined_filesystem import ConfinedRoot, required_no_follow_flag
+from core.memory.confined_filesystem import (
+    ConfinedFilesystemError,
+    ConfinedRoot,
+    required_no_follow_flag,
+)
 from core.memory.data_reset import MemoryDataResetResult, reset_memory_data_roots
 from core.memory.everos import (
     EverOSPort,
@@ -713,6 +717,13 @@ class MemoryRuntime:
             if self._process is not None:
                 return False
             try:
+                required_no_follow_flag()
+            except ConfinedFilesystemError as exc:
+                logger.warning("Recorded EverOS recovery is unavailable: %s", exc)
+                if fail_closed:
+                    raise
+                return False
+            try:
                 legacy_sync = RecordedSyncReaper(
                     effective_home=self._effective_home,
                     provider_root=self._provider_root,
@@ -722,7 +733,6 @@ class MemoryRuntime:
                 logger.exception("Released EverOS sync recovery did not finish")
                 raise
             try:
-                required_no_follow_flag()
                 recovery = RecordedSidecarReaper(
                     effective_home=self._effective_home,
                     provider_root=self._provider_root,

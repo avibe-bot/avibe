@@ -18,6 +18,7 @@ from core.memory.artifact import (
     FakeMemoryArtifactManager,
     MemoryArtifactManager,
 )
+from core.memory.confined_filesystem import ConfinedFilesystemError
 from core.memory.everos import FakeMemoryProvider, ProviderHealthSnapshot
 from core.memory.operation_lock import MemoryOperationBusy
 from core.memory.process import FakeEverOSProcessFactory
@@ -343,6 +344,32 @@ async def test_orphan_recovery_reaps_released_sync_before_sidecar(
 
     assert await runtime._reap_recorded_sidecar_if_unowned() is True
     assert events == ["sync", "sidecar"]
+
+
+@pytest.mark.asyncio
+async def test_orphan_recovery_degrades_without_no_follow_but_reset_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    memory_runtime_factory,
+) -> None:
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=False),
+        effective_home=tmp_path,
+    )
+
+    def unsupported() -> int:
+        raise ConfinedFilesystemError("no-follow unavailable")
+
+    def unexpected_reaper(**_kwargs):
+        pytest.fail("orphan reapers must not touch paths without no-follow support")
+
+    monkeypatch.setattr(runtime_module, "required_no_follow_flag", unsupported)
+    monkeypatch.setattr(runtime_module, "RecordedSyncReaper", unexpected_reaper)
+    monkeypatch.setattr(runtime_module, "RecordedSidecarReaper", unexpected_reaper)
+
+    assert await runtime._reap_recorded_sidecar_if_unowned() is False
+    with pytest.raises(ConfinedFilesystemError, match="no-follow unavailable"):
+        await runtime._reap_recorded_sidecar_if_unowned(fail_closed=True)
 
 
 @pytest.mark.asyncio
