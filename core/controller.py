@@ -72,6 +72,25 @@ _RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS = 10.0
 _MemorySessionLifecycleResult = TypeVar("_MemorySessionLifecycleResult")
 
 
+def _memory_reconfigure_changes_identity(
+    expected_config: MemoryConfig,
+    candidate_config: MemoryConfig,
+) -> bool:
+    """Recognize runtime changes and explicit cloud-transition acknowledgements."""
+
+    if (
+        expected_config.runtime_embedding_identity()
+        != candidate_config.runtime_embedding_identity()
+    ):
+        return True
+    return bool(
+        expected_config.cloud.transition_notice_pending
+        and not candidate_config.cloud.transition_notice_pending
+        and expected_config.cloud.applied_embedding_identity
+        != candidate_config.cloud.applied_embedding_identity
+    )
+
+
 @dataclass
 class _MemoryAttachmentCaptureReservation:
     """Single-owner bridge from SessionTurn registration to Memory execution."""
@@ -793,10 +812,7 @@ class Controller:
                 "error": "memory_loss_confirmation_required",
                 "result": "unchanged",
             }
-        if (
-            expected_config.runtime_embedding_identity()
-            == memory_config.runtime_embedding_identity()
-        ):
+        if not _memory_reconfigure_changes_identity(expected_config, memory_config):
             return {
                 "ok": False,
                 "operation": "reconfigure",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import os
 import stat
 import threading
@@ -9,7 +10,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from config.v2_config import MemoryConfig, MemoryEndpointConfig
+from config.v2_config import (
+    MemoryCloudConfig,
+    MemoryConfig,
+    MemoryEndpointConfig,
+    MemoryProcessingConfig,
+)
 from core.controller import Controller
 from core.memory.data_reset import reset_memory_data_roots
 
@@ -374,6 +380,63 @@ async def test_reconfigure_keeps_confirmed_identity_when_readiness_fails(
     assert runtime.events.index("delete") < runtime.events.index("persist")
     assert controller.config.memory == target
     assert fresh.marked_reason is None
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_accepts_scope_release_acknowledgement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _Runtime(tmp_path)
+    processing = MemoryProcessingConfig(
+        llm=MemoryEndpointConfig(
+            "https://llm.example.test/v1",
+            "chat-v1",
+            "llm-secret",
+        ),
+        embedding=MemoryEndpointConfig(
+            "https://embedding.example.test/v1",
+            "embedding-v1",
+            "embedding-secret",
+        ),
+    )
+    expected = MemoryConfig(
+        enabled=True,
+        mode="custom",
+        processing=processing,
+        cloud=MemoryCloudConfig(
+            scope="platform",
+            transition_notice_pending=True,
+            applied_embedding_identity="emb-org",
+        ),
+    )
+    candidate = deepcopy(expected)
+    candidate.cloud.transition_notice_pending = False
+    candidate.cloud.applied_embedding_identity = "emb-platform"
+    controller = _controller(runtime)
+    controller.config.memory = expected
+    calls: list[dict[str, object]] = []
+
+    async def reset(**kwargs):
+        calls.append(kwargs)
+        return {"ok": True, "operation": "reconfigure"}
+
+    monkeypatch.setattr(controller, "_reset_memory_data", reset)
+
+    result = await controller.reconfigure_memory(
+        candidate,
+        expected_config=expected,
+        confirm_loss=True,
+    )
+
+    assert result == {"ok": True, "operation": "reconfigure"}
+    assert calls == [
+        {
+            "operation": "reconfigure",
+            "target_config": candidate,
+            "expected_config": expected,
+        }
+    ]
 
 
 @pytest.mark.asyncio
