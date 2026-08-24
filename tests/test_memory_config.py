@@ -10,7 +10,6 @@ import pytest
 
 from config.v2_config import (
     AgentsConfig,
-    CONFIG_LOCK,
     MemoryCloudConfig,
     MemoryConfig,
     MemoryEndpointConfig,
@@ -142,20 +141,6 @@ def _memory_writer(
 
     atomic_update_memory(update, config_path=config_path)
     done.set()
-
-
-class _ObservedConfigLock:
-    def __init__(self, contender_entered: threading.Event) -> None:
-        self._contender_entered = contender_entered
-
-    def __enter__(self):
-        if threading.current_thread().name == "second-config-save":
-            self._contender_entered.set()
-        CONFIG_LOCK.acquire()
-        return self
-
-    def __exit__(self, *_args) -> None:
-        CONFIG_LOCK.release()
 
 
 def test_memory_config_round_trips_and_hides_keys(tmp_path) -> None:
@@ -1140,13 +1125,20 @@ def test_concurrent_generic_config_saves_preserve_both_updates(
     monkeypatch,
     tmp_path,
 ) -> None:
-    """Generic read/merge/write stays one process-local linearized operation."""
+    """Generic read/merge/write stays one linearized operation.
+
+    With the cross-process config transaction (#1458 stage ③) the whole
+    cycle — base load, merge, write — runs under the config file lock,
+    so a second save that starts mid-cycle blocks at the lock (not the
+    process-local CONFIG_LOCK), and both updates persist.
+    """
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     V2Config.from_payload(_payload({})).save()
     first_merged = threading.Event()
     release_first = threading.Event()
-    second_entered = threading.Event()
+    second_started = threading.Event()
+    second_done = threading.Event()
     failures: list[BaseException] = []
     merge = api._deep_merge_dicts
 
@@ -1164,16 +1156,20 @@ def test_concurrent_generic_config_saves_preserve_both_updates(
         except BaseException as exc:
             failures.append(exc)
 
-    monkeypatch.setattr(api, "CONFIG_LOCK", _ObservedConfigLock(second_entered))
     monkeypatch.setattr(api, "_deep_merge_dicts", hold_first_merge)
     first = _config_writer(
         save,
         args=({"language": "zh"},),
         name="first-config-save",
     )
+
+    def observed_second_save() -> None:
+        second_started.set()
+        save({"runtime": {"log_level": "DEBUG"}})
+        second_done.set()
+
     second = _config_writer(
-        save,
-        args=({"runtime": {"log_level": "DEBUG"}},),
+        observed_second_save,
         name="second-config-save",
     )
 
@@ -1181,7 +1177,8 @@ def test_concurrent_generic_config_saves_preserve_both_updates(
         first.start()
         assert first_merged.wait(_WRITER_TIMEOUT_SECONDS)
         second.start()
-        assert second_entered.wait(_WRITER_TIMEOUT_SECONDS)
+        assert second_started.wait(_WRITER_TIMEOUT_SECONDS)
+        assert not second_done.wait(1.0), "second save entered while first held the lock"
     finally:
         release_first.set()
         _join_config_writers(first, second)

@@ -257,7 +257,7 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
     route must inherit the same Instance role as the rest of that capability.
     The member surface is the opposite shape: an explicit allow-list, so an
     unknown API fails closed to Owner along with allowlist mutation,
-    pairing-identity writes, and instance-wide default-agent routing.
+    pairing-identity writes, and bulk Agent onboarding.
     """
 
     assert _EDITOR_HTTP_NAMESPACES == (
@@ -308,6 +308,10 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         # The Web UI's ShowPageShareControl reads the page it can mutate;
         # editors must keep GET access (regression: PR #1606 round 1).
         ("GET", "/api/show-pages/session-1"),
+        # Read-only model catalogs behind Chat's route picker and the Agents
+        # detail panel. Editor-tier because the picker is an editor surface.
+        ("GET", "/api/claude/models"),
+        ("GET", "/api/codex/models"),
     )
     for method, path in editor_examples:
         assert http_authorization_policy(method, path).minimum_role == "editor", path
@@ -333,6 +337,7 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
     member_examples = (
         ("POST", "/api/agents"),
         ("POST", "/api/agents/import"),
+        ("POST", "/api/agents/default"),
         ("PATCH", "/api/agents/demo"),
         ("DELETE", "/api/agents/demo"),
         ("PUT", "/api/models/agents/codex/chain"),
@@ -357,7 +362,22 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         ("POST", "/api/control"),
         ("POST", "/api/upgrade"),
         ("POST", "/api/logs"),
+        # Classifying the read-only catalogs above does not widen /api/backend:
+        # credential, custom-provider, install, and runtime routes keep Owner by
+        # the unknown-route default. That includes OpenCode's provider catalog --
+        # it is the Settings surface (base URLs, masked keys, active auth type,
+        # tool-call permission state) and reading it starts the daemon, so unlike
+        # the Claude and Codex snapshots it is not a catalog a lower rank may
+        # read. The model picker treats its 403 as "no catalog".
+        ("GET", "/api/backend/opencode/providers"),
         ("POST", "/api/backend/codex/auth"),
+        ("POST", "/api/backend/claude/auth"),
+        ("POST", "/api/backend/opencode/auth"),
+        ("DELETE", "/api/backend/opencode/auth/anthropic"),
+        ("POST", "/api/backend/opencode/providers"),
+        ("POST", "/api/backend/opencode/future-mutation"),
+        ("POST", "/api/claude/models/refresh"),
+        ("POST", "/api/codex/future-mutation"),
         # Access administration and bearer credentials.
         ("PUT", "/api/permissions/authorized-users"),
         ("GET", "/api/users/bind-codes"),
@@ -370,8 +390,7 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         # Host reach.
         ("POST", "/api/browse"),
         ("POST", "/api/browse/mkdir"),
-        # Instance-wide Agent routing and bulk migration.
-        ("POST", "/api/agents/default"),
+        # Bulk migration.
         ("GET", "/api/agent-onboarding"),
         ("POST", "/api/agent-onboarding"),
     )
@@ -443,6 +462,65 @@ def test_member_reachable_routes_are_bounded_by_declaration() -> None:
         synthetic = http_authorization_policy(method, "/api/route-added-after-the-member-rank")
         assert synthetic is not None
         assert synthetic.minimum_role == "owner", method
+
+
+def test_agents_page_load_reads_are_admitted_for_every_rank_that_sees_the_page() -> None:
+    """The GETs one Agents-page load issues must be admitted by the ranks it renders for.
+
+    A remote member landing on ``/agents`` got two ``instance_access_forbidden``
+    toasts after the Agent ACL fix: the page's own reads were reachable, but the
+    onboarding inventory was requested off ``can_manage_agents`` (a member bit)
+    while the route is deliberately Owner, and the backend model catalogs the
+    detail panel loads were classified by nobody and so fell to the Owner
+    default. The property is stated over the ranks rather than over a list of
+    fixed cases: whoever can reach the surface can complete its load. Chat's
+    route picker shares the catalog loader and is an editor surface, so editor is
+    the floor for the catalogs; the rest of the page is member management.
+
+    OpenCode is the exception the test also pins. It has no catalog separable
+    from its Settings surface, so its read stays Owner and the picker degrades to
+    a typed model id -- silently, because the loader declares that refusal
+    expected. "Completes its load" therefore means "issues no request whose 403
+    the user is told about", not "every backend answers".
+    """
+
+    page_load_reads = (
+        ("GET", "/api/agents"),
+        ("GET", "/api/agents/demo"),
+        ("GET", "/api/running-agents"),
+        ("GET", "/api/models/agents"),
+    )
+    catalog_reads = (
+        ("GET", "/api/claude/models"),
+        ("GET", "/api/codex/models"),
+    )
+
+    for role in ("editor", "member", "owner"):
+        context = _context(role, remote=True)
+        for method, path in catalog_reads:
+            minimum_role = http_authorization_policy(method, path).minimum_role
+            assert minimum_role is not None and context.has_role(minimum_role), f"{role} {path}"
+
+    for role in ("member", "owner"):
+        context = _context(role, remote=True)
+        for method, path in (*page_load_reads, *catalog_reads):
+            minimum_role = http_authorization_policy(method, path).minimum_role
+            assert minimum_role is not None and context.has_role(minimum_role), f"{role} {path}"
+
+    # The counterparts a member page load must not announce. Bulk onboarding is a
+    # one-way instance-wide migration and must not be requested at all; the
+    # OpenCode provider catalog may be requested but its refusal is expected data
+    # for the picker. Both stay Owner, so a toast from either is a UI defect
+    # rather than a policy gap.
+    owner_only_page_neighbours = (
+        ("GET", "/api/agent-onboarding"),
+        ("POST", "/api/agent-onboarding"),
+        ("GET", "/api/backend/opencode/providers"),
+    )
+    for method, path in owner_only_page_neighbours:
+        minimum_role = http_authorization_policy(method, path).minimum_role
+        assert minimum_role == "owner", path
+        assert not _context("member", remote=True).has_role(minimum_role), path
 
 
 def test_workbench_events_follow_role_boundaries() -> None:
@@ -1114,15 +1192,13 @@ def test_pair_is_forbidden_for_member_and_succeeds_for_owner(monkeypatch, tmp_pa
     assert paired == [("key", "https://avibe.bot", "avibe")]
 
 
-def test_member_cannot_set_instance_default_agent(monkeypatch, tmp_path) -> None:
-    """Instance-wide default routing is Owner-only, and that is the whole gate.
+def test_member_can_set_instance_default_agent(monkeypatch, tmp_path) -> None:
+    """Default selection follows Agent management at service and HTTP layers.
 
-    A member is refused twice over -- by the store's own permission check and by
-    the route policy -- and the Owner may then point routing at any Agent,
-    including one narrower than the instance audience. Nothing about the target's
-    policy shape is validated here: a default is advisory and the ACL is enforced
-    per-principal at use time (``core.vibe_agents.resolve_usable_default_agent``),
-    which is covered in ``tests/test_resource_acl_agents.py``.
+    Member may point routing at any Agent it can manage, including one narrower
+    than the instance audience. Editor and Viewer stay denied. The default stays
+    advisory: per-principal degradation remains covered in
+    ``tests/test_resource_acl_agents.py``.
     """
 
     from core.vibe_agents import VibeAgentAccessError, VibeAgentStore
@@ -1149,9 +1225,15 @@ def test_member_cannot_set_instance_default_agent(monkeypatch, tmp_path) -> None
             backend="codex",
             user_context=member,
         )
-        with pytest.raises(VibeAgentAccessError):
-            store.set_default_agent_name(private_agent.name, user_context=member)
+        for role in ("viewer", "editor"):
+            with pytest.raises(VibeAgentAccessError):
+                store.set_default_agent_name(
+                    private_agent.name,
+                    user_context=_context(role, remote=True),
+                )
         assert store.get_default_agent_name() == before
+        store.set_default_agent_name(private_agent.name, user_context=member)
+        assert store.get_default_agent_name() == private_agent.name
     finally:
         store.close()
 
@@ -1175,11 +1257,11 @@ def test_member_cannot_set_instance_default_agent(monkeypatch, tmp_path) -> None
         base_url="https://alex.avibe.bot",
         environ_base=remote_peer(),
     )
-    assert member_response.status_code == 403
-    assert member_response.get_json()["error"] == "instance_access_forbidden"
+    assert member_response.status_code == 200
+    assert member_response.get_json()["default_agent_name"] == "member-private"
     store = VibeAgentStore()
     try:
-        assert store.get_default_agent_name() == before
+        assert store.get_default_agent_name() == "member-private"
     finally:
         store.close()
 

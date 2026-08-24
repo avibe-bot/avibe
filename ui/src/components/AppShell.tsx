@@ -544,13 +544,15 @@ export const AppShell: React.FC = () => {
       : []),
   ];
 
-  // Chat is a full-screen detail (own composer) and Search is a full-screen
-  // focused surface (own header + back button); the wizard owns the whole
-  // viewport. These mobile surfaces render their own top chrome, so the shell's
-  // mobile brand header AND the bottom tab bar are hidden on them.
+  // Chat is a full-screen detail (own composer), Search is a full-screen focused
+  // surface (own header + back button), and built-in apps own their toolbars.
+  // These mobile surfaces render their own top chrome, so the shell's mobile
+  // brand header AND the bottom tab bar are hidden on them.
   const isChat = location.pathname.startsWith('/chat/');
   const isSearch = location.pathname === '/search';
-  const isFullScreenMobile = isChat || isSearch;
+  const isShowPageApp = location.pathname.startsWith('/apps/show/');
+  const isBuiltinApp = isStandaloneAppRoutePath(location.pathname);
+  const isFullScreenMobile = isChat || isSearch || isShowPageApp || isBuiltinApp;
 
   const showBottomNav = !isFullScreenMobile && !chromeless && location.pathname !== '/setup';
 
@@ -738,6 +740,8 @@ export const AppShell: React.FC = () => {
             // Single-app tab: no sidebar offset, no scroll, no page glow — the app body
             // is the only thing in the viewport and sizes itself to this box (h-full).
             ? 'min-h-0 flex-1 overflow-hidden'
+            : isFullScreenMobile
+              ? 'min-h-0 flex-1 overflow-hidden md:ml-[240px] md:min-h-screen md:flex-none md:overflow-visible md:pb-0'
             : 'flex-1 min-h-0 overflow-y-auto md:ml-[240px] md:min-h-screen md:flex-none md:overflow-visible md:pb-0',
           !chromeless && (showBottomNav ? 'pb-[calc(5.5rem+env(safe-area-inset-bottom))]' : 'pb-0'),
           !chromeless &&
@@ -748,6 +752,8 @@ export const AppShell: React.FC = () => {
           'w-full',
           chromeless
             ? 'h-full'
+            : isFullScreenMobile
+              ? 'h-full p-0 md:mx-auto md:h-auto md:px-10 md:py-8'
             : 'mx-auto px-4 py-5 md:px-10 md:py-8',
         )}>
           {/* A crashing page only replaces the content area — the sidebar + chrome stay usable, and

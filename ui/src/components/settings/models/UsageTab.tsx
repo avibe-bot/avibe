@@ -338,28 +338,34 @@ const ByDayPanel: React.FC<{ summary: UsageSummary }> = ({ summary }) => {
             which is the same per-column association the Source table carries.
             Sibling of the image, never a child: inside it, it would be hidden
             along with everything else. */}
-        <table className="sr-only">
-          <caption>{t('settings.models.usage.byDay.table', { from: day(summary.from_day), to: day(summary.to_day) })}</caption>
-          <thead>
-            <tr>
-              <th scope="col">{t('settings.models.usage.byDay.col.day')}</th>
-              <th scope="col">{t('settings.models.usage.tokens.label')}</th>
-              <th scope="col">{t('settings.models.usage.requests.label')}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {columns.map((column) => (
-              <tr key={column.day}>
-                <th scope="row">{day(column.day)}</th>
-                <td><TokenFigure counters={column} value={column.tokens} /></td>
-                <td>{count(column.requests)}</td>
+        {/* Apply the visually-hidden box to a generic wrapper. A table keeps its
+            intrinsic column width even when the table itself is only one pixel
+            wide; containing that layout inside the clipped wrapper keeps its
+            semantics without letting it widen the document. */}
+        <div className="model-hub-usage-a11y-table sr-only">
+          <table>
+            <caption>{t('settings.models.usage.byDay.table', { from: day(summary.from_day), to: day(summary.to_day) })}</caption>
+            <thead>
+              <tr>
+                <th scope="col">{t('settings.models.usage.byDay.col.day')}</th>
+                <th scope="col">{t('settings.models.usage.tokens.label')}</th>
+                <th scope="col">{t('settings.models.usage.requests.label')}</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-        <div className="model-hub-usage-axis flex items-baseline justify-between gap-3">
-          <span className="truncate">{day(summary.from_day)}</span>
-          <span className="model-hub-usage-peak truncate">
+            </thead>
+            <tbody>
+              {columns.map((column) => (
+                <tr key={column.day}>
+                  <th scope="row">{day(column.day)}</th>
+                  <td><TokenFigure counters={column} value={column.tokens} /></td>
+                  <td>{count(column.requests)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="model-hub-usage-axis">
+          <span className="model-hub-usage-axis-label">{day(summary.from_day)}</span>
+          <span className="model-hub-usage-axis-label model-hub-usage-peak">
             {peak !== null
               ? t('settings.models.usage.byDay.peak', { tokens: tokenText(peak, peak.tokens), day: day(peak.day) })
               // No peak is three different windows, and the tokens cannot tell them
@@ -375,7 +381,7 @@ const ByDayPanel: React.FC<{ summary: UsageSummary }> = ({ summary }) => {
                   ? t('settings.models.usage.byDay.unreported')
                   : t('settings.models.usage.byDay.quiet')}
           </span>
-          <span className="truncate">{day(summary.to_day)}</span>
+          <span className="model-hub-usage-axis-label">{day(summary.to_day)}</span>
         </div>
       </div>
     </section>

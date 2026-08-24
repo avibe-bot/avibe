@@ -78,6 +78,34 @@ def test_re_entrance_belongs_to_the_path_not_to_one_lock_object(tmp_path: Path) 
     assert _free_for_another_thread(lock_path) is True
 
 
+def test_failed_reentrant_validation_preserves_the_outer_lock(tmp_path: Path) -> None:
+    lock_path = tmp_path / "migration.lock"
+    validation_allowed = True
+
+    def validate_handle(_handle) -> bool:
+        return validation_allowed
+
+    outer = MigrationFileLock(
+        lock_path,
+        timeout_seconds=None,
+        _handle_validator=validate_handle,
+    )
+    inner = MigrationFileLock(
+        lock_path,
+        timeout_seconds=0,
+        _handle_validator=validate_handle,
+    )
+
+    with outer:
+        assert _free_for_another_thread(lock_path) is False
+        validation_allowed = False
+        with pytest.raises(OSError, match="Lock path failed identity validation"):
+            inner.acquire()
+        assert _free_for_another_thread(lock_path) is False
+
+    assert _free_for_another_thread(lock_path) is True
+
+
 def test_the_lock_follows_the_database_not_the_route_taken_to_it(tmp_path: Path) -> None:
     # Two callers that disagree about which directory is "the" state directory
     # would otherwise take two different locks over one database and both

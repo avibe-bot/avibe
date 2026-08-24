@@ -21,6 +21,7 @@ from types import SimpleNamespace
 import psutil
 import pytest
 
+from core import managed_runtime
 from core.managed_runtime import ManagedRuntimeArchive, ManagedRuntimeManifest
 import core.memory.artifact as memory_artifact
 import core.memory.confined_filesystem as confined_filesystem
@@ -91,6 +92,7 @@ from config.v2_config import (
 
 PROJECT = "default"
 PRINCIPAL = "u-11111111111111111111111111111111"
+MEMORY_FIXTURES = Path(__file__).parent / "fixtures" / "memory"
 
 
 async def test_all_project_agentic_recall_is_rejected_before_project_access() -> None:
@@ -822,6 +824,154 @@ def test_memory_artifact_status_marks_broken_active_binary_as_error(tmp_path: Pa
 
 
 @pytest.mark.parametrize(
+    ("probe_outcome", "expected_admitted"),
+    [("success", True), ("false", False), ("raise", False)],
+)
+def test_released_memory_pointer_status_is_shallow_and_resolver_readmits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe_outcome: str,
+    expected_admitted: bool,
+) -> None:
+    manager = MemoryArtifactManager(
+        runtime_dir=tmp_path / "runtime",
+        manifest_path=tmp_path / "missing-manifest.json",
+        offline=True,
+    )
+    pointer = json.loads(
+        (MEMORY_FIXTURES / "released_active_pointer.json").read_text(encoding="utf-8")
+    )
+    pointer["platform"] = memory_artifact.runtime_platform_tag()
+    fingerprint = hashlib.sha256(
+        f'{pointer["manifest_sha256"]}:{pointer["archive_sha256"]}'.encode("utf-8")
+    ).hexdigest()[:16]
+    install_dir = (
+        manager.runtime_dir
+        / "versions"
+        / pointer["runtime_version"]
+        / pointer["platform"]
+        / fingerprint
+    )
+    binary = install_dir / "bin" / "python"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    binary.chmod(0o755)
+    pointer["install_dir"] = str(install_dir)
+    (install_dir / manager.spec.metadata_filename).write_text(
+        json.dumps(
+            {
+                **pointer,
+                "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager._restore_current_pointer(pointer)
+    pointer_path = manager.runtime_dir / "current.json"
+    pointer_before = pointer_path.read_bytes()
+    artifact_before = {
+        path.relative_to(install_dir): path.read_bytes()
+        for path in install_dir.rglob("*")
+        if path.is_file()
+    }
+    real_restore = manager._restore_current_pointer
+
+    monkeypatch.setattr(
+        manager,
+        "_prepare_binary",
+        lambda *_args, **_kwargs: pytest.fail("status performed a deep probe"),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_restore_current_pointer",
+        lambda *_args: pytest.fail("status rewrote the released pointer"),
+    )
+
+    status = manager.status()
+
+    assert status["installed"] is True
+    assert status["status"] == "ready"
+    assert status["path"] == str(binary)
+    assert pointer_path.read_bytes() == pointer_before
+    assert {
+        path.relative_to(install_dir): path.read_bytes()
+        for path in install_dir.rglob("*")
+        if path.is_file()
+    } == artifact_before
+
+    def probe(*_args, **_kwargs) -> dict[str, bool]:
+        if probe_outcome == "raise":
+            raise RuntimeError("probe failed")
+        return {"ok": probe_outcome == "success"}
+
+    monkeypatch.setattr(manager, "_prepare_binary", probe)
+    monkeypatch.setattr(manager, "_restore_current_pointer", real_restore)
+
+    resolved = manager.resolve_python()
+    active = manager._active_pointer()
+
+    assert resolved == (binary if expected_admitted else None)
+    assert active is not None
+    if probe_outcome == "raise":
+        assert "admission_revision" not in active
+        assert "admission_ok" not in active
+    else:
+        assert active["admission_revision"] == memory_artifact.ARTIFACT_ADMISSION_REVISION
+        assert active["admission_ok"] is expected_admitted
+
+
+def test_released_memory_pointer_readmission_refuses_symlinked_mutation_guard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = MemoryArtifactManager(
+        runtime_dir=tmp_path / "runtime",
+        manifest_path=tmp_path / "missing-manifest.json",
+        offline=True,
+    )
+    pointer = json.loads(
+        (MEMORY_FIXTURES / "released_active_pointer.json").read_text(encoding="utf-8")
+    )
+    pointer["platform"] = memory_artifact.runtime_platform_tag()
+    install_dir = manager.runtime_dir / "versions" / "released"
+    binary = install_dir / "bin" / "python"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    binary.chmod(0o755)
+    pointer["install_dir"] = str(install_dir)
+    (install_dir / manager.spec.metadata_filename).write_text(
+        json.dumps(
+            {
+                **pointer,
+                "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager._restore_current_pointer(pointer)
+    pointer_path = manager.runtime_dir / "current.json"
+    pointer_before = pointer_path.read_bytes()
+    victim = tmp_path / "victim.txt"
+    victim.write_text("do not rewrite", encoding="utf-8")
+    try:
+        manager._install_file_lock_path.symlink_to(victim)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+    monkeypatch.setattr(
+        manager,
+        "_prepare_binary",
+        lambda *_args, **_kwargs: pytest.fail("unsafe guard reached the compatibility probe"),
+    )
+
+    resolved = manager.resolve_python()
+
+    assert victim.read_text(encoding="utf-8") == "do not rewrite"
+    assert resolved is None
+    assert manager._install_reason == "memory_runtime_install_failed"
+    assert pointer_path.read_bytes() == pointer_before
+
+
+@pytest.mark.parametrize(
     "mismatch",
     [
         {"platform": "plan9-vax"},
@@ -867,68 +1017,6 @@ def test_memory_artifact_rejects_an_active_pointer_built_for_another_target(
     # The binary itself is intact and its metadata agrees with the pointer, so
     # only the target check can reject this.
     assert manager.resolve_python() is None
-
-
-@pytest.mark.parametrize("admitted", [False, True])
-def test_memory_artifact_readmits_active_pointer_after_contract_revision(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    admitted: bool,
-) -> None:
-    manager = MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True)
-    install_dir = manager.runtime_dir / "versions" / "old"
-    binary = install_dir / "bin" / "python"
-    binary.parent.mkdir(parents=True)
-    binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    binary.chmod(0o755)
-    pointer = {
-        "provider": "manifest",
-        "runtime_id": "memory-runtime",
-        "runtime_version": memory_artifact.EVEROS_VERSION,
-        "platform": memory_artifact.runtime_platform_tag(),
-        "install_dir": str(install_dir),
-        "manifest_sha256": "a" * 64,
-        "archive_sha256": "b" * 64,
-        "bin_path": "bin/python",
-    }
-    (install_dir / manager.spec.metadata_filename).write_text(
-        json.dumps(
-            {
-                **pointer,
-                "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
-            }
-        ),
-        encoding="utf-8",
-    )
-    manager._restore_current_pointer(pointer)
-    admissions: list[Path] = []
-
-    def admit(candidate: Path) -> dict[str, object]:
-        admissions.append(candidate)
-        return {
-            "ok": admitted,
-            "reason": None if admitted else "memory_runtime_install_failed",
-        }
-
-    monkeypatch.setattr(manager, "_prepare_binary", admit)
-
-    resolved = manager.resolve_python()
-
-    assert resolved == (binary if admitted else None)
-    assert admissions == [binary]
-    active = manager._active_pointer()
-    assert active is not None
-    if admitted:
-        assert active["admission_revision"] == memory_artifact.ARTIFACT_ADMISSION_REVISION
-        assert active["admission_ok"] is True
-        assert manager.resolve_python() == binary
-        assert admissions == [binary]
-    else:
-        assert active["admission_revision"] == memory_artifact.ARTIFACT_ADMISSION_REVISION
-        assert active["admission_ok"] is False
-        assert manager.resolve_python() is None
-        assert manager.status()["reason"] == "memory_runtime_install_failed"
-        assert admissions == [binary]
 
 
 @pytest.mark.parametrize("admitted", [False, True])
@@ -993,7 +1081,7 @@ def test_memory_artifact_readmits_existing_install_before_reuse(
     monkeypatch.setattr(manager, "_load_manifest", lambda *, allow_network: manifest)
     admissions: list[Path] = []
 
-    def admit(candidate: Path) -> dict[str, object]:
+    def admit(candidate: Path, **_kwargs) -> dict[str, object]:
         admissions.append(candidate)
         return {
             "ok": admitted,
@@ -1001,6 +1089,7 @@ def test_memory_artifact_readmits_existing_install_before_reuse(
         }
 
     monkeypatch.setattr(manager, "_prepare_binary", admit)
+    pointer_before = (manager.runtime_dir / "current.json").read_bytes()
 
     result = manager.ensure(force=False)
 
@@ -1009,12 +1098,16 @@ def test_memory_artifact_readmits_existing_install_before_reuse(
     assert admissions == [binary]
     active = manager._active_pointer()
     assert active is not None
-    assert active["admission_revision"] == memory_artifact.ARTIFACT_ADMISSION_REVISION
-    assert active["admission_ok"] is admitted
-    assert manager.resolve_python() == (binary if admitted else None)
-    if not admitted:
-        assert manager.status()["reason"] == "memory_runtime_install_failed"
-    assert admissions == [binary]
+    if admitted:
+        assert active["admission_revision"] == memory_artifact.ARTIFACT_ADMISSION_REVISION
+        assert active["admission_ok"] is True
+        assert manager.resolve_python() == binary
+        assert admissions == [binary]
+    else:
+        assert (manager.runtime_dir / "current.json").read_bytes() == pointer_before
+        assert manager.status()["installed"] is True
+        assert (manager.runtime_dir / "current.json").read_bytes() == pointer_before
+        assert admissions == [binary]
 
 
 def test_memory_artifact_coordinator_rolls_back_the_active_pointer(tmp_path: Path) -> None:
@@ -1071,7 +1164,8 @@ def test_memory_artifact_coordinator_rolls_back_the_active_pointer(tmp_path: Pat
             == memory_artifact.ARTIFACT_ADMISSION_REVISION
         )
         assert manager._active_pointer()["admission_ok"] is True
-        calls.append(("active", manager.provider_root_format()))
+        active = manager._active_pointer()
+        calls.append(("active", active.get("provider_root_format") if active else None))
         rollback()
 
     manager.set_activation_coordinator(coordinate)
@@ -1087,7 +1181,7 @@ def test_memory_artifact_coordinator_rolls_back_the_active_pointer(tmp_path: Pat
         ("active", "everos-2.0"),
     ]
     assert json.loads((manager.runtime_dir / "current.json").read_text(encoding="utf-8")) == previous_pointer
-    assert manager.provider_root_format() == "everos-1.0"
+    assert manager._active_pointer()["provider_root_format"] == "everos-1.0"
 
 
 def test_memory_artifact_pending_reset_can_commit_when_old_root_is_incompatible(
@@ -1133,6 +1227,43 @@ def test_memory_artifact_pending_reset_can_commit_when_old_root_is_incompatible(
 
     assert calls == [None]
     assert manager._active_pointer() is not None
+
+
+def test_memory_artifact_activation_fails_closed_without_coordinator(tmp_path: Path) -> None:
+    provider_root = tmp_path / "memory" / "everos-root"
+    provider_root.mkdir(parents=True, mode=0o700)
+    provider_root.parent.chmod(0o700)
+    sentinel = provider_root / ".avibe-memory-root.json"
+    sentinel.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "provider_root_id": "root-id",
+                "provider_id": "everos",
+                "provider_root_format": "everos-1.0",
+                "created_by_artifact_fingerprint": "old-artifact",
+            }
+        ),
+        encoding="utf-8",
+    )
+    sentinel.chmod(0o600)
+    manager = MemoryArtifactManager(
+        runtime_dir=tmp_path / "runtime",
+        offline=True,
+        provider_root=provider_root,
+    )
+
+    with pytest.raises(
+        MemoryRuntimeActivationError,
+        match="memory runtime activation is unavailable",
+    ):
+        manager._write_current_pointer(
+            manager.runtime_dir / "versions" / "candidate",
+            _artifact_manifest("everos-2.0", compatible_formats=["everos-1.0"]),
+            _artifact_archive(),
+        )
+
+    assert manager._active_pointer() is None
 
 
 def test_memory_artifact_first_activation_rollback_does_not_need_temp_sqlite(
@@ -1184,7 +1315,16 @@ async def test_memory_artifact_rollback_resolves_old_active_binary(
         offline=True,
         provider_root=tmp_path / "memory" / "everos-root",
     )
-    old_install_dir = manager.runtime_dir / "versions" / "old"
+    manifest_sha256 = "a" * 64
+    archive_sha256 = "b" * 64
+    platform_tag = memory_artifact.runtime_platform_tag()
+    old_install_dir = (
+        manager.runtime_dir
+        / "versions"
+        / memory_artifact.EVEROS_VERSION
+        / platform_tag
+        / hashlib.sha256(f"{manifest_sha256}:{archive_sha256}".encode("utf-8")).hexdigest()[:16]
+    )
     old_binary = old_install_dir / "bin" / "python"
     old_binary.parent.mkdir(parents=True)
     old_binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -1194,10 +1334,10 @@ async def test_memory_artifact_rollback_resolves_old_active_binary(
         "provider": "manifest",
         "runtime_id": "memory-runtime",
         "runtime_version": memory_artifact.EVEROS_VERSION,
-        "platform": memory_artifact.runtime_platform_tag(),
+        "platform": platform_tag,
         "install_dir": str(old_install_dir),
-        "manifest_sha256": "a" * 64,
-        "archive_sha256": "b" * 64,
+        "manifest_sha256": manifest_sha256,
+        "archive_sha256": archive_sha256,
         "bin_path": "bin/python",
         "admission_revision": memory_artifact.ARTIFACT_ADMISSION_REVISION,
         "admission_ok": True,
@@ -1211,9 +1351,9 @@ async def test_memory_artifact_rollback_resolves_old_active_binary(
                 "provider": "manifest",
                 "runtime_id": "memory-runtime",
                 "runtime_version": memory_artifact.EVEROS_VERSION,
-                "platform": memory_artifact.runtime_platform_tag(),
-                "manifest_sha256": "a" * 64,
-                "archive_sha256": "b" * 64,
+                "platform": platform_tag,
+                "manifest_sha256": manifest_sha256,
+                "archive_sha256": archive_sha256,
                 "binary_sha256": binary_sha256,
                 "bin_path": "bin/python",
             }
@@ -4284,12 +4424,33 @@ async def test_runtime_artifact_activation_rolls_back_root_and_sidecar(
     manager._restore_current_pointer(previous_pointer)
     monkeypatch.setattr(manager, "resolve_python", lambda: Path(sys.executable))
     monkeypatch.setattr(manager, "status", lambda: {"reason": None})
+    monkeypatch.setattr(
+        manager,
+        "provider_root_format",
+        lambda: manager._active_pointer().get("provider_root_format"),
+    )
+    monkeypatch.setattr(
+        manager,
+        "compatible_provider_root_formats",
+        lambda: frozenset(
+            {
+                manager._active_pointer().get("provider_root_format"),
+                *manager._active_pointer().get("compatible_provider_root_formats", []),
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        manager,
+        "artifact_fingerprint",
+        lambda: manager._active_pointer().get("artifact_fingerprint"),
+    )
 
     class _Process(FakeEverOSProcess):
         """Refuse to boot against the incompatible activated root format."""
 
         async def start(self) -> bool:
-            if manager.provider_root_format() == "everos-2.0":
+            active = manager._active_pointer()
+            if active is not None and active.get("provider_root_format") == "everos-2.0":
                 self.starts += 1
                 return False
             return await super().start()
@@ -4321,7 +4482,7 @@ async def test_runtime_artifact_activation_rolls_back_root_and_sidecar(
         )
 
     assert manager._active_pointer() == previous_pointer
-    assert manager.provider_root_format() == "everos-1.0"
+    assert manager._active_pointer()["provider_root_format"] == "everos-1.0"
     assert len(instances) == 3
     assert instances[0].stopped is True
     assert instances[1].stopped is True
@@ -4359,6 +4520,26 @@ async def test_runtime_artifact_activation_switches_incompatible_empty_root(
     )
     monkeypatch.setattr(manager, "resolve_python", lambda: Path(sys.executable))
     monkeypatch.setattr(manager, "status", lambda: {"reason": None})
+    monkeypatch.setattr(
+        manager,
+        "provider_root_format",
+        lambda: manager._active_pointer().get("provider_root_format"),
+    )
+    monkeypatch.setattr(
+        manager,
+        "compatible_provider_root_formats",
+        lambda: frozenset(
+            {
+                manager._active_pointer().get("provider_root_format"),
+                *manager._active_pointer().get("compatible_provider_root_formats", []),
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        manager,
+        "artifact_fingerprint",
+        lambda: manager._active_pointer().get("artifact_fingerprint"),
+    )
 
     factory = FakeEverOSProcessFactory()
     instances = factory.supervised
@@ -4385,7 +4566,7 @@ async def test_runtime_artifact_activation_switches_incompatible_empty_root(
         _artifact_archive(),
     )
 
-    assert manager.provider_root_format() == "everos-2.0"
+    assert manager._active_pointer()["provider_root_format"] == "everos-2.0"
     assert len(instances) == 2
     assert instances[0].stopped is True
     assert instances[1].stopped is False
@@ -5091,6 +5272,11 @@ def _artifact_manifest(provider_root_format: str, *, compatible_formats: list[st
         digest="c" * 64,
         loaded_from="test",
         payload={
+            "release_state": "published",
+            "python_version": memory_artifact.EMBEDDED_PYTHON_VERSION,
+            "lock_sha256": memory_artifact.PACKAGE_LOCK_SHA256,
+            "lock_id": f"uv-lock-sha256:{memory_artifact.PACKAGE_LOCK_SHA256}",
+            "uv_version": memory_artifact.RUNTIME_BUILDER_UV_VERSION,
             "provider_root_format": provider_root_format,
             "compatible_provider_root_formats": compatible_formats,
         },

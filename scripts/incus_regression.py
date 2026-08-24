@@ -28,6 +28,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Container, Iterable, Iterator, Sequence
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from core.show_runtime_source import retired_show_runtime_source
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Incus runner is not used on Windows.
@@ -67,6 +73,7 @@ DEFAULT_WORKTREE_PORT_START = 15200
 DEFAULT_WORKTREE_PORT_END = 15399
 ENV_FILE_NAME = ".env.regression"
 ENV_PREFIX = "REGRESSION_"
+SHOW_RUNTIME_BUILD_TIMEOUT_SECONDS = 300
 SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{1,38}[a-z0-9]$")
 DAEMON_UNREACHABLE_HINT = (
     "The daemon did not answer, so whether the environment already exists is unknown and the "
@@ -104,6 +111,7 @@ class Runner:
         input_text: str | None = None,
         check: bool = True,
         capture: bool = False,
+        timeout: float | None = None,
     ) -> subprocess.CompletedProcess[str]:
         print("+ " + shlex.join(command))
         if self.dry_run:
@@ -117,7 +125,14 @@ class Runner:
             kwargs["input"] = input_bytes
         elif input_text is not None:
             kwargs["input"] = input_text
-        return subprocess.run(list(command), **kwargs)
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        try:
+            return subprocess.run(list(command), **kwargs)
+        except subprocess.TimeoutExpired as exc:
+            detail = f"Command timed out after {timeout:g} seconds: {shlex.join(command)}"
+            print(detail, file=sys.stderr)
+            raise RegressionError(detail) from exc
 
     def records(self, command: Sequence[str], *, what: str) -> list[dict]:
         """Return the objects the daemon enumerated, or raise if it could not answer.
@@ -244,6 +259,25 @@ def regression_env(suffix: str, default: str = "") -> str:
     if value is None:
         value = default
     return value.strip()
+
+
+def regression_show_runtime_source(source: str | None = None) -> str:
+    source = regression_env("SHOW_RUNTIME_SOURCE", "archive") if source is None else source.strip()
+    source = source or "archive"
+    return "archive" if retired_show_runtime_source(source) is not None else source
+
+
+def regression_show_runtime_env(
+    source: str | None,
+    service_home: str,
+) -> dict[str, str]:
+    resolved = regression_show_runtime_source(source)
+    env = {"VIBE_SHOW_RUNTIME_SOURCE": resolved}
+    if resolved == "archive":
+        env["VIBE_SHOW_RUNTIME_ARCHIVE_PATH"] = (
+            f"{service_home}/.cache/avibe-regression/vibe-show-runtime-node.tgz"
+        )
+    return env
 
 
 def host_bind_env(default: str = "127.0.0.1") -> str:
@@ -1775,15 +1809,15 @@ def compute_fingerprints(repo_root: Path) -> dict:
     # ``postcss.config.js``, ``eslint.config.js`` and ``ui/scripts/``; a build
     # input added tomorrow is covered without anyone remembering to extend a
     # literal, including the ones that live outside ``ui/``.
+    show_runtime_env = regression_show_runtime_env(None, SERVICE_HOME)
     return {
         "python": file_hash(repo_root, ["pyproject.toml", "uv.lock"]),
         "ui_deps": file_hash(repo_root, ["ui/package.json", "ui/package-lock.json"]),
         "ui_source": ui_source_hash(repo_root),
         "show_runtime": "|".join(
             [
-                regression_env("SHOW_RUNTIME_SOURCE", "github-source"),
-                regression_env("SHOW_RUNTIME_GITHUB_REPO", "https://github.com/avibe-bot/vibe-show-runtime.git"),
-                regression_env("SHOW_RUNTIME_GITHUB_REF", "main"),
+                show_runtime_env["VIBE_SHOW_RUNTIME_SOURCE"],
+                show_runtime_env.get("VIBE_SHOW_RUNTIME_ARCHIVE_PATH", ""),
             ]
         ),
     }
@@ -1944,9 +1978,7 @@ def runtime_env_payload(repo_root: Path | None = None) -> bytes:
         "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS": scm_version,
         "REGRESSION_UI_HOST": CONTAINER_UI_HOST,
         "AVIBE_ALLOW_DEV_STATE_MIGRATION": "1",
-        "VIBE_SHOW_RUNTIME_SOURCE": regression_env("SHOW_RUNTIME_SOURCE", "github-source"),
-        "VIBE_SHOW_RUNTIME_GITHUB_REPO": regression_env("SHOW_RUNTIME_GITHUB_REPO", "https://github.com/avibe-bot/vibe-show-runtime.git"),
-        "VIBE_SHOW_RUNTIME_GITHUB_REF": regression_env("SHOW_RUNTIME_GITHUB_REF", "main"),
+        **regression_show_runtime_env(None, SERVICE_HOME),
         "ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY", ""),
         "ANTHROPIC_BASE_URL": os.environ.get("ANTHROPIC_BASE_URL", ""),
         "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY", ""),
@@ -2317,15 +2349,47 @@ def restart_and_verify(runner: Runner, target: RegressionTarget, *, remote: str 
 
 
 def prepare_show_runtime(runner: Runner, target: RegressionTarget, *, remote: str | None) -> None:
-    result = runner.run(tenant_exec(target, f"{VENV_DIR}/bin/vibe runtime prepare --strict", remote=remote), check=False)
+    source_result = runner.run(
+        tenant_exec(target, 'printf "%s" "${VIBE_SHOW_RUNTIME_SOURCE:-}"', remote=remote),
+        capture=True,
+    )
+    runtime_env = regression_show_runtime_env(source_result.stdout or "", SERVICE_HOME)
+    runtime_env_prefix = " ".join(f"{key}={shlex.quote(value)}" for key, value in runtime_env.items())
+    runtime_env_exports = "\n".join(f"export {key}={shlex.quote(value)}" for key, value in runtime_env.items())
+    runner.run(
+        tenant_exec(
+            target,
+            f"""
+set -euo pipefail
+{runtime_env_exports}
+if [ "${{VIBE_SHOW_RUNTIME_SOURCE:-}}" = "archive" ]; then
+  : "${{VIBE_SHOW_RUNTIME_ARCHIVE_PATH:?VIBE_SHOW_RUNTIME_ARCHIVE_PATH is required for archive runtime source}}"
+  build_dir=$(mktemp -d)
+  trap 'rm -rf "$build_dir"' EXIT
+  git clone --depth 1 https://github.com/avibe-bot/vibe-show-runtime.git "$build_dir/runtime"
+  (
+    cd "$build_dir/runtime"
+    npm ci
+    npm run build
+    npm run bundle:vibe-remote
+  )
+  set -- "$build_dir"/runtime/dist/vibe-show-runtime-node-*.tgz
+  [ "$#" -eq 1 ] && [ -f "$1" ]
+  install -D -m 0644 "$1" "$VIBE_SHOW_RUNTIME_ARCHIVE_PATH"
+fi
+""".strip(),
+            remote=remote,
+        ),
+        timeout=SHOW_RUNTIME_BUILD_TIMEOUT_SECONDS,
+    )
+    result = runner.run(
+        tenant_exec(target, f"{runtime_env_prefix} {VENV_DIR}/bin/vibe runtime prepare --strict", remote=remote),
+        check=False,
+    )
     if result.returncode != 0:
-        # Retry from a fresh checkout. The npm cache is verified rather than
-        # deleted: it grows past a gigabyte, refilling it costs more than the
-        # rest of an update put together, and `npm cache verify` already
-        # discards exactly the corrupt entries that made deleting it tempting.
-        runner.run(tenant_exec(target, "rm -rf ~/.avibe/runtime/show-runtime/source && npm cache verify", remote=remote), check=False)
-        runner.run(tenant_exec(target, f"{VENV_DIR}/bin/vibe runtime prepare --strict", remote=remote))
-    runner.run(tenant_exec(target, f"{VENV_DIR}/bin/vibe runtime status --json", remote=remote))
+        runner.run(tenant_exec(target, "rm -rf ~/.avibe/runtime/show-runtime/prebuilt/current", remote=remote), check=False)
+        runner.run(tenant_exec(target, f"{runtime_env_prefix} {VENV_DIR}/bin/vibe runtime prepare --strict", remote=remote))
+    runner.run(tenant_exec(target, f"{runtime_env_prefix} {VENV_DIR}/bin/vibe runtime status --json", remote=remote))
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -2563,7 +2627,7 @@ def print_summary(target: RegressionTarget) -> None:
     print(f"  Target: {target.target}")
     print(f"  Project: {target.project}")
     print(f"  Instance: {target.instance}")
-    print(f"  Show Runtime source: {regression_env('SHOW_RUNTIME_SOURCE', 'github-source')}")
+    print(f"  Show Runtime source: {regression_show_runtime_source()}")
 
 
 def cmd_status(args: argparse.Namespace) -> int:

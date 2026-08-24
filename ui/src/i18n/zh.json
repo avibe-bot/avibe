@@ -480,6 +480,8 @@
       "codexApiKeyRemoveConfirm": "确定要从 auth.json 移除已保存的 OpenAI API Key 吗？如果有 OAuth 凭据，Codex 会回落到 OAuth；否则会变成未配置状态。",
       "codexApiKeyRemoved": "已移除 OpenAI API Key。",
       "codexApiKeyRemoveFailed": "移除 API Key 失败：{{detail}}",
+      "backendNoticeV2ClearFailed": "API Key 已删除，但保存的设置可能仍未更新：{{detail}}",
+      "backendNoticeDetailUnknown": "设置保存未完成",
       "codexNoticeClearedRelayPointer": "已清除自定义中继指向（{{provider}} → {{url}}）：OAuth 凭据无法被自定义 base_url 验证，Codex 将改为使用 OpenAI 官方端点。如需切回，请重新添加 API Key 或手动编辑 ~/.codex/config.toml。",
       "codexNoticeGeneric": "配置提示：{{code}}",
       "opencodeProviderSignIn": "登录",
@@ -655,7 +657,8 @@
         },
         "tab": {
           "hub": "来源与网关",
-          "usage": "用量"
+          "usage": "用量",
+          "logs": "日志"
         }
       },
       "direct": {
@@ -770,8 +773,7 @@
         "modelCount_other": "{{count}} 个型号",
         "moreModels_one": "还有 {{count}} 个型号",
         "moreModels_other": "还有 {{count}} 个型号",
-        "collapse_one": "还有 {{count}} 个型号",
-        "collapse_other": "还有 {{count}} 个型号",
+        "collapse": "收起",
         "retry": "重试",
         "supply": {
           "none": "没有可用来源",
@@ -1097,11 +1099,6 @@
         "yesterday": "昨天",
         "empty": "暂无切换记录",
         "deletedSource": "已删除"
-      },
-      "advanced": {
-        "title": "高级",
-        "detail": "跨厂商自动顶替（默认关）· 请求日志 · 诊断",
-        "comingSoon": "高级设置即将上线"
       },
       "addKey": {
         "title": "添加 API Key",
@@ -4736,7 +4733,7 @@
     },
     "roles": {
       "owner": "所有者",
-      "member": "Avibe 成员",
+      "member": "成员",
       "editor": "编辑者",
       "viewer": "查看者"
     },

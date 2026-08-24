@@ -12,6 +12,7 @@ from core.vibe_agents import (
     VibeAgent,
     VibeAgentAccessError,
     VibeAgentStore,
+    ensure_agent_name_access,
     ensure_agent_selection_access,
     ensure_default_agent_access,
     ensure_session_agent_access,
@@ -131,7 +132,7 @@ def _restricted_agent_keys() -> list[str]:
 
 
 def _set_default_agent_row(store: VibeAgentStore, agent_name: str) -> None:
-    """Point instance-wide routing at an Agent, bypassing the Owner-only gate.
+    """Point instance-wide routing at an Agent, bypassing the management gate.
 
     Defaults are advisory: the setter accepts any Agent its caller may manage,
     including one whose policy admits less than the whole instance. Writing the
@@ -236,10 +237,9 @@ def test_owner_can_create_agent_without_a_trusted_local_identity(monkeypatch, tm
 def test_active_org_agent_management_is_allowed_inside_the_store(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store, agents = _seed_agents_with_policies()
-    # Resource ACL management stays reserved to owner/admin Organization roles
-    # under the temporary full-access rollout (see #1343); a plain member has
-    # no management authority.
-    member = _organization_context("member-1")
+    member = _organization_context("member-1", instance_role="member")
+    editor = _organization_context("editor-1")
+    resource_owner_editor = _organization_context("owner-1")
     admin = resource_access_service.ResourceUserContext(
         subject="admin-1",
         email="admin-1@example.com",
@@ -253,19 +253,56 @@ def test_active_org_agent_management_is_allowed_inside_the_store(monkeypatch, tm
     )
     owner = _organization_context("owner-1", instance_role="owner")
     try:
+        builtin = store.ensure_builtin_default_agent(backend="codex")
+        with store.engine.connect() as connection:
+            # Member management is owner-equivalent across every policy shape,
+            # including another subject's policy and a built-in with no row.
+            for agent in (*agents.values(), builtin):
+                assert resource_access_service.can_manage_resource_acl(
+                    member,
+                    "agent",
+                    agent.id,
+                    connection=connection,
+                )
+                assert not resource_access_service.can_manage_resource_acl(
+                    editor,
+                    "agent",
+                    agent.id,
+                    connection=connection,
+                )
+            for agent in agents.values():
+                assert resource_access_service.can_manage_resource_acl(
+                    resource_owner_editor,
+                    "agent",
+                    agent.id,
+                    connection=connection,
+                )
+            assert not resource_access_service.can_manage_resource_acl(
+                resource_owner_editor,
+                "agent",
+                builtin.id,
+                connection=connection,
+            )
+
         with pytest.raises(VibeAgentAccessError):
-            store.update(agents["public"].name, description="member update", user_context=member)
+            store.update(agents["public"].name, description="editor update", user_context=editor)
         with pytest.raises(VibeAgentAccessError):
-            store.remove(agents["public"].name, user_context=member)
+            store.remove(agents["public"].name, user_context=editor)
+        member_updated = store.update(
+            agents["public"].name,
+            description="member update",
+            user_context=member,
+        )
+        assert member_updated.description == "member update"
         updated = store.update(agents["public"].name, description="admin update", user_context=admin)
         assert updated.description == "admin update"
-        store.set_default_agent_name(agents["public"].name, user_context=admin)
+        store.set_default_agent_name(agents["public"].name, user_context=member)
         assert store.get_default_agent_name() == agents["public"].name
         # A default is advisory: an Agent narrower than the whole audience is a
         # legitimate assignment, because the ACL is enforced per-principal at use
         # time (see ``resolve_usable_default_agent``) rather than at bind time.
         for key in _restricted_agent_keys():
-            store.set_default_agent_name(agents[key].name, user_context=admin)
+            store.set_default_agent_name(agents[key].name, user_context=member)
             assert store.get_default_agent_name() == agents[key].name
         store.set_default_agent_name(agents["public"].name, user_context=admin)
         assert store.remove(agents["public"].name, user_context=admin) is True
@@ -594,27 +631,84 @@ def test_personal_install_default_routing_never_degrades(monkeypatch, tmp_path) 
         store.close()
 
 
-def test_missing_agent_selector_fails_closed_for_editor_only(monkeypatch, tmp_path) -> None:
+def test_legacy_runtime_fallbacks_follow_management_entitlement(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store = VibeAgentStore()
     try:
         with store.engine.connect() as connection:
-            with pytest.raises(VibeAgentAccessError):
-                ensure_agent_selection_access(
-                    connection,
-                    agent_name="deleted-legacy-agent",
-                    user_context=_organization_context("member-1"),
-                )
-            assert (
-                ensure_agent_selection_access(
-                    connection,
-                    agent_name="deleted-legacy-agent",
-                    user_context=_organization_context("owner-1", instance_role="owner"),
-                )
-                is None
-            )
+            for role in ("viewer", "editor", "member", "owner"):
+                context = _organization_context(f"{role}-1", instance_role=role)
+                if context.can_manage_agents:
+                    assert (
+                        ensure_agent_selection_access(
+                            connection,
+                            agent_name="codex",
+                            user_context=context,
+                        )
+                        is None
+                    )
+                    assert (
+                        ensure_session_agent_access(
+                            connection,
+                            {"agent_backend": "codex"},
+                            user_context=context,
+                        )
+                        is None
+                    )
+                else:
+                    with pytest.raises(VibeAgentAccessError):
+                        ensure_agent_selection_access(
+                            connection,
+                            agent_name="codex",
+                            user_context=context,
+                        )
+                    with pytest.raises(VibeAgentAccessError):
+                        ensure_session_agent_access(
+                            connection,
+                            {"agent_backend": "codex"},
+                            user_context=context,
+                        )
     finally:
         store.close()
+
+
+def test_member_cannot_save_non_catalog_task_or_watch_bindings(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    context = _organization_context("member-1", instance_role="member")
+    task_store = ScheduledTaskStore(tmp_path / "tasks.json")
+    watch_store = ManagedWatchStore(tmp_path / "watches.json")
+
+    with pytest.raises(ValueError):
+        task_store.add_task(
+            session_key="slack::channel::C123",
+            prompt="run task",
+            schedule_type="cron",
+            agent_name="deleted-legacy-agent",
+            cron="0 * * * *",
+            timezone_name="UTC",
+            user_context=context,
+        )
+    with pytest.raises(ValueError):
+        watch_store.add_watch(
+            name="legacy watch",
+            session_key="slack::channel::C123",
+            command=["true"],
+            shell_command=None,
+            prefix=None,
+            cwd=str(tmp_path),
+            mode="once",
+            timeout_seconds=1,
+            lifetime_timeout_seconds=0,
+            retry_exit_codes=[75],
+            retry_delay_seconds=1,
+            post_to=None,
+            deliver_key=None,
+            agent_name="deleted-legacy-agent",
+            user_context=context,
+        )
+
+    assert task_store.list_tasks() == []
+    assert watch_store.list_watches() == []
 
 
 def test_active_org_agent_detail_uses_full_runtime_projection(monkeypatch, tmp_path) -> None:
@@ -669,6 +763,7 @@ def test_editor_agent_selection_and_harness_bindings_follow_acl(monkeypatch, tmp
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path, paired=True, instance_kind="organization")
     store, agents = _seed_agents_with_policies()
+    builtin = store.ensure_builtin_default_agent(backend="codex")
     private_agent = agents["private"]
     _set_default_agent_row(store, private_agent.name)
     store.close()
@@ -697,8 +792,7 @@ def test_editor_agent_selection_and_harness_bindings_follow_acl(monkeypatch, tmp
     assert {"public-agent", "scope-agent"} == {
         agent["name"] for agent in catalog.get_json()["agents"]
     }
-    # A plain active Organization member is denied mutations under the
-    # Resource ACL boundary.
+    # Editor and Viewer remain below the Agent-management tier.
     denied_mutation = client.patch(
         "/api/agents/public-agent",
         json={"description": "member update"},
@@ -707,30 +801,57 @@ def test_editor_agent_selection_and_harness_bindings_follow_acl(monkeypatch, tmp
         environ_base=_remote_peer(),
     )
     assert denied_mutation.status_code == 403
-    # Only the Instance Owner can manage Agents.
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
         _organization_cookie(
             config,
-            subject="admin-1",
+            subject="viewer-1",
             groups=["group-engineering"],
-            instance_role="owner",
-            organization_role="admin",
+            instance_role="viewer",
         ),
         domain="alex.avibe.bot",
     )
-    mutation = client.patch(
-        "/api/agents/public-agent",
-        json={"description": "admin update"},
+    denied_viewer_mutation = client.patch(
+        f"/api/agents/{builtin.name}",
+        json={"enabled": False, "model": "gpt-5.4-mini"},
         headers=csrf_headers(client, "https://alex.avibe.bot"),
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),
     )
-    assert mutation.status_code == 200
-    # Instance-wide default routing is Owner-only, but the Agent it points at is
-    # not constrained by policy shape: the default is advisory and the ACL is
-    # enforced per-principal at use time, so a narrower Agent is accepted here
-    # and degrades for whoever cannot use it.
+    assert denied_viewer_mutation.status_code == 403
+
+    # Member can mutate a policy-less built-in and another subject's Agent.
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        _organization_cookie(
+            config,
+            subject="member-1",
+            groups=["group-engineering"],
+            instance_role="member",
+        ),
+        domain="alex.avibe.bot",
+    )
+    builtin_mutation = client.patch(
+        f"/api/agents/{builtin.name}",
+        json={"enabled": False, "model": "gpt-5.4-mini"},
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+    assert builtin_mutation.status_code == 200
+    assert builtin_mutation.get_json()["agent"]["enabled"] is False
+    assert builtin_mutation.get_json()["agent"]["model"] == "gpt-5.4-mini"
+    member_mutation = client.patch(
+        "/api/agents/public-agent",
+        json={"description": "member update"},
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+    assert member_mutation.status_code == 200
+
+    # A member may set the advisory instance default to a narrower Agent. The
+    # ACL is still enforced per principal when that default is resolved.
     for key in _restricted_agent_keys():
         default_mutation = client.post(
             "/api/agents/default",
@@ -740,6 +861,16 @@ def test_editor_agent_selection_and_harness_bindings_follow_acl(monkeypatch, tmp
             environ_base=_remote_peer(),
         )
         assert default_mutation.status_code == 200
+    degraded_context = _organization_context("editor-1", group_ids=None)
+    engine = get_cached_sqlite_engine()
+    with engine.connect() as connection:
+        configured_default = resolve_effective_default_agent(connection)
+        degraded_default = ensure_default_agent_access(
+            connection,
+            user_context=degraded_context,
+        )
+    assert configured_default.id == agents[_restricted_agent_keys()[-1]].id
+    assert degraded_default.id == agents["public"].id
     shared_default = client.post(
         "/api/agents/default",
         json={"name": agents["public"].name},
@@ -749,7 +880,7 @@ def test_editor_agent_selection_and_harness_bindings_follow_acl(monkeypatch, tmp
     )
     assert shared_default.status_code == 200
 
-    engine = get_cached_sqlite_engine()
+    editor_context = _organization_context("editor-1")
     with engine.begin() as connection:
         scope_id = upsert_scope(
             connection,
@@ -764,16 +895,24 @@ def test_editor_agent_selection_and_harness_bindings_follow_acl(monkeypatch, tmp
             agent_backend="codex",
             agent_name=agents["scope"].name,
             agent_id=agents["scope"].id,
-            user_context=context,
+            user_context=editor_context,
         )
         assert session["agent_id"] == agents["scope"].id
         backend_only = workbench_sessions_service.create_session(
             connection,
             scope_id=scope_id,
             agent_backend="codex",
-            user_context=context,
+            user_context=_organization_context("member-1", instance_role="member"),
         )
         assert backend_only["agent_backend"] == "codex"
+        assert (
+            ensure_session_agent_access(
+                connection,
+                backend_only,
+                user_context=_organization_context("member-1", instance_role="member"),
+            )
+            is None
+        )
 
     task_store = ScheduledTaskStore(tmp_path / "tasks.json")
     watch_store = ManagedWatchStore(tmp_path / "watches.json")

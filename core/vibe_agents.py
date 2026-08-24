@@ -256,10 +256,10 @@ def ensure_agent_selection_access(
     if row is None:
         if missing_is_error:
             raise LookupError("Agent not found")
-        # Owners keep the pre-catalog fallback for historical backend names.
-        # Everyone else must resolve a real Agent row; a missing selector is
-        # not an authorization grant.
-        if context.is_instance_owner:
+        # Members keep the pre-catalog fallback for historical backend names:
+        # selecting a backend is part of Agent entitlement, not Owner identity.
+        # Editors and Viewers must still resolve a real Agent row.
+        if context.has_role("member"):
             return None
         raise VibeAgentAccessError("Agent access is not permitted.")
 
@@ -289,9 +289,9 @@ def ensure_agent_name_access(
         try:
             store.require_accessible(str(agent_name), user_context=context)
         except ValueError:
-            # Legacy local/Owner task definitions may refer to a backend name
-            # that predates the Vibe Agent catalog. Keep those internal flows
-            # intact; an Editor or Viewer must still resolve a real ACL row.
+            # Existing local/Owner definitions may predate the Agent catalog.
+            # A Member binding is new data and must resolve a real Agent row,
+            # matching the execution-time catalog requirement.
             if context.is_instance_owner:
                 return
             raise
@@ -637,7 +637,9 @@ def ensure_session_agent_access(
         )
     if not session.get("agent_backend"):
         return ensure_default_agent_access(connection, user_context=context)
-    if not context.is_instance_owner:
+    # A backend-only row predates the Agent catalog. Dispatch entitlement
+    # follows Agent management rank; it is not an Owner identity operation.
+    if not context.has_role("member"):
         raise VibeAgentAccessError("Agent access is not permitted.")
     return None
 
@@ -1747,7 +1749,7 @@ class VibeAgentStore:
     ) -> None:
         normalized = normalize_agent_name(name)
         context = resolve_resource_access_context(user_context)
-        if not context.can_manage_access_members:
+        if not context.can_manage_agents:
             raise VibeAgentAccessError("Agent access is not permitted.")
         now = _utc_now_iso()
         with self.engine.begin() as conn:
@@ -1772,8 +1774,8 @@ class VibeAgentStore:
                     reason="disabled",
                 )
             # No audience validation here: the default is advisory and the ACL
-            # is enforced per-principal at use time. The Owner-only gate on this
-            # setter is what bounds who may point instance-wide routing.
+            # is enforced per-principal at use time. Agent managers may point
+            # instance-wide routing without widening the target Agent's ACL.
             self._write_default_agent_name(conn, agent.name, now=now)
 
     def get_default_agent(self, *, enabled_only: bool = True) -> Optional[VibeAgent]:

@@ -6,6 +6,8 @@
 // shortfall presented as spare capacity.
 import { cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -82,6 +84,13 @@ const bodyRows = (table: HTMLElement) =>
  * which column each of them answers.
  */
 const figures = (row: HTMLElement) => [...within(row).getAllByRole('rowheader'), ...within(row).getAllByRole('cell')];
+
+const surfaceCss = readFileSync(join(__dirname, 'modelHubSurface.css'), 'utf8');
+
+const rule = (selector: string) => {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return surfaceCss.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`))?.[1] ?? '';
+};
 
 afterEach(cleanup);
 
@@ -257,6 +266,43 @@ describe('UsageTab', () => {
       expect(stated).toHaveLength(said.length);
       stated.forEach((text, column) => expect(said[column]).toContain(text));
     });
+  });
+
+  it('MH-USAGE-027: keeps a 390px viewport within bounds and states long chart labels without clipping', () => {
+    const longPeak = counters({ input_tokens: 123_456_789_012, output_tokens: 34_567_890 });
+    const { container } = draw(readyRegion(summary({
+      from_day: '2026-08-16',
+      to_day: '2026-08-18',
+      window_days: 3,
+      totals: longPeak,
+      sources: [source({ ...longPeak, models: [model(longPeak)] })],
+      days: [{ ...longPeak, day: '2026-08-18' }],
+    })));
+
+    // A table's intrinsic columns can remain wider than the one-pixel `sr-only`
+    // box applied to the table itself. A generic paint/layout container is the
+    // boundary that keeps the complete semantic table out of visual geometry.
+    const dailyTable = screen.getByRole('table', { name: /Metered tokens and requests per day/ });
+    expect(dailyTable.classList.contains('sr-only')).toBe(false);
+    expect(dailyTable.parentElement?.classList.contains('sr-only')).toBe(true);
+    expect(dailyTable.parentElement?.classList.contains('model-hub-usage-a11y-table')).toBe(true);
+    expect(rule('.model-hub-usage-a11y-table')).toContain('contain: strict');
+
+    const axis = container.querySelector('.model-hub-usage-axis');
+    const labels = [...(axis?.querySelectorAll('.model-hub-usage-axis-label') ?? [])];
+    expect(labels).toHaveLength(3);
+    expect(labels[1].textContent).toContain('123,491,356,902');
+    expect(labels[1].textContent).toContain('Aug 18, 2026');
+    for (const label of labels) expect(label.classList.contains('truncate')).toBe(false);
+
+    // jsdom has no layout engine, so the narrow-width browser property is stated
+    // by the same min-zero fractional grid and emergency wrapping Chrome uses.
+    // No track owns an intrinsic pixel width, so this holds below and above 390px
+    // rather than special-casing the reproduced fixture width.
+    expect(rule('.model-hub-usage-axis')).toContain('grid-template-columns: var(--model-hub-usage-axis-columns)');
+    expect(rule('.model-hub-usage-axis-label')).toContain('min-width: 0');
+    expect(rule('.model-hub-usage-axis-label')).toContain('overflow-wrap: anywhere');
+    expect(rule('.model-hub-usage')).toContain('--model-hub-usage-axis-columns: minmax(0, 1fr) minmax(0, 2fr) minmax(0, 1fr)');
   });
 
   it('MH-USAGE-024: every figure the report states names the row and the column it answers', () => {

@@ -266,6 +266,42 @@ describe('AppShell Permissions navigation', () => {
 });
 
 describe('AppShell remote Apps access', () => {
+  it('gives the mobile Show Page app the full viewport without duplicate shell chrome', async () => {
+    render(
+      <MemoryRouter initialEntries={['/apps/show/session-1']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="apps/show/:sessionId" element={<div data-testid="show-page-surface" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const surface = await screen.findByTestId('show-page-surface');
+    expect(screen.queryByRole('banner')).toBeNull();
+    expect(document.querySelector('nav.fixed.inset-x-0.bottom-0')).toBeNull();
+    expect(surface.parentElement?.className).toContain('h-full p-0');
+    expect(surface.parentElement?.className).not.toContain('px-4 py-5');
+  });
+
+  it.each(['/apps/files', '/apps/terminal', '/apps/editor'])('gives the mobile built-in app %s the full viewport', async (path) => {
+    render(
+      <MemoryRouter initialEntries={[path]}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path={path.slice(1)} element={<div data-testid="builtin-app-surface" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const surface = await screen.findByTestId('builtin-app-surface');
+    expect(screen.queryByRole('banner')).toBeNull();
+    expect(document.querySelector('nav.fixed.inset-x-0.bottom-0')).toBeNull();
+    expect(surface.parentElement?.className).toContain('h-full p-0');
+    expect(surface.parentElement?.className).not.toContain('px-4 py-5');
+  });
+
   it.each([
     ['owner', true],
     ['member', false],

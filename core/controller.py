@@ -357,6 +357,10 @@ class Controller:
 
         # Background task for cleanup
         self.cleanup_task: Optional[asyncio.Task] = None
+        self.trace_retention_task: Optional[asyncio.Task] = None
+        self._trace_retention_executor: Optional[Any] = None
+        self._trace_retention_cancel_event: Optional[threading.Event] = None
+        self._trace_retention_future: Optional[Any] = None
         self._memory_reconcile_task: Optional[asyncio.Task] = None
         self._memory_replacement_gate = asyncio.Lock()
         self._memory_factory_reset_task: Optional[asyncio.Task[dict[str, Any]]] = None
@@ -487,7 +491,7 @@ class Controller:
 
         self.memory_runtime = create_memory_runtime(
             getattr(self.config, "memory", None) or MemoryConfig(),
-            processing_event=self._send_memory_processing_event,
+            processing_event=self._log_memory_processing_event,
             on_config_settled=self._adopt_settled_memory_config,
         )
         self.memory_module = self.memory_runtime.module
@@ -864,7 +868,7 @@ class Controller:
                             artifact_manager=getattr(runtime, "artifact_manager", None),
                             process_factory=getattr(runtime, "process_factory", None),
                             effective_home=runtime.effective_home,
-                            processing_event=self._send_memory_processing_event,
+                            processing_event=self._log_memory_processing_event,
                             on_config_settled=self._adopt_settled_memory_config,
                         )
                         if not await self._retain_failed_factory_reset_runtime(
@@ -900,7 +904,7 @@ class Controller:
                         artifact_manager=runtime.artifact_manager,
                         process_factory=runtime.process_factory,
                         effective_home=runtime.effective_home,
-                        processing_event=self._send_memory_processing_event,
+                        processing_event=self._log_memory_processing_event,
                         on_config_settled=self._adopt_settled_memory_config,
                     )
                     activation = await fresh.activate_fresh(settled)
@@ -1605,6 +1609,11 @@ class Controller:
                 self.cleanup_task = asyncio.create_task(self.periodic_cleanup())
         except Exception as e:
             logger.error("Failed to start idle session cleanup: %s", e, exc_info=True)
+        try:
+            if self.trace_retention_task is None or self.trace_retention_task.done():
+                self.trace_retention_task = asyncio.create_task(self._agent_events_retention_loop())
+        except Exception as e:
+            logger.error("Failed to start agent trace-event retention: %s", e, exc_info=True)
 
     async def _recover_runtime_owners(self) -> None:
         """Restore durable execution owners before any producer can admit work."""
@@ -2782,31 +2791,26 @@ class Controller:
                 int((time.monotonic() - started_at) * 1000),
             )
 
-    async def _send_memory_processing_event(
+    async def _log_memory_processing_event(
         self,
         event: str,
         kind: str | None,
         occurred_at: str,
         queued: int,
     ) -> bool:
-        from core.handlers.admin_notifications import send_admin_text
+        """Record one durable Memory health event without notifying IM users."""
 
-        store = self.settings_manager.get_store()
-        admin_ids = list(store.get_admins().keys()) if store else []
-        if not admin_ids:
-            return True
-        if event == "recovered":
-            key = "memory.alert.recovered"
-        else:
-            key = "memory.alert.credential" if kind == "credential" else "memory.alert.engine"
-        text = self._t(key, occurred_at=occurred_at, queued=queued)
-        delivered = await send_admin_text(
-            self,
-            admin_ids,
-            text,
-            log_label="Memory processing notification",
+        logger.log(
+            logging.INFO if event == "recovered" else logging.WARNING,
+            "Memory processing event=%s kind=%s occurred_at=%s queued=%d",
+            event,
+            kind or "none",
+            occurred_at,
+            queued,
         )
-        return bool(delivered)
+        # Logging is the terminal sink for this durable event. Acknowledge it so
+        # the coordinator does not replay the same record on every drain tick.
+        return True
 
     def update_thread_message_id(self, context: MessageContext) -> None:
         """Run real-turn-start hooks after the runtime gate is acquired."""
@@ -3258,6 +3262,143 @@ class Controller:
         )
         return claude_timeout, codex_timeout
 
+    _AGENT_EVENTS_RETENTION_CHECK_INTERVAL_SECONDS = 3600
+
+    def _agent_events_retention_config(self) -> dict[str, Any] | None:
+        """Read the retention window from the persisted V2 config, failing closed.
+
+        The controller's ``self.config`` is an ``AppCompatConfig`` shim without
+        the runtime section, so this reloads ``V2Config`` directly. Deletion is
+        irreversible, so every ambiguous state disables the automatic pass:
+        config recovery defaults (``load_warnings`` set — the persisted policy
+        is unknown), a malformed opt-out, or a malformed window (a shorter
+        default must never silently override a longer persisted policy).
+        """
+        from storage import agent_events_retention
+
+        try:
+            from config.v2_config import V2Config
+
+            config = V2Config.load()
+        except Exception:
+            logger.warning("Agent trace-event retention: config unreadable; disabling automatic pass", exc_info=True)
+            return None
+
+        policy = agent_events_retention.resolve_policy(config)
+        if policy.recovered:
+            logger.warning(
+                "Agent trace-event retention: persisted policy is malformed or recovered; "
+                "disabling automatic pass until the config is fixed"
+            )
+            return None
+        if not policy.enabled:
+            return None
+        return {"days": policy.days}
+
+    def _run_agent_events_retention_pass(
+        self, cancel_event: Optional[threading.Event] = None
+    ) -> dict[str, Any]:
+        """One maintenance pass on the worker thread (no VACUUM: manual-only).
+
+        Full ``VACUUM`` holds SQLite's sole write lock for the entire rewrite;
+        on a large live database that can exceed every writer's busy timeout.
+        The automatic path therefore deletes rows only and reports compaction
+        as not attempted — ``vibe data retention --run`` owns compaction.
+        """
+        from storage import agent_events_retention
+        from storage.db import get_cached_sqlite_engine
+
+        config = self._agent_events_retention_config()
+        if config is None:
+            return {"status": "disabled"}
+        engine = get_cached_sqlite_engine()
+        return agent_events_retention.run_once(
+            engine,
+            retention_days=int(config["days"]),
+            compact=False,
+            cancel_event=cancel_event,
+        )
+
+    async def _join_trace_retention_future(self) -> None:
+        """Wait for the worker's current batch to observe cooperative stop."""
+
+        future = getattr(self, "_trace_retention_future", None)
+        if future is None:
+            return
+        # The worker checks the event between transactions.  Keep waiting even
+        # if the outer task receives another cancellation so shutdown never
+        # disposes the executor while SQLite work is still executing.
+        while not future.done():
+            try:
+                await asyncio.shield(future)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+
+    async def _agent_events_retention_loop(self) -> None:
+        """Bounded retention for internal agent trace events (avibe#1506).
+
+        Checks immediately and then hourly; the storage marker inside
+        ``agent_events_retention.run_once`` owns the once-per-day cadence, so
+        short-lived sessions still get their first pass on startup. Work runs
+        on a single-worker executor so shutdown can join it.
+        """
+        import concurrent.futures
+
+        executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="trace-retention"
+        )
+        cancel_event = threading.Event()
+        self._trace_retention_executor = executor
+        self._trace_retention_cancel_event = cancel_event
+        logger.info(
+            "Agent trace-event retention loop started (check interval=%ss)",
+            self._AGENT_EVENTS_RETENTION_CHECK_INTERVAL_SECONDS,
+        )
+        loop = asyncio.get_running_loop()
+        try:
+            while True:
+                try:
+                    future = loop.run_in_executor(
+                        executor,
+                        self._run_agent_events_retention_pass,
+                        cancel_event,
+                    )
+                    self._trace_retention_future = future
+                    try:
+                        summary = await asyncio.shield(future)
+                    finally:
+                        if self._trace_retention_future is future and future.done():
+                            self._trace_retention_future = None
+                    status = str((summary or {}).get("status") or "unknown")
+                    if status not in {"not_due", "disabled"}:
+                        logger.info(
+                            "Agent trace-event retention %s: deleted=%s compaction=%s",
+                            status,
+                            (summary or {}).get("deleted_rows"),
+                            ((summary or {}).get("compaction") or {}).get("status"),
+                        )
+                except asyncio.CancelledError:
+                    cancel_event.set()
+                    await self._join_trace_retention_future()
+                    raise
+                except Exception:
+                    logger.error("Agent trace-event retention failed", exc_info=True)
+                await asyncio.sleep(self._AGENT_EVENTS_RETENTION_CHECK_INTERVAL_SECONDS)
+        finally:
+            cancel_event.set()
+            await self._join_trace_retention_future()
+            try:
+                executor.shutdown(wait=True)
+            finally:
+                if self._trace_retention_executor is executor:
+                    self._trace_retention_executor = None
+                if self._trace_retention_cancel_event is cancel_event:
+                    self._trace_retention_cancel_event = None
+                if self._trace_retention_future is not None and self._trace_retention_future.done():
+                    self._trace_retention_future = None
+
     async def periodic_cleanup(self):
         """Sweep idle backend runtime state without interrupting active work."""
         claude_timeout, codex_timeout = self._get_idle_cleanup_timeouts()
@@ -3341,6 +3482,28 @@ class Controller:
                     pass
             self.cleanup_task = None
 
+        async def _cancel_trace_retention_task() -> None:
+            cancel_event = getattr(self, "_trace_retention_cancel_event", None)
+            if cancel_event is not None:
+                cancel_event.set()
+            if self.trace_retention_task and not self.trace_retention_task.done():
+                self.trace_retention_task.cancel()
+                try:
+                    await self.trace_retention_task
+                except asyncio.CancelledError:
+                    pass
+            self.trace_retention_task = None
+            # The loop normally joins this future in its finally block.  Keep
+            # the fallback here for partial startup/shutdown states where the
+            # task was never fully scheduled.
+            await self._join_trace_retention_future()
+            executor = getattr(self, "_trace_retention_executor", None)
+            if executor is not None:
+                executor.shutdown(wait=True)
+                self._trace_retention_executor = None
+            self._trace_retention_cancel_event = None
+            self._trace_retention_future = None
+
         async def _cancel_internal_server_task() -> None:
             task = getattr(self, "_internal_server_task", None)
             if task is not None and not task.done():
@@ -3378,6 +3541,14 @@ class Controller:
             logger.debug(f"Internal dispatch server status write skipped: {e}")
 
         _stop_loop_coroutine(_cancel_cleanup_task(), "Idle cleanup task")
+        # Retention cancellation is cooperative at a delete-batch boundary;
+        # wait for that bounded join instead of abandoning the worker after
+        # the generic five-second cleanup timeout.
+        _stop_loop_coroutine(
+            _cancel_trace_retention_task(),
+            "Agent trace retention task",
+            timeout=None,
+        )
         _stop_loop_coroutine(
             self._join_runtime_work_stack_shutdown(),
             "Runtime work stack",

@@ -11,7 +11,7 @@ import i18n from '@/i18n';
 import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
 import { AgentCard as RuntimeAgentCard } from './AgentCard';
-import { modelChainKey, NOMINAL_MODEL_BASELINE } from './modelRows';
+import { COLLAPSED_MODEL_LIMIT, modelChainKey } from './modelRows';
 import { readyRegion } from './regionRead';
 import { freshRuntimeProjection } from './runtimeLifecycle';
 import type { AgentSupply, RuntimeDependency, Source } from './types';
@@ -94,7 +94,7 @@ describe('AgentCard', () => {
 
   it('renders the AgentSupply collapse projection and rereads chains on expand and collapse', async () => {
     const onProbeSettled = vi.fn();
-    const models = Array.from({ length: NOMINAL_MODEL_BASELINE + 2 }, (_, index) => `model-${index + 1}`);
+    const models = Array.from({ length: COLLAPSED_MODEL_LIMIT + 2 }, (_, index) => `model-${index + 1}`);
     render(<I18nextProvider i18n={i18n}><AgentCard agents={[{
       ...hubAgent,
       builtin_models: models,
@@ -102,19 +102,21 @@ describe('AgentCard', () => {
       routes: {},
     }]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={onProbeSettled} /></I18nextProvider>);
 
+    expect(screen.getAllByRole('button', { name: /route chain/i })).toHaveLength(COLLAPSED_MODEL_LIMIT);
     expect(screen.queryByText(models.at(-1) as string)).toBeNull();
     await userEvent.click(screen.getByRole('button', { name: /more model/i }));
     expect(screen.getByText(models.at(-1) as string)).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^Collapse$|^收起$/i })).toBeTruthy();
     expect(onProbeSettled).toHaveBeenCalledOnce();
-    await userEvent.click(screen.getByRole('button', { name: /more model/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^Collapse$|^收起$/i }));
     expect(screen.queryByText(models.at(-1) as string)).toBeNull();
     expect(onProbeSettled).toHaveBeenCalledTimes(2);
     expect(onProbeSettled).toHaveBeenNthCalledWith(1, expect.objectContaining({ backend: 'claude' }));
     expect(onProbeSettled).toHaveBeenNthCalledWith(2, expect.objectContaining({ backend: 'claude' }));
   });
 
-  it('keeps a nonempty paused route visible beyond the nominal collapsed rows', () => {
-    const models = Array.from({ length: NOMINAL_MODEL_BASELINE + 2 }, (_, index) => `model-${index + 1}`);
+  it('folds a paused route beyond the six-row limit until the group is expanded', async () => {
+    const models = Array.from({ length: COLLAPSED_MODEL_LIMIT + 2 }, (_, index) => `model-${index + 1}`);
     const pausedModel = models.at(-1) as string;
     render(<I18nextProvider i18n={i18n}><AgentCard agents={[{
       ...hubAgent,
@@ -127,6 +129,8 @@ describe('AgentCard', () => {
       })),
     }]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
 
+    expect(screen.queryByText(pausedModel)).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: /more model/i }));
     expect(screen.getByText(pausedModel)).toBeTruthy();
     expect(screen.getByText(/^Supply paused$|^供给已暂停$/i)).toBeTruthy();
   });

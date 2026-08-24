@@ -80,6 +80,11 @@ composite status poll. A section may be marked stale or unavailable while the
 other independently sourced sections continue to render, including while
 Memory is disabled.
 
+Memory processing pause and recovery events are written only to the main Avibe
+service log, including the fault kind, occurrence time, and queued-capture
+count. They are not sent as direct messages to administrators on Slack,
+Discord, Telegram, Lark, WeChat, or other IM transports.
+
 The timeline is the installation operator's view across every valid project and
 user. Each row and its detail view visibly includes the full **Project ID** and
 **User ID**, followed by the path from message capture through memcell creation,

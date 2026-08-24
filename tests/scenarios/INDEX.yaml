@@ -71,6 +71,7 @@ capabilities:
     name: Memory remains optional across delivery and session lifecycle
     status: active
     catalog: tests/scenarios/memory_independence/catalog.yaml
+    observations: tests/scenarios/memory_independence/observations.yaml
     scenario_tests:
       - tests/test_session_delivery_fsm.py
     unit_or_contract_tests:
@@ -83,6 +84,7 @@ capabilities:
       - tests/test_controller_dispatch_loop.py
       - tests/test_native_session_providers.py
       - tests/test_core_services_dispatch.py
+      - tests/test_admin_notifications.py
   - id: memory_im_attachment_capture
     name: Bound-DM attachment capture through EverOS multimodal ingest
     status: active

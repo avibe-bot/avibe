@@ -89,8 +89,11 @@ function AccessModeSelect({
           <ChevronDown className="size-4 shrink-0 text-muted" />
         </button>
       </PopoverTrigger>
+      {/* Anchored to the trigger's leading edge: the trigger is left-aligned in
+          the panel, and a 16rem list hung off the right edge of a 10rem trigger
+          would reach past the panel and rely on collision shifting. */}
       <PopoverContent
-        align="end"
+        align="start"
         sideOffset={4}
         role="listbox"
         aria-label={t('chat.showPage.sharingAccess')}
@@ -220,7 +223,7 @@ function AudienceCombobox({
   return (
     <div
       ref={containerRef}
-      className="relative w-full max-w-[17.5rem]"
+      className="relative w-full"
       onBlur={(event) => {
         if (containerRef.current?.contains(event.relatedTarget as Node | null)) return;
         setFocused(false);
@@ -700,29 +703,30 @@ export function ShowPageSharingSettings({
             aria-label={t('chat.showPage.sharingAccess')}
             className={clsx('space-y-2.5', sharedMode && 'border-t border-border pt-3')}
           >
-            <div className="flex items-center justify-between gap-3">
-              <div className="min-w-0">
-                <div className="text-sm font-medium">{t('chat.showPage.sharingAccess')}</div>
-                <div className="mt-0.5 flex items-center gap-1 text-[11px] text-muted" role="status">
-                  {saving ? (
-                    <>
-                      <Loader2 className="size-3 animate-spin" />
-                      {t('common.saving')}
-                    </>
-                  ) : (
-                    <>
-                      <Check className="size-3 text-mint-ink" />
-                      {t('chat.showPage.sharingAutoSave')}
-                    </>
-                  )}
-                </div>
-              </div>
+            {/* Title, then control, then status — the same vertical rhythm the
+                Custom link section above uses, so the panel reads as one
+                stack of labelled fields instead of one stack plus one row. */}
+            <div className="space-y-1.5">
+              <div className="text-sm font-medium">{t('chat.showPage.sharingAccess')}</div>
               <AccessModeSelect
                 value={mode}
                 disabled={!editable}
                 onChange={changeMode}
                 ownerWindowId={ownerWindowId}
               />
+              <div className="flex items-center gap-1 text-[11px] text-muted" role="status">
+                {saving ? (
+                  <>
+                    <Loader2 className="size-3 animate-spin" />
+                    {t('common.saving')}
+                  </>
+                ) : (
+                  <>
+                    <Check className="size-3 text-mint-ink" />
+                    {t('chat.showPage.sharingAutoSave')}
+                  </>
+                )}
+              </div>
             </div>
 
             {mode === 'limited' ? (

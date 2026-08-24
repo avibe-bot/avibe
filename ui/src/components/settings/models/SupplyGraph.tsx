@@ -20,7 +20,7 @@ export const SupplyGraph: React.FC<{
 }> = ({ containerRef, relations }) => {
   const [drawing, setDrawing] = React.useState<{ width: number; height: number; railX: number; wires: DrawnRelation[] } | null>(null);
 
-  React.useLayoutEffect(() => {
+  React.useEffect(() => {
     const container = containerRef.current;
     if (!container) return undefined;
     const measure = () => {
@@ -61,7 +61,7 @@ export const SupplyGraph: React.FC<{
   if (!drawing || drawing.wires.length === 0) return null;
   const yValues = drawing.wires.flatMap((wire) => [wire.startY, wire.endY]);
   return (
-    <svg aria-hidden="true" className="pointer-events-none absolute inset-0 z-10 hidden size-full overflow-visible lg:block" viewBox={`0 0 ${drawing.width} ${drawing.height}`} preserveAspectRatio="none">
+    <svg aria-hidden="true" className="pointer-events-none absolute inset-0 z-10 hidden size-full overflow-hidden lg:block" viewBox={`0 0 ${drawing.width} ${drawing.height}`} preserveAspectRatio="none">
       <line className="model-hub-rail-line" x1={drawing.railX} x2={drawing.railX} y1={Math.min(...yValues)} y2={Math.max(...yValues)} />
       {drawing.wires.map((wire) => (
         <g key={`${wire.sourceId}:${wire.backend}`}>

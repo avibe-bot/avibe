@@ -426,6 +426,24 @@ def test_require_incus_reports_missing_override(monkeypatch: pytest.MonkeyPatch)
         incus_regression.require_incus()
 
 
+def test_runner_reports_command_timeout(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    command = ["incus", "exec", "avibe-master"]
+
+    def time_out(actual_command, **kwargs):
+        assert kwargs["timeout"] == incus_regression.SHOW_RUNTIME_BUILD_TIMEOUT_SECONDS
+        raise subprocess.TimeoutExpired(actual_command, kwargs["timeout"])
+
+    monkeypatch.setattr(incus_regression.subprocess, "run", time_out)
+
+    with pytest.raises(incus_regression.RegressionError, match="timed out after 300 seconds"):
+        incus_regression.Runner().run(
+            command,
+            timeout=incus_regression.SHOW_RUNTIME_BUILD_TIMEOUT_SECONDS,
+        )
+
+    assert "Command timed out after 300 seconds" in capsys.readouterr().err
+
+
 def test_existence_comes_from_the_names_the_daemon_listed(monkeypatch: pytest.MonkeyPatch) -> None:
     listing = json.dumps([{"name": "avr-master"}, {"name": "avr-wt-demo-branch"}])
     monkeypatch.setattr(incus_regression.subprocess, "run", stub_incus_result(0, stdout=listing))
@@ -1154,7 +1172,7 @@ def test_legacy_voice_realtime_build_flag_does_not_change_ui_fingerprint(
 
 
 def test_runtime_env_payload_maps_show_runtime_and_llm_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("REGRESSION_SHOW_RUNTIME_GITHUB_REF", "main")
+    monkeypatch.setenv("REGRESSION_SHOW_RUNTIME_ARCHIVE_PATH", "/tmp/show-runtime.tgz")
     monkeypatch.setenv("REGRESSION_SLACK_CHANNEL", "C123")
     monkeypatch.setenv("REGRESSION_VOICE_REALTIME_ENABLED", "false")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
@@ -1164,23 +1182,37 @@ def test_runtime_env_payload_maps_show_runtime_and_llm_env(monkeypatch: pytest.M
     assert "SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0.dev0" in payload
     assert "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS=0.0.0.dev0" in payload
     assert "AVIBE_ALLOW_DEV_STATE_MIGRATION=1" in payload
-    assert "VIBE_SHOW_RUNTIME_SOURCE=github-source" in payload
-    assert "VIBE_SHOW_RUNTIME_GITHUB_REF=main" in payload
+    assert "VIBE_SHOW_RUNTIME_SOURCE=archive" in payload
+    assert "VIBE_SHOW_RUNTIME_ARCHIVE_PATH=/home/avibe/.cache/avibe-regression/vibe-show-runtime-node.tgz" in payload
+    assert "VIBE_SHOW_RUNTIME_ARCHIVE_PATH=/tmp/show-runtime.tgz" not in payload
     assert "REGRESSION_SLACK_CHANNEL=C123" in payload
     assert "VITE_VOICE_REALTIME_ENABLED" not in payload
     assert "REGRESSION_VOICE_REALTIME_ENABLED" not in payload
     assert "OPENAI_API_KEY=sk-test" in payload
 
 
+@pytest.mark.parametrize("legacy_source", ["github", "github-source"])
+def test_runtime_env_payload_migrates_legacy_github_source(
+    monkeypatch: pytest.MonkeyPatch,
+    legacy_source: str,
+) -> None:
+    monkeypatch.setenv("REGRESSION_SHOW_RUNTIME_SOURCE", legacy_source)
+
+    payload = incus_regression.runtime_env_payload().decode()
+
+    assert "VIBE_SHOW_RUNTIME_SOURCE=archive" in payload
+    assert f"VIBE_SHOW_RUNTIME_SOURCE={legacy_source}" not in payload
+
+
 def test_runtime_env_payload_ignores_legacy_regression_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("REGRESSION_SHOW_RUNTIME_GITHUB_REF", raising=False)
+    monkeypatch.delenv("REGRESSION_SHOW_RUNTIME_ARCHIVE_PATH", raising=False)
     monkeypatch.delenv("REGRESSION_SLACK_CHANNEL", raising=False)
-    monkeypatch.setenv("THREE_REGRESSION_SHOW_RUNTIME_GITHUB_REF", "legacy-ref")
+    monkeypatch.setenv("THREE_REGRESSION_SHOW_RUNTIME_ARCHIVE_PATH", "/tmp/legacy.tgz")
     monkeypatch.setenv("THREE_REGRESSION_SLACK_CHANNEL", "CLEGACY")
 
     payload = incus_regression.runtime_env_payload().decode()
 
-    assert "VIBE_SHOW_RUNTIME_GITHUB_REF=main" in payload
+    assert "VIBE_SHOW_RUNTIME_ARCHIVE_PATH=/home/avibe/.cache/avibe-regression/vibe-show-runtime-node.tgz" in payload
     assert "REGRESSION_SLACK_CHANNEL=CLEGACY" not in payload
     assert "THREE_REGRESSION_SLACK_CHANNEL" not in payload
 
@@ -4486,8 +4518,9 @@ def test_missing_ui_dist_rebuilds_even_when_python_is_unchanged() -> None:
     assert "pip install -e ." not in joined
 
 
-def test_prepare_show_runtime_cleans_partial_source_and_retries_once() -> None:
+def test_prepare_show_runtime_builds_archive_and_retries_from_fresh_install() -> None:
     commands = []
+    build_timeouts = []
 
     class RecordingRunner:
         def __init__(self) -> None:
@@ -4496,6 +4529,8 @@ def test_prepare_show_runtime_cleans_partial_source_and_retries_once() -> None:
         def run(self, command, **kwargs):
             joined = " ".join(command)
             commands.append(joined)
+            if "git clone --depth 1" in joined:
+                build_timeouts.append(kwargs.get("timeout"))
             if "vibe runtime prepare --strict" in joined:
                 self.prepare_attempts += 1
                 return subprocess.CompletedProcess(command, 1 if self.prepare_attempts == 1 else 0)
@@ -4514,17 +4549,18 @@ def test_prepare_show_runtime_cleans_partial_source_and_retries_once() -> None:
     incus_regression.prepare_show_runtime(RecordingRunner(), target, remote=None)
 
     joined = "\n".join(commands)
+    assert "git clone --depth 1 https://github.com/avibe-bot/vibe-show-runtime.git" in joined
+    assert "npm run bundle:vibe-remote" in joined
+    assert 'install -D -m 0644 "$1" "$VIBE_SHOW_RUNTIME_ARCHIVE_PATH"' in joined
+    assert build_timeouts == [incus_regression.SHOW_RUNTIME_BUILD_TIMEOUT_SECONDS]
+    build_command = next(command for command in commands if "git clone --depth 1" in command)
+    assert build_command.index("VIBE_SHOW_RUNTIME_ARCHIVE_PATH is required") < build_command.index("git clone")
     assert joined.count("vibe runtime prepare --strict") == 2
-    assert "rm -rf ~/.avibe/runtime/show-runtime/source" in joined
+    assert "rm -rf ~/.avibe/runtime/show-runtime/prebuilt/current" in joined
     assert "vibe runtime status --json" in joined
 
 
-def test_prepare_show_runtime_retry_verifies_the_npm_cache_instead_of_deleting_it() -> None:
-    """The npm cache is a gigabyte of downloads shared by every later build.
-
-    Deleting it turns one failed prepare into a cold rebuild of everything;
-    `npm cache verify` drops the corrupt entries and keeps the rest.
-    """
+def test_prepare_show_runtime_retry_keeps_the_npm_cache() -> None:
     commands = []
 
     class RecordingRunner:
@@ -4552,8 +4588,54 @@ def test_prepare_show_runtime_retry_verifies_the_npm_cache_instead_of_deleting_i
     incus_regression.prepare_show_runtime(RecordingRunner(), target, remote=None)
 
     joined = "\n".join(commands)
-    assert "npm cache verify" in joined
     assert "_cacache" not in joined
+    assert "npm cache clean" not in joined
+
+
+@pytest.mark.parametrize("legacy_source", ["github", "github-source", "GitHub-Source"])
+def test_retired_runtime_source_is_recognized_by_product_and_regression(
+    legacy_source: str,
+) -> None:
+    from core.show_runtime import _normalize_runtime_source
+
+    assert incus_regression.regression_show_runtime_source(legacy_source) == "archive"
+    assert _normalize_runtime_source(legacy_source) == "manifest-cache"
+
+    commands = []
+
+    class RecordingRunner:
+        def __init__(self) -> None:
+            self.prepare_attempts = 0
+
+        def run(self, command, **kwargs):
+            joined = " ".join(command)
+            commands.append(joined)
+            if 'printf "%s" "${VIBE_SHOW_RUNTIME_SOURCE:-}"' in joined:
+                return subprocess.CompletedProcess(command, 0, stdout=legacy_source)
+            if "vibe runtime prepare --strict" in joined:
+                self.prepare_attempts += 1
+                return subprocess.CompletedProcess(command, 1 if self.prepare_attempts == 1 else 0)
+            return subprocess.CompletedProcess(command, 0)
+
+    target = incus_regression.RegressionTarget(
+        target="master",
+        slug="master",
+        project="avr-master",
+        instance="avibe-master",
+        host_port=15130,
+        ui_host="127.0.0.1",
+        ui_port=5123,
+    )
+
+    incus_regression.prepare_show_runtime(RecordingRunner(), target, remote=None)
+
+    joined = "\n".join(commands)
+    assert "cat > /etc/avibe-regression.env" not in joined
+    assert "git clone --depth 1 https://github.com/avibe-bot/vibe-show-runtime.git" in joined
+    assert joined.count("VIBE_SHOW_RUNTIME_SOURCE=archive") == 4
+    archive_path = f"{incus_regression.SERVICE_HOME}/.cache/avibe-regression/vibe-show-runtime-node.tgz"
+    assert joined.count(f"VIBE_SHOW_RUNTIME_ARCHIVE_PATH={archive_path}") == 4
+    assert f"VIBE_SHOW_RUNTIME_SOURCE={legacy_source}" not in joined
 
 
 def test_restart_waits_for_service_and_status_running() -> None:

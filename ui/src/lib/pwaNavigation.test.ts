@@ -141,14 +141,14 @@ describe('PWA navigation', () => {
 describe('internalPwaLinkTarget', () => {
   const current = 'https://alex-app.avibe.bot/chat/session-123';
 
-  it('keeps private Show Pages inside the AppShell route', () => {
+  it('opens private Show Pages at their literal document route', () => {
     expect(internalPwaLinkTarget('/show/ses_123/', current)).toEqual({
-      path: '/apps/show/ses_123',
-      navigation: 'spa',
+      path: '/show/ses_123/',
+      navigation: 'document',
     });
     expect(internalPwaLinkTarget('https://alex-app.avibe.bot/show/a%20b%2Fc/', current)).toEqual({
-      path: '/apps/show/a%20b%2Fc',
-      navigation: 'spa',
+      path: '/show/a%20b%2Fc/',
+      navigation: 'document',
     });
   });
 

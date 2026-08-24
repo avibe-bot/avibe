@@ -5,15 +5,24 @@ import hashlib
 import io
 import json
 import os
+import shutil
+import stat
 import tarfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from core import managed_runtime
 from core.git_runtime import GitRuntimeManager
-from core.managed_runtime import ManagedRuntimeManager, ManagedRuntimeSpec
-from core.memory.artifact import MemoryArtifactManager
+from core.managed_runtime import (
+    ManagedRuntimeArchive,
+    ManagedRuntimeManager,
+    ManagedRuntimeManifest,
+    ManagedRuntimeSpec,
+)
+from core.memory import artifact as memory_artifact
+from core.memory.artifact import MemoryArtifactManager, MemoryRuntimeActivationError
 from vibe.model_hub_runtime.installer import EngineRuntimeManager
 
 
@@ -22,6 +31,784 @@ class FixtureRuntimeManager(ManagedRuntimeManager):
         if binary is None:
             return None
         return binary.read_text(encoding="utf-8").strip()
+
+
+def _write_subclass_runtime_fixture(
+    tmp_path: Path,
+    runtime_kind: str,
+    *,
+    bin_path: str | None = None,
+    runtime_version: str | None = None,
+) -> tuple[Path, Path]:
+    binary_paths = {
+        "git": "bin/git",
+        "memory": "bin/python",
+        "model-hub": "cli-proxy-api",
+    }
+    binary_path = bin_path or binary_paths[runtime_kind]
+    runtime_version = runtime_version or {
+        "git": "2.55.0",
+        "memory": "1.2.3",
+        "model-hub": "v7.2.95",
+    }[runtime_kind]
+    binary_payloads = {
+        "git": f'#!/bin/sh\n[ "$1" = "--version" ] || exit 2\necho git version {runtime_version}\n'.encode(),
+        "memory": b"#!/bin/sh\nexit 0\n",
+        "model-hub": (
+            f'#!/bin/sh\n[ "$1" = "--help" ] || exit 2\n'
+            f'echo "CLIProxyAPI Version: {runtime_version.removeprefix("v")}" >&2\n'
+        ).encode(),
+    }
+    binary_payload = binary_payloads[runtime_kind]
+    archive = tmp_path / f"{runtime_kind}.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        member = tarfile.TarInfo(binary_path)
+        member.mode = 0o755
+        member.size = len(binary_payload)
+        tar.addfile(member, io.BytesIO(binary_payload))
+
+    archive_payload = {
+        "name": archive.name,
+        "url": archive.as_uri(),
+        "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+        "binary_sha256": hashlib.sha256(binary_payload).hexdigest(),
+        "size": archive.stat().st_size,
+        "bin_path": binary_path,
+    }
+    platform_tag = managed_runtime.runtime_platform_tag()
+    if runtime_kind == "git":
+        payload = {
+            "schema_version": 1,
+            "git_version": runtime_version,
+            "source": "fixture",
+            "release_state": "published",
+            "archives": {platform_tag: archive_payload},
+        }
+    elif runtime_kind == "memory":
+        payload = {
+            "schema_version": 1,
+            "everos_version": runtime_version,
+            "python_version": "3.12.12",
+            "lock_sha256": "e6acc17e4c0969563d380326e90134965af0822259bb4a9adb4d54433e9737fe",
+            "lock_id": "uv-lock-sha256:e6acc17e4c0969563d380326e90134965af0822259bb4a9adb4d54433e9737fe",
+            "uv_version": "0.9.18",
+            "source": "fixture",
+            "release_state": "published",
+            "provider_root_format": "everos-1.2.3",
+            "compatible_provider_root_formats": [],
+            "archives": {platform_tag: archive_payload},
+        }
+    else:
+        asset_platform = "linux-amd64" if platform_tag == "linux-x64" else platform_tag
+        payload = {
+            "schema_version": 1,
+            "name": "cliproxyapi",
+            "version": runtime_version,
+            "source": "router-for-me/CLIProxyAPI",
+            "source_sha": "f71ec0eb6776854457892452cf28c47f0d658251",
+            "release_tag": runtime_version,
+            "license": "MIT",
+            "assets": [
+                {
+                    **archive_payload,
+                    "platform": asset_platform,
+                    "size_bytes": archive_payload["size"],
+                }
+            ],
+        }
+        del payload["assets"][0]["size"]
+    manifest = tmp_path / f"{runtime_kind}-manifest.json"
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    return archive, manifest
+
+
+def _subclass_runtime_manager(
+    tmp_path: Path,
+    runtime_kind: str,
+    manifest: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    runtime_dir: Path | None = None,
+) -> ManagedRuntimeManager:
+    runtime_dir = runtime_dir or tmp_path / f"{runtime_kind}-runtime"
+    if runtime_kind == "git":
+        return GitRuntimeManager(runtime_dir=runtime_dir, manifest_path=manifest)
+    if runtime_kind == "memory":
+        manager = MemoryArtifactManager(
+            runtime_dir=runtime_dir,
+            manifest_path=manifest,
+            provider_root=tmp_path / "memory-provider-root",
+        )
+        monkeypatch.setattr(manager, "_prepare_binary", lambda _binary, **_kwargs: {"ok": True})
+        monkeypatch.setattr(manager, "_binary_matches_manifest", lambda _binary, _manifest: True)
+        return manager
+    return EngineRuntimeManager(runtime_dir=runtime_dir, manifest_path=manifest)
+
+
+def _change_unrelated_platform(manifest: Path, runtime_kind: str) -> None:
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    unrelated = {
+        "name": "unrelated.tar.gz",
+        "url": "https://example.test/unrelated.tar.gz",
+        "sha256": "d" * 64,
+        "binary_sha256": "e" * 64,
+        "size": 1,
+        "bin_path": "unused",
+    }
+    if runtime_kind == "model-hub":
+        payload["assets"].append(
+            {
+                **unrelated,
+                "platform": "fixture-unrelated",
+                "size_bytes": unrelated["size"],
+            }
+        )
+        del payload["assets"][-1]["size"]
+    else:
+        payload["archives"]["fixture-unrelated"] = unrelated
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _resolve_subclass_runtime(manager: ManagedRuntimeManager, runtime_kind: str) -> Path | None:
+    if runtime_kind == "git":
+        return manager.resolve_git_path()  # type: ignore[attr-defined]
+    if runtime_kind == "memory":
+        return manager.resolve_python()  # type: ignore[attr-defined]
+    return manager.resolve_engine_path()  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("runtime_kind", ["git", "memory", "model-hub"])
+def test_subclass_relative_runtime_directory_persists_an_admissible_absolute_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_kind: str,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest = _write_subclass_runtime_fixture(tmp_path, runtime_kind)
+    monkeypatch.chdir(tmp_path)
+    relative_runtime_dir = Path("relative-runtimes") / runtime_kind
+    manager = _subclass_runtime_manager(
+        tmp_path,
+        runtime_kind,
+        manifest,
+        monkeypatch,
+        runtime_dir=relative_runtime_dir,
+    )
+
+    installed = manager.ensure()
+
+    assert installed["ok"] is True
+    assert manager.runtime_dir == tmp_path / relative_runtime_dir
+    assert Path(installed["install_dir"]).is_absolute()
+    assert manager.status()["path"] == installed["path"]
+    assert _resolve_subclass_runtime(manager, runtime_kind) == Path(installed["path"])
+
+
+@pytest.mark.parametrize("runtime_kind", ["git", "memory", "model-hub"])
+def test_installed_subclass_status_and_resolution_survive_unavailable_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_kind: str,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest = _write_subclass_runtime_fixture(tmp_path, runtime_kind)
+    manager = _subclass_runtime_manager(tmp_path, runtime_kind, manifest, monkeypatch)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+    installed_path = Path(installed["path"])
+    pointer_path = manager.runtime_dir / "current.json"
+    metadata_path = Path(installed["install_dir"]) / manager.spec.metadata_filename
+    pointer_before = pointer_path.read_bytes()
+    metadata_before = metadata_path.read_bytes()
+
+    _change_unrelated_platform(manifest, runtime_kind)
+    monkeypatch.setattr(
+        manager,
+        "_resolve_manifest_archive",
+        lambda _archive: pytest.fail("disk-local inspection accessed an archive"),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_write_current_pointer",
+        lambda *_args: pytest.fail("disk-local inspection rewrote the active pointer"),
+    )
+
+    reused = manager.ensure()
+
+    assert reused["ok"] is True
+    assert reused["changed"] is False
+    assert reused["path"] == str(installed_path)
+    assert reused["install_dir"] == installed["install_dir"]
+    assert pointer_path.read_bytes() == pointer_before
+    assert metadata_path.read_bytes() == metadata_before
+
+    manifest.unlink()
+    status = manager.status()
+
+    assert status["installed"] is True
+    assert status["version"] == {"git": "2.55.0", "memory": "1.2.3", "model-hub": "v7.2.95"}[
+        runtime_kind
+    ]
+    assert status["selected_version"] is None
+    assert status["matches_manifest"] is None
+    assert status["path"] == str(installed_path)
+    assert status["install_dir"] == installed["install_dir"]
+    assert status["reason"] is None
+    assert _resolve_subclass_runtime(manager, runtime_kind) == installed_path
+    assert pointer_path.read_bytes() == pointer_before
+    assert metadata_path.read_bytes() == metadata_before
+
+
+@pytest.mark.parametrize("runtime_kind", ["git", "memory", "model-hub"])
+def test_subclass_operational_resolution_uses_disk_snapshot_when_manifest_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_kind: str,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest = _write_subclass_runtime_fixture(tmp_path, runtime_kind)
+    manager = _subclass_runtime_manager(tmp_path, runtime_kind, manifest, monkeypatch)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+    installed_path = Path(installed["path"])
+    manifest.unlink()
+
+    status = manager.status()
+    resolved = _resolve_subclass_runtime(manager, runtime_kind)
+
+    assert (status["installed"], status["path"], resolved) == (
+        True,
+        str(installed_path),
+        installed_path,
+    )
+
+
+def test_git_resolves_a_runtime_version_accepted_by_the_installer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _archive, manifest = _write_subclass_runtime_fixture(
+        tmp_path,
+        "git",
+        runtime_version="2.55.0+avibe.1",
+    )
+    manager = _subclass_runtime_manager(tmp_path, "git", manifest, monkeypatch)
+
+    installed = manager.ensure()
+    manifest.unlink()
+
+    assert installed["ok"] is True
+    assert manager.status()["version"] == "2.55.0+avibe.1"
+    assert manager.resolve_git_path() == Path(installed["path"])
+
+
+@pytest.mark.parametrize("bin_path", ["python", "usr/bin/python"])
+def test_memory_status_uses_the_recorded_install_dir_for_any_safe_entrypoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bin_path: str,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest = _write_subclass_runtime_fixture(
+        tmp_path,
+        "memory",
+        bin_path=bin_path,
+    )
+    manager = _subclass_runtime_manager(tmp_path, "memory", manifest, monkeypatch)
+
+    installed = manager.ensure()
+    status = manager.status()
+
+    assert installed["ok"] is True
+    assert status["installed"] is True
+    assert status["matches_manifest"] is True
+    assert status["path"] == installed["path"]
+    assert status["install_dir"] == installed["install_dir"]
+
+
+def test_shared_status_retries_when_current_pointer_switches_during_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _archive, manifest = _write_subclass_runtime_fixture(tmp_path, "git")
+    manager = _subclass_runtime_manager(tmp_path, "git", manifest, monkeypatch)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+    manifest.unlink()
+
+    pointer_path = manager.runtime_dir / "current.json"
+    old_pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    new_install_dir = manager.runtime_dir / "versions" / "concurrent-replacement"
+    old_install_dir = Path(installed["install_dir"])
+    shutil.copytree(old_install_dir, new_install_dir)
+    metadata_path = new_install_dir / manager.spec.metadata_filename
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["runtime_version"] = "2.56.0"
+    managed_runtime.write_json_atomic(metadata_path, metadata)
+    new_pointer = {
+        **old_pointer,
+        "runtime_version": "2.56.0",
+        "install_dir": str(new_install_dir),
+    }
+
+    original_resolve = manager.resolve_binary
+    resolve_calls = 0
+
+    def switch_pointer_after_first_resolution() -> Path | None:
+        nonlocal resolve_calls
+        binary = original_resolve()
+        resolve_calls += 1
+        if resolve_calls == 1:
+            managed_runtime.write_json_atomic(pointer_path, new_pointer)
+        return binary
+
+    monkeypatch.setattr(manager, "resolve_binary", switch_pointer_after_first_resolution)
+
+    status = manager.status()
+
+    expected_binary = new_install_dir / manager.spec.default_bin_path
+    assert resolve_calls == 2
+    assert status["installed"] is True
+    assert status["version"] == "2.56.0"
+    assert status["path"] == str(expected_binary)
+    assert status["install_dir"] == str(new_install_dir)
+
+
+@pytest.mark.parametrize("runtime_kind", ["git", "model-hub"])
+def test_subclass_derives_released_missing_bin_path_from_safe_spec_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_kind: str,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest = _write_subclass_runtime_fixture(tmp_path, runtime_kind)
+    manager = _subclass_runtime_manager(tmp_path, runtime_kind, manifest, monkeypatch)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+    installed_path = Path(installed["path"])
+    pointer_path = manager.runtime_dir / "current.json"
+    metadata_path = Path(installed["install_dir"]) / manager.spec.metadata_filename
+    pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    pointer.pop("bin_path")
+    metadata.pop("bin_path")
+    managed_runtime.write_json_atomic(pointer_path, pointer)
+    managed_runtime.write_json_atomic(metadata_path, metadata)
+    pointer_before = pointer_path.read_bytes()
+    metadata_before = metadata_path.read_bytes()
+    monkeypatch.setattr(
+        manager,
+        "_resolve_manifest_archive",
+        lambda _archive: pytest.fail("safe default entrypoint accessed an archive"),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_write_current_pointer",
+        lambda *_args: pytest.fail("safe default entrypoint rewrote the pointer"),
+    )
+
+    reused = manager.ensure()
+
+    assert reused["ok"] is True
+    assert reused["changed"] is False
+    assert reused["path"] == str(installed_path)
+    manifest.unlink()
+    status = manager.status()
+    assert status["installed"] is True
+    assert status["path"] == str(installed_path)
+    assert _resolve_subclass_runtime(manager, runtime_kind) == installed_path
+    assert pointer_path.read_bytes() == pointer_before
+    assert metadata_path.read_bytes() == metadata_before
+
+
+@pytest.mark.parametrize("runtime_kind", ["git", "memory", "model-hub"])
+def test_subclass_status_rejects_an_unreadable_installed_binary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_kind: str,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest = _write_subclass_runtime_fixture(tmp_path, runtime_kind)
+    manager = _subclass_runtime_manager(tmp_path, runtime_kind, manifest, monkeypatch)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+
+    def unreadable_binary(_path: Path) -> str:
+        raise OSError("binary became unreadable")
+
+    monkeypatch.setattr(managed_runtime, "file_sha256", unreadable_binary)
+
+    status = manager.status()
+
+    assert status["installed"] is False
+    assert status["status"] == "error"
+    assert status["reason"] is not None
+    assert _resolve_subclass_runtime(manager, runtime_kind) is None
+
+
+@pytest.mark.parametrize("runtime_kind", ["git", "memory", "model-hub"])
+@pytest.mark.parametrize("state_file", ["pointer", "metadata"])
+def test_subclass_projects_deep_installed_json_as_an_inspection_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_kind: str,
+    state_file: str,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest = _write_subclass_runtime_fixture(tmp_path, runtime_kind)
+    manager = _subclass_runtime_manager(tmp_path, runtime_kind, manifest, monkeypatch)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+    state_path = (
+        manager.runtime_dir / "current.json"
+        if state_file == "pointer"
+        else Path(installed["install_dir"]) / manager.spec.metadata_filename
+    )
+    state_path.write_text(
+        "[" * 2_000 + "0" + "]" * 2_000,
+        encoding="utf-8",
+    )
+
+    status = manager.status()
+
+    assert status["installed"] is False
+    assert status["status"] == "error"
+    assert _resolve_subclass_runtime(manager, runtime_kind) is None
+
+
+@pytest.mark.parametrize("runtime_kind", ["git", "model-hub"])
+def test_shared_reuse_repairs_pointer_from_persisted_metadata_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_kind: str,
+) -> None:
+    _archive, manifest = _write_subclass_runtime_fixture(tmp_path, runtime_kind)
+    manager = _subclass_runtime_manager(tmp_path, runtime_kind, manifest, monkeypatch)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+    pointer_path = manager.runtime_dir / "current.json"
+    metadata_path = Path(installed["install_dir"]) / manager.spec.metadata_filename
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    pointer["manifest_sha256"] = "f" * 64
+    managed_runtime.write_json_atomic(pointer_path, pointer)
+    metadata_before = metadata_path.read_bytes()
+    monkeypatch.setattr(
+        manager,
+        "_resolve_manifest_archive",
+        lambda _archive: pytest.fail("pointer repair accessed an archive"),
+    )
+
+    reused = manager.ensure()
+
+    assert reused["ok"] is True
+    assert reused["changed"] is False
+    repaired = json.loads(pointer_path.read_text(encoding="utf-8"))
+    assert repaired["manifest_sha256"] == metadata["manifest_sha256"]
+    assert metadata_path.read_bytes() == metadata_before
+    assert _resolve_subclass_runtime(manager, runtime_kind) == Path(installed["path"])
+
+
+@pytest.mark.parametrize("runtime_kind", ["git", "memory", "model-hub"])
+def test_invalid_manifest_keeps_disk_resolution_but_blocks_repair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_kind: str,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest = _write_subclass_runtime_fixture(tmp_path, runtime_kind)
+    manager = _subclass_runtime_manager(tmp_path, runtime_kind, manifest, monkeypatch)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+    installed_path = Path(installed["path"])
+    manifest.write_text("{", encoding="utf-8")
+    monkeypatch.setattr(
+        manager,
+        "_resolve_manifest_archive",
+        lambda _archive: pytest.fail("invalid manifest repair accessed an archive"),
+    )
+
+    status = manager.status()
+    resolved = _resolve_subclass_runtime(manager, runtime_kind)
+    repair = manager.ensure()
+
+    assert status["installed"] is True
+    assert status["path"] == str(installed_path)
+    assert resolved == installed_path
+    assert repair["ok"] is False
+    assert str(repair["reason"]).endswith("manifest_invalid")
+
+
+def test_memory_reuse_refreshes_changed_manifest_contract_through_activation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest_path = _write_subclass_runtime_fixture(tmp_path, "memory")
+    manager = _subclass_runtime_manager(tmp_path, "memory", manifest_path, monkeypatch)
+    assert isinstance(manager, MemoryArtifactManager)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["provider_root_format"] = "everos-2.0"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    updated_manifest_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    selected_status = manager.status()
+
+    assert selected_status["installed"] is True
+    assert selected_status["path"] == installed["path"]
+    assert selected_status["matches_manifest"] is False
+
+    activations: list[str] = []
+
+    def activate(candidate, root_state, commit, _rollback) -> None:
+        activations.append(candidate.provider_root_format)
+        assert root_state is not None
+        assert root_state.exists is False
+        commit()
+
+    manager.set_activation_coordinator(activate)
+    sync_admissions: list[tuple[int, tuple[str, ...], str, str] | None] = []
+
+    def admit_sync(
+        _binary: Path,
+        contract: tuple[int, tuple[str, ...], str, str] | None,
+    ) -> bool:
+        sync_admissions.append(contract)
+        return True
+
+    monkeypatch.setattr(manager, "_admit_sync_contract", admit_sync)
+    monkeypatch.setattr(
+        manager,
+        "_resolve_manifest_archive",
+        lambda _archive: pytest.fail("Memory contract refresh accessed an archive"),
+    )
+
+    reused = manager.ensure()
+
+    assert reused["ok"] is True
+    assert reused["changed"] is False
+    assert reused["path"] == installed["path"]
+    assert activations == ["everos-2.0"]
+    active = manager._active_pointer()
+    assert active is not None
+    assert active["provider_root_format"] == "everos-2.0"
+    assert active["compatible_provider_root_formats"] == []
+    assert active["artifact_fingerprint"] == updated_manifest_digest[:16]
+    assert sync_admissions == []
+    assert manager.status()["matches_manifest"] is True
+
+
+def test_memory_selected_contract_failure_preserves_admitted_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest_path = _write_subclass_runtime_fixture(tmp_path, "memory")
+    manager = _subclass_runtime_manager(tmp_path, "memory", manifest_path, monkeypatch)
+    assert isinstance(manager, MemoryArtifactManager)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+    pointer_path = manager.runtime_dir / "current.json"
+    pointer_before = pointer_path.read_bytes()
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["provider_root_format"] = "everos-next"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(manager, "_prepare_binary", lambda _binary, **_kwargs: {"ok": False})
+    monkeypatch.setattr(
+        manager,
+        "_resolve_manifest_archive",
+        lambda _archive: pytest.fail("failed Memory re-admission accessed an archive"),
+    )
+
+    failed = manager.ensure()
+
+    assert failed["ok"] is False
+    assert pointer_path.read_bytes() == pointer_before
+    assert manager.status()["installed"] is True
+    assert manager.resolve_python() == Path(installed["path"])
+
+
+def test_memory_force_pointer_failure_preserves_active_install_and_retry_repairs_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest_path = _write_subclass_runtime_fixture(tmp_path, "memory")
+    manager = _subclass_runtime_manager(tmp_path, "memory", manifest_path, monkeypatch)
+    assert isinstance(manager, MemoryArtifactManager)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+    pointer_path = manager.runtime_dir / "current.json"
+    metadata_path = Path(installed["install_dir"]) / manager.spec.metadata_filename
+    metadata_before = metadata_path.read_bytes()
+    install_dirs_before = {
+        path.parent for path in manager.runtime_dir.rglob(manager.spec.metadata_filename)
+    }
+    original_pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["provider_root_format"] = "everos-2.0"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    real_write_pointer = manager._write_memory_current_pointer
+
+    def fail_pointer_write(*_args, **_kwargs) -> None:
+        raise MemoryRuntimeActivationError("pointer write failed")
+
+    monkeypatch.setattr(manager, "_write_memory_current_pointer", fail_pointer_write)
+
+    failed = manager.ensure(force=True)
+
+    assert failed["ok"] is False
+    assert metadata_path.read_bytes() == metadata_before
+    assert json.loads(pointer_path.read_text(encoding="utf-8")) == original_pointer
+    assert manager.resolve_python() == Path(installed["path"])
+    assert {
+        path.parent for path in manager.runtime_dir.rglob(manager.spec.metadata_filename)
+    } == install_dirs_before
+
+    monkeypatch.setattr(manager, "_write_memory_current_pointer", real_write_pointer)
+    monkeypatch.setattr(
+        manager,
+        "_resolve_manifest_archive",
+        lambda _archive: pytest.fail("pointer retry accessed an archive"),
+    )
+
+    retried = manager.ensure()
+
+    assert retried["ok"] is True
+    assert retried["changed"] is False
+    repaired_pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    repaired_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert repaired_pointer["manifest_sha256"] == repaired_metadata["manifest_sha256"]
+    assert repaired_pointer["manifest_sha256"] != original_pointer["manifest_sha256"]
+    assert repaired_pointer["install_dir"] == installed["install_dir"]
+
+
+def test_memory_force_repair_rollback_preserves_the_active_install_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest_path = _write_subclass_runtime_fixture(tmp_path, "memory")
+    manager = _subclass_runtime_manager(tmp_path, "memory", manifest_path, monkeypatch)
+    assert isinstance(manager, MemoryArtifactManager)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+    active_dir = Path(installed["install_dir"])
+    pointer_path = manager.runtime_dir / "current.json"
+    metadata_path = active_dir / manager.spec.metadata_filename
+    pointer_before = pointer_path.read_bytes()
+    metadata_before = metadata_path.read_bytes()
+    binary_before = Path(installed["path"]).read_bytes()
+    install_dirs_before = {path.parent for path in manager.runtime_dir.rglob(manager.spec.metadata_filename)}
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["source"] = "fixture-force-repair"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def reject_candidate(_candidate, _root_state, commit, rollback) -> None:
+        commit()
+        candidate = manager._active_pointer()
+        assert candidate is not None
+        assert candidate["install_dir"] != str(active_dir)
+        rollback()
+        raise MemoryRuntimeActivationError("candidate rejected")
+
+    manager.set_activation_coordinator(reject_candidate)
+
+    failed = manager.ensure(force=True)
+
+    assert failed["ok"] is False
+    assert pointer_path.read_bytes() == pointer_before
+    assert metadata_path.read_bytes() == metadata_before
+    assert Path(installed["path"]).read_bytes() == binary_before
+    assert manager.resolve_python() == Path(installed["path"])
+    assert {path.parent for path in manager.runtime_dir.rglob(manager.spec.metadata_filename)} == install_dirs_before
+
+    def accept_candidate(_candidate, _root_state, commit, _rollback) -> None:
+        commit()
+
+    manager.set_activation_coordinator(accept_candidate)
+    repaired = manager.ensure(force=True)
+    assert repaired["ok"] is True
+    assert repaired["changed"] is True
+    assert repaired["install_dir"] != str(active_dir)
+    assert active_dir.is_dir()
+    monkeypatch.setattr(
+        manager,
+        "_resolve_manifest_archive",
+        lambda _archive: pytest.fail("successful force reuse accessed an archive"),
+    )
+
+    reused = manager.ensure()
+
+    assert reused["ok"] is True
+    assert reused["changed"] is False
+    assert reused["install_dir"] == repaired["install_dir"]
+
+
+@pytest.mark.parametrize("runtime_kind", ["git", "memory", "model-hub"])
+def test_existing_subclass_adopts_released_manifest_digest_layout_without_write_or_download(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_kind: str,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest_path = _write_subclass_runtime_fixture(tmp_path, runtime_kind)
+    manager = _subclass_runtime_manager(tmp_path, runtime_kind, manifest_path, monkeypatch)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+
+    manifest = manager._load_manifest(allow_network=False)
+    assert manifest is not None
+    archive = manager._manifest_archive_for_platform(manifest)
+    assert archive is not None
+    install_dir = Path(installed["install_dir"])
+    released_fingerprint = hashlib.sha256(
+        f"{manifest.digest}:{archive.sha256}".encode("utf-8")
+    ).hexdigest()[:16]
+    released_install_dir = install_dir.parent / released_fingerprint
+    if released_install_dir != install_dir:
+        install_dir.rename(released_install_dir)
+    pointer_path = manager.runtime_dir / "current.json"
+    pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    pointer["install_dir"] = str(released_install_dir)
+    pointer.pop("binary_sha256", None)
+    pointer_path.write_text(json.dumps(pointer), encoding="utf-8")
+    released_binary = released_install_dir / archive.bin_path
+    metadata_path = released_install_dir / manager.spec.metadata_filename
+    pointer_before = pointer_path.read_bytes()
+    metadata_before = metadata_path.read_bytes()
+    install_mtime_before = released_install_dir.stat().st_mtime_ns
+
+    monkeypatch.setattr(
+        manager,
+        "_resolve_manifest_archive",
+        lambda _archive: pytest.fail("released install adoption accessed an archive"),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_write_current_pointer",
+        lambda *_args: pytest.fail("released install adoption rewrote the active pointer"),
+    )
+
+    reused = manager.ensure()
+
+    assert reused["ok"] is True
+    assert reused["changed"] is False
+    assert reused["install_dir"] == str(released_install_dir)
+    assert Path(reused["path"]) == released_binary
+    assert pointer_path.read_bytes() == pointer_before
+    assert metadata_path.read_bytes() == metadata_before
+    assert released_install_dir.stat().st_mtime_ns == install_mtime_before
+
+    manifest_path.unlink()
+    status = manager.status()
+    assert status["installed"] is True
+    assert status["path"] == str(released_binary)
+    assert _resolve_subclass_runtime(manager, runtime_kind) == released_binary
+    assert pointer_path.read_bytes() == pointer_before
+    assert metadata_path.read_bytes() == metadata_before
 
 
 def test_clean_dry_run_is_read_only_and_creates_no_lock(
@@ -125,6 +912,257 @@ def test_clean_dry_run_holds_preview_guard_through_planning(
     manager._install_lock.release()
 
 
+@pytest.mark.parametrize("runtime_kind", ["git", "memory", "model-hub"])
+def test_subclass_install_refuses_symlinked_mutation_guard_without_external_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_kind: str,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest = _write_subclass_runtime_fixture(tmp_path, runtime_kind)
+    runtime_dir = tmp_path / f"{runtime_kind}-runtime"
+    runtime_dir.mkdir()
+    victim = tmp_path / f"{runtime_kind}-victim.txt"
+    victim.write_text("do not rewrite", encoding="utf-8")
+    try:
+        (runtime_dir / ".install.lock").symlink_to(victim)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+    manager = _subclass_runtime_manager(
+        tmp_path,
+        runtime_kind,
+        manifest,
+        monkeypatch,
+        runtime_dir=runtime_dir,
+    )
+
+    result = manager.ensure()
+
+    assert victim.read_text(encoding="utf-8") == "do not rewrite"
+    assert result["ok"] is False
+    assert result["reason"] == manager._reason("install_lock_failed")
+
+
+def test_real_cleanup_refuses_hardlinked_mutation_guard_without_external_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    runtime_dir = tmp_path / "git-runtime"
+    runtime_dir.mkdir()
+    victim = tmp_path / "victim.txt"
+    victim.write_text("do not rewrite", encoding="utf-8")
+    try:
+        os.link(victim, runtime_dir / ".install.lock")
+    except OSError as exc:
+        pytest.skip(f"hard-link creation unavailable: {exc}")
+    manager = GitRuntimeManager(
+        runtime_dir=runtime_dir,
+        manifest_path=tmp_path / "missing-manifest.json",
+        offline=True,
+    )
+
+    result = manager.clean()
+
+    assert victim.read_text(encoding="utf-8") == "do not rewrite"
+    assert result["ok"] is False
+    assert result["reason"] == "git_clean_lock_failed"
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected_reason"),
+    [("install", "git_install_lock_failed"), ("clean", "git_clean_lock_failed")],
+)
+def test_mutation_reports_uninspectable_guard_as_lock_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    expected_reason: str,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest = _write_subclass_runtime_fixture(tmp_path, "git")
+    runtime_dir = tmp_path / "git-runtime"
+    runtime_dir.mkdir()
+    lock_path = runtime_dir / ".install.lock"
+    lock_path.write_text("", encoding="utf-8")
+    manager = GitRuntimeManager(runtime_dir=runtime_dir, manifest_path=manifest)
+    real_lstat = Path.lstat
+
+    def _lstat(self):
+        if self == lock_path:
+            raise OSError("guard unreadable")
+        return real_lstat(self)
+
+    monkeypatch.setattr(Path, "lstat", _lstat)
+
+    result = manager.ensure() if operation == "install" else manager.clean()
+
+    assert result["ok"] is False
+    assert result["reason"] == expected_reason
+
+
+@pytest.mark.parametrize("runtime_kind", ["git", "memory", "model-hub"])
+def test_subclass_preview_classifies_special_guard_as_inspection_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_kind: str,
+) -> None:
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("FIFO creation unavailable")
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest = _write_subclass_runtime_fixture(tmp_path, runtime_kind)
+    runtime_dir = tmp_path / f"{runtime_kind}-runtime"
+    runtime_dir.mkdir()
+    os.mkfifo(runtime_dir / ".install.lock")
+    manager = _subclass_runtime_manager(
+        tmp_path,
+        runtime_kind,
+        manifest,
+        monkeypatch,
+        runtime_dir=runtime_dir,
+    )
+
+    result = manager.clean(dry_run=True)
+
+    assert result["ok"] is False
+    assert result["reason"] == manager._reason("clean_inspection_failed")
+
+
+def test_preview_classifies_uninspectable_guard_as_inspection_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    runtime_dir = tmp_path / "git-runtime"
+    runtime_dir.mkdir()
+    lock_path = runtime_dir / ".install.lock"
+    lock_path.write_text("", encoding="utf-8")
+    manager = GitRuntimeManager(
+        runtime_dir=runtime_dir,
+        manifest_path=tmp_path / "missing-manifest.json",
+        offline=True,
+    )
+    real_lstat = Path.lstat
+
+    def _lstat(self):
+        if self == lock_path:
+            raise OSError("guard unreadable")
+        return real_lstat(self)
+
+    monkeypatch.setattr(Path, "lstat", _lstat)
+
+    result = manager.clean(dry_run=True)
+
+    assert result["ok"] is False
+    assert result["reason"] == "git_clean_inspection_failed"
+
+
+def test_preview_classifies_special_guard_created_during_planning_as_inspection_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("FIFO creation unavailable")
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    runtime_dir = tmp_path / "git-runtime"
+    manager = GitRuntimeManager(
+        runtime_dir=runtime_dir,
+        manifest_path=tmp_path / "missing-manifest.json",
+        offline=True,
+    )
+
+    def _create_special_guard(*, keep_previous, dry_run=False, removed=None):
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(runtime_dir / ".install.lock")
+        return {"ok": True, "removed": []}
+
+    monkeypatch.setattr(manager, "_clean_locked", _create_special_guard)
+
+    result = manager.clean(dry_run=True)
+
+    assert result["ok"] is False
+    assert result["reason"] == "git_clean_inspection_failed"
+
+
+def test_windows_preview_classifies_reparse_guard_as_inspection_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    runtime_dir = tmp_path / "git-runtime"
+    runtime_dir.mkdir()
+    lock_path = runtime_dir / ".install.lock"
+    lock_path.write_text("", encoding="utf-8")
+    manager = GitRuntimeManager(
+        runtime_dir=runtime_dir,
+        manifest_path=tmp_path / "missing-manifest.json",
+        offline=True,
+    )
+    real_lstat = Path.lstat
+
+    def _lstat(self):
+        info = real_lstat(self)
+        if self != lock_path:
+            return info
+        return SimpleNamespace(
+            st_mode=info.st_mode,
+            st_nlink=info.st_nlink,
+            st_dev=info.st_dev,
+            st_ino=info.st_ino,
+            st_file_attributes=1,
+        )
+
+    monkeypatch.setattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 1, raising=False)
+    monkeypatch.setattr(Path, "lstat", _lstat)
+    monkeypatch.setattr("core.managed_runtime.fcntl_available", lambda: False)
+    monkeypatch.setattr("core.managed_runtime.try_windows_exclusive_lock", lambda _fd: True)
+
+    result = manager.clean(dry_run=True)
+
+    assert result["ok"] is False
+    assert result["reason"] == "git_clean_inspection_failed"
+
+
+def test_install_refuses_guard_replaced_after_lock_acquisition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from storage import lock as storage_lock
+
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest = _write_subclass_runtime_fixture(tmp_path, "git")
+    runtime_dir = tmp_path / "git-runtime"
+    runtime_dir.mkdir()
+    lock_path = runtime_dir / ".install.lock"
+    lock_path.write_text("", encoding="utf-8")
+    manager = GitRuntimeManager(runtime_dir=runtime_dir, manifest_path=manifest)
+    real_lstat = Path.lstat
+    real_try_lock = storage_lock._try_lock
+    replaced = {"value": False}
+
+    def _lstat(self):
+        info = real_lstat(self)
+        if replaced["value"] and self == lock_path:
+            fields = list(info)
+            fields[1] = info.st_ino + 73
+            return os.stat_result(fields)
+        return info
+
+    def _try_lock(handle):
+        acquired = real_try_lock(handle)
+        if acquired:
+            replaced["value"] = True
+        return acquired
+
+    monkeypatch.setattr(Path, "lstat", _lstat)
+    monkeypatch.setattr(storage_lock, "_try_lock", _try_lock)
+
+    result = manager.ensure()
+
+    assert result["ok"] is False
+    assert result["reason"] == "git_install_lock_failed"
+
+
 def test_windows_preview_detects_held_git_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
     runtime_dir = tmp_path / "git-runtime"
@@ -176,7 +1214,7 @@ def test_git_preview_refuses_lock_identity_mismatch(
     monkeypatch.setattr(os, "fstat", _fstat)
     result = manager.clean(dry_run=True)
     assert result["ok"] is False
-    assert result["reason"] == "git_install_already_running"
+    assert result["reason"] == "git_clean_inspection_failed"
 
 
 def test_shared_ensure_failure_vocabulary_matches_reachable_reason_literals() -> None:
@@ -227,74 +1265,6 @@ def test_shared_ensure_failure_vocabulary_matches_reachable_reason_literals() ->
     assert managed_runtime._ENSURE_FAILURE_SUFFIXES == reason_suffixes
 
 
-@pytest.mark.parametrize(
-    ("include_direct_platform", "expected_platform"),
-    [(False, "linux-amd64"), (True, "linux-x64")],
-)
-def test_list_asset_manifest_prefers_direct_platform_then_falls_back_to_alias(
-    tmp_path: Path,
-    monkeypatch,
-    include_direct_platform: bool,
-    expected_platform: str,
-) -> None:
-    archive = tmp_path / "fixture-linux_amd64.tar.gz"
-    binary_payload = b"v1\n"
-    with tarfile.open(archive, "w:gz") as tar:
-        member = tarfile.TarInfo("fixture")
-        member.mode = 0o755
-        member.size = len(binary_payload)
-        tar.addfile(member, io.BytesIO(binary_payload))
-
-    assets = [
-        {
-            "platform": "linux-amd64",
-            "url": archive.as_uri(),
-            "size_bytes": archive.stat().st_size,
-            "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
-            "binary_sha256": hashlib.sha256(binary_payload).hexdigest(),
-        }
-    ]
-    if include_direct_platform:
-        assets.append({**assets[0], "platform": "linux-x64"})
-    manifest = tmp_path / "manifest.json"
-    manifest.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "version": "v1",
-                "source": "example/fixture",
-                "assets": assets,
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: "linux-x64")
-    manager = FixtureRuntimeManager(
-        spec=ManagedRuntimeSpec(
-            runtime_id="fixture",
-            manifest_resource="unused.json",
-            version_field="version",
-            default_bin_path="fixture",
-            archives_field="assets",
-            archive_size_field="size_bytes",
-            platform_aliases=(("linux-x64", "linux-amd64"),),
-        ),
-        runtime_dir=tmp_path / "runtime",
-        manifest_path=manifest,
-    )
-
-    resolved_targets: list[dict[str, str]] = []
-    result = manager.ensure(on_resolved=resolved_targets.append)
-
-    assert result["ok"] is True
-    assert result["changed"] is True
-    assert result["platform"] == expected_platform
-    assert resolved_targets == [result["target"]]
-    assert Path(result["path"]).read_bytes() == binary_payload
-    assert manager.ensure()["changed"] is False
-    assert manager.status()["installed"] is True
-
-
 def test_ensure_rejects_a_changed_resolved_target_before_archive_access(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -337,10 +1307,9 @@ def test_ensure_rejects_a_changed_resolved_target_before_archive_access(
         manifest_path=manifest,
     )
     expected_target = {
-        "manifest_sha256": "0" * 64,
         "runtime_version": "v1",
         "platform": "linux-x64",
-        "archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+        "archive_sha256": "0" * 64,
         "binary_sha256": hashlib.sha256(binary_payload).hexdigest(),
     }
     monkeypatch.setattr(
@@ -353,30 +1322,3 @@ def test_ensure_rejects_a_changed_resolved_target_before_archive_access(
 
     assert result["ok"] is False
     assert result["reason"] == "fixture_install_target_changed"
-
-
-@pytest.mark.parametrize(
-    ("manager_type", "expected_reason"),
-    [
-        (GitRuntimeManager, "git_manifest_missing"),
-        (MemoryArtifactManager, "memory-runtime_manifest_missing"),
-        (EngineRuntimeManager, "model_hub_engine_manifest_missing"),
-    ],
-)
-def test_optional_ensure_hooks_leave_each_existing_subclass_default_unchanged(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    manager_type,
-    expected_reason: str,
-) -> None:
-    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
-    manager = manager_type(
-        runtime_dir=tmp_path / manager_type.__name__,
-        manifest_path=tmp_path / "missing-manifest.json",
-        offline=True,
-    )
-
-    result = manager.ensure()
-
-    assert result["ok"] is False
-    assert result["reason"] == expected_reason

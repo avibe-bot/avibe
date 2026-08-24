@@ -71,6 +71,20 @@ def _stub_runtime_prepare_dependencies(
     return calls
 
 
+def _show_runtime_prepare_payload(*, installed: bool = True, reason: str | None = None):
+    return {
+        "policy": {"state": "allowed", "reason": None},
+        "install": {
+            "state": "installed" if installed else "failed",
+            "reason": reason,
+        },
+        "runtime": {"state": "unchecked", "reason": None},
+        "ok": installed,
+        "reason": reason,
+        "status": {},
+    }
+
+
 def test_public_show_write_token_is_share_scoped_and_distinct(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
@@ -120,7 +134,7 @@ def test_runtime_prepare_cli_reports_warning_only_failure(monkeypatch, capsys):
         def prepare(self, *, force=False, offline=None):
             assert force is False
             assert offline is None
-            return {"ok": False, "reason": "runtime_node_missing"}
+            return _show_runtime_prepare_payload(installed=False, reason="runtime_node_missing")
 
     monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
     calls = _stub_runtime_prepare_dependencies(monkeypatch)
@@ -145,7 +159,7 @@ def test_runtime_prepare_cli_preserves_offline_environment(monkeypatch):
         def prepare(self, *, force=False, offline=None):
             assert force is False
             assert offline is None
-            return {"ok": True}
+            return _show_runtime_prepare_payload()
 
     monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
     calls = _stub_runtime_prepare_dependencies(monkeypatch)
@@ -226,7 +240,10 @@ def test_runtime_prepare_cli_strict_fails_when_prepare_fails(monkeypatch, capsys
 
     class FakeRuntimeManager:
         def prepare(self, *, force=False, offline=None):
-            return {"ok": False, "reason": "runtime_archive_download_failed"}
+            return _show_runtime_prepare_payload(
+                installed=False,
+                reason="runtime_archive_download_failed",
+            )
 
     monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
     calls = _stub_runtime_prepare_dependencies(monkeypatch)
@@ -242,7 +259,7 @@ def test_runtime_prepare_cli_strict_fails_when_git_prepare_fails(monkeypatch, ca
 
     class FakeRuntimeManager:
         def prepare(self, *, force=False, offline=None):
-            return {"ok": True}
+            return _show_runtime_prepare_payload()
 
     monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
     _stub_runtime_prepare_dependencies(
@@ -260,7 +277,7 @@ def test_runtime_prepare_cli_strict_allows_pending_git_publication(monkeypatch, 
 
     class FakeRuntimeManager:
         def prepare(self, *, force=False, offline=None):
-            return {"ok": True}
+            return _show_runtime_prepare_payload()
 
     monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
     _stub_runtime_prepare_dependencies(
@@ -278,7 +295,7 @@ def test_runtime_prepare_cli_strict_allows_unsupported_git_platform(monkeypatch,
 
     class FakeRuntimeManager:
         def prepare(self, *, force=False, offline=None):
-            return {"ok": True}
+            return _show_runtime_prepare_payload()
 
     monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
     _stub_runtime_prepare_dependencies(
@@ -297,7 +314,7 @@ def test_runtime_prepare_cli_skips_avault_offline(monkeypatch, capsys):
     class FakeRuntimeManager:
         def prepare(self, *, force=False, offline=None):
             assert offline is True
-            return {"ok": True}
+            return _show_runtime_prepare_payload()
 
     monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
     offline_result = {"ok": True, "skipped": True, "reason": "offline"}
@@ -325,7 +342,7 @@ def test_runtime_prepare_cli_prints_status_skipped_tmux_as_skipped(monkeypatch, 
 
     class FakeRuntimeManager:
         def prepare(self, *, force=False, offline=None):
-            return {"ok": True}
+            return _show_runtime_prepare_payload()
 
     monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
     _stub_runtime_prepare_dependencies(
@@ -454,7 +471,7 @@ def test_runtime_prepare_force_reaches_every_managed_dependency(monkeypatch):
     class FakeRuntimeManager:
         def prepare(self, *, force=False, offline=None):
             assert force is True
-            return {"ok": True}
+            return _show_runtime_prepare_payload()
 
     monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
     calls = _stub_runtime_prepare_dependencies(monkeypatch)

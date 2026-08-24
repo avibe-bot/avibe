@@ -1488,6 +1488,8 @@
   --model-hub-usage-chart-height: 132px;
   --model-hub-usage-chart-gap: 3px;
   --model-hub-usage-column-radius: 2px;
+  --model-hub-usage-axis-gap: 12px;
+  --model-hub-usage-axis-columns: minmax(0, 1fr) minmax(0, 2fr) minmax(0, 1fr);
   --model-hub-usage-head-fill: var(--model-hub-wash-05);
   --model-hub-usage-label-ink: var(--model-hub-ink-73);
   --model-hub-usage-note-ink: var(--model-hub-muted-b3);
@@ -1593,11 +1595,25 @@
   border-radius: var(--model-hub-usage-column-radius);
   background: var(--model-hub-usage-column-fill);
 }
+.model-hub-usage-a11y-table { contain: strict; }
 .model-hub-usage-axis {
+  display: grid;
+  grid-template-columns: var(--model-hub-usage-axis-columns);
+  gap: var(--model-hub-usage-axis-gap);
+  align-items: start;
   color: var(--model-hub-usage-note-ink);
   font-size: var(--model-hub-usage-note-size);
 }
-.model-hub-usage-peak { color: var(--model-hub-usage-label-ink); }
+.model-hub-usage-axis-label {
+  min-width: 0;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.model-hub-usage-axis-label:last-child { text-align: right; }
+.model-hub-usage-peak {
+  color: var(--model-hub-usage-label-ink);
+  text-align: center;
+}
 
 @media (min-width: 1024px) {
   .model-hub-direct-grid {
