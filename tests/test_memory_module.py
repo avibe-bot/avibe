@@ -161,6 +161,38 @@ async def test_shutdown_drops_volatile_work(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_capture_reserves_capacity_before_slow_digest(tmp_path: Path) -> None:
+    """A slow source lookup cannot grow pending captures past the writer bound."""
+
+    module, store, _provider = _module(tmp_path)
+    module._writer._permits = 1
+    digest_entered = threading.Event()
+    finish_digest = threading.Event()
+    source_message_digest = store.source_message_digest
+
+    def slow_digest(source_message_id: str) -> str:
+        digest_entered.set()
+        finish_digest.wait(timeout=1.0)
+        return source_message_digest(source_message_id)
+
+    store.source_message_digest = slow_digest
+    first = asyncio.create_task(
+        module.capture(_request(source_message_id="slow-digest"))
+    )
+    assert await asyncio.to_thread(digest_entered.wait, 1.0)
+    assert module._writer._permits == 0
+
+    second = await module.capture(_request(source_message_id="overflow"))
+    assert second == CaptureSkipped(reason="memory_queue_full")
+    assert module._writer._permits == 0
+
+    finish_digest.set()
+    assert await first == CaptureAccepted()
+    await module.wait_writer_idle_for_tests()
+    assert module._writer._permits == 1
+
+
+@pytest.mark.asyncio
 async def test_cancelled_pinning_releases_shared_writer_reservation(tmp_path: Path) -> None:
     module, _store, _provider = _module(tmp_path)
     pin_entered = threading.Event()

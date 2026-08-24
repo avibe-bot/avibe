@@ -277,6 +277,32 @@ def test_slack_memory_reservation_normalizes_invalid_multimodal_generation(
     assert reservation.config_generation is None
 
 
+def test_attachment_capacity_is_reserved_before_session_or_lease_work() -> None:
+    controller = _controller()
+    reserve_admission = Mock()
+    controller.memory_module.reserve_capture_capacity = lambda: "full"
+    controller.memory_module.reserve_capture_admission = reserve_admission
+    context = _context("slack", ordinary=False)
+    context.files = [
+        FileAttachment(
+            name="receipt.pdf",
+            mimetype="application/pdf",
+            url="https://files.slack.test/private",
+        )
+    ]
+    context.is_ordinary_attachment = True
+
+    reservation = controller.reserve_memory_attachment_capture(
+        context,
+        "stable-session",
+    )
+
+    assert reservation is not None
+    assert reservation.capacity_full is True
+    reserve_admission.assert_not_called()
+    reservation.release()
+
+
 def test_attachment_reservation_failure_preserves_caption_as_text_only() -> None:
     """Scenario: MEMORY-IM-ATTACH-004."""
 

@@ -313,6 +313,20 @@ class MemoryModule:
 
         await self._writer.close()
 
+    def reserve_capture_capacity(
+        self,
+    ) -> WriterReservation | Literal["full", "disabled", "unavailable"]:
+        """Claim one volatile capture slot before deferred work starts."""
+
+        return self._writer.reserve_pending()
+
+    def release_capture_capacity(self, reservation: object) -> None:
+        """Release a pending slot that was not handed to the writer queue."""
+
+        if isinstance(reservation, WriterReservation):
+            if reservation.active and not reservation.handed_off:
+                reservation.abandon()
+
     async def wait_writer_idle_for_tests(self, *, timeout_seconds: float = 5.0) -> None:
         await self._writer.wait_idle_for_tests(timeout_seconds=timeout_seconds)
 
@@ -338,6 +352,7 @@ class MemoryModule:
         *,
         source_lease: InboundAttachmentLease | None = None,
         admission: object = None,
+        capacity_reservation: object = None,
     ) -> CaptureReceipt:
         """Validate and persist one source capture without touching the provider."""
 
@@ -348,40 +363,58 @@ class MemoryModule:
         if self._retired:
             return CaptureSkipped(reason="memory_operation_in_progress")
 
-        admission_lock = self._capture_lock_for_request(request)
-        if admission is None:
-            key = self._capture_admission_key(
-                principal_id=getattr(request, "principal_id", None),
-                project_id=getattr(request, "project_id", None),
-                session_id=getattr(request, "session_id", None),
-            )
-            if key is not None:
-                reservation = self.reserve_capture_admission(
-                    principal_id=key[0],
-                    project_id=key[1],
-                    session_id=key[2],
+        reservation = capacity_reservation
+        if reservation is None:
+            reservation = self.reserve_capture_capacity()
+        if isinstance(reservation, str):
+            if reservation == "full":
+                return await self._skipped_with_missed("memory_queue_full")
+            if reservation == "unavailable":
+                return await self._skipped_with_missed("memory_sidecar_unavailable")
+            return CaptureSkipped(reason="memory_operation_in_progress")
+        if not isinstance(reservation, WriterReservation):
+            return await self._skipped_with_missed("memory_invalid_input")
+
+        try:
+            admission_lock = self._capture_lock_for_request(request)
+            if admission is None:
+                key = self._capture_admission_key(
+                    principal_id=getattr(request, "principal_id", None),
+                    project_id=getattr(request, "project_id", None),
+                    session_id=getattr(request, "session_id", None),
                 )
-                async with self.capture_admission(
-                    principal_id=key[0],
-                    project_id=key[1],
-                    session_id=key[2],
-                    reservation=reservation,
-                ):
+                if key is not None:
+                    capture_admission = self.reserve_capture_admission(
+                        principal_id=key[0],
+                        project_id=key[1],
+                        session_id=key[2],
+                    )
+                    async with self.capture_admission(
+                        principal_id=key[0],
+                        project_id=key[1],
+                        session_id=key[2],
+                        reservation=capture_admission,
+                    ):
+                        return await self._capture_with_admission(
+                            request,
+                            source_lease=source_lease,
+                            capacity_reservation=reservation,
+                        )
+                async with admission_lock:
                     return await self._capture_with_admission(
                         request,
                         source_lease=source_lease,
+                        capacity_reservation=reservation,
                     )
-            async with admission_lock:
-                return await self._capture_with_admission(
-                    request,
-                    source_lease=source_lease,
-                )
-        if not self._owns_capture_admission(admission, request, admission_lock):
-            return await self._skipped_with_missed("memory_invalid_input")
-        return await self._capture_with_admission(
-            request,
-            source_lease=source_lease,
-        )
+            if not self._owns_capture_admission(admission, request, admission_lock):
+                return await self._skipped_with_missed("memory_invalid_input")
+            return await self._capture_with_admission(
+                request,
+                source_lease=source_lease,
+                capacity_reservation=reservation,
+            )
+        finally:
+            self.release_capture_capacity(reservation)
 
     @asynccontextmanager
     async def capture_admission(
@@ -492,6 +525,7 @@ class MemoryModule:
         request: CaptureRequest,
         *,
         source_lease: InboundAttachmentLease | None,
+        capacity_reservation: WriterReservation,
     ) -> CaptureReceipt:
         async with self._root_lifecycle_lock():
             if self._retired:
@@ -524,6 +558,7 @@ class MemoryModule:
                 request,
                 normalized_text,
                 source_lease=source_lease,
+                capacity_reservation=capacity_reservation,
             )
 
     def _capture_lock_for_request(self, request: object) -> asyncio.Lock:
@@ -557,6 +592,7 @@ class MemoryModule:
         normalized_text: str,
         *,
         source_lease: InboundAttachmentLease | None,
+        capacity_reservation: WriterReservation,
     ) -> CaptureReceipt:
         """Reserve, pin, and offer one capture to the volatile writer."""
 
@@ -567,17 +603,14 @@ class MemoryModule:
             )
         except Exception:
             return OperationFailed(error="memory_store_unavailable")
-        reservation = self._writer.reserve(digest)
-        if reservation == "duplicate":
+        binding = capacity_reservation.bind_digest(digest)
+        if binding == "duplicate":
             return CaptureDuplicate()
-        if reservation == "full":
-            await self._skipped_with_missed("memory_queue_full")
-            return CaptureSkipped(reason="memory_queue_full")
-        if reservation == "unavailable":
+        if binding == "unavailable":
             return await self._skipped_with_missed("memory_sidecar_unavailable")
-        if reservation == "disabled":
+        if binding == "disabled":
             return CaptureSkipped(reason="memory_operation_in_progress")
-        assert isinstance(reservation, WriterReservation)
+        reservation = capacity_reservation
 
         pinned_bundle: PinnedBundle | None = None
         try:

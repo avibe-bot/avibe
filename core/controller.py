@@ -77,17 +77,27 @@ class _MemoryAttachmentCaptureReservation:
     """Single-owner bridge from SessionTurn registration to Memory execution."""
 
     module: object
-    token: object
+    token: object | None
     config_generation: int | None
+    capacity_token: object | None = None
+    capacity_outcome: str | None = None
     active: bool = True
 
     def release(self) -> None:
         if not self.active:
             return
         self.active = False
-        cancel = getattr(self.module, "cancel_capture_reservation", None)
-        if callable(cancel):
-            cancel(self.token)
+        if self.token is not None:
+            cancel = getattr(self.module, "cancel_capture_reservation", None)
+            if callable(cancel):
+                cancel(self.token)
+        release_capacity = getattr(self.module, "release_capture_capacity", None)
+        if callable(release_capacity) and self.capacity_token is not None:
+            release_capacity(self.capacity_token)
+
+    @property
+    def capacity_full(self) -> bool:
+        return self.capacity_outcome == "full"
 
 
 class _SettingsUserBindings:
@@ -2078,7 +2088,7 @@ class Controller:
         context: MessageContext,
         session_id: str,
     ) -> object | None:
-        """Register exact-session capture order using local facts only."""
+        """Reserve writer capacity and exact-session order before retaining a lease."""
 
         admission = self._memory_admission()
         facts = self._memory_turn_facts(
@@ -2091,6 +2101,7 @@ class Controller:
             return None
         runtime = getattr(self, "memory_runtime", None)
         module = getattr(runtime, "module", None)
+        reserve_capacity = getattr(module, "reserve_capture_capacity", None)
         reserve = getattr(module, "reserve_capture_admission", None)
         principal_id = admission.principal_for(facts)
         project_id = admission.project_for(facts)
@@ -2100,19 +2111,46 @@ class Controller:
             or not isinstance(project_id, str)
         ):
             return None
-        read_generation = getattr(
-            runtime,
-            "attachment_capture_config_generation",
-            None,
-        )
-        generation = None
+        if not callable(reserve_capacity):
+            try:
+                token = reserve(
+                    principal_id=principal_id,
+                    project_id=project_id,
+                    session_id=session_id,
+                )
+            except Exception:
+                return None
+            read_generation = getattr(
+                runtime,
+                "attachment_capture_config_generation",
+                None,
+            )
+            try:
+                observed_generation = (
+                    read_generation() if callable(read_generation) else None
+                )
+            except Exception:
+                observed_generation = None
+            return _MemoryAttachmentCaptureReservation(
+                module=module,
+                token=token,
+                config_generation=memory_admission.normalize_attachment_config_generation(
+                    observed_generation
+                ),
+            )
         try:
-            observed_generation = read_generation() if callable(read_generation) else None
+            capacity_token = reserve_capacity()
         except Exception:
-            observed_generation = None
-        generation = memory_admission.normalize_attachment_config_generation(
-            observed_generation
-        )
+            return None
+        if isinstance(capacity_token, str):
+            if capacity_token != "full":
+                return None
+            return _MemoryAttachmentCaptureReservation(
+                module=module,
+                token=None,
+                config_generation=None,
+                capacity_outcome="full",
+            )
         try:
             token = reserve(
                 principal_id=principal_id,
@@ -2120,11 +2158,74 @@ class Controller:
                 session_id=session_id,
             )
         except Exception:
+            release_capacity = getattr(module, "release_capture_capacity", None)
+            if callable(release_capacity):
+                release_capacity(capacity_token)
             return None
+        if token is None:
+            release_capacity = getattr(module, "release_capture_capacity", None)
+            if callable(release_capacity):
+                release_capacity(capacity_token)
+            return None
+        read_generation = getattr(
+            runtime,
+            "attachment_capture_config_generation",
+            None,
+        )
+        try:
+            observed_generation = read_generation() if callable(read_generation) else None
+        except Exception:
+            observed_generation = None
+        generation = memory_admission.normalize_attachment_config_generation(
+            observed_generation
+        )
         return _MemoryAttachmentCaptureReservation(
             module=module,
             token=token,
             config_generation=generation,
+            capacity_token=capacity_token,
+        )
+
+    def reserve_memory_capture_capacity(
+        self,
+        context: MessageContext,
+        text: str,
+        session_id: str,
+    ) -> object | None:
+        """Reserve one writer slot before a text capture task is scheduled."""
+
+        admission = self._memory_admission()
+        facts = self._memory_turn_facts(
+            context,
+            text=text,
+            session_id=session_id,
+            include_workdir=False,
+        )
+        if not admission.admits(facts):
+            return None
+        runtime = getattr(self, "memory_runtime", None)
+        module = getattr(runtime, "module", None)
+        reserve_capacity = getattr(module, "reserve_capture_capacity", None)
+        if not callable(reserve_capacity):
+            return None
+        try:
+            capacity_token = reserve_capacity()
+        except Exception:
+            return None
+        if isinstance(capacity_token, str):
+            if capacity_token != "full":
+                return None
+            return _MemoryAttachmentCaptureReservation(
+                module=module,
+                token=None,
+                config_generation=None,
+                capacity_outcome="full",
+            )
+        return _MemoryAttachmentCaptureReservation(
+            module=module,
+            token=None,
+            config_generation=None,
+            capacity_token=capacity_token,
         )
 
     def memory_principal_for_context(self, context: MessageContext) -> Optional[str]:
@@ -2387,12 +2488,22 @@ class Controller:
         aggregate before task scheduling can yield to a concurrent reset.
         """
 
+        capture_reservation = attachment_reservation
+        if not isinstance(capture_reservation, _MemoryAttachmentCaptureReservation):
+            prepared = self.reserve_memory_capture_capacity(
+                context,
+                text,
+                session_id,
+            )
+            if prepared is not None:
+                capture_reservation = prepared
+
         return self._capture_user_memory_bound(
             context,
             text,
             session_id,
             attachment_lease=attachment_lease,
-            attachment_reservation=attachment_reservation,
+            attachment_reservation=capture_reservation,
             attachment_config_generation=attachment_config_generation,
             attachment_text_only=attachment_text_only,
             admission_ready=admission_ready,
@@ -2422,6 +2533,9 @@ class Controller:
         )
         if reservation is not None:
             attachment_config_generation = reservation.config_generation
+            if reservation.capacity_full:
+                reservation.release()
+                return
         admission = self._memory_admission()
         facts = self._memory_turn_facts(
             context,
@@ -2438,6 +2552,11 @@ class Controller:
                         self._memory_attachment_unavailable(facts),
                         attachment_lease=None,
                         observed_runtime=observed_runtime,
+                        capacity_reservation=(
+                            reservation.capacity_token
+                            if reservation is not None
+                            else None
+                        ),
                     )
                     return
                 principal_id = admission.principal_for(facts)
@@ -2472,6 +2591,7 @@ class Controller:
                             ),
                             observed_runtime=observed_runtime,
                             held_admission=held_admission,
+                            capacity_reservation=reservation.capacity_token,
                         )
                     return
             if admission_ready is not None:
@@ -2481,6 +2601,9 @@ class Controller:
                 facts,
                 attachment_lease=attachment_lease,
                 observed_runtime=observed_runtime,
+                capacity_reservation=(
+                    reservation.capacity_token if reservation is not None else None
+                ),
             )
         finally:
             if reservation is not None:
@@ -2509,6 +2632,7 @@ class Controller:
         attachment_lease: object,
         observed_runtime: object,
         held_admission: object = None,
+        capacity_reservation: object = None,
     ) -> None:
         platform = CaptureAdmission.platform_of(facts)
         if admission.admits_attachment_turn(facts):
@@ -2604,6 +2728,8 @@ class Controller:
                 capture_options = {}
                 if held_admission is not None:
                     capture_options["admission"] = held_admission
+                if capacity_reservation is not None:
+                    capture_options["capacity_reservation"] = capacity_reservation
                 if request.attachments and attachment_lease is not None:
                     capture_options["source_lease"] = attachment_lease
                 result = await runtime.module.capture(

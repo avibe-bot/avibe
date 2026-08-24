@@ -242,20 +242,51 @@ class MessageHandler(BaseHandler):
             return
         if not self._memory_capture_registration_open:
             return
+        capacity_reservation = None
+        reserve_capacity = getattr(
+            self.controller,
+            "reserve_memory_capture_capacity",
+            None,
+        )
+        if callable(reserve_capacity):
+            try:
+                capacity_reservation = reserve_capacity(context, text, session_id)
+            except Exception:
+                logger.warning(
+                    "Memory text capture capacity reservation failed",
+                    exc_info=True,
+                )
+                return
+            if getattr(capacity_reservation, "capacity_full", False):
+                release = getattr(capacity_reservation, "release", None)
+                if callable(release):
+                    release()
+                return
         capture: Awaitable[None] | None = None
         try:
-            capture = capture_memory(context, text, session_id)
+            capture_options = {}
+            if capacity_reservation is not None:
+                capture_options["attachment_reservation"] = capacity_reservation
+            capture = capture_memory(context, text, session_id, **capture_options)
             if (
                 self._schedule_memory_capture_task(
                     session_id=session_id,
                     expected_snapshot=expected_snapshot,
                     capture=capture,
+                    attachment_reservation=capacity_reservation,
                 )
                 is None
             ):
                 self._close_memory_capture(capture)
         except Exception:
             self._close_memory_capture(capture)
+            release_reservation = getattr(
+                capacity_reservation,
+                "release",
+                None,
+            )
+            if callable(release_reservation):
+                release_reservation()
             logger.warning(
                 "Memory text capture could not be scheduled",
                 exc_info=True,
@@ -992,6 +1023,20 @@ class MessageHandler(BaseHandler):
                             and not stale_attachment_capture
                             else None
                         )
+                        if getattr(
+                            memory_capture_reservation,
+                            "capacity_full",
+                            False,
+                        ):
+                            release = getattr(
+                                memory_capture_reservation,
+                                "release",
+                                None,
+                            )
+                            if callable(release):
+                                release()
+                            memory_capture_reservation = None
+                            raise _MemoryCaptureRegistrationClosed
                         from core.memory import admission as memory_admission
 
                         attachment_config_generation = (

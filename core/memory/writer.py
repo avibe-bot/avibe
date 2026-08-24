@@ -77,10 +77,11 @@ class _PendingSession:
 class WriterReservation:
     """A permit and duplicate-LRU claim held until terminal handling."""
 
-    def __init__(self, writer: "BestEffortMemoryWriter", digest: str) -> None:
+    def __init__(self, writer: "BestEffortMemoryWriter", digest: str | None) -> None:
         self._writer = writer
         self.digest = digest
         self.active = True
+        self.handed_off = False
 
     def release(self) -> None:
         if self.active:
@@ -93,6 +94,14 @@ class WriterReservation:
         if self.active:
             self.active = False
             self._writer._abandon_reservation(self.digest)
+
+    def bind_digest(
+        self,
+        digest: str,
+    ) -> Literal["bound", "duplicate", "disabled", "unavailable"]:
+        """Bind the final source digest after the pending work is admitted."""
+
+        return self._writer.bind_reservation(self, digest)
 
 
 class BestEffortMemoryWriter:
@@ -187,20 +196,56 @@ class BestEffortMemoryWriter:
     ) -> WriterReservation | Literal["duplicate", "full", "disabled", "unavailable"]:
         """Try to claim one permit before attachment pinning."""
 
+        reservation = self.reserve_pending()
+        if isinstance(reservation, str):
+            return reservation
+        outcome = reservation.bind_digest(digest)
+        if outcome == "bound":
+            return reservation
+        return outcome
+
+    def reserve_pending(
+        self,
+    ) -> WriterReservation | Literal["full", "disabled", "unavailable"]:
+        """Claim capacity before deferred capture work performs I/O."""
+
         if self._unavailable:
             return "unavailable"
         if self._closed or self._intake_paused or not self._enabled():
             return "disabled"
-        if digest in self._duplicate_lru:
-            self._duplicate_lru.move_to_end(digest)
-            return "duplicate"
         if self._permits <= 0:
             return "full"
         self._permits -= 1
+        return WriterReservation(self, None)
+
+    def bind_reservation(
+        self,
+        reservation: WriterReservation,
+        digest: str,
+    ) -> Literal["bound", "duplicate", "disabled", "unavailable"]:
+        """Attach a source digest to an already-counted pending capture."""
+
+        if (
+            reservation._writer is not self
+            or not reservation.active
+            or reservation.digest is not None
+        ):
+            return "disabled"
+        if self._unavailable:
+            reservation.abandon()
+            return "unavailable"
+        if self._closed or self._intake_paused or not self._enabled():
+            reservation.abandon()
+            return "disabled"
+        if digest in self._duplicate_lru:
+            self._duplicate_lru.move_to_end(digest)
+            reservation.abandon()
+            return "duplicate"
+        reservation.digest = digest
         self._duplicate_lru[digest] = True
         self._duplicate_lru.move_to_end(digest)
         self._evict_duplicate_entries()
-        return WriterReservation(self, digest)
+        return "bound"
 
     def offer_capture(
         self,
@@ -213,7 +258,11 @@ class BestEffortMemoryWriter:
     ) -> CaptureOfferOutcome:
         """Queue one already-admitted capture without waiting for worker space."""
 
-        if not reservation.active or admission.outcome != "accepted":
+        if (
+            not reservation.active
+            or reservation.digest is None
+            or admission.outcome != "accepted"
+        ):
             return "disabled"
         if self._unavailable:
             return "unavailable"
@@ -239,6 +288,7 @@ class BestEffortMemoryWriter:
         except asyncio.QueueFull:
             self.dropped += 1
             return "full"
+        reservation.handed_off = True
         self._queued_items += 1
         self._ensure_worker()
         return "queued"
@@ -372,16 +422,17 @@ class BestEffortMemoryWriter:
                 # permit bound prevents this protected set from growing.
                 break
 
-    def _release_reservation(self, digest: str) -> None:
+    def _release_reservation(self, digest: str | None) -> None:
         self._release_permit()
-        if digest in self._duplicate_lru:
+        if digest is not None and digest in self._duplicate_lru:
             self._duplicate_lru[digest] = False
             self._duplicate_lru.move_to_end(digest)
             self._evict_duplicate_entries()
 
-    def _abandon_reservation(self, digest: str) -> None:
+    def _abandon_reservation(self, digest: str | None) -> None:
         self._release_permit()
-        self._duplicate_lru.pop(digest, None)
+        if digest is not None:
+            self._duplicate_lru.pop(digest, None)
 
     async def _run(self) -> None:
         while not self._closed:

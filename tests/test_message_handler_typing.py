@@ -1232,6 +1232,46 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
 
         assert handler._memory_capture_tasks == set()
 
+    async def test_text_memory_capacity_is_released_when_setup_raises(self):
+        class Reservation:
+            capacity_full = False
+
+            def __init__(self):
+                self.released = 0
+
+            def release(self):
+                self.released += 1
+
+        controller = _StubController(
+            platform="slack",
+            ack_mode="reaction",
+            typing_result=True,
+        )
+        reservation = Reservation()
+        controller.reserve_memory_capture_capacity = Mock(
+            return_value=reservation
+        )
+        controller.capture_user_memory = Mock(
+            side_effect=RuntimeError("Memory runtime binding failed")
+        )
+        handler = MessageHandler(controller)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            message_id="m-memory-capacity-release",
+            platform="slack",
+        )
+
+        handler._schedule_text_only_memory_capture(
+            context,
+            "remember this",
+            "base-session",
+            expected_snapshot=0,
+        )
+
+        assert reservation.released == 1
+        assert handler._memory_capture_tasks == set()
+
     async def test_text_memory_capture_starts_before_agent_route_resolution(self):
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
         captured = asyncio.Event()
