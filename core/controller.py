@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional, Dict, Any, TypeVar
+from typing import TYPE_CHECKING, Optional, Dict, Any
 from config import paths
 from config.platform_registry import get_platform_descriptor
 from config.v2_config import (
@@ -41,7 +41,11 @@ from core.audio_asr import AudioAsrService
 from core.message_context import build_context_session_key
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.message_output import MessageOutput
-from core.memory_adapter import DisabledMemoryAdapter, MemoryCaptureAdapter
+from core.memory_adapter import (
+    DisabledMemoryAdapter,
+    MemoryCaptureAdapter,
+    SessionArchived,
+)
 from core.processing_indicator import ProcessingIndicatorService
 from core.run_settlement import SETTLED_BY_NO_TERMINAL_RESULT
 from core.runtime_commands import RuntimeCommandWatcher
@@ -79,9 +83,6 @@ logger = logging.getLogger(__name__)
 
 _RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS = 10.0
 _MEMORY_SHUTDOWN_BUDGET_SECONDS = 15.0
-_MemorySessionLifecycleResult = TypeVar("_MemorySessionLifecycleResult")
-
-
 @dataclass(frozen=True, slots=True)
 class _MemoryRuntimeLease:
     runtime: "MemoryRuntime"
@@ -3246,81 +3247,32 @@ class Controller:
 
         return DEFAULT_MEMORY_PROJECT_ID
 
-    async def run_memory_session_lifecycle(
-        self,
-        context: MessageContext,
-        raw_session_id: str,
-        operation: Callable[[], Awaitable[_MemorySessionLifecycleResult]],
-        *,
-        deadline_seconds: float = 5.0,
-    ) -> _MemorySessionLifecycleResult:
-        """Run an IM session reset without waiting for volatile capture delivery."""
-
-        if self._memory_scope_for_im_session(context, raw_session_id) is None:
-            return await operation()
-
-        runtime = getattr(self, "memory_runtime", None)
-        offer = getattr(runtime, "offer_barrier", None)
-        if callable(offer):
-            try:
-                offer(raw_session_id)
-            except Exception:
-                logger.debug("Memory session barrier offer failed", exc_info=True)
-        del deadline_seconds
-        return await operation()
-
-    def _memory_scope_for_im_session(
-        self,
-        context: MessageContext,
-        raw_session_id: object,
-    ) -> Optional[tuple[str, str]]:
-        """Resolve the same complete, admitted scope used by IM capture."""
-
-        from core.memory.store import is_principal_id, is_project_id
-
-        if not isinstance(raw_session_id, str) or not raw_session_id:
-            return None
-        facts = self._memory_turn_facts(context, session_id=raw_session_id)
-        if not facts.memory_enabled:
-            return None
-        admission = self._memory_admission()
-        try:
-            if not admission.admits(facts):
-                return None
-            principal_id = admission.principal_for(facts)
-            project_id = admission.project_for(facts)
-        except Exception:
-            logger.debug("Memory session lifecycle admission failed", exc_info=True)
-            return None
-        if not is_principal_id(principal_id) or not is_project_id(project_id):
-            return None
-        return principal_id, project_id
-
-    def _offer_best_effort_archive_memory_barrier(self, raw_session_id: str) -> None:
-        """Offer a volatile barrier after archive without delaying the archive."""
+    def _offer_best_effort_session_archived(self, raw_session_id: str) -> None:
+        """Offer a post-commit archive observation without delaying archive."""
 
         try:
-            runtime = getattr(self, "memory_runtime", None)
-            offer = getattr(runtime, "offer_barrier", None)
+            adapter = getattr(self, "memory_adapter", None)
+            offer = getattr(adapter, "offer", None)
             if callable(offer):
-                offer(raw_session_id)
+                offer(SessionArchived(raw_session_id))
+            else:
+                # Removed once enabled capture is fully owned by the adapter.
+                runtime = getattr(self, "memory_runtime", None)
+                legacy_offer = getattr(runtime, "offer_barrier", None)
+                if callable(legacy_offer):
+                    legacy_offer(raw_session_id)
         except Exception:
-            logger.debug("archive: Memory barrier offer failed", exc_info=True)
+            logger.debug("archive: session observation failed", exc_info=True)
         finally:
             self._forget_memory_cli_session(raw_session_id)
 
-    async def archive_memory_cli_session(
+    async def archive_session(
         self,
         raw_session_id: str,
         *,
         deadline_seconds: float = 5.0,
     ) -> dict[str, Any]:
-        """Archive one Workbench session without waiting on Memory.
-
-        The controller still owns the terminal session write. Memory barrier
-        admission is best-effort after that write commits: a failed, busy, or
-        fenced runtime must not block or roll back archive.
-        """
+        """Archive one Workbench session and offer its post-commit event."""
 
         from core.services import sessions as workbench_sessions_service
         from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
@@ -3370,12 +3322,12 @@ class Controller:
                 # Offer before run_blocking can re-raise a pending cancellation.
                 try:
                     loop.call_soon_threadsafe(
-                        self._offer_best_effort_archive_memory_barrier,
+                        self._offer_best_effort_session_archived,
                         raw_session_id,
                     )
                 except RuntimeError:
                     logger.debug(
-                        "archive: Memory flush dropped; event loop closed for %s",
+                        "archive: session observation dropped; event loop closed for %s",
                         raw_session_id,
                     )
                     self._forget_memory_cli_session(raw_session_id)

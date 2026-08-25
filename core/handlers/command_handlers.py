@@ -12,6 +12,7 @@ from core.message_context import (
     requires_typed_user_session_key,
     resolve_context_thread_id,
 )
+from core.memory_adapter import SessionReset
 from modules.agents import get_agent_display_name
 from modules.agents.native_sessions.types import NativeResumeSession
 from modules.agents.base import AgentRequest
@@ -138,38 +139,42 @@ class CommandHandlers(BaseHandler):
             base_id = context.message_id or context.channel_id or context.user_id
         return f"{platform}_{base_id}", None
 
-    async def _run_memory_lifecycle_for_new(
+    async def _run_session_lifecycle_for_new(
         self,
-        context: MessageContext,
         session_anchor: Optional[str],
         operation: Callable[[], Awaitable[_NewSessionResult]],
     ) -> _NewSessionResult:
-        """Run `/new` without waiting for volatile Memory delivery."""
-
-        async def run_memory_lifecycle() -> _NewSessionResult:
-            lifecycle = getattr(
-                self.controller,
-                "run_memory_session_lifecycle",
-                None,
-            )
-            if session_anchor and callable(lifecycle):
-                return await lifecycle(
-                    context,
-                    session_anchor,
-                    operation,
-                    deadline_seconds=0.0,
-                )
-            return await operation()
+        """Run `/new` in the core session generation boundary."""
 
         turn_manager = getattr(self.controller, "session_turns", None)
         turn_lifecycle = getattr(turn_manager, "run_session_lifecycle", None)
         if session_anchor and callable(turn_lifecycle):
             return await turn_lifecycle(
                 session_anchor,
-                run_memory_lifecycle,
+                operation,
                 deadline_seconds=0.0,
             )
-        return await run_memory_lifecycle()
+        return await operation()
+
+    def _offer_session_reset(self, session_anchor: str | None) -> None:
+        if not session_anchor:
+            return
+        adapter = getattr(self.controller, "memory_adapter", None)
+        offer = getattr(adapter, "offer", None)
+        if not callable(offer):
+            runtime = getattr(self.controller, "memory_runtime", None)
+            offer = getattr(runtime, "offer_barrier", None)
+            if not callable(offer):
+                return
+            try:
+                offer(session_anchor)
+            except Exception:
+                logger.debug("Session reset observation failed", exc_info=True)
+            return
+        try:
+            offer(SessionReset(session_anchor))
+        except Exception:
+            logger.debug("Session reset observation failed", exc_info=True)
 
     def _compat_session_keys_for_new(self, context: MessageContext, session_key: str) -> list[str]:
         keys = [session_key]
@@ -606,10 +611,14 @@ class CommandHandlers(BaseHandler):
                                 )
                 return False, reclaimed
 
-            topic_started, reclaimed = await self._run_memory_lifecycle_for_new(
-                context,
+            async def _reset_and_offer() -> _NewSessionResult:
+                result = await _reset_session()
+                self._offer_session_reset(memory_session_anchor)
+                return result
+
+            topic_started, reclaimed = await self._run_session_lifecycle_for_new(
                 memory_session_anchor,
-                _reset_session,
+                _reset_and_offer,
             )
             if topic_started:
                 return

@@ -601,7 +601,7 @@ def test_memory_archive_session_delegates_raw_identity_with_bounded_lifecycle() 
     controller.memory_scope_for_cli_session = Mock(
         side_effect=AssertionError("the endpoint must not resolve identity")
     )
-    controller.archive_memory_cli_session = AsyncMock(
+    controller.archive_session = AsyncMock(
         return_value={"id": "ses-memory", "status": "archived"}
     )
     app = internal_server.create_app(controller)
@@ -626,7 +626,7 @@ def test_memory_archive_session_delegates_raw_identity_with_bounded_lifecycle() 
     }
     # The UI transport waits without a reporting deadline so the controller can
     # finish the terminal archive write. Memory flush is scheduled afterwards.
-    controller.archive_memory_cli_session.assert_awaited_once_with(
+    controller.archive_session.assert_awaited_once_with(
         "ses-memory",
         deadline_seconds=5.0,
     )
@@ -647,7 +647,7 @@ def test_memory_archive_session_rejects_widened_or_invalid_payloads(
     payload: dict[str, object],
 ) -> None:
     controller = _build_controller_double()
-    controller.archive_memory_cli_session = AsyncMock(return_value={})
+    controller.archive_session = AsyncMock(return_value={})
     app = internal_server.create_app(controller)
 
     async def _exercise() -> httpx.Response:
@@ -665,7 +665,7 @@ def test_memory_archive_session_rejects_widened_or_invalid_payloads(
 
     assert response.status_code == 400
     assert response.json() == {"ok": False, "error": "memory_invalid_input"}
-    controller.archive_memory_cli_session.assert_not_awaited()
+    controller.archive_session.assert_not_awaited()
 
 
 @pytest.mark.parametrize(
@@ -681,7 +681,7 @@ def test_memory_archive_session_returns_closed_failure_codes(
     error_code: str,
 ) -> None:
     controller = _build_controller_double()
-    controller.archive_memory_cli_session = AsyncMock(side_effect=error)
+    controller.archive_session = AsyncMock(side_effect=error)
     app = internal_server.create_app(controller)
 
     async def _exercise() -> httpx.Response:

@@ -834,91 +834,7 @@ def test_capture_user_memory_rejects_fresh_runtime_after_reset_gate() -> None:
     asyncio.run(run())
 
 
-def test_memory_session_lifecycle_reuses_capture_scope_and_raw_anchor() -> None:
-    controller = _controller()
-    operation_calls = []
-
-    async def reset_session() -> str:
-        operation_calls.append("reset")
-        return "reset-complete"
-
-    result = asyncio.run(
-        controller.run_memory_session_lifecycle(
-            _context("wechat"),
-            "wechat_dm-1",
-            reset_session,
-            deadline_seconds=4.0,
-        )
-    )
-
-    assert result == "reset-complete"
-    assert operation_calls == ["reset"]
-    assert controller.memory_runtime.barrier_sessions == ["wechat_dm-1"]
-
-
-def test_memory_session_lifecycle_does_not_reset_without_a_fence() -> None:
-    controller = _controller()
-    controller.memory_runtime.barrier_error = RuntimeError("fence unavailable")
-    operation_calls = []
-
-    async def reset_session() -> str:
-        operation_calls.append("reset")
-        return "reset-complete"
-
-    result = asyncio.run(
-        controller.run_memory_session_lifecycle(
-            _context("slack"),
-            "slack_dm-1",
-            reset_session,
-        )
-    )
-
-    assert result == "reset-complete"
-    assert operation_calls == ["reset"]
-
-
-def test_memory_session_lifecycle_resets_without_guessing_an_ineligible_scope() -> None:
-    controller = _controller(user=SimpleNamespace(enabled=False, is_admin=False))
-    operation_calls = []
-
-    async def reset_session() -> str:
-        operation_calls.append("reset")
-        return "reset-complete"
-
-    result = asyncio.run(
-        controller.run_memory_session_lifecycle(
-            _context("slack"),
-            "slack_dm-1",
-            reset_session,
-        )
-    )
-
-    assert result == "reset-complete"
-    assert operation_calls == ["reset"]
-    assert controller.memory_runtime.barrier_sessions == []
-
-
-def test_memory_session_lifecycle_does_not_repeat_failed_reset() -> None:
-    controller = _controller()
-    operation_calls = []
-
-    async def reset_session() -> None:
-        operation_calls.append("reset")
-        raise RuntimeError("reset failed")
-
-    with pytest.raises(RuntimeError, match="reset failed"):
-        asyncio.run(
-            controller.run_memory_session_lifecycle(
-                _context("telegram"),
-                "telegram_dm-1",
-                reset_session,
-            )
-        )
-
-    assert operation_calls == ["reset"]
-
-
-def test_archive_memory_cli_session_commits_without_waiting_on_memory(
+def test_archive_session_commits_then_offers_session_archived(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -946,17 +862,18 @@ def test_archive_memory_cli_session_commits_without_waiting_on_memory(
     principal_id = "u-" + ("2" * 32)
     barrier_started_after_archive: list[bool] = []
 
-    class LifecycleRuntime(_Runtime):
-        def offer_barrier(self, raw_session_id: str) -> str:
+    class RecordingAdapter:
+        def offer(self, event: object) -> None:
             with engine.connect() as conn:
                 barrier_started_after_archive.append(
                     workbench_sessions_service.get_session(conn, session_id)["status"]
                     == "archived"
                 )
-            return super().offer_barrier(raw_session_id)
+            assert type(event).__name__ == "SessionArchived"
+            assert getattr(event, "session_id") == session_id
 
     controller = _controller()
-    controller.memory_runtime = LifecycleRuntime(controller.memory_module)
+    controller.memory_adapter = RecordingAdapter()
     from core.session_turns import SessionTurnManager
 
     controller.session_turns = SessionTurnManager()
@@ -973,7 +890,7 @@ def test_archive_memory_cli_session_commits_without_waiting_on_memory(
         )
     }
     async def run() -> None:
-        result = await controller.archive_memory_cli_session(
+        result = await controller.archive_session(
             session_id,
             deadline_seconds=2.0,
         )
@@ -982,10 +899,6 @@ def test_archive_memory_cli_session_commits_without_waiting_on_memory(
             assert workbench_sessions_service.get_session(conn, session_id)["status"] == "archived"
         await asyncio.sleep(0)
         assert barrier_started_after_archive == [True]
-        assert controller.memory_runtime.barrier_offers == 1
-        assert controller.memory_runtime.barrier_sessions == [session_id]
-        assert session_id not in controller._memory_scopes_by_session
-        assert session_id not in controller._memory_cli_facts_by_session
 
     try:
         asyncio.run(run())
@@ -1004,14 +917,14 @@ def test_archive_memory_barrier_failure_still_releases_authorization() -> None:
     }
     controller._memory_cli_facts_by_session = {session_id: object()}
 
-    controller._offer_best_effort_archive_memory_barrier(session_id)
+    controller._offer_best_effort_session_archived(session_id)
 
     assert controller.memory_runtime.barrier_offers == 1
     assert session_id not in controller._memory_scopes_by_session
     assert session_id not in controller._memory_cli_facts_by_session
 
 
-def test_archive_memory_cli_session_offers_barrier_when_commit_is_cancelled(
+def test_archive_session_offers_barrier_when_commit_is_cancelled(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1062,7 +975,7 @@ def test_archive_memory_cli_session_offers_barrier_when_commit_is_cancelled(
     controller._memory_cli_facts_by_session = {}
 
     async def run() -> None:
-        archive = asyncio.create_task(controller.archive_memory_cli_session(session_id))
+        archive = asyncio.create_task(controller.archive_session(session_id))
         deadline = asyncio.get_running_loop().time() + 2.0
         while not commit_entered.is_set():
             if asyncio.get_running_loop().time() >= deadline:
@@ -1086,7 +999,7 @@ def test_archive_memory_cli_session_offers_barrier_when_commit_is_cancelled(
 
 
 @pytest.mark.parametrize("state", ["missing", "reserved", "archived"])
-def test_archive_memory_cli_session_preflight_skips_memory_lifecycle(
+def test_archive_session_preflight_skips_lifecycle_event(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     state: str,
@@ -1122,7 +1035,7 @@ def test_archive_memory_cli_session_preflight_skips_memory_lifecycle(
     controller._memory_cli_facts_by_session = {}
 
     async def archive() -> dict[str, object]:
-        return await controller.archive_memory_cli_session(session_id)
+        return await controller.archive_session(session_id)
 
     try:
         if state == "missing":
@@ -1140,7 +1053,7 @@ def test_archive_memory_cli_session_preflight_skips_memory_lifecycle(
     assert controller.memory_runtime.barrier_offers == 0
 
 
-def test_archive_memory_cli_session_commits_when_barrier_offer_fails(
+def test_archive_session_commits_when_barrier_offer_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1169,7 +1082,7 @@ def test_archive_memory_cli_session_commits_when_barrier_offer_fails(
     controller._memory_cli_facts_by_session = {}
 
     async def run() -> dict[str, object]:
-        result = await controller.archive_memory_cli_session(session_id)
+        result = await controller.archive_session(session_id)
         await asyncio.sleep(0)
         return result
 

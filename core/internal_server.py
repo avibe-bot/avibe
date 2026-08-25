@@ -1214,7 +1214,7 @@ def create_app(
                 status_code=400,
                 content={"ok": False, "error": "memory_invalid_input"},
             )
-        archive_session = getattr(controller, "archive_memory_cli_session", None)
+        archive_session = getattr(controller, "archive_session", None)
         if not callable(archive_session):
             return JSONResponse(
                 status_code=503,
