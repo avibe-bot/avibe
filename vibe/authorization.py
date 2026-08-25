@@ -492,6 +492,7 @@ _MEMBER_HTTP_RULES = tuple(
         # can_manage_agents: selecting among already-authenticated model sources.
         # Adding or re-authenticating a source is credential work and stays Owner.
         ("GET", r"^/api/models/agents$"),
+        ("GET", r"^/api/models/agents/[^/]+/chains$"),
         ("GET", r"^/api/models/agents/[^/]+/chain$"),
         ("PUT", r"^/api/models/agents/[^/]+/chain$"),
         ("GET", r"^/api/models/agents/[^/]+/sources$"),

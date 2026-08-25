@@ -1889,6 +1889,44 @@ def test_agents_endpoint_projects_exact_chain_runnability(tmp_path):
     assert blocked[model_id]["has_runnable_hop"] is False
 
 
+def test_agent_chains_returns_the_complete_overview_from_one_snapshot(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    agent = store.config.agents["claude"]
+    routed_extra = "claude-route-only"
+    selected_extra = "claude-selected-only"
+    agent.routes[routed_extra] = ModelHubRouteConfig()
+    store.requested_models["claude"] = selected_extra
+    expected_model_ids = list(
+        dict.fromkeys(
+            [
+                *service.get_agent_sources("claude")["builtin_models"],
+                selected_extra,
+                *agent.routes,
+            ]
+        )
+    )
+
+    load_count = 0
+    original_load = store.load
+
+    def counted_load():
+        nonlocal load_count
+        load_count += 1
+        return original_load()
+
+    store.load = counted_load
+    chains = service.agent_chains("claude")
+
+    assert load_count == 1
+    model_ids = [chain["model_id"] for chain in chains]
+    assert model_ids == expected_model_ids
+    assert selected_extra in model_ids
+    assert routed_extra in model_ids
+    assert len(model_ids) == len(set(model_ids))
+    for chain in chains:
+        _assert_valid("agent-chain.schema.json", chain)
+
+
 def test_agents_endpoint_cli_presence_probe_errors_fail_closed(tmp_path):
     service, _store, _adapter = _service(tmp_path)
 

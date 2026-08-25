@@ -4849,6 +4849,17 @@ async def model_hub_usage_get(starlette_request: FastAPIRequest):
     return await _dispatch_native_ui_request(starlette_request, handler)
 
 
+@app.route("/api/models/agents/<backend>/chains", methods=["GET"])
+def model_hub_agent_chains_get(backend):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        chains = _model_hub_service().agent_chains(backend)
+        return _model_hub_success(chains=chains)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
 @app.route("/api/models/agents/<backend>/chain", methods=["GET"])
 def model_hub_agent_chain_get(backend):
     from core.handlers.model_hub import ModelHubError

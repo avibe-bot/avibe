@@ -88,8 +88,26 @@ const readChainRequests = async (requests: readonly ModelChainRequest[]): Promis
   ),
 );
 
-const readAgentChains = async (agent: AgentSupply): Promise<ModelChainIndex> =>
-  readChainRequests(modelChainRequests([agent]));
+const readAgentChains = async (agent: AgentSupply): Promise<ModelChainIndex> => {
+  const requests = modelChainRequests([agent]);
+  try {
+    const chains = new Map(
+      (await modelsApi.getAgentChains(agent.backend)).map((chain) => [chain.model_id, chain]),
+    );
+    return Object.fromEntries(requests.map(({ backend, modelId }) => {
+      const chain = chains.get(modelId);
+      return [
+        modelChainKey(backend, modelId),
+        chain?.backend === backend ? readyRegion(chain) : unreadRegion(),
+      ];
+    }));
+  } catch {
+    return Object.fromEntries(requests.map(({ backend, modelId }) => [
+      modelChainKey(backend, modelId),
+      unreadRegion(),
+    ]));
+  }
+};
 
 const readExactAgentChain = async (
   agent: AgentSupply,

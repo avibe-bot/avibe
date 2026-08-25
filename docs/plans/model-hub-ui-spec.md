@@ -819,7 +819,7 @@ state exit; held intent never bypasses the evidence column.
 | §1.0 | Status unread | Status request fails with no retained live snapshot | F2; H1 retains any initiating sequence | `shell.unread`, `shell.closed.unread.*` | Internal configuration remains hidden until a live `ok` / `degraded` snapshot is available. A retained live snapshot may remain visible under F2, but the switch is disabled because the read is not authoritative |
 | §1.0 | Partial | Sources load, per-backend supply does not | F1 on a first paint, in the region the group rollups would have filled; F2 on any later read, which keeps the rollups already drawn | `gateway.supply.unread`, `gateway.retry` on a first paint; `—` on a later one, which states nothing new because nothing it was showing changed `[derived]` | 重试 → the supply read runs again and what comes back decides, read against the source list this page is already holding (D-33): a reading with at least one source → Ready, or whichever rollup §1.1 names for it; a reading while `sources == []` → Empty (no sources), which a first-paint retry reaches whenever the list that succeeded beside it was the empty one; another failure → back here |
 | §1.0 | Sources unread | The mirror: `GET /api/models/sources` fails while `health` and per-backend supply both answer `[derived]` | F1, in the region the list would have filled | `upstream.unread`, `upstream.retry` | The list decides, not the fact that one arrived: 重试 answers with at least one source → Ready, and with `sources == []` → Empty (no sources); a later payload carrying the list is read the same two ways |
-| §1.1 | Ready | Sources + per-backend supply both loaded — the two page-level payloads every group-level element is drawn from. The per-model 当前 line is a third read, owned by Chain unresolved below, and this state neither waits on it nor fails with it | F5 | `gateway.group.subtitle.direct`, `gateway.group.subtitle.gateway`, `gateway.group.mode.direct`, `gateway.group.mode.gateway`, `gateway.group.status.ok` | Card → 06; 来源顺序 → 03; model row → 02; 切换到网关 → 10; 切换到直连 → Leaving the gateway; collapse row → Group expanded |
+| §1.1 | Ready | Sources + per-backend supply both loaded — the two page-level payloads every group-level element is drawn from. The 当前 lines are members of one third, per-backend chain-collection read, owned by Chain unresolved below, and this state neither waits on it nor fails with it | F5 | `gateway.group.subtitle.direct`, `gateway.group.subtitle.gateway`, `gateway.group.mode.direct`, `gateway.group.mode.gateway`, `gateway.group.status.ok` | Card → 06; 来源顺序 → 03; model row → 02; 切换到网关 → 10; 切换到直连 → Leaving the gateway; collapse row → Group expanded |
 | §1.1 | Empty | `sources == []` | F5 | `upstream.empty` | 添加订阅 → 13, then a vendor row → 04; 添加 API Key → 05 |
 | §1.1 | Loading | First paint | → §1.0 Unreachable / §1.0 Sources unread / §1.0 Partial — the same three §1.0 disperses first paint into, because this row is that same first paint seen from the module | — | The payload decides where it lands, not the fact that it arrived — the same reading §1.0 makes one module up: `sources == []` → Empty; anything else → Ready, whose per-source and per-group rows below are drawn from that same payload |
 | §1.1 | Per-source `cooldown` | Source reports cooling `[spec §4.5]` | F5 — a rendered report, not a request | `upstream.state.unavailableRetry` while `retry_at` is still ahead, `upstream.state.unavailableDue` once it has passed `[derived]`, `legend.unavailable` | A later payload reports the source in a different state → that state. `retry_at` is when it becomes worth asking again, not evidence that asking worked, so nothing here promotes the source on a clock — and the two keys are that same fact said in copy: the clock running out changes the sentence and not the state |
@@ -835,10 +835,10 @@ state exit; held intent never bypasses the evidence column.
 | §1.1 | Backend has no models | The group resolves to zero model rows `[derived]` | F5 | `gateway.group.emptyModels` | A model becomes available to that backend |
 | §1.1 | No enabled Agent uses this backend | `mode` reads `hub` and `named_agents` is empty `[contract]` | F5 — a rendered report, not a request | `gateway.group.subtitle.gateway`, `gateway.group.mode.gateway`, `gateway.group.status.unused` | An enabled Agent begins using this backend; its live rollup enters the aggregate and selects Ready, waiting, degraded or interrupted |
 | §1.1 | Per-model route unconfigured | The page-grain `model_supply` row reads `chain_length: 0`; this structural branch is evaluated before the forced `has_runnable_hop: false` reading `[contract]` | F5 for the page-grain statement; an outstanding or failed chain detail read remains F2 only for its other derived columns | server-owned `models.launch.route_unconfigured`, consumed verbatim | Render the existing route-unconfigured family in the current-text slot; never gold 供给已暂停 / Supply paused. A later page-grain payload with `chain_length > 0` leaves this structural state and is dispatched by `has_runnable_hop` |
-| §1.1 | Per-model supply paused | The page-grain `model_supply` row reads `chain_length > 0` and `has_runnable_hop: false` `[contract]` | F5 for the page-grain marker; an outstanding or failed chain detail read remains F2 only for its other derived columns | `legend.unavailable` in the existing current-text slot | Render 供给已暂停 / Supply paused immediately in `$--gold`; do not wait for the per-model chain read. A later page-grain payload with `has_runnable_hop: true` removes the marker; `chain_length: 0` instead enters Per-model route unconfigured. The chain read may still fill its other derived columns, but a pending or failed detail read cannot erase or replace this page-owned marker |
-| §1.1 | Takeover active | The chain read — `GET /api/models/agents/<backend>/chain?model=<id>` — returns non-null `current` different from `chain[0]`, while the head is unavailable for a recoverable quota/cooldown or live connection-backoff reason `[contract]` | F5 | `gateway.group.takenOver`, `gateway.row.currentTakeover`, `gateway.group.status.degraded` | Re-evaluate the complete predicate on every later chain payload. `current` back at the head → Ready. A head that is runnable / no longer recoverably unavailable also retires Takeover immediately under the derived-state predicate rule: if `current` still names the later hop, render the ordinary serving/current-hop projection without violet takeover ink or copy until a later payload changes `current`. A local clock alone changes no payload. This is frame 08 (§1.7) |
+| §1.1 | Per-model supply paused | The page-grain `model_supply` row reads `chain_length > 0` and `has_runnable_hop: false` `[contract]` | F5 for the page-grain marker; an outstanding or failed chain-collection member remains F2 only for its other derived columns | `legend.unavailable` in the existing current-text slot | Render 供给已暂停 / Supply paused immediately in `$--gold`; do not wait for the backend chain collection. A later page-grain payload with `has_runnable_hop: true` removes the marker; `chain_length: 0` instead enters Per-model route unconfigured. The collection member may still fill its other derived columns, but a pending or failed detail read cannot erase or replace this page-owned marker |
+| §1.1 | Takeover active | A member of `GET /api/models/agents/<backend>/chains` returns non-null `current` different from `chain[0]`, while the head is unavailable for a recoverable quota/cooldown or live connection-backoff reason `[contract]` | F5 | `gateway.group.takenOver`, `gateway.row.currentTakeover`, `gateway.group.status.degraded` | Re-evaluate the complete predicate on every later chain payload. `current` back at the head → Ready. A head that is runnable / no longer recoverably unavailable also retires Takeover immediately under the derived-state predicate rule: if `current` still names the later hop, render the ordinary serving/current-hop projection without violet takeover ink or copy until a later payload changes `current`. A local clock alone changes no payload. This is frame 08 (§1.7) |
 | §1.1 | Serving past a blocked head | The serving hop is not the head, and the head is blocked by something waiting does not clear — **stated as the negation of the row above, not as a list of causes.** `runnable = health-permits AND process-available` `[contract]`, so a head is here whenever it is not runnable and its block is not a recoverable quota/cooldown or live connection-backoff reason: the head's source reading `needs_action` or `error`, a source that is `healthy` while the native CLI it needs is unavailable in this process (`reason: native_cli_unavailable` `[contract]`), and a head the chain reports as `source_missing` or `model_unsupported` `[contract]`. Defined by negation because the set of non-self-healing blockers is the contract's to extend, and a row enumerated by cause has to be reopened every time it does | F5 | `gateway.group.status.degraded` | The head becomes runnable again → Ready; the head enters a recoverable quota/cooldown or live connection-backoff while a later hop serves → Takeover active. Both are readings of a later payload and neither is a clock (D-16) — including the user-cleared blocks, which are reported by the same read as the rest |
-| §1.1 | Chain unresolved | Row grain, not group. That same chain read is outstanding for this row, or came back failed or refused, while the two page payloads are in hand | F2 read at row grain — the group keeps everything those two payloads drew. A page-grain `chain_length: 0` row keeps `models.launch.route_unconfigured`; otherwise a row whose `has_runnable_hop` is true renders `—` in its three derived columns and a false row keeps `legend.unavailable` in the current-text slot. Every case renders `—` only in the other unresolved columns. The engine is not implicated and nothing on the head changes | `models.launch.route_unconfigured` for the empty Route; `legend.unavailable` only for a nonempty false row | The read answers → Ready, Takeover active, Per-model route unconfigured or Per-model supply paused. What re-issues it is the collapse row (D-35): collapsing and re-expanding the group re-reads every row in it, and it is the drawn control this row's repair uses, there being no per-row 重试 on the frame. The two triggers beside it are the page's own — any mutation that re-renders the group (*Ready* above) and the next load — so a row that failed is never waiting on a request nobody will send |
+| §1.1 | Chain unresolved | Row grain, not group. The backend chain collection is outstanding, failed or refused, or omitted this row, while the two page payloads are in hand | F2 read at row grain — the group keeps everything those two payloads drew. A page-grain `chain_length: 0` row keeps `models.launch.route_unconfigured`; otherwise a row whose `has_runnable_hop` is true renders `—` in its three derived columns and a false row keeps `legend.unavailable` in the current-text slot. Every case renders `—` only in the other unresolved columns. The engine is not implicated and nothing on the head changes | `models.launch.route_unconfigured` for the empty Route; `legend.unavailable` only for a nonempty false row | Its collection member answers → Ready, Takeover active, Per-model route unconfigured or Per-model supply paused. What re-issues it is the collapse row (D-35): collapsing and re-expanding the group re-reads the backend collection once, and it is the drawn control this row's repair uses, there being no per-row 重试 on the frame. The two triggers beside it are the page's own — any mutation that re-renders the group (*Ready* above) and the next load — so a row that failed is never waiting on a request nobody will send |
 | §1.1 | Group expanded | Collapse row activated | F5 | `gateway.collapse` | Collapse toggled back → Ready |
 | §1.1 | Leaving the gateway | 切换到直连 pressed on a gateway group `[frame]` D-30 — `PATCH /api/models/agents/<backend>/mode` | F1, in place on the group head | `gateway.switchToDirect`, `gateway.fail.switchToDirect`, `gateway.retry` | Success → the group re-renders in its 直连 form; when it was the last gateway backend the page is decided by the sources that are still there, not by the switch — no source left → 09, at least one source retained → **01**, which is §1.8's own *Retained sources* branch and not this frame; a failure keeps the group on the gateway and puts the line and 重试 on the group head, which is the slot the re-rendered form would have used |
 | §1.2 | Loading route | A model row opens 02 with the exact `(backend, menu_model)` held; `GET /api/models/agents/<backend>/chain?model=<id>` owns the dialog body | F1 → Route unread | `route.title`, `route.loading`, `route.cancel` | ET-1–ET-4, ET-8a and ET-18a own opening, response dispatch, focus, retry and the non-mutating exit; an unlisted answer cannot leave this state |
@@ -1741,19 +1741,20 @@ dispatch arbitrates → each backend's models resolve to these sources today.
 | `FZUYI` wire layer | one path per supply relation + endpoint dots | derived supply set | no | — |
 | `ftWgW` legend info icon | the legend's note — **the string is measured from the frame, not specified here** (§0.2) | static | hover, focus **and** activation — the same three §1.0's title icon carries | Tooltip, the note standing as the icon's accessible description |
 
-**The 当前 line is a third read, and the page does not wait on it** `[contract]`. Every
+**The 当前 lines are a third read, and the page does not wait on it** `[contract]`. Every
 element above it is drawn from the two page-level payloads — tile, name, count, the mode
 and status line, the head buttons, the collapse row — but the serving hop is in neither:
 `api.md` states that AgentSupply projects no backend-level serving head; `model_supply`
-carries row-grain configuration/runnability facts but no current hop. The one read that carries hops at all is
-`GET /api/models/agents/<backend>/chain?model=<id>`, per model and Hub only — a 直连
+carries row-grain configuration/runnability facts but no current hop. Overview reads every
+row's existing AgentChain shape through one `GET /api/models/agents/<backend>/chains`
+per Hub backend — a 直连
 backend gets the documented `direct_mode` refusal. So 「Ready」 is defined on the two
 payloads on purpose: waiting on the third would hold the whole page for one row's
 projection, and on a 直连 group it would wait for a read the contract refuses. That
 refusal is also why a 直连 group draws no 当前 line and no takeover rather than an empty
 one — there is nothing there to be pending about.
 
-**When that read answers, `current` names the serving hop exactly** `[contract]`.
+**When a collection member answers, `current` names the serving hop exactly** `[contract]`.
 `agent-chain.schema.json` requires either null or an exact member of `chain`; the page
 renders that member and never substitutes the first runnable hop. Takeover is true only
 when `current` is not the chain head and that head is unavailable for a recoverable
@@ -1763,9 +1764,9 @@ no takeover visual. Every later chain payload re-evaluates that complete predica
 `current` still names the successor, that successor is rendered as the ordinary serving
 hop without takeover ink or copy.
 
-**Until that read answers, only facts the page payload already proved may replace `—`**
-`[derived]`. Chain and takeover render `—` while the chain read is outstanding, and
-again when it comes back failed or refused. Current source does too when
+**Until that collection member answers, only facts the page payload already proved may replace `—`**
+`[derived]`. Chain and takeover render `—` while the collection is outstanding, and
+again when it fails, is refused or omits the member. Current source does too when
 `has_runnable_hop` is true. When that page-grain field is false, however, the existing
 current-text slot immediately renders a page-owned statement: `chain_length: 0` first
 selects server-owned `models.launch.route_unconfigured`, while a nonempty chain selects
@@ -1787,8 +1788,8 @@ drew.
 this one** `[derived]` D-35. 「Chain unresolved」 is the only failure state on this page
 whose repair is not a control drawn beside it: the three columns render `—`, the frame
 carries no per-row 重试, and a row left there would be waiting on a request nothing was
-going to send again. Collapsing a group and expanding it re-reads every row in it, which
-costs no new control and reads as what it already means. The page's own two triggers sit
+going to send again. Collapsing a group and expanding it re-reads that backend's collection
+once, which costs no new control and reads as what it already means. The page's own two triggers sit
 beside it — any mutation re-renders the group, and the next load re-reads everything —
 so the user-available repair and the ambient ones agree. What this row must not do is
 resolve on a clock: a poll cadence is a number this file has no basis to pick, and 「no
@@ -1873,8 +1874,8 @@ collapse label count = |collapsed|
 partitions a false value into structural `models.launch.route_unconfigured` at zero and
 `legend.unavailable` for a nonempty chain. Which hop is current and why another is
 unavailable belong to the third read (「Chain unresolved」 above), and **neither consumer
-may manufacture those details.** That read is per model, asynchronous, and allowed to
-fail, so visibility must not consume it. A row whose chain read is outstanding, failed
+may manufacture those details.** That read is per backend, asynchronous, and allowed to
+fail, so visibility must not consume it. A row whose collection member is outstanding, missing, failed
 or refused keeps exactly the position and visibility the backend menu gave it. Expanding
 reveals any paused or unconfigured row beyond the first six without changing its
 classification.
@@ -5765,15 +5766,15 @@ failed region with no unread line and no 重试 — under the one engine reading
 failed read *more* likely, not less. §1.1's *Chain unresolved* is this rule one grain
 further down, and it is why that row exists instead of a transition into Unreachable.
 
-**D-35 — The collapse row is the chain read's re-read control.** Collapsing a group and
-expanding it re-issues the per-model chain read for every row in it. §1.1's *Chain
+**D-35 — The collapse row is the chain collection's re-read control.** Collapsing a group and
+expanding it re-issues one chain-collection read for that backend. §1.1's *Chain
 unresolved* names it as the repair, and no per-row 重试 is added to the frame.
 For a page-owned RO `unknown` whose exact-chain observation failed or did not match, this same
 re-expansion is the only read retry: it reacquires one RO-O generation when Hub-observable,
 retains the submitted pairs/stage and sends no mutation. A nonmatching answer installs the
 current chain but does not settle or abandon the attempt; Direct-suspended keeps the evidence
 and sends nothing.
-*Why:* that read is per row, allowed to fail, and drawn nowhere, so a row whose read
+*Why:* each collection member is row-grain, allowed to be unresolved, and drawn nowhere, so a row whose read
 failed had `—` in three columns and nothing that would ask again — a dead end, which is
 worse than the dead control D-9a rules out and is not licensed by it. A control already
 on the frame, already meaning 「show me this group's rows」, re-reads them at no cost in
