@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from core.memory.project_ids import (
+from vibe.memory_project_ids import (
     DEFAULT_MEMORY_PROJECT_ID,
     MEMORY_SEARCH_ALL_PROJECTS,
     is_legacy_memory_project_id,

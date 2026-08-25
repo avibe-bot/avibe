@@ -79,7 +79,7 @@ from core.memory.provider_root import (
     ProviderRootMetadata,
     ProviderRootRollback,
 )
-from core.memory.project_ids import (
+from vibe.memory_project_ids import (
     DEFAULT_MEMORY_PROJECT_ID,
     MEMORY_SEARCH_ALL_PROJECTS,
 )

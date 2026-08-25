@@ -96,7 +96,7 @@ def _processing_record_list_query(
         raise ValueError("invalid Processing Record limit")
     project = values.get("project")
     if project is not None:
-        from core.memory.project_ids import parse_agent_search_project
+        from vibe.memory_project_ids import parse_agent_search_project
 
         project = parse_agent_search_project(project)
     return cursor, limit, project
@@ -117,7 +117,7 @@ def _processing_record_entry_query(request: Request) -> tuple[str, str | None]:
         raise ValueError("invalid Processing Record entry id")
     project = values.get("project")
     if project is not None:
-        from core.memory.project_ids import parse_agent_search_project
+        from vibe.memory_project_ids import parse_agent_search_project
 
         project = parse_agent_search_project(project)
     return memcell_id, project
@@ -1182,7 +1182,7 @@ def create_app(
             return JSONResponse(status_code=503, content={"ok": False, "error": "memory_processing_failed"})
 
     def _memory_cli_scope(request: Request) -> tuple[str, str] | None:
-        from core.memory.http_headers import CALLER_SESSION_HEADER
+        from vibe.memory_http_headers import CALLER_SESSION_HEADER
 
         session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip()
         if not session_id:
@@ -1260,7 +1260,7 @@ def create_app(
         return {"ok": True, "session": session}
 
     def _verified_memory_ui_user_key(request: Request) -> str | None:
-        from core.memory.http_headers import (
+        from vibe.memory_http_headers import (
             CALLER_SESSION_HEADER,
             MEMORY_USER_KEY_HEADER,
         )
@@ -1289,7 +1289,7 @@ def create_app(
     def _memory_read_owner(
         request: Request,
     ) -> tuple[str | None, tuple[str, str] | None] | None:
-        from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+        from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
 
         if str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip():
             user_key = _verified_memory_ui_user_key(request)
@@ -1511,8 +1511,8 @@ def create_app(
             or not isinstance(payload.get("query"), str)
         ):
             return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
-        from core.memory.http_headers import CALLER_SESSION_HEADER, MEMORY_USER_KEY_HEADER
-        from core.memory.project_ids import (
+        from vibe.memory_http_headers import CALLER_SESSION_HEADER, MEMORY_USER_KEY_HEADER
+        from vibe.memory_project_ids import (
             omitted_project_to_default,
             parse_agent_search_project,
             parse_ui_search_project,
@@ -1572,8 +1572,8 @@ def create_app(
                 status_code=400,
                 content={"status": "failed", "error": "memory_invalid_input"},
             )
-        from core.memory.http_headers import MEMORY_USER_KEY_HEADER
-        from core.memory.project_ids import (
+        from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
+        from vibe.memory_project_ids import (
             MEMORY_SEARCH_ALL_PROJECTS,
             omitted_project_to_default,
             parse_agent_search_project,
@@ -1701,7 +1701,7 @@ def create_app(
             or len(payload["text"]) > 4_000
         ):
             return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
-        from core.memory.project_ids import omitted_project_to_default, parse_writable_memory_project
+        from vibe.memory_project_ids import omitted_project_to_default, parse_writable_memory_project
 
         try:
             project_id = parse_writable_memory_project(
@@ -1711,7 +1711,7 @@ def create_app(
             return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
 
         from core.memory import CaptureRequest
-        from core.memory.http_headers import CALLER_SESSION_HEADER
+        from vibe.memory_http_headers import CALLER_SESSION_HEADER
 
         session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip()
         text = payload["text"]

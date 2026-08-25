@@ -18,7 +18,7 @@ from core.memory.processing_record import (
     ProcessingSourceObservations,
     SourceObservation,
 )
-from core.memory.project_ids import is_persisted_memory_project_id
+from vibe.memory_project_ids import is_persisted_memory_project_id
 from core.memory.secret_scrubber import scrub_text
 from core.memory.store import (
     derive_assistant_memory_owner_id,

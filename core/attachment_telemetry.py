@@ -1,8 +1,4 @@
-"""Scrub-safe Memory attachment telemetry.
-
-This leaf stays above the eager ``core.memory`` package because importing that
-package loads SQLite-backed modules and breaks native-session lightweight imports.
-"""
+"""Scrub-safe attachment capture telemetry owned by the host."""
 
 from __future__ import annotations
 

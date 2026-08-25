@@ -68,7 +68,7 @@ from core.memory.admission import (
 )
 from core.blocking import run_blocking
 from config.memory_operation_lock import MemoryOperationBusy, MemoryOperationLease
-from core.memory_telemetry import log_attachment_capture
+from core.attachment_telemetry import log_attachment_capture
 from vibe.i18n import get_supported_languages, t as i18n_t
 from vibe.memory_contract import (
     MemoryRuntimeCloseUnprovedError,
@@ -1334,7 +1334,7 @@ class Controller:
         verified_user_key: str | None,
         cli_scope: tuple[str, str] | None,
     ) -> dict[str, Any]:
-        from core.memory.project_ids import (
+        from vibe.memory_project_ids import (
             DEFAULT_MEMORY_PROJECT_ID,
             MEMORY_SEARCH_ALL_PROJECTS,
         )
@@ -1376,7 +1376,7 @@ class Controller:
         verified_user_key: str | None,
         cli_scope: tuple[str, str] | None,
     ) -> dict[str, Any]:
-        from core.memory.project_ids import DEFAULT_MEMORY_PROJECT_ID
+        from vibe.memory_project_ids import DEFAULT_MEMORY_PROJECT_ID
 
         async with self._borrow_memory_runtime() as lease:
             scope = self._memory_scope_for_runtime(
@@ -1409,7 +1409,7 @@ class Controller:
         verified_user_key: str | None,
         cli_scope: tuple[str, str] | None,
     ) -> dict[str, Any]:
-        from core.memory.project_ids import (
+        from vibe.memory_project_ids import (
             DEFAULT_MEMORY_PROJECT_ID,
             MEMORY_SEARCH_ALL_PROJECTS,
         )
@@ -3212,7 +3212,7 @@ class Controller:
     def memory_scope_for_cli_session(self, session_id: str) -> Optional[tuple[str, str]]:
         """Return the principal and project owned by an admitted Agent session."""
 
-        from core.memory.project_ids import DEFAULT_MEMORY_PROJECT_ID
+        from vibe.memory_project_ids import DEFAULT_MEMORY_PROJECT_ID
         from core.memory.store import is_principal_id, is_project_id
 
         session_key = str(session_id or "").strip()
@@ -3269,7 +3269,7 @@ class Controller:
     def default_memory_project_id(self) -> str:
         """Return the Memory project used by Settings and default Agent search."""
 
-        from core.memory.project_ids import DEFAULT_MEMORY_PROJECT_ID
+        from vibe.memory_project_ids import DEFAULT_MEMORY_PROJECT_ID
 
         return DEFAULT_MEMORY_PROJECT_ID
 

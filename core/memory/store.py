@@ -24,7 +24,7 @@ from core.memory.confined_filesystem import (
     open_and_harden_confined_regular_file,
     open_confined_regular_file,
 )
-from core.memory.project_ids import (
+from vibe.memory_project_ids import (
     DEFAULT_MEMORY_PROJECT_ID,
     MAX_NAMED_MEMORY_PROJECTS,
     is_legacy_memory_project_id,

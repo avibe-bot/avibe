@@ -18,7 +18,7 @@ from typing import Any, Literal
 from urllib.parse import unquote, urlparse
 
 from core.memory.artifact import EVEROS_VERSION
-from core.memory.project_ids import (
+from vibe.memory_project_ids import (
     is_new_stored_memory_project_id,
     is_persisted_memory_project_id,
 )

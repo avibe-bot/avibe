@@ -81,7 +81,7 @@ def _processing_record_list_query(
         raise ValueError("invalid Processing Record limit")
     project = values.get("project")
     if project is not None:
-        from core.memory.project_ids import parse_agent_search_project
+        from vibe.memory_project_ids import parse_agent_search_project
 
         project = parse_agent_search_project(project)
     return cursor, limit, project
@@ -104,7 +104,7 @@ def _processing_record_entry_query(
         raise ValueError("invalid Processing Record entry id")
     project = values.get("project")
     if project is not None:
-        from core.memory.project_ids import parse_agent_search_project
+        from vibe.memory_project_ids import parse_agent_search_project
 
         project = parse_agent_search_project(project)
     return memcell_id, project
@@ -331,7 +331,7 @@ def _memory_preflight_projection(payload: dict) -> dict:
 
 
 def _memory_closed_error(payload: dict, *, fallback: str) -> str:
-    from core.memory.types import is_memory_error_code
+    from vibe.memory_contract import is_memory_error_code
 
     value = payload.get("error")
     return value if is_memory_error_code(value) else fallback

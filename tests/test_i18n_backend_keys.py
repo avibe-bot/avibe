@@ -23,7 +23,7 @@ from core.failure_notices import (
     NOTICE_REASON_UNKNOWN_I18N_KEY,
     PER_FIRE_INTERRUPT_REASONS,
 )
-from core.memory.types import CLOSED_MEMORY_ERROR_CODES
+from vibe.memory_contract import CLOSED_MEMORY_ERROR_CODES
 from core.run_settlement import (
     RUN_INTERRUPTION_REASONS,
     SETTLEMENT_I18N_KEYS,
