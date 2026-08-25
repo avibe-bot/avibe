@@ -8,6 +8,11 @@ import { Markdown } from '@/components/ui/markdown';
 import { useTheme } from '@/context/ThemeContext';
 import { apiFetch } from '@/lib/apiFetch';
 import {
+  EDITOR_FONT_DEFAULT,
+  getEditorFontSize,
+  subscribeEditorFontSize,
+} from '@/lib/editorFontSize';
+import {
   CODE_HIGHLIGHT_MAX_BYTES,
   CSV_MAX_COLS,
   CSV_MAX_ROWS,
@@ -640,6 +645,11 @@ type TextKind = 'svg' | 'html' | 'markdown' | 'json' | 'csv' | 'code';
 const TextPreview: React.FC<{ source: PreviewSource; kind: TextKind; onText?: (text: string) => void; className?: string }> = ({ source, kind, onText, className }) => {
   const { t } = useTranslation();
   const onTextRef = useLatestRef(onText);
+  const fontSize = React.useSyncExternalStore(
+    subscribeEditorFontSize,
+    getEditorFontSize,
+    () => EDITOR_FONT_DEFAULT,
+  );
   const [state, setState] = React.useState<{ phase: 'loading' | 'ready' | 'error' | 'toolarge'; text: string }>(() =>
     source.text != null ? { phase: 'ready', text: source.text } : { phase: 'loading', text: '' },
   );
@@ -698,17 +708,33 @@ const TextPreview: React.FC<{ source: PreviewSource; kind: TextKind; onText?: (t
   if (state.phase === 'error') return <Centered className={className}>{t('preview.failed')}</Centered>;
 
   const text = state.text;
-  if (kind === 'markdown')
-    return (
-      <div className={clsx('h-full min-h-0 overflow-auto bg-surface', className)}>
+  let content: React.ReactNode;
+  if (kind === 'markdown') {
+    content = (
+      <div className="h-full min-h-0 overflow-auto bg-surface">
         <Markdown content={text} interactive={false} className="vr-fileview-md mx-auto max-w-3xl px-6 py-5" />
       </div>
     );
-  if (kind === 'svg') return <ImageBody src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(text)}`} name={source.name} className={className} />;
-  if (kind === 'html') return <HtmlView html={text} className={className} />;
-  if (kind === 'json') return <JsonBlock text={text} className={className} />;
-  if (kind === 'csv') return <CsvTable text={text} className={className} />;
-  return <CodeBlock code={text} lang={codeLanguage(source.name, source.ext)} className={className} />;
+  } else if (kind === 'svg') {
+    content = <ImageBody src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(text)}`} name={source.name} />;
+  } else if (kind === 'html') {
+    content = <HtmlView html={text} />;
+  } else if (kind === 'json') {
+    content = <JsonBlock text={text} />;
+  } else if (kind === 'csv') {
+    content = <CsvTable text={text} />;
+  } else {
+    content = <CodeBlock code={text} lang={codeLanguage(source.name, source.ext)} />;
+  }
+
+  return (
+    <div
+      className={clsx('vr-fileview-text h-full min-h-0', className)}
+      style={{ '--vr-fileview-font-size': `${fontSize}px` } as React.CSSProperties}
+    >
+      {content}
+    </div>
+  );
 };
 
 // Scroll container shared by the text renderers (their inner markup owns its own padding via the
