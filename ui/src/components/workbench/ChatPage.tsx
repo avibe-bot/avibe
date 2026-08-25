@@ -633,6 +633,8 @@ export const ChatPage: React.FC = () => {
   // Config saves execute on worker threads. Preserve click order locally so an
   // older request can never persist after a newer visibility choice.
   const agentActivityConfigWriteRef = useRef<Promise<unknown>>(Promise.resolve());
+  const confirmedAgentActivityVisibilityRef = useRef(false);
+  const agentActivityVisibilityRequestRef = useRef(0);
   const [activityGroups, setActivityGroups] = useState<ActivityGroup[]>([]);
   const liveStateRef = useRef<LiveActivityState>(initialLiveActivity());
   const [liveRows, setLiveRows] = useState<ActivityRow[]>([]);
@@ -801,9 +803,8 @@ export const ChatPage: React.FC = () => {
     [refreshActivity],
   );
   scheduleActivityRefreshRef.current = scheduleActivityRefresh;
-  const setAgentActivityVisibility = useCallback(
+  const applyAgentActivityVisibility = useCallback(
     (enabled: boolean) => {
-      if (!canEditAgentActivityVisibility) return;
       showAgentActivityRef.current = enabled;
       setShowAgentActivity(enabled);
 
@@ -828,6 +829,14 @@ export const ChatPage: React.FC = () => {
           activityRetryTimerRef.current = null;
         }
       }
+    },
+    [dispatchLive, scheduleActivityRefresh],
+  );
+  const setAgentActivityVisibility = useCallback(
+    (enabled: boolean) => {
+      if (!canEditAgentActivityVisibility) return;
+      applyAgentActivityVisibility(enabled);
+      const request = ++agentActivityVisibilityRequestRef.current;
 
       const pendingWrite = agentActivityConfigWriteRef.current
         .catch(() => undefined)
@@ -835,13 +844,18 @@ export const ChatPage: React.FC = () => {
       agentActivityConfigWriteRef.current = pendingWrite;
       void pendingWrite
         .then(() => {
+          confirmedAgentActivityVisibilityRef.current = enabled;
+          if (request !== agentActivityVisibilityRequestRef.current) return;
           // Close the small save/streaming gap: rows persisted while the config
           // mutation was in flight are recovered from the durable group.
           if (enabled && showAgentActivityRef.current) scheduleActivityRefresh();
         })
-        .catch(() => {});
+        .catch(() => {
+          if (request !== agentActivityVisibilityRequestRef.current) return;
+          applyAgentActivityVisibility(confirmedAgentActivityVisibilityRef.current);
+        });
     },
-    [api, canEditAgentActivityVisibility, dispatchLive, scheduleActivityRefresh],
+    [api, applyAgentActivityVisibility, canEditAgentActivityVisibility, scheduleActivityRefresh],
   );
   // Send-while-busy queue (messages sent while a turn runs, shown above the
   // composer) + the loaded draft to seed the composer with.
@@ -1446,6 +1460,7 @@ export const ChatPage: React.FC = () => {
       const activityEnabled = Boolean(bootstrap.config?.ui?.show_agent_activity);
       setShowAgentActivity(activityEnabled);
       showAgentActivityRef.current = activityEnabled;
+      confirmedAgentActivityVisibilityRef.current = activityEnabled;
       // Default on: only an explicit ``false`` hides tool rows.
       setShowToolCalls(bootstrap.config?.ui?.show_tool_calls !== false);
       // Merge (not replace) so a row that arrived over the stream during the

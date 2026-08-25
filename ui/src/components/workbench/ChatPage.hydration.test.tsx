@@ -649,6 +649,79 @@ describe('ChatPage transcript hydration', () => {
     })).toBeNull());
   });
 
+  it('restores the enable shortcut when the visibility write fails', async () => {
+    mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+    mocks.api.getSessionBootstrap.mockResolvedValue({
+      ...bootstrapPayload('session-new'),
+      turn_state: { ...idleTurnState, foreground: 'running', in_flight: true },
+    });
+    mocks.api.mutateConfig.mockRejectedValueOnce(new Error('save failed'));
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-new']}>
+        <Routes>
+          <Route path="/chat/:sessionId" element={<ChatPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const enable = await screen.findByRole('button', { name: 'chat.agentActivity.enable' });
+    act(() => enable.click());
+    await waitFor(() => expect(mocks.api.mutateConfig).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByRole('button', {
+      name: 'chat.agentActivity.enable',
+    })).toBeTruthy());
+  });
+
+  it('restores the last confirmed visibility when the latest write fails', async () => {
+    const openGroup = {
+      id: 'current-turn',
+      anchor_message_id: null,
+      anchor_position: 'after' as const,
+      open: true,
+      status: 'running' as const,
+      steps: 1,
+      duration_ms: null,
+    };
+    mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+    mocks.api.getSessionBootstrap.mockResolvedValue({
+      ...bootstrapPayload('session-new'),
+      turn_state: { ...idleTurnState, foreground: 'running', in_flight: true },
+    });
+    mocks.api.getSessionActivity.mockResolvedValue({ groups: [openGroup] });
+    mocks.api.getSessionActivityGroup.mockResolvedValue({
+      ...openGroup,
+      rows: [{
+        id: 'current-step',
+        kind: 'assistant',
+        text: 'current work step',
+        created_at: '2026-08-25T00:00:00Z',
+      }],
+    });
+    mocks.api.mutateConfig
+      .mockResolvedValueOnce({ ui: { show_agent_activity: true } })
+      .mockRejectedValueOnce(new Error('save failed'));
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-new']}>
+        <Routes>
+          <Route path="/chat/:sessionId" element={<ChatPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const enable = await screen.findByRole('button', { name: 'chat.agentActivity.enable' });
+    act(() => enable.click());
+    await screen.findByText('current work step');
+    const disable = screen.getByRole('button', { name: 'chat.agentActivity.disable' });
+    act(() => disable.click());
+    await waitFor(() => expect(mocks.api.mutateConfig).toHaveBeenCalledTimes(2));
+    await screen.findByText('current work step');
+    await waitFor(() => expect(screen.getByRole('button', {
+      name: 'chat.agentActivity.disable',
+    })).toBeTruthy());
+  });
+
   it('does not offer the global enable shortcut to a Viewer', async () => {
     mocks.authorizationCapabilities.can_chat = false;
     mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
