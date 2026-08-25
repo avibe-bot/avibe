@@ -1632,9 +1632,7 @@ def test_install_codex_fresh_install_uses_resolved_npm(
     assert calls[0][1]["NPM_CONFIG_PREFIX"] == str(api.Path.home() / ".local")
     assert calls[0][1]["PATH"].split(api.os.pathsep)[0] == str(api.Path.home() / ".local" / "bin")
     assert result["path"] == "/Users/test/.nvm/versions/node/v22.18.0/bin/codex"
-    assert codex_catalog_refresh_calls == [
-        ("/Users/test/.nvm/versions/node/v22.18.0/bin/codex", calls[0][1])
-    ]
+    assert codex_catalog_refresh_calls == []
 
 
 def test_install_codex_npm_install_runs_npm_upgrade(

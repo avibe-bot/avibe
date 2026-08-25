@@ -1980,6 +1980,15 @@ class AgentAuthService:
             return
         await self._apply_backend_runtime_refresh(backend, False)
 
+    @staticmethod
+    async def _prepare_codex_hub_catalog(runtime_config: Any) -> None:
+        from vibe import backend_model_catalog
+
+        await asyncio.to_thread(
+            backend_model_catalog.refresh_codex_hub_catalog_now,
+            runtime_config.binary,
+        )
+
     async def _apply_backend_runtime_refresh(self, backend: str, force: bool = False) -> None:
         agent_service = getattr(self.controller, "agent_service", None)
         runtime_tokens: dict[str, str] = {}
@@ -1989,8 +1998,15 @@ class AgentAuthService:
         try:
             refresh_runtime_config = getattr(agent_service, "refresh_runtime_config", None)
             runtime_config = None
-            if callable(refresh_runtime_config):
+            if backend == "codex":
                 runtime_config = self._load_backend_runtime_config(backend)
+                if runtime_config is None:
+                    await self._unregister_disabled_backend_agent(backend)
+                    return
+                await self._prepare_codex_hub_catalog(runtime_config)
+            if callable(refresh_runtime_config):
+                if runtime_config is None:
+                    runtime_config = self._load_backend_runtime_config(backend)
                 if runtime_config is None:
                     await self._unregister_disabled_backend_agent(backend)
                     return
