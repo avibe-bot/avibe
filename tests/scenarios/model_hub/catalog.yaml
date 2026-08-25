@@ -103,10 +103,11 @@ scenarios:
     test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_protocol_002_contract_exposes_only_the_three_authoritative_transports
   - id: MH-PROTOCOL-003
     name: Codex Model Hub launches use standard Responses provider capabilities
-    status: covered
+    status: partial
     kind: compatibility
-    layer: scenario
-    test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_protocol_003_codex_hub_uses_standard_responses_catalog
+    layer: contract
+    missing_layer: scenario
+    test: tests/test_model_hub_injection.py::test_codex_hub_launch_uses_responses_wire_api_and_ephemeral_token
   - id: MH-AC29-001
     name: A persisted import-shaped Source survives canonical serialization and reload
     status: covered
@@ -437,6 +438,7 @@ scenarios:
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py::test_mh_oauth_native_003_cancel_and_timeout_terminate_cleanly
 next_priority:
+  - MH-PROTOCOL-003
   - MH-RUNTIME-001
   - MH-OAUTH-B-001
   - MH-OAUTH-C-001

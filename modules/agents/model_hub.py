@@ -63,10 +63,6 @@ _NETWORK_ERROR_RE = re.compile(
     r"(?:timed?\s*out|timeout|connection (?:failed|reset|refused)|network (?:error|unreachable))",
     re.IGNORECASE,
 )
-_CODEX_CATALOG_DUMP_TIMEOUT_SECONDS = 15.0
-_CODEX_CATALOG_MAX_BYTES = 8 * 1024 * 1024
-
-
 @dataclass(frozen=True)
 class ModelHubLaunch:
     backend: BackendName
@@ -332,113 +328,6 @@ def build_codex_hub_launch(
         f"model_catalog_json={json.dumps(str(model_catalog_path))}",
     ]
     return overrides + list(base_args), env
-
-
-def _codex_hub_catalog_bytes(raw_catalog: bytes) -> bytes:
-    """Project Codex's bundled catalog onto generic Responses semantics.
-
-    Responses Lite and its coupled tool modes are capabilities of OpenAI's
-    first-party backend, not of a generic OpenAI-compatible provider. Model Hub
-    presents the latter contract, so every model must use the standard
-    Responses body before the app-server constructs a request.
-    """
-
-    try:
-        payload = json.loads(raw_catalog)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise RuntimeError("Codex returned an invalid bundled model catalog") from exc
-    if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
-        raise RuntimeError("Codex bundled model catalog has no models list")
-    models = payload["models"]
-    if not models:
-        raise RuntimeError("Codex bundled model catalog is empty")
-
-    projected: list[dict[str, Any]] = []
-    provider_private_defaults: dict[str, object] = {
-        "use_responses_lite": False,
-        "multi_agent_version": None,
-        "tool_mode": None,
-        "prefer_websockets": False,
-    }
-    for model in models:
-        if not isinstance(model, dict) or not isinstance(model.get("slug"), str):
-            raise RuntimeError("Codex bundled model catalog contains an invalid model")
-        row = dict(model)
-        for key, value in provider_private_defaults.items():
-            if key in row:
-                row[key] = value
-        projected.append(row)
-    payload["models"] = projected
-    return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode()
-
-
-async def _dump_codex_bundled_catalog(
-    binary: str,
-    base_env: dict[str, str],
-) -> bytes:
-    env = dict(base_env)
-    for key in (
-        "OPENAI_API_KEY",
-        "OPENAI_BASE_URL",
-        "OPENAI_API_BASE",
-        "CODEX_API_KEY",
-        "AVIBE_MODEL_HUB_TOKEN",
-    ):
-        env.pop(key, None)
-    process = await asyncio.create_subprocess_exec(
-        binary,
-        "debug",
-        "models",
-        "--bundled",
-        "-c",
-        "model_catalog_json=null",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
-        env=env,
-    )
-    try:
-        stdout, _ = await asyncio.wait_for(
-            process.communicate(),
-            timeout=_CODEX_CATALOG_DUMP_TIMEOUT_SECONDS,
-        )
-    except asyncio.TimeoutError as exc:
-        process.kill()
-        await process.wait()
-        raise RuntimeError("Codex bundled model catalog timed out") from exc
-    if process.returncode != 0:
-        raise RuntimeError("Codex could not export its bundled model catalog")
-    if len(stdout) > _CODEX_CATALOG_MAX_BYTES:
-        raise RuntimeError("Codex bundled model catalog exceeded the safety limit")
-    return stdout
-
-
-async def prepare_codex_hub_launch(
-    base_args: list[str],
-    base_env: dict[str, str],
-    launch: ModelHubLaunch,
-    *,
-    binary: str,
-) -> tuple[list[str], dict[str, str] | None]:
-    """Prepare an immutable, binary-matched catalog before a Hub app-server."""
-
-    if launch.channel != "hub" or not launch.gateway_base_url or not launch.gateway_token:
-        return build_codex_hub_launch(base_args, base_env, launch)
-    raw_catalog = await _dump_codex_bundled_catalog(binary, base_env)
-    catalog = _codex_hub_catalog_bytes(raw_catalog)
-    digest = hashlib.sha256(catalog).hexdigest()[:16]
-    catalog_path = (
-        paths.get_runtime_dir()
-        / "model-hub"
-        / "codex"
-        / f"standard-responses-{digest}.json"
-    )
-    write_atomic(catalog_path, catalog)
-    return build_codex_hub_launch(
-        base_args,
-        base_env,
-        launch,
-        model_catalog_path=catalog_path,
-    )
 
 
 def _provider_package() -> str:

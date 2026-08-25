@@ -1,4 +1,5 @@
 import builtins
+import io
 import json
 import threading
 import time
@@ -28,6 +29,7 @@ class _FakeResponse:
 def _reset_remote_cache(monkeypatch):
     backend_model_catalog._REMOTE_MEMORY_CACHE.clear()
     monkeypatch.setattr(backend_model_catalog, "_REMOTE_REFRESH_IN_FLIGHT", False)
+    monkeypatch.setattr(backend_model_catalog, "_CODEX_HUB_REFRESH_IN_FLIGHT", False)
     yield
     backend_model_catalog._REMOTE_MEMORY_CACHE.clear()
 
@@ -62,6 +64,137 @@ def test_backend_model_entries_normalize_runtime_catalog_shape():
             "reasoning_efforts": ["low", "ultra"],
         },
     ]
+
+
+def test_codex_hub_catalog_warms_from_complete_local_cache(monkeypatch, tmp_path):
+    codex_home = tmp_path / "codex"
+    runtime_dir = tmp_path / "runtime"
+    codex_home.mkdir()
+    (codex_home / "models_cache.json").write_text(
+        json.dumps(
+            {
+                "client_version": "0.149.1",
+                "models": [
+                    {
+                        "slug": "gpt-5.6-luna",
+                        "display_name": "GPT-5.6 Luna",
+                        "use_responses_lite": True,
+                        "multi_agent_version": "v1",
+                        "tool_mode": "code_mode_only",
+                        "prefer_websockets": True,
+                        "model_messages": {"instructions_template": "preserved"},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(backend_model_catalog.paths, "get_runtime_dir", lambda: runtime_dir)
+
+    path = backend_model_catalog.prepare_codex_hub_catalog_from_cache()
+
+    assert path == backend_model_catalog.ready_codex_hub_catalog_path()
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["client_version"] == "0.149.1"
+    assert payload["models"][0] == {
+        "slug": "gpt-5.6-luna",
+        "display_name": "GPT-5.6 Luna",
+        "use_responses_lite": False,
+        "multi_agent_version": None,
+        "tool_mode": None,
+        "prefer_websockets": False,
+        "model_messages": {"instructions_template": "preserved"},
+    }
+
+
+def test_codex_hub_catalog_export_strips_auth_and_stays_bounded(monkeypatch):
+    payload = b"x" * (backend_model_catalog.CODEX_HUB_CATALOG_MAX_BYTES + 1)
+    captured = {}
+    terminated = []
+
+    class Process:
+        def __init__(self):
+            self.stdout = io.BytesIO(payload)
+            self.returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            self.returncode = -9
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    process = Process()
+
+    def popen(command, **kwargs):
+        captured.update({"command": command, **kwargs})
+        return process
+
+    def terminate(target, *_args):
+        terminated.append(target)
+        target.returncode = -9
+
+    monkeypatch.setattr(backend_model_catalog.subprocess, "Popen", popen)
+    monkeypatch.setattr(backend_model_catalog, "signal_process_tree", terminate)
+
+    with pytest.raises(RuntimeError, match="exceeded the safety limit"):
+        backend_model_catalog._export_codex_bundled_catalog(
+            "/opt/codex",
+            {"PATH": "/bin", "OPENAI_API_KEY": "secret", "CODEX_API_KEY": "secret"},
+        )
+
+    assert captured["command"] == [
+        "/opt/codex",
+        "debug",
+        "models",
+        "--bundled",
+        "-c",
+        "model_catalog_json=null",
+    ]
+    assert captured["env"] == {"PATH": "/bin"}
+    assert captured["stderr"] is backend_model_catalog.subprocess.DEVNULL
+    assert terminated == [process]
+
+
+def test_codex_hub_catalog_export_terminates_timed_out_process_tree(monkeypatch):
+    terminated = []
+
+    class Process:
+        def __init__(self):
+            self.stdout = io.BytesIO(b"")
+            self.returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            self.returncode = -9
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    process = Process()
+    monkeypatch.setattr(
+        backend_model_catalog.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: process,
+    )
+    monkeypatch.setattr(
+        backend_model_catalog,
+        "signal_process_tree",
+        lambda target, *_args: (terminated.append(target), setattr(target, "returncode", -9)),
+    )
+    monkeypatch.setattr(backend_model_catalog, "CODEX_HUB_CATALOG_TIMEOUT_SECONDS", 0)
+
+    with pytest.raises(RuntimeError, match="timed out"):
+        backend_model_catalog._export_codex_bundled_catalog("/opt/codex")
+
+    assert terminated == [process]
 
 
 def test_merge_sources_applies_tombstones_and_fills_missing_metadata():

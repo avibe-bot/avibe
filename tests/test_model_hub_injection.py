@@ -6,7 +6,6 @@ from types import SimpleNamespace
 
 import pytest
 
-import modules.agents.model_hub as model_hub_module
 from core.handlers.model_hub.service import (
     PRE_ATTEMPT_SETTLEMENT_GENERATION,
     ModelHubError,
@@ -21,7 +20,6 @@ from modules.agents.model_hub import (
     launch_for_context,
     opencode_model_for_overlay,
     persisted_launch_identity,
-    prepare_codex_hub_launch,
 )
 
 
@@ -133,6 +131,8 @@ def test_hub_launch_masks_inherited_claude_auth_and_injects_gateway():
 
 
 def test_codex_hub_launch_uses_responses_wire_api_and_ephemeral_token(tmp_path):
+    """MH-PROTOCOL-003: Hub launches consume a prepared standard Responses catalog."""
+
     launch = hub_launch(backend="codex")
     catalog_path = tmp_path / "codex-hub-models.json"
     args, env = build_codex_hub_launch(
@@ -152,67 +152,6 @@ def test_codex_hub_launch_requires_provider_safe_catalog():
     launch = hub_launch(backend="codex")
     with pytest.raises(ValueError, match="provider-safe model catalog"):
         build_codex_hub_launch([], {}, launch)
-
-
-def test_prepare_codex_hub_launch_disables_provider_private_model_capabilities(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
-):
-    launch = hub_launch(backend="codex", runtime_model="gpt-5.6-luna")
-    raw_catalog = json.dumps(
-        {
-            "models": [
-                {
-                    "slug": "gpt-5.6-luna",
-                    "display_name": "GPT-5.6 Luna",
-                    "use_responses_lite": True,
-                    "multi_agent_version": "v1",
-                    "tool_mode": "code_mode_only",
-                    "prefer_websockets": True,
-                    "model_messages": {"instructions_template": "preserved"},
-                },
-                {
-                    "slug": "custom-model",
-                    "use_responses_lite": False,
-                    "multi_agent_version": None,
-                    "tool_mode": None,
-                },
-            ]
-        }
-    ).encode()
-    calls = []
-
-    async def dump(binary, env):
-        calls.append((binary, env))
-        return raw_catalog
-
-    monkeypatch.setattr(model_hub_module, "_dump_codex_bundled_catalog", dump)
-    monkeypatch.setattr(model_hub_module.paths, "get_runtime_dir", lambda: tmp_path)
-
-    args, env = asyncio.run(
-        prepare_codex_hub_launch(
-            [],
-            {"OPENAI_API_KEY": "user-key", "PATH": "/bin"},
-            launch,
-            binary="/opt/codex",
-        )
-    )
-
-    catalog_arg = next(value for value in args if value.startswith("model_catalog_json="))
-    catalog_path = json.loads(catalog_arg.split("=", 1)[1])
-    payload = json.loads(model_hub_module.Path(catalog_path).read_text(encoding="utf-8"))
-    assert calls == [("/opt/codex", {"OPENAI_API_KEY": "user-key", "PATH": "/bin"})]
-    assert env == {"AVIBE_MODEL_HUB_TOKEN": "local-test-token", "PATH": "/bin"}
-    assert payload["models"][0] == {
-        "slug": "gpt-5.6-luna",
-        "display_name": "GPT-5.6 Luna",
-        "use_responses_lite": False,
-        "multi_agent_version": None,
-        "tool_mode": None,
-        "prefer_websockets": False,
-        "model_messages": {"instructions_template": "preserved"},
-    }
-    assert payload["models"][1]["use_responses_lite"] is False
 
 
 def test_opencode_overlay_requires_exact_checked_identifier():

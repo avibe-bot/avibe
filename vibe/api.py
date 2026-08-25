@@ -7065,6 +7065,21 @@ def _run_install_command(
             # pre-upgrade value.
             _invalidate_version_cache(name)
 
+            if name == "codex" and installed_path:
+                from vibe import backend_model_catalog
+
+                try:
+                    backend_model_catalog.refresh_codex_hub_catalog_now(
+                        installed_path,
+                        command_env,
+                    )
+                except Exception as exc:  # noqa: BLE001 - install remains usable directly
+                    logger.warning(
+                        "Codex Hub model catalog preparation failed after %s: %s",
+                        mode,
+                        exc,
+                    )
+
             # Persist real Agent backend CLI paths to V2Config so the next
             # ``get_backend_runtime`` reads them directly instead of relying
             # on the resolver's stale-path fallback. Local dependencies such

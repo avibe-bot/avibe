@@ -3172,6 +3172,12 @@ class Controller:
         logger.info("Starting Claude Proxy Controller with platforms: %s", ", ".join(self.enabled_platforms))
 
         try:
+            from vibe import backend_model_catalog
+
+            backend_model_catalog.prepare_codex_hub_catalog_from_cache()
+            backend_model_catalog.schedule_codex_hub_catalog_refresh(
+                self.config.codex.binary
+            )
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
             memory_runtime = getattr(self, "memory_runtime", None)
