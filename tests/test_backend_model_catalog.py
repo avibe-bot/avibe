@@ -183,6 +183,24 @@ def test_codex_hub_catalog_preparation_exports_current_binary(monkeypatch, tmp_p
     assert calls == [("codex", None)]
 
 
+def test_codex_hub_catalog_refresh_invalidates_stale_artifact_on_failure(monkeypatch, tmp_path):
+    runtime_dir = tmp_path / "runtime"
+    monkeypatch.setattr(backend_model_catalog.paths, "get_runtime_dir", lambda: runtime_dir)
+    stale = backend_model_catalog.get_codex_hub_catalog_path()
+    stale.parent.mkdir(parents=True)
+    stale.write_text('{"client_version":"old","models":[{"slug":"old"}]}')
+
+    def fail_export(*_args, **_kwargs):
+        raise RuntimeError("export failed")
+
+    monkeypatch.setattr(backend_model_catalog, "_export_codex_bundled_catalog", fail_export)
+
+    with pytest.raises(RuntimeError, match="export failed"):
+        backend_model_catalog.refresh_codex_hub_catalog_now("/opt/codex")
+
+    assert backend_model_catalog.ready_codex_hub_catalog_path() is None
+
+
 def test_merge_sources_applies_tombstones_and_fills_missing_metadata():
     merged = backend_model_catalog.merge_model_sources(
         [

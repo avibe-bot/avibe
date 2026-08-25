@@ -1544,7 +1544,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         controller.agent_service.agents["codex"].refresh_auth_state.assert_awaited_once()
         controller.agent_service.agents["claude"].refresh_auth_state.assert_awaited_once()
         service._refresh_opencode_server.assert_awaited_once()
-        service._prepare_codex_hub_catalog.assert_awaited_once_with(runtime_config)
+        service._prepare_codex_hub_catalog.assert_not_awaited()
 
     async def test_refresh_backend_runtime_prefers_runtime_config_reload(self):
         controller = _StubController()
@@ -1561,9 +1561,21 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         await service._refresh_backend_runtime("codex")
 
         service._load_backend_runtime_config.assert_called_once_with("codex")
-        service._prepare_codex_hub_catalog.assert_awaited_once_with(runtime_config)
+        service._prepare_codex_hub_catalog.assert_not_awaited()
         agent.refresh_runtime_config.assert_awaited_once_with(runtime_config)
         agent.refresh_auth_state.assert_not_awaited()
+
+    async def test_web_refresh_does_not_publish_codex_catalog(self):
+        controller = _StubController()
+        controller.agent_service = None
+        service = AgentAuthService(controller)
+        service._prepare_codex_hub_catalog = AsyncMock()
+        service._load_backend_runtime_config = Mock()
+
+        await service._refresh_backend_runtime("codex")
+
+        service._load_backend_runtime_config.assert_not_called()
+        service._prepare_codex_hub_catalog.assert_not_awaited()
 
     async def test_refresh_backend_runtime_releases_runtime_tokens_after_refresh(self):
         controller = _StubController()

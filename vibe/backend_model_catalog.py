@@ -167,7 +167,11 @@ def refresh_codex_hub_catalog_now(
     binary: str,
     base_env: dict[str, str] | None = None,
 ) -> Path:
-    return _publish_codex_hub_catalog(_export_codex_bundled_catalog(binary, base_env))
+    try:
+        return _publish_codex_hub_catalog(_export_codex_bundled_catalog(binary, base_env))
+    except Exception:
+        get_codex_hub_catalog_path().unlink(missing_ok=True)
+        raise
 
 
 def prepare_codex_hub_catalog(

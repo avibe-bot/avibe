@@ -1998,7 +1998,7 @@ class AgentAuthService:
         try:
             refresh_runtime_config = getattr(agent_service, "refresh_runtime_config", None)
             runtime_config = None
-            if backend == "codex":
+            if backend == "codex" and callable(refresh_runtime_config):
                 runtime_config = self._load_backend_runtime_config(backend)
                 if runtime_config is None:
                     await self._unregister_disabled_backend_agent(backend)

@@ -9333,7 +9333,7 @@ def _wait_for_controller_ack(marker: Path, timeout: float) -> tuple[bool, str | 
 
 def _request_controller_restart(
     backend: str,
-    timeout: float = 4.0,
+    timeout: float | None = None,
     *,
     metadata: Optional[dict[str, Any]] = None,
 ) -> tuple[bool, str | None]:
@@ -9359,6 +9359,13 @@ def _request_controller_restart(
     so the UI toast doesn't claim a restart when the controller's refresh
     actually raised.
     """
+    if timeout is None:
+        timeout = 4.0
+        if backend == "codex":
+            from vibe.backend_model_catalog import CODEX_HUB_CATALOG_TIMEOUT_SECONDS
+
+            timeout = CODEX_HUB_CATALOG_TIMEOUT_SECONDS + 5.0
+
     reqid = uuid.uuid4().hex[:8]
     marker = _runtime_command_dir() / f"restart-{backend}.{reqid}.cmd"
     try:
@@ -9659,7 +9666,6 @@ def _on_web_auth_success(backend: str) -> None:
     try:
         handled, err = _request_controller_restart(
             backend,
-            timeout=4.0,
             metadata={"reason": "web_auth_success", "source": "oauth_callback"},
         )
         if handled and err:
