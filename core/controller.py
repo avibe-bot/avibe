@@ -415,6 +415,7 @@ class Controller:
         self._trace_retention_future: Optional[Any] = None
         self._memory_reconcile_task: Optional[asyncio.Task] = None
         self._memory_disabled_cleanup_task: Optional[asyncio.Task] = None
+        self._memory_disabled_cleanup_unproved = False
         self._memory_replacement_gate = asyncio.Lock()
         self._memory_runtime_lease_condition = asyncio.Condition(
             self._memory_replacement_gate
@@ -907,6 +908,12 @@ class Controller:
                 while getattr(self, "_memory_runtime_leases_blocked", False):
                     await condition.wait()
                 runtime = getattr(self, "memory_runtime", None)
+                if (
+                    memory_config is None
+                    and not self.config.memory.enabled
+                    and not allow_disabled
+                ):
+                    raise MemoryStoreUnavailableError("Memory is disabled")
                 if runtime is not None and getattr(runtime, "retired", False):
                     raise MemoryRuntimeCloseUnprovedError(
                         "Memory runtime remains fenced after an unproved close"
@@ -919,12 +926,6 @@ class Controller:
                 ):
                     break
                 await condition.wait()
-            if (
-                memory_config is None
-                and not self.config.memory.enabled
-                and not allow_disabled
-            ):
-                raise MemoryStoreUnavailableError("Memory is disabled")
             temporary = runtime is None
             if temporary:
                 runtime = self._create_memory_runtime(selected_config)
@@ -1001,6 +1002,7 @@ class Controller:
                     self.memory_adapter = DisabledMemoryAdapter()
                     self.memory_module = None
                     self.config.memory = memory_config
+                    self._recheck_disabled_memory_cleanup_locked()
                     return {"ok": True, "state": "disabled"}
                 runtime = self._create_memory_runtime(memory_config)
                 self._attach_memory_runtime_locked(runtime, capture_enabled=True)
@@ -1011,6 +1013,7 @@ class Controller:
                 if not memory_config.enabled:
                     self.memory_adapter = DisabledMemoryAdapter()
                     await self._close_memory_runtime_locked(runtime, retire=False)
+                    self._recheck_disabled_memory_cleanup_locked()
                 else:
                     self.memory_adapter = None
             return result
@@ -1049,19 +1052,21 @@ class Controller:
         self,
         *,
         retained_runtime: bool = False,
+        cleanup_unproved: bool = False,
     ) -> dict[str, Any]:
         config = self.config.memory
+        runtime_busy = retained_runtime or cleanup_unproved
         needs_repair = bool(config.legacy_needs_repair)
-        state = "degraded" if retained_runtime else (
+        state = "degraded" if runtime_busy else (
             "needs_repair" if needs_repair else "disabled"
         )
-        reason = "memory_runtime_busy" if retained_runtime else (
+        reason = "memory_runtime_busy" if runtime_busy else (
             "memory_legacy_recovery_required" if needs_repair else None
         )
         return {
             "status": "ok",
             "source": self._disabled_memory_source_payload(
-                reason="memory_runtime_busy" if retained_runtime else "memory_disabled"
+                reason="memory_runtime_busy" if runtime_busy else "memory_disabled"
             ),
             "health": None,
             "state": state,
@@ -1074,6 +1079,18 @@ class Controller:
                 )
             },
         }
+
+    def _disabled_memory_status_payload_locked(self) -> dict[str, Any]:
+        """Project Controller-owned disabled state while its condition is held."""
+
+        cleanup_task = getattr(self, "_memory_disabled_cleanup_task", None)
+        return self._disabled_memory_status_payload(
+            retained_runtime=getattr(self, "memory_runtime", None) is not None,
+            cleanup_unproved=(
+                getattr(self, "_memory_disabled_cleanup_unproved", False)
+                or (cleanup_task is not None and not cleanup_task.done())
+            ),
+        )
 
     def _disabled_memory_processing_record_payload(self) -> dict[str, Any]:
         def unavailable() -> dict[str, Any]:
@@ -1111,11 +1128,15 @@ class Controller:
         condition = self._memory_runtime_condition()
         async with condition:
             if not self.config.memory.enabled:
-                return self._disabled_memory_status_payload(
-                    retained_runtime=getattr(self, "memory_runtime", None) is not None
-                )
-        async with self._borrow_memory_runtime() as lease:
-            return await lease.runtime.status_payload()
+                return self._disabled_memory_status_payload_locked()
+        try:
+            async with self._borrow_memory_runtime() as lease:
+                return await lease.runtime.status_payload()
+        except MemoryStoreUnavailableError:
+            async with condition:
+                if not self.config.memory.enabled:
+                    return self._disabled_memory_status_payload_locked()
+            raise
 
     async def wake_memory(self) -> dict[str, Any]:
         """Wake enabled Memory, or return the host-owned disabled outcome."""
@@ -2361,51 +2382,78 @@ class Controller:
         except OSError:
             return False
 
-    def _schedule_disabled_memory_cleanup(self) -> None:
-        """Reap older owned Memory children only when a record exists."""
+    def _recheck_disabled_memory_cleanup_locked(self) -> None:
+        """Clear a stale cleanup fence only after released ownership is absent."""
 
-        if not isinstance(
-            getattr(self, "memory_adapter", None),
-            DisabledMemoryAdapter,
-        ):
-            return
-        task = getattr(self, "_memory_disabled_cleanup_task", None)
-        if task is not None and not task.done():
+        if not self._memory_replacement_lock().locked():
+            raise RuntimeError("Memory cleanup recheck requires the replacement lock")
+        if not getattr(self, "_memory_disabled_cleanup_unproved", False):
             return
         memory_dir = paths.get_vibe_remote_dir() / "memory"
-        if not self._disabled_memory_ownership_exists(memory_dir):
-            return
-        self._memory_disabled_cleanup_task = asyncio.create_task(
-            self._cleanup_disabled_memory_process(memory_dir),
-            name="memory-disabled-everos-cleanup",
+        self._memory_disabled_cleanup_unproved = (
+            self._disabled_memory_ownership_exists(memory_dir)
         )
+
+    async def _schedule_disabled_memory_cleanup(self) -> None:
+        """Reap older owned Memory children only when a record exists."""
+
+        condition = self._memory_runtime_condition()
+        async with condition:
+            if not isinstance(
+                getattr(self, "memory_adapter", None),
+                DisabledMemoryAdapter,
+            ):
+                return
+            task = getattr(self, "_memory_disabled_cleanup_task", None)
+            if task is not None and not task.done():
+                return
+            memory_dir = paths.get_vibe_remote_dir() / "memory"
+            if not self._disabled_memory_ownership_exists(memory_dir):
+                return
+            self._memory_disabled_cleanup_unproved = True
+            self._memory_disabled_cleanup_task = asyncio.create_task(
+                self._cleanup_disabled_memory_process(memory_dir),
+                name="memory-disabled-everos-cleanup",
+            )
 
     async def _cleanup_disabled_memory_process(self, memory_dir: Path) -> None:
         """Lazily load the proven-ownership reaper after service readiness."""
 
-        async with self._memory_replacement_lock():
+        condition = self._memory_runtime_condition()
+        async with condition:
             if not isinstance(
                 getattr(self, "memory_adapter", None),
                 DisabledMemoryAdapter,
             ) or getattr(self, "memory_runtime", None) is not None:
                 return
             if not self._disabled_memory_ownership_exists(memory_dir):
+                self._memory_disabled_cleanup_unproved = False
                 return
+            self._memory_disabled_cleanup_unproved = True
 
-            try:
-                from core.memory.process import ReleasedEverOSOrphanReconciler
+        try:
+            from core.memory.process import ReleasedEverOSOrphanReconciler
 
-                reconciler = ReleasedEverOSOrphanReconciler(
-                    provider_root=memory_dir / "everos-root",
-                    effective_home=paths.get_vibe_remote_dir(),
-                )
-                await reconciler.reconcile_orphans()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.warning(
-                    "Disabled Memory could not clean up an older owned EverOS process",
-                    exc_info=True,
+            reconciler = ReleasedEverOSOrphanReconciler(
+                provider_root=memory_dir / "everos-root",
+                effective_home=paths.get_vibe_remote_dir(),
+            )
+            await reconciler.reconcile_orphans()
+        except asyncio.CancelledError:
+            async with condition:
+                self._memory_disabled_cleanup_unproved = True
+            raise
+        except Exception:
+            async with condition:
+                self._memory_disabled_cleanup_unproved = True
+            logger.warning(
+                "Disabled Memory could not clean up an older owned EverOS process",
+                exc_info=True,
+            )
+        else:
+            async with condition:
+                self._memory_disabled_cleanup_unproved = (
+                    self._disabled_memory_ownership_exists(memory_dir)
                 )
 
     def _run_im_runtime(self) -> None:
@@ -2511,7 +2559,7 @@ class Controller:
         # embedded and test paths that run a controller are unaffected.
         self._publish_readiness_unless_im_runtime_failed()
         try:
-            self._schedule_disabled_memory_cleanup()
+            await self._schedule_disabled_memory_cleanup()
         except Exception as e:
             logger.error(f"Failed to schedule disabled Memory cleanup: {e}", exc_info=True)
 
