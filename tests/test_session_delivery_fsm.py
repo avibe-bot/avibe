@@ -1124,6 +1124,32 @@ def test_legacy_and_new_original_rows_keep_the_same_merge_identity() -> None:
     )
 
 
+def test_raw_legacy_and_new_original_snapshots_keep_the_same_merge_identity() -> None:
+    common = {
+        "scope_id": "scope",
+        "platform": "avibe",
+        "author": "user",
+        "type": "user",
+        "source": "user",
+        "author_id": "remote:alice",
+        "author_name": "Alice",
+        "parent_native_message_id": None,
+    }
+    legacy = {
+        **common,
+        "metadata_json": json.dumps({"_memory_ordinary_text": True}),
+    }
+    current = {
+        **common,
+        "message_kind": "original",
+        "metadata_json": "{}",
+    }
+
+    assert delivery_store.message_merge_identity(legacy) == (
+        delivery_store.message_merge_identity(current)
+    )
+
+
 def test_scheduled_segment_key_keeps_source_sessions_separate() -> None:
     def row(source_session_id: str) -> dict:
         return {
@@ -2273,7 +2299,7 @@ def test_workbench_memory_principal_uses_authenticated_author_id(managers) -> No
     )
 
     assert skipped_context.user_id == "workbench"
-    assert skipped_facts.user_id == "workbench"
+    assert skipped_facts.user_id is None
     assert controller.memory_capture_admitted(skipped_context) is False
     assert controller.memory_principal_for_context(skipped_context) is None
     assert starts
@@ -2310,6 +2336,98 @@ def test_workbench_memory_principal_uses_authenticated_author_id(managers) -> No
     assert context.user_id == "push-user"
     assert facts.user_id == "push-user"
     assert controller.memory_principal_for_context(context) == "principal:avibe:push-user"
+
+
+def test_legacy_workbench_lan_author_does_not_gain_memory_admission(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    manager.controller.config.memory = SimpleNamespace(enabled=True)
+    snapshot = delivery_store.message_snapshot(
+        scope_id=None,
+        session_id="ses_fsm",
+        platform="avibe",
+        author="user",
+        source="user",
+        text="legacy LAN input",
+        author_id="local",
+        metadata={
+            "_memory_cli_admitted": False,
+            "_memory_ordinary_text": True,
+        },
+    )
+    snapshot.pop("message_kind")
+    snapshot["metadata_json"] = json.dumps(
+        {
+            "_memory_cli_admitted": False,
+            "_memory_ordinary_text": True,
+        }
+    )
+    delivery_id = delivery_store.new_delivery_id()
+    with engine.begin() as conn:
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="queued",
+            snapshot=snapshot,
+            dispatch_text="legacy LAN input",
+        )
+
+    context = _context()
+    manager._hydrate_delivery_context(context, _row(engine, delivery_id))
+    controller = _memory_facts_controller()
+
+    assert context.user_id == "user"
+    assert (context.platform_specific or {}).get("memory_cli_admitted") is None
+    assert controller.memory_capture_admitted(context) is False
+    assert controller.memory_principal_for_context(context) is None
+
+
+def test_legacy_workbench_strict_author_keeps_memory_admission(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    manager.controller.config.memory = SimpleNamespace(enabled=True)
+    snapshot = delivery_store.message_snapshot(
+        scope_id=None,
+        session_id="ses_fsm",
+        platform="avibe",
+        author="user",
+        source="user",
+        text="legacy loopback input",
+        author_id="local",
+        metadata={
+            "_memory_user_id": "local",
+            "_memory_cli_admitted": True,
+            "_memory_ordinary_text": True,
+        },
+    )
+    snapshot.pop("message_kind")
+    snapshot["metadata_json"] = json.dumps(
+        {
+            "_memory_user_id": "local",
+            "_memory_cli_admitted": True,
+            "_memory_ordinary_text": True,
+        }
+    )
+    delivery_id = delivery_store.new_delivery_id()
+    with engine.begin() as conn:
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="queued",
+            snapshot=snapshot,
+            dispatch_text="legacy loopback input",
+        )
+
+    context = _context()
+    manager._hydrate_delivery_context(context, _row(engine, delivery_id))
+    controller = _memory_facts_controller()
+
+    assert context.user_id == "local"
+    assert (context.platform_specific or {}).get("memory_cli_admitted") is True
+    assert controller.memory_capture_admitted(context) is True
+    assert controller.memory_principal_for_context(context) == "principal:avibe:local"
 
 
 @pytest.mark.parametrize("launch_path", ["immediate", "fifo", "recovery"])

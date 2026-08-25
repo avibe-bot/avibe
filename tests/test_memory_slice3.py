@@ -1145,7 +1145,7 @@ def test_retired_memory_delivery_symbols_have_no_product_callers() -> None:
 
 def test_workbench_capture_requires_resolved_identity_and_uses_row_id() -> None:
     controller = _controller()
-    context = _context("avibe", user_id="local")
+    context = _context("avibe", user_id="local", author_id="local")
 
     asyncio.run(controller.capture_user_memory(context, "ordinary text", "stable-session"))
 
@@ -1161,7 +1161,7 @@ def test_workbench_capture_converts_owned_attachment_without_text(monkeypatch, t
     attachment_path.parent.mkdir(parents=True)
     attachment_path.write_bytes(b"pdf")
     controller = _controller()
-    context = _context("avibe", user_id="local")
+    context = _context("avibe", user_id="local", author_id="local")
     context.files = [
         FileAttachment(
             name="receipt.pdf",

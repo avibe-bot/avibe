@@ -6274,6 +6274,17 @@ def _web_push_user_key() -> str:
     return "local"
 
 
+def _workbench_author_id() -> str | None:
+    """Return an author only when the browser passes strict Memory admission."""
+
+    memory_user_key = memory_ui_user_key()
+    prefix = "avibe:"
+    if not isinstance(memory_user_key, str) or not memory_user_key.startswith(prefix):
+        return None
+    author_id = memory_user_key[len(prefix) :].strip()
+    return author_id or None
+
+
 def _web_push_normal_delivery_diagnostics() -> dict:
     """Explain the normal-path authorization gates for the calling owner.
 
@@ -11199,6 +11210,7 @@ async def sessions_messages_create(session_id: str):
     quick_reply_for = (payload.get("metadata") or {}).get("quick_reply_for")
     message_kind = workbench_message_kind(payload, quick_reply_for)
     web_push_user_key = _web_push_user_key()
+    workbench_author_id = _workbench_author_id()
     web_push_authorization_context = web_push_authorization_context_record(
         web_push_user_key,
         getattr(g, "authorization_context", None),
@@ -11301,7 +11313,7 @@ async def sessions_messages_create(session_id: str):
                     text=text if isinstance(text, str) else None,
                     content=content if isinstance(content, dict) else None,
                     metadata=message_metadata,
-                    author_id=web_push_user_key,
+                    author_id=workbench_author_id,
                     author_name=payload.get("author_name"),
                     message_kind=message_kind,
                 ),
@@ -11346,7 +11358,7 @@ async def sessions_messages_create(session_id: str):
         "display_text": message.get("text") or "",
         "content": content if isinstance(content, dict) else None,
         "metadata": payload.get("metadata") or {},
-        "author_id": web_push_user_key,
+        "author_id": workbench_author_id,
         "author_name": payload.get("author_name"),
         "files": attachment_specs,
         "message_id": message.get("id"),

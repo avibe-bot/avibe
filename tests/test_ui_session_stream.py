@@ -248,6 +248,10 @@ def test_route_fire_and_forgets_dispatch(isolated_state, tmp_path):
     with (
         patch("vibe.internal_client.dispatch_async", dispatch_mock),
         patch("vibe.ui_server._web_push_user_key", return_value="remote:user-a"),
+        patch(
+            "vibe.ui_server._workbench_author_id",
+            return_value="remote:user-a",
+        ),
         patch("vibe.ui_server.is_direct_loopback_memory_request", return_value=False),
     ):
         client = app.test_client()
@@ -282,6 +286,31 @@ def test_route_fire_and_forgets_dispatch(isolated_state, tmp_path):
     assert "user_id" not in sent
     assert "memory_cli_admitted" not in sent
     assert "is_ordinary_text" not in sent
+
+
+def test_lan_workbench_message_has_no_memory_author(isolated_state, tmp_path):
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    dispatch = _accepted_dispatch(session_id)
+    with (
+        patch("vibe.internal_client.dispatch_async", dispatch),
+        patch("vibe.ui_server._web_push_user_key", return_value="local"),
+        patch("vibe.ui_server.is_direct_loopback_memory_request", return_value=False),
+        patch("vibe.ui_server._load_remote_access_config", return_value=None),
+    ):
+        client = app.test_client()
+        response = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"text": "LAN input"},
+            headers=csrf_headers(client),
+        )
+
+    assert response.status_code == 201
+    assert response.get_json()["author_id"] is None
+    sent = dispatch.await_args.args[0]
+    assert sent["author_id"] is None
+    assert "memory_cli_admitted" not in sent
 
 
 @pytest.mark.parametrize(
@@ -471,6 +500,10 @@ def test_route_reads_the_materialized_message_id_for_a_merged_batch(
     with (
         patch("vibe.internal_client.dispatch_async", AsyncMock(side_effect=dispatch)),
         patch("vibe.ui_server._web_push_user_key", return_value="remote:user-a"),
+        patch(
+            "vibe.ui_server._workbench_author_id",
+            return_value="remote:user-a",
+        ),
     ):
         client = app.test_client()
         response = client.post(

@@ -2991,10 +2991,15 @@ class Controller:
         payload = context.platform_specific if isinstance(context.platform_specific, dict) else {}
         metadata = payload.get("message_metadata")
         metadata = metadata if isinstance(metadata, dict) else {}
-        # The hydrated author is host-owned. Released `_memory_user_id`
-        # metadata remains translation input for old queue identities only;
-        # it is never a trusted principal for a live turn.
-        user_id = getattr(context, "user_id", None)
+        # Workbench routing identity is broader than Memory admission. Hydration
+        # puts only a strictly authenticated current author, or its released-row
+        # translation, in this host-owned field.
+        platform = context.platform or payload.get("platform")
+        user_id = (
+            payload.get("author_id")
+            if platform == "avibe"
+            else getattr(context, "user_id", None)
+        )
         workdir = None
         if include_workdir:
             try:
@@ -3002,7 +3007,7 @@ class Controller:
             except Exception:
                 workdir = None
         return InboundTurnFacts(
-            platform=context.platform or payload.get("platform"),
+            platform=platform,
             user_id=user_id,
             message_id=getattr(context, "message_id", None),
             session_id=session_id,

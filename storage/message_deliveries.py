@@ -437,6 +437,8 @@ def message_merge_identity(value: dict[str, Any]) -> tuple[Any, ...]:
     """Return the Message fields that must stay singular after batching."""
 
     metadata = value.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = _json_object(value.get("metadata_json"))
     kind = (
         normalize_message_kind(value.get("message_kind"))
         if "message_kind" in value

@@ -35,6 +35,7 @@ from core.message_context import (
     SCHEDULED_DISPATCH_METADATA_APPLIED_KEY,
     resolve_turn_sink_key,
 )
+from core.memory.admission_metadata import admitted_user_id, is_cli_admitted
 from core.native_dispatch_phase import (
     backend_dispatch_attempted,
     mark_prewrite_user_stop,
@@ -2321,11 +2322,22 @@ class SessionTurnManager:
             if context.platform != "avibe" and native_message_id
             else str(delivery["id"])
         )
-        if payload.get("author_id"):
-            context.user_id = str(payload["author_id"])
         if context.platform_specific is None:
             context.platform_specific = {}
         metadata = payload.get("metadata") or {}
+        raw_snapshot = delivery.get("snapshot_json")
+        try:
+            snapshot = json.loads(raw_snapshot) if isinstance(raw_snapshot, str) else {}
+        except (TypeError, ValueError):
+            snapshot = {}
+        legacy_workbench = context.platform == "avibe" and (
+            not isinstance(snapshot, dict) or "message_kind" not in snapshot
+        )
+        author_id = payload.get("author_id")
+        if legacy_workbench:
+            author_id = admitted_user_id(metadata)
+        if author_id:
+            context.user_id = str(author_id)
         context.message_kind = normalize_message_kind(payload.get("message_kind"))
         context.is_original_human_text = context.message_kind == "original"
         memory_enabled = bool(
@@ -2336,7 +2348,10 @@ class SessionTurnManager:
             )
         )
         memory_cli_admitted = bool(
-            context.platform == "avibe" and memory_enabled and payload.get("author_id")
+            context.platform == "avibe"
+            and memory_enabled
+            and author_id
+            and (not legacy_workbench or is_cli_admitted(metadata))
         )
         if memory_cli_admitted:
             context.platform_specific["memory_cli_admitted"] = True
@@ -2349,7 +2364,7 @@ class SessionTurnManager:
                 "display_text": payload.get("text") or "",
                 "message_content": dict(payload.get("content") or {}),
                 "message_metadata": dict(metadata),
-                "author_id": payload.get("author_id"),
+                "author_id": author_id,
                 "author_name": payload.get("author_name"),
                 "native_message_id": payload.get("native_message_id"),
                 "message_kind": context.message_kind,
