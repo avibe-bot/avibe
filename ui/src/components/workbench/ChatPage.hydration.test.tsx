@@ -17,7 +17,7 @@ const mocks = vi.hoisted(() => ({
     listSessionMessages: vi.fn(),
     listSessionQueue: vi.fn(),
     mutateConfig: vi.fn(),
-    waitForConfigMutations: vi.fn(),
+    waitForAgentActivityConfigMutations: vi.fn(),
     onSessionArchived: vi.fn(),
   },
   events: null as null | {
@@ -221,7 +221,7 @@ describe('ChatPage transcript hydration', () => {
     mocks.api.listSessionMessages.mockResolvedValue({ messages: [] });
     mocks.api.listSessionQueue.mockResolvedValue([]);
     mocks.api.mutateConfig.mockResolvedValue({ ui: {} });
-    mocks.api.waitForConfigMutations.mockResolvedValue(undefined);
+    mocks.api.waitForAgentActivityConfigMutations.mockResolvedValue(undefined);
     mocks.api.onSessionArchived.mockReturnValue(() => {});
   });
 
@@ -588,7 +588,7 @@ describe('ChatPage transcript hydration', () => {
     );
 
     const enable = await screen.findByRole('button', { name: 'chat.agentActivity.enable' });
-    mocks.api.waitForConfigMutations.mockImplementationOnce(
+    mocks.api.waitForAgentActivityConfigMutations.mockImplementationOnce(
       () => activityWrite.promise.then(() => undefined),
     );
     act(() => enable.click());

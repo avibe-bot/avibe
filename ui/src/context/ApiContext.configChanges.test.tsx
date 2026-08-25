@@ -98,8 +98,12 @@ describe('ApiProvider config convergence', () => {
       .mockImplementationOnce(() => firstResponse.promise)
       .mockResolvedValueOnce(response({ language: 'en' }));
 
-    const first = capturedApi!.mutateConfig([setConfigField(['language'], 'zh')]);
-    const second = capturedApi!.mutateConfig([setConfigField(['language'], 'en')]);
+    const first = capturedApi!.mutateConfig([
+      setConfigField(['ui', 'show_agent_activity'], true),
+    ]);
+    const second = capturedApi!.mutateConfig([
+      setConfigField(['ui', 'show_agent_activity'], false),
+    ]);
     await waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(1));
 
     view.rerender(<ApiProvider><div /></ApiProvider>);
@@ -107,13 +111,13 @@ describe('ApiProvider config convergence', () => {
     view.rerender(<ApiProvider><CaptureApi /></ApiProvider>);
     await waitFor(() => expect(capturedApi).not.toBeNull());
     let fenceSettled = false;
-    const fence = capturedApi!.waitForConfigMutations().then(() => {
+    const fence = capturedApi!.waitForAgentActivityConfigMutations().then(() => {
       fenceSettled = true;
     });
     await Promise.resolve();
     expect(fenceSettled).toBe(false);
 
-    firstResponse.resolve(response({ language: 'zh' }));
+    firstResponse.resolve(response({ ui: { show_agent_activity: true } }));
     await first;
     await waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(2));
     await second;
@@ -128,10 +132,28 @@ describe('ApiProvider config convergence', () => {
       .mockResolvedValueOnce(response({ detail: 'save failed' }, 500))
       .mockResolvedValueOnce(response({ language: 'en' }));
 
-    const failed = capturedApi!.mutateConfig([setConfigField(['language'], 'zh')]);
-    const recovered = capturedApi!.mutateConfig([setConfigField(['language'], 'en')]);
+    const failed = capturedApi!.mutateConfig([
+      setConfigField(['ui', 'show_agent_activity'], true),
+    ]);
+    const recovered = capturedApi!.mutateConfig([
+      setConfigField(['ui', 'show_agent_activity'], false),
+    ]);
     await expect(failed).rejects.toThrow();
     await expect(recovered).resolves.toEqual({ language: 'en' });
     expect(apiFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not hold the Agent Activity fence behind an unrelated config save', async () => {
+    const unrelatedResponse = deferred<Response>();
+    render(<ApiProvider><CaptureApi /></ApiProvider>);
+    await waitFor(() => expect(capturedApi).not.toBeNull());
+    apiFetch.mockImplementationOnce(() => unrelatedResponse.promise);
+
+    const unrelated = capturedApi!.mutateConfig([setConfigField(['language'], 'zh')]);
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(1));
+    await expect(capturedApi!.waitForAgentActivityConfigMutations()).resolves.toBeUndefined();
+
+    unrelatedResponse.resolve(response({ language: 'zh' }));
+    await unrelated;
   });
 });

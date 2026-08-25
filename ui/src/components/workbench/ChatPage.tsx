@@ -1419,7 +1419,7 @@ export const ChatPage: React.FC = () => {
       // This component is reused across chat routes. A visibility click from the
       // previous route must settle before the next bootstrap reads global config,
       // otherwise the new chat can reinstall the pre-click value.
-      await api.waitForConfigMutations();
+      await api.waitForAgentActivityConfigMutations();
       if (!requestIsCurrent()) return;
       const activityVisibilityRequest = agentActivityVisibilityRequestRef.current;
       // Initial chat open needs the same recent tail window, queue, draft,
