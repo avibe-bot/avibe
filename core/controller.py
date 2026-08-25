@@ -745,6 +745,26 @@ class Controller:
             "states": states,
         }
 
+    async def _await_disabled_memory_cleanup(self) -> None:
+        cleanup_task = getattr(self, "_memory_reconcile_task", None)
+        if cleanup_task is not None and not cleanup_task.done():
+            await cleanup_task
+
+    async def preflight_memory(self, memory_config: MemoryConfig) -> dict[str, Any]:
+        """Preflight a candidate without activating capture on a disabled host."""
+
+        async with self._memory_replacement_lock():
+            runtime = getattr(self, "memory_runtime", None)
+            temporary = runtime is None
+            if temporary:
+                await self._await_disabled_memory_cleanup()
+                runtime = self._create_memory_runtime(memory_config)
+            try:
+                return await runtime.preflight(memory_config)
+            finally:
+                if temporary:
+                    await runtime.close()
+
     async def reconcile_memory(self, memory_config: MemoryConfig) -> dict[str, Any]:
         """Hot-apply persisted Memory settings without destructive fallback."""
 
@@ -756,9 +776,7 @@ class Controller:
                     self.memory_module = None
                     self.config.memory = memory_config
                     return {"ok": True, "state": "disabled"}
-                cleanup_task = getattr(self, "_memory_reconcile_task", None)
-                if cleanup_task is not None and not cleanup_task.done():
-                    await cleanup_task
+                await self._await_disabled_memory_cleanup()
                 runtime = self._create_memory_runtime(memory_config)
                 self.memory_runtime = runtime
                 self.memory_module = runtime.module
@@ -805,7 +823,12 @@ class Controller:
                 "result": "unchanged",
             }
         runtime = getattr(self, "memory_runtime", None)
-        if runtime is None or not getattr(runtime, "needs_repair", False):
+        needs_repair = (
+            getattr(runtime, "needs_repair", False)
+            if runtime is not None
+            else getattr(self.config.memory, "legacy_needs_repair", False)
+        )
+        if not needs_repair:
             return {
                 "ok": False,
                 "operation": "repair",
@@ -871,6 +894,7 @@ class Controller:
                 "error": "memory_operation_in_progress",
                 "result": "unchanged",
             }
+        borrowed_runtime = getattr(self, "memory_runtime", None) is None
         transaction = asyncio.create_task(
             self._reset_memory_data_transaction(
                 operation=operation,
@@ -901,6 +925,20 @@ class Controller:
             return result
         finally:
             transactions.discard(transaction)
+            if borrowed_runtime and not self.config.memory.enabled:
+                async with self._memory_replacement_lock():
+                    runtime = getattr(self, "memory_runtime", None)
+                    try:
+                        if runtime is not None and not getattr(runtime, "closed", False):
+                            await runtime.close()
+                    except Exception:
+                        logger.exception(
+                            "Temporary Memory runtime failed to close after explicit operation"
+                        )
+                    finally:
+                        self.memory_runtime = None
+                        self.memory_module = None
+                        self.memory_adapter = DisabledMemoryAdapter()
 
     async def _join_memory_destructive_transactions(self) -> None:
         """Stop admission and settle accepted data-loss operations before shutdown."""
@@ -987,13 +1025,21 @@ class Controller:
         )
         loop = asyncio.get_running_loop()
         deadline = loop.time() + budget
+        runtime_close_safe = True
         for index, (label, operation) in enumerate(stages):
+            if label == "runtime close" and not runtime_close_safe:
+                self._shutdown_tainted = True
+                logger.error(
+                    "Skipping Memory runtime close because an earlier shutdown stage did not settle"
+                )
+                continue
             remaining = max(0.0, deadline - loop.time())
             stage_budget = remaining / (len(stages) - index)
             task = asyncio.create_task(operation(), name=f"memory-shutdown-{index}")
             done, _pending = await asyncio.wait({task}, timeout=stage_budget)
             if task not in done:
                 self._shutdown_tainted = True
+                runtime_close_safe = False
                 logger.error(
                     "Memory %s exceeded its %.3fs shutdown budget slice",
                     label,
@@ -1012,9 +1058,11 @@ class Controller:
                 task.result()
             except asyncio.CancelledError:
                 self._shutdown_tainted = True
+                runtime_close_safe = False
                 logger.error("Memory %s was cancelled during shutdown", label)
             except Exception:
                 self._shutdown_tainted = True
+                runtime_close_safe = False
                 logger.error("Memory %s failed during shutdown", label, exc_info=True)
 
     async def _reset_memory_data_transaction(
@@ -1030,10 +1078,10 @@ class Controller:
         async with self._memory_replacement_lock():
             runtime = getattr(self, "memory_runtime", None)
             if runtime is None:
-                return unchanged_memory_data_result(
-                    operation=operation,
-                    reason="memory_runtime_unavailable",
-                )
+                await self._await_disabled_memory_cleanup()
+                runtime = self._create_memory_runtime(self.config.memory)
+                self.memory_runtime = runtime
+                self.memory_module = runtime.module
             if operation == "repair" and not runtime.needs_repair:
                 return {
                     "ok": False,
@@ -1166,9 +1214,15 @@ class Controller:
                 )
                 deletion_payload = deletion.payload()
                 if deletion.data_remaining:
-                    failed = runtime.replacement(fenced_config)
-                    self.memory_runtime = failed
-                    self.memory_module = failed.module
+                    if fenced_config.enabled:
+                        failed = runtime.replacement(fenced_config)
+                        self.memory_runtime = failed
+                        self.memory_module = failed.module
+                        self.memory_adapter = None
+                    else:
+                        self.memory_runtime = None
+                        self.memory_module = None
+                        self.memory_adapter = DisabledMemoryAdapter()
                     return {
                         "ok": False,
                         "operation": operation,
@@ -1196,18 +1250,23 @@ class Controller:
                             "Memory data reset could not reload configuration after deletion"
                         )
                         live_config = deepcopy(expected_config or self.config.memory)
-                    fallback = runtime.replacement(live_config)
-                    self.memory_runtime = fallback
-                    self.memory_module = fallback.module
                     self.config.memory = live_config
                     fallback_state = "disabled"
                     if live_config.enabled:
+                        fallback = runtime.replacement(live_config)
+                        self.memory_runtime = fallback
+                        self.memory_module = fallback.module
+                        self.memory_adapter = None
                         fallback_activation = await fallback.wake(
                             operation_lease_held=True
                         )
                         fallback_state = str(
                             fallback_activation.get("state") or "degraded"
                         )
+                    else:
+                        self.memory_runtime = None
+                        self.memory_module = None
+                        self.memory_adapter = DisabledMemoryAdapter()
                     return {
                         "ok": False,
                         "operation": operation,
@@ -1223,12 +1282,11 @@ class Controller:
 
                 target = persisted.memory
                 self.config.memory = target
-                fresh = runtime.replacement(target)
-                self.memory_runtime = fresh
-                self.memory_module = fresh.module
-                self.config.memory = target
 
                 if not target.enabled:
+                    self.memory_runtime = None
+                    self.memory_module = None
+                    self.memory_adapter = DisabledMemoryAdapter()
                     return {
                         "ok": True,
                         "operation": operation,
@@ -1236,6 +1294,10 @@ class Controller:
                         "result": "completed",
                         **deletion_payload,
                     }
+                fresh = runtime.replacement(target)
+                self.memory_runtime = fresh
+                self.memory_module = fresh.module
+                self.memory_adapter = None
                 activation = await fresh.wake(operation_lease_held=True)
                 if activation.get("ok") is not True:
                     state = activation.get("state")
@@ -1839,7 +1901,10 @@ class Controller:
         # A no-op in any process that does not hold the service lock, so the
         # embedded and test paths that run a controller are unaffected.
         self._publish_readiness_unless_im_runtime_failed()
-        self._schedule_disabled_memory_cleanup()
+        try:
+            self._schedule_disabled_memory_cleanup()
+        except Exception as e:
+            logger.error(f"Failed to schedule disabled Memory cleanup: {e}", exc_info=True)
 
         try:
             await self.update_checker.check_and_send_post_update_notification(ready_platform="avibe")

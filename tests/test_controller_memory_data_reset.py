@@ -18,6 +18,7 @@ from config.v2_config import (
 )
 from core.controller import Controller
 from core.memory.data_reset import reset_memory_data_roots
+from core.memory_adapter import DisabledMemoryAdapter
 
 
 class _Runtime:
@@ -318,6 +319,38 @@ async def test_delete_data_has_distinct_intent_but_reuses_reset(
 
 
 @pytest.mark.asyncio
+async def test_delete_data_lazily_constructs_runtime_after_disabled_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _roots(tmp_path)
+    runtime = _Runtime(tmp_path)
+    controller = _controller(runtime, enabled=False)
+    controller.memory_runtime = None
+    controller.memory_module = None
+    controller.memory_adapter = DisabledMemoryAdapter()
+    created: list[MemoryConfig] = []
+
+    def create_memory_runtime(config: MemoryConfig) -> _Runtime:
+        created.append(config)
+        return runtime
+
+    monkeypatch.setattr(controller, "_create_memory_runtime", create_memory_runtime)
+    _persist(monkeypatch, controller)
+
+    result = await controller.delete_memory_data(confirm_loss=True)
+
+    assert result["ok"] is True
+    assert result["state"] == "disabled"
+    assert result["data_deleted"] is True
+    assert created == [controller.config.memory]
+    assert controller.memory_runtime is None
+    assert controller.memory_module is None
+    assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
+    assert runtime.replacement_configs == []
+
+
+@pytest.mark.asyncio
 async def test_partial_deletion_persists_repair_fence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -332,7 +365,9 @@ async def test_partial_deletion_persists_repair_fence(
     assert result["result"] == "partial"
     assert result["state"] == "needs_repair"
     assert controller.config.memory.legacy_needs_repair is True
-    assert runtime.replacement_configs[0].legacy_needs_repair is True
+    assert runtime.replacement_configs == []
+    assert controller.memory_runtime is None
+    assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
 
 
 @pytest.mark.asyncio
@@ -570,7 +605,10 @@ async def test_cancelled_reset_joins_deletion_before_releasing_exclusion(
     assert lease_events == ["acquire", "release"]
     assert controller._memory_destructive_tasks == set()
     assert runtime.events == ["reap", "retire", "close", "settle", "delete"]
-    assert controller.memory_runtime is fresh
+    assert controller.memory_runtime is None
+    assert controller.memory_module is None
+    assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
+    assert runtime.replacement_configs == []
 
 
 @pytest.mark.asyncio

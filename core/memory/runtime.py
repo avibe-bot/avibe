@@ -102,6 +102,8 @@ from core.memory.types import (
     memory_item_payload,
     memory_list_page_payload,
 )
+from vibe.memory_contract import MemoryStoreUnavailableError
+
 logger = logging.getLogger(__name__)
 
 ProcessingEvent = Callable[
@@ -283,10 +285,6 @@ class _UnavailableMemoryModule:
 
 
 _UNAVAILABLE_MODULE = _UnavailableMemoryModule()
-
-
-class MemoryStoreUnavailableError(RuntimeError):
-    """Raised when the local Memory store cannot be used safely."""
 
 
 def create_memory_runtime(

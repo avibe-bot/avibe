@@ -36,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core import internal_server, session_turns
 from core.message_context import build_context_turn_sink_key
 from core.vibe_agents import VibeAgentStore
-from core.memory.runtime import MemoryStoreUnavailableError
+from vibe.memory_contract import MemoryStoreUnavailableError
 from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
 from core.services.agent_steering import SteerOutcome, result as steer_result
 from core.services.dispatch import (
@@ -1081,9 +1081,8 @@ def test_reconcile_memory_hot_applies_the_persisted_config(
 
 
 def test_memory_preflight_requires_signed_ui_operator() -> None:
-    runtime = SimpleNamespace(preflight=AsyncMock())
     controller = _build_controller_double()
-    controller.memory_runtime = runtime
+    controller.preflight_memory = AsyncMock()
     app = internal_server.create_app(controller, memory_ui_secret="test-secret")
 
     async def _exercise() -> httpx.Response:
@@ -1094,7 +1093,64 @@ def test_memory_preflight_requires_signed_ui_operator() -> None:
     response = asyncio.run(_exercise())
     assert response.status_code == 403
     assert response.json() == {"ok": False, "error": "memory_access_denied"}
-    runtime.preflight.assert_not_awaited()
+    controller.preflight_memory.assert_not_awaited()
+
+
+def test_memory_preflight_uses_controller_lifecycle_when_runtime_is_disabled() -> None:
+    from config.v2_config import (
+        MemoryConfig,
+        MemoryEndpointConfig,
+        MemoryProcessingConfig,
+        memory_config_to_payload,
+    )
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    path = "/internal/memory/preflight"
+    candidate = MemoryConfig(
+        enabled=True,
+        processing=MemoryProcessingConfig(
+            llm=MemoryEndpointConfig(
+                base_url="https://llm.example/v1",
+                model="chat-model",
+                api_key="llm-secret",
+            ),
+            embedding=MemoryEndpointConfig(
+                base_url="https://embedding.example/v1",
+                model="embedding-model",
+                api_key="embedding-secret",
+            ),
+        ),
+    )
+    controller = _build_controller_double()
+    controller.memory_runtime = None
+    controller.preflight_memory = AsyncMock(return_value={"ok": True})
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+    headers = {
+        MEMORY_USER_KEY_HEADER: "avibe:local",
+        MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+            secret,
+            method="POST",
+            path=path,
+            user_key="avibe:local",
+        ),
+    }
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                path,
+                headers=headers,
+                json={"memory": memory_config_to_payload(candidate, include_secrets=True)},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    controller.preflight_memory.assert_awaited_once_with(candidate)
 
 
 @pytest.mark.parametrize(

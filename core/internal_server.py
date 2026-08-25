@@ -52,6 +52,7 @@ from core.blocking import run_blocking
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED
 from modules.im.base import MessageContext
 from storage.db import get_cached_sqlite_engine
+from vibe.memory_contract import MemoryStoreUnavailableError
 from vibe.message_identity import HARNESS_TYPE, is_input_turn
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -172,8 +173,6 @@ def create_app(
         from vibe.memory_ui_access import process_ui_read_secret
 
         memory_ui_secret = process_ui_read_secret()
-    from core.memory.runtime import MemoryStoreUnavailableError
-
     app = FastAPI(
         title="avibe internal dispatch",
         docs_url=None,
@@ -1183,12 +1182,12 @@ def create_app(
         payload = await _safe_json(request)
         try:
             from config.v2_config import memory_config_from_payload
-            from core.memory.runtime import MemoryRuntime
+
             config = memory_config_from_payload(payload.get("memory", payload) if isinstance(payload, dict) else {})
-            runtime = _memory_runtime()
-            if runtime is None:
+            preflight = getattr(controller, "preflight_memory", None)
+            if not callable(preflight):
                 return JSONResponse(status_code=503, content={"ok": False, "error": "memory_runtime_missing"})
-            return JSONResponse(status_code=200, content=await runtime.preflight(config))
+            return JSONResponse(status_code=200, content=await preflight(config))
         except Exception:
             logger.exception("internal memory preflight failed")
             return JSONResponse(status_code=503, content={"ok": False, "error": "memory_processing_failed"})

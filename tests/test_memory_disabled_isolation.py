@@ -177,6 +177,7 @@ sys.meta_path.insert(0, BlockMemoryImplementation())
 
 from config.v2_compat import to_app_config
 from config.v2_config import V2Config
+from core import internal_server
 from core.controller import Controller
 from core.memory_adapter import DisabledMemoryAdapter
 
@@ -194,6 +195,7 @@ config = to_app_config(V2Config.from_payload({
     "setup_completed": True,
 }))
 controller = Controller(config)
+internal_server.create_app(controller, memory_ui_secret="test-secret")
 assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
 assert controller.memory_runtime is None
 assert not BLOCKED.intersection(sys.modules)
@@ -316,6 +318,40 @@ async def test_memory_reconcile_lazily_enters_and_leaves_enabled_runtime(
 
 
 @pytest.mark.asyncio
+async def test_disabled_preflight_uses_one_temporary_runtime() -> None:
+    controller = Controller.__new__(Controller)
+    controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)
+    controller.memory_adapter = DisabledMemoryAdapter()
+    controller.memory_runtime = None
+    controller.memory_module = None
+    controller._memory_reconcile_task = None
+    candidate = replace(controller.config.memory, enabled=True)
+    calls: list[object] = []
+
+    class _Runtime:
+        def __init__(self) -> None:
+            self.module = object()
+            self.closed = False
+
+        async def preflight(self, config) -> dict[str, object]:
+            calls.append(config)
+            return {"ok": True}
+
+        async def close(self) -> None:
+            self.closed = True
+
+    runtime = _Runtime()
+    controller._create_memory_runtime = lambda config: runtime
+
+    assert await controller.preflight_memory(candidate) == {"ok": True}
+    assert calls == [candidate]
+    assert runtime.closed is True
+    assert controller.memory_runtime is None
+    assert controller.memory_module is None
+    assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
+
+
+@pytest.mark.asyncio
 async def test_memory_indep_015_shutdown_bounds_all_memory_stages_under_one_budget() -> None:
     controller = Controller.__new__(Controller)
     controller._memory_reconcile_task = None
@@ -340,7 +376,7 @@ async def test_memory_indep_015_shutdown_bounds_all_memory_stages_under_one_budg
             started.append("capture-registration")
 
         async def cancel_memory_capture_tasks(self) -> None:
-            await stubborn_stage("capture")
+            started.append("capture")
 
     class _MemoryRuntime:
         async def close(self) -> None:
@@ -350,7 +386,7 @@ async def test_memory_indep_015_shutdown_bounds_all_memory_stages_under_one_budg
     controller.memory_runtime = _MemoryRuntime()
 
     async def join_destructive_transactions() -> None:
-        await stubborn_stage("destructive")
+        started.append("destructive")
 
     controller._join_memory_destructive_transactions = join_destructive_transactions
 
@@ -366,10 +402,52 @@ async def test_memory_indep_015_shutdown_bounds_all_memory_stages_under_one_budg
         "destructive",
         "runtime",
     ]
-    assert cancelled == ["capture", "destructive", "runtime"]
+    assert cancelled == ["runtime"]
     assert controller._shutdown_tainted is True
 
     release.set()
     leftovers = set(asyncio.all_tasks()).difference(before)
     if leftovers:
         await asyncio.gather(*leftovers, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_does_not_close_runtime_over_live_destructive_transaction() -> None:
+    controller = Controller.__new__(Controller)
+    controller._memory_reconcile_task = None
+    controller._memory_shutdown_budget_seconds = 0.04
+    controller._shutdown_tainted = False
+    controller._memory_destructive_quiescing = False
+    controller.message_handler = types.SimpleNamespace(
+        quiesce_memory_capture_tasks=lambda: None,
+    )
+    release = asyncio.Event()
+
+    async def transaction() -> dict[str, object]:
+        await release.wait()
+        return {"ok": True}
+
+    destructive = asyncio.create_task(transaction())
+    controller._memory_destructive_tasks = {destructive}
+
+    class _MemoryRuntime:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    runtime = _MemoryRuntime()
+    controller.memory_runtime = runtime
+
+    started_at = time.monotonic()
+    await controller._shutdown_memory_stack()
+
+    assert time.monotonic() - started_at < 0.2
+    assert destructive.done() is False
+    assert runtime.closed is False
+    assert controller._shutdown_tainted is True
+
+    release.set()
+    await destructive
+    await asyncio.sleep(0)
