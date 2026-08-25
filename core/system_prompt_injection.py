@@ -90,6 +90,11 @@ Change visibility:
 
 For more usage details, run `vibe show --help` or a subcommand help such as `vibe show update --help`.
 
+### Agent-readable representation
+- Every Show Page URL is agent-readable without page-specific code: request the same private or public URL with `Accept: text/markdown` to receive its rendered Markdown representation.
+- Author semantic HTML so that representation stays dense and useful: use headings for sections, lists for sequences or groups, and `<table>` for genuinely tabular data.
+- Add `data-agent-hidden` to visual-only or sensitive-to-representation elements that should be omitted from Markdown. Add `agent-note="..."` when an element needs short agent-only context; the note text is preserved in the representation.
+
 ### Show Page annotations & reverse marks
 - Users can annotate your Show Page; each annotation arrives as a chat message tagged [show-annotation] with its event id. Some messages end with a ready-to-run reply command — whether to reply on the page or respond by editing the page content is your call, per scenario.
 - After reworking a page area you may leave a short callout: `vibe show mark <selector-or-anchor> --message '...'` (same target replaces), or an `agent-note="..."` attribute on elements you author. Marks retire once read — leave at most 1-2 per turn.

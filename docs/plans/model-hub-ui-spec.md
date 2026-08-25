@@ -33,12 +33,13 @@ a reviewer can open the exact frame.
 | 11 | `cyaYh` | 模型网关 11 — 编辑来源 / 移除来源 |
 | 12 | `qQvkP` | 模型网关 12 — needs_action 来源卡片 |
 | 13 | `Q9q5lF` | 模型网关 13 — 添加订阅厂商菜单 |
+| 14 | `IM4c2` | 模型网关 14 — 运行时关闭 |
 
 There is no 07: it was removed during the design pass and the remaining frames
 were deliberately **not** renumbered, so that every existing reference to "08"
 keeps pointing at the same picture.
 
-**All thirteen frame exports are covered and specified.** Frame 02's drawing remains the
+**All fourteen frame exports are covered and specified.** Frame 02's drawing remains the
 visual authority; §1.2 now registers the interaction facts a drawing cannot carry: the
 route-replacement draft, save and guard sequence, complete success-envelope consumption,
 lost-response reconciliation, failure copy and keyboard path. G-32 remains in §0.5 only
@@ -797,25 +798,25 @@ state exit; held intent never bypasses the evidence column.
 | Authoritative phase evidence | held `install_and_start` | held `install_start_switch` | no held sequence |
 | --- | --- | --- | --- |
 | Status reads `installing`, including after reload | Installing; retain the sequence and keep the 2s read owner | Installing; retain the sequence and keep the 2s read owner | Installing and keep the same 2s read owner; there is no continuation promise |
-| Status reads `not_started` | Send runtime start, enter Starting and retain the sequence | Send runtime start, enter Starting and retain the sequence | Not started; do not infer either sequence |
-| Status reads `down` | Send runtime start, enter Starting and retain the sequence | Send runtime start, enter Starting and retain the sequence | Unreachable; do not infer either sequence |
+| Status reads `not_started` | Send runtime start, enter Starting and retain the sequence | Send runtime start, enter Starting and retain the sequence | Closed; do not infer either sequence; the page-level switch is the only activation |
+| Status reads `down` | Send runtime start, enter Starting and retain the sequence | Send runtime start, enter Starting and retain the sequence | Closed with failed-start copy; do not infer either sequence; the page-level switch is the only activation |
 | Status reads `not_installed` | The owning F state retains the sequence; Retry resumes install | The owning §1.9 Failed state retains the sequence; Retry resumes install | Dispatch `error_key` and manifest support through Install failed / Not installed / Unsupported host |
 | Status reads runtime live (`ok` or `degraded`) | Perform the ordinary full live-page dispatch, then release the sequence | Send the mode `PATCH` and enter §1.9 Committing; retain the sequence until M5 accepts the committed AgentSupply evidence, then let M5 own its Source read | Perform the ordinary full live-page dispatch |
 | Any owned request or read fails | The owning F state retains this exact sequence; Retry resumes its first unproved phase | The owning F state retains this exact sequence; Retry resumes its first unproved phase | The owning F state has no sequence to reconstruct |
 
 | Frame | State | Entry condition | Failure / pending | Copy keys | Exit |
 | --- | --- | --- | --- | --- | --- |
-| §1.0 | Loading | Route entered, first payload outstanding | → Unreachable / Sources unread / Partial | — | What the payload says decides where it lands, not the fact that it arrived. In the order the page reads it: `health` first — `down` → Unreachable (engine down); `installing` → Installing; `not_installed` + non-null `error_key` → Install failed; `not_installed` + null `error_key` → Not installed or Unsupported host by the manifest; `not_started` → Not started; `degraded` → Impaired. Of those readings only `degraded` leaves the dispatch running, because it is the one reading under which the page's own two reads still answer (D-34) — the two are then dispatched underneath an Impaired pill at region grain, one of them failing → Sources unread or Partial in the region it owns; then `sources == []` → Empty (no sources); and a payload that trips none of them → Ready |
+| §1.0 | Loading | Route entered, first payload outstanding | → Closed / Sources unread / Partial | — | What the payload says decides where it lands, not the fact that it arrived. In the order the page reads it: `health` first — `down` or `not_started` → Closed; `installing` → Installing; `not_installed` + non-null `error_key` → Install failed; `not_installed` + null `error_key` → Not installed or Unsupported host by the manifest; `degraded` → Impaired. Only `ok` / `degraded` expose the internal configuration. Under `degraded`, the page's two reads are dispatched beneath the Impaired pill at region grain; one failing → Sources unread or Partial in the region it owns. Then `sources == []` → Empty (no sources), and a payload that trips none of them → Ready |
 | §1.0 | Ready | `health` reads `ok`, both page reads answered, and at least one source `[contract]` | F5 | `shell.running` | Any mutation re-renders in place `[derived]` |
 | §1.0 | Empty (no sources) | `sources == []` | F5 | `upstream.empty` | 添加订阅 → 13, then a vendor row → 04; 添加 API Key → 05; first source → Ready |
 | §1.0 | Not installed | `health: not_installed`, `error_key: null`, and an exact asset exists for server-derived `host_platform` `[contract]` | F5 | `shell.notInstalled`, `install.title` … `install.cancel` | Confirm holds initiating sequence `install_and_start` → Installing |
 | §1.0 | Unsupported host | `health: not_installed`, `error_key: null`, and no `manifest.assets[].platform` exactly equals server-derived `host_platform` `[contract]` | F5 | `shell.unsupported` | Not from this page — 直连 (§1.8) is the documented escape hatch |
 | §1.0 | Installing | `health: installing` from `POST /api/models/runtime/install`, a later status read or G-10's reload read `[contract]` | F2 — the installing-state read owner keeps the last progress state and read cause across a failed tick; the next 2s tick retries `[derived]` | `install.progress` | The observed state, not intent, owns the read loop. H1 dispatches every later RuntimeDependency: `installing` continues it; `not_started` or `down` starts runtime only for a held sequence; failed `not_installed` enters its F state; `ok` / `degraded` takes the held sequence's live row or ordinary page dispatch. Unmount stops polling; reload reconstructs no sequence |
 | §1.0 | Install failed | `health: not_installed` with `error_key: settings.models.install.fail.detail` `[contract]` | F1 lands here | `install.fail.title`, `settings.models.install.fail.detail`, `install.retry` | 重试 sends the idempotent install route → Installing; dismiss leaves the persisted failed projection, and a later successful install clears it before entering Installing |
-| §1.0 | Not started | `health` reads `not_started` `[contract]` | F5 | `shell.notStarted` | Run pill → Starting |
+| §1.0 | Closed | `health` reads `not_started` or `down` `[contract]` | F5 | `shell.notStarted` or `shell.stopped`; `shell.closed.*` | Hide the tabs, Sources, Agent gateway models, route controls, supply lines and configuration dialogs. The off switch sends Start and enters Starting |
 | §1.0 | Starting | Start accepted — `POST /api/models/runtime/start` | → Unreachable; H1 retains any initiating sequence | `shell.starting` | H1 owns a live payload before ordinary page dispatch: held `install_and_start` → perform Loading's full live dispatch, then release; held `install_start_switch` → send the mode `PATCH`, enter §1.9 Committing and release only after M5 accepts commit evidence; no held sequence → Loading's ordinary dispatch. No runtime reading may infer either intent |
 | §1.0 | Impaired | `health` reads `degraded` `[contract]` | F2 at shell grain, over whatever the page already drew — on a first paint that is nothing, and the region whose read failed carries its own F1 beneath this pill (D-34) | `shell.degraded` | The next payload decides, read the way Loading reads one (D-33): `health` back to `ok` with both page reads answered and at least one source → Ready, `sources == []` → Empty (no sources), a page read still failing → Sources unread or Partial, another `health` value → whichever state that value names |
-| §1.0 | Unreachable (engine down) | Status request fails, or `health` reads `down` `[contract]` | F2; H1 retains any initiating sequence | `shell.stopped` | Every recovered RuntimeDependency enters H1: only `ok` / `degraded` may advance held `install_start_switch` to its mode `PATCH`; `not_started` / `down` resumes runtime start for either held sequence; `installing` resumes the installing-state read owner; `not_installed` enters its registered failure/support state. With no held sequence H1 performs the ordinary health dispatch, and no recovery reading creates intent |
+| §1.0 | Status unread | Status request fails with no retained live snapshot | F2; H1 retains any initiating sequence | `shell.unread`, `shell.closed.unread.*` | Internal configuration remains hidden until a live `ok` / `degraded` snapshot is available. A retained live snapshot may remain visible under F2, but the switch is disabled because the read is not authoritative |
 | §1.0 | Partial | Sources load, per-backend supply does not | F1 on a first paint, in the region the group rollups would have filled; F2 on any later read, which keeps the rollups already drawn | `gateway.supply.unread`, `gateway.retry` on a first paint; `—` on a later one, which states nothing new because nothing it was showing changed `[derived]` | 重试 → the supply read runs again and what comes back decides, read against the source list this page is already holding (D-33): a reading with at least one source → Ready, or whichever rollup §1.1 names for it; a reading while `sources == []` → Empty (no sources), which a first-paint retry reaches whenever the list that succeeded beside it was the empty one; another failure → back here |
 | §1.0 | Sources unread | The mirror: `GET /api/models/sources` fails while `health` and per-backend supply both answer `[derived]` | F1, in the region the list would have filled | `upstream.unread`, `upstream.retry` | The list decides, not the fact that one arrived: 重试 answers with at least one source → Ready, and with `sources == []` → Empty (no sources); a later payload carrying the list is read the same two ways |
 | §1.1 | Ready | Sources + per-backend supply both loaded — the two page-level payloads every group-level element is drawn from. The per-model 当前 line is a third read, owned by Chain unresolved below, and this state neither waits on it nor fails with it | F5 | `gateway.group.subtitle.direct`, `gateway.group.subtitle.gateway`, `gateway.group.mode.direct`, `gateway.group.mode.gateway`, `gateway.group.status.ok` | Card → 06; 来源顺序 → 03; model row → 02; 切换到网关 → 10; 切换到直连 → Leaving the gateway; collapse row → Group expanded |
@@ -1123,25 +1124,26 @@ destination and gets its own key, which is the case this rule is the complement 
 **States** — §0.8, rows marked §1.0. Every other frame inherits them, and the rows
 that belong to a frame alone are marked with that frame instead.
 
-Every state above except Ready is **not drawn** `[derived]`. Required behaviour:
+Ready and Runtime off are drawn. Every other state above is **not drawn** `[derived]`.
+Required behaviour:
 
 - Empty: upstream module keeps its head and footer and shows one line —
   「还没有来源。先添加一个订阅或 API Key。」 The gateway module shows its backend
   groups with 「没有可用来源」 per group rather than vanishing; a backend that
   exists is a fact independent of whether anything can supply it.
-- **Not installed**: the pill reads `shell.notInstalled` and **is** an activation
-  target — for installation, not for start `[derived]`. It carries the same idle styling
+- **Not installed**: the pill reads `shell.notInstalled`; the adjacent off switch is the
+  activation target — for installation, not for start `[derived]`. The pill carries the same idle styling
   as Not started, for the same reason: a missing optional component is not a fault. It
   must never offer 点击启动, because starting is not the action that resolves it. The
   runtime contract enumerates `not_installed` alongside `not_started`
   (`runtime-dependency.schema.json`, `health`) `[contract]`, so a UI that collapses the
   two renders a start button that cannot succeed and reports the failure as if the
-  engine had crashed. Activating the pill opens an install confirm that names the
+  engine had crashed. Activating the switch opens an install confirm that names the
   component and its rough duration before anything is downloaded, exactly as D-26
   requires — but it is the **non-switching variant**, and the difference is not
   cosmetic `[derived]`.
 
-  | | From a backend's 切换到网关 (D-26) | From the run pill |
+  | | From a backend's 切换到网关 (D-26) | From the runtime switch |
   | --- | --- | --- |
   | Title | 把 {{backend}} 切换到网关 | 安装网关组件 |
   | What it promises | install, start, and move that one backend to the gateway | install and start the component; **no backend changes mode** |
@@ -1149,16 +1151,16 @@ Every state above except Ready is **not drawn** `[derived]`. Required behaviour:
   | Primary | 安装并切换 | 安装并启动 |
   | Where it lands | that backend on the gateway | the same page, run pill in Starting then healthy |
 
-  Reusing D-26's confirm here would be underspecified and then wrong: the run pill is a
+  Reusing D-26's confirm here would be underspecified and then wrong: the runtime switch is a
   page-level control with **no backend in hand**, so an implementation would have to
   invent one to fill `{{backend}}` in the title and the four `effects.*` bullets, and
   whichever it picked would silently switch a backend the user never named. The user
-  pressed 点击安装; the confirm may promise installation and nothing else. Both variants
+  turned the gateway on; the confirm may promise installation and nothing else. Both variants
   share the component name, the duration and the download-nothing-before-consent rule —
   which is the part D-26 exists to keep from diverging — and differ on exactly the
   consequence each entry point actually has.
 - **The initiating sequence, not the frame, owns post-install continuation** `[derived]`.
-  Before the install request, the non-switching run-pill confirm holds
+  Before the install request, the non-switching runtime-switch confirm holds
   `install_and_start`; §1.9's three-step confirm holds `install_start_switch`. These are
   local operation intents, never a wire field or a second runtime state. H1 is their one
   continuation register: while either sequence remains held, a status read settling at
@@ -1208,21 +1210,23 @@ Every state above except Ready is **not drawn** `[derived]`. Required behaviour:
   `manifest.assets[].platform`. A browser platform is a different subject and is never a
   fallback. Unsupported `not_installed` therefore renders the inert escape immediately,
   while a supported host renders the install affordance.
-- **Not started**: the pill reads `shell.notStarted` and is the page's start
-  affordance. It is styled as an *idle* pill — `$--muted` label on `#FFFFFF0A`,
+- **Not started**: the pill reads `shell.notStarted`; the adjacent off switch is the
+  page's start affordance. The pill is styled as an *idle* pill — `$--muted` label on `#FFFFFF0A`,
   **not** the error treatment `[derived]`. The runtime contract classes
   `not_started` as lazy-start idleness rather than an alarm `[contract]`, and a
   page that paints idleness red teaches users to ignore the colour that matters.
-  Derived columns render `—` exactly as in Unreachable; supply that has never been
-  arbitrated is unknown, not empty.
+  The closed page-level gate replaces every internal column; no `—` placeholder is
+  rendered for configuration that is intentionally unavailable while the runtime is off.
 - **Starting**: the pill reads `shell.starting` with the `loader-circle` spinner and
-  stops accepting activation, so a second click cannot queue a second start
+  the switch stops accepting activation, so a second click cannot queue a second start
   `[derived]`.
-- Unreachable: the run pill flips to `shell.stopped` — the error treatment, because an
-  engine that *was* running and stopped answering is a fault — and every derived
-  column (current source, chain, takeover) renders `—`, **not** a stale last-known
-  value. See D-3: a surface that cannot prove a fact must say so.
-  Recovery offers the same start action as Not started.
+- **Down**: the run pill flips to `shell.stopped` with the error treatment, because an
+  engine that *was* running and stopped answering is a fault. The closed page-level gate
+  replaces the internal configuration and its body explains that the previous start did
+  not become ready. Recovery offers the same switch action as Not started.
+- **Status unread**: a first-paint status transport failure uses `shell.unread`, hides the
+  internal configuration and disables the switch. A retained live F2 snapshot may remain
+  visible, but its switch is disabled until the next authoritative status read.
 - **Impaired**: the pill reads `shell.degraded` with the error treatment and **no**
   activation target `[derived]`. The engine is answering, so the page keeps the data it
   has and no column falls back to `—`; on a first paint the data it has may be none, and
@@ -1238,40 +1242,48 @@ Every state above except Ready is **not drawn** `[derived]`. Required behaviour:
   paint, not only from a loaded page**, and saying so is the whole of this clause: the two
   page-level payloads are separate requests, so the supply read can fail on the very first
   one while the source list succeeds — the exact condition this row defines — and a
-  first-paint dispatch offering only Unreachable resolves it to 网关未运行 with a Start
-  button, for an engine that answered. It also discards the inventory that did load, so
+  first-paint dispatch offering only Closed would replace the whole internal surface with
+  a runtime switch, for an engine that answered. It also discards the inventory that did load, so
   the repair costs the user a fetch that already succeeded. A partial payload is partial
   whether it is the first or the fiftieth.
 - **Sources unread**: the mirror of Partial, and it needs its own row for the reason
-  Partial does. A failed source list used to arrive at Unreachable, which is the sentence
-  for an engine that stopped answering: it renders 网关未运行, it offers Start, and it
-  blanks every derived column. None of that is true here — the status read answered, the
+  Partial does. A failed source list used to arrive at Closed, which is the sentence
+  for an engine that is not running: it renders the closed gate and offers the runtime
+  switch. None of that is true here — the status read answered, the
   supply read answered, and one list did not — so the pill keeps whatever `health` said,
   no other region degrades, and the repair is to ask for the list again. Reading an
   outage off the failure of one read is the same mistake in the other direction as
   reading health off a stale value: both state a fact the payload did not carry.
 
-**The run pill is a total rendering of `health`, and the states above are how it gets
-there** `[contract]`. Every value `runtime-dependency.schema.json` admits for it is
-rendered, and no pill is drawn for anything else. One value splits, on a second field —
-the same shape frame 06's bar has when it splits `active` on adoption:
+**The runtime control is a total rendering of `health`, and the states above are how it
+gets there** `[contract]`. The pill names the state; the adjacent switch owns activation.
+Every value `runtime-dependency.schema.json` admits is rendered, and no state is inferred
+from an empty relationship array. One value splits on a second field — the same shape
+frame 06's bar has when it splits `active` on adoption:
 
 | `RuntimeDependency.status.health` `[contract]` | State | Pill | Treatment | Activation |
 | --- | --- | --- | --- | --- |
-| `ok` | Ready | `shell.running` | idle | none |
-| `degraded` | Impaired | `shell.degraded` | error | none |
-| `down` | Unreachable | `shell.stopped` | error | start (`POST /api/models/runtime/start` `[contract]`) |
-| `not_started` | Not started | `shell.notStarted` | idle | start |
+| `ok` | Ready | `shell.running` | idle | on switch; stop only when every Agent backend is Direct (`POST /api/models/runtime/stop` `[contract]`) |
+| `degraded` | Impaired | `shell.degraded` | error | on switch; same guarded stop rule |
+| `down` | Closed | `shell.stopped` | error | off switch; start (`POST /api/models/runtime/start` `[contract]`) |
+| `not_started` | Closed | `shell.notStarted` | idle | off switch; start |
 | `installing` | Installing | `install.progress` | idle / busy | none; status reads own progress |
 | `not_installed`, `error_key` non-null `[contract]` | Install failed | `install.fail.title` / `settings.models.install.fail.detail` | error | retry `POST /api/models/runtime/install` |
 | `not_installed`, `error_key: null`, exact asset for `host_platform` `[contract]` | Not installed | `shell.notInstalled` | idle | the non-switching install confirm — **never** the start route |
 | `not_installed`, `error_key: null`, no exact asset for `host_platform` `[contract]` | Unsupported host | `shell.unsupported` | idle | none — 直连 (§1.8) is the escape hatch |
 
+The runtime is a page-level gate. Only `ok` and `degraded` expose the tabs, Sources,
+Agent gateway-model rows, route controls, supply graph and internal dialogs. Every other
+authoritative health renders a closed/setup surface instead. Turning the gateway off is
+not a bulk routing mutation: while any backend remains in Hub mode, the switch is disabled
+and names those backends; the server independently rejects the same race with
+`runtime_in_use`. Configuration is preserved while hidden and reappears unchanged after a
+successful start.
+
 Starting is the one pill with no `health` behind it: it is the client's own optimistic
 state between accepting the press and the next payload. A transport failure — the status
-request not returning at all — renders as Unreachable, which is the one pill two inputs
-share, because from the page's side an engine that says `down` and an engine that says
-nothing afford the same action. And `degraded` here is the *engine* speaking about
+request not returning at all — renders Status unread and disables the switch because the
+page has no authoritative action basis. And `degraded` here is the *engine* speaking about
 itself, unrelated to `supply_status: degraded` above, which is a backend speaking about
 its arbitration; the two hold independently and D-24's rule applies to both words.
 
@@ -1358,14 +1370,35 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | --- | --- | --- |
 | `shell.title` | 模型 | Models |
 | `shell.running` | 网关运行中 | Gateway running |
-| `shell.stopped` `[derived]` | 网关未运行 | Gateway not running |
+| `shell.stopped` `[derived]` | 网关已关闭 | Gateway off |
 | `shell.degraded` `[derived]` | 网关降级运行 | Gateway running degraded |
-| `shell.notStarted` `[derived]` | 网关未启动 · 点击启动 | Gateway not started · click to start |
-| `shell.notInstalled` `[derived]` | 网关组件未安装 · 点击安装 | Gateway component not installed · click to install |
+| `shell.notStarted` `[derived]` | 网关已关闭 | Gateway off |
+| `shell.notInstalled` `[derived]` | 网关组件未安装 | Gateway component not installed |
 | `shell.allDirect_one` `[frame]` | {{count}} 个后端都在直连 | The only backend is direct |
 | `shell.allDirect_other` `[frame]` | {{count}} 个后端都在直连 | All {{count}} backends are direct |
 | `shell.starting` `[derived]` | 正在启动… | Starting… |
+| `shell.stopping` `[derived]` | 正在关闭… | Stopping… |
 | `shell.unsupported` `[derived]` | 这个平台还没有网关组件 | No gateway component for this platform yet |
+| `shell.toggle.turnOn` `[derived]` | 开启模型网关 | Turn model gateway on |
+| `shell.toggle.turnOff` `[derived]` | 关闭模型网关 | Turn model gateway off |
+| `shell.toggle.stopBlocked` `[derived]` | 请先将 {{names}} 切换为直连，再关闭模型网关 | Switch {{names}} to Direct before turning the model gateway off |
+| `shell.toggle.stopUnavailable` `[derived]` | 暂时无法读取 Agent 路由状态，当前不能关闭模型网关 | Agent routing status is unavailable; the model gateway cannot be turned off yet |
+| `shell.closed.off.title` `[frame]` | 模型网关已关闭 | Model gateway is off |
+| `shell.closed.off.body` `[frame]` | 开启后才会显示和编辑来源、路由与网关模型。 | Turn it on to view and edit sources, routes, and gateway models. |
+| `shell.closed.down.title` `[derived]` | 模型网关已关闭 | Model gateway is off |
+| `shell.closed.down.body` `[derived]` | 上一次启动没有就绪。开启网关即可重试。 | The previous start did not become ready. Turn it on to try again. |
+| `shell.closed.notInstalled.title` `[derived]` | 模型网关尚未安装 | Model gateway is not installed |
+| `shell.closed.notInstalled.body` `[derived]` | 开启后会安装由 Avibe 管理的网关组件。 | Turn it on to install the managed gateway component. |
+| `shell.closed.unsupported.title` `[derived]` | 模型网关不可用 | Model gateway is unavailable |
+| `shell.closed.unsupported.body` `[derived]` | 当前平台没有兼容的托管网关组件。 | This platform does not have a compatible managed gateway component. |
+| `shell.closed.installing.title` `[derived]` | 正在安装模型网关 | Installing model gateway |
+| `shell.closed.installing.body` `[derived]` | 安装并启动完成后才会显示来源与路由。 | Sources and routing will appear after installation and startup complete. |
+| `shell.closed.starting.title` `[derived]` | 正在启动模型网关 | Starting model gateway |
+| `shell.closed.starting.body` `[derived]` | 网关就绪后才会显示来源与路由。 | Sources and routing will appear when the gateway is ready. |
+| `shell.closed.stopping.title` `[derived]` | 正在关闭模型网关 | Turning model gateway off |
+| `shell.closed.stopping.body` `[derived]` | 运行时停止期间会隐藏网关配置。 | Gateway configuration is hidden while the runtime stops. |
+| `shell.closed.unread.title` `[derived]` | 暂时无法读取网关状态 | Model gateway status unavailable |
+| `shell.closed.unread.body` `[derived]` | 确认运行状态前不会显示网关配置。 | Configuration stays hidden until the runtime state can be confirmed. |
 | `shell.gatewayInfo.label` `[derived]` | 什么是网关 | What the gateway is |
 | `shell.gatewayInfo.body` `[derived]` | 网关是本机的一层调度:它持有你添加的来源,按你配置的顺序供给各个 Agent。 | The gateway is a dispatch layer on this machine: it holds the sources you add and supplies them to your Agents in the order you configure. |
 | `install.title` `[derived]` | 安装网关组件 | Install the gateway component |
@@ -1749,13 +1782,12 @@ current-text slot immediately renders a page-owned statement: `chain_length: 0` 
 selects server-owned `models.launch.route_unconfigured`, while a nonempty chain selects
 `legend.unavailable` in `$--gold`. The page has already proved which of those two facts
 holds even though it cannot yet name a current hop or detailed cause. This reuses the
-row's measured 10.5px text slot and adds no geometry. The unresolved rendering otherwise
-matches the one §1.0 gives those same columns when the engine is unreachable, for the same reason (D-3
-— a surface that cannot prove a fact must say so). **The rendering is shared; the state
-is not** — 「Chain unresolved」 is a row-grain state of its own precisely so that this
-one cannot be written as a transition into §1.0 Unreachable, which would stop the run
-pill, offer 启动引擎 and clear every derived column on the page over a request about one
-model. A stale last-known hop is specifically excluded. AC-30 makes takeover a projection of the chain the surface
+  row's measured 10.5px text slot and adds no geometry. The unresolved rendering follows
+  D-3 — a surface that cannot prove a fact must say so. 「Chain unresolved」 is a row-grain
+  state of its own precisely so that this one cannot be written as a transition into §1.0
+  Closed, which would replace the entire internal surface with the runtime gate over a
+  request about one model. A stale last-known hop is specifically excluded. AC-30 makes
+  takeover a projection of the chain the surface
 displays, so a takeover badge drawn from a chain no longer in hand is a projection of
 nothing — the one failure that rule exists to prevent. And a failed chain read degrades
 those columns and nothing else, which is §1.0's Partial rule read at row grain: only the
@@ -5290,6 +5322,36 @@ terminal enters 06 instead, and that receiving surface owns focus (C3).
 Long localized recommendation badges may not widen the 300px menu. The badge wraps only
 as a last resort; the vendor label keeps the flexible track and truncates with its full
 value in `title` `[derived]`.
+
+---
+
+### 1.13 Frame 14 `IM4c2` — Runtime off
+
+**The question it answers:** *what remains when the managed gateway is not running?*
+The page shell, runtime state pill and unchecked switch remain. The tab strip, Sources,
+Agent gateway models, route controls, supply graph and every internal configuration
+dialog are absent. Configuration is preserved; it is hidden rather than deleted.
+
+**Element inventory** `[frame]`
+
+| Element | Displays | Interactive | On activate |
+| --- | --- | --- | --- |
+| Runtime pill | `shell.notStarted` or `shell.stopped` | no | none |
+| Runtime switch | Unchecked `Switch/Unchecked` | yes when start/install is available | Start the runtime, or open the managed-install confirmation |
+| Closed-state icon | Neutral power glyph in a 44×44 bordered tile | no | none |
+| Closed-state title | `shell.closed.off.title` | no | none |
+| Closed-state body | `shell.closed.off.body` | no | none |
+
+**Geometry** `[frame]` — the frame is 1440×1100 Dark and reuses Frame 01's shell.
+The internal area is a fill-width 854px vertical band with only top/bottom borders;
+content is centered, with a 44×44 radius-8 icon tile, 17px title and 12.5px body.
+The runtime switch sits beside the state pill in the page header. No hidden internal
+surface consumes layout space.
+
+`down` uses the same positive inventory with failed-start body copy; `not_installed`,
+`installing`, `starting`, `stopping`, unsupported and unread states replace only the
+center title/body and busy glyph. A retained live F2 snapshot may keep the prior internal
+surface visible, but its switch is disabled until an authoritative status read lands.
 
 ---
 

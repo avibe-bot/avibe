@@ -117,11 +117,14 @@ SHOW_RUNTIME_PROTOCOL_VERSION = 1
 SHOW_RUNTIME_PROTOCOL_HEADER = "X-Avibe-Show-Protocol"
 SHOW_RUNTIME_CONTEXT_HEADER = "X-Avibe-Show-Context"
 SHOW_RUNTIME_BASE_HEADER = "x-vibe-show-base"
+SHOW_RUNTIME_TARGET_HEADER = "x-vibe-show-target"
 SHOW_RUNTIME_CONTEXT_KEY_FEATURE = "show-context-key-v1"
+SHOW_RUNTIME_RENDER_MARKDOWN_CAPABILITY = "render_markdown"
 SHOW_RUNTIME_REQUEST_TIMEOUT_SECONDS = 30.0
 _CAPABILITY_RETRY_BASE_SECONDS = 0.25
 _CAPABILITY_RETRY_MAX_SECONDS = 5.0
 _CAPABILITY_RETRYABLE_STATUS_CODES = {408, 429}
+_CAPABILITY_ENDPOINT_UNSUPPORTED = object()
 SHOW_RUNTIME_CLI_FALLBACK_DELAY_SECONDS = 30
 _STARTUP_READY_TIMEOUT_SECONDS = 10.0
 _STARTUP_POLL_INTERVAL_SECONDS = 0.05
@@ -492,6 +495,9 @@ class ShowRuntimeManager:
         self._install_guard_path = self.runtime_dir / ".install.lock"
         self._capability_identity: tuple[str, int | None] | None = None
         self._context_key_capability: ShowRuntimeContextCapability | None = None
+        self._render_markdown_capability: bool | None = None
+        self._render_markdown_retry_deadline = 0.0
+        self._render_markdown_retry_attempt = 0
         self._capability_retry_deadline = 0.0
         self._capability_retry_attempt = 0
         self._capability_generation = 0
@@ -725,6 +731,8 @@ class ShowRuntimeManager:
         envelope: ShowRuntimeProtocolEnvelope,
         headers: dict[str, str] | None = None,
         body: bytes | None = None,
+        base_path: str | None = None,
+        render_target: str | None = None,
         timeout_seconds: float | None = None,
         automatic: bool = True,
     ) -> httpx.Response:
@@ -737,11 +745,30 @@ class ShowRuntimeManager:
             base_url = ready.base_url
             process = self._process
         await self._negotiate_context_key_capability(base_url)
-        request_headers = {
-            key: value for key, value in envelope.headers(headers).items() if key.lower() != SHOW_RUNTIME_BASE_HEADER
+        reserved_headers = {
+            SHOW_RUNTIME_BASE_HEADER.lower(),
+            SHOW_RUNTIME_TARGET_HEADER.lower(),
         }
-        if session_part := _show_runtime_app_session_part(path):
+        request_headers = {
+            key: value
+            for key, value in envelope.headers(headers).items()
+            if key.lower() not in reserved_headers
+        }
+        if base_path is not None:
+            if (
+                not base_path.startswith("/")
+                or not base_path.endswith("/")
+                or "\r" in base_path
+                or "\n" in base_path
+            ):
+                raise ValueError("Show Runtime base path must be an absolute path ending in '/'")
+            request_headers[SHOW_RUNTIME_BASE_HEADER] = base_path
+        elif session_part := _show_runtime_app_session_part(path):
             request_headers[SHOW_RUNTIME_BASE_HEADER] = f"/show/{session_part}/"
+        if render_target is not None:
+            if not render_target.startswith("/") or "\r" in render_target or "\n" in render_target:
+                raise ValueError("Show Runtime render target must be an absolute path")
+            request_headers[SHOW_RUNTIME_TARGET_HEADER] = render_target
         phase_timeout_seconds = SHOW_RUNTIME_REQUEST_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
         return await self._request_runtime_transport(
             method,
@@ -775,6 +802,7 @@ class ShowRuntimeManager:
             SHOW_RUNTIME_PROTOCOL_HEADER.lower(),
             SHOW_RUNTIME_CONTEXT_HEADER.lower(),
             SHOW_RUNTIME_BASE_HEADER.lower(),
+            SHOW_RUNTIME_TARGET_HEADER.lower(),
         }
         forwarded = {key: value for key, value in (headers or {}).items() if key.lower() not in blocked}
         return await self._request_runtime_transport(
@@ -949,6 +977,36 @@ class ShowRuntimeManager:
             return ShowRuntimeContextCapability.TRANSIENT_UNKNOWN
         return await self._negotiate_context_key_capability(ready.base_url)
 
+    async def supports_render_markdown(self, *, automatic: bool = True) -> bool:
+        """Return whether this Runtime process implements Markdown rendering."""
+        ready = await self.ensure(automatic=automatic)
+        if not ready.available or not ready.base_url:
+            raise RuntimeError(ready.reason or "show runtime unavailable")
+        identity = self._runtime_identity(ready.base_url)
+        async with self._capability_lock:
+            if identity != self._capability_identity:
+                self._clear_capability_state(identity=identity)
+            if self._render_markdown_capability is not None:
+                return self._render_markdown_capability
+            if time.monotonic() < self._render_markdown_retry_deadline:
+                raise RuntimeError("show runtime capability probe temporarily unavailable")
+
+            generation = self._capability_generation
+            outcome = await self._probe_render_markdown_capability(ready.base_url)
+            if generation != self._capability_generation or identity != self._runtime_identity(ready.base_url):
+                raise RuntimeError("show runtime changed during capability probe")
+            if outcome is None:
+                self._render_markdown_retry_attempt += 1
+                self._render_markdown_retry_deadline = (
+                    time.monotonic()
+                    + _show_runtime_capability_retry_delay(self._render_markdown_retry_attempt)
+                )
+                raise RuntimeError("show runtime capability probe unavailable")
+            self._render_markdown_capability = outcome
+            self._render_markdown_retry_attempt = 0
+            self._render_markdown_retry_deadline = 0.0
+            return outcome
+
     async def _negotiate_context_key_capability(
         self,
         base_url: str,
@@ -988,22 +1046,9 @@ class ShowRuntimeManager:
             return outcome
 
     async def _probe_context_key_capability(self, base_url: str) -> ShowRuntimeContextCapability:
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(2.0, connect=0.5)) as client:
-                response = await client.get(f"{base_url}/capabilities")
-        except (httpx.TimeoutException, httpx.TransportError):
-            return ShowRuntimeContextCapability.TRANSIENT_UNKNOWN
-
-        if response.status_code == 404:
+        payload = await self._probe_capabilities_payload(base_url)
+        if payload is _CAPABILITY_ENDPOINT_UNSUPPORTED:
             return ShowRuntimeContextCapability.UNSUPPORTED
-        if response.status_code in _CAPABILITY_RETRYABLE_STATUS_CODES or response.status_code >= 500:
-            return ShowRuntimeContextCapability.TRANSIENT_UNKNOWN
-        if not 200 <= response.status_code < 300:
-            return ShowRuntimeContextCapability.TRANSIENT_UNKNOWN
-        try:
-            payload = response.json()
-        except (UnicodeDecodeError, ValueError):
-            return ShowRuntimeContextCapability.TRANSIENT_UNKNOWN
         if not isinstance(payload, dict):
             return ShowRuntimeContextCapability.TRANSIENT_UNKNOWN
 
@@ -1021,6 +1066,45 @@ class ShowRuntimeManager:
             return ShowRuntimeContextCapability.SUPPORTED
         return ShowRuntimeContextCapability.UNSUPPORTED
 
+    async def _probe_capabilities_payload(self, base_url: str) -> dict[str, Any] | object | None:
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(2.0, connect=0.5)) as client:
+                response = await client.get(f"{base_url}/capabilities")
+        except (httpx.TimeoutException, httpx.TransportError):
+            return None
+
+        if response.status_code == 404:
+            return _CAPABILITY_ENDPOINT_UNSUPPORTED
+        if response.status_code in _CAPABILITY_RETRYABLE_STATUS_CODES or response.status_code >= 500:
+            return None
+        if not 200 <= response.status_code < 300:
+            return None
+        try:
+            payload = response.json()
+        except (UnicodeDecodeError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return payload
+
+    async def _probe_render_markdown_capability(self, base_url: str) -> bool | None:
+        payload = await self._probe_capabilities_payload(base_url)
+        if payload is _CAPABILITY_ENDPOINT_UNSUPPORTED:
+            return False
+        if not isinstance(payload, dict):
+            return None
+
+        protocol = payload.get("protocol", _MISSING)
+        capability = payload.get(SHOW_RUNTIME_RENDER_MARKDOWN_CAPABILITY, _MISSING)
+        if protocol is not _MISSING and (isinstance(protocol, bool) or not isinstance(protocol, int)):
+            return None
+        if capability is not _MISSING and not isinstance(capability, bool):
+            return None
+        return bool(
+            protocol == SHOW_RUNTIME_PROTOCOL_VERSION
+            and capability is True
+        )
+
     def _runtime_identity(self, base_url: str) -> tuple[str, int | None]:
         process = self._process
         return base_url, getattr(process, "pid", None) if process is not None else None
@@ -1028,6 +1112,9 @@ class ShowRuntimeManager:
     def _clear_capability_state(self, *, identity: tuple[str, int | None] | None = None) -> None:
         self._capability_identity = identity
         self._context_key_capability = None
+        self._render_markdown_capability = None
+        self._render_markdown_retry_deadline = 0.0
+        self._render_markdown_retry_attempt = 0
         self._capability_retry_deadline = 0.0
         self._capability_retry_attempt = 0
         self._capability_generation += 1

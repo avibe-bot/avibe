@@ -1929,6 +1929,18 @@ def test_supervisor_starts_checks_health_and_stops_mock_engine(
     supervisor.stop()
 
 
+def test_supervisor_disable_restores_explicit_off_state(tmp_path: Path) -> None:
+    supervisor, _store = _fixture_supervisor(tmp_path)
+    supervisor.ensure_running()
+
+    supervisor.disable()
+
+    assert supervisor.status()["status"]["health"] == "not_started"
+    supervisor.ensure_running()
+    assert supervisor.status()["status"]["health"] == "ok"
+    supervisor.stop()
+
+
 def _assert_supervisor_owned_startup_log(
     message: str,
     *,

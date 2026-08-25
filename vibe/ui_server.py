@@ -142,6 +142,7 @@ _SHOW_RUNTIME_RESPONSE_HEADER_ALLOWLIST = {
     "location",
     "sourcemap",
     "vary",
+    "x-avibe-render-cache",
     "x-sourcemap",
 }
 _SHOW_RUNTIME_MODULE_SCRIPT_RE = re.compile(
@@ -149,6 +150,44 @@ _SHOW_RUNTIME_MODULE_SCRIPT_RE = re.compile(
     re.IGNORECASE,
 )
 _SHOW_RUNTIME_IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable"
+_SHOW_PAGE_ASSET_SUFFIXES = frozenset(
+    {
+        ".avif",
+        ".br",
+        ".cjs",
+        ".css",
+        ".eot",
+        ".gif",
+        ".gz",
+        ".ico",
+        ".jpeg",
+        ".jpg",
+        ".js",
+        ".json",
+        ".jsx",
+        ".map",
+        ".mjs",
+        ".mp3",
+        ".mp4",
+        ".ogg",
+        ".otf",
+        ".pdf",
+        ".png",
+        ".svg",
+        ".ts",
+        ".tsx",
+        ".ttf",
+        ".wasm",
+        ".wav",
+        ".webm",
+        ".webmanifest",
+        ".webp",
+        ".woff",
+        ".woff2",
+        ".xml",
+        ".zip",
+    }
+)
 # Shared, content-hashed vendor bundle. The runtime serves this at a
 # session-independent path (`/_show-runtime/vendor/<hash>/<file>`) and injects the
 # matching `<script type="importmap">` + vendor CSS `<link>` into every Show Page it
@@ -2361,6 +2400,7 @@ def reject_disabled_model_hub_api():
 @app.before_request
 def enforce_remote_access_cookie():
     config = _load_remote_access_config()
+    markdown_show_request = _is_private_show_page_markdown_request()
     if _remote_auth_exempt_before_host_validation():
         return None
     from vibe.authorization import context_from_session_payload, instance_owner_context
@@ -2405,6 +2445,8 @@ def enforce_remote_access_cookie():
                 g.remote_session_identity = identity
                 g.remote_authorization_resolution = resolution
                 return None
+            if markdown_show_request:
+                return _show_page_markdown_error_response("forbidden", 403)
             return jsonify({"ok": False, "error": "remote_access_revoked"}), 403
         if resolution.state == "unavailable":
             if _is_ui_static_request():
@@ -2428,11 +2470,13 @@ def enforce_remote_access_cookie():
                     or _show_page_resource_access_allowed(context, show_page_id)
                 )
                 reauth_attempted = request.args.get(REMOTE_SHOW_PAGE_REAUTH_PARAM) == "1"
-                wants_html = "text/html" in request.headers.get("Accept", "")
+                wants_html = not markdown_show_request and "text/html" in request.headers.get("Accept", "")
                 raw_next = request.full_path if request.query_string else request.path
                 if reauth_attempted and resource_allowed and wants_html:
                     return redirect(_strip_show_page_reauth_param(raw_next))
                 if not resource_allowed:
+                    if markdown_show_request:
+                        return _show_page_markdown_error_response("forbidden", 403)
                     if not wants_html:
                         return jsonify({"ok": False, "error": "remote_access_login_required"}), 401
                     if not reauth_attempted:
@@ -2451,6 +2495,8 @@ def enforce_remote_access_cookie():
     # origin instead of automatically crossing into an OAuth browser sheet.
     if _is_ui_static_request():
         return None
+    if markdown_show_request:
+        return _show_page_markdown_error_response("authentication_required", 401)
     if request.method == "GET" and "text/html" in request.headers.get("Accept", ""):
         target = request.full_path if request.query_string else request.path
         return redirect(f"/auth/login?{urlencode({'next': _safe_remote_redirect_target(target)})}")
@@ -4445,8 +4491,6 @@ def doctor_get():
 
 @app.route("/api/config", methods=["GET"])
 def config_get():
-    from vibe import api
-    from config.v2_config import is_model_hub_enabled
     from core.services import settings as settings_service
 
     # On a truly fresh install no config file exists yet, but the setup
@@ -4457,8 +4501,7 @@ def config_get():
     # (``save_config``) already creates the file on the first real save.
     config = settings_service.load_config_or_default()
     authorization_context = getattr(g, "authorization_context", None)
-    payload = _config_payload_for_context(config, authorization_context)
-    payload["capabilities"] = {"model_hub": {"enabled": is_model_hub_enabled()}}
+    payload = _config_api_payload_for_context(config, authorization_context)
     return jsonify(payload)
 
 
@@ -4470,6 +4513,16 @@ def _config_payload_for_context(config: Any, authorization_context: Any) -> dict
     if authorization_context is None or authorization_context.can_manage_instance:
         return api.client_config_payload(config)
     return api.non_owner_config_payload(config)
+
+
+def _config_api_payload_for_context(config: Any, authorization_context: Any) -> dict[str, Any]:
+    """Return the complete payload exposed by the config API."""
+
+    from config.v2_config import is_model_hub_enabled
+
+    payload = _config_payload_for_context(config, authorization_context)
+    payload["capabilities"] = {"model_hub": {"enabled": is_model_hub_enabled()}}
+    return payload
 
 
 _MODEL_HUB_SERVICE = None
@@ -4958,6 +5011,16 @@ async def model_hub_runtime_start():
 
     try:
         return _model_hub_success(runtime=await _model_hub_service().runtime_start())
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/runtime/stop", methods=["POST"])
+async def model_hub_runtime_stop():
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        return _model_hub_success(runtime=await _model_hub_service().runtime_stop())
     except ModelHubError as exc:
         return _model_hub_error(exc)
 
@@ -6760,7 +6823,7 @@ async def config_post():
             else:
                 agent_backend_runtime["apply_on_next_start"] = True
     authorization_context = getattr(g, "authorization_context", None)
-    response_payload = _config_payload_for_context(config, authorization_context)
+    response_payload = _config_api_payload_for_context(config, authorization_context)
     if remote_access_runtime is not None:
         response_payload["remote_access_runtime"] = remote_access_runtime
     if platform_runtime is not None:
@@ -12811,6 +12874,19 @@ def _show_page_accepts_html() -> bool:
     return html_quality > 0.0 and html_quality > json_quality
 
 
+def _show_page_accepts_markdown_value(accept: str) -> bool:
+    """Choose Markdown only when explicitly requested over HTML."""
+    explicitly_requested = any(
+        item.split(";", 1)[0].strip().lower() == "text/markdown"
+        for item in accept.split(",")
+    )
+    if not explicitly_requested:
+        return False
+    markdown_quality = _show_page_accept_quality(accept, "text/markdown")
+    html_quality = _show_page_accept_quality(accept, "text/html")
+    return markdown_quality > 0.0 and markdown_quality >= html_quality
+
+
 def _show_page_not_found_html_response():
     language = _request_ui_language()
     title = html.escape(t("show.pageUnavailable.title", language), quote=True)
@@ -12954,12 +13030,71 @@ def _is_show_page_spa_route_request(asset_path: str, starlette_request: FastAPIR
     relative = _decode_show_page_asset_path(asset_path)
     if relative in {"", "index.html"}:
         return True
-    if "text/html" not in starlette_request.headers.get("accept", "").lower():
-        return False
+    accept = starlette_request.headers.get("accept", "")
+    if "text/html" not in accept.lower():
+        if not _show_page_accepts_markdown_value(accept):
+            return False
+        if _is_show_page_non_document_path(relative):
+            return False
     segments = [segment for segment in relative.split("/") if segment]
     if not segments or segments[0] in {"api", "__show"}:
         return False
     return True
+
+
+def _is_show_page_non_document_path(asset_path: str) -> bool:
+    relative = _decode_show_page_asset_path(asset_path)
+    segments = [segment for segment in relative.split("/") if segment]
+    if not segments:
+        return False
+    if segments[0] in {
+        "api",
+        "assets",
+        "src",
+        "node_modules",
+        "__show",
+        "__events",
+        "__vite_hmr",
+        "@fs",
+        "@id",
+        "@vite",
+        "@react-refresh",
+    }:
+        return True
+    return Path(segments[-1]).suffix.lower() in _SHOW_PAGE_ASSET_SUFFIXES
+
+
+def _is_show_page_markdown_request(
+    asset_path: str,
+    starlette_request: FastAPIRequest,
+) -> bool:
+    if not _show_page_accepts_markdown_value(starlette_request.headers.get("accept", "")):
+        return False
+    fetch_destination = starlette_request.headers.get("sec-fetch-dest", "").strip().lower()
+    if fetch_destination and fetch_destination not in {"document", "empty", "iframe"}:
+        return False
+    if not _is_show_page_entry_asset(asset_path) and _is_show_page_non_document_path(asset_path):
+        return False
+    return _is_show_page_spa_route_request(asset_path, starlette_request)
+
+
+def _is_private_show_page_markdown_request() -> bool:
+    match = re.match(r"^/show/[^/]+(?:/(.*))?$", request.path or "")
+    if match is None:
+        return False
+    return _is_show_page_markdown_request(
+        match.group(1) or "",
+        request._request,
+    )
+
+
+def _show_page_markdown_target_is_document(session_id: str, asset_path: str) -> bool:
+    if _is_show_page_entry_asset(asset_path):
+        return True
+    return not _show_page_runtime_asset_exists(
+        session_id,
+        asset_path,
+    ) or _show_page_runtime_document_exists(session_id, asset_path)
 
 
 def _show_page_runtime_asset_exists(session_id: str, asset_path: str) -> bool:
@@ -12970,6 +13105,22 @@ def _show_page_runtime_asset_exists(session_id: str, asset_path: str) -> bool:
     try:
         for candidate in (workspace / relative, workspace / "public" / relative):
             if candidate.is_file() or (candidate.is_dir() and (candidate / "index.html").is_file()):
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def _show_page_runtime_document_exists(session_id: str, asset_path: str) -> bool:
+    relative = _decode_show_page_asset_path(asset_path)
+    if not relative:
+        return False
+    workspace = paths.get_show_page_dir(session_id)
+    try:
+        for candidate in (workspace / relative, workspace / "public" / relative):
+            if candidate.is_file() and candidate.suffix.lower() in {".htm", ".html"}:
+                return True
+            if candidate.is_dir() and (candidate / "index.html").is_file():
                 return True
     except OSError:
         return False
@@ -14320,6 +14471,168 @@ def _show_runtime_public_client_shim_response(asset_path: str):
     return None
 
 
+_SHOW_PAGE_MARKDOWN_ERROR_I18N_KEYS = {
+    "authentication_required": "show.markdown.errors.authenticationRequired",
+    "forbidden": "show.markdown.errors.forbidden",
+    "page_offline": "show.markdown.errors.pageOffline",
+    "renderer_unavailable": "show.markdown.errors.rendererUnavailable",
+    "render_timeout": "show.markdown.errors.renderTimeout",
+    "render_failed": "show.markdown.errors.renderFailed",
+    "session_unknown": "show.markdown.errors.sessionUnknown",
+}
+
+
+def _show_page_markdown_error_response(
+    code: str,
+    status_code: int,
+    message: str | None = None,
+):
+    if message is None:
+        key = _SHOW_PAGE_MARKDOWN_ERROR_I18N_KEYS.get(code, "show.markdown.errors.renderFailed")
+        message = t(key, _request_ui_language())
+    response = jsonify({"error": {"code": code, "message": message}})
+    response.status_code = status_code
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Vary"] = _append_vary_header(response.headers.get("Vary"), "Accept")
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
+def _show_page_markdown_runtime_error_response(proxied: Any):
+    expected_codes = {
+        400: {"invalid_target"},
+        404: {"session_unknown"},
+        502: {"render_failed", "output_too_large"},
+        503: {"renderer_unavailable"},
+        504: {"render_timeout"},
+    }
+    try:
+        payload = proxied.json()
+    except (UnicodeDecodeError, ValueError):
+        payload = None
+    error = payload.get("error") if isinstance(payload, dict) else None
+    code = error.get("code") if isinstance(error, dict) else None
+    message = error.get("message") if isinstance(error, dict) else None
+    if (
+        proxied.status_code in expected_codes
+        and isinstance(code, str)
+        and code in expected_codes[proxied.status_code]
+        and isinstance(message, str)
+        and message
+    ):
+        return _show_page_markdown_error_response(code, proxied.status_code, message)
+    if proxied.status_code == 404:
+        return _show_page_markdown_error_response("renderer_unavailable", 503)
+    fallback_codes = {
+        502: "render_failed",
+        503: "renderer_unavailable",
+        504: "render_timeout",
+    }
+    fallback_code = fallback_codes.get(proxied.status_code, "render_failed")
+    fallback_status = proxied.status_code if proxied.status_code in fallback_codes else 502
+    return _show_page_markdown_error_response(fallback_code, fallback_status)
+
+
+def _show_page_markdown_render_target(
+    asset_path: str,
+    starlette_request: FastAPIRequest,
+) -> str:
+    relative = _decode_show_page_asset_path(asset_path)
+    target = f"/{quote(relative, safe='/@:-._~')}" if relative else "/"
+    if asset_path and asset_path.endswith("/") and target != "/":
+        target = f"{target}/"
+    if starlette_request.url.query:
+        target = f"{target}?{starlette_request.url.query}"
+    return target
+
+
+async def _show_page_markdown_runtime_response(
+    session_id: str,
+    asset_path: str,
+    starlette_request: FastAPIRequest,
+    *,
+    external_prefix: str | None = None,
+    runtime_retry_authorized: bool = False,
+):
+    from core.show_runtime import (
+        SHOW_RUNTIME_REQUEST_TIMEOUT_SECONDS,
+        ShowRuntimeContext,
+        ShowRuntimeProtocolEnvelope,
+        ShowRuntimeRequestTimeoutError,
+        get_show_runtime_manager,
+    )
+    from httpx import ReadTimeout
+
+    manager = get_show_runtime_manager()
+    automatic = not (
+        runtime_retry_authorized
+        and starlette_request.headers.get("X-Avibe-Show-Recovery-Retry") == "1"
+    )
+    try:
+        if not await manager.supports_render_markdown(automatic=automatic):
+            return _show_page_markdown_error_response("renderer_unavailable", 503)
+    except Exception:
+        logger.debug("Show Runtime Markdown capability probe unavailable", exc_info=True)
+        return _show_page_markdown_error_response("renderer_unavailable", 503)
+
+    session_part = quote(session_id, safe="")
+    runtime_path = f"/sessions/{session_part}/render-markdown"
+    base_path = (
+        f"{external_prefix.rstrip('/')}/"
+        if external_prefix
+        else f"/show/{session_part}/"
+    )
+    context = ShowRuntimeContext.SHARED if external_prefix else ShowRuntimeContext.PRIVATE
+    envelope = ShowRuntimeProtocolEnvelope(context)
+    render_target = _show_page_markdown_render_target(asset_path, starlette_request)
+    forwarded_headers = _show_runtime_forwarded_headers(starlette_request.headers)
+    try:
+        proxied = await manager.request(
+            "GET",
+            runtime_path,
+            envelope=envelope,
+            headers=forwarded_headers,
+            body=None,
+            base_path=base_path,
+            render_target=render_target,
+            timeout_seconds=SHOW_RUNTIME_REQUEST_TIMEOUT_SECONDS,
+            automatic=automatic,
+        )
+    except (ReadTimeout, ShowRuntimeRequestTimeoutError):
+        logger.debug("Show Runtime Markdown request timed out", exc_info=True)
+        return _show_page_markdown_error_response("render_timeout", 504)
+    except Exception:
+        logger.debug("Show Runtime Markdown request unavailable", exc_info=True)
+        return _show_page_markdown_error_response("renderer_unavailable", 503)
+
+    if proxied.status_code != 200:
+        return _show_page_markdown_runtime_error_response(proxied)
+
+    response_headers = {
+        key: value
+        for key, value in proxied.headers.items()
+        if key.lower() in _SHOW_RUNTIME_RESPONSE_HEADER_ALLOWLIST
+    }
+    content_type = _response_header(response_headers, "content-type") or ""
+    if content_type.split(";", 1)[0].strip().lower() != "text/markdown":
+        return _show_page_markdown_error_response("render_failed", 502)
+    if "charset=" not in content_type.lower():
+        _set_response_header(response_headers, "Content-Type", "text/markdown; charset=utf-8")
+    _mark_show_runtime_document_no_store(response_headers)
+    _set_response_header(
+        response_headers,
+        "Vary",
+        _append_vary_header(_response_header(response_headers, "vary"), "Accept"),
+    )
+    response_headers["X-Content-Type-Options"] = "nosniff"
+    response_headers["Referrer-Policy"] = "no-referrer"
+    content = _compress_response_content(proxied.content, response_headers, starlette_request)
+    if starlette_request.method == "HEAD":
+        content = b""
+    return FastAPIResponse(content=content, status_code=200, headers=response_headers)
+
+
 async def _show_page_runtime_response(
     session_id: str,
     asset_path: str,
@@ -14963,6 +15276,7 @@ async def serve_private_show_page(session_id, asset_path):
 
     authorization_context = _request_authorization_context()
     runtime_retry_authorized = _has_runtime_owner_access(authorization_context)
+    markdown_requested = _is_show_page_markdown_request(asset_path, request._request)
     store = ShowPageStore()
     try:
         try:
@@ -14972,15 +15286,23 @@ async def serve_private_show_page(session_id, asset_path):
             )
         except ShowPageError as exc:
             if exc.code == "resource_access_forbidden":
+                if markdown_requested:
+                    return _show_page_markdown_error_response("forbidden", 403)
                 return _show_page_access_forbidden_response()
+            if markdown_requested:
+                return _show_page_markdown_error_response("session_unknown", 404)
             return _show_page_not_found_response()
         if page.visibility == "offline":
+            if markdown_requested:
+                return _show_page_markdown_error_response("page_offline", 404)
             return _show_page_offline_response()
         # The Workbench editor route serves every online audience mode. This is
         # no new anonymous exposure: `/show` stays behind Workbench and resource
         # authorization, while `/p` owns shared navigation admission. `offline`
         # (handled above) and unexpected states still fail closed.
         if page.visibility not in {"private", "limited", "public"}:
+            if markdown_requested:
+                return _show_page_markdown_error_response("session_unknown", 404)
             return _show_page_not_found_response()
         # A remote viewer is an untrusted viewer even on the private surface: keep
         # its asset reads inside the page workspace so an authored symlink cannot
@@ -14990,6 +15312,8 @@ async def serve_private_show_page(session_id, asset_path):
             session_id=page.session_id,
             confine_to_workspace=_is_remote_show_page_request(),
         ):
+            if markdown_requested:
+                return _show_page_markdown_error_response("session_unknown", 404)
             return _show_page_file_not_found_response()
         show_author = _show_request_author()
         can_annotate = _show_annotation_capability(
@@ -15002,6 +15326,17 @@ async def serve_private_show_page(session_id, asset_path):
             authorization_context
         ):
             return _show_page_access_forbidden_response()
+        markdown_requested = markdown_requested and _show_page_markdown_target_is_document(
+            page.session_id,
+            asset_path,
+        )
+        if markdown_requested:
+            return await _show_page_markdown_runtime_response(
+                page.session_id,
+                asset_path,
+                request._request,
+                runtime_retry_authorized=runtime_retry_authorized,
+            )
         if asset_path.strip("/") == "__show/me":
             if request.method not in {"GET", "HEAD"}:
                 return jsonify({"ok": False, "code": "method_not_allowed"}), 405
@@ -15309,8 +15644,11 @@ async def serve_public_show_page(share_id, asset_path):
     from core.show_pages import ShowPageError, ShowPageStore, ensure_show_page_dir
     from vibe import show_identity
 
+    markdown_requested = _is_show_page_markdown_request(asset_path, request._request)
     config = _load_remote_access_config()
     lease = _show_guest_lease(config, share_id)
+    editor_admitted = False
+    limited_authenticated = False
     store = ShowPageStore()
     try:
         page = store.get_by_share_id(share_id)
@@ -15319,8 +15657,12 @@ async def serve_public_show_page(share_id, asset_path):
             if page is not None:
                 access = store.get_access(page.session_id)
                 if access is None or access.share_id != share_id:
+                    if markdown_requested:
+                        return _show_page_markdown_error_response("session_unknown", 404)
                     return _show_limited_not_found_response()
         if page is None:
+            if markdown_requested:
+                return _show_page_markdown_error_response("session_unknown", 404)
             return _show_page_not_found_response()
         limited_guest = (
             lease is not None
@@ -15328,10 +15670,15 @@ async def serve_public_show_page(share_id, asset_path):
             and page.visibility != "public"
         )
         if page.visibility == "offline":
+            if markdown_requested:
+                return _show_page_markdown_error_response("page_offline", 404)
             return _show_page_offline_response()
         is_spa_navigation = _is_show_page_spa_route_request(
             asset_path,
             request._request,
+        )
+        admission_navigation_method = request.method == "GET" or (
+            markdown_requested and request.method == "HEAD"
         )
         if page.visibility != "public" and is_spa_navigation:
             editor_context = await asyncio.to_thread(_show_public_editor_context)
@@ -15344,13 +15691,16 @@ async def serve_public_show_page(share_id, asset_path):
                 except ShowPageError:
                     pass
                 else:
-                    private_target = f"/show/{quote(page.session_id, safe='')}/"
-                    if asset_path:
-                        private_target += quote(asset_path.lstrip("/"), safe="/@:-._~")
-                    query = urlsplit(request.full_path).query
-                    if query:
-                        private_target = f"{private_target}?{query}"
-                    return redirect(private_target)
+                    if markdown_requested:
+                        editor_admitted = True
+                    else:
+                        private_target = f"/show/{quote(page.session_id, safe='')}/"
+                        if asset_path:
+                            private_target += quote(asset_path.lstrip("/"), safe="/@:-._~")
+                        query = urlsplit(request.full_path).query
+                        if query:
+                            private_target = f"{private_target}?{query}"
+                        return redirect(private_target)
         if limited_guest:
             # A guest lease does not grant a grace period after access changes.
             # Already-rendered pages are not proactively closed, but every
@@ -15377,9 +15727,9 @@ async def serve_public_show_page(share_id, asset_path):
                     )
                     if (
                         authenticated_context is not None
-                        and request.method == "GET"
+                        and admission_navigation_method
                         and is_spa_navigation
-                        and _show_page_accepts_html()
+                        and (_show_page_accepts_html() or markdown_requested)
                     ):
                         if not _show_limited_viewer_is_allowed(
                             authenticated_context,
@@ -15387,6 +15737,8 @@ async def serve_public_show_page(share_id, asset_path):
                             page.session_id,
                             allow_page_scoped=False,
                         ):
+                            if markdown_requested:
+                                return _show_page_markdown_error_response("forbidden", 403)
                             return _show_page_access_denied_response(
                                 include_back_link=(
                                     authenticated_context.instance_access_source
@@ -15396,13 +15748,20 @@ async def serve_public_show_page(share_id, asset_path):
                         # The current identity may be allowed again, but the
                         # old lease must not be treated as valid guest access.
                         limited_guest = False
+                        limited_authenticated = markdown_requested
                     else:
+                        if markdown_requested:
+                            return _show_page_markdown_error_response("session_unknown", 404)
                         return _show_limited_not_found_response()
                 else:
+                    if markdown_requested:
+                        return _show_page_markdown_error_response("session_unknown", 404)
                     return _show_limited_not_found_response()
         if page.visibility == "limited":
-            if not limited_guest:
-                if request.method != "GET" or not is_spa_navigation:
+            if not limited_guest and not editor_admitted and not limited_authenticated:
+                if not admission_navigation_method or not is_spa_navigation:
+                    if markdown_requested:
+                        return _show_page_markdown_error_response("session_unknown", 404)
                     return _show_page_not_found_response()
                 authenticated_context = await asyncio.to_thread(
                     _show_public_authenticated_context,
@@ -15415,35 +15774,57 @@ async def serve_public_show_page(share_id, asset_path):
                         access,
                         page.session_id,
                     ):
+                        if markdown_requested:
+                            return _show_page_markdown_error_response("forbidden", 403)
                         return _show_page_access_denied_response(
                             include_back_link=(
                                 authenticated_context.instance_access_source != "show_page_email"
                             )
                         )
-                if config is None:
-                    return _show_identity_error_response("identity_unavailable", 503)
-                return_target = request.full_path if request.query_string else request.path
-                try:
-                    authorization_url = show_identity.begin_show_identity_authorization(
-                        config,
-                        callback_origin=_current_origin(),
-                        share_id=share_id,
-                        return_target=return_target,
-                    )
-                except show_identity.ShowIdentityError:
-                    return _show_identity_error_response("identity_unavailable", 503)
-                response = redirect(authorization_url)
-                response.headers["Cache-Control"] = "private, no-store"
-                response.headers["Referrer-Policy"] = "no-referrer"
-                return response
-        if not limited_guest and page.visibility != "public":
+                    if markdown_requested:
+                        limited_authenticated = True
+                elif markdown_requested:
+                    return _show_page_markdown_error_response("authentication_required", 401)
+                if not limited_authenticated:
+                    if config is None:
+                        return _show_identity_error_response("identity_unavailable", 503)
+                    return_target = request.full_path if request.query_string else request.path
+                    try:
+                        authorization_url = show_identity.begin_show_identity_authorization(
+                            config,
+                            callback_origin=_current_origin(),
+                            share_id=share_id,
+                            return_target=return_target,
+                        )
+                    except show_identity.ShowIdentityError:
+                        return _show_identity_error_response("identity_unavailable", 503)
+                    response = redirect(authorization_url)
+                    response.headers["Cache-Control"] = "private, no-store"
+                    response.headers["Referrer-Policy"] = "no-referrer"
+                    return response
+        if not limited_guest and not editor_admitted and not limited_authenticated and page.visibility != "public":
+            if markdown_requested:
+                return _show_page_markdown_error_response("session_unknown", 404)
             return _show_page_not_found_response()
         if _is_show_page_runtime_denied_path(
             asset_path,
             session_id=page.session_id,
             confine_to_workspace=True,
         ):
+            if markdown_requested:
+                return _show_page_markdown_error_response("session_unknown", 404)
             return _show_page_file_not_found_response()
+        markdown_requested = markdown_requested and _show_page_markdown_target_is_document(
+            page.session_id,
+            asset_path,
+        )
+        if markdown_requested:
+            return await _show_page_markdown_runtime_response(
+                page.session_id,
+                asset_path,
+                request._request,
+                external_prefix=f"/p/{quote(share_id, safe='')}",
+            )
         if asset_path.strip("/") == "__show/me":
             if request.method not in {"GET", "HEAD"}:
                 return jsonify({"ok": False, "code": "method_not_allowed"}), 405

@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import type { ReactNode } from 'react';
@@ -39,6 +39,11 @@ const api = vi.hoisted(() => ({
 }));
 const status = vi.hoisted(() => ({ state: 'ready' as const }));
 const inbox = vi.hoisted(() => ({ totalUnread: 0 }));
+const i18n = vi.hoisted(() => ({
+  language: 'en',
+  options: { resources: { en: {}, zh: {} } },
+  changeLanguage: vi.fn(),
+}));
 const instanceAuth = vi.hoisted(() => ({
   remote: true,
   instanceKind: null as 'personal' | 'organization' | null,
@@ -97,11 +102,7 @@ vi.mock('./workbench/search/SearchPalette', () => ({ SearchPalette: () => null }
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: (key: string) => key,
-    i18n: {
-      language: 'en',
-      options: { resources: { en: {}, zh: {} } },
-      changeLanguage: vi.fn(),
-    },
+    i18n,
   }),
 }));
 
@@ -112,6 +113,8 @@ beforeEach(() => {
   instanceAuth.capabilities.can_manage_instance = true;
   instanceAuth.capabilities.can_chat = true;
   instanceAuth.capabilities.can_use_show_pages = true;
+  i18n.language = 'en';
+  i18n.changeLanguage.mockResolvedValue(undefined);
   api.getConfig.mockResolvedValue({ platforms: { enabled: [] } });
   api.getMemorySettings.mockResolvedValue({
     status: 'failed',
@@ -226,11 +229,30 @@ describe('AppShell workbench sidebar', () => {
 });
 
 describe('AppShell persistent Workbench chrome', () => {
+  it('applies the instance language while Settings controls stay unmounted', async () => {
+    viewport.isDesktop = true;
+    api.getConfig.mockResolvedValue({ language: 'zh', platforms: { enabled: [] } });
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route index element={<div data-testid="workbench" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('workbench')).toBeTruthy();
+    expect(screen.queryByTestId('language-switcher')).toBeNull();
+    await waitFor(() => expect(i18n.changeLanguage).toHaveBeenCalledWith('zh'));
+  });
+
   it.each([
     'personal',
     null,
     'organization',
-  ] as const)('keeps Settings and preferences in the Workbench sidebar for %s instances', async (instanceKind) => {
+  ] as const)('keeps Settings in the Workbench sidebar without preference controls for %s instances', async (instanceKind) => {
     viewport.isDesktop = true;
     instanceAuth.instanceKind = instanceKind;
 
@@ -248,12 +270,9 @@ describe('AppShell persistent Workbench chrome', () => {
     expect(screen.getByRole('link', { name: 'appShell.openControlPanel' }).getAttribute('href')).toBe(
       '/settings/replies',
     );
-    expect(screen.getByTestId('language-switcher')).toBeTruthy();
-    expect(screen.getByTestId('theme-toggle')).toBeTruthy();
-    expect(screen.getByTestId('account-menu')).toBeTruthy();
-    const preferencesRow = screen.getByTestId('language-switcher').parentElement!;
-    const appsRow = screen.getByTestId('apps-launcher').parentElement!;
-    expect(preferencesRow.compareDocumentPosition(appsRow) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByTestId('language-switcher')).toBeNull();
+    expect(screen.queryByTestId('theme-toggle')).toBeNull();
+    expect(screen.queryByTestId('account-menu')).toBeNull();
   });
 
   it('uses the Settings button to close an open Settings surface', async () => {

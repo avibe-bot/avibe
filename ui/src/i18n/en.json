@@ -279,6 +279,7 @@
       "memory": "Memory",
       "replies": "Replies",
       "platforms": "Platforms",
+      "platformConnections": "Platform Connections",
       "remoteAccess": "Remote Access",
       "service": "Service",
       "dependencies": "Dependencies",
@@ -665,15 +666,56 @@
       "shell": {
         "title": "Models",
         "running": "Gateway running",
-        "stopped": "Gateway stopped · click to start",
+        "stopped": "Gateway off",
         "degraded": "Gateway running degraded",
         "unread": "Gateway status unavailable",
-        "notStarted": "Gateway not started · click to start",
-        "notInstalled": "Gateway component not installed · click to install",
+        "notStarted": "Gateway off",
+        "notInstalled": "Gateway component not installed",
         "allDirect_one": "The only backend is direct",
         "allDirect_other": "All {{count}} backends are direct",
         "starting": "Starting…",
+        "stopping": "Stopping…",
         "unsupported": "No gateway component for this platform yet",
+        "toggle": {
+          "turnOn": "Turn model gateway on",
+          "turnOff": "Turn model gateway off",
+          "stopBlocked": "Switch {{names}} to Direct before turning the model gateway off",
+          "stopUnavailable": "Agent routing status is unavailable; the model gateway cannot be turned off yet"
+        },
+        "closed": {
+          "off": {
+            "title": "Model gateway is off",
+            "body": "Turn it on to view and edit sources, routes, and gateway models."
+          },
+          "down": {
+            "title": "Model gateway is off",
+            "body": "The previous start did not become ready. Turn it on to try again."
+          },
+          "notInstalled": {
+            "title": "Model gateway is not installed",
+            "body": "Turn it on to install the managed gateway component."
+          },
+          "unsupported": {
+            "title": "Model gateway is unavailable",
+            "body": "This platform does not have a compatible managed gateway component."
+          },
+          "installing": {
+            "title": "Installing model gateway",
+            "body": "Sources and routing will appear after installation and startup complete."
+          },
+          "starting": {
+            "title": "Starting model gateway",
+            "body": "Sources and routing will appear when the gateway is ready."
+          },
+          "stopping": {
+            "title": "Turning model gateway off",
+            "body": "Gateway configuration is hidden while the runtime stops."
+          },
+          "unread": {
+            "title": "Model gateway status unavailable",
+            "body": "Configuration stays hidden until the runtime state can be confirmed."
+          }
+        },
         "gatewayInfo": {
           "label": "What the gateway is",
           "body": "The gateway is a dispatch layer on this machine: it holds the sources you add and supplies them to your Agents in the order you configure."
@@ -1023,7 +1065,8 @@
       },
       "errors": {
         "engineDown": "Model engine is not ready yet; try again shortly",
-        "startFailed": "Model engine could not be started"
+        "startFailed": "Model engine could not be started",
+        "stopFailed": "Model gateway could not be turned off"
       },
       "runtime": {
         "notStarted": "Not started · starts automatically on first use",

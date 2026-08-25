@@ -72,6 +72,12 @@ class EngineSupervisor:
         with self._lock:
             self._stop_locked()
 
+    def disable(self) -> None:
+        """Stop the managed engine and restore explicit lazy-start idleness."""
+        with self._lock:
+            self._stop_locked()
+            self._start_attempted = False
+
     def restart_if_running(self) -> None:
         with self._lock:
             if not self._is_running_locked():
