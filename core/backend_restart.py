@@ -42,6 +42,7 @@ class BackendRestartCoordinator:
         self._drain_timeout = _configured_drain_timeout() if drain_timeout is None else max(0.0, drain_timeout)
         self._poll_interval = max(0.001, poll_interval)
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._pending_refreshes: set[str] = set()
         self._request_locks: dict[str, asyncio.Lock] = {}
 
     async def request_restart(self, backend: str) -> str:
@@ -52,6 +53,7 @@ class BackendRestartCoordinator:
             if existing is not None and not existing.done():
                 if self._preflight is not None:
                     await self._preflight(backend)
+                    self._pending_refreshes.add(backend)
                 return "draining"
 
             agent_service = self.controller.agent_service
@@ -103,7 +105,7 @@ class BackendRestartCoordinator:
 
     async def _run(self, backend: str) -> None:
         forced = False
-        refreshed = False
+        finalized = False
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._drain_timeout
         try:
@@ -119,13 +121,51 @@ class BackendRestartCoordinator:
                     self.controller.agent_service.force_end_backend_activities(backend)
                     break
                 await asyncio.sleep(self._poll_interval)
-            await self._refresh(backend, forced)
-            refreshed = True
+            while True:
+                try:
+                    await self._refresh(backend, forced)
+                except Exception:
+                    lock = self._request_locks.setdefault(backend, asyncio.Lock())
+                    async with lock:
+                        if backend not in self._pending_refreshes:
+                            raise
+                        self._pending_refreshes.discard(backend)
+                    logger.exception(
+                        "Backend refresh failed for %s; applying the latest joined request",
+                        backend,
+                    )
+                    continue
+
+                lock = self._request_locks.setdefault(backend, asyncio.Lock())
+                async with lock:
+                    if backend in self._pending_refreshes:
+                        self._pending_refreshes.discard(backend)
+                        continue
+                    # Runtime admission opens before durable queues are flushed. A
+                    # flush therefore always enters the latest refreshed generation.
+                    self.controller.agent_service.end_backend_drain(backend)
+                    await self.controller.session_turns.end_backend_drain(
+                        backend,
+                        resume_deferred=True,
+                    )
+                    current = asyncio.current_task()
+                    if self._tasks.get(backend) is current:
+                        self._tasks.pop(backend, None)
+                    finalized = True
+                    return
         finally:
-            # Runtime admission opens before durable queues are flushed. A flush
-            # therefore always enters the refreshed generation.
-            self.controller.agent_service.end_backend_drain(backend)
-            await self.controller.session_turns.end_backend_drain(backend, resume_deferred=refreshed)
+            if not finalized:
+                lock = self._request_locks.setdefault(backend, asyncio.Lock())
+                async with lock:
+                    self._pending_refreshes.discard(backend)
+                    self.controller.agent_service.end_backend_drain(backend)
+                    await self.controller.session_turns.end_backend_drain(
+                        backend,
+                        resume_deferred=False,
+                    )
+                    current = asyncio.current_task()
+                    if self._tasks.get(backend) is current:
+                        self._tasks.pop(backend, None)
 
     async def wait(self, backend: str) -> None:
         """Testing/diagnostic hook: wait for the current restart, if any."""

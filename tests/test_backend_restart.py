@@ -126,6 +126,47 @@ def test_concurrent_restart_requests_coalesce() -> None:
     asyncio.run(run())
 
 
+def test_joined_preflight_queues_follow_up_before_reopening_drain() -> None:
+    async def run() -> None:
+        service = _AgentService()
+        controller = _controller(service)
+        first_refresh_started = asyncio.Event()
+        release_first_refresh = asyncio.Event()
+        observed_drains: list[bool] = []
+
+        async def refresh(_backend: str, _forced: bool) -> None:
+            observed_drains.append(service.draining)
+            if len(observed_drains) == 1:
+                first_refresh_started.set()
+                await release_first_refresh.wait()
+
+        preflight = AsyncMock()
+        coordinator = BackendRestartCoordinator(
+            controller,
+            refresh,
+            preflight=preflight,
+            drain_timeout=1,
+        )
+
+        first_request = asyncio.create_task(coordinator.request_restart("opencode"))
+        await first_refresh_started.wait()
+
+        assert await coordinator.request_restart("opencode") == "draining"
+        assert service.draining is True
+        release_first_refresh.set()
+
+        assert await first_request == "restarted"
+        assert observed_drains == [True, True]
+        assert preflight.await_count == 2
+        controller.session_turns.end_backend_drain.assert_awaited_once_with(
+            "opencode",
+            resume_deferred=True,
+        )
+        assert service.draining is False
+
+    asyncio.run(run())
+
+
 def test_refresh_failure_reopens_barrier() -> None:
     async def run() -> None:
         service = _AgentService()
