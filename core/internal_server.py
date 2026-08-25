@@ -1664,6 +1664,7 @@ def create_app(
             "page",
             "limit",
             "cursor",
+            "origin",
         }:
             return JSONResponse(
                 status_code=400,
@@ -1681,6 +1682,8 @@ def create_app(
 
         is_ui = bool(str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip())
         limit = payload.get("limit", 20)
+        origin = payload.get("origin", "user")
+        origin_options = {"origin": origin} if "origin" in payload else {}
         try:
             raw_project = omitted_project_to_default(payload.get("project"))
             project_id = (
@@ -1697,6 +1700,8 @@ def create_app(
             isinstance(limit, bool)
             or not isinstance(limit, int)
             or not 1 <= limit <= 20
+            or origin not in ("user", "agent")
+            or ("origin" in payload and not is_ui)
         ):
             return JSONResponse(
                 status_code=400,
@@ -1733,6 +1738,7 @@ def create_app(
                     principal_id,
                     cursor=cursor,
                     limit=limit,
+                    **origin_options,
                 )
                 if result == {
                     "status": "failed",
@@ -1783,6 +1789,7 @@ def create_app(
                 project_id,
                 page=page,
                 page_size=limit,
+                **origin_options,
             )
         except Exception:
             logger.warning("internal memory list failed")

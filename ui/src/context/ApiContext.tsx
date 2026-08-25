@@ -585,7 +585,12 @@ export type ApiContextType = {
   searchMemory: (query: string, limit?: number, project?: string) => Promise<MemoryRecallResult>;
   listMemoryEpisodes: (
     project: string,
-    options?: { page?: number; cursor?: string | null; limit?: number },
+    options?: {
+      page?: number;
+      cursor?: string | null;
+      limit?: number;
+      origin?: MemoryOrigin;
+    },
   ) => Promise<MemoryListResult>;
   listMemoryProjects: () => Promise<{ status: 'ok'; projects: Array<{ id: string; kind: 'default' | 'named' | 'all' }> } | { status: 'failed'; error?: string }>;
   deleteMemoryData: (confirmLoss: true) => Promise<MemoryDataOperationResult>;
@@ -2083,6 +2088,7 @@ export type MemoryRecallResult =
   | MemoryFailure;
 
 export type MemoryListWarning = 'memory_list_partial' | 'memory_list_truncated';
+export type MemoryOrigin = 'user' | 'agent';
 
 export type MemoryListItem = {
   id: string;
@@ -2092,6 +2098,7 @@ export type MemoryListItem = {
   body: string;
   timestamp: string;
   project: string;
+  origin?: MemoryOrigin;
 };
 
 export type MemoryListResult =
@@ -3674,6 +3681,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return postJson('/api/memory/list', {
         project,
         limit,
+        ...(options.origin ? { origin: options.origin } : {}),
         ...(project === 'all'
           ? (options.cursor ? { cursor: options.cursor } : {})
           : { page: options.page ?? 1 }),

@@ -92,6 +92,7 @@ from core.memory.types import (
     MemoryListItem,
     MemoryListResult,
     MemoryListWarningCode,
+    MemoryOrigin,
     MemoryResult,
     MemoryWarningCode,
     OperationFailed,
@@ -1251,6 +1252,7 @@ class MemoryRuntime:
         *,
         page: int = 1,
         page_size: int = 20,
+        origin: MemoryOrigin = "user",
     ) -> dict[str, Any]:
         """Return one single-project processed-episode page."""
 
@@ -1261,6 +1263,7 @@ class MemoryRuntime:
             project_id=project_id,
             page=page,
             page_size=page_size,
+            origin=origin,
         )
         if isinstance(result, OperationFailed):
             return {"status": result.status, "error": result.error}
@@ -1274,6 +1277,7 @@ class MemoryRuntime:
         *,
         cursor: str | None,
         limit: int = 20,
+        origin: MemoryOrigin = "user",
     ) -> dict[str, Any]:
         """Merge this principal's project pages behind an Avibe cursor."""
 
@@ -1284,6 +1288,7 @@ class MemoryRuntime:
             or isinstance(limit, bool)
             or not isinstance(limit, int)
             or not 1 <= limit <= _MEMORY_LIST_PROVIDER_PAGE_SIZE
+            or origin not in ("user", "agent")
         ):
             return {"status": "failed", "error": "memory_invalid_input"}
         try:
@@ -1293,7 +1298,11 @@ class MemoryRuntime:
         if not projects:
             projects = (DEFAULT_MEMORY_PROJECT_ID,)
         projects = tuple(sorted(projects))
-        fingerprint = _memory_list_catalog_fingerprint(principal_id, projects)
+        fingerprint = _memory_list_catalog_fingerprint(
+            principal_id,
+            projects,
+            origin=origin,
+        )
         try:
             boundaries, page_hints, total_hints = _decode_memory_list_cursor(
                 cursor,
@@ -1327,6 +1336,7 @@ class MemoryRuntime:
                         total_hint=total_hints[project_id],
                         limit=limit,
                         deadline=deadline,
+                        origin=origin,
                     )
                     for project_id in projects
                 )
@@ -1434,6 +1444,7 @@ class MemoryRuntime:
         total_hint: int | None,
         limit: int,
         deadline: float,
+        origin: MemoryOrigin,
     ) -> (
         tuple[
             tuple[MemoryListItem, ...],
@@ -1486,6 +1497,7 @@ class MemoryRuntime:
                         project_id=project_id,
                         page=page_number,
                         page_size=_MEMORY_LIST_PROVIDER_PAGE_SIZE,
+                        origin=origin,
                     ),
                     timeout=remaining,
                 )
@@ -1648,6 +1660,7 @@ class MemoryRuntime:
                             project_id=project_id,
                             page=previous_page_number,
                             page_size=_MEMORY_LIST_PROVIDER_PAGE_SIZE,
+                            origin=origin,
                         ),
                         timeout=remaining,
                     )
@@ -2835,10 +2848,13 @@ def _merge_search_items(items: list[MemoryItem], *, limit: int) -> tuple[MemoryI
 def _memory_list_catalog_fingerprint(
     principal_id: str,
     projects: tuple[str, ...],
+    *,
+    origin: MemoryOrigin,
 ) -> str:
     material = json.dumps(
         {
             "principal": principal_id,
+            "origin": origin,
             "projects": list(projects),
             "sort": "timestamp:desc,project:id:asc",
         },

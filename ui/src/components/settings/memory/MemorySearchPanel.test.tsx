@@ -95,7 +95,7 @@ afterEach(() => {
 });
 
 describe('MemorySearchPanel browse and search modes', () => {
-  it('[MEMORY-LIST-004][MEMORY-LIST-006] browses a page boundary and copies the selected entry ID', async () => {
+  it('[MEMORY-LIST-004][MEMORY-LIST-006][MEMORY-LIST-008] browses a page boundary and copies the selected entry ID', async () => {
     const first = episode();
     const second = episode({ id: 'entry-021', subject: 'Follow-up', summary: '', body: 'Second page body.' });
     api.listMemoryEpisodes.mockImplementation((_project: string, options: { page: number }) =>
@@ -139,6 +139,14 @@ describe('MemorySearchPanel browse and search modes', () => {
       limit: 20,
     });
     expect((screen.getByRole('button', { name: 'memory.search.browse.next' }) as HTMLButtonElement).disabled).toBe(true);
+
+    const callsBeforeReselect = api.listMemoryEpisodes.mock.calls.length;
+    await user.click(screen.getByRole('radio', { name: 'memory.origin.user' }));
+    expect(api.listMemoryEpisodes).toHaveBeenCalledTimes(callsBeforeReselect);
+    expect(screen.getByText('memory.search.browse.pageSummary:2/2')).toBeTruthy();
+    expect(screen.getByRole('button', {
+      name: 'memory.search.browse.openDetail:Follow-up',
+    })).toBeTruthy();
   });
 
   it('[MEMORY-LIST-003] resumes the all-project aggregate with the opaque cursor', async () => {
@@ -401,6 +409,32 @@ describe('MemorySearchPanel browse and search modes', () => {
     expect(screen.getByText('memory.origin.agent')).toBeTruthy();
     expect(screen.getByText('memory.origin.both')).toBeTruthy();
     expect(screen.getByText('Legacy result')).toBeTruthy();
+  });
+
+  it('[MEMORY-LIST-008] browses Agent episodes through the explicit owner selector', async () => {
+    api.listMemoryEpisodes.mockImplementation((_project: string, options: { origin?: string }) =>
+      Promise.resolve(listResult([
+        episode({
+          id: 'agent-entry',
+          body: 'Agent-owned episode',
+          summary: 'Agent-owned episode',
+          origin: options.origin === 'agent' ? 'agent' : 'user',
+        }),
+      ])),
+    );
+    const user = userEvent.setup();
+
+    render(<MemorySearchPanel enabled />);
+    await screen.findByText('Agent-owned episode');
+    await user.click(screen.getByRole('radio', { name: 'memory.origin.agent' }));
+
+    await waitFor(() => expect(api.listMemoryEpisodes).toHaveBeenLastCalledWith('default', {
+      page: 1,
+      cursor: null,
+      limit: 20,
+      origin: 'agent',
+    }));
+    expect(screen.getAllByText('memory.origin.agent')).toHaveLength(2);
   });
 
   it('shows the Memory-closed state without issuing list calls', () => {

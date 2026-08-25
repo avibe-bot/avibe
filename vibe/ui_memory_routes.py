@@ -784,6 +784,7 @@ def register_memory_routes(app) -> None:
                 "page",
                 "cursor",
                 "limit",
+                "origin",
             }:
                 return _memory_response(
                     {"status": "failed", "error": "memory_invalid_input"},
@@ -793,6 +794,7 @@ def register_memory_routes(app) -> None:
             page = payload.get("page")
             cursor = payload.get("cursor")
             limit = payload.get("limit", 20)
+            origin = payload.get("origin")
             from core.memory.runtime import MEMORY_LIST_CURSOR_MAX_BYTES
 
             cursor_bytes: int | None = None
@@ -804,6 +806,7 @@ def register_memory_routes(app) -> None:
 
             if (
                 (project is not None and not isinstance(project, str))
+                or (origin is not None and origin not in ("user", "agent"))
                 or isinstance(limit, bool)
                 or not isinstance(limit, int)
                 or not 1 <= limit <= 20
@@ -840,6 +843,7 @@ def register_memory_routes(app) -> None:
                     page=page,
                     cursor=cursor,
                     limit=limit,
+                    origin=origin,
                 )
             )
 

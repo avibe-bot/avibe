@@ -18,8 +18,8 @@ cannot be distilled into the same Memory cell.
 Search reads both owners. Results are labeled **User**, **Agent**, or **Both**;
 an exact text match held by both owners is returned once with the **Both** label.
 Profile reads show separate labeled blocks rather than combining the two
-profiles. Processed episode listing remains user-owner-only, so use Search or
-Profile to inspect Agent-owned memory.
+profiles. The Settings episode browser has an explicit **User memory** /
+**Agent memory** selector; `vibe memory list` remains user-owner-only.
 
 Existing Memory data is not moved. Agent-recorded facts written before this
 split remain under the user owner and are still searchable there. A newer
@@ -68,10 +68,11 @@ Search/Get payloads to provider diagnostics and does not invoke LLM, embedding,
 or reranking providers.
 
 In **Settings > Memory > Search**, leave the query empty to browse these
-episodes newest first. Choose one project or **All my projects**, use the page
-controls below the episode excerpts, then select a row to open its full detail.
-The **Entry ID** chip copies the provider's opaque identifier. Entering any
-non-empty query switches the same tab back to relevance-ordered search.
+episodes newest first. Choose **User memory** or **Agent memory**, then choose
+one project or **All my projects**. Use the page controls below the episode
+excerpts, then select a row to open its full detail. The **Entry ID** chip copies
+the provider's opaque identifier. Entering any non-empty query switches the
+same tab back to relevance-ordered search across both owners.
 
 ## Optional reranking endpoint
 

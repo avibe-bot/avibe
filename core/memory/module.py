@@ -57,6 +57,7 @@ from core.memory.types import (
     MemoryListItem,
     MemoryListPage,
     MemoryListResult,
+    MemoryOrigin,
     MemoryProfile,
     MemoryProfileExplicitInfo,
     MemoryProfileTrait,
@@ -1143,6 +1144,7 @@ class MemoryModule:
         project_id: str,
         page: int = 1,
         page_size: int = MAX_LIST_PAGE_SIZE,
+        origin: MemoryOrigin = "user",
     ) -> MemoryListResult:
         """Return one bounded page of processed episodes or a closed error."""
 
@@ -1151,6 +1153,7 @@ class MemoryModule:
             project_id=project_id,
             page=page,
             page_size=page_size,
+            origin=origin,
         )
         if invalid is not None:
             return invalid
@@ -1160,6 +1163,7 @@ class MemoryModule:
                 project_id=project_id,
                 page=page,
                 page_size=page_size,
+                origin=origin,
             )
 
     @asynccontextmanager
@@ -1219,6 +1223,7 @@ class MemoryModule:
         project_id: str,
         page: int,
         page_size: int,
+        origin: MemoryOrigin,
     ) -> OperationFailed | None:
         if not self._is_enabled():
             return OperationFailed(error="memory_disabled")
@@ -1233,6 +1238,7 @@ class MemoryModule:
             or isinstance(page_size, bool)
             or not isinstance(page_size, int)
             or not 1 <= page_size <= MAX_LIST_PAGE_SIZE
+            or origin not in ("user", "agent")
         ):
             return OperationFailed(error="memory_invalid_input")
         if self._retired:
@@ -1246,12 +1252,14 @@ class MemoryModule:
         project_id: str,
         page: int,
         page_size: int,
+        origin: MemoryOrigin,
     ) -> MemoryListResult:
         invalid = self._list_request_error(
             principal_id=principal_id,
             project_id=project_id,
             page=page,
             page_size=page_size,
+            origin=origin,
         )
         if invalid is not None:
             return invalid
@@ -1266,6 +1274,7 @@ class MemoryModule:
             project_id=project_id,
             page=page,
             page_size=page_size,
+            origin=origin,
         )
 
     async def _list_episodes_after_store_check(
@@ -1275,18 +1284,25 @@ class MemoryModule:
         project_id: str,
         page: int,
         page_size: int,
+        origin: MemoryOrigin,
     ) -> MemoryListResult:
         invalid = self._list_request_error(
             principal_id=principal_id,
             project_id=project_id,
             page=page,
             page_size=page_size,
+            origin=origin,
         )
         if invalid is not None:
             return invalid
+        owner_id = (
+            principal_id
+            if origin == "user"
+            else derive_assistant_memory_owner_id(principal_id)
+        )
         result = await self._provider_list_read(
             lambda: self._provider.list_episodes(
-                principal_id,
+                owner_id,
                 project_id,
                 page,
                 page_size,
@@ -1294,11 +1310,17 @@ class MemoryModule:
         )
         if isinstance(result, OperationFailed):
             return result
-        return self._bounded_list_page(
+        bounded = self._bounded_list_page(
             result,
             project_id=project_id,
             page=page,
             page_size=page_size,
+        )
+        if isinstance(bounded, OperationFailed):
+            return bounded
+        return replace(
+            bounded,
+            items=tuple(replace(item, origin=origin) for item in bounded.items),
         )
 
     async def _skipped_with_missed(self, error: MemoryErrorCode) -> CaptureReceipt:
@@ -1431,6 +1453,7 @@ class MemoryModule:
                 not isinstance(item, MemoryListItem)
                 or item.kind != "episode"
                 or item.project != project_id
+                or item.origin is not None
                 or not _valid_list_identifier(item.id)
                 or item.id in seen_ids
                 or instant is None

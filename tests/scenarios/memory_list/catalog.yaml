@@ -55,3 +55,9 @@ scenarios:
     kind: compatibility
     layer: contract
     test: ui/src/components/settings/memory/MemorySearchPanel.test.tsx::[MEMORY-LIST-007]
+  - id: MEMORY-LIST-008
+    name: Settings can browse user-owned and Agent-owned episodes without crossing owner scopes
+    status: covered
+    kind: authorization
+    layer: scenario
+    test: tests/scenarios/memory_list/test_memory_list_scenarios.py::test_settings_can_browse_agent_episodes_without_crossing_owner_scopes

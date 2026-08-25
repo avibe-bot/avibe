@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Literal, TypeAlias
 
 MemoryKind = Literal["profile", "episode", "fact"]
+MemoryOrigin = Literal["user", "agent"]
 RecallMode = Literal["auto", "keyword", "vector", "hybrid", "agentic"]
 MAX_AGENTIC_TIMEOUT_SECONDS = 30.0
 MemoryContentKind = Literal["image", "audio", "doc", "pdf", "html", "email"]
@@ -408,6 +409,7 @@ class MemoryListItem:
     timestamp: str
     project: str
     kind: Literal["episode"] = "episode"
+    origin: MemoryOrigin | None = None
 
 
 @dataclass(frozen=True)
@@ -440,6 +442,7 @@ def memory_list_page_payload(result: MemoryListPage) -> dict[str, Any]:
                 "body": item.body,
                 "timestamp": item.timestamp,
                 "project": item.project,
+                **({"origin": item.origin} if item.origin is not None else {}),
             }
             for item in result.items
         ],
