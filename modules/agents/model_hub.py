@@ -393,11 +393,11 @@ async def _dump_codex_bundled_catalog(
         "-c",
         "model_catalog_json=null",
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
         env=env,
     )
     try:
-        stdout, stderr = await asyncio.wait_for(
+        stdout, _ = await asyncio.wait_for(
             process.communicate(),
             timeout=_CODEX_CATALOG_DUMP_TIMEOUT_SECONDS,
         )
@@ -406,9 +406,7 @@ async def _dump_codex_bundled_catalog(
         await process.wait()
         raise RuntimeError("Codex bundled model catalog timed out") from exc
     if process.returncode != 0:
-        detail = stderr.decode("utf-8", errors="replace").strip().splitlines()
-        suffix = f": {detail[-1][:300]}" if detail else ""
-        raise RuntimeError(f"Codex could not export its bundled model catalog{suffix}")
+        raise RuntimeError("Codex could not export its bundled model catalog")
     if len(stdout) > _CODEX_CATALOG_MAX_BYTES:
         raise RuntimeError("Codex bundled model catalog exceeded the safety limit")
     return stdout
