@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { ArrowUpRight, Brain, Loader2, RotateCw, ShieldAlert } from 'lucide-react';
+import { ArrowUpRight, Brain, Loader2, MoreHorizontal, RotateCw, ShieldAlert } from 'lucide-react';
 
 import { SettingsPageShell } from './SettingsPageShell';
 import { Button } from '../ui/button';
 import { ConfirmDialog } from '../ui/confirm-dialog';
 import { InfoHint } from '../ui/info-hint';
+import { ResponsiveMenu } from '../ui/responsive-menu';
 import { SegmentedRadio } from '../ui/segmented';
 import { MemoryProfilePanel } from './memory/MemoryProfilePanel';
 import { MemoryProcessingRecordPanel } from './memory/MemoryProcessingRecordPanel';
@@ -44,6 +45,7 @@ export const SettingsMemoryPage: React.FC = () => {
 
   const [tab, setTab] = useState<MemoryTab>('processingRecord');
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [restartMenuOpen, setRestartMenuOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [waking, setWaking] = useState(false);
   const [repairing, setRepairing] = useState(false);
@@ -73,6 +75,7 @@ export const SettingsMemoryPage: React.FC = () => {
   });
 
   const settings = settingsRead.data;
+  const runtimeState = statusRead.data?.state;
   const processingRecord = processingRecordRead.data;
   const anomalySourceReason = processingRecord?.anomalies.source.status === 'unavailable'
     ? processingRecord.anomalies.source.reason
@@ -115,17 +118,22 @@ export const SettingsMemoryPage: React.FC = () => {
     refreshAll();
   }, [refreshAll]);
 
-  const wakeMemory = async () => {
+  useEffect(() => {
+    if (runtimeState !== 'running') setRestartMenuOpen(false);
+  }, [runtimeState]);
+
+  const runMemoryRuntimeAction = async () => {
     if (mutationBusy) return;
+    setRestartMenuOpen(false);
     setWaking(true);
     try {
       const result = await api.wakeMemory();
       showToast(
-        result.ok ? t('memory.wake.completed') : memoryErrorMessage(t, result.error),
+        result.ok ? t('memory.runtimeAction.completed') : memoryErrorMessage(t, result.error),
         result.ok ? 'success' : 'error',
       );
     } catch {
-      showToast(t('memory.wake.failed'), 'error');
+      showToast(t('memory.runtimeAction.failed'), 'error');
     } finally {
       setWaking(false);
       refreshAll();
@@ -188,6 +196,48 @@ export const SettingsMemoryPage: React.FC = () => {
     ...(canAdminister ? [{ id: 'settings' as const, label: t('memory.tabs.settings') }] : []),
   ], [canAdminister, t]);
   const activeTab = tabs.some((entry) => entry.id === tab) ? tab : 'processingRecord';
+  const runtimeAction = !remoteUnavailable && canAdminister && settings?.enabled === true
+    ? runtimeState === 'degraded' ? (
+        <Button variant="secondary" size="xs" onClick={() => void runMemoryRuntimeAction()} disabled={mutationBusy}>
+          {waking ? <Loader2 className="animate-spin" /> : <RotateCw />}
+          {waking ? t('memory.runtimeAction.retryRunning') : t('memory.runtimeAction.retryButton')}
+        </Button>
+      ) : runtimeState === 'running' ? (
+        <ResponsiveMenu
+          open={restartMenuOpen}
+          onOpenChange={setRestartMenuOpen}
+          sheetTitle={t('memory.runtimeAction.moreActions')}
+          sheetDescription={t('memory.runtimeAction.restartDescription')}
+          className="w-64"
+          trigger={(
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-8"
+              disabled={mutationBusy}
+              aria-label={t(waking ? 'memory.runtimeAction.restartRunning' : 'memory.runtimeAction.moreActions')}
+              aria-haspopup="menu"
+            >
+              {waking ? <Loader2 className="size-4 animate-spin" /> : <MoreHorizontal className="size-4" />}
+            </Button>
+          )}
+        >
+          <button
+            type="button"
+            role="menuitem"
+            className="flex w-full items-start gap-2.5 rounded-md px-2.5 py-2 text-left hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={mutationBusy}
+            onClick={() => void runMemoryRuntimeAction()}
+          >
+            <RotateCw className="mt-0.5 size-4 shrink-0 text-muted" />
+            <span className="flex min-w-0 flex-col gap-0.5">
+              <span className="text-[12.5px] font-semibold text-foreground">{t('memory.runtimeAction.restartButton')}</span>
+              <span className="text-[11.5px] leading-relaxed text-muted">{t('memory.runtimeAction.restartDescription')}</span>
+            </span>
+          </button>
+        </ResponsiveMenu>
+      ) : null
+    : null;
 
   const settingsPanel = settings ? (
     <MemorySettingsPanel
@@ -220,12 +270,7 @@ export const SettingsMemoryPage: React.FC = () => {
       activeTab="memory"
       title={t('memory.title')}
       subtitle={t('memory.subtitle')}
-      actions={!remoteUnavailable && canAdminister && settings?.enabled === true ? (
-        <Button variant="secondary" size="xs" onClick={() => void wakeMemory()} disabled={mutationBusy}>
-          {waking ? <Loader2 className="animate-spin" /> : <RotateCw />}
-          {waking ? t('memory.wake.running') : t('memory.wake.button')}
-        </Button>
-      ) : null}
+      actions={runtimeAction}
     >
       {remoteUnavailable ? (
         <div className="flex flex-col items-center gap-2 rounded-2xl border border-border bg-surface p-10 text-center">

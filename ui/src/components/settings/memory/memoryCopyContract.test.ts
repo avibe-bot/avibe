@@ -6,10 +6,11 @@ import zh from '../../../i18n/zh.json';
 const bundles = { en, zh } as const;
 
 describe('Memory UI copy contracts', () => {
-  it.each(['en', 'zh'] as const)('states that Wake is non-destructive in %s', (language) => {
-    const wake = bundles[language].memory.wake;
-    expect(wake.button).toBe(language === 'en' ? 'Wake Memory' : '唤醒记忆');
-    expect(wake.failed).toMatch(language === 'en' ? /No Memory data was deleted/ : /未删除任何记忆数据/);
+  it.each(['en', 'zh'] as const)('names runtime recovery by user intent in %s', (language) => {
+    const runtimeAction = bundles[language].memory.runtimeAction;
+    expect(runtimeAction.retryButton).toBe(language === 'en' ? 'Retry startup' : '重试启动');
+    expect(runtimeAction.restartButton).toBe(language === 'en' ? 'Restart Memory service' : '重启记忆服务');
+    expect(runtimeAction.restartDescription).toMatch(language === 'en' ? /without deleting Memory data/ : /不会删除记忆数据/);
   });
 
   it.each(['en', 'zh'] as const)('makes Repair destructive and loss-explicit in %s', (language) => {
@@ -53,11 +54,12 @@ describe('Memory UI copy contracts', () => {
 
     expect(memory).not.toHaveProperty('factoryReset');
     expect(memory).not.toHaveProperty('clear');
+    expect(memory).not.toHaveProperty('wake');
     expect(processingRecord).not.toHaveProperty('repair');
     expect(processingRecord).not.toHaveProperty('clearInProgress');
     expect(runtime).not.toHaveProperty('cascade');
     expect(status).not.toHaveProperty('restartEngine');
-    expect(localeText).not.toMatch(/Retry rebuild|重试重建|Factory Reset|恢复出厂|Restart engine|重启引擎/);
+    expect(localeText).not.toMatch(/Wake Memory|唤醒记忆|Retry rebuild|重试重建|Factory Reset|恢复出厂|Restart engine|重启引擎/);
   });
 
   it.each(['en', 'zh'] as const)('keeps best-effort capture disclosure in %s', (language) => {

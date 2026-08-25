@@ -85,7 +85,7 @@ const settings = {
   },
 };
 
-const status = (state: 'running' | 'degraded' | 'needs_repair') => ({
+const status = (state: 'starting' | 'running' | 'degraded' | 'needs_repair') => ({
   status: 'ok' as const,
   state,
   reason: state === 'needs_repair' ? 'memory_local_data_unusable' : null,
@@ -159,12 +159,36 @@ afterEach(() => {
 });
 
 describe('SettingsMemoryPage', () => {
-  it('uses Wake for the non-destructive runtime action', async () => {
+  it('offers Retry startup for degraded Memory', async () => {
+    api.getMemoryStatus.mockResolvedValue(status('degraded'));
     renderPage();
-    await userEvent.click(await screen.findByRole('button', { name: 'memory.wake.button' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'memory.runtimeAction.retryButton' }));
     await waitFor(() => expect(api.wakeMemory).toHaveBeenCalledOnce());
     expect(api.repairMemory).not.toHaveBeenCalled();
     expect(api.deleteMemoryData).not.toHaveBeenCalled();
+  });
+
+  it('keeps manual restart in More actions while Memory is running', async () => {
+    api.getMemoryStatus.mockResolvedValue(status('running'));
+    renderPage();
+
+    expect(screen.queryByRole('button', { name: 'memory.runtimeAction.retryButton' })).toBeNull();
+    await userEvent.click(await screen.findByRole('button', { name: 'memory.runtimeAction.moreActions' }));
+    expect(await screen.findByText('memory.runtimeAction.restartDescription')).toBeTruthy();
+    await userEvent.click(screen.getByRole('menuitem', { name: /memory.runtimeAction.restartButton/ }));
+
+    await waitFor(() => expect(api.wakeMemory).toHaveBeenCalledOnce());
+    expect(api.repairMemory).not.toHaveBeenCalled();
+    expect(api.deleteMemoryData).not.toHaveBeenCalled();
+  });
+
+  it.each(['starting', 'needs_repair'] as const)('hides runtime restart actions while Memory is %s', async (state) => {
+    api.getMemoryStatus.mockResolvedValue(status(state));
+    renderPage();
+
+    await screen.findByText(state === 'needs_repair' ? 'repair-supported' : 'repair-hidden');
+    expect(screen.queryByRole('button', { name: 'memory.runtimeAction.retryButton' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'memory.runtimeAction.moreActions' })).toBeNull();
   });
 
   it('offers Repair only for needs_repair and passes literal accepted loss', async () => {

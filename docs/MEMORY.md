@@ -113,15 +113,19 @@ state is one of `disabled`, `starting`, `running`, `degraded`, or
 `needs_repair`. Memory failure never makes Avibe, its Agent, or chat unavailable.
 Conflicting Memory lifecycle operations are rejected by one process-level lease.
 
-**Wake** is the ordinary, non-destructive availability operation. It validates
-the admitted `memory-runtime` artifact, reinstalls it when needed, proves the old
-owned process stopped, and starts the same EverOS root. Startup and unexpected
-child exit use the same path. Readiness uses bounded backoff and the native
-EverOS health path. Wake never deletes or recreates Memory data.
+Internally, **Wake** is the ordinary, non-destructive availability path. It
+validates the admitted `memory-runtime` artifact, reinstalls it when needed,
+proves the old owned process stopped, and starts the same EverOS root. Startup
+and unexpected child exit use the same path. Readiness uses bounded backoff and
+the native EverOS health path. Wake never deletes or recreates Memory data.
+
+Settings names this path by user intent: `degraded` shows **Retry startup**,
+while `running` keeps **Restart Memory service** under **More actions**. Both use
+the same non-destructive Wake path.
 
 Provider, credential, disk, and permission faults produce `degraded` with a
-sanitized reason. Correct the external condition and use Wake again. These faults
-never enable or route to destructive Repair.
+sanitized reason. Correct the external condition and choose **Retry startup**.
+These faults never enable or route to destructive Repair.
 
 **Repair** is offered only in `needs_repair`, when the local native data root is
 unusable or incompatible. Every UI, public API, internal API, client, and
@@ -133,7 +137,8 @@ Controller boundary requires the exact `confirm_loss: true` field. Repair then:
    project catalog while rotating the provider data generation;
 3. removes only the confined `<effective_home>/memory` root and narrowly named
    retired recovery residue;
-4. reuses Wake and reports success only after native EverOS readiness succeeds.
+4. reuses the non-destructive startup path and reports success only after native
+   EverOS readiness succeeds.
 
 If ownership or termination cannot be proved, Repair deletes nothing. If a
 confined deletion is partial or unsafe, the response reports the exact remaining
