@@ -22,7 +22,7 @@ from core.memory.artifact import (
 )
 from core.memory.confined_filesystem import ConfinedFilesystemError
 from core.memory.everos import FakeMemoryProvider, ProviderHealthSnapshot
-from core.memory.operation_lock import MemoryOperationBusy
+from config.memory_operation_lock import MemoryOperationBusy
 from core.memory.process import FakeEverOSProcessFactory
 
 

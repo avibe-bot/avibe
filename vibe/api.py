@@ -52,7 +52,7 @@ from config.v2_settings import (
 from config.v2_sessions import SessionsStore
 from config.platform_registry import get_platform_descriptor
 from core import latest_version_cache
-from core.memory.operation_lock import MemoryOperationBusy, MemoryOperationLease
+from config.memory_operation_lock import MemoryOperationBusy, MemoryOperationLease
 from vibe.opencode_config import (
     get_opencode_config_paths,
     load_first_opencode_user_config,

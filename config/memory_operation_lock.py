@@ -1,4 +1,4 @@
-"""Cross-process admission for destructive Memory operations."""
+"""Cross-process admission for host-owned destructive Memory operations."""
 
 from __future__ import annotations
 

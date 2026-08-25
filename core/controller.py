@@ -40,6 +40,7 @@ from core.audio_asr import AudioAsrService
 from core.message_context import build_context_session_key
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.message_output import MessageOutput
+from core.memory_adapter import DisabledMemoryAdapter, MemoryCaptureAdapter
 from core.processing_indicator import ProcessingIndicatorService
 from core.run_settlement import SETTLED_BY_NO_TERMINAL_RESULT
 from core.runtime_commands import RuntimeCommandWatcher
@@ -60,8 +61,8 @@ from core.memory.admission import (
     InboundTurnFacts,
     admitted_user_id,
 )
-from core.memory.blocking import run_blocking
-from core.memory.operation_lock import MemoryOperationBusy, MemoryOperationLease
+from core.blocking import run_blocking
+from config.memory_operation_lock import MemoryOperationBusy, MemoryOperationLease
 from core.memory_telemetry import log_attachment_capture
 from vibe.i18n import get_supported_languages, t as i18n_t
 from vibe.runtime import mark_service_instance_started
@@ -69,6 +70,7 @@ from vibe.runtime import mark_service_instance_started
 logger = logging.getLogger(__name__)
 
 _RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS = 10.0
+_MEMORY_SHUTDOWN_BUDGET_SECONDS = 15.0
 _MemorySessionLifecycleResult = TypeVar("_MemorySessionLifecycleResult")
 
 
@@ -296,6 +298,7 @@ class Controller:
         self._runtime_work_shutdown_grace_seconds = (
             _RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS
         )
+        self._memory_shutdown_budget_seconds = _MEMORY_SHUTDOWN_BUDGET_SECONDS
         self.enabled_platforms = list(getattr(config, "enabled_platforms", lambda: [config.platform])())
         self.primary_platform = getattr(getattr(config, "platforms", None), "primary", config.platform)
         self._reconcile_lock: Optional[asyncio.Lock] = None
@@ -521,16 +524,14 @@ class Controller:
         self.native_session_service = None
         self.processing_indicator = ProcessingIndicatorService(self)
         self.audio_asr_service = AudioAsrService(self.config)
-        # The runtime serves controller UDS reads/capture and the shared
-        # private-IM Memory admission path.
-        from core.memory.runtime import create_memory_runtime
-
-        self.memory_runtime = create_memory_runtime(
-            getattr(self.config, "memory", None) or MemoryConfig(),
-            processing_event=self._log_memory_processing_event,
-            on_config_settled=self._adopt_settled_memory_config,
-        )
-        self.memory_module = self.memory_runtime.module
+        memory_config = getattr(self.config, "memory", None) or MemoryConfig()
+        self.memory_adapter: MemoryCaptureAdapter | None = DisabledMemoryAdapter()
+        self.memory_runtime = None
+        self.memory_module = None
+        if memory_config.enabled:
+            self.memory_runtime = self._create_memory_runtime(memory_config)
+            self.memory_module = self.memory_runtime.module
+            self.memory_adapter = None
         self._migrate_discord_guild_scope_from_config()
 
         # Migrate legacy per-channel language into global config
@@ -553,6 +554,17 @@ class Controller:
         """Publish a settled Memory config into the live Controller snapshot."""
 
         self.config.memory = deepcopy(memory_config)
+
+    def _create_memory_runtime(self, memory_config: MemoryConfig):
+        """Load the optional Memory implementation only for an enabled runtime."""
+
+        from core.memory.runtime import create_memory_runtime
+
+        return create_memory_runtime(
+            memory_config,
+            processing_event=self._log_memory_processing_event,
+            on_config_settled=self._adopt_settled_memory_config,
+        )
 
     @staticmethod
     def _derive_primary_platform(config) -> str:
@@ -739,11 +751,29 @@ class Controller:
         async with self._memory_replacement_lock():
             runtime = getattr(self, "memory_runtime", None)
             if runtime is None:
-                return {"ok": False, "state": "degraded", "error": "memory_store_unavailable"}
+                if not memory_config.enabled:
+                    self.memory_adapter = DisabledMemoryAdapter()
+                    self.memory_module = None
+                    self.config.memory = memory_config
+                    return {"ok": True, "state": "disabled"}
+                cleanup_task = getattr(self, "_memory_reconcile_task", None)
+                if cleanup_task is not None and not cleanup_task.done():
+                    await cleanup_task
+                runtime = self._create_memory_runtime(memory_config)
+                self.memory_runtime = runtime
+                self.memory_module = runtime.module
+                self.memory_adapter = None
             result = await runtime.reconcile(memory_config)
             self.memory_module = runtime.module
             if result.get("ok") is True:
                 self.config.memory = memory_config
+                if not memory_config.enabled:
+                    self.memory_adapter = DisabledMemoryAdapter()
+                    try:
+                        await runtime.close()
+                    finally:
+                        self.memory_runtime = None
+                        self.memory_module = None
             return result
 
     async def capture_memory(self, request: CaptureRequest) -> CaptureReceipt:
@@ -894,6 +924,98 @@ class Controller:
                 "Memory destructive transaction failed while shutdown joined it",
                 exc_info=(type(errors[0]), errors[0], errors[0].__traceback__),
             )
+
+    async def _cancel_memory_reconcile_task(self) -> None:
+        task = getattr(self, "_memory_reconcile_task", None)
+        try:
+            if task is None:
+                return
+            if not task.done():
+                task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as error:
+                logger.debug("Memory startup reconciliation already failed: %s", error)
+        finally:
+            self._memory_reconcile_task = None
+
+    @staticmethod
+    def _log_late_memory_shutdown_stage(task: asyncio.Task[Any], label: str) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.error("Memory %s failed after the shutdown budget", label, exc_info=True)
+
+    async def _shutdown_memory_stack(self) -> None:
+        """Attempt every Memory shutdown stage within one finite shared budget."""
+
+        self._memory_destructive_quiescing = True
+        handler = getattr(self, "message_handler", None)
+        quiesce = getattr(handler, "quiesce_memory_capture_tasks", None)
+        if callable(quiesce):
+            quiesce()
+
+        stages: list[tuple[str, Callable[[], Awaitable[None]]]] = []
+        if getattr(self, "_memory_reconcile_task", None) is not None:
+            stages.append(("startup reconciliation", self._cancel_memory_reconcile_task))
+
+        cancel_capture = getattr(handler, "cancel_memory_capture_tasks", None)
+        if callable(cancel_capture):
+            stages.append(("capture cancellation", cancel_capture))
+        stages.append(
+            ("destructive-operation settlement", self._join_memory_destructive_transactions)
+        )
+
+        memory_runtime = getattr(self, "memory_runtime", None)
+        close_runtime = getattr(memory_runtime, "close", None)
+        if callable(close_runtime):
+            stages.append(("runtime close", close_runtime))
+
+        budget = max(
+            0.0,
+            float(
+                getattr(
+                    self,
+                    "_memory_shutdown_budget_seconds",
+                    _MEMORY_SHUTDOWN_BUDGET_SECONDS,
+                )
+            ),
+        )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + budget
+        for index, (label, operation) in enumerate(stages):
+            remaining = max(0.0, deadline - loop.time())
+            stage_budget = remaining / (len(stages) - index)
+            task = asyncio.create_task(operation(), name=f"memory-shutdown-{index}")
+            done, _pending = await asyncio.wait({task}, timeout=stage_budget)
+            if task not in done:
+                self._shutdown_tainted = True
+                logger.error(
+                    "Memory %s exceeded its %.3fs shutdown budget slice",
+                    label,
+                    stage_budget,
+                )
+                task.add_done_callback(
+                    lambda settled, stage=label: self._log_late_memory_shutdown_stage(
+                        settled,
+                        stage,
+                    )
+                )
+                task.cancel()
+                await asyncio.sleep(0)
+                continue
+            try:
+                task.result()
+            except asyncio.CancelledError:
+                self._shutdown_tainted = True
+                logger.error("Memory %s was cancelled during shutdown", label)
+            except Exception:
+                self._shutdown_tainted = True
+                logger.error("Memory %s failed during shutdown", label, exc_info=True)
 
     async def _reset_memory_data_transaction(
         self,
@@ -1558,6 +1680,63 @@ class Controller:
             return
         mark_service_instance_started()
 
+    def _schedule_disabled_memory_cleanup(self) -> None:
+        """Reap an older owned sidecar only when its ownership record exists."""
+
+        if not isinstance(
+            getattr(self, "memory_adapter", None),
+            DisabledMemoryAdapter,
+        ) or getattr(self, "memory_runtime", None) is not None:
+            return
+        task = getattr(self, "_memory_reconcile_task", None)
+        if task is not None and not task.done():
+            return
+        record_path = (
+            paths.get_vibe_remote_dir()
+            / "memory"
+            / ".rt"
+            / "everos.sidecar.json"
+        )
+        try:
+            record_path.lstat()
+        except OSError:
+            return
+        self._memory_reconcile_task = asyncio.create_task(
+            self._cleanup_disabled_memory_process(record_path),
+            name="memory-disabled-everos-cleanup",
+        )
+
+    async def _cleanup_disabled_memory_process(self, record_path: Path) -> None:
+        """Lazily load the proven-ownership reaper after service readiness."""
+
+        if not isinstance(
+            getattr(self, "memory_adapter", None),
+            DisabledMemoryAdapter,
+        ) or getattr(self, "memory_runtime", None) is not None:
+            return
+        try:
+            record_path.lstat()
+        except OSError:
+            return
+
+        memory_dir = record_path.parent.parent
+        try:
+            from core.memory.process import SidecarOwnership
+
+            ownership = SidecarOwnership(
+                record_path=record_path,
+                socket_path=memory_dir / ".rt" / "everos.sock",
+                provider_root=memory_dir / "everos-root",
+            )
+            await ownership.reap(discover_missing=False)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "Disabled Memory could not clean up an older owned EverOS process",
+                exc_info=True,
+            )
+
     def _run_im_runtime(self) -> None:
         try:
             self.im_client.run()
@@ -1660,6 +1839,7 @@ class Controller:
         # A no-op in any process that does not hold the service lock, so the
         # embedded and test paths that run a controller are unaffected.
         self._publish_readiness_unless_im_runtime_failed()
+        self._schedule_disabled_memory_cleanup()
 
         try:
             await self.update_checker.check_and_send_post_update_notification(ready_platform="avibe")
@@ -3504,21 +3684,6 @@ class Controller:
                     pass
             self._internal_server_task = None
 
-        async def _cancel_memory_reconcile_task() -> None:
-            task = getattr(self, "_memory_reconcile_task", None)
-            try:
-                if task is not None:
-                    if not task.done():
-                        task.cancel()
-                    try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
-                    except Exception as error:
-                        logger.debug("Memory startup reconciliation already failed: %s", error)
-            finally:
-                self._memory_reconcile_task = None
-
         # Without this the task is never settled, so the done callback that
         # records "stopped" never runs and internal-server.json keeps saying
         # "ready" after the service exits.
@@ -3544,33 +3709,21 @@ class Controller:
             "Runtime work stack",
         )
         _stop_loop_coroutine(self.runtime_command_watcher.stop(), "Runtime command watcher")
-        # Reconciliation can start the sidecar, so settle it before closing the
-        # runtime or it could race shutdown and leave a process behind.
-        _stop_loop_coroutine(_cancel_memory_reconcile_task(), "Memory startup reconciliation")
-        async def _cancel_memory_capture_tasks() -> None:
-            handler = getattr(self, "message_handler", None)
-            quiesce = getattr(handler, "quiesce_memory_capture_tasks", None)
-            if callable(quiesce):
-                quiesce()
-            cancel = getattr(handler, "cancel_memory_capture_tasks", None)
-            if callable(cancel):
-                await cancel()
-
-        # Close registration and sweep the resulting closed task set in one
-        # event-loop turn. This does not depend on platform shutdown ordering.
+        # Reconciliation, capture cancellation, accepted destructive work, and
+        # runtime close share one deadline so no stage can block service exit or
+        # starve the stages behind it.
         _stop_loop_coroutine(
-            _cancel_memory_capture_tasks(),
-            "Memory capture tasks",
-            timeout=None,
+            self._shutdown_memory_stack(),
+            "Memory stack",
+            timeout=(
+                getattr(
+                    self,
+                    "_memory_shutdown_budget_seconds",
+                    _MEMORY_SHUTDOWN_BUDGET_SECONDS,
+                )
+                + 1
+            ),
         )
-        _stop_loop_coroutine(
-            self._join_memory_destructive_transactions(),
-            "Memory destructive transactions",
-            timeout=None,
-        )
-        memory_runtime = getattr(self, "memory_runtime", None)
-        if memory_runtime is not None:
-            _stop_loop_coroutine(memory_runtime.close(), "Memory runtime")
         model_hub_turn_gateway = getattr(self, "model_hub_turn_gateway", None)
         if model_hub_turn_gateway is not None:
             _stop_loop_coroutine(model_hub_turn_gateway.close(), "Model Hub turn gateway")

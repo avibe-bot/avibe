@@ -12083,7 +12083,7 @@ def _write_refreshed_runtime_status() -> None:
 
 
 def _start_service_after_repair(target: str, success_message: str, failure_message: str, *, stopped_pids: list[int]) -> dict:
-    from core.memory.ui_access import generate_ui_read_secret
+    from vibe.memory_ui_access import generate_ui_read_secret
 
     # This repair stopped the old service and starts a replacement, so it is the
     # same shape ``cmd_start`` handles when it starts a service beside a
@@ -12628,7 +12628,7 @@ def cmd_start():
     else:
         _write_status("starting")
 
-    from core.memory.ui_access import generate_ui_read_secret
+    from vibe.memory_ui_access import generate_ui_read_secret
 
     # The Memory UI read proof is a per-launch secret: it reaches a child only
     # over stdin and is deliberately never persisted, so this launcher can only

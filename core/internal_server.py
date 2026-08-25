@@ -48,7 +48,7 @@ from sqlalchemy.exc import IntegrityError
 
 from config import paths
 from config.atomic_io import write_atomic
-from core.memory.blocking import run_blocking
+from core.blocking import run_blocking
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED
 from modules.im.base import MessageContext
 from storage.db import get_cached_sqlite_engine
@@ -169,7 +169,7 @@ def create_app(
 
     mark_controller_process()
     if memory_ui_secret is None:
-        from core.memory.ui_access import process_ui_read_secret
+        from vibe.memory_ui_access import process_ui_read_secret
 
         memory_ui_secret = process_ui_read_secret()
     from core.memory.runtime import MemoryStoreUnavailableError
@@ -1285,7 +1285,7 @@ def create_app(
             or (user_key.startswith(remote_prefix) and len(user_key) > len(remote_prefix))
         ):
             return None
-        from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, verify_ui_read_proof
+        from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, verify_ui_read_proof
 
         proof = str(request.headers.get(MEMORY_UI_PROOF_HEADER) or "").strip()
         if memory_ui_secret is None or not verify_ui_read_proof(

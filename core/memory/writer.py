@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 from core.memory.attachments import AttachmentPinError, AttachmentPinStore, PinnedBundle
-from core.memory.blocking import run_blocking
+from core.blocking import run_blocking
 from core.memory.everos import (
     AddAck,
     AddRejected,

@@ -390,7 +390,7 @@ def test_schedule_restart_can_prepare_show_runtime_after_restart(monkeypatch, tm
 
 
 def test_schedule_restart_passes_memory_ui_secret_only_through_stdin(monkeypatch, tmp_path):
-    from core.memory.ui_access import MEMORY_UI_SECRET_STDIN_ENV
+    from vibe.memory_ui_access import MEMORY_UI_SECRET_STDIN_ENV
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()

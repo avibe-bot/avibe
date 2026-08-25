@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from core.memory.operation_lock import (
+from config.memory_operation_lock import (
     MemoryOperationBusy,
     MemoryOperationLease,
     memory_operation_lock_path,
