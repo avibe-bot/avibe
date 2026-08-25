@@ -7330,7 +7330,7 @@ def ui_reload():
         import sys
         import time
         from config import paths as config_paths
-        from core.memory.ui_access import process_ui_read_secret
+        from vibe.memory_ui_access import process_ui_read_secret
 
         command = f"from vibe.ui_server import run_ui_server; run_ui_server('{bind_host}', {port})"
         memory_ui_secret = process_ui_read_secret()
@@ -16216,7 +16216,7 @@ def _bind_ui_socket(host: str, port: int) -> socket.socket:
 def run_ui_server(host: str, port: int) -> None:
     """Start the FastAPI UI server."""
 
-    from core.memory.ui_access import initialize_process_ui_read_secret
+    from vibe.memory_ui_access import initialize_process_ui_read_secret
 
     initialize_process_ui_read_secret()
     global _UI_RUNTIME_ACTIVE, _server

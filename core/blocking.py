@@ -1,4 +1,4 @@
-"""Cancellation-safe execution for blocking Memory operations."""
+"""Cancellation-safe execution for blocking host operations."""
 
 from __future__ import annotations
 

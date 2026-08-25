@@ -1035,7 +1035,7 @@ def _memory_ui_child_env(
 ) -> dict[str, str] | None:
     if memory_ui_secret is None:
         return env
-    from core.memory.ui_access import MEMORY_UI_SECRET_STDIN_ENV
+    from vibe.memory_ui_access import MEMORY_UI_SECRET_STDIN_ENV
 
     child_env = dict(os.environ if env is None else env)
     child_env[MEMORY_UI_SECRET_STDIN_ENV] = "1"
@@ -1850,7 +1850,7 @@ def _resolve_service_pid(
     """
 
     from storage.migrations import guard_source_checkout_default_state_bootstrap
-    from core.memory.ui_access import process_ui_read_secret
+    from vibe.memory_ui_access import process_ui_read_secret
 
     memory_ui_secret = memory_ui_secret or process_ui_read_secret()
     guard_source_checkout_default_state_bootstrap()
@@ -2079,7 +2079,7 @@ def start_ui(
     memory_ui_secret: str | None = None,
     launcher: ServiceLauncher | None = None,
 ):
-    from core.memory.ui_access import process_ui_read_secret
+    from vibe.memory_ui_access import process_ui_read_secret
 
     memory_ui_secret = memory_ui_secret or process_ui_read_secret()
     pid_path = paths.get_runtime_ui_pid_path()

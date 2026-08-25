@@ -36,7 +36,7 @@ from core.memory.artifact import (
     get_memory_artifact_manager,
 )
 from core.memory.attachments import IM_ATTACHMENT_CAPTURE_PLATFORMS
-from core.memory.blocking import run_blocking
+from core.blocking import run_blocking
 from core.memory.confined_filesystem import (
     ConfinedFilesystemError,
     ConfinedRoot,
@@ -52,7 +52,7 @@ from core.memory.everos import (
 )
 from core.memory.everos_insight import MemoryInsightPaths, MemoryInsightReader
 from core.memory.module import MemoryModule, MemorySessionLifecycleBusyError
-from core.memory.operation_lock import MemoryOperationBusy, MemoryOperationLease
+from config.memory_operation_lock import MemoryOperationBusy, MemoryOperationLease
 from core.memory.process import EverOSProcessSettings
 from core.memory.supervisor import (
     EverOSSupervisor,
@@ -102,6 +102,8 @@ from core.memory.types import (
     memory_item_payload,
     memory_list_page_payload,
 )
+from vibe.memory_contract import MemoryStoreUnavailableError
+
 logger = logging.getLogger(__name__)
 
 ProcessingEvent = Callable[
@@ -283,10 +285,6 @@ class _UnavailableMemoryModule:
 
 
 _UNAVAILABLE_MODULE = _UnavailableMemoryModule()
-
-
-class MemoryStoreUnavailableError(RuntimeError):
-    """Raised when the local Memory store cannot be used safely."""
 
 
 def create_memory_runtime(

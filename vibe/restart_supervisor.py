@@ -435,7 +435,7 @@ def _start_runtime_processes(
     different installs is a state neither release was ever tested in.
     """
 
-    from core.memory.ui_access import generate_ui_read_secret, process_ui_read_secret
+    from vibe.memory_ui_access import generate_ui_read_secret, process_ui_read_secret
     from core.services import settings as settings_service
 
     paths.ensure_data_dirs()
@@ -1070,7 +1070,7 @@ def schedule_restart(
     three are apart, and only because a command line has no other shape; `main()`
     is the only place they are put back together.
     """
-    from core.memory.ui_access import process_ui_read_secret
+    from vibe.memory_ui_access import process_ui_read_secret
     from storage.migrations import guard_source_checkout_default_state_bootstrap
 
     memory_ui_secret = memory_ui_secret or process_ui_read_secret()
@@ -1165,7 +1165,7 @@ def schedule_restart(
 
 
 def main(argv: list[str] | None = None) -> int:
-    from core.memory.ui_access import initialize_process_ui_read_secret
+    from vibe.memory_ui_access import initialize_process_ui_read_secret
 
     initialize_process_ui_read_secret()
     parser = argparse.ArgumentParser()

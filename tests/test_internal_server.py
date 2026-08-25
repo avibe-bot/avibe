@@ -16,7 +16,9 @@ We exercise three layers:
 from __future__ import annotations
 
 import asyncio
+import ast
 import contextlib
+import inspect
 import socket
 import sys
 import tempfile
@@ -34,9 +36,10 @@ from sqlalchemy import select
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core import internal_server, session_turns
+from core.controller import Controller
 from core.message_context import build_context_turn_sink_key
 from core.vibe_agents import VibeAgentStore
-from core.memory.runtime import MemoryStoreUnavailableError
+from vibe.memory_contract import MemoryStoreUnavailableError
 from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
 from core.services.agent_steering import SteerOutcome, result as steer_result
 from core.services.dispatch import (
@@ -48,6 +51,7 @@ from core.services.dispatch import (
 from modules.im import MessageContext
 from storage import message_deliveries, resource_access_service
 from vibe.authorization import AuthorizationContext
+from config.v2_config import MemoryConfig
 
 
 # ---------------------------------------------------------------------
@@ -353,7 +357,168 @@ def _build_controller_double(handler=None):
     # ``_t`` returns the key verbatim so refusal chunks stay JSON-serializable
     # (a bare MagicMock would blow up ``json.dumps`` in ``_sse_event``).
     controller._t = lambda key, **kwargs: key
+    controller.config = SimpleNamespace(memory=MemoryConfig(enabled=True))
+    controller.memory_adapter = None
+    controller.memory_runtime = None
+    controller.memory_module = None
+    controller._memory_reconcile_task = None
+    controller._memory_disabled_cleanup_task = None
+    controller._memory_replacement_gate = None
+    controller._memory_runtime_lease_condition = None
+    controller._memory_runtime_lease_count = 0
+    controller._memory_runtime_leases_blocked = False
+    controller._memory_runtime_temporary = False
+    controller._memory_runtime_generation = 0
+    controller.default_memory_project_id.return_value = "default"
+    for method_name in (
+        "_memory_replacement_lock",
+        "_memory_runtime_condition",
+        "_drain_memory_runtime_leases_locked",
+        "_mutate_memory_runtime",
+        "_await_disabled_memory_cleanup",
+        "_attach_memory_runtime_locked",
+        "_clear_memory_runtime_locked",
+        "_close_memory_runtime_locked",
+        "_borrow_memory_runtime",
+        "_disabled_memory_source_payload",
+        "_disabled_memory_status_payload",
+        "_disabled_memory_processing_record_payload",
+        "_disabled_memory_maintenance_payload",
+        "_memory_scope_for_runtime",
+        "_memory_scope_for_project",
+        "wake_memory",
+        "install_memory_runtime",
+        "memory_status_payload",
+        "memory_processing_record_payload",
+        "memory_failure_log_payload",
+        "memory_maintenance_payload",
+        "memory_profile_payload",
+        "memory_processing_record_entries_payload",
+        "memory_processing_record_entry_payload",
+        "memory_projects_payload",
+        "memory_search_payload",
+        "memory_list_payload",
+    ):
+        method = getattr(Controller, method_name)
+        setattr(controller, method_name, method.__get__(controller, Controller))
     return controller
+
+
+def test_memory_internal_routes_cannot_bypass_controller_lifecycle() -> None:
+    """Wave 0: internal Memory routes must not inspect runtime ownership."""
+
+    tree = ast.parse(inspect.getsource(internal_server.create_app))
+    bypasses = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr == "memory_runtime"
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "controller"
+    ]
+    private_runtime_helpers = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "_memory_runtime"
+    ]
+    reflective_bypasses = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "getattr"
+        and len(node.args) >= 2
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == "controller"
+        and isinstance(node.args[1], ast.Constant)
+        and node.args[1].value == "memory_runtime"
+    ]
+
+    assert bypasses == []
+    assert private_runtime_helpers == []
+    assert reflective_bypasses == []
+
+
+def test_disabled_memory_status_route_uses_host_projection_without_runtime() -> None:
+    from core.memory_adapter import DisabledMemoryAdapter
+
+    controller = _build_controller_double()
+    controller.config.memory = MemoryConfig(enabled=False)
+    controller.memory_adapter = DisabledMemoryAdapter()
+    controller._create_memory_runtime = Mock(
+        side_effect=AssertionError("status must not construct Memory")
+    )
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.get("/internal/memory/status")
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "disabled"
+    assert response.json()["source"]["reason"] == "memory_disabled"
+    controller._create_memory_runtime.assert_not_called()
+
+
+def test_memory_projects_unknown_lifecycle_failure_uses_stable_envelope() -> None:
+    from core.memory.http_headers import CALLER_SESSION_HEADER
+
+    controller = _build_controller_double()
+    controller.memory_scope_for_cli_session.return_value = (
+        "u-11111111111111111111111111111111",
+        "default",
+    )
+    controller.memory_projects_payload = AsyncMock(
+        side_effect=RuntimeError("injected lifecycle failure")
+    )
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.get(
+                "/internal/memory/projects",
+                headers={CALLER_SESSION_HEADER: "session-1"},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "failed",
+        "error": "memory_store_unavailable",
+    }
+
+
+def test_memory_install_route_delegates_to_controller_lifecycle() -> None:
+    controller = _build_controller_double()
+    controller.memory_runtime = None
+    controller.install_memory_runtime = AsyncMock(return_value={"ok": True})
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.post("/internal/memory/install-runtime")
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    controller.install_memory_runtime.assert_awaited_once_with()
 
 
 def test_controller_double_omits_retired_turn_lifecycle_admission() -> None:
@@ -515,7 +680,7 @@ def test_memory_archive_session_returns_closed_failure_codes(
 
 def test_memory_recovery_reads_resolve_only_signed_ui_operators() -> None:
     from core.memory.http_headers import MEMORY_USER_KEY_HEADER
-    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
     secret = "test-memory-ui-secret"
     calls: list[tuple[str, str | None]] = []
@@ -792,7 +957,7 @@ def test_memory_list_rejects_all_for_cli_at_controller_boundary() -> None:
 def test_memory_list_all_is_available_only_to_signed_ui_principal() -> None:
     """MEMORY-LIST-003, MEMORY-LIST-008."""
     from core.memory.http_headers import MEMORY_USER_KEY_HEADER
-    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
     secret = "test-memory-ui-secret"
     runtime = SimpleNamespace(
@@ -887,7 +1052,7 @@ def test_memory_list_rejects_agent_origin_for_cli_callers() -> None:
 
 def test_memory_list_rejects_invalid_aggregate_cursor_at_controller_boundary() -> None:
     from core.memory.http_headers import MEMORY_USER_KEY_HEADER
-    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
     secret = "test-memory-ui-secret"
     runtime = SimpleNamespace(
@@ -933,7 +1098,7 @@ def test_memory_list_rejects_invalid_aggregate_cursor_at_controller_boundary() -
 
 def test_memory_list_rejects_surrogate_aggregate_cursor_at_controller_boundary() -> None:
     from core.memory.http_headers import MEMORY_USER_KEY_HEADER
-    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
     secret = "test-memory-ui-secret"
     runtime = SimpleNamespace(
@@ -980,7 +1145,7 @@ def test_memory_list_rejects_surrogate_aggregate_cursor_at_controller_boundary()
 def test_memory_list_accepts_maximum_aggregate_cursor_transport_bound() -> None:
     from core.memory.http_headers import MEMORY_USER_KEY_HEADER
     from core.memory.runtime import MEMORY_LIST_CURSOR_MAX_BYTES
-    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
     secret = "test-memory-ui-secret"
     cursor = "a" * MEMORY_LIST_CURSOR_MAX_BYTES
@@ -1081,9 +1246,8 @@ def test_reconcile_memory_hot_applies_the_persisted_config(
 
 
 def test_memory_preflight_requires_signed_ui_operator() -> None:
-    runtime = SimpleNamespace(preflight=AsyncMock())
     controller = _build_controller_double()
-    controller.memory_runtime = runtime
+    controller.preflight_memory = AsyncMock()
     app = internal_server.create_app(controller, memory_ui_secret="test-secret")
 
     async def _exercise() -> httpx.Response:
@@ -1094,7 +1258,64 @@ def test_memory_preflight_requires_signed_ui_operator() -> None:
     response = asyncio.run(_exercise())
     assert response.status_code == 403
     assert response.json() == {"ok": False, "error": "memory_access_denied"}
-    runtime.preflight.assert_not_awaited()
+    controller.preflight_memory.assert_not_awaited()
+
+
+def test_memory_preflight_uses_controller_lifecycle_when_runtime_is_disabled() -> None:
+    from config.v2_config import (
+        MemoryConfig,
+        MemoryEndpointConfig,
+        MemoryProcessingConfig,
+        memory_config_to_payload,
+    )
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    path = "/internal/memory/preflight"
+    candidate = MemoryConfig(
+        enabled=True,
+        processing=MemoryProcessingConfig(
+            llm=MemoryEndpointConfig(
+                base_url="https://llm.example/v1",
+                model="chat-model",
+                api_key="llm-secret",
+            ),
+            embedding=MemoryEndpointConfig(
+                base_url="https://embedding.example/v1",
+                model="embedding-model",
+                api_key="embedding-secret",
+            ),
+        ),
+    )
+    controller = _build_controller_double()
+    controller.memory_runtime = None
+    controller.preflight_memory = AsyncMock(return_value={"ok": True})
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+    headers = {
+        MEMORY_USER_KEY_HEADER: "avibe:local",
+        MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+            secret,
+            method="POST",
+            path=path,
+            user_key="avibe:local",
+        ),
+    }
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                path,
+                headers=headers,
+                json={"memory": memory_config_to_payload(candidate, include_secrets=True)},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    controller.preflight_memory.assert_awaited_once_with(candidate)
 
 
 @pytest.mark.parametrize(
@@ -1110,7 +1331,7 @@ def test_memory_data_operations_require_signed_ui_operator(
     operation: str,
 ) -> None:
     from core.memory.http_headers import MEMORY_USER_KEY_HEADER
-    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER
+    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER
 
     secret = "test-memory-ui-secret"
     controller = _build_controller_double()
@@ -1158,7 +1379,7 @@ def test_memory_data_operations_require_exact_loss_confirmation(
     operation: str,
 ) -> None:
     from core.memory.http_headers import MEMORY_USER_KEY_HEADER
-    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
     secret = "test-memory-ui-secret"
     controller = _build_controller_double()
@@ -1213,7 +1434,7 @@ def test_memory_data_operations_return_distinct_final_result(
     operation: str,
 ) -> None:
     from core.memory.http_headers import MEMORY_USER_KEY_HEADER
-    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
     secret = "test-memory-ui-secret"
     result = {
@@ -1251,7 +1472,7 @@ def test_memory_data_operations_return_distinct_final_result(
 def test_memory_reconfigure_forwards_the_cas_snapshot() -> None:
     from config.v2_config import MemoryConfig, memory_config_to_payload
     from core.memory.http_headers import MEMORY_USER_KEY_HEADER
-    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
     secret = "test-memory-ui-secret"
     path = "/internal/memory/reconfigure"
@@ -1322,7 +1543,7 @@ def test_memory_reconfigure_forwards_the_cas_snapshot() -> None:
 )
 def test_memory_repair_maps_controller_status(result: dict, expected_status: int) -> None:
     from core.memory.http_headers import MEMORY_USER_KEY_HEADER
-    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
     secret = "test-memory-ui-secret"
     path = "/internal/memory/repair"
@@ -1355,7 +1576,7 @@ def test_memory_repair_maps_controller_status(result: dict, expected_status: int
 
 def test_processing_record_degrades_signed_operator_lookup_failure() -> None:
     from core.memory.http_headers import MEMORY_USER_KEY_HEADER
-    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
     secret = "test-memory-ui-secret"
     verified_user_keys: list[str | None] = []
@@ -1416,7 +1637,7 @@ def test_processing_record_degrades_signed_operator_lookup_failure() -> None:
 
 def test_processing_record_route_leaves_operator_lookup_to_runtime() -> None:
     from core.memory.http_headers import MEMORY_USER_KEY_HEADER
-    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
     secret = "test-memory-ui-secret"
     verified_user_keys: list[str | None] = []
@@ -1472,7 +1693,7 @@ def test_processing_record_route_leaves_operator_lookup_to_runtime() -> None:
 
 def test_native_processing_record_routes_authorize_the_selected_project() -> None:
     from core.memory.http_headers import MEMORY_USER_KEY_HEADER
-    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
     principal_id = "u-11111111111111111111111111111111"
     runtime = SimpleNamespace(
@@ -1558,7 +1779,11 @@ def test_memory_remember_route_rejects_capture_queued_across_runtime_replacement
     old_runtime = SimpleNamespace(retired=False, available=True, module=old_module)
     fresh_runtime = SimpleNamespace(retired=False, available=True, module=fresh_module)
     controller = Controller.__new__(Controller)
+    controller.config = SimpleNamespace(
+        memory=SimpleNamespace(enabled=True),
+    )
     controller.memory_runtime = old_runtime
+    controller._memory_runtime_generation = 1
     controller.memory_scope_for_cli_session = lambda _session_id: (
         "u-" + "1" * 32,
         "p-" + "2" * 32,
@@ -1586,6 +1811,7 @@ def test_memory_remember_route_rejects_capture_queued_across_runtime_replacement
                     break
             assert getattr(gate, "_waiters", None)
             controller.memory_runtime = fresh_runtime
+            controller._memory_runtime_generation += 1
             gate.release()
             return await request
 

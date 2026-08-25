@@ -11,7 +11,7 @@ from pathlib import Path
 
 from config import paths
 from config.v2_config import V2Config
-from core.memory.ui_access import generate_ui_read_secret
+from vibe.memory_ui_access import generate_ui_read_secret
 from scripts.incus_regression import SERVICE_HOME, regression_show_runtime_env
 from vibe import runtime
 

@@ -237,6 +237,10 @@ class MessageHandler(BaseHandler):
         *,
         expected_snapshot: object,
     ) -> None:
+        memory_adapter = getattr(self.controller, "memory_adapter", None)
+        if memory_adapter is not None:
+            memory_adapter.offer((context, text, session_id))
+            return
         capture_memory = getattr(self.controller, "capture_user_memory", None)
         if not callable(capture_memory) or not text.strip():
             return
@@ -1000,7 +1004,10 @@ class MessageHandler(BaseHandler):
             # Memory capture remains best effort and outside the Agent turn, but
             # file turns start only after the one shared download has produced an
             # immutable lease. Authorization precedes retaining a Memory consumer.
-            if is_human and context.files:
+            memory_adapter = getattr(self.controller, "memory_adapter", None)
+            if is_human and context.files and memory_adapter is not None:
+                memory_adapter.offer(context)
+            if is_human and context.files and memory_adapter is None:
                 capture_memory = getattr(self.controller, "capture_user_memory", None)
                 if callable(capture_memory):
                     memory_attachment_lease = None

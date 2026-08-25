@@ -13,6 +13,7 @@ capability:
     - tests/test_native_session_providers.py
     - tests/test_core_services_dispatch.py
     - tests/test_admin_notifications.py
+    - tests/test_memory_disabled_isolation.py
 contract:
   dispatch: capture_must_not_fence_turn_start
   destructive_ops: new_and_archive_fail_open_on_capture_timeout
@@ -98,3 +99,21 @@ scenarios:
     kind: regression_keep
     layer: contract
     test: tests/test_admin_notifications.py::test_memory_indep_012_processing_events_stay_in_service_logs
+  - id: MEMORY-INDEP-013
+    name: Disabled fresh startup has no Memory runtime filesystem, task, or process side effects
+    status: covered
+    kind: guardrail
+    layer: scenario
+    test: tests/test_memory_disabled_isolation.py::test_memory_indep_013_disabled_fresh_startup_has_no_runtime_side_effects
+  - id: MEMORY-INDEP-014
+    name: Disabled Controller startup succeeds while optional Memory implementation imports are blocked
+    status: covered
+    kind: guardrail
+    layer: scenario
+    test: tests/test_memory_disabled_isolation.py::test_memory_indep_014_disabled_controller_starts_with_runtime_imports_blocked
+  - id: MEMORY-INDEP-015
+    name: Shutdown bounds capture cancellation, destructive settlement, and runtime close under one shared budget
+    status: covered
+    kind: guardrail
+    layer: scenario
+    test: tests/test_memory_disabled_isolation.py::test_memory_indep_015_shutdown_bounds_all_memory_stages_under_one_budget

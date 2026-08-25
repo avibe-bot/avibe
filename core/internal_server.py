@@ -48,10 +48,10 @@ from sqlalchemy.exc import IntegrityError
 
 from config import paths
 from config.atomic_io import write_atomic
-from core.memory.blocking import run_blocking
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED
 from modules.im.base import MessageContext
 from storage.db import get_cached_sqlite_engine
+from vibe.memory_contract import MemoryStoreUnavailableError
 from vibe.message_identity import HARNESS_TYPE, is_input_turn
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -169,11 +169,9 @@ def create_app(
 
     mark_controller_process()
     if memory_ui_secret is None:
-        from core.memory.ui_access import process_ui_read_secret
+        from vibe.memory_ui_access import process_ui_read_secret
 
         memory_ui_secret = process_ui_read_secret()
-    from core.memory.runtime import MemoryStoreUnavailableError
-
     app = FastAPI(
         title="avibe internal dispatch",
         docs_url=None,
@@ -997,9 +995,6 @@ def create_app(
         except Exception as exc:
             logger.exception("internal backend auth test failed")
             return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
-    def _memory_runtime():
-        return getattr(controller, "memory_runtime", None)
-
     @app.post("/internal/reconcile-memory")
     async def _reconcile_memory() -> Any:
         """Hot-apply persisted Memory configuration on the controller loop."""
@@ -1029,14 +1024,8 @@ def create_app(
     async def _memory_wake() -> Any:
         """Non-destructively wake the existing admitted Memory root."""
 
-        runtime = _memory_runtime()
-        if runtime is None:
-            return JSONResponse(
-                status_code=503,
-                content={"ok": False, "state": "degraded", "error": "memory_runtime_missing"},
-            )
         try:
-            result = await runtime.wake()
+            result = await controller.wake_memory()
         except Exception:
             logger.exception("internal memory wake failed")
             result = {"ok": False, "state": "degraded", "error": "memory_wake_failed"}
@@ -1166,11 +1155,8 @@ def create_app(
     async def _memory_install_runtime() -> Any:
         """Install or repair the managed runtime on the controller lifecycle."""
 
-        runtime = _memory_runtime()
-        if runtime is None:
-            return JSONResponse(status_code=503, content={"ok": False, "reason": "memory_runtime_missing"})
         try:
-            result = await runtime.install_artifact()
+            result = await controller.install_memory_runtime()
             return JSONResponse(status_code=200, content=result)
         except Exception:
             logger.exception("internal memory runtime install failed")
@@ -1183,12 +1169,12 @@ def create_app(
         payload = await _safe_json(request)
         try:
             from config.v2_config import memory_config_from_payload
-            from core.memory.runtime import MemoryRuntime
+
             config = memory_config_from_payload(payload.get("memory", payload) if isinstance(payload, dict) else {})
-            runtime = _memory_runtime()
-            if runtime is None:
+            preflight = getattr(controller, "preflight_memory", None)
+            if not callable(preflight):
                 return JSONResponse(status_code=503, content={"ok": False, "error": "memory_runtime_missing"})
-            return JSONResponse(status_code=200, content=await runtime.preflight(config))
+            return JSONResponse(status_code=200, content=await preflight(config))
         except Exception:
             logger.exception("internal memory preflight failed")
             return JSONResponse(status_code=503, content={"ok": False, "error": "memory_processing_failed"})
@@ -1285,7 +1271,7 @@ def create_app(
             or (user_key.startswith(remote_prefix) and len(user_key) > len(remote_prefix))
         ):
             return None
-        from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, verify_ui_read_proof
+        from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, verify_ui_read_proof
 
         proof = str(request.headers.get(MEMORY_UI_PROOF_HEADER) or "").strip()
         if memory_ui_secret is None or not verify_ui_read_proof(
@@ -1298,63 +1284,31 @@ def create_app(
             return None
         return user_key
 
-    def _memory_read_scope(request: Request) -> tuple[str, str] | None:
+    def _memory_read_owner(
+        request: Request,
+    ) -> tuple[str | None, tuple[str, str] | None] | None:
         from core.memory.http_headers import MEMORY_USER_KEY_HEADER
 
         if str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip():
             user_key = _verified_memory_ui_user_key(request)
             if user_key is None:
                 return None
-            runtime = _memory_runtime()
-            try:
-                principal_id = runtime.principal_for_user_key(user_key) if runtime is not None else None
-                resolve_project = getattr(controller, "default_memory_project_id", None)
-                project_id = resolve_project() if callable(resolve_project) else None
-                from core.memory.store import is_principal_id, is_project_id
-
-                if is_principal_id(principal_id) and is_project_id(project_id):
-                    return principal_id, project_id
-                return None
-            except MemoryStoreUnavailableError:
-                raise
-            except Exception as exc:
-                raise MemoryStoreUnavailableError("Memory store is unavailable") from exc
-        return _memory_cli_scope(request)
-
-    async def _memory_read_scope_for_project(
-        scope: tuple[str, str],
-        project_id: str | None,
-        runtime: Any,
-    ) -> tuple[str, str]:
-        principal_id, default_project_id = scope
-        if project_id is None or project_id == default_project_id:
-            return scope
-        try:
-            catalog = await run_blocking(runtime.list_memory_projects, principal_id)
-        except Exception as exc:
-            raise MemoryStoreUnavailableError("Memory store is unavailable") from exc
-        if project_id not in catalog:
-            raise ValueError("unknown Memory project")
-        return principal_id, project_id
+            return user_key, None
+        scope = _memory_cli_scope(request)
+        return (None, scope) if scope is not None else None
 
     @app.get("/internal/memory/status")
     async def _memory_status() -> Any:
-        runtime = _memory_runtime()
-        if runtime is None:
-            return JSONResponse(status_code=503, content={"error": "memory_runtime_missing"})
         try:
-            return await runtime.status_payload()
+            return await controller.memory_status_payload()
         except Exception:
             logger.warning("internal memory status failed")
             return JSONResponse(status_code=503, content={"error": "memory_store_unavailable"})
 
     @app.get("/internal/memory/processing-record")
     async def _memory_processing_record(request: Request) -> Any:
-        runtime = _memory_runtime()
-        if runtime is None:
-            return JSONResponse(status_code=503, content={"error": "memory_runtime_missing"})
         try:
-            return await runtime.processing_record_payload(
+            return await controller.memory_processing_record_payload(
                 verified_user_key=_verified_memory_ui_user_key(request)
             )
         except Exception:
@@ -1366,11 +1320,8 @@ def create_app(
 
     @app.get("/internal/memory/failures")
     async def _memory_failures(request: Request) -> Any:
-        runtime = _memory_runtime()
-        if runtime is None:
-            return JSONResponse(status_code=503, content={"error": "memory_runtime_missing"})
         try:
-            return await runtime.failure_log_payload(
+            return await controller.memory_failure_log_payload(
                 verified_user_key=_verified_memory_ui_user_key(request)
             )
         except Exception:
@@ -1379,11 +1330,8 @@ def create_app(
 
     @app.get("/internal/memory/maintenance")
     async def _memory_maintenance(request: Request) -> Any:
-        runtime = _memory_runtime()
-        if runtime is None:
-            return JSONResponse(status_code=503, content={"error": "memory_runtime_missing"})
         try:
-            return await runtime.maintenance_payload(
+            return await controller.memory_maintenance_payload(
                 verified_user_key=_verified_memory_ui_user_key(request)
             )
         except Exception:
@@ -1395,21 +1343,22 @@ def create_app(
 
     @app.get("/internal/memory/profile")
     async def _memory_profile(request: Request) -> Any:
+        owner = _memory_read_owner(request)
+        if owner is None:
+            return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
+        verified_user_key, cli_scope = owner
         try:
-            scope = _memory_read_scope(request)
+            return await controller.memory_profile_payload(
+                verified_user_key=verified_user_key,
+                cli_scope=cli_scope,
+            )
         except MemoryStoreUnavailableError:
             return JSONResponse(
                 status_code=503,
                 content={"status": "failed", "error": "memory_store_unavailable"},
             )
-        if scope is None:
+        except PermissionError:
             return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
-        principal_id, project_id = scope
-        runtime = _memory_runtime()
-        if runtime is None:
-            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
-        try:
-            return await runtime.profile_payload(principal_id, project_id)
         except Exception:
             logger.warning("internal memory profile failed")
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_processing_failed"})
@@ -1418,38 +1367,25 @@ def create_app(
     async def _memory_processing_record_entries(request: Request) -> Any:
         try:
             cursor, limit, requested_project = _processing_record_list_query(request)
-            scope = _memory_read_scope(request)
+            owner = _memory_read_owner(request)
         except ValueError:
             return JSONResponse(
                 status_code=400,
                 content={"status": "failed", "error": "memory_invalid_input"},
             )
-        except MemoryStoreUnavailableError:
-            return JSONResponse(
-                status_code=503,
-                content={"status": "failed", "error": "memory_store_unavailable"},
-            )
-        if scope is None:
+        if owner is None:
             return JSONResponse(
                 status_code=403,
                 content={"status": "failed", "error": "memory_access_denied"},
             )
-        runtime = _memory_runtime()
-        if runtime is None:
-            return JSONResponse(
-                status_code=503,
-                content={"status": "failed", "error": "memory_runtime_missing"},
-            )
+        verified_user_key, cli_scope = owner
         try:
-            scope = await _memory_read_scope_for_project(
-                scope, requested_project, runtime
-            )
-            principal_id, project_id = scope
-            return await runtime.processing_record_entries_payload(
-                principal_id,
-                project_id,
-                cursor,
-                limit,
+            return await controller.memory_processing_record_entries_payload(
+                cursor=cursor,
+                limit=limit,
+                project_id=requested_project,
+                verified_user_key=verified_user_key,
+                cli_scope=cli_scope,
             )
         except ValueError:
             return JSONResponse(
@@ -1460,6 +1396,11 @@ def create_app(
             return JSONResponse(
                 status_code=503,
                 content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+        except PermissionError:
+            return JSONResponse(
+                status_code=403,
+                content={"status": "failed", "error": "memory_access_denied"},
             )
         except Exception:
             logger.warning("internal native Processing Record list failed")
@@ -1472,37 +1413,24 @@ def create_app(
     async def _memory_processing_record_entry(request: Request) -> Any:
         try:
             memcell_id, requested_project = _processing_record_entry_query(request)
-            scope = _memory_read_scope(request)
+            owner = _memory_read_owner(request)
         except ValueError:
             return JSONResponse(
                 status_code=400,
                 content={"status": "failed", "error": "memory_invalid_input"},
             )
-        except MemoryStoreUnavailableError:
-            return JSONResponse(
-                status_code=503,
-                content={"status": "failed", "error": "memory_store_unavailable"},
-            )
-        if scope is None:
+        if owner is None:
             return JSONResponse(
                 status_code=403,
                 content={"status": "failed", "error": "memory_access_denied"},
             )
-        runtime = _memory_runtime()
-        if runtime is None:
-            return JSONResponse(
-                status_code=503,
-                content={"status": "failed", "error": "memory_runtime_missing"},
-            )
+        verified_user_key, cli_scope = owner
         try:
-            scope = await _memory_read_scope_for_project(
-                scope, requested_project, runtime
-            )
-            principal_id, project_id = scope
-            payload = await runtime.processing_record_entry_payload(
-                principal_id,
-                project_id,
-                memcell_id,
+            payload = await controller.memory_processing_record_entry_payload(
+                memcell_id=memcell_id,
+                project_id=requested_project,
+                verified_user_key=verified_user_key,
+                cli_scope=cli_scope,
             )
         except ValueError:
             return JSONResponse(
@@ -1513,6 +1441,11 @@ def create_app(
             return JSONResponse(
                 status_code=503,
                 content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+        except PermissionError:
+            return JSONResponse(
+                status_code=403,
+                content={"status": "failed", "error": "memory_access_denied"},
             )
         except Exception:
             logger.warning("internal native Processing Record detail failed")
@@ -1532,58 +1465,42 @@ def create_app(
 
     @app.get("/internal/memory/projects")
     async def _memory_projects(request: Request) -> Any:
-        try:
-            scope = _memory_read_scope(request)
-        except MemoryStoreUnavailableError:
-            return JSONResponse(
-                status_code=503,
-                content={"status": "failed", "error": "memory_store_unavailable"},
-            )
-        if scope is None:
+        owner = _memory_read_owner(request)
+        if owner is None:
             return JSONResponse(
                 status_code=403,
                 content={"status": "failed", "error": "memory_access_denied"},
             )
-        principal_id, _project_id = scope
-        runtime = _memory_runtime()
-        if runtime is None:
+        verified_user_key, cli_scope = owner
+        try:
+            return await controller.memory_projects_payload(
+                verified_user_key=verified_user_key,
+                cli_scope=cli_scope,
+            )
+        except MemoryStoreUnavailableError:
+            logger.warning("internal memory project list failed")
             return JSONResponse(
                 status_code=503,
-                content={"status": "failed", "error": "memory_runtime_missing"},
+                content={"status": "failed", "error": "memory_store_unavailable"},
             )
-        from core.memory.project_ids import DEFAULT_MEMORY_PROJECT_ID, MEMORY_SEARCH_ALL_PROJECTS
-
-        try:
-            catalogued = await run_blocking(runtime.list_memory_projects, principal_id)
+        except PermissionError:
+            return JSONResponse(
+                status_code=403,
+                content={"status": "failed", "error": "memory_access_denied"},
+            )
         except Exception:
             logger.warning("internal memory project list failed")
             return JSONResponse(
                 status_code=503,
                 content={"status": "failed", "error": "memory_store_unavailable"},
             )
-        named = [item for item in catalogued if item != DEFAULT_MEMORY_PROJECT_ID]
-        projects = [
-            {"id": DEFAULT_MEMORY_PROJECT_ID, "kind": "default"},
-            *[{"id": item, "kind": "named"} for item in named],
-            {"id": MEMORY_SEARCH_ALL_PROJECTS, "kind": "all"},
-        ]
-        return {"status": "ok", "projects": projects}
 
     @app.post("/internal/memory/search")
     async def _memory_search(request: Request) -> Any:
-        try:
-            scope = _memory_read_scope(request)
-        except MemoryStoreUnavailableError:
-            return JSONResponse(
-                status_code=503,
-                content={"status": "failed", "error": "memory_store_unavailable"},
-            )
-        if scope is None:
+        owner = _memory_read_owner(request)
+        if owner is None:
             return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
-        principal_id, project_id = scope
-        runtime = _memory_runtime()
-        if runtime is None:
-            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
+        verified_user_key, cli_scope = owner
         payload = await _safe_json(request)
         if (
             not isinstance(payload, dict)
@@ -1594,7 +1511,6 @@ def create_app(
             return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
         from core.memory.http_headers import CALLER_SESSION_HEADER, MEMORY_USER_KEY_HEADER
         from core.memory.project_ids import (
-            DEFAULT_MEMORY_PROJECT_ID,
             omitted_project_to_default,
             parse_agent_search_project,
             parse_ui_search_project,
@@ -1611,53 +1527,37 @@ def create_app(
         except (TypeError, ValueError):
             return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
         current_session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip() or None
-        if project_id not in {DEFAULT_MEMORY_PROJECT_ID, "all"}:
-            try:
-                catalog = await run_blocking(runtime.list_memory_projects, principal_id)
-            except Exception:
-                logger.warning("internal memory project catalog failed")
-                return JSONResponse(
-                    status_code=503,
-                    content={"status": "failed", "error": "memory_store_unavailable"},
-                )
-            if project_id not in catalog:
-                return JSONResponse(
-                    status_code=400,
-                    content={"status": "failed", "error": "memory_invalid_input"},
-                )
         try:
-            return await runtime.search_payload(
-                payload["query"],
-                policy,
-                principal_id,
-                project_id,
+            return await controller.memory_search_payload(
+                query=payload["query"],
+                policy=policy,
+                project_id=project_id,
                 current_session_id=current_session_id,
+                verified_user_key=verified_user_key,
+                cli_scope=cli_scope,
             )
+        except ValueError:
+            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+        except MemoryStoreUnavailableError:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+        except PermissionError:
+            return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
         except Exception:
             logger.warning("internal memory search failed")
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_processing_failed"})
 
     @app.post("/internal/memory/list")
     async def _memory_list(request: Request) -> Any:
-        try:
-            scope = _memory_read_scope(request)
-        except MemoryStoreUnavailableError:
-            return JSONResponse(
-                status_code=503,
-                content={"status": "failed", "error": "memory_store_unavailable"},
-            )
-        if scope is None:
+        owner = _memory_read_owner(request)
+        if owner is None:
             return JSONResponse(
                 status_code=403,
                 content={"status": "failed", "error": "memory_access_denied"},
             )
-        principal_id, _default_project_id = scope
-        runtime = _memory_runtime()
-        if runtime is None:
-            return JSONResponse(
-                status_code=503,
-                content={"status": "failed", "error": "memory_runtime_missing"},
-            )
+        verified_user_key, cli_scope = owner
         payload = await _safe_json(request)
         if not isinstance(payload, dict) or set(payload) - {
             "project",
@@ -1672,7 +1572,6 @@ def create_app(
             )
         from core.memory.http_headers import MEMORY_USER_KEY_HEADER
         from core.memory.project_ids import (
-            DEFAULT_MEMORY_PROJECT_ID,
             MEMORY_SEARCH_ALL_PROJECTS,
             omitted_project_to_default,
             parse_agent_search_project,
@@ -1683,7 +1582,6 @@ def create_app(
         is_ui = bool(str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip())
         limit = payload.get("limit", 20)
         origin = payload.get("origin", "user")
-        origin_options = {"origin": origin} if "origin" in payload else {}
         try:
             raw_project = omitted_project_to_default(payload.get("project"))
             project_id = (
@@ -1709,6 +1607,7 @@ def create_app(
             )
         if project_id == MEMORY_SEARCH_ALL_PROJECTS:
             cursor = payload.get("cursor")
+            page = None
             try:
                 cursor_bytes = (
                     len(cursor.encode("utf-8"))
@@ -1733,63 +1632,49 @@ def create_app(
                     status_code=400,
                     content={"status": "failed", "error": "memory_invalid_input"},
                 )
-            try:
-                result = await runtime.list_all_episodes_payload(
-                    principal_id,
-                    cursor=cursor,
-                    limit=limit,
-                    **origin_options,
-                )
-                if result == {
-                    "status": "failed",
-                    "error": "memory_invalid_input",
-                }:
-                    return JSONResponse(status_code=400, content=result)
-                return result
-            except Exception:
-                logger.warning("internal aggregate memory list failed")
-                return JSONResponse(
-                    status_code=503,
-                    content={"status": "failed", "error": "memory_processing_failed"},
-                )
-
-        page = payload.get("page", 1)
-        if (
-            "cursor" in payload
-            or isinstance(page, bool)
-            or not isinstance(page, int)
-            or page < 1
-        ):
-            return JSONResponse(
-                status_code=400,
-                content={"status": "failed", "error": "memory_invalid_input"},
-            )
-        if project_id != DEFAULT_MEMORY_PROJECT_ID:
-            if getattr(runtime, "available", True) is False:
-                return JSONResponse(
-                    status_code=503,
-                    content={"status": "failed", "error": "memory_store_unavailable"},
-                )
-            try:
-                catalog = await run_blocking(runtime.list_memory_projects, principal_id)
-            except Exception:
-                logger.warning("internal memory project catalog failed")
-                return JSONResponse(
-                    status_code=503,
-                    content={"status": "failed", "error": "memory_store_unavailable"},
-                )
-            if project_id not in catalog:
+        else:
+            cursor = None
+            page = payload.get("page", 1)
+            if (
+                "cursor" in payload
+                or isinstance(page, bool)
+                or not isinstance(page, int)
+                or page < 1
+            ):
                 return JSONResponse(
                     status_code=400,
                     content={"status": "failed", "error": "memory_invalid_input"},
                 )
         try:
-            return await runtime.list_episodes_payload(
-                principal_id,
-                project_id,
+            result = await controller.memory_list_payload(
+                project_id=project_id,
                 page=page,
-                page_size=limit,
-                **origin_options,
+                cursor=cursor,
+                limit=limit,
+                origin=origin if "origin" in payload else None,
+                verified_user_key=verified_user_key,
+                cli_scope=cli_scope,
+            )
+            if result == {
+                "status": "failed",
+                "error": "memory_invalid_input",
+            }:
+                return JSONResponse(status_code=400, content=result)
+            return result
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"status": "failed", "error": "memory_invalid_input"},
+            )
+        except MemoryStoreUnavailableError:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+        except PermissionError:
+            return JSONResponse(
+                status_code=403,
+                content={"status": "failed", "error": "memory_access_denied"},
             )
         except Exception:
             logger.warning("internal memory list failed")
@@ -1804,9 +1689,6 @@ def create_app(
         if scope is None:
             return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
         principal_id, project_id = scope
-        runtime = _memory_runtime()
-        if runtime is None:
-            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
         payload = await _safe_json(request)
         if (
             not isinstance(payload, dict)

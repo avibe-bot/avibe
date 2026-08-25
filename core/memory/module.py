@@ -19,7 +19,7 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any, AsyncIterator, Literal, TypeVar
 
 from config import paths
-from core.memory.blocking import run_blocking
+from core.blocking import run_blocking
 from core.memory.attachments import (
     AttachmentCleanupUnprovenError,
     AttachmentPinError,

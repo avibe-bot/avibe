@@ -925,7 +925,7 @@ def _memory_cli_session_headers(session_id: str | None) -> dict[str, str] | None
 
 def _memory_user_key_headers(method: str, path: str, user_key: str) -> dict[str, str]:
     from core.memory.http_headers import MEMORY_USER_KEY_HEADER
-    from core.memory.ui_access import (
+    from vibe.memory_ui_access import (
         MEMORY_UI_PROOF_HEADER,
         build_ui_read_proof,
         process_ui_read_secret,
