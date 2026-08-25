@@ -362,11 +362,19 @@ def _build_controller_double(handler=None):
     controller.memory_runtime = None
     controller.memory_module = None
     controller._memory_reconcile_task = None
+    controller._memory_disabled_cleanup_task = None
     controller._memory_replacement_gate = None
+    controller._memory_runtime_lease_condition = None
+    controller._memory_runtime_lease_count = 0
+    controller._memory_runtime_leases_blocked = False
+    controller._memory_runtime_temporary = False
     controller._memory_runtime_generation = 0
     controller.default_memory_project_id.return_value = "default"
     for method_name in (
         "_memory_replacement_lock",
+        "_memory_runtime_condition",
+        "_drain_memory_runtime_leases_locked",
+        "_mutate_memory_runtime",
         "_await_disabled_memory_cleanup",
         "_attach_memory_runtime_locked",
         "_clear_memory_runtime_locked",

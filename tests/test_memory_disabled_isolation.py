@@ -97,7 +97,7 @@ assert not [
            for part in path.relative_to(home).parts)
 ]
 controller._schedule_disabled_memory_cleanup()
-assert controller._memory_reconcile_task is None
+assert controller._memory_disabled_cleanup_task is None
 assert "core.memory.process" not in sys.modules
 
 
@@ -254,12 +254,12 @@ async def test_disabled_cleanup_reaps_only_preexisting_everos_ownership(
     controller = Controller.__new__(Controller)
     controller.memory_adapter = DisabledMemoryAdapter()
     controller.memory_runtime = None
-    controller._memory_reconcile_task = None
+    controller._memory_disabled_cleanup_task = None
 
     controller._schedule_disabled_memory_cleanup()
 
-    assert controller._memory_reconcile_task is not None
-    await controller._memory_reconcile_task
+    assert controller._memory_disabled_cleanup_task is not None
+    await controller._memory_disabled_cleanup_task
     assert calls == [
         (
             record_path,
@@ -637,6 +637,207 @@ async def test_disabled_store_backed_read_borrows_one_owned_runtime() -> None:
         ],
     }
     assert runtime.closed is True
+    assert controller.memory_runtime is None
+    assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
+
+
+@pytest.mark.asyncio
+async def test_enabled_status_does_not_wait_for_startup_wake() -> None:
+    controller = Controller.__new__(Controller)
+    controller.config = types.SimpleNamespace(
+        memory=replace(_disabled_app_config().memory, enabled=True)
+    )
+    controller.memory_adapter = None
+    controller._memory_disabled_cleanup_task = None
+    wake_release = asyncio.Event()
+
+    async def startup_wake() -> None:
+        await wake_release.wait()
+
+    controller._memory_reconcile_task = asyncio.create_task(startup_wake())
+
+    class _Runtime:
+        module = object()
+        closed = False
+        retired = False
+
+        async def status_payload(self) -> dict[str, object]:
+            return {"status": "ok", "state": "starting"}
+
+    runtime = _Runtime()
+    controller.memory_runtime = runtime
+    controller.memory_module = runtime.module
+
+    try:
+        assert await asyncio.wait_for(
+            controller.memory_status_payload(),
+            timeout=0.1,
+        ) == {"status": "ok", "state": "starting"}
+    finally:
+        wake_release.set()
+        await controller._memory_reconcile_task
+
+
+@pytest.mark.asyncio
+async def test_concurrent_enabled_memory_reads_overlap() -> None:
+    controller = Controller.__new__(Controller)
+    controller.config = types.SimpleNamespace(
+        memory=replace(_disabled_app_config().memory, enabled=True)
+    )
+    controller.memory_adapter = None
+    controller._memory_reconcile_task = None
+    controller._memory_disabled_cleanup_task = None
+    started: set[str] = set()
+    release = asyncio.Event()
+
+    class _Runtime:
+        module = object()
+        closed = False
+        retired = False
+
+        async def status_payload(self) -> dict[str, object]:
+            started.add("status")
+            await release.wait()
+            return {"status": "ok", "state": "running"}
+
+        async def processing_record_payload(
+            self,
+            *,
+            verified_user_key: str | None,
+        ) -> dict[str, object]:
+            assert verified_user_key == "user-1"
+            started.add("processing")
+            await release.wait()
+            return {"status": "ok"}
+
+    runtime = _Runtime()
+    controller.memory_runtime = runtime
+    controller.memory_module = runtime.module
+    status = asyncio.create_task(controller.memory_status_payload())
+    processing = asyncio.create_task(
+        controller.memory_processing_record_payload(
+            verified_user_key="user-1",
+        )
+    )
+
+    try:
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert started == {"status", "processing"}
+    finally:
+        release.set()
+        await asyncio.gather(status, processing)
+
+
+@pytest.mark.asyncio
+async def test_disable_waits_for_outstanding_read_lease_then_closes_once() -> None:
+    enabled = replace(_disabled_app_config().memory, enabled=True)
+    disabled = replace(enabled, enabled=False)
+    controller = Controller.__new__(Controller)
+    controller.config = types.SimpleNamespace(memory=enabled)
+    controller.memory_adapter = None
+    controller._memory_reconcile_task = None
+    controller._memory_disabled_cleanup_task = None
+    read_started = asyncio.Event()
+    read_release = asyncio.Event()
+
+    class _Runtime:
+        def __init__(self) -> None:
+            self.module = object()
+            self.closed = False
+            self.retired = False
+            self.close_calls = 0
+
+        async def status_payload(self) -> dict[str, object]:
+            read_started.set()
+            await read_release.wait()
+            return {"status": "ok", "state": "running"}
+
+        async def reconcile(self, config) -> dict[str, object]:
+            return {"ok": True, "state": "running" if config.enabled else "disabled"}
+
+        async def close(self) -> None:
+            self.close_calls += 1
+            self.closed = True
+
+    runtime = _Runtime()
+    controller.memory_runtime = runtime
+    controller.memory_module = runtime.module
+    status = asyncio.create_task(controller.memory_status_payload())
+    await read_started.wait()
+    disable = asyncio.create_task(controller.reconcile_memory(disabled))
+
+    try:
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert controller._memory_replacement_lock().locked() is False
+        assert disable.done() is False
+        assert runtime.close_calls == 0
+    finally:
+        read_release.set()
+
+    assert await status == {"status": "ok", "state": "running"}
+    assert await disable == {"ok": True, "state": "disabled"}
+    assert runtime.close_calls == 1
+    assert controller.memory_runtime is None
+
+
+@pytest.mark.asyncio
+async def test_concurrent_temporary_borrows_share_runtime_until_final_release() -> None:
+    controller = Controller.__new__(Controller)
+    controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)
+    controller.memory_adapter = DisabledMemoryAdapter()
+    controller.memory_runtime = None
+    controller.memory_module = None
+    controller._memory_reconcile_task = None
+    controller._memory_disabled_cleanup_task = None
+    candidate = replace(controller.config.memory, enabled=True)
+    started = 0
+    release = asyncio.Event()
+    created: list[object] = []
+
+    class _Runtime:
+        def __init__(self) -> None:
+            self.module = object()
+            self.closed = False
+            self.retired = False
+            self.close_calls = 0
+
+        async def preflight(self, config) -> dict[str, object]:
+            nonlocal started
+            assert config is candidate
+            assert controller.memory_runtime is self
+            started += 1
+            await release.wait()
+            return {"ok": True}
+
+        def retire(self) -> None:
+            self.retired = True
+
+        async def close(self) -> None:
+            self.close_calls += 1
+            self.closed = True
+
+    def create_runtime(_config) -> _Runtime:
+        runtime = _Runtime()
+        created.append(runtime)
+        return runtime
+
+    controller._create_memory_runtime = create_runtime
+    first = asyncio.create_task(controller.preflight_memory(candidate))
+    second = asyncio.create_task(controller.preflight_memory(candidate))
+
+    try:
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert started == 2
+        assert len(created) == 1
+        assert created[0].close_calls == 0
+    finally:
+        release.set()
+
+    assert await asyncio.gather(first, second) == [{"ok": True}, {"ok": True}]
+    assert created[0].close_calls == 1
     assert controller.memory_runtime is None
     assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
 

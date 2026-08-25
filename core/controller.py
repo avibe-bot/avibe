@@ -414,7 +414,14 @@ class Controller:
         self._trace_retention_cancel_event: Optional[threading.Event] = None
         self._trace_retention_future: Optional[Any] = None
         self._memory_reconcile_task: Optional[asyncio.Task] = None
+        self._memory_disabled_cleanup_task: Optional[asyncio.Task] = None
         self._memory_replacement_gate = asyncio.Lock()
+        self._memory_runtime_lease_condition = asyncio.Condition(
+            self._memory_replacement_gate
+        )
+        self._memory_runtime_lease_count = 0
+        self._memory_runtime_leases_blocked = False
+        self._memory_runtime_temporary = False
         self._memory_destructive_tasks: set[asyncio.Task[dict[str, Any]]] = set()
         self._memory_destructive_quiescing = False
 
@@ -762,15 +769,56 @@ class Controller:
         }
 
     async def _await_disabled_memory_cleanup(self) -> None:
-        cleanup_task = getattr(self, "_memory_reconcile_task", None)
+        cleanup_task = getattr(self, "_memory_disabled_cleanup_task", None)
         if cleanup_task is not None and not cleanup_task.done():
             await cleanup_task
+
+    def _memory_runtime_condition(self) -> asyncio.Condition:
+        """Return the lease condition bound to the replacement gate."""
+
+        condition = getattr(self, "_memory_runtime_lease_condition", None)
+        if condition is None:
+            condition = asyncio.Condition(self._memory_replacement_lock())
+            self._memory_runtime_lease_condition = condition
+        return condition
+
+    async def _drain_memory_runtime_leases_locked(
+        self,
+        runtime: "MemoryRuntime",
+    ) -> None:
+        """Wait for all references to one fenced runtime to leave."""
+
+        condition = self._memory_runtime_condition()
+        while (
+            getattr(self, "memory_runtime", None) is runtime
+            and getattr(self, "_memory_runtime_lease_count", 0) > 0
+        ):
+            await condition.wait()
+
+    @asynccontextmanager
+    async def _mutate_memory_runtime(self) -> AsyncIterator[None]:
+        """Fence new leases and drain existing ones before runtime mutation."""
+
+        condition = self._memory_runtime_condition()
+        async with condition:
+            while getattr(self, "_memory_runtime_leases_blocked", False):
+                await condition.wait()
+            self._memory_runtime_leases_blocked = True
+            try:
+                runtime = getattr(self, "memory_runtime", None)
+                if runtime is not None:
+                    await self._drain_memory_runtime_leases_locked(runtime)
+                yield
+            finally:
+                self._memory_runtime_leases_blocked = False
+                condition.notify_all()
 
     def _attach_memory_runtime_locked(
         self,
         runtime: "MemoryRuntime",
         *,
         capture_enabled: bool,
+        temporary: bool = False,
     ) -> None:
         """Attach the sole runtime while the replacement gate is held."""
 
@@ -781,9 +829,12 @@ class Controller:
         if current not in (None, runtime):
             raise RuntimeError("A different Memory runtime is already owned")
         if current is None:
+            if getattr(self, "_memory_runtime_lease_count", 0) != 0:
+                raise RuntimeError("Cannot attach Memory while runtime leases remain")
             self._memory_runtime_generation = (
                 getattr(self, "_memory_runtime_generation", 0) + 1
             )
+            self._memory_runtime_temporary = temporary
         self.memory_runtime = runtime
         self.memory_module = runtime.module
         self.memory_adapter = None if capture_enabled else DisabledMemoryAdapter()
@@ -800,9 +851,12 @@ class Controller:
             raise MemoryRuntimeCloseUnprovedError(
                 "Memory runtime close returned without a closed proof"
             )
+        if getattr(self, "_memory_runtime_lease_count", 0) != 0:
+            raise RuntimeError("Cannot release Memory while runtime leases remain")
         self.memory_runtime = None
         self.memory_module = None
         self.memory_adapter = DisabledMemoryAdapter()
+        self._memory_runtime_temporary = False
         self._memory_runtime_generation = (
             getattr(self, "_memory_runtime_generation", 0) + 1
         )
@@ -818,6 +872,7 @@ class Controller:
         gate = self._memory_replacement_lock()
         if not gate.locked() or getattr(self, "memory_runtime", None) is not runtime:
             raise RuntimeError("Memory runtime close requires locked Controller ownership")
+        await self._drain_memory_runtime_leases_locked(runtime)
         if retire:
             retire_runtime = getattr(runtime, "retire", None)
             if callable(retire_runtime) and not getattr(runtime, "retired", False):
@@ -833,7 +888,10 @@ class Controller:
         """Lease the sole runtime for one non-destructive explicit operation."""
 
         await self._await_disabled_memory_cleanup()
-        async with self._memory_replacement_lock():
+        condition = self._memory_runtime_condition()
+        async with condition:
+            while getattr(self, "_memory_runtime_leases_blocked", False):
+                await condition.wait()
             runtime = getattr(self, "memory_runtime", None)
             temporary = runtime is None
             if temporary:
@@ -843,17 +901,51 @@ class Controller:
                 self._attach_memory_runtime_locked(
                     runtime,
                     capture_enabled=bool(self.config.memory.enabled),
+                    temporary=True,
                 )
             elif getattr(runtime, "retired", False):
                 raise MemoryRuntimeCloseUnprovedError(
                     "Memory runtime remains fenced after an unproved close"
                 )
-            lease = _MemoryRuntimeLease(runtime=runtime, temporary=temporary)
-            try:
-                yield lease
-            finally:
-                if temporary and getattr(self, "memory_runtime", None) is runtime:
-                    await self._close_memory_runtime_locked(runtime, retire=True)
+            self._memory_runtime_lease_count = (
+                getattr(self, "_memory_runtime_lease_count", 0) + 1
+            )
+            lease = _MemoryRuntimeLease(
+                runtime=runtime,
+                temporary=bool(getattr(self, "_memory_runtime_temporary", False)),
+            )
+        try:
+            yield lease
+        finally:
+            condition = self._memory_runtime_condition()
+            async with condition:
+                if getattr(self, "memory_runtime", None) is not runtime:
+                    raise RuntimeError("Memory runtime ownership changed during a lease")
+                lease_count = getattr(self, "_memory_runtime_lease_count", 0)
+                if lease_count <= 0:
+                    raise RuntimeError("Memory runtime lease count underflow")
+                self._memory_runtime_lease_count = lease_count - 1
+                condition.notify_all()
+                if (
+                    self._memory_runtime_lease_count == 0
+                    and getattr(self, "_memory_runtime_temporary", False)
+                ):
+                    acquired_fence = not getattr(
+                        self,
+                        "_memory_runtime_leases_blocked",
+                        False,
+                    )
+                    if acquired_fence:
+                        self._memory_runtime_leases_blocked = True
+                    try:
+                        await self._close_memory_runtime_locked(
+                            runtime,
+                            retire=True,
+                        )
+                    finally:
+                        if acquired_fence:
+                            self._memory_runtime_leases_blocked = False
+                        condition.notify_all()
 
     async def preflight_memory(self, memory_config: MemoryConfig) -> dict[str, Any]:
         """Preflight a candidate without activating capture on a disabled host."""
@@ -871,7 +963,7 @@ class Controller:
         """Hot-apply persisted Memory settings without destructive fallback."""
 
         await self._await_disabled_memory_cleanup()
-        async with self._memory_replacement_lock():
+        async with self._mutate_memory_runtime():
             runtime = getattr(self, "memory_runtime", None)
             if runtime is None:
                 if not memory_config.enabled:
@@ -1329,7 +1421,7 @@ class Controller:
         """Own temporary runtime cleanup inside one destructive transaction."""
 
         await self._await_disabled_memory_cleanup()
-        async with self._memory_replacement_lock():
+        async with self._mutate_memory_runtime():
             runtime = getattr(self, "memory_runtime", None)
             temporary = runtime is None
             if temporary:
@@ -1337,6 +1429,7 @@ class Controller:
                 self._attach_memory_runtime_locked(
                     runtime,
                     capture_enabled=bool(self.config.memory.enabled),
+                    temporary=True,
                 )
             try:
                 yield runtime
@@ -1387,6 +1480,22 @@ class Controller:
         finally:
             self._memory_reconcile_task = None
 
+    async def _cancel_disabled_memory_cleanup_task(self) -> None:
+        task = getattr(self, "_memory_disabled_cleanup_task", None)
+        try:
+            if task is None:
+                return
+            if not task.done():
+                task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as error:
+                logger.debug("Disabled Memory cleanup already failed: %s", error)
+        finally:
+            self._memory_disabled_cleanup_task = None
+
     @staticmethod
     def _log_late_memory_shutdown_stage(task: asyncio.Task[Any], label: str) -> None:
         try:
@@ -1406,6 +1515,10 @@ class Controller:
             quiesce()
 
         stages: list[tuple[str, Callable[[], Awaitable[None]]]] = []
+        if getattr(self, "_memory_disabled_cleanup_task", None) is not None:
+            stages.append(
+                ("disabled cleanup", self._cancel_disabled_memory_cleanup_task)
+            )
         if getattr(self, "_memory_reconcile_task", None) is not None:
             stages.append(("startup reconciliation", self._cancel_memory_reconcile_task))
 
@@ -1473,7 +1586,7 @@ class Controller:
     async def _close_memory_runtime_for_shutdown(self) -> None:
         """Close the currently owned runtime through the replacement gate."""
 
-        async with self._memory_replacement_lock():
+        async with self._mutate_memory_runtime():
             runtime = getattr(self, "memory_runtime", None)
             if runtime is None:
                 return
@@ -2148,7 +2261,7 @@ class Controller:
             DisabledMemoryAdapter,
         ):
             return
-        task = getattr(self, "_memory_reconcile_task", None)
+        task = getattr(self, "_memory_disabled_cleanup_task", None)
         if task is not None and not task.done():
             return
         record_path = (
@@ -2161,7 +2274,7 @@ class Controller:
             record_path.lstat()
         except OSError:
             return
-        self._memory_reconcile_task = asyncio.create_task(
+        self._memory_disabled_cleanup_task = asyncio.create_task(
             self._cleanup_disabled_memory_process(record_path),
             name="memory-disabled-everos-cleanup",
         )
