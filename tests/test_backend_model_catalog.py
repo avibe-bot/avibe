@@ -1,5 +1,4 @@
 import builtins
-import io
 import json
 import threading
 import time
@@ -29,7 +28,6 @@ class _FakeResponse:
 def _reset_remote_cache(monkeypatch):
     backend_model_catalog._REMOTE_MEMORY_CACHE.clear()
     monkeypatch.setattr(backend_model_catalog, "_REMOTE_REFRESH_IN_FLIGHT", False)
-    monkeypatch.setattr(backend_model_catalog, "_CODEX_HUB_REFRESH_IN_FLIGHT", False)
     yield
     backend_model_catalog._REMOTE_MEMORY_CACHE.clear()
 
@@ -108,45 +106,27 @@ def test_codex_hub_catalog_warms_from_complete_local_cache(monkeypatch, tmp_path
     }
 
 
-def test_codex_hub_catalog_export_strips_auth_and_stays_bounded(monkeypatch):
-    payload = b"x" * (backend_model_catalog.CODEX_HUB_CATALOG_MAX_BYTES + 1)
+def test_codex_hub_catalog_export_uses_stable_supervisor(monkeypatch):
     captured = {}
-    terminated = []
 
-    class Process:
-        def __init__(self):
-            self.stdout = io.BytesIO(payload)
-            self.returncode = None
-
-        def poll(self):
-            return self.returncode
-
-        def wait(self, timeout=None):
-            self.returncode = -9
-            return self.returncode
-
-        def kill(self):
-            self.returncode = -9
-
-    process = Process()
-
-    def popen(command, **kwargs):
-        captured.update({"command": command, **kwargs})
-        return process
-
-    def terminate(target, *_args):
-        terminated.append(target)
-        target.returncode = -9
-
-    monkeypatch.setattr(backend_model_catalog.subprocess, "Popen", popen)
-    monkeypatch.setattr(backend_model_catalog, "signal_process_tree", terminate)
-
-    with pytest.raises(RuntimeError, match="exceeded the safety limit"):
-        backend_model_catalog._export_codex_bundled_catalog(
-            "/opt/codex",
-            {"PATH": "/bin", "OPENAI_API_KEY": "secret", "CODEX_API_KEY": "secret"},
+    async def run(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            exit_code=0,
+            stdout='{"models":[{"slug":"gpt-test"}]}',
+            stderr="",
+            timed_out=False,
+            stdout_truncated=False,
         )
 
+    monkeypatch.setattr(backend_model_catalog, "run_supervised_command", run)
+
+    exported = backend_model_catalog._export_codex_bundled_catalog(
+        "/opt/codex",
+        {"PATH": "/bin", "OPENAI_API_KEY": "secret", "CODEX_API_KEY": "secret"},
+    )
+
+    assert exported == b'{"models":[{"slug":"gpt-test"}]}'
     assert captured["command"] == [
         "/opt/codex",
         "debug",
@@ -155,46 +135,74 @@ def test_codex_hub_catalog_export_strips_auth_and_stays_bounded(monkeypatch):
         "-c",
         "model_catalog_json=null",
     ]
-    assert captured["env"] == {"PATH": "/bin"}
-    assert captured["stderr"] is backend_model_catalog.subprocess.DEVNULL
-    assert terminated == [process]
+    assert captured["extra_env"] == {
+        "PATH": "/bin",
+        "OPENAI_API_KEY": "",
+        "OPENAI_BASE_URL": "",
+        "OPENAI_API_BASE": "",
+        "CODEX_API_KEY": "",
+        "AVIBE_MODEL_HUB_TOKEN": "",
+    }
+    assert captured["timeout_seconds"] == backend_model_catalog.CODEX_HUB_CATALOG_TIMEOUT_SECONDS
+    assert captured["max_output_bytes"] == backend_model_catalog.CODEX_HUB_CATALOG_MAX_BYTES
+    assert captured["discard_stderr"] is True
 
 
-def test_codex_hub_catalog_export_terminates_timed_out_process_tree(monkeypatch):
-    terminated = []
+@pytest.mark.parametrize(
+    ("result", "message"),
+    [
+        (SimpleNamespace(timed_out=True, stdout_truncated=False, exit_code=124), "timed out"),
+        (
+            SimpleNamespace(timed_out=False, stdout_truncated=True, exit_code=0),
+            "exceeded the safety limit",
+        ),
+        (SimpleNamespace(timed_out=False, stdout_truncated=False, exit_code=1), "could not export"),
+    ],
+)
+def test_codex_hub_catalog_export_rejects_supervised_failures(monkeypatch, result, message):
+    result.stdout = ""
 
-    class Process:
-        def __init__(self):
-            self.stdout = io.BytesIO(b"")
-            self.returncode = None
+    async def run(**_kwargs):
+        return result
 
-        def poll(self):
-            return self.returncode
+    monkeypatch.setattr(backend_model_catalog, "run_supervised_command", run)
 
-        def wait(self, timeout=None):
-            self.returncode = -9
-            return self.returncode
+    with pytest.raises(RuntimeError, match=message):
+        backend_model_catalog._export_codex_bundled_catalog("/opt/codex")
 
-        def kill(self):
-            self.returncode = -9
 
-    process = Process()
+def test_codex_hub_catalog_preparation_reuses_ready_artifact(monkeypatch, tmp_path):
+    exported = []
+    ready = tmp_path / "standard-responses.json"
     monkeypatch.setattr(
-        backend_model_catalog.subprocess,
-        "Popen",
-        lambda *_args, **_kwargs: process,
+        backend_model_catalog,
+        "prepare_codex_hub_catalog_from_cache",
+        lambda: ready,
     )
     monkeypatch.setattr(
         backend_model_catalog,
-        "signal_process_tree",
-        lambda target, *_args: (terminated.append(target), setattr(target, "returncode", -9)),
+        "refresh_codex_hub_catalog_now",
+        lambda *_args: exported.append(True),
     )
-    monkeypatch.setattr(backend_model_catalog, "CODEX_HUB_CATALOG_TIMEOUT_SECONDS", 0)
 
-    with pytest.raises(RuntimeError, match="timed out"):
-        backend_model_catalog._export_codex_bundled_catalog("/opt/codex")
+    assert backend_model_catalog.prepare_codex_hub_catalog("codex") == ready
+    assert exported == []
 
-    assert terminated == [process]
+
+def test_codex_hub_catalog_preparation_exports_before_initial_readiness(monkeypatch, tmp_path):
+    exported = tmp_path / "standard-responses.json"
+    monkeypatch.setattr(
+        backend_model_catalog,
+        "prepare_codex_hub_catalog_from_cache",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        backend_model_catalog,
+        "refresh_codex_hub_catalog_now",
+        lambda binary, base_env=None: exported,
+    )
+
+    assert backend_model_catalog.prepare_codex_hub_catalog("codex") == exported
 
 
 def test_merge_sources_applies_tombstones_and_fills_missing_metadata():

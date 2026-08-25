@@ -395,6 +395,28 @@ async def test_spawn_uses_the_stable_supervisor_entrypoint(tmp_path: Path, monke
     assert kwargs["stderr"] == asyncio.subprocess.PIPE
 
 
+async def test_spawn_can_discard_supervisor_stderr(tmp_path: Path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_create_subprocess_exec(*_args, **kwargs):
+        captured.update(kwargs)
+        return _FakeProcess(stderr=None)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    result = await run_supervised_command(
+        command=["python3", "-c", "print('ok')"],
+        cwd=str(tmp_path),
+        timeout_seconds=5,
+        label="test discarded stderr",
+        discard_stderr=True,
+    )
+
+    assert result.exit_code == 0
+    assert result.stderr == ""
+    assert captured["stderr"] == asyncio.subprocess.DEVNULL
+
+
 _LARGE_OUTPUT_COMMAND = (
     "import sys; sys.stdout.write('x' * 300000); sys.stdout.flush(); sys.exit(0)"
 )

@@ -1,10 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
-import logging
 import os
-import subprocess
 import threading
 import time
 import urllib.error
@@ -14,7 +13,7 @@ from typing import Any, Iterable, Sequence
 
 from config import paths
 from config.atomic_io import write_atomic
-from core.process_isolation import KILL_SIGNAL, isolated_subprocess_kwargs, signal_process_tree
+from core.command_runner import run_supervised_command
 from vibe.claude_model_catalog import DEFAULT_CLAUDE_MODEL_ALIASES, load_catalog_models
 from vibe.codex_config import get_codex_home
 
@@ -65,9 +64,6 @@ _REASONING_LABELS = {
 _REMOTE_LOCK = threading.Lock()
 _REMOTE_REFRESH_IN_FLIGHT = False
 _REMOTE_MEMORY_CACHE: dict[str, Any] = {}
-_CODEX_HUB_LOCK = threading.Lock()
-_CODEX_HUB_REFRESH_IN_FLIGHT = False
-logger = logging.getLogger(__name__)
 
 
 def get_bundled_catalog_path(repo_root: Path | None = None) -> Path:
@@ -150,20 +146,11 @@ def prepare_codex_hub_catalog_from_cache() -> Path | None:
         return ready_codex_hub_catalog_path()
 
 
-def _terminate_catalog_export(process: subprocess.Popen[bytes]) -> None:
-    signal_process_tree(process, KILL_SIGNAL, logger, "Codex model catalog export")
-    try:
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=5)
-
-
 def _export_codex_bundled_catalog(
     binary: str,
     base_env: dict[str, str] | None = None,
 ) -> bytes:
-    env = dict(base_env or os.environ)
+    env = dict(base_env or {})
     for key in (
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
@@ -171,76 +158,32 @@ def _export_codex_bundled_catalog(
         "CODEX_API_KEY",
         "AVIBE_MODEL_HUB_TOKEN",
     ):
-        env.pop(key, None)
-    process = subprocess.Popen(
-        [
-            binary,
-            "debug",
-            "models",
-            "--bundled",
-            "-c",
-            "model_catalog_json=null",
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        env=env,
-        **isolated_subprocess_kwargs(),
+        env[key] = ""
+    result = asyncio.run(
+        run_supervised_command(
+            command=[
+                binary,
+                "debug",
+                "models",
+                "--bundled",
+                "-c",
+                "model_catalog_json=null",
+            ],
+            cwd=os.getcwd(),
+            timeout_seconds=CODEX_HUB_CATALOG_TIMEOUT_SECONDS,
+            label="Codex model catalog export",
+            max_output_bytes=CODEX_HUB_CATALOG_MAX_BYTES,
+            extra_env=env,
+            discard_stderr=True,
+        )
     )
-    if process.stdout is None:  # pragma: no cover - PIPE guarantees this
-        _terminate_catalog_export(process)
-        raise RuntimeError("Codex model catalog export opened no output stream")
-
-    chunks: list[bytes] = []
-    total = 0
-    overflow = threading.Event()
-    reader_error: list[BaseException] = []
-
-    def read_stdout() -> None:
-        nonlocal total
-        try:
-            while True:
-                chunk = process.stdout.read(64 * 1024)
-                if not chunk:
-                    return
-                total += len(chunk)
-                if total > CODEX_HUB_CATALOG_MAX_BYTES:
-                    overflow.set()
-                    return
-                chunks.append(chunk)
-        except BaseException as exc:  # noqa: BLE001 - returned to owner thread
-            reader_error.append(exc)
-
-    reader = threading.Thread(
-        target=read_stdout,
-        name="avibe-codex-model-catalog-reader",
-        daemon=True,
-    )
-    reader.start()
-    deadline = time.monotonic() + CODEX_HUB_CATALOG_TIMEOUT_SECONDS
-    try:
-        while process.poll() is None:
-            if overflow.is_set():
-                raise RuntimeError("Codex bundled model catalog exceeded the safety limit")
-            if time.monotonic() >= deadline:
-                raise RuntimeError("Codex bundled model catalog timed out")
-            time.sleep(0.02)
-
-        reader.join(timeout=2)
-        if reader.is_alive():
-            raise RuntimeError("Codex bundled model catalog left its output stream open")
-        if reader_error:
-            raise RuntimeError("Codex bundled model catalog could not be read") from reader_error[0]
-        if overflow.is_set():
-            raise RuntimeError("Codex bundled model catalog exceeded the safety limit")
-        if process.returncode != 0:
-            raise RuntimeError("Codex could not export its bundled model catalog")
-        return b"".join(chunks)
-    except BaseException:
-        _terminate_catalog_export(process)
-        reader.join(timeout=5)
-        raise
-    finally:
-        process.stdout.close()
+    if result.timed_out:
+        raise RuntimeError("Codex bundled model catalog timed out")
+    if result.stdout_truncated:
+        raise RuntimeError("Codex bundled model catalog exceeded the safety limit")
+    if result.exit_code != 0:
+        raise RuntimeError("Codex could not export its bundled model catalog")
+    return result.stdout.encode()
 
 
 def refresh_codex_hub_catalog_now(
@@ -250,33 +193,16 @@ def refresh_codex_hub_catalog_now(
     return _publish_codex_hub_catalog(_export_codex_bundled_catalog(binary, base_env))
 
 
-def schedule_codex_hub_catalog_refresh(
+def prepare_codex_hub_catalog(
     binary: str,
     base_env: dict[str, str] | None = None,
-) -> bool:
-    global _CODEX_HUB_REFRESH_IN_FLIGHT
+) -> Path:
+    """Make the Hub catalog available before an enabled Codex backend is ready."""
 
-    with _CODEX_HUB_LOCK:
-        if _CODEX_HUB_REFRESH_IN_FLIGHT:
-            return False
-        _CODEX_HUB_REFRESH_IN_FLIGHT = True
-
-    def worker() -> None:
-        global _CODEX_HUB_REFRESH_IN_FLIGHT
-        try:
-            refresh_codex_hub_catalog_now(binary, base_env)
-        except Exception as exc:  # noqa: BLE001 - best-effort startup refresh
-            logger.warning("Codex Hub model catalog refresh failed: %s", exc)
-        finally:
-            with _CODEX_HUB_LOCK:
-                _CODEX_HUB_REFRESH_IN_FLIGHT = False
-
-    threading.Thread(
-        target=worker,
-        name="avibe-codex-hub-catalog-refresh",
-        daemon=True,
-    ).start()
-    return True
+    cached = prepare_codex_hub_catalog_from_cache()
+    if cached is not None:
+        return cached
+    return refresh_codex_hub_catalog_now(binary, base_env)
 
 
 def load_bundled_catalog(path: Path | None = None) -> dict[str, Any]:
