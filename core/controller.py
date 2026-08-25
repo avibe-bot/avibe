@@ -422,6 +422,7 @@ class Controller:
         self._memory_runtime_lease_count = 0
         self._memory_runtime_leases_blocked = False
         self._memory_runtime_temporary = False
+        self._memory_runtime_temporary_config: MemoryConfig | None = None
         self._memory_destructive_tasks: set[asyncio.Task[dict[str, Any]]] = set()
         self._memory_destructive_quiescing = False
 
@@ -771,7 +772,7 @@ class Controller:
     async def _await_disabled_memory_cleanup(self) -> None:
         cleanup_task = getattr(self, "_memory_disabled_cleanup_task", None)
         if cleanup_task is not None and not cleanup_task.done():
-            await cleanup_task
+            await asyncio.shield(cleanup_task)
 
     def _memory_runtime_condition(self) -> asyncio.Condition:
         """Return the lease condition bound to the replacement gate."""
@@ -857,6 +858,7 @@ class Controller:
         self.memory_module = None
         self.memory_adapter = DisabledMemoryAdapter()
         self._memory_runtime_temporary = False
+        self._memory_runtime_temporary_config = None
         self._memory_runtime_generation = (
             getattr(self, "_memory_runtime_generation", 0) + 1
         )
@@ -895,7 +897,21 @@ class Controller:
         await self._await_disabled_memory_cleanup()
         condition = self._memory_runtime_condition()
         async with condition:
-            while getattr(self, "_memory_runtime_leases_blocked", False):
+            while True:
+                while getattr(self, "_memory_runtime_leases_blocked", False):
+                    await condition.wait()
+                runtime = getattr(self, "memory_runtime", None)
+                if runtime is not None and getattr(runtime, "retired", False):
+                    raise MemoryRuntimeCloseUnprovedError(
+                        "Memory runtime remains fenced after an unproved close"
+                    )
+                if not (
+                    runtime is not None
+                    and getattr(self, "_memory_runtime_temporary", False)
+                    and getattr(self, "_memory_runtime_temporary_config", None)
+                    != selected_config
+                ):
+                    break
                 await condition.wait()
             if (
                 memory_config is None
@@ -903,7 +919,6 @@ class Controller:
                 and not allow_disabled
             ):
                 raise MemoryStoreUnavailableError("Memory is disabled")
-            runtime = getattr(self, "memory_runtime", None)
             temporary = runtime is None
             if temporary:
                 runtime = self._create_memory_runtime(selected_config)
@@ -912,10 +927,7 @@ class Controller:
                     capture_enabled=bool(self.config.memory.enabled),
                     temporary=True,
                 )
-            elif getattr(runtime, "retired", False):
-                raise MemoryRuntimeCloseUnprovedError(
-                    "Memory runtime remains fenced after an unproved close"
-                )
+                self._memory_runtime_temporary_config = selected_config
             self._memory_runtime_lease_count = (
                 getattr(self, "_memory_runtime_lease_count", 0) + 1
             )

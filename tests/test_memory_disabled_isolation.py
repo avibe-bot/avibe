@@ -410,6 +410,58 @@ async def test_disabled_install_owns_runtime_until_successful_close() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancelled_install_does_not_cancel_shared_disabled_cleanup() -> None:
+    controller = Controller.__new__(Controller)
+    controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)
+    controller.memory_adapter = DisabledMemoryAdapter()
+    controller.memory_runtime = None
+    controller.memory_module = None
+    controller._memory_reconcile_task = None
+    cleanup_started = asyncio.Event()
+    cleanup_release = asyncio.Event()
+    created: list[object] = []
+
+    async def cleanup() -> None:
+        cleanup_started.set()
+        await cleanup_release.wait()
+
+    class _Runtime:
+        def __init__(self) -> None:
+            self.module = object()
+            self.closed = False
+            self.retired = False
+
+        async def install_artifact(self) -> dict[str, object]:
+            return {"ok": True}
+
+        def retire(self) -> None:
+            self.retired = True
+
+        async def close(self) -> None:
+            self.closed = True
+
+    cleanup_task = asyncio.create_task(cleanup())
+    controller._memory_disabled_cleanup_task = cleanup_task
+    controller._create_memory_runtime = lambda config: created.append(config) or _Runtime()
+
+    first = asyncio.create_task(controller.install_memory_runtime())
+    await cleanup_started.wait()
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    assert cleanup_task.done() is False
+    second = asyncio.create_task(controller.install_memory_runtime())
+    await asyncio.sleep(0)
+    assert created == []
+
+    cleanup_release.set()
+    assert await second == {"ok": True}
+    assert cleanup_task.done() is True
+    assert created == [controller.config.memory]
+
+
+@pytest.mark.asyncio
 async def test_temporary_close_failure_retains_fenced_controller_ownership() -> None:
     controller = Controller.__new__(Controller)
     controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)
@@ -900,6 +952,66 @@ async def test_concurrent_temporary_borrows_share_runtime_until_final_release() 
     assert created[0].close_calls == 1
     assert controller.memory_runtime is None
     assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
+
+
+@pytest.mark.asyncio
+async def test_temporary_borrows_do_not_share_different_configs() -> None:
+    controller = Controller.__new__(Controller)
+    controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)
+    controller.memory_adapter = DisabledMemoryAdapter()
+    controller.memory_runtime = None
+    controller.memory_module = None
+    controller._memory_reconcile_task = None
+    controller._memory_disabled_cleanup_task = None
+    candidate = replace(controller.config.memory, enabled=True)
+    candidate_started = asyncio.Event()
+    candidate_release = asyncio.Event()
+    install_started = asyncio.Event()
+    created: list[object] = []
+
+    class _Runtime:
+        def __init__(self, config) -> None:
+            self.config = config
+            self.module = object()
+            self.closed = False
+            self.retired = False
+
+        async def preflight(self, config) -> dict[str, object]:
+            assert self.config == candidate
+            assert config == candidate
+            candidate_started.set()
+            await candidate_release.wait()
+            return {"ok": True}
+
+        async def install_artifact(self) -> dict[str, object]:
+            assert self.config == controller.config.memory
+            install_started.set()
+            return {"ok": True}
+
+        def retire(self) -> None:
+            self.retired = True
+
+        async def close(self) -> None:
+            self.closed = True
+
+    def create_runtime(config) -> _Runtime:
+        created.append(config)
+        return _Runtime(config)
+
+    controller._create_memory_runtime = create_runtime
+    preflight = asyncio.create_task(controller.preflight_memory(candidate))
+    await candidate_started.wait()
+    install = asyncio.create_task(controller.install_memory_runtime())
+    await asyncio.sleep(0)
+
+    assert install_started.is_set() is False
+    assert created == [candidate]
+
+    candidate_release.set()
+    assert await preflight == {"ok": True}
+    assert await install == {"ok": True}
+    assert created == [candidate, controller.config.memory]
+    assert controller.memory_runtime is None
 
 
 @pytest.mark.asyncio
