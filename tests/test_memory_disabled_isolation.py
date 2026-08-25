@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 import types
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -59,6 +60,37 @@ def _memory_state_entries(home: Path) -> list[Path]:
     ]
 
 
+async def _start_disabled_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    reconcile_orphans: Callable[[], Awaitable[None]],
+) -> tuple[Controller, asyncio.Task[None], Path]:
+    memory_dir = paths.get_vibe_remote_dir() / "memory"
+    record_path = memory_dir / ".rt" / "everos.sidecar.json"
+    record_path.parent.mkdir(parents=True)
+    record_path.write_text("{}", encoding="utf-8")
+
+    class _Reconciler:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def reconcile_orphans(self) -> None:
+            await reconcile_orphans()
+
+    process_module = types.ModuleType("core.memory.process")
+    process_module.ReleasedEverOSOrphanReconciler = _Reconciler
+    monkeypatch.setitem(sys.modules, "core.memory.process", process_module)
+
+    controller = Controller.__new__(Controller)
+    controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)
+    controller.memory_adapter = DisabledMemoryAdapter()
+    controller.memory_runtime = None
+    controller._memory_disabled_cleanup_task = None
+    await controller._schedule_disabled_memory_cleanup()
+    cleanup_task = controller._memory_disabled_cleanup_task
+    assert cleanup_task is not None
+    return controller, cleanup_task, record_path
+
+
 def test_memory_indep_013_disabled_fresh_startup_has_no_runtime_side_effects(
     tmp_path: Path,
 ) -> None:
@@ -100,7 +132,7 @@ assert not [
     if any("memory" in part.casefold() or "everos" in part.casefold()
            for part in path.relative_to(home).parts)
 ]
-controller._schedule_disabled_memory_cleanup()
+asyncio.run(controller._schedule_disabled_memory_cleanup())
 assert controller._memory_disabled_cleanup_task is None
 assert "core.memory.process" not in sys.modules
 
@@ -268,7 +300,7 @@ async def test_disabled_cleanup_reaps_only_preexisting_everos_ownership(
     controller.memory_runtime = None
     controller._memory_disabled_cleanup_task = None
 
-    controller._schedule_disabled_memory_cleanup()
+    await controller._schedule_disabled_memory_cleanup()
 
     assert controller._memory_disabled_cleanup_task is not None
     await controller._memory_disabled_cleanup_task
@@ -278,6 +310,84 @@ async def test_disabled_cleanup_reaps_only_preexisting_everos_ownership(
             paths.get_vibe_remote_dir(),
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_disabled_cleanup_pending_projects_degraded_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleanup_started = asyncio.Event()
+    cleanup_release = asyncio.Event()
+
+    async def reconcile_orphans() -> None:
+        cleanup_started.set()
+        await cleanup_release.wait()
+        record_path.unlink()
+
+    controller, cleanup_task, record_path = await _start_disabled_cleanup(
+        monkeypatch,
+        reconcile_orphans,
+    )
+    await cleanup_started.wait()
+
+    try:
+        status = await asyncio.wait_for(
+            controller.memory_status_payload(),
+            timeout=0.1,
+        )
+        assert status["state"] == "degraded"
+        assert status["reason"] == "memory_runtime_busy"
+        assert status["source"]["reason"] == "memory_runtime_busy"
+    finally:
+        cleanup_release.set()
+        await cleanup_task
+
+
+@pytest.mark.asyncio
+async def test_disabled_cleanup_failure_remains_degraded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def reconcile_orphans() -> None:
+        raise RuntimeError("cleanup failed")
+
+    controller, cleanup_task, _record_path = await _start_disabled_cleanup(
+        monkeypatch,
+        reconcile_orphans,
+    )
+    await cleanup_task
+
+    status = await controller.memory_status_payload()
+
+    assert status["state"] == "degraded"
+    assert status["reason"] == "memory_runtime_busy"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("remove_ownership", "expected_state"),
+    [(False, "degraded"), (True, "disabled")],
+)
+async def test_disabled_cleanup_success_rechecks_released_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+    remove_ownership: bool,
+    expected_state: str,
+) -> None:
+    async def reconcile_orphans() -> None:
+        if remove_ownership:
+            record_path.unlink()
+
+    controller, cleanup_task, record_path = await _start_disabled_cleanup(
+        monkeypatch,
+        reconcile_orphans,
+    )
+    await cleanup_task
+
+    status = await controller.memory_status_payload()
+
+    assert status["state"] == expected_state
+    assert status["reason"] == (
+        "memory_runtime_busy" if expected_state == "degraded" else None
+    )
 
 
 @pytest.mark.asyncio
@@ -663,6 +773,28 @@ async def test_disabled_status_preserves_legacy_repair_fence_without_runtime() -
 
 
 @pytest.mark.asyncio
+async def test_disabled_cleanup_fence_precedes_legacy_repair_projection() -> None:
+    controller = Controller.__new__(Controller)
+    controller.config = types.SimpleNamespace(
+        memory=replace(
+            _disabled_app_config().memory,
+            legacy_needs_repair=True,
+        )
+    )
+    controller.memory_adapter = DisabledMemoryAdapter()
+    controller.memory_runtime = None
+    controller.memory_module = None
+    controller._memory_disabled_cleanup_task = None
+    controller._memory_disabled_cleanup_unproved = True
+
+    status = await controller.memory_status_payload()
+
+    assert status["state"] == "degraded"
+    assert status["reason"] == "memory_runtime_busy"
+    assert status["source"]["reason"] == "memory_runtime_busy"
+
+
+@pytest.mark.asyncio
 async def test_disabled_dashboard_reads_do_not_construct_runtime() -> None:
     controller = Controller.__new__(Controller)
     controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)
@@ -799,6 +931,44 @@ async def test_enabled_status_does_not_wait_for_startup_wake() -> None:
     finally:
         wake_release.set()
         await controller._memory_reconcile_task
+
+
+@pytest.mark.asyncio
+async def test_enabled_status_reprojects_when_disabled_before_borrow() -> None:
+    enabled = replace(_disabled_app_config().memory, enabled=True)
+    disabled = replace(enabled, enabled=False)
+    controller = Controller.__new__(Controller)
+    controller.config = types.SimpleNamespace(memory=enabled)
+    controller.memory_adapter = None
+    controller.memory_runtime = None
+    controller.memory_module = None
+    controller._memory_reconcile_task = None
+    controller._memory_disabled_cleanup_task = None
+    borrow_started = asyncio.Event()
+    borrow_release = asyncio.Event()
+
+    async def await_cleanup() -> None:
+        borrow_started.set()
+        await borrow_release.wait()
+
+    controller._await_disabled_memory_cleanup = await_cleanup
+    controller._create_memory_runtime = lambda _config: pytest.fail(
+        "status must re-project disabled state before constructing Memory"
+    )
+    status_task = asyncio.create_task(controller.memory_status_payload())
+    await borrow_started.wait()
+
+    condition = controller._memory_runtime_condition()
+    async with condition:
+        controller.config.memory = disabled
+    borrow_release.set()
+
+    status = await status_task
+
+    assert status["status"] == "ok"
+    assert status["state"] == "disabled"
+    assert status["reason"] is None
+    assert status["source"]["reason"] == "memory_disabled"
 
 
 @pytest.mark.asyncio
