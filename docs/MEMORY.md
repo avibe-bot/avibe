@@ -55,9 +55,17 @@ The following rules are architectural invariants:
 
 ## Current architecture
 
+Platform adapters classify native events but do not own Memory business logic.
+They normalize each event into `InboundTurnFacts`; `CaptureAdmission` treats
+those facts as untrusted and rechecks identity, platform, event shape, and
+settings before admitting a capture. `MemoryModule` owns the admitted product
+operation and its scoped read behavior.
+
 | Component | Single responsibility |
 | --- | --- |
-| `CaptureAdmission` / `MemoryModule` | Keep Memory business policy out of transports, validate product requests, derive owner/project scope, and expose capture and read semantics. |
+| Platform adapters | Classify native events and normalize transport-specific facts without deciding Memory business eligibility. |
+| `CaptureAdmission` | Revalidate untrusted inbound facts and make the single capture-admission decision. |
+| `MemoryModule` | Derive owner/project scope and expose admitted capture and read semantics without exposing storage internals. |
 | `BestEffortMemoryWriter` | Owns bounded, ordered, volatile capture delivery and flush attempts. |
 | `MemoryRuntime` | Owns public state, configuration policy, operation exclusion, and destructive-operation admission. |
 | `EverOSSupervisor` | Exclusively owns the current child, readiness, bounded Wake/restart recovery, stop proof, and released-orphan reconciliation. |
@@ -71,9 +79,11 @@ The data and lifecycle paths remain separate and short:
 `MemoryRuntime -> EverOSSupervisor -> one EverOSProcess attempt`
 
 Reads use the same private EverOS service and its active native root.
-`memory.sqlite` retains only stable Avibe identity and project-catalog facts; it
-is not a delivery queue or recovery state machine. The later sections define
-the product behavior at these seams.
+`memory.sqlite` retains stable Avibe identity and project-catalog facts plus a
+bounded metadata row for timestamp, capture-outcome, and processing-fault
+diagnostics. It contains no Memory payload and is not a delivery queue or
+recovery state machine. The later sections define the product behavior at these
+seams.
 
 ## User and Agent memory ownership
 
@@ -226,11 +236,18 @@ An Embedding identity change invalidates the native root. Saving such a change
 uses the same explicit accepted-loss boundary and unified reset; there is no
 candidate config, rebuild marker, retry stage, or fallback to old settings.
 
-Released `recovery_intent`, `embedding_change_pending`, cloud transition, and
-Clear-state shapes are compatibility input only. Their retired stages are not
-serialized or resumed. Unsafe compatibility evidence collapses into an internal
-`repair_required` fence that ordinary saves preserve until a successful
-destructive Repair clears it.
+When a working custom installation first receives organization-managed Memory
+capability, Avibe persists `cloud.transition_notice_pending` as an
+acknowledgement fence and keeps the current custom source selected until the
+user explicitly confirms the identity-changing reset. This flag records a
+pending user decision, not capture delivery or resumable recovery progress, and
+does not promise to retain capture while the decision is pending.
+
+Released `recovery_intent`, `embedding_change_pending`,
+`transition_rebuild_owned`, and Clear-state shapes are compatibility input only.
+Their retired execution stages are not serialized or resumed. Unsafe
+compatibility evidence collapses into an internal `repair_required` fence that
+ordinary saves preserve until a successful destructive Repair clears it.
 
 ## Best-effort capture
 
@@ -241,12 +258,16 @@ and a bounded pending-flush tracker (256 sessions, 100 message IDs per session).
 Idle, age, and count thresholds are fixed at five minutes, thirty minutes, and
 100 acknowledgements.
 
-Admission writes only stable identity facts to `memory.sqlite`: the install
-scope key, epoch, provider timestamp watermark, and project catalog. After v4
-migration the only application tables are `memory_meta` and `memory_projects`;
-released queue, lease, settlement, attachment-reference, and recovery tables
-are discarded without provider I/O. Older v0-v3 shapes preserve identity and
-project facts, deriving legacy project rows from their former capture data.
+Persistence is metadata-only. `memory.sqlite` stores the install scope key,
+epoch, provider-root id, provider timestamp watermark, project catalog, capture
+summaries (`missed_count`, `last_success_at`, `last_error`, and their
+timestamps), and bounded processing-fault diagnostics. These fields summarize
+local state; they contain no message payload or per-call delivery workflow.
+After v4 migration the only application tables are `memory_meta` and
+`memory_projects`; released queue, lease, settlement, attachment-reference, and
+recovery tables are discarded without provider I/O. Older v0-v3 shapes preserve
+identity and project facts, deriving legacy project rows from their former
+capture data.
 
 Lifecycle offers and barriers are non-blocking. `/new`, archive, runtime
 replacement, and shutdown never wait for capture delivery. Work still preparing

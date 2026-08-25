@@ -1,4 +1,4 @@
--- Identity-only Memory schema for new databases and v4 migration targets.
+-- Metadata-only Memory schema for new databases and v4 migration targets.
 CREATE TABLE IF NOT EXISTS memory_meta (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     epoch INTEGER NOT NULL,

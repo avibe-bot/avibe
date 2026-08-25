@@ -1,4 +1,4 @@
-"""Identity-only SQLite state for best-effort Memory capture."""
+"""Metadata-only SQLite state for best-effort Memory capture."""
 
 from __future__ import annotations
 

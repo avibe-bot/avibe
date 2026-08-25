@@ -38,9 +38,15 @@ Avibe 记忆会把符合条件的 Workbench 和私聊消息提炼为按范围隔
 
 ## 当前架构
 
+平台适配器负责对原生事件分类，但不拥有 Memory 业务逻辑。它们把事件规范化为
+`InboundTurnFacts`；`CaptureAdmission` 将这些事实视为不可信输入，在准入前重新校验身份、
+平台、事件形状与设置。`MemoryModule` 负责已准入的产品操作及其范围化读取行为。
+
 | 组件 | 唯一职责 |
 | --- | --- |
-| `CaptureAdmission` / `MemoryModule` | 避免 transport 承担 Memory 业务策略，校验产品请求、派生 owner/project 范围，并提供捕获与读取语义。 |
+| 平台适配器 | 分类原生事件并规范化 transport 事实，但不决定 Memory 业务准入。 |
+| `CaptureAdmission` | 复核不可信的入站事实，并作出唯一的捕获准入决定。 |
+| `MemoryModule` | 派生 owner/project 范围，提供已准入的捕获与读取语义，不暴露存储内部。 |
 | `BestEffortMemoryWriter` | 负责有界、有序、易失的捕获投递和 flush 尝试。 |
 | `MemoryRuntime` | 负责公开状态、配置策略、操作互斥和破坏性操作准入。 |
 | `EverOSSupervisor` | 独占当前子进程、就绪状态、有界 Wake/重启恢复、停止证明和旧版本孤儿协调。 |
@@ -53,8 +59,9 @@ Avibe 记忆会把符合条件的 Workbench 和私聊消息提炼为按范围隔
 
 `MemoryRuntime -> EverOSSupervisor -> 一次 EverOSProcess 启动`
 
-读取使用同一个私有 EverOS 服务及其当前原生数据根。`memory.sqlite` 只保留稳定的 Avibe
-身份与项目目录事实，不承担投递队列或恢复状态机。后续章节定义这些边界上的具体产品行为。
+读取使用同一个私有 EverOS 服务及其当前原生数据根。`memory.sqlite` 保留稳定的 Avibe
+身份与项目目录事实，以及一行有界的时间戳、捕获结果和处理故障诊断元数据；它不包含
+Memory 消息载荷，也不承担投递队列或恢复状态机。后续章节定义这些边界上的具体产品行为。
 
 ## 用户与 Agent 记忆归属
 
@@ -135,10 +142,12 @@ Call Log，记录可以不完整或丢失。包含 `memory.diagnostics.log_provi
 有界的 PendingFlush 跟踪器（最多 256 个 session、每个 100 个消息 ID）；空闲、年龄和
 数量阈值固定为 5 分钟、30 分钟和 100 次确认。
 
-准入事务只写入稳定身份事实：安装 scope key、epoch、提供方时间戳水位线和项目目录。
-v4 之后 `memory.sqlite` 只有 `memory_meta` 与 `memory_projects` 两张应用表。v0-v3
-迁移会保留身份和项目事实，并从旧捕获数据推导项目行；队列、租约、结算、附件引用和
-恢复表会在没有提供方 I/O 的情况下丢弃。
+持久化仅包含元数据。`memory.sqlite` 保存安装 scope key、epoch、provider-root id、提供方
+时间戳水位线、项目目录、捕获摘要（`missed_count`、`last_success_at`、`last_error` 及其
+时间戳）和有界的处理故障诊断。这些字段只概括本地状态，不包含消息载荷或逐调用投递
+工作流。v4 之后只有 `memory_meta` 与 `memory_projects` 两张应用表。v0-v3 迁移会保留身份
+与项目事实，并从旧捕获数据推导项目行；队列、租约、结算、附件引用和恢复表会在没有
+提供方 I/O 的情况下丢弃。
 
 生命周期 offer 和 barrier 都不会阻塞。`/new`、归档、运行时替换和关机不会等待捕获
 投递；仍在准备中或属于旧 authority generation 的捕获可能丢失或失效。替换和关机
@@ -185,9 +194,14 @@ API、内部 API、客户端与 Controller 每一层都要求精确的 `confirm_
 Embedding 身份变更会使原生数据根失效，因此保存时使用同一个明确接受丢失的边界与统一重置。
 系统不再保留候选配置、重建标记、重试阶段，也不会静默回退到旧设置。
 
-已发布的 `recovery_intent`、`embedding_change_pending`、cloud transition 与 Clear 状态仅作
-兼容输入，其已退役阶段不会再次序列化或续跑。不安全的兼容证据会折叠为内部
-`repair_required` 围栏；普通保存会保留该围栏，直到一次成功的破坏性修复将其清除。
+当一个正常工作的 custom 安装首次获得组织托管的 Memory 能力时，Avibe 会持久化
+`cloud.transition_notice_pending` 作为确认围栏，并在用户明确确认身份变更重置前继续选择
+当前 custom 来源。该字段只记录待处理的用户决定，不表示捕获投递或可续跑的恢复进度，
+也不承诺在等待确认期间保留捕获。
+
+已发布的 `recovery_intent`、`embedding_change_pending`、`transition_rebuild_owned` 与 Clear
+状态仅作兼容输入，其已退役执行阶段不会再次序列化或续跑。不安全的兼容证据会折叠为
+内部 `repair_required` 围栏；普通保存会保留该围栏，直到一次成功的破坏性修复将其清除。
 
 ## 召回策略
 
