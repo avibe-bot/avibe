@@ -879,7 +879,13 @@ class Controller:
             retire_runtime = getattr(runtime, "retire", None)
             if callable(retire_runtime) and not getattr(runtime, "retired", False):
                 retire_runtime()
-        await runtime.close()
+        try:
+            await runtime.close()
+        except BaseException:
+            retire_runtime = getattr(runtime, "retire", None)
+            if callable(retire_runtime) and not getattr(runtime, "retired", False):
+                retire_runtime()
+            raise
         self._clear_memory_runtime_locked(runtime)
 
     @asynccontextmanager
@@ -986,6 +992,10 @@ class Controller:
         await self._await_disabled_memory_cleanup()
         async with self._mutate_memory_runtime():
             runtime = getattr(self, "memory_runtime", None)
+            if runtime is not None and getattr(runtime, "retired", False):
+                raise MemoryRuntimeCloseUnprovedError(
+                    "Memory runtime remains fenced after an unproved close"
+                )
             if runtime is None:
                 if not memory_config.enabled:
                     self.memory_adapter = DisabledMemoryAdapter()
@@ -1499,6 +1509,10 @@ class Controller:
         await self._await_disabled_memory_cleanup()
         async with self._mutate_memory_runtime():
             runtime = getattr(self, "memory_runtime", None)
+            if runtime is not None and getattr(runtime, "retired", False):
+                raise MemoryRuntimeCloseUnprovedError(
+                    "Memory runtime remains fenced after an unproved close"
+                )
             temporary = runtime is None
             if temporary:
                 runtime = self._create_memory_runtime(self.config.memory)

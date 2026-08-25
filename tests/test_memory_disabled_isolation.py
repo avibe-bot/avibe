@@ -17,7 +17,10 @@ from config.v2_config import V2Config
 from core.controller import Controller
 from core.memory import CaptureRequest, CaptureSkipped
 from core.memory_adapter import DisabledMemoryAdapter
-from vibe.memory_contract import MemoryStoreUnavailableError
+from vibe.memory_contract import (
+    MemoryRuntimeCloseUnprovedError,
+    MemoryStoreUnavailableError,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -577,7 +580,7 @@ async def test_temporary_close_without_closed_proof_retains_ownership() -> None:
 
 
 @pytest.mark.asyncio
-async def test_disable_close_failure_then_settings_rollback_reuses_one_runtime() -> None:
+async def test_disable_close_failure_fences_rollback_and_destructive_reuse() -> None:
     enabled = replace(_disabled_app_config().memory, enabled=True)
     disabled = replace(enabled, enabled=False)
     controller = Controller.__new__(Controller)
@@ -585,12 +588,14 @@ async def test_disable_close_failure_then_settings_rollback_reuses_one_runtime()
     controller.memory_adapter = None
     controller.memory_module = None
     controller._memory_reconcile_task = None
+    controller._memory_disabled_cleanup_task = None
     created: list[object] = []
 
     class _Runtime:
         def __init__(self) -> None:
             self.module = object()
             self.closed = False
+            self.retired = False
             self.reconciled: list[object] = []
 
         async def reconcile(self, config) -> dict[str, object]:
@@ -602,6 +607,9 @@ async def test_disable_close_failure_then_settings_rollback_reuses_one_runtime()
 
         async def close(self) -> None:
             raise RuntimeError("close failed")
+
+        def retire(self) -> None:
+            self.retired = True
 
     runtime = _Runtime()
     controller.memory_runtime = runtime
@@ -620,15 +628,18 @@ async def test_disable_close_failure_then_settings_rollback_reuses_one_runtime()
     assert controller.memory_runtime is runtime
     assert controller.memory_module is runtime.module
     assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
+    assert runtime.retired is True
 
-    assert await controller.reconcile_memory(enabled) == {
-        "ok": True,
-        "state": "running",
-    }
-    assert runtime.reconciled == [disabled, enabled]
+    with pytest.raises(MemoryRuntimeCloseUnprovedError, match="fenced"):
+        await controller.reconcile_memory(enabled)
+    with pytest.raises(MemoryRuntimeCloseUnprovedError, match="fenced"):
+        async with controller._destructive_memory_runtime():
+            pytest.fail("destructive operations must not reuse a closing runtime")
+
+    assert runtime.reconciled == [disabled]
     assert created == []
     assert controller.memory_runtime is runtime
-    assert controller.memory_adapter is None
+    assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
 
 
 @pytest.mark.asyncio
