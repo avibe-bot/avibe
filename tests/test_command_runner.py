@@ -540,3 +540,21 @@ async def test_extra_env_reaches_the_child_without_replacing_its_environment(tmp
     assert result.exit_code == 0
     assert "wat_123" in result.stdout
     assert "True" in result.stdout
+
+
+async def test_remove_env_deletes_inherited_and_extra_keys(tmp_path: Path) -> None:
+    result = await run_supervised_command(
+        command=[
+            sys.executable,
+            "-c",
+            "import os; print('DROP_ME' in os.environ); print(os.environ.get('KEEP_ME'))",
+        ],
+        cwd=str(tmp_path),
+        timeout_seconds=10,
+        label="test removed env",
+        extra_env={"DROP_ME": "secret", "KEEP_ME": "present"},
+        remove_env={"DROP_ME"},
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout.splitlines() == ["False", "present"]

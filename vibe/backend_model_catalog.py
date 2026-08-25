@@ -116,17 +116,6 @@ def _codex_hub_catalog_bytes(raw_catalog: bytes) -> bytes:
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode()
 
 
-def _read_bounded_catalog(path: Path) -> bytes | None:
-    try:
-        with path.open("rb") as handle:
-            payload = handle.read(CODEX_HUB_CATALOG_MAX_BYTES + 1)
-    except OSError:
-        return None
-    if len(payload) > CODEX_HUB_CATALOG_MAX_BYTES:
-        return None
-    return payload
-
-
 def _publish_codex_hub_catalog(raw_catalog: bytes) -> Path:
     catalog = _codex_hub_catalog_bytes(raw_catalog)
     path = get_codex_hub_catalog_path()
@@ -134,31 +123,18 @@ def _publish_codex_hub_catalog(raw_catalog: bytes) -> Path:
     return path
 
 
-def prepare_codex_hub_catalog_from_cache() -> Path | None:
-    """Warm the Hub artifact from Codex's maintained local snapshot."""
-
-    payload = _read_bounded_catalog(get_codex_home() / "models_cache.json")
-    if payload is None:
-        return ready_codex_hub_catalog_path()
-    try:
-        return _publish_codex_hub_catalog(payload)
-    except ValueError:
-        return ready_codex_hub_catalog_path()
-
-
 def _export_codex_bundled_catalog(
     binary: str,
     base_env: dict[str, str] | None = None,
 ) -> bytes:
     env = dict(base_env or {})
-    for key in (
+    removed_env = (
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
         "OPENAI_API_BASE",
         "CODEX_API_KEY",
         "AVIBE_MODEL_HUB_TOKEN",
-    ):
-        env[key] = ""
+    )
     result = asyncio.run(
         run_supervised_command(
             command=[
@@ -174,6 +150,7 @@ def _export_codex_bundled_catalog(
             label="Codex model catalog export",
             max_output_bytes=CODEX_HUB_CATALOG_MAX_BYTES,
             extra_env=env,
+            remove_env=removed_env,
             discard_stderr=True,
         )
     )
@@ -199,9 +176,6 @@ def prepare_codex_hub_catalog(
 ) -> Path:
     """Make the Hub catalog available before an enabled Codex backend is ready."""
 
-    cached = prepare_codex_hub_catalog_from_cache()
-    if cached is not None:
-        return cached
     return refresh_codex_hub_catalog_now(binary, base_env)
 
 

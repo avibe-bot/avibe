@@ -64,11 +64,11 @@ def test_backend_model_entries_normalize_runtime_catalog_shape():
     ]
 
 
-def test_codex_hub_catalog_warms_from_complete_local_cache(monkeypatch, tmp_path):
-    codex_home = tmp_path / "codex"
+def test_codex_hub_catalog_projects_complete_catalog(monkeypatch, tmp_path):
     runtime_dir = tmp_path / "runtime"
-    codex_home.mkdir()
-    (codex_home / "models_cache.json").write_text(
+    monkeypatch.setattr(backend_model_catalog.paths, "get_runtime_dir", lambda: runtime_dir)
+
+    path = backend_model_catalog._publish_codex_hub_catalog(
         json.dumps(
             {
                 "client_version": "0.149.1",
@@ -84,13 +84,8 @@ def test_codex_hub_catalog_warms_from_complete_local_cache(monkeypatch, tmp_path
                     }
                 ],
             }
-        ),
-        encoding="utf-8",
+        ).encode()
     )
-    monkeypatch.setenv("CODEX_HOME", str(codex_home))
-    monkeypatch.setattr(backend_model_catalog.paths, "get_runtime_dir", lambda: runtime_dir)
-
-    path = backend_model_catalog.prepare_codex_hub_catalog_from_cache()
 
     assert path == backend_model_catalog.ready_codex_hub_catalog_path()
     payload = json.loads(path.read_text(encoding="utf-8"))
@@ -137,12 +132,16 @@ def test_codex_hub_catalog_export_uses_stable_supervisor(monkeypatch):
     ]
     assert captured["extra_env"] == {
         "PATH": "/bin",
-        "OPENAI_API_KEY": "",
-        "OPENAI_BASE_URL": "",
-        "OPENAI_API_BASE": "",
-        "CODEX_API_KEY": "",
-        "AVIBE_MODEL_HUB_TOKEN": "",
+        "OPENAI_API_KEY": "secret",
+        "CODEX_API_KEY": "secret",
     }
+    assert captured["remove_env"] == (
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "OPENAI_API_BASE",
+        "CODEX_API_KEY",
+        "AVIBE_MODEL_HUB_TOKEN",
+    )
     assert captured["timeout_seconds"] == backend_model_catalog.CODEX_HUB_CATALOG_TIMEOUT_SECONDS
     assert captured["max_output_bytes"] == backend_model_catalog.CODEX_HUB_CATALOG_MAX_BYTES
     assert captured["discard_stderr"] is True
@@ -171,38 +170,17 @@ def test_codex_hub_catalog_export_rejects_supervised_failures(monkeypatch, resul
         backend_model_catalog._export_codex_bundled_catalog("/opt/codex")
 
 
-def test_codex_hub_catalog_preparation_reuses_ready_artifact(monkeypatch, tmp_path):
-    exported = []
-    ready = tmp_path / "standard-responses.json"
-    monkeypatch.setattr(
-        backend_model_catalog,
-        "prepare_codex_hub_catalog_from_cache",
-        lambda: ready,
-    )
-    monkeypatch.setattr(
-        backend_model_catalog,
-        "refresh_codex_hub_catalog_now",
-        lambda *_args: exported.append(True),
-    )
-
-    assert backend_model_catalog.prepare_codex_hub_catalog("codex") == ready
-    assert exported == []
-
-
-def test_codex_hub_catalog_preparation_exports_before_initial_readiness(monkeypatch, tmp_path):
+def test_codex_hub_catalog_preparation_exports_current_binary(monkeypatch, tmp_path):
     exported = tmp_path / "standard-responses.json"
-    monkeypatch.setattr(
-        backend_model_catalog,
-        "prepare_codex_hub_catalog_from_cache",
-        lambda: None,
-    )
+    calls = []
     monkeypatch.setattr(
         backend_model_catalog,
         "refresh_codex_hub_catalog_now",
-        lambda binary, base_env=None: exported,
+        lambda binary, base_env=None: (calls.append((binary, base_env)), exported)[1],
     )
 
     assert backend_model_catalog.prepare_codex_hub_catalog("codex") == exported
+    assert calls == [("codex", None)]
 
 
 def test_merge_sources_applies_tombstones_and_fills_missing_metadata():
