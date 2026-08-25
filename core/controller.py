@@ -64,7 +64,6 @@ from core.memory.admission import (
     WORKBENCH_PLATFORM,
     CaptureAdmission,
     InboundTurnFacts,
-    admitted_user_id,
 )
 from core.blocking import run_blocking
 from config.memory_operation_lock import MemoryOperationBusy, MemoryOperationLease
@@ -2968,16 +2967,10 @@ class Controller:
         payload = context.platform_specific if isinstance(context.platform_specific, dict) else {}
         metadata = payload.get("message_metadata")
         metadata = metadata if isinstance(metadata, dict) else {}
-        memory_user_id = admitted_user_id(metadata)
-        if memory_user_id is not None:
-            user_id = memory_user_id
-        else:
-            # IM: the platform sender id is what admission and
-            # ``principal_for_user_key(f"{platform}:{user_id}")`` expect.
-            # Workbench without a Memory principal in delivery metadata keeps
-            # the scope fallback (typically ``"workbench"``), which admission
-            # rejects.
-            user_id = getattr(context, "user_id", None)
+        # The hydrated author is host-owned. Released `_memory_user_id`
+        # metadata remains translation input for old queue identities only;
+        # it is never a trusted principal for a live turn.
+        user_id = getattr(context, "user_id", None)
         workdir = None
         if include_workdir:
             try:
@@ -2993,8 +2986,8 @@ class Controller:
             text=text,
             files=getattr(context, "files", None),
             is_dm=payload.get("is_dm") is True,
-            is_ordinary_text=context.is_ordinary_text,
-            is_ordinary_attachment=context.is_ordinary_attachment,
+            is_ordinary_text=context.is_original_human_text,
+            is_ordinary_attachment=context.is_original_human_attachment,
             attachment_lease=attachment_lease,
             attachment_capture_status=attachment_capture_status,
             attachment_config_generation=attachment_config_generation,

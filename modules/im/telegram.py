@@ -28,7 +28,7 @@ from .base import (
     InlineKeyboard,
 )
 from .formatters import TelegramFormatter
-from .message_facts import is_ordinary_telegram_attachment, is_ordinary_telegram_text
+from .message_facts import is_original_human_telegram_attachment, is_original_human_telegram_text
 from . import telegram_api
 
 logger = logging.getLogger(__name__)
@@ -630,7 +630,7 @@ class TelegramBot(BaseIMClient):
             message_id=context.message_id,
             platform="telegram",
             files=context.files,
-            is_ordinary_text=context.is_ordinary_text,
+            is_original_human_text=context.is_original_human_text,
             platform_specific={
                 **payload,
                 "is_topic_message": True,
@@ -760,8 +760,8 @@ class TelegramBot(BaseIMClient):
             thread_id=str(thread_id) if thread_id is not None else None,
             message_id=str(message.get("message_id")),
             files=files,
-            is_ordinary_text=is_ordinary_telegram_text(message, files),
-            is_ordinary_attachment=is_ordinary_telegram_attachment(message, files),
+            is_original_human_text=is_original_human_telegram_text(message, files),
+            is_original_human_attachment=is_original_human_telegram_attachment(message, files),
             platform="telegram",
             platform_specific={
                 "is_dm": chat.get("type") == "private",

@@ -117,3 +117,9 @@ scenarios:
     kind: guardrail
     layer: scenario
     test: tests/test_memory_disabled_isolation.py::test_memory_indep_015_shutdown_bounds_all_memory_stages_under_one_budget
+  - id: MEMORY-INDEP-016
+    name: New queued rows use authenticated author and message kind without Memory-private metadata
+    status: covered
+    kind: guardrail
+    layer: scenario
+    test: tests/test_session_delivery_fsm.py::test_memory_indep_016_new_queue_uses_core_identity_without_memory_metadata

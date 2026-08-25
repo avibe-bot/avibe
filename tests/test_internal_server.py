@@ -2293,13 +2293,18 @@ def test_dispatch_context_does_not_restore_memory_admission_from_transient_paylo
             {
                 "session_id": session["id"],
                 "text": "remember this",
+                "author_id": "remote:authenticated",
+                "user_id": "remote:forged-memory-principal",
+                "message_kind": "original",
                 "memory_cli_admitted": True,
                 "is_ordinary_text": True,
             }
         )
     )
 
-    assert context.is_ordinary_text is None
+    assert context.user_id == "remote:authenticated"
+    assert context.message_kind == "original"
+    assert context.is_original_human_text is True
     assert "memory_cli_admitted" not in (context.platform_specific or {})
 
 

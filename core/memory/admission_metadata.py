@@ -58,3 +58,21 @@ def merge_identity(metadata: object) -> tuple[str | None, bool, bool]:
         is_ordinary_text(metadata),
         is_cli_admitted(metadata),
     )
+
+
+def legacy_message_kind(metadata: object) -> str:
+    """Translate released `_memory_*` rows into the core message vocabulary."""
+
+    metadata = _admission_metadata(metadata)
+    if metadata.get("quick_reply_for"):
+        return "quick_reply"
+    if any(
+        metadata.get(key)
+        for key in ("forwarded", "is_forwarded", "forward_origin", "forwarded_from")
+    ):
+        return "forwarded"
+    if metadata.get("edited"):
+        return "edited"
+    if metadata.get("is_system") or metadata.get("system"):
+        return "system"
+    return "original" if is_ordinary_text(metadata) else "unknown"

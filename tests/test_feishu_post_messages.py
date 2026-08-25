@@ -127,12 +127,12 @@ class FeishuPostMessageTests(unittest.IsolatedAsyncioTestCase):
         args = bot.on_message_callback.await_args.args
         context, text = args
         self.assertEqual(text, "日报\nhello\n[image]")
-        self.assertFalse(context.is_ordinary_text)
+        self.assertFalse(context.is_original_human_text)
         self.assertIsNotNone(context.files)
         assert context.files is not None
         self.assertEqual(len(context.files), 1)
         self.assertEqual(context.files[0].name, "img_123.image")
-        self.assertIs(context.is_ordinary_attachment, False)
+        self.assertIs(context.is_original_human_attachment, False)
 
     async def test_native_file_message_publishes_lark_attachment_fact(self):
         bot = self._make_bot()
@@ -160,7 +160,7 @@ class FeishuPostMessageTests(unittest.IsolatedAsyncioTestCase):
         bot.on_message_callback.assert_awaited_once()
         context = bot.on_message_callback.await_args.args[0]
         self.assertEqual(context.platform, "lark")
-        self.assertIs(context.is_ordinary_attachment, True)
+        self.assertIs(context.is_original_human_attachment, True)
 
     async def test_active_thread_requires_fresh_mention_when_require_mention_enabled(self):
         bot = FeishuBot(LarkConfig(app_id="app-id", app_secret="app-secret", require_mention=True))

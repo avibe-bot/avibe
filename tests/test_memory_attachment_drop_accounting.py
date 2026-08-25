@@ -26,7 +26,7 @@ def _attachment_context(message_id: str, count: int):
         )
         for index in range(count)
     ]
-    context.is_ordinary_attachment = True
+    context.is_original_human_attachment = True
     return context
 
 

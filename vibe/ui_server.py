@@ -6310,22 +6310,6 @@ def _web_push_normal_delivery_diagnostics() -> dict:
     return evaluation
 
 
-def _workbench_memory_user_id() -> str | None:
-    """Resolve only identities that may use scoped Memory commands."""
-
-    if is_direct_loopback_memory_request():
-        return "local"
-    config = _load_remote_access_config()
-    if config is None:
-        return None
-    try:
-        payload = _resolved_remote_session_payload(config)
-    except Exception:
-        return None
-    subject = payload.get("sub") if isinstance(payload, dict) else None
-    return f"remote:{subject}" if isinstance(subject, str) and subject.strip() else None
-
-
 @app.route("/api/web-push/status", methods=["GET", "POST"])
 def web_push_status():
     from core.web_push import load_or_create_vapid_keys
@@ -11196,31 +11180,24 @@ async def sessions_messages_create(session_id: str):
     in Step 6 — the session-scoped stream replaced it.
     """
 
-    from core.memory.admission import (
-        MEMORY_CLI_ADMITTED_METADATA,
-        MEMORY_ORDINARY_TEXT_METADATA,
-        MEMORY_USER_ID_METADATA,
-    )
     from core.services import sessions as workbench_sessions_service
     from core.web_push_notifications import (
         WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA,
         web_push_authorization_context_record,
     )
-    from modules.im.message_facts import is_ordinary_workbench_text
+    from modules.im.message_facts import workbench_message_kind
     from storage import messages_service, resource_access_service
     from storage.agent_session_rows import session_is_runtime_owned
     from vibe import internal_client
 
     payload = request.json or {}
-    memory_user_id = _workbench_memory_user_id()
-    memory_cli_admitted = memory_user_id is not None
     text = payload.get("text")
     content = payload.get("content")
     if text is None and not content:
         return jsonify({"error": "text or content is required"}), 400
     # A quick-reply click tags the row with the agent message it answers.
     quick_reply_for = (payload.get("metadata") or {}).get("quick_reply_for")
-    memory_ordinary_text = is_ordinary_workbench_text(payload, quick_reply_for)
+    message_kind = workbench_message_kind(payload, quick_reply_for)
     web_push_user_key = _web_push_user_key()
     web_push_authorization_context = web_push_authorization_context_record(
         web_push_user_key,
@@ -11301,9 +11278,6 @@ async def sessions_messages_create(session_id: str):
                 {
                     **(payload.get("metadata") or {}),
                     "_web_push_user_key": web_push_user_key,
-                    MEMORY_USER_ID_METADATA: memory_user_id,
-                    MEMORY_CLI_ADMITTED_METADATA: memory_cli_admitted,
-                    MEMORY_ORDINARY_TEXT_METADATA: memory_ordinary_text,
                 },
                 getattr(g, "authorization_context", None),
             )
@@ -11329,6 +11303,7 @@ async def sessions_messages_create(session_id: str):
                     metadata=message_metadata,
                     author_id=web_push_user_key,
                     author_name=payload.get("author_name"),
+                    message_kind=message_kind,
                 ),
                 dispatch_text=dispatch_text,
                 history_event={"kind": "admission", "priority": "p3", "state": "reserved"},
@@ -11374,10 +11349,8 @@ async def sessions_messages_create(session_id: str):
         "author_id": web_push_user_key,
         "author_name": payload.get("author_name"),
         "files": attachment_specs,
-        "user_id": memory_user_id,
         "message_id": message.get("id"),
-        "memory_cli_admitted": memory_cli_admitted,
-        "is_ordinary_text": memory_ordinary_text,
+        "message_kind": message_kind,
     }
 
     def _current_delivery_response() -> dict:

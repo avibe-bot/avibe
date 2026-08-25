@@ -31,16 +31,16 @@ from core.memory.everos import FakeMemoryProvider
 from core.memory.store import MemoryStore
 from modules.im.base import FileAttachment, MessageContext
 from modules.im.message_facts import (
-    is_ordinary_discord_attachment,
-    is_ordinary_discord_text,
-    is_ordinary_feishu_attachment,
-    is_ordinary_feishu_text,
-    is_ordinary_slack_attachment,
-    is_ordinary_slack_text,
-    is_ordinary_telegram_attachment,
-    is_ordinary_telegram_text,
-    is_ordinary_wechat_attachment,
-    is_ordinary_wechat_text,
+    is_original_human_discord_attachment,
+    is_original_human_discord_text,
+    is_original_human_feishu_attachment,
+    is_original_human_feishu_text,
+    is_original_human_slack_attachment,
+    is_original_human_slack_text,
+    is_original_human_telegram_attachment,
+    is_original_human_telegram_text,
+    is_original_human_wechat_attachment,
+    is_original_human_wechat_text,
 )
 
 
@@ -163,7 +163,7 @@ def _context(platform: str, *, user_id: str = "user-1", ordinary=True, **payload
         message_id="native-1",
         platform_specific={"platform": platform, "is_dm": True, **payload},
         files=[],
-        is_ordinary_text=ordinary,
+        is_original_human_text=ordinary,
     )
 
 
@@ -239,7 +239,7 @@ def test_slack_memory_lease_retention_is_local_and_ignores_runtime_health(
             url="https://files.slack.test/private",
         )
     ]
-    context.is_ordinary_attachment = True
+    context.is_original_human_attachment = True
 
     reservation = controller.reserve_memory_attachment_capture(
         context,
@@ -266,7 +266,7 @@ def test_slack_memory_reservation_normalizes_invalid_multimodal_generation(
             url="https://files.slack.test/private",
         )
     ]
-    context.is_ordinary_attachment = True
+    context.is_original_human_attachment = True
 
     reservation = controller.reserve_memory_attachment_capture(
         context,
@@ -290,7 +290,7 @@ def test_attachment_capacity_is_reserved_before_session_or_lease_work() -> None:
             url="https://files.slack.test/private",
         )
     ]
-    context.is_ordinary_attachment = True
+    context.is_original_human_attachment = True
 
     reservation = controller.reserve_memory_attachment_capture(
         context,
@@ -335,7 +335,7 @@ def test_attachment_reservation_failure_preserves_caption_as_text_only() -> None
             url="https://files.slack.test/private",
         )
     ]
-    context.is_ordinary_attachment = True
+    context.is_original_human_attachment = True
 
     reservation = controller.reserve_memory_attachment_capture(
         context,
@@ -370,7 +370,7 @@ def test_retained_lease_failure_preserves_reserved_caption_as_text_only() -> Non
             url="https://files.slack.test/private",
         )
     ]
-    context.is_ordinary_attachment = True
+    context.is_original_human_attachment = True
     reservation = controller.reserve_memory_attachment_capture(
         context,
         "stable-session",
@@ -421,7 +421,7 @@ def test_slack_without_multimodal_opt_in_skips_live_health_read() -> None:
                 url="https://files.slack.test/private",
             )
         ]
-        context.is_ordinary_attachment = True
+        context.is_original_human_attachment = True
         reservation = controller.reserve_memory_attachment_capture(
             context,
             "stable-session",
@@ -493,7 +493,7 @@ def test_configured_attachment_capture_skips_live_health_read(
                 url="https://files.slack.test/private",
             )
         ]
-        context.is_ordinary_attachment = True
+        context.is_original_human_attachment = True
         reservation = controller.reserve_memory_attachment_capture(
             context,
             "stable-session",
@@ -551,7 +551,7 @@ def test_configured_attachment_capture_does_not_block_session_reset(
                 url="https://files.slack.test/private",
             )
         ]
-        context.is_ordinary_attachment = True
+        context.is_original_human_attachment = True
         reservation = controller.reserve_memory_attachment_capture(
             context,
             "stable-session",
@@ -626,7 +626,7 @@ def test_attachment_selection_runs_off_event_loop(
                 url="https://files.slack.test/private",
             )
         ]
-        context.is_ordinary_attachment = True
+        context.is_original_human_attachment = True
         reservation = controller.reserve_memory_attachment_capture(
             context,
             "stable-session",
@@ -684,7 +684,7 @@ def test_attachment_capture_fails_closed_when_config_generation_changes(
                 url="https://files.slack.test/private",
             )
         ]
-        context.is_ordinary_attachment = True
+        context.is_original_human_attachment = True
         reservation = controller.reserve_memory_attachment_capture(
             context,
             "stable-session",
@@ -748,7 +748,7 @@ def test_downstream_capture_unavailability_does_not_change_ingress_eligibility(
                 url="https://files.slack.test/private",
             )
         ]
-        context.is_ordinary_attachment = True
+        context.is_original_human_attachment = True
         reservation = controller.reserve_memory_attachment_capture(
             context,
             "stable-session",
@@ -1182,24 +1182,24 @@ def test_im_adapters_normalize_native_ordinary_text_facts() -> None:
         message_snapshots=(),
         is_system=lambda: False,
     )
-    assert is_ordinary_discord_text(discord_message, None) is True
+    assert is_original_human_discord_text(discord_message, None) is True
     discord_message.flags.forwarded = True
-    assert is_ordinary_discord_text(discord_message, None) is False
+    assert is_original_human_discord_text(discord_message, None) is False
 
-    assert is_ordinary_slack_text({"text": "hello"}, None) is True
-    assert is_ordinary_slack_text({"text": "hello", "subtype": "message_changed"}, None) is False
+    assert is_original_human_slack_text({"text": "hello"}, None) is True
+    assert is_original_human_slack_text({"text": "hello", "subtype": "message_changed"}, None) is False
 
-    assert is_ordinary_telegram_text({"from": {"is_bot": False}, "text": "hello"}, []) is True
-    assert is_ordinary_telegram_text({"from": {"is_bot": False}, "forward_origin": {"type": "user"}}, []) is False
+    assert is_original_human_telegram_text({"from": {"is_bot": False}, "text": "hello"}, []) is True
+    assert is_original_human_telegram_text({"from": {"is_bot": False}, "forward_origin": {"type": "user"}}, []) is False
 
     feishu_event = {"sender": {"sender_type": "user"}, "message": {"message_type": "text"}}
-    assert is_ordinary_feishu_text(feishu_event, None, shared_text=None) is True
+    assert is_original_human_feishu_text(feishu_event, None, shared_text=None) is True
     feishu_event["message"]["message_type"] = "post"
-    assert is_ordinary_feishu_text(feishu_event, None, shared_text=None) is False
+    assert is_original_human_feishu_text(feishu_event, None, shared_text=None) is False
 
-    assert is_ordinary_wechat_text({"item_list": [{"type": "TEXT"}]}, None) is True
-    assert is_ordinary_wechat_text({"item_list": [{"type": 1}, {"type": 2}]}, None) is False
-    assert is_ordinary_wechat_text({"item_list": [{"type": 1, "ref_msg": {"title": "quoted"}}]}, None) is False
+    assert is_original_human_wechat_text({"item_list": [{"type": "TEXT"}]}, None) is True
+    assert is_original_human_wechat_text({"item_list": [{"type": 1}, {"type": 2}]}, None) is False
+    assert is_original_human_wechat_text({"item_list": [{"type": 1, "ref_msg": {"title": "quoted"}}]}, None) is False
 
 
 def test_im_adapters_normalize_native_ordinary_attachment_facts() -> None:
@@ -1223,7 +1223,7 @@ def test_im_adapters_normalize_native_ordinary_attachment_facts() -> None:
         message_snapshots=(),
         is_system=lambda: False,
     )
-    assert is_ordinary_discord_attachment(discord_message, [discord_file]) is True
+    assert is_original_human_discord_attachment(discord_message, [discord_file]) is True
     for field, value in (
         ("embeds", [object()]),
         ("components", [object()]),
@@ -1232,10 +1232,10 @@ def test_im_adapters_normalize_native_ordinary_attachment_facts() -> None:
         ("message_snapshots", [object()]),
     ):
         setattr(discord_message, field, value)
-        assert is_ordinary_discord_attachment(discord_message, [discord_file]) is False
+        assert is_original_human_discord_attachment(discord_message, [discord_file]) is False
         setattr(discord_message, field, None)
     discord_message.author.bot = True
-    assert is_ordinary_discord_attachment(discord_message, [discord_file]) is False
+    assert is_original_human_discord_attachment(discord_message, [discord_file]) is False
 
     telegram_file = FileAttachment(
         name="telegram-file.bin",
@@ -1253,20 +1253,20 @@ def test_im_adapters_normalize_native_ordinary_attachment_facts() -> None:
             "media_group_id": "album-1",
             native_field: native_value,
         }
-        assert is_ordinary_telegram_attachment(telegram_message, [telegram_file]) is True
+        assert is_original_human_telegram_attachment(telegram_message, [telegram_file]) is True
     for rejected_field in ("video", "animation", "sticker"):
         telegram_message = {
             "from": {"id": 42, "is_bot": False},
             "document": {"file_id": "document"},
             rejected_field: {"file_id": "decorated"},
         }
-        assert is_ordinary_telegram_attachment(telegram_message, [telegram_file]) is False
+        assert is_original_human_telegram_attachment(telegram_message, [telegram_file]) is False
     telegram_message = {
         "from": {"id": 42, "is_bot": False},
         "document": {"file_id": "document"},
         "forward_origin": {"type": "user"},
     }
-    assert is_ordinary_telegram_attachment(telegram_message, [telegram_file]) is False
+    assert is_original_human_telegram_attachment(telegram_message, [telegram_file]) is False
 
     feishu_file = FileAttachment(
         name="report.pdf",
@@ -1278,7 +1278,7 @@ def test_im_adapters_normalize_native_ordinary_attachment_facts() -> None:
         "message": {"message_type": "file"},
     }
     assert (
-        is_ordinary_feishu_attachment(
+        is_original_human_feishu_attachment(
             feishu_event,
             {"file_key": "file-key", "file_name": "report.pdf"},
             [feishu_file],
@@ -1287,7 +1287,7 @@ def test_im_adapters_normalize_native_ordinary_attachment_facts() -> None:
         is True
     )
     assert (
-        is_ordinary_feishu_attachment(
+        is_original_human_feishu_attachment(
             feishu_event,
             {"file_key": ""},
             [feishu_file],
@@ -1297,7 +1297,7 @@ def test_im_adapters_normalize_native_ordinary_attachment_facts() -> None:
     )
     feishu_event["message"]["message_type"] = "image"
     assert (
-        is_ordinary_feishu_attachment(
+        is_original_human_feishu_attachment(
             feishu_event,
             {"image_key": "image-key"},
             [feishu_file],
@@ -1307,7 +1307,7 @@ def test_im_adapters_normalize_native_ordinary_attachment_facts() -> None:
     )
     feishu_event["message"]["message_type"] = "media"
     assert (
-        is_ordinary_feishu_attachment(
+        is_original_human_feishu_attachment(
             feishu_event,
             {"file_key": "media-key"},
             [feishu_file],
@@ -1334,9 +1334,9 @@ def test_im_adapters_normalize_native_ordinary_attachment_facts() -> None:
             },
         ],
     }
-    assert is_ordinary_wechat_attachment(wechat_message, wechat_files) is True
+    assert is_original_human_wechat_attachment(wechat_message, wechat_files) is True
     wechat_message["item_list"][0]["ref_msg"] = {"title": "forwarded"}
-    assert is_ordinary_wechat_attachment(wechat_message, wechat_files) is False
+    assert is_original_human_wechat_attachment(wechat_message, wechat_files) is False
     for item_type, media_field in (
         (2, "image_item"),
         (3, "voice_item"),
@@ -1353,11 +1353,11 @@ def test_im_adapters_normalize_native_ordinary_attachment_facts() -> None:
                 }
             ]
         }
-        assert is_ordinary_wechat_attachment(direct_message, wechat_files) is True
+        assert is_original_human_wechat_attachment(direct_message, wechat_files) is True
         direct_message["item_list"][0][media_field]["media"][
             "encrypt_query_param"
         ] = ""
-        assert is_ordinary_wechat_attachment(direct_message, wechat_files) is False
+        assert is_original_human_wechat_attachment(direct_message, wechat_files) is False
 
 
 def _slack_dm_event(**overrides) -> dict:
@@ -1395,7 +1395,7 @@ def _slack_dm_event(**overrides) -> dict:
 
 
 def test_slack_composer_rich_text_dm_is_ordinary_human_text() -> None:
-    assert is_ordinary_slack_text(_slack_dm_event(), None) is True
+    assert is_original_human_slack_text(_slack_dm_event(), None) is True
 
     # Mentions, links, emoji, styled runs, lists, quotes, and code blocks are all
     # plain composer output for a human-typed DM.
@@ -1439,7 +1439,7 @@ def test_slack_composer_rich_text_dm_is_ordinary_human_text() -> None:
             }
         ],
     )
-    assert is_ordinary_slack_text(decorated, None) is True
+    assert is_original_human_slack_text(decorated, None) is True
 
 
 def test_slack_non_text_block_payloads_are_not_ordinary() -> None:
@@ -1459,7 +1459,7 @@ def test_slack_non_text_block_payloads_are_not_ordinary() -> None:
             }
         ],
     )
-    assert is_ordinary_slack_text(upload, None) is False
+    assert is_original_human_slack_text(upload, None) is False
     extracted_upload = [
         FileAttachment(
             name="screenshot.png",
@@ -1467,7 +1467,7 @@ def test_slack_non_text_block_payloads_are_not_ordinary() -> None:
             url="https://files.slack.com/files-pri/T04-F04/screenshot.png",
         )
     ]
-    assert is_ordinary_slack_attachment(upload, extracted_upload) is True
+    assert is_original_human_slack_attachment(upload, extracted_upload) is True
 
     # Forwarded / shared message: composer rich text PLUS a share attachment.
     forwarded = _slack_dm_event(
@@ -1483,8 +1483,8 @@ def test_slack_non_text_block_payloads_are_not_ordinary() -> None:
             }
         ],
     )
-    assert is_ordinary_slack_text(forwarded, None) is False
-    assert is_ordinary_slack_attachment(forwarded, extracted_upload) is False
+    assert is_original_human_slack_text(forwarded, None) is False
+    assert is_original_human_slack_attachment(forwarded, extracted_upload) is False
 
     # App-authored layout blocks are not composer output, even without ``bot_id``.
     app_blocks = _slack_dm_event(
@@ -1494,8 +1494,8 @@ def test_slack_non_text_block_payloads_are_not_ordinary() -> None:
             {"type": "image", "image_url": "https://example.com/chart.png", "alt_text": "chart"},
         ],
     )
-    assert is_ordinary_slack_text(app_blocks, None) is False
-    assert is_ordinary_slack_attachment(app_blocks, extracted_upload) is False
+    assert is_original_human_slack_text(app_blocks, None) is False
+    assert is_original_human_slack_attachment(app_blocks, extracted_upload) is False
 
     # An unrecognized node inside rich text fails closed.
     unknown_element = _slack_dm_event(
@@ -1515,27 +1515,27 @@ def test_slack_non_text_block_payloads_are_not_ordinary() -> None:
             }
         ],
     )
-    assert is_ordinary_slack_text(unknown_element, None) is False
+    assert is_original_human_slack_text(unknown_element, None) is False
 
     # Only an absent blocks value or a real empty list is the legacy plain-text
     # shape. Falsy values of any other type are malformed and fail closed.
-    assert is_ordinary_slack_text(_slack_dm_event(blocks=[]), None) is True
+    assert is_original_human_slack_text(_slack_dm_event(blocks=[]), None) is True
     for malformed_blocks in ({}, "", 0, False):
-        assert is_ordinary_slack_text(_slack_dm_event(blocks=malformed_blocks), None) is False
+        assert is_original_human_slack_text(_slack_dm_event(blocks=malformed_blocks), None) is False
 
     # Edits and bot/self events stay excluded regardless of block content.
-    assert is_ordinary_slack_text(_slack_dm_event(subtype="message_changed"), None) is False
-    assert is_ordinary_slack_text(_slack_dm_event(subtype="future_system_event"), None) is False
+    assert is_original_human_slack_text(_slack_dm_event(subtype="message_changed"), None) is False
+    assert is_original_human_slack_text(_slack_dm_event(subtype="future_system_event"), None) is False
     assert (
-        is_ordinary_slack_text(
+        is_original_human_slack_text(
             _slack_dm_event(edited={"user": "U04ABCDEF", "ts": "1753420900.000000"}),
             None,
         )
         is False
     )
-    assert is_ordinary_slack_text(_slack_dm_event(bot_id="B04BOTID"), None) is False
+    assert is_original_human_slack_text(_slack_dm_event(bot_id="B04BOTID"), None) is False
     assert (
-        is_ordinary_slack_text(
+        is_original_human_slack_text(
             _slack_dm_event(),
             [
                 FileAttachment(

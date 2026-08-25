@@ -78,7 +78,7 @@ def is_plain_slack_composer_blocks(blocks: Any) -> bool:
     return True
 
 
-def is_ordinary_slack_text(event: dict[str, Any], files: Optional[list[FileAttachment]]) -> bool:
+def is_original_human_slack_text(event: dict[str, Any], files: Optional[list[FileAttachment]]) -> bool:
     return not any(
         (
             files,
@@ -102,7 +102,7 @@ def is_ordinary_slack_text(event: dict[str, Any], files: Optional[list[FileAttac
     )
 
 
-def is_ordinary_slack_attachment(
+def is_original_human_slack_attachment(
     event: dict[str, Any],
     files: Optional[list[FileAttachment]],
 ) -> bool:
@@ -130,7 +130,7 @@ def is_ordinary_slack_attachment(
     )
 
 
-def is_ordinary_discord_text(message: Any, files: Optional[list[FileAttachment]]) -> bool:
+def is_original_human_discord_text(message: Any, files: Optional[list[FileAttachment]]) -> bool:
     try:
         is_system = message.is_system() if callable(getattr(message, "is_system", None)) else False
     except Exception:
@@ -150,7 +150,7 @@ def is_ordinary_discord_text(message: Any, files: Optional[list[FileAttachment]]
     )
 
 
-def is_ordinary_discord_attachment(
+def is_original_human_discord_attachment(
     message: Any,
     files: Optional[list[FileAttachment]],
 ) -> bool:
@@ -180,7 +180,7 @@ def is_ordinary_discord_attachment(
     )
 
 
-def is_ordinary_telegram_text(message: dict[str, Any], files: list[FileAttachment]) -> bool:
+def is_original_human_telegram_text(message: dict[str, Any], files: list[FileAttachment]) -> bool:
     sender = message.get("from") or {}
     return not any(
         (
@@ -196,7 +196,7 @@ def is_ordinary_telegram_text(message: dict[str, Any], files: list[FileAttachmen
     )
 
 
-def is_ordinary_telegram_attachment(
+def is_original_human_telegram_attachment(
     message: dict[str, Any],
     files: list[FileAttachment],
 ) -> bool:
@@ -236,7 +236,7 @@ def is_ordinary_telegram_attachment(
     )
 
 
-def is_ordinary_feishu_text(
+def is_original_human_feishu_text(
     event: dict[str, Any],
     files: Optional[list[FileAttachment]],
     *,
@@ -253,7 +253,7 @@ def is_ordinary_feishu_text(
     )
 
 
-def is_ordinary_feishu_attachment(
+def is_original_human_feishu_attachment(
     event: dict[str, Any],
     content: dict[str, Any],
     files: Optional[list[FileAttachment]],
@@ -279,7 +279,29 @@ def is_ordinary_feishu_attachment(
     )
 
 
-def is_ordinary_workbench_text(payload: object, quick_reply_for: object) -> bool:
+def workbench_message_kind(payload: object, quick_reply_for: object) -> str:
+    """Classify a Workbench submit from host-owned request facts."""
+
+    if not isinstance(payload, dict):
+        return "unknown"
+    if quick_reply_for:
+        return "quick_reply"
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        return "original"
+    if metadata.get("is_system") or metadata.get("system"):
+        return "system"
+    if metadata.get("edited"):
+        return "edited"
+    if any(
+        metadata.get(key)
+        for key in ("forwarded", "is_forwarded", "forward_origin", "forwarded_from")
+    ):
+        return "forwarded"
+    return "original"
+
+
+def is_original_human_workbench_text(payload: object, quick_reply_for: object) -> bool:
     """Classify a Workbench submit the same way the IM adapters classify events.
 
     Quick replies and forwarded messages are not ordinary human turns. Uploads
@@ -287,18 +309,10 @@ def is_ordinary_workbench_text(payload: object, quick_reply_for: object) -> bool
     can actually convert.
     """
 
-    if not isinstance(payload, dict) or quick_reply_for:
-        return False
-    metadata = payload.get("metadata")
-    if isinstance(metadata, dict) and any(
-        metadata.get(key)
-        for key in ("forwarded", "is_forwarded", "forward_origin", "forwarded_from")
-    ):
-        return False
-    return True
+    return workbench_message_kind(payload, quick_reply_for) == "original"
 
 
-def is_ordinary_wechat_text(msg: dict[str, Any], files: Optional[list[FileAttachment]]) -> bool:
+def is_original_human_wechat_text(msg: dict[str, Any], files: Optional[list[FileAttachment]]) -> bool:
     items = msg.get("item_list") or []
     return (
         bool(items)
@@ -313,7 +327,7 @@ def is_ordinary_wechat_text(msg: dict[str, Any], files: Optional[list[FileAttach
     )
 
 
-def is_ordinary_wechat_attachment(
+def is_original_human_wechat_attachment(
     msg: dict[str, Any],
     files: Optional[list[FileAttachment]],
 ) -> bool:

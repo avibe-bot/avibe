@@ -48,6 +48,7 @@ from sqlalchemy.exc import IntegrityError
 
 from config import paths
 from config.atomic_io import write_atomic
+from core.delivery_target import normalize_message_kind
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED
 from modules.im.base import MessageContext
 from storage.db import get_cached_sqlite_engine
@@ -2183,7 +2184,7 @@ async def _build_dispatch_payload(payload: dict[str, Any]) -> tuple[str, Message
     context = await asyncio.to_thread(
         _build_session_context,
         session_id,
-        user_id=payload.get("user_id"),
+        user_id=payload.get("author_id"),
         channel_id=payload.get("channel_id"),
         platform=payload.get("platform"),
         thread_id=payload.get("thread_id"),
@@ -2192,6 +2193,8 @@ async def _build_dispatch_payload(payload: dict[str, Any]) -> tuple[str, Message
     )
     if context.platform_specific is None:
         context.platform_specific = {}
+    context.message_kind = normalize_message_kind(payload.get("message_kind"))
+    context.is_original_human_text = context.message_kind == "original"
     context.platform_specific.update(
         {
             "delivery_id": payload.get("user_message_id"),
@@ -2201,6 +2204,7 @@ async def _build_dispatch_payload(payload: dict[str, Any]) -> tuple[str, Message
             "message_metadata": payload.get("metadata") or {},
             "author_id": payload.get("author_id"),
             "author_name": payload.get("author_name"),
+            "message_kind": context.message_kind,
         }
     )
     return text, context

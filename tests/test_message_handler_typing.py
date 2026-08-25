@@ -543,7 +543,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             platform="slack",
             platform_specific={"is_dm": True},
             files=[FileAttachment("report.pdf", "application/pdf", url="private")],
-            is_ordinary_attachment=True,
+            is_original_human_attachment=True,
         )
 
         await handler.handle_user_message(context, "remember this")
@@ -627,7 +627,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             platform="slack",
             platform_specific={"is_dm": True},
             files=[FileAttachment("report.pdf", "application/pdf", url="private")],
-            is_ordinary_attachment=True,
+            is_original_human_attachment=True,
         )
 
         await handler.handle_user_message(context, "remember this")
@@ -681,7 +681,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
                             url="private",
                         )
                     ],
-                    is_ordinary_attachment=True,
+                    is_original_human_attachment=True,
                 )
 
                 result = await handler._handle_turn(
@@ -732,7 +732,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             platform="discord",
             platform_specific={"is_dm": True},
             files=[FileAttachment("report.pdf", "application/pdf", url="private")],
-            is_ordinary_attachment=True,
+            is_original_human_attachment=True,
         )
 
         await handler._handle_turn(
@@ -770,7 +770,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             platform="telegram",
             platform_specific={"is_dm": True},
             files=[FileAttachment("report.pdf", "application/pdf", url="private")],
-            is_ordinary_attachment=True,
+            is_original_human_attachment=True,
         )
 
         with self.assertRaises(asyncio.CancelledError):
@@ -816,7 +816,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             platform="slack",
             platform_specific={"is_dm": True},
             files=[FileAttachment("report.pdf", "application/pdf", url="private")],
-            is_ordinary_attachment=True,
+            is_original_human_attachment=True,
         )
 
         result = await handler._handle_turn(
@@ -880,7 +880,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             platform="slack",
             platform_specific={"is_dm": True},
             files=[FileAttachment("report.pdf", "application/pdf", url="private")],
-            is_ordinary_attachment=True,
+            is_original_human_attachment=True,
         )
 
         await handler.handle_user_message(context, "remember this")
@@ -938,7 +938,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             platform="slack",
             platform_specific={"is_dm": False},
             files=[FileAttachment("report.pdf", "application/pdf", url="private")],
-            is_ordinary_attachment=True,
+            is_original_human_attachment=True,
         )
 
         await handler.handle_user_message(context, "review this")
@@ -1363,7 +1363,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             platform="slack",
             platform_specific={"is_dm": True},
             files=[FileAttachment("report.pdf", "application/pdf", url="private")],
-            is_ordinary_attachment=True,
+            is_original_human_attachment=True,
         )
 
         await handler.handle_user_message(context, "remember this")
@@ -1490,7 +1490,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
                 "agent_run_target": {"agent_variant": "researcher"},
             },
             files=[FileAttachment("report.pdf", "application/pdf", url="private")],
-            is_ordinary_attachment=True,
+            is_original_human_attachment=True,
         )
 
         await handler.handle_user_message(context, "remember this")
@@ -1575,7 +1575,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             platform="slack",
             platform_specific={"is_dm": True},
             files=[FileAttachment("report.pdf", "application/pdf", url="private")],
-            is_ordinary_attachment=True,
+            is_original_human_attachment=True,
         )
 
         await asyncio.wait_for(
@@ -1644,7 +1644,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             platform="slack",
             platform_specific={"is_dm": True},
             files=[FileAttachment("report.pdf", "application/pdf", url="private")],
-            is_ordinary_attachment=True,
+            is_original_human_attachment=True,
         )
 
         turn = asyncio.create_task(
@@ -1776,7 +1776,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
                         url="private",
                     )
                 ],
-                is_ordinary_attachment=True,
+                is_original_human_attachment=True,
             )
             await handler.handle_user_message(context, "remember this")
 
@@ -1842,7 +1842,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             platform="slack",
             platform_specific={"is_dm": True},
             files=[FileAttachment("report.pdf", "application/pdf", url="private")],
-            is_ordinary_attachment=True,
+            is_original_human_attachment=True,
         )
 
         task = asyncio.create_task(
@@ -1915,7 +1915,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             platform="slack",
             platform_specific={"is_dm": True},
             files=[FileAttachment("report.pdf", "application/pdf", url="private")],
-            is_ordinary_attachment=True,
+            is_original_human_attachment=True,
         )
 
         turn = asyncio.create_task(
@@ -1966,7 +1966,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
                     size=9,
                 )
             ],
-            is_ordinary_attachment=True,
+            is_original_human_attachment=True,
         )
         batch = await InboundAttachmentMaterializer(
             effective_home=root,
@@ -2045,7 +2045,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
                     size=9,
                 )
             ],
-            is_ordinary_attachment=True,
+            is_original_human_attachment=True,
         )
         batch = await InboundAttachmentMaterializer(
             effective_home=root,
