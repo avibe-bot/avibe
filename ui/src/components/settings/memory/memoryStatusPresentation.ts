@@ -43,6 +43,7 @@ const HEALTH_STATUS_LABEL_KEYS = {
 
 const MEMORY_SOURCE_ERROR_REASONS = new Set([
   'memory_disabled',
+  'memory_runtime_busy',
   'memory_runtime_missing',
   'memory_runtime_unsupported',
   'memory_runtime_install_failed',

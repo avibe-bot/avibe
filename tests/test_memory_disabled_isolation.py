@@ -425,6 +425,7 @@ async def test_memory_reconcile_lazily_enters_and_leaves_enabled_runtime(
     controller.memory_adapter = DisabledMemoryAdapter()
     controller.memory_runtime = None
     controller.memory_module = None
+    controller._memory_disabled_cleanup_unproved = True
 
     enabled = replace(controller.config.memory, enabled=True)
     assert await controller.reconcile_memory(enabled) == {
@@ -447,6 +448,7 @@ async def test_memory_reconcile_lazily_enters_and_leaves_enabled_runtime(
     assert controller.memory_module is None
     assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
     assert controller.config.memory.enabled is False
+    assert controller._memory_disabled_cleanup_unproved is False
 
 
 @pytest.mark.asyncio
@@ -969,6 +971,67 @@ async def test_enabled_status_reprojects_when_disabled_before_borrow() -> None:
     assert status["state"] == "disabled"
     assert status["reason"] is None
     assert status["source"]["reason"] == "memory_disabled"
+
+
+@pytest.mark.asyncio
+async def test_enabled_status_reprojects_after_failed_disable_close() -> None:
+    enabled = replace(_disabled_app_config().memory, enabled=True)
+    disabled = replace(enabled, enabled=False)
+    controller = Controller.__new__(Controller)
+    controller.config = types.SimpleNamespace(memory=enabled)
+    controller.memory_adapter = None
+    controller._memory_disabled_cleanup_task = None
+    status_waiting = asyncio.Event()
+    status_release = asyncio.Event()
+
+    class _Runtime:
+        def __init__(self) -> None:
+            self.module = object()
+            self.closed = False
+            self.retired = False
+
+        async def status_payload(self) -> dict[str, object]:
+            pytest.fail("status must re-project before reading a retired runtime")
+
+        async def reconcile(self, config) -> dict[str, object]:
+            return {"ok": True, "state": "disabled"}
+
+        async def close(self) -> None:
+            raise RuntimeError("close failed")
+
+        def retire(self) -> None:
+            self.retired = True
+
+    runtime = _Runtime()
+    controller.memory_runtime = runtime
+    controller.memory_module = runtime.module
+
+    async def hold_status_before_borrow() -> None:
+        status_waiting.set()
+        await status_release.wait()
+
+    controller._await_disabled_memory_cleanup = hold_status_before_borrow
+    status_task = asyncio.create_task(controller.memory_status_payload())
+    await status_waiting.wait()
+
+    async def cleanup_ready() -> None:
+        return None
+
+    controller._await_disabled_memory_cleanup = cleanup_ready
+    try:
+        with pytest.raises(RuntimeError, match="close failed"):
+            await controller.reconcile_memory(disabled)
+    finally:
+        status_release.set()
+
+    status = await status_task
+
+    assert runtime.retired is True
+    assert controller.memory_runtime is runtime
+    assert status["status"] == "ok"
+    assert status["state"] == "degraded"
+    assert status["reason"] == "memory_runtime_busy"
+    assert status["source"]["reason"] == "memory_runtime_busy"
 
 
 @pytest.mark.asyncio

@@ -908,6 +908,12 @@ class Controller:
                 while getattr(self, "_memory_runtime_leases_blocked", False):
                     await condition.wait()
                 runtime = getattr(self, "memory_runtime", None)
+                if (
+                    memory_config is None
+                    and not self.config.memory.enabled
+                    and not allow_disabled
+                ):
+                    raise MemoryStoreUnavailableError("Memory is disabled")
                 if runtime is not None and getattr(runtime, "retired", False):
                     raise MemoryRuntimeCloseUnprovedError(
                         "Memory runtime remains fenced after an unproved close"
@@ -920,12 +926,6 @@ class Controller:
                 ):
                     break
                 await condition.wait()
-            if (
-                memory_config is None
-                and not self.config.memory.enabled
-                and not allow_disabled
-            ):
-                raise MemoryStoreUnavailableError("Memory is disabled")
             temporary = runtime is None
             if temporary:
                 runtime = self._create_memory_runtime(selected_config)
@@ -1002,6 +1002,7 @@ class Controller:
                     self.memory_adapter = DisabledMemoryAdapter()
                     self.memory_module = None
                     self.config.memory = memory_config
+                    self._recheck_disabled_memory_cleanup_locked()
                     return {"ok": True, "state": "disabled"}
                 runtime = self._create_memory_runtime(memory_config)
                 self._attach_memory_runtime_locked(runtime, capture_enabled=True)
@@ -1012,6 +1013,7 @@ class Controller:
                 if not memory_config.enabled:
                     self.memory_adapter = DisabledMemoryAdapter()
                     await self._close_memory_runtime_locked(runtime, retire=False)
+                    self._recheck_disabled_memory_cleanup_locked()
                 else:
                     self.memory_adapter = None
             return result
@@ -2379,6 +2381,18 @@ class Controller:
             )
         except OSError:
             return False
+
+    def _recheck_disabled_memory_cleanup_locked(self) -> None:
+        """Clear a stale cleanup fence only after released ownership is absent."""
+
+        if not self._memory_replacement_lock().locked():
+            raise RuntimeError("Memory cleanup recheck requires the replacement lock")
+        if not getattr(self, "_memory_disabled_cleanup_unproved", False):
+            return
+        memory_dir = paths.get_vibe_remote_dir() / "memory"
+        self._memory_disabled_cleanup_unproved = (
+            self._disabled_memory_ownership_exists(memory_dir)
+        )
 
     async def _schedule_disabled_memory_cleanup(self) -> None:
         """Reap older owned Memory children only when a record exists."""
