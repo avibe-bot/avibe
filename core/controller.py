@@ -3175,9 +3175,11 @@ class Controller:
             from vibe import backend_model_catalog
 
             backend_model_catalog.prepare_codex_hub_catalog_from_cache()
-            backend_model_catalog.schedule_codex_hub_catalog_refresh(
-                self.config.codex.binary
-            )
+            codex_config = getattr(self.config, "codex", None)
+            if codex_config is not None:
+                backend_model_catalog.schedule_codex_hub_catalog_refresh(
+                    codex_config.binary
+                )
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
             memory_runtime = getattr(self, "memory_runtime", None)
