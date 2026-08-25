@@ -328,6 +328,7 @@ export const MemorySearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) =
             <SegmentedRadio<MemoryOrigin>
               value={browseOrigin}
               onChange={(nextOrigin) => {
+                if (nextOrigin === browseOrigin) return;
                 resetBrowseNavigation(project, nextOrigin);
                 setBrowseOrigin(nextOrigin);
               }}
