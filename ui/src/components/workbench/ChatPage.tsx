@@ -1421,6 +1421,7 @@ export const ChatPage: React.FC = () => {
       // otherwise the new chat can reinstall the pre-click value.
       await api.waitForConfigMutations();
       if (!requestIsCurrent()) return;
+      const activityVisibilityRequest = agentActivityVisibilityRequestRef.current;
       // Initial chat open needs the same recent tail window, queue, draft,
       // route/config state, and current turn state. Fetch them as one bootstrap
       // payload so remote links don't pay a tunnel round-trip per widget.
@@ -1453,10 +1454,18 @@ export const ChatPage: React.FC = () => {
       setAgents(bootstrap.agents);
       setDefaultAgentName(bootstrap.default_agent_name);
       setMessageFontSize(normalizeChatMessageFontSize(bootstrap.config?.ui?.chat_message_font_size));
-      const activityEnabled = Boolean(bootstrap.config?.ui?.show_agent_activity);
-      setShowAgentActivity(activityEnabled);
-      showAgentActivityRef.current = activityEnabled;
-      confirmedAgentActivityVisibilityRef.current = activityEnabled;
+      const bootstrapActivityEnabled = Boolean(bootstrap.config?.ui?.show_agent_activity);
+      const activityPreferenceIsCurrent = (
+        activityVisibilityRequest === agentActivityVisibilityRequestRef.current
+      );
+      if (activityPreferenceIsCurrent) {
+        setShowAgentActivity(bootstrapActivityEnabled);
+        showAgentActivityRef.current = bootstrapActivityEnabled;
+        confirmedAgentActivityVisibilityRef.current = bootstrapActivityEnabled;
+      }
+      const activityEnabled = activityPreferenceIsCurrent
+        ? bootstrapActivityEnabled
+        : showAgentActivityRef.current;
       // Default on: only an explicit ``false`` hides tool rows.
       setShowToolCalls(bootstrap.config?.ui?.show_tool_calls !== false);
       // Merge (not replace) so a row that arrived over the stream during the

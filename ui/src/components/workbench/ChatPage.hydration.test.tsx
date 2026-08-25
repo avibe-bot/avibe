@@ -22,7 +22,10 @@ const mocks = vi.hoisted(() => ({
   },
   events: null as null | {
     onConnected: () => void;
-    onAuthorizationChanged: (data: { resource_kinds?: string[] }) => void;
+    onAuthorizationChanged: (data: {
+      resource_kinds?: string[];
+      instance_authorization_revision?: number;
+    }) => void;
     onMessageNew: (message: ReturnType<typeof projectedMessage>) => void;
     onTurnStart: (data: { session_id: string }) => void;
     onTurnEnd: (data: { session_id: string }) => void;
@@ -597,6 +600,39 @@ describe('ChatPage transcript hydration', () => {
     await act(async () => activityWrite.resolve({ ui: { show_agent_activity: true } }));
     await waitFor(() => expect(mocks.api.getSessionBootstrap).toHaveBeenCalledTimes(2));
     expect(mocks.api.getSessionBootstrap).toHaveBeenLastCalledWith('session-running');
+    await waitFor(() => expect(screen.queryByRole('button', {
+      name: 'chat.agentActivity.enable',
+    })).toBeNull());
+  });
+
+  it('does not let an in-flight authorization bootstrap overwrite a newer visibility click', async () => {
+    const authorizationBootstrap = deferred<ReturnType<typeof bootstrapPayload>>();
+    mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+    mocks.api.getSessionBootstrap
+      .mockResolvedValueOnce({
+        ...bootstrapPayload('session-new'),
+        turn_state: { ...idleTurnState, foreground: 'running', in_flight: true },
+      })
+      .mockImplementationOnce(() => authorizationBootstrap.promise);
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-new']}>
+        <Routes>
+          <Route path="/chat/:sessionId" element={<ChatPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const enable = await screen.findByRole('button', { name: 'chat.agentActivity.enable' });
+    act(() => mocks.events?.onAuthorizationChanged({ instance_authorization_revision: 2 }));
+    await waitFor(() => expect(mocks.api.getSessionBootstrap).toHaveBeenCalledTimes(2));
+    act(() => enable.click());
+    await waitFor(() => expect(mocks.api.mutateConfig).toHaveBeenCalledTimes(1));
+
+    await act(async () => authorizationBootstrap.resolve({
+      ...bootstrapPayload('session-new'),
+      turn_state: { ...idleTurnState, foreground: 'running', in_flight: true },
+    }));
     await waitFor(() => expect(screen.queryByRole('button', {
       name: 'chat.agentActivity.enable',
     })).toBeNull());
