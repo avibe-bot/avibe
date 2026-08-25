@@ -367,6 +367,8 @@ async def test_orphan_recovery_degrades_without_no_follow_but_reset_fails_closed
     monkeypatch: pytest.MonkeyPatch,
     memory_runtime_factory,
 ) -> None:
+    """MEMORY-WAKE-203: unreconciled ownership is never reported as disabled."""
+
     runtime = memory_runtime_factory(
         MemoryConfig(enabled=False),
         effective_home=tmp_path,
@@ -384,11 +386,85 @@ async def test_orphan_recovery_degrades_without_no_follow_but_reset_fails_closed
 
     assert await runtime.wake() == {
         "ok": False,
-        "state": "disabled",
-        "error": "memory_disabled",
+        "state": "degraded",
+        "error": "memory_sidecar_unavailable",
     }
+    assert runtime.runtime_state() == "degraded"
+    assert (await runtime.status_payload())["reason"] == "memory_sidecar_unavailable"
     with pytest.raises(ConfinedFilesystemError, match="no-follow unavailable"):
         await runtime.prepare_data_reset()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_reports_released_ownership_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    memory_runtime_factory,
+) -> None:
+    """MEMORY-WAKE-203: config reconciliation cannot hide orphan failure."""
+
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=False),
+        effective_home=tmp_path,
+    )
+
+    outcomes = iter((False, True))
+
+    async def released_reconciliation(*, fail_closed: bool = False) -> bool:
+        assert fail_closed is False
+        return next(outcomes)
+
+    monkeypatch.setattr(
+        runtime._supervisor,
+        "reconcile_orphans",
+        released_reconciliation,
+    )
+
+    assert await runtime.reconcile(MemoryConfig(enabled=False)) == {
+        "ok": False,
+        "state": "degraded",
+        "error": "memory_sidecar_unavailable",
+    }
+    assert runtime.runtime_state() == "degraded"
+
+    assert await runtime.reconcile(MemoryConfig(enabled=False)) == {
+        "ok": True,
+        "state": "disabled",
+    }
+    assert runtime.runtime_state() == "disabled"
+
+
+@pytest.mark.asyncio
+async def test_repair_fenced_wake_reports_released_ownership_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    memory_runtime_factory,
+) -> None:
+    """MEMORY-WAKE-203: repair eligibility does not conceal orphan failure."""
+
+    runtime = memory_runtime_factory(
+        _config(legacy_needs_repair=True),
+        effective_home=tmp_path,
+    )
+
+    async def failed_reconciliation(*, fail_closed: bool = False) -> bool:
+        assert fail_closed is False
+        return False
+
+    monkeypatch.setattr(
+        runtime._supervisor,
+        "reconcile_orphans",
+        failed_reconciliation,
+    )
+
+    assert await runtime.wake() == {
+        "ok": False,
+        "state": "needs_repair",
+        "error": "memory_sidecar_unavailable",
+    }
+    status = await runtime.status_payload()
+    assert status["state"] == "needs_repair"
+    assert status["reason"] == "memory_sidecar_unavailable"
 
 
 @pytest.mark.asyncio

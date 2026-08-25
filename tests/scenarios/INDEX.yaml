@@ -90,6 +90,8 @@ capabilities:
       - tests/test_ui_memory_routes.py
     unit_or_contract_tests:
       - tests/test_memory_wake.py
+      - tests/test_memory_supervisor.py
+      - tests/test_memory_confined_filesystem.py
       - tests/test_controller_memory_data_reset.py
       - tests/test_memory_store.py
       - tests/test_internal_client.py

@@ -333,9 +333,11 @@ async def test_recovery_authority_reaches_an_artifact_activation_task(
     await supervisor.close()
 
 
-async def test_unreaped_child_degrades_without_launching_a_replacement(
+async def test_retained_child_reenters_bounded_wake_before_replacement(
     tmp_path: Path,
 ) -> None:
+    """MEMORY-WAKE-202: retained execution is stopped before replacement."""
+
     unavailable = 0
 
     def observe_unavailable() -> None:
@@ -351,7 +353,16 @@ async def test_unreaped_child_degrades_without_launching_a_replacement(
                 if asyncio.iscoroutine(result):
                     await result
 
-    factory = FakeEverOSProcessFactory(template=RetainedProcess)
+    first = True
+
+    def process() -> FakeEverOSProcess:
+        nonlocal first
+        if first:
+            first = False
+            return RetainedProcess()
+        return FakeEverOSProcess()
+
+    factory = FakeEverOSProcessFactory(template=process)
     supervisor = _supervisor(
         tmp_path,
         factory,
@@ -359,13 +370,62 @@ async def test_unreaped_child_degrades_without_launching_a_replacement(
     )
     assert await supervisor.wake(Path(sys.executable), _settings()) is True
 
-    await factory.supervised[0].unexpected_exit()
-    await _settle()
+    retained = factory.supervised[0]
+    await retained.unexpected_exit()
+    for _ in range(20):
+        await _settle()
+        if (
+            len(factory.supervised) == 2
+            and factory.supervised[1].running
+            and supervisor._restart_task is None
+        ):
+            break
 
     assert unavailable == 1
+    assert retained.stops == 1
+    assert retained.retains_active_config is False
+    assert len(factory.supervised) == 2
+    assert factory.supervised[1].running is True
+    assert supervisor.status.state == "running"
+    assert supervisor.status.retains_configuration is True
+    await supervisor.close()
+
+
+async def test_retained_child_exhausts_recovery_without_dual_ownership(
+    tmp_path: Path,
+) -> None:
+    """MEMORY-WAKE-202: failed stop proof exhausts one bounded recovery budget."""
+
+    class RetainedProcess(FakeEverOSProcess):
+        async def unexpected_exit(self) -> None:
+            self._running = False
+            self._process_tree_retained = True
+            if self.on_unexpected_exit is not None:
+                result = self.on_unexpected_exit()
+                if asyncio.iscoroutine(result):
+                    await result
+
+    retained = RetainedProcess(stop_failure=RuntimeError("tree retained"))
+    factory = FakeEverOSProcessFactory(template=lambda: retained)
+    supervisor = _supervisor(
+        tmp_path,
+        factory,
+        restart_delays=(0.0, 0.0),
+    )
+    assert await supervisor.wake(Path(sys.executable), _settings()) is True
+
+    await retained.unexpected_exit()
+    for _ in range(40):
+        await _settle()
+        if supervisor._restart_task is None and retained.stops == 2:
+            break
+
+    assert retained.stops == 2
+    assert retained.retains_active_config is True
     assert len(factory.supervised) == 1
     assert supervisor.status.state == "degraded"
-    assert supervisor.status.retains_configuration is True
+
+    retained.stop_failure = None
     await supervisor.close()
 
 

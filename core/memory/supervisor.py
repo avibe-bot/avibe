@@ -358,27 +358,26 @@ class EverOSSupervisor:
         child: EverOSProcessPort,
         epoch: int,
     ) -> None:
-        should_restart = False
         async with self._lock:
             if self._closing or epoch != self._epoch or child is not self._child:
                 return
+            # A retained helper or process tree still needs the same bounded Wake
+            # path. Wake retries stop proof before it can create a replacement.
+            # Slow recovery does not earn a fresh budget. Only a replacement
+            # that stayed admitted for the full window starts a new episode.
+            stable_since = self._restart_stable_since
+            if (
+                stable_since is not None
+                and time.monotonic() - stable_since
+                >= self._restart_window_seconds
+            ):
+                self._restart_attempts = 0
+            self._restart_stable_since = None
             if not child.retains_active_config:
-                # Slow recovery does not earn a fresh budget. Only a replacement
-                # that stayed admitted for the full window starts a new episode.
-                stable_since = self._restart_stable_since
-                if (
-                    stable_since is not None
-                    and time.monotonic() - stable_since
-                    >= self._restart_window_seconds
-                ):
-                    self._restart_attempts = 0
-                self._restart_stable_since = None
                 self._child = None
-                should_restart = True
         await self._notify(self._on_unavailable, "unexpected-exit")
-        if should_restart:
-            async with self._lock:
-                self._schedule_restart_locked(epoch)
+        async with self._lock:
+            self._schedule_restart_locked(epoch)
 
     def _schedule_restart_locked(self, epoch: int) -> None:
         if self._closing or self._closed or epoch != self._epoch:
