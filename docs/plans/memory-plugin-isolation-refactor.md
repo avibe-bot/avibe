@@ -90,6 +90,10 @@ behavior.
 
 ### Disabled or absent
 
+**Disabled = inert + truthful:** disabled paths never construct a Memory runtime,
+status reflects retained fenced ownership, and every internal Memory endpoint
+fails closed with its stable error shape for unknown lifecycle failures.
+
 - A fresh home with Memory disabled imports no optional Memory implementation.
 - It creates no Memory database, attachment directory, provider root, artifact
   state, or Memory lock.

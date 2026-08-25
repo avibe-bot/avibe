@@ -884,20 +884,29 @@ class Controller:
     async def _borrow_memory_runtime(
         self,
         memory_config: MemoryConfig | None = None,
+        *,
+        allow_disabled: bool = False,
     ) -> AsyncIterator[_MemoryRuntimeLease]:
         """Lease the sole runtime for one non-destructive explicit operation."""
 
+        selected_config = memory_config or self.config.memory
+        if not selected_config.enabled and not allow_disabled:
+            raise MemoryStoreUnavailableError("Memory is disabled")
         await self._await_disabled_memory_cleanup()
         condition = self._memory_runtime_condition()
         async with condition:
             while getattr(self, "_memory_runtime_leases_blocked", False):
                 await condition.wait()
+            if (
+                memory_config is None
+                and not self.config.memory.enabled
+                and not allow_disabled
+            ):
+                raise MemoryStoreUnavailableError("Memory is disabled")
             runtime = getattr(self, "memory_runtime", None)
             temporary = runtime is None
             if temporary:
-                runtime = self._create_memory_runtime(
-                    memory_config or self.config.memory
-                )
+                runtime = self._create_memory_runtime(selected_config)
                 self._attach_memory_runtime_locked(
                     runtime,
                     capture_enabled=bool(self.config.memory.enabled),
@@ -956,7 +965,7 @@ class Controller:
     async def install_memory_runtime(self) -> dict[str, Any]:
         """Install the managed artifact through Controller runtime ownership."""
 
-        async with self._borrow_memory_runtime() as lease:
+        async with self._borrow_memory_runtime(allow_disabled=True) as lease:
             return await lease.runtime.install_artifact()
 
     async def reconcile_memory(self, memory_config: MemoryConfig) -> dict[str, Any]:
@@ -1003,21 +1012,38 @@ class Controller:
                 return CaptureSkipped(reason="memory_store_unavailable")
             return await runtime.module.capture(request)
 
-    def _disabled_memory_status_payload(self) -> dict[str, Any]:
+    def _disabled_memory_source_payload(
+        self,
+        *,
+        reason: str = "memory_disabled",
+    ) -> dict[str, Any]:
+        return {
+            "status": "unavailable",
+            "observed_at": None,
+            "reason": reason,
+        }
+
+    def _disabled_memory_status_payload(
+        self,
+        *,
+        retained_runtime: bool = False,
+    ) -> dict[str, Any]:
         config = self.config.memory
         needs_repair = bool(config.legacy_needs_repair)
+        state = "degraded" if retained_runtime else (
+            "needs_repair" if needs_repair else "disabled"
+        )
+        reason = "memory_runtime_busy" if retained_runtime else (
+            "memory_legacy_recovery_required" if needs_repair else None
+        )
         return {
             "status": "ok",
-            "source": {
-                "status": "unavailable",
-                "observed_at": None,
-                "reason": "memory_disabled",
-            },
-            "health": None,
-            "state": "needs_repair" if needs_repair else "disabled",
-            "reason": (
-                "memory_legacy_recovery_required" if needs_repair else None
+            "source": self._disabled_memory_source_payload(
+                reason="memory_runtime_busy" if retained_runtime else "memory_disabled"
             ),
+            "health": None,
+            "state": state,
+            "reason": reason,
             "attachment_capture": {
                 "status": (
                     "unavailable"
@@ -1027,11 +1053,45 @@ class Controller:
             },
         }
 
+    def _disabled_memory_processing_record_payload(self) -> dict[str, Any]:
+        def unavailable() -> dict[str, Any]:
+            return self._disabled_memory_source_payload()
+
+        return {
+            "status": "ok",
+            "runtime": {"source": unavailable(), "health": None},
+            "sources": {
+                "memcells": unavailable(),
+                "runs": unavailable(),
+                "semantic": unavailable(),
+            },
+            "anomalies": {"source": unavailable(), "items": []},
+            "maintenance": {
+                "source": unavailable(),
+                # Without store I/O, absence cannot be proved. Keep explicit
+                # deletion available for state left by an older enabled run.
+                "data_exists": True,
+                "can_delete_data": True,
+            },
+        }
+
+    def _disabled_memory_maintenance_payload(self) -> dict[str, Any]:
+        return {
+            "status": "ok",
+            # See the matching Processing Record projection above.
+            "data_exists": True,
+            "can_delete_data": True,
+        }
+
     async def memory_status_payload(self) -> dict[str, Any]:
         """Project disabled status without loading or touching Memory state."""
 
-        if not self.config.memory.enabled:
-            return self._disabled_memory_status_payload()
+        condition = self._memory_runtime_condition()
+        async with condition:
+            if not self.config.memory.enabled:
+                return self._disabled_memory_status_payload(
+                    retained_runtime=getattr(self, "memory_runtime", None) is not None
+                )
         async with self._borrow_memory_runtime() as lease:
             return await lease.runtime.status_payload()
 
@@ -1054,6 +1114,8 @@ class Controller:
         *,
         verified_user_key: str | None,
     ) -> dict[str, Any]:
+        if not self.config.memory.enabled:
+            return self._disabled_memory_processing_record_payload()
         async with self._borrow_memory_runtime() as lease:
             return await lease.runtime.processing_record_payload(
                 verified_user_key=verified_user_key
@@ -1074,6 +1136,8 @@ class Controller:
         *,
         verified_user_key: str | None,
     ) -> dict[str, Any]:
+        if not self.config.memory.enabled:
+            return self._disabled_memory_maintenance_payload()
         async with self._borrow_memory_runtime() as lease:
             return await lease.runtime.maintenance_payload(
                 verified_user_key=verified_user_key
@@ -2253,8 +2317,26 @@ class Controller:
             return
         mark_service_instance_started()
 
+    @staticmethod
+    def _disabled_memory_ownership_exists(memory_dir: Path) -> bool:
+        """Detect only released ownership records without loading Memory code."""
+
+        try:
+            (memory_dir / ".rt" / "everos.sidecar.json").lstat()
+            return True
+        except OSError:
+            pass
+        try:
+            return any(
+                path.name.startswith("cascade-sync-")
+                and path.name.endswith(".json")
+                for path in (memory_dir / ".avibe-memory-locks").iterdir()
+            )
+        except OSError:
+            return False
+
     def _schedule_disabled_memory_cleanup(self) -> None:
-        """Reap an older owned sidecar only when its ownership record exists."""
+        """Reap older owned Memory children only when a record exists."""
 
         if not isinstance(
             getattr(self, "memory_adapter", None),
@@ -2264,22 +2346,15 @@ class Controller:
         task = getattr(self, "_memory_disabled_cleanup_task", None)
         if task is not None and not task.done():
             return
-        record_path = (
-            paths.get_vibe_remote_dir()
-            / "memory"
-            / ".rt"
-            / "everos.sidecar.json"
-        )
-        try:
-            record_path.lstat()
-        except OSError:
+        memory_dir = paths.get_vibe_remote_dir() / "memory"
+        if not self._disabled_memory_ownership_exists(memory_dir):
             return
         self._memory_disabled_cleanup_task = asyncio.create_task(
-            self._cleanup_disabled_memory_process(record_path),
+            self._cleanup_disabled_memory_process(memory_dir),
             name="memory-disabled-everos-cleanup",
         )
 
-    async def _cleanup_disabled_memory_process(self, record_path: Path) -> None:
+    async def _cleanup_disabled_memory_process(self, memory_dir: Path) -> None:
         """Lazily load the proven-ownership reaper after service readiness."""
 
         async with self._memory_replacement_lock():
@@ -2288,21 +2363,17 @@ class Controller:
                 DisabledMemoryAdapter,
             ) or getattr(self, "memory_runtime", None) is not None:
                 return
-            try:
-                record_path.lstat()
-            except OSError:
+            if not self._disabled_memory_ownership_exists(memory_dir):
                 return
 
-            memory_dir = record_path.parent.parent
             try:
-                from core.memory.process import SidecarOwnership
+                from core.memory.process import ReleasedEverOSOrphanReconciler
 
-                ownership = SidecarOwnership(
-                    record_path=record_path,
-                    socket_path=memory_dir / ".rt" / "everos.sock",
+                reconciler = ReleasedEverOSOrphanReconciler(
                     provider_root=memory_dir / "everos-root",
+                    effective_home=paths.get_vibe_remote_dir(),
                 )
-                await ownership.reap(discover_missing=False)
+                await reconciler.reconcile_orphans()
             except asyncio.CancelledError:
                 raise
             except Exception:

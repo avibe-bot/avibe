@@ -1488,6 +1488,12 @@ def create_app(
                 status_code=403,
                 content={"status": "failed", "error": "memory_access_denied"},
             )
+        except Exception:
+            logger.warning("internal memory project list failed")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_processing_failed"},
+            )
 
     @app.post("/internal/memory/search")
     async def _memory_search(request: Request) -> Any:

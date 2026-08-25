@@ -17,6 +17,7 @@ from config.v2_config import V2Config
 from core.controller import Controller
 from core.memory import CaptureRequest, CaptureSkipped
 from core.memory_adapter import DisabledMemoryAdapter
+from vibe.memory_contract import MemoryStoreUnavailableError
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -231,24 +232,32 @@ assert not BLOCKED.intersection(sys.modules)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "record_relative_path",
+    [
+        Path(".rt/everos.sidecar.json"),
+        Path(".avibe-memory-locks/cascade-sync-owned.json"),
+    ],
+)
 async def test_disabled_cleanup_reaps_only_preexisting_everos_ownership(
     monkeypatch: pytest.MonkeyPatch,
+    record_relative_path: Path,
 ) -> None:
     memory_dir = paths.get_vibe_remote_dir() / "memory"
-    record_path = memory_dir / ".rt" / "everos.sidecar.json"
+    record_path = memory_dir / record_relative_path
     record_path.parent.mkdir(parents=True)
     record_path.write_text("{}", encoding="utf-8")
-    calls: list[tuple[Path, Path, Path, bool]] = []
+    calls: list[tuple[Path, Path]] = []
 
-    class _Ownership:
-        def __init__(self, *, record_path, socket_path, provider_root) -> None:
-            self._paths = (record_path, socket_path, provider_root)
+    class _Reconciler:
+        def __init__(self, *, provider_root, effective_home) -> None:
+            self._paths = (provider_root, effective_home)
 
-        async def reap(self, *, discover_missing: bool = False) -> None:
-            calls.append((*self._paths, discover_missing))
+        async def reconcile_orphans(self) -> None:
+            calls.append(self._paths)
 
     process_module = types.ModuleType("core.memory.process")
-    process_module.SidecarOwnership = _Ownership
+    process_module.ReleasedEverOSOrphanReconciler = _Reconciler
     monkeypatch.setitem(sys.modules, "core.memory.process", process_module)
 
     controller = Controller.__new__(Controller)
@@ -262,10 +271,8 @@ async def test_disabled_cleanup_reaps_only_preexisting_everos_ownership(
     await controller._memory_disabled_cleanup_task
     assert calls == [
         (
-            record_path,
-            memory_dir / ".rt" / "everos.sock",
             memory_dir / "everos-root",
-            False,
+            paths.get_vibe_remote_dir(),
         )
     ]
 
@@ -452,6 +459,33 @@ async def test_temporary_close_failure_retains_fenced_controller_ownership() -> 
 
 
 @pytest.mark.asyncio
+async def test_disabled_status_reports_retained_fenced_runtime_truthfully() -> None:
+    controller = Controller.__new__(Controller)
+    controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)
+    controller.memory_adapter = DisabledMemoryAdapter()
+    controller.memory_module = object()
+    controller._memory_reconcile_task = None
+    controller._memory_disabled_cleanup_task = None
+
+    runtime = types.SimpleNamespace(
+        module=controller.memory_module,
+        closed=False,
+        retired=True,
+    )
+    controller.memory_runtime = runtime
+    controller._create_memory_runtime = lambda _config: pytest.fail(
+        "disabled status must not construct Memory"
+    )
+
+    status = await controller.memory_status_payload()
+
+    assert status["state"] == "degraded"
+    assert status["reason"] == "memory_runtime_busy"
+    assert status["source"]["reason"] == "memory_runtime_busy"
+    assert controller.memory_runtime is runtime
+
+
+@pytest.mark.asyncio
 async def test_temporary_close_without_closed_proof_retains_ownership() -> None:
     controller = Controller.__new__(Controller)
     controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)
@@ -566,6 +600,56 @@ async def test_disabled_status_preserves_legacy_repair_fence_without_runtime() -
 
 
 @pytest.mark.asyncio
+async def test_disabled_dashboard_reads_do_not_construct_runtime() -> None:
+    controller = Controller.__new__(Controller)
+    controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)
+    controller.memory_adapter = DisabledMemoryAdapter()
+    controller.memory_runtime = None
+    controller.memory_module = None
+    controller._memory_reconcile_task = None
+    controller._memory_disabled_cleanup_task = None
+    factory_calls: list[object] = []
+
+    def create_runtime(config):
+        factory_calls.append(config)
+        raise AssertionError("disabled dashboard reads must not construct Memory")
+
+    controller._create_memory_runtime = create_runtime
+
+    processing, maintenance = await asyncio.gather(
+        controller.memory_processing_record_payload(verified_user_key="user-1"),
+        controller.memory_maintenance_payload(verified_user_key="user-1"),
+    )
+
+    unavailable = {
+        "status": "unavailable",
+        "observed_at": None,
+        "reason": "memory_disabled",
+    }
+    assert processing == {
+        "status": "ok",
+        "runtime": {"source": unavailable, "health": None},
+        "sources": {
+            "memcells": unavailable,
+            "runs": unavailable,
+            "semantic": unavailable,
+        },
+        "anomalies": {"source": unavailable, "items": []},
+        "maintenance": {
+            "source": unavailable,
+            "data_exists": True,
+            "can_delete_data": True,
+        },
+    }
+    assert maintenance == {
+        "status": "ok",
+        "data_exists": True,
+        "can_delete_data": True,
+    }
+    assert factory_calls == []
+
+
+@pytest.mark.asyncio
 async def test_disabled_wake_and_remember_are_host_derived_without_runtime() -> None:
     controller = Controller.__new__(Controller)
     controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)
@@ -595,7 +679,7 @@ async def test_disabled_wake_and_remember_are_host_derived_without_runtime() -> 
 
 
 @pytest.mark.asyncio
-async def test_disabled_store_backed_read_borrows_one_owned_runtime() -> None:
+async def test_disabled_store_backed_read_is_gated_before_runtime_construction() -> None:
     controller = Controller.__new__(Controller)
     controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)
     controller.memory_adapter = DisabledMemoryAdapter()
@@ -603,40 +687,16 @@ async def test_disabled_store_backed_read_borrows_one_owned_runtime() -> None:
     controller.memory_module = None
     controller._memory_reconcile_task = None
 
-    class _Runtime:
-        def __init__(self) -> None:
-            self.module = object()
-            self.closed = False
-            self.retired = False
-
-        def list_memory_projects(self, principal_id: str) -> tuple[str, ...]:
-            assert controller.memory_runtime is self
-            assert principal_id == "u-11111111111111111111111111111111"
-            return ("default", "notes")
-
-        def retire(self) -> None:
-            self.retired = True
-
-        async def close(self) -> None:
-            self.closed = True
-
-    runtime = _Runtime()
-    controller._create_memory_runtime = lambda config: runtime
-
-    result = await controller.memory_projects_payload(
-        verified_user_key=None,
-        cli_scope=("u-11111111111111111111111111111111", "default"),
+    controller._create_memory_runtime = lambda _config: pytest.fail(
+        "disabled reads must not construct Memory"
     )
 
-    assert result == {
-        "status": "ok",
-        "projects": [
-            {"id": "default", "kind": "default"},
-            {"id": "notes", "kind": "named"},
-            {"id": "all", "kind": "all"},
-        ],
-    }
-    assert runtime.closed is True
+    with pytest.raises(MemoryStoreUnavailableError, match="Memory is disabled"):
+        await controller.memory_projects_payload(
+            verified_user_key=None,
+            cli_scope=("u-11111111111111111111111111111111", "default"),
+        )
+
     assert controller.memory_runtime is None
     assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
 

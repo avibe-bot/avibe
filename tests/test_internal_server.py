@@ -380,7 +380,10 @@ def _build_controller_double(handler=None):
         "_clear_memory_runtime_locked",
         "_close_memory_runtime_locked",
         "_borrow_memory_runtime",
+        "_disabled_memory_source_payload",
         "_disabled_memory_status_payload",
+        "_disabled_memory_processing_record_payload",
+        "_disabled_memory_maintenance_payload",
         "_memory_scope_for_runtime",
         "_memory_scope_for_project",
         "wake_memory",
@@ -462,6 +465,39 @@ def test_disabled_memory_status_route_uses_host_projection_without_runtime() -> 
     assert response.json()["state"] == "disabled"
     assert response.json()["source"]["reason"] == "memory_disabled"
     controller._create_memory_runtime.assert_not_called()
+
+
+def test_memory_projects_unknown_lifecycle_failure_uses_stable_envelope() -> None:
+    from core.memory.http_headers import CALLER_SESSION_HEADER
+
+    controller = _build_controller_double()
+    controller.memory_scope_for_cli_session.return_value = (
+        "u-11111111111111111111111111111111",
+        "default",
+    )
+    controller.memory_projects_payload = AsyncMock(
+        side_effect=RuntimeError("injected lifecycle failure")
+    )
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.get(
+                "/internal/memory/projects",
+                headers={CALLER_SESSION_HEADER: "session-1"},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "failed",
+        "error": "memory_processing_failed",
+    }
 
 
 def test_memory_install_route_delegates_to_controller_lifecycle() -> None:
