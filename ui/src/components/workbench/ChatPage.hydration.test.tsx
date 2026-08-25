@@ -610,6 +610,45 @@ describe('ChatPage transcript hydration', () => {
     ]);
   });
 
+  it('waits for a visibility write before bootstrapping a switched chat', async () => {
+    const activityWrite = deferred<{ ui: { show_agent_activity: boolean } }>();
+    mocks.api.getSession.mockImplementation((id: string) => Promise.resolve({ id }));
+    mocks.api.getSessionBootstrap
+      .mockResolvedValueOnce({
+        ...bootstrapPayload('session-new'),
+        turn_state: { ...idleTurnState, foreground: 'running', in_flight: true },
+      })
+      .mockResolvedValueOnce({
+        ...bootstrapPayload('session-running'),
+        config: { ui: { show_agent_activity: true } },
+        turn_state: { ...idleTurnState, foreground: 'running', in_flight: true },
+      });
+    mocks.api.mutateConfig.mockImplementationOnce(() => activityWrite.promise);
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-new']}>
+        <SessionSwitcher />
+        <Routes>
+          <Route path="/chat/:sessionId" element={<ChatPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const enable = await screen.findByRole('button', { name: 'chat.agentActivity.enable' });
+    act(() => enable.click());
+    await waitFor(() => expect(mocks.api.mutateConfig).toHaveBeenCalledTimes(1));
+    act(() => screen.getByRole('button', { name: 'switch chat' }).click());
+    await act(async () => Promise.resolve());
+    expect(mocks.api.getSessionBootstrap).toHaveBeenCalledTimes(1);
+
+    await act(async () => activityWrite.resolve({ ui: { show_agent_activity: true } }));
+    await waitFor(() => expect(mocks.api.getSessionBootstrap).toHaveBeenCalledTimes(2));
+    expect(mocks.api.getSessionBootstrap).toHaveBeenLastCalledWith('session-running');
+    await waitFor(() => expect(screen.queryByRole('button', {
+      name: 'chat.agentActivity.enable',
+    })).toBeNull());
+  });
+
   it('does not offer the global enable shortcut to a Viewer', async () => {
     mocks.authorizationCapabilities.can_chat = false;
     mocks.api.getSession.mockResolvedValue({ id: 'session-new' });

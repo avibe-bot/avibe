@@ -1406,6 +1406,11 @@ export const ChatPage: React.FC = () => {
     setError(null);
     setFailedBootstrapSessionId((current) => current === sessionId ? null : current);
     try {
+      // This component is reused across chat routes. A visibility click from the
+      // previous route must settle before the next bootstrap reads global config,
+      // otherwise the new chat can reinstall the pre-click value.
+      await agentActivityConfigWriteRef.current.catch(() => undefined);
+      if (!requestIsCurrent()) return;
       // Initial chat open needs the same recent tail window, queue, draft,
       // route/config state, and current turn state. Fetch them as one bootstrap
       // payload so remote links don't pay a tunnel round-trip per widget.
