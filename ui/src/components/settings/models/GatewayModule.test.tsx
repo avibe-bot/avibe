@@ -25,6 +25,33 @@ const agent: AgentSupply = {
 afterEach(cleanup);
 
 describe('GatewayModule region failure treatment', () => {
+  it('fills a narrow overview column without preserving an intrinsic panel width', () => {
+    render(
+      <I18nextProvider i18n={i18n}>
+        <GatewayModule
+          supply={readyRegion([])}
+          runtime={null}
+          runtimeSnapshot={null}
+          onRetry={vi.fn()}
+          sources={[]}
+          chains={{}}
+          pendingBackends={new Set()}
+          switchFailures={new Set()}
+          connectingBackend={null}
+          onConnectHub={vi.fn()}
+          onSwitchDirect={vi.fn()}
+          onOpenOrder={vi.fn()}
+          onOpenRoute={vi.fn()}
+          onProbeSettled={vi.fn()}
+        />
+      </I18nextProvider>,
+    );
+
+    const panel = screen.getByRole('heading', { name: /Gateway|网关/i }).closest('section');
+    expect(panel?.className).toContain('w-full');
+    expect(panel?.className).toContain('min-w-0');
+  });
+
   it('keeps the last good Agent rows visible with an F2 retry after a later read fails', async () => {
     const onRetry = vi.fn();
     render(

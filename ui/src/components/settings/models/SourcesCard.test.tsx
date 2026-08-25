@@ -25,6 +25,18 @@ const retained: Source = {
 afterEach(cleanup);
 
 describe('SourcesCard footer', () => {
+  it('fills a narrow overview column without preserving an intrinsic panel width', () => {
+    render(
+      <I18nextProvider i18n={i18n}>
+        <SourcesCard read={readyRegion([])} onRetry={vi.fn()} onOpenSource={vi.fn()} onAddApiKey={vi.fn()} onAddSubscription={vi.fn()} />
+      </I18nextProvider>,
+    );
+
+    const panel = screen.getByRole('heading', { name: /Sources|来源/i }).closest('section');
+    expect(panel?.className).toContain('w-full');
+    expect(panel?.className).toContain('min-w-0');
+  });
+
   it('exposes the upstream info note to keyboard activation and Escape dismissal', async () => {
     const user = userEvent.setup();
     render(

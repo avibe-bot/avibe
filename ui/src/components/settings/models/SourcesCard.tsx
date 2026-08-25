@@ -34,7 +34,7 @@ export const SourcesCard: React.FC<{
   // leave ~100px of void above it. `max-h-full` still hands overflow to the
   // scroll region when there are more.
   return (
-    <section className="relative z-20 flex max-h-full flex-col self-start overflow-hidden rounded-[14px] border border-border bg-surface">
+    <section className="relative z-20 flex max-h-full w-full min-w-0 flex-col self-start overflow-hidden rounded-[14px] border border-border bg-surface">
       <div className="flex h-14 shrink-0 items-center justify-between border-b border-border px-3.5">
         <span className="flex items-center gap-[7px]">
           <h2 className="text-[16px] font-bold leading-[23px] text-foreground">{t('settings.models.upstream.heading')}</h2>
