@@ -1548,6 +1548,11 @@ def _should_rotate_remote_session_secret(previous: V2Config | None, current: V2C
     return bool(previous_cloud.enabled and not current_cloud.enabled and current_cloud.session_secret)
 
 
+def _activity_streaming_flag_touched(payload: dict) -> bool:
+    ui_payload = payload.get("ui")
+    return isinstance(ui_payload, dict) and "show_agent_activity" in ui_payload
+
+
 def _platform_runtime_signature(config: V2Config) -> dict[str, tuple[Any, ...]]:
     from config.platform_registry import get_platform_descriptor
 
@@ -6601,7 +6606,7 @@ def _schedule_service_restart_for_config_fallback() -> dict[str, Any]:
     return {"ok": True, "restart": restart}
 
 
-def _save_config_and_runtime_decisions(payload: dict) -> tuple[V2Config, bool, bool, list[str]]:
+def _save_config_and_runtime_decisions(payload: dict) -> tuple[V2Config, bool, bool, bool, list[str]]:
     from vibe import api
     from vibe import remote_access
 
@@ -6631,8 +6636,15 @@ def _save_config_and_runtime_decisions(payload: dict) -> tuple[V2Config, bool, b
                 config = V2Config.load()
             should_reconcile_remote_access = True
         should_reconcile_platforms = _platform_runtime_fields_changed(previous_config, config, payload)
+        should_reconcile_activity_streaming = _activity_streaming_flag_touched(payload)
         changed_agent_backends = _changed_agent_backend_runtimes(previous_config, config, payload)
-        return config, should_reconcile_remote_access, should_reconcile_platforms, changed_agent_backends
+        return (
+            config,
+            should_reconcile_remote_access,
+            should_reconcile_platforms,
+            should_reconcile_activity_streaming,
+            changed_agent_backends,
+        )
 
 
 _UI_RUNTIME_ACTIVE = False
@@ -6746,6 +6758,7 @@ async def config_post():
             config,
             should_reconcile_remote_access,
             should_reconcile_platforms,
+            should_reconcile_activity_streaming,
             changed_agent_backends,
         ) = await asyncio.to_thread(
             _save_config_and_runtime_decisions,
@@ -6764,6 +6777,25 @@ async def config_post():
     if should_reconcile_remote_access:
         remote_access_runtime = await asyncio.to_thread(remote_access.reconcile)
     await asyncio.to_thread(_ensure_remote_access_monitoring, config)
+    activity_streaming_runtime = None
+    if should_reconcile_activity_streaming:
+        try:
+            result = await internal_client.invalidate_activity_streaming()
+            body = result.get("body") or {}
+            hot_reconciled = result.get("status_code") == 200 and bool(body.get("ok"))
+            activity_streaming_runtime = {
+                "ok": hot_reconciled,
+                "hot_reconciled": hot_reconciled,
+                "body": body,
+            }
+        except internal_client.InternalServerUnavailable as exc:
+            # The controller's bounded cache remains the degradation path; the
+            # persisted setting is still authoritative and self-heals within its TTL.
+            activity_streaming_runtime = {
+                "ok": False,
+                "hot_reconciled": False,
+                "error": str(exc),
+            }
     platform_runtime = None
     if should_reconcile_platforms:
         try:
@@ -6828,6 +6860,8 @@ async def config_post():
         response_payload["remote_access_runtime"] = remote_access_runtime
     if platform_runtime is not None:
         response_payload["platform_runtime"] = platform_runtime
+    if activity_streaming_runtime is not None:
+        response_payload["activity_streaming_runtime"] = activity_streaming_runtime
     if agent_backend_runtime is not None:
         response_payload["agent_backend_runtime"] = agent_backend_runtime
     return jsonify(response_payload)

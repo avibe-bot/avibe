@@ -397,7 +397,7 @@ export const ActivityCard: React.FC<{
   onToggleExpanded: () => void;
   showToolCalls: boolean;
   onToggleTools: () => void;
-  onDisableActivity: () => void;
+  onDisableActivity?: () => void;
 }> = ({
   rows,
   startedAtMs,
@@ -473,15 +473,17 @@ export const ActivityCard: React.FC<{
             <span className="ml-auto shrink-0 font-mono text-[11px] text-muted">{clock}</span>
           </button>
           <ToolsEyePill shown={showToolCalls} onToggle={onToggleTools} />
-          <button
-            type="button"
-            onClick={onDisableActivity}
-            aria-label={t('chat.agentActivity.disable')}
-            title={t('chat.agentActivity.disable')}
-            className="inline-flex size-6 shrink-0 items-center justify-center rounded-full border border-border bg-foreground/[0.04] text-foreground/80 transition-colors hover:bg-foreground/[0.08]"
-          >
-            <X className="size-3.5" aria-hidden="true" />
-          </button>
+          {onDisableActivity && (
+            <button
+              type="button"
+              onClick={onDisableActivity}
+              aria-label={t('chat.agentActivity.disable')}
+              title={t('chat.agentActivity.disable')}
+              className="inline-flex size-6 shrink-0 items-center justify-center rounded-full border border-border bg-foreground/[0.04] text-foreground/80 transition-colors hover:bg-foreground/[0.08]"
+            >
+              <X className="size-3.5" aria-hidden="true" />
+            </button>
+          )}
           <button type="button" onClick={onToggleExpanded} aria-label={t('chat.agentActivity.collapse')}>
             <ChevronDown
               className={clsx('size-3.5 shrink-0 text-muted transition-transform', expanded && 'rotate-180')}

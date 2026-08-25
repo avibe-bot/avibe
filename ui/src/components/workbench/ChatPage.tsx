@@ -303,6 +303,9 @@ export const ChatPage: React.FC = () => {
   const readOnly = isSessionReadOnly(session);
   const writable = canChat && !readOnly;
   const metadataWritable = sessionCanChat && !readOnly;
+  // The shared Messaging settings use this same capability boundary: Editors
+  // can persist display preferences, while Viewers can only observe them.
+  const canEditAgentActivityVisibility = capabilities.can_chat || capabilities.can_use_system;
 
   // Chat-page-wide drag-and-drop: dropping files anywhere over the chat surface
   // (not just the input row) stages them on the composer via its imperative
@@ -627,6 +630,9 @@ export const ChatPage: React.FC = () => {
   const [showAgentActivity, setShowAgentActivity] = useState(false);
   const showAgentActivityRef = useRef(false);
   showAgentActivityRef.current = showAgentActivity;
+  // Config saves execute on worker threads. Preserve click order locally so an
+  // older request can never persist after a newer visibility choice.
+  const agentActivityConfigWriteRef = useRef<Promise<unknown>>(Promise.resolve());
   const [activityGroups, setActivityGroups] = useState<ActivityGroup[]>([]);
   const liveStateRef = useRef<LiveActivityState>(initialLiveActivity());
   const [liveRows, setLiveRows] = useState<ActivityRow[]>([]);
@@ -797,6 +803,7 @@ export const ChatPage: React.FC = () => {
   scheduleActivityRefreshRef.current = scheduleActivityRefresh;
   const setAgentActivityVisibility = useCallback(
     (enabled: boolean) => {
+      if (!canEditAgentActivityVisibility) return;
       showAgentActivityRef.current = enabled;
       setShowAgentActivity(enabled);
 
@@ -822,8 +829,11 @@ export const ChatPage: React.FC = () => {
         }
       }
 
-      void api
-        .mutateConfig([setConfigField(['ui', 'show_agent_activity'], enabled)])
+      const pendingWrite = agentActivityConfigWriteRef.current
+        .catch(() => undefined)
+        .then(() => api.mutateConfig([setConfigField(['ui', 'show_agent_activity'], enabled)]));
+      agentActivityConfigWriteRef.current = pendingWrite;
+      void pendingWrite
         .then(() => {
           // Close the small save/streaming gap: rows persisted while the config
           // mutation was in flight are recovered from the durable group.
@@ -831,7 +841,7 @@ export const ChatPage: React.FC = () => {
         })
         .catch(() => {});
     },
-    [api, dispatchLive, scheduleActivityRefresh],
+    [api, canEditAgentActivityVisibility, dispatchLive, scheduleActivityRefresh],
   );
   // Send-while-busy queue (messages sent while a turn runs, shown above the
   // composer) + the loaded draft to seed the composer with.
@@ -2757,8 +2767,12 @@ export const ChatPage: React.FC = () => {
             liveStartedAt,
             cardExpanded: activityCardExpanded,
             onToggleCard: () => setActivityCardExpanded((v) => !v),
-            onEnable: () => setAgentActivityVisibility(true),
-            onDisable: () => setAgentActivityVisibility(false),
+            onEnable: canEditAgentActivityVisibility
+              ? () => setAgentActivityVisibility(true)
+              : undefined,
+            onDisable: canEditAgentActivityVisibility
+              ? () => setAgentActivityVisibility(false)
+              : undefined,
             expanded: expandedActivity,
             loading: loadingActivity,
             error: activityError,
@@ -3592,8 +3606,8 @@ interface TranscriptProps {
     liveStartedAt: number | null;
     cardExpanded: boolean;
     onToggleCard: () => void;
-    onEnable: () => void;
-    onDisable: () => void;
+    onEnable?: () => void;
+    onDisable?: () => void;
     expanded: Record<string, boolean>;
     loading: Record<string, boolean>;
     error: Record<string, boolean>;
