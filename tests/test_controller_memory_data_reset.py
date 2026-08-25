@@ -351,6 +351,70 @@ async def test_delete_data_lazily_constructs_runtime_after_disabled_restart(
 
 
 @pytest.mark.asyncio
+async def test_disable_vs_delete_race_closes_temporary_runtime_on_early_return(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A queued delete decides temporary ownership only after taking the gate."""
+
+    old_runtime = _Runtime(tmp_path)
+    controller = _controller(old_runtime)
+    controller.memory_adapter = None
+    controller._memory_reconcile_task = None
+    temporary = _Runtime(tmp_path)
+    created: list[MemoryConfig] = []
+
+    def create_memory_runtime(config: MemoryConfig) -> _Runtime:
+        created.append(config)
+        return temporary
+
+    class _BusyLease:
+        def __init__(self, _home: Path) -> None:
+            pass
+
+        def acquire(self) -> None:
+            from config.memory_operation_lock import MemoryOperationBusy
+
+            raise MemoryOperationBusy("busy")
+
+        def release(self) -> None:
+            raise AssertionError("an unacquired lease must not be released")
+
+    monkeypatch.setattr(controller, "_create_memory_runtime", create_memory_runtime)
+    monkeypatch.setattr("core.controller.MemoryOperationLease", _BusyLease)
+
+    gate = controller._memory_replacement_lock()
+    await gate.acquire()
+    operation = asyncio.create_task(
+        controller.delete_memory_data(confirm_loss=True)
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    disabled = MemoryConfig(enabled=False)
+    controller.config.memory = disabled
+    controller.memory_runtime = None
+    controller.memory_module = None
+    controller.memory_adapter = DisabledMemoryAdapter()
+    gate.release()
+
+    result = await operation
+
+    assert result == {
+        "ok": False,
+        "operation": "delete_data",
+        "error": "memory_operation_in_progress",
+        "result": "unchanged",
+    }
+    assert created == [disabled]
+    assert temporary.events == ["retire", "close"]
+    assert temporary.closed is True
+    assert controller.memory_runtime is None
+    assert controller.memory_module is None
+    assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
+
+
+@pytest.mark.asyncio
 async def test_partial_deletion_persists_repair_fence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -3,3 +3,7 @@
 
 class MemoryStoreUnavailableError(RuntimeError):
     """The optional Memory store cannot currently serve a host request."""
+
+
+class MemoryRuntimeCloseUnprovedError(RuntimeError):
+    """Controller ownership remains fenced because runtime close was unproved."""
