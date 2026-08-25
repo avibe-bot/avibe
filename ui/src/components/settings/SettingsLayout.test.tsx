@@ -116,15 +116,19 @@ describe('SettingsLayout', () => {
     expect(shell?.className).not.toContain('min-h-full');
   });
 
-  it('lets Model Hub fill the route pane without changing other settings page widths', () => {
-    const { unmount } = renderLayout('/settings/models');
+  it.each(['/settings/models', '/settings/models/'])(
+    'lets Model Hub fill the route pane at %s',
+    (path) => {
+      renderLayout(path);
 
-    const modelHubFrame = screen.getByText('models-body').parentElement;
-    expect(modelHubFrame?.className).toContain('min-h-full');
-    expect(modelHubFrame?.className).not.toContain('mx-auto');
-    expect(modelHubFrame?.className).not.toContain('max-w-[1180px]');
+      const modelHubFrame = screen.getByText('models-body').parentElement;
+      expect(modelHubFrame?.className).toContain('min-h-full');
+      expect(modelHubFrame?.className).not.toContain('mx-auto');
+      expect(modelHubFrame?.className).not.toContain('max-w-[1180px]');
+    },
+  );
 
-    unmount();
+  it('keeps standard settings pages constrained', () => {
     renderLayout('/settings/replies');
 
     const standardFrame = screen.getByText('replies-body').parentElement;

@@ -184,7 +184,7 @@ export const SettingsLayout: React.FC = () => {
   const [memoryVisible, setMemoryVisible] = useState(false);
   const [channelSettingsVisible, setChannelSettingsVisible] = useState(false);
   const atRoot = location.pathname === '/settings' || location.pathname === '/settings/';
-  const isModelHub = location.pathname === '/settings/models';
+  const isModelHub = pathMatches(location.pathname, '/settings/models');
 
   useEffect(() => {
     if (!capabilities.can_manage_instance) return;
