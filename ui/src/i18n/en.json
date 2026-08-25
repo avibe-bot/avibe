@@ -1740,7 +1740,7 @@
     "memory_provider_response_invalid": "Memory returned an invalid response.",
     "memory_capability_unavailable": "Memory models are temporarily unavailable. Try again when the configured model service is available.",
     "memory_processing_failed": "Memory processing failed.",
-    "memory_wake_failed": "Memory could not be woken. No data was deleted.",
+    "memory_wake_failed": "Memory service could not start. No data was deleted.",
     "memory_runtime_busy": "Memory is still handling work and could not stop safely.",
     "memory_permission_denied": "Memory cannot access its local data path. Fix the path permissions; Repair is not available for this fault.",
     "memory_disk_unavailable": "Memory cannot use the local disk. Restore disk access or free space; Repair is not available for this fault.",
@@ -4144,11 +4144,15 @@
       "degraded": "Degraded",
       "needs_repair": "Needs repair"
     },
-    "wake": {
-      "button": "Wake Memory",
-      "running": "Waking…",
-      "completed": "Memory is ready.",
-      "failed": "Memory could not be woken. No Memory data was deleted."
+    "runtimeAction": {
+      "moreActions": "More Memory actions",
+      "retryButton": "Retry startup",
+      "retryRunning": "Retrying…",
+      "restartButton": "Restart Memory service",
+      "restartRunning": "Restarting…",
+      "restartDescription": "Stops and restarts EverOS without deleting Memory data.",
+      "completed": "Memory service is ready.",
+      "failed": "Memory service could not start. No Memory data was deleted."
     },
     "repair": {
       "button": "Repair Memory",
