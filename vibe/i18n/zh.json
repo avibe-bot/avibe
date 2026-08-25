@@ -30,6 +30,18 @@
       "message": "请联系页面所有者，将你的邮箱加入允许访问名单。",
       "back": "返回首页"
     },
+    "markdown": {
+      "help": "每个 Show Page URL 都提供 Agent 可读的表示；请求时设置 Accept: text/markdown 即可获取。",
+      "errors": {
+        "authenticationRequired": "需要先完成身份验证才能读取此 Show Page。",
+        "forbidden": "你无权读取此 Show Page。",
+        "pageOffline": "此 Show Page 已离线。",
+        "rendererUnavailable": "Markdown 渲染暂不可用。请升级 Show Runtime 后重试。",
+        "renderTimeout": "Show Runtime 渲染此页面时超时。",
+        "renderFailed": "Show Runtime 无法渲染此页面。",
+        "sessionUnknown": "Show Runtime 中没有此 Show Page 会话。"
+      }
+    },
     "runtimeRecovery": {
       "title": "Show Runtime 暂时不可用",
       "loading": "正在加载 Show Page",

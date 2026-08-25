@@ -30,6 +30,18 @@
       "message": "Please contact the page owner to be added to the allowed list.",
       "back": "Back to home"
     },
+    "markdown": {
+      "help": "Every Show Page URL also has an agent-readable representation: request it with Accept: text/markdown.",
+      "errors": {
+        "authenticationRequired": "Authentication is required to read this Show Page.",
+        "forbidden": "You do not have permission to read this Show Page.",
+        "pageOffline": "This Show Page is offline.",
+        "rendererUnavailable": "Markdown rendering is unavailable. Upgrade the Show Runtime and try again.",
+        "renderTimeout": "The Show Runtime timed out while rendering this page.",
+        "renderFailed": "The Show Runtime could not render this page.",
+        "sessionUnknown": "The Show Runtime does not have this Show Page session."
+      }
+    },
     "runtimeRecovery": {
       "title": "Show Runtime unavailable",
       "loading": "Loading Show Page",

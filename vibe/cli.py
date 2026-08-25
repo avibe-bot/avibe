@@ -1471,10 +1471,14 @@ def _remote_pair_examples_text() -> str:
 
 
 def _show_examples_text() -> str:
+    markdown_help = i18n_t("show.markdown.help", _configured_cli_language())
     return dedent(
         """\
         A Show Page is one session-scoped visual page that Avibe serves through the Web UI / Avibe Cloud tunnel.
         One Agent Session has exactly one Show Page.
+
+        Agent-readable representation:
+          __MARKDOWN_HELP__
 
         Commands:
           list     List existing Show Pages across sessions.
@@ -1519,7 +1523,7 @@ def _show_examples_text() -> str:
           vibe show event --help
           vibe show annotate --help
         """
-    )
+    ).replace("__MARKDOWN_HELP__", markdown_help)
 
 
 def _show_path_examples_text() -> str:
