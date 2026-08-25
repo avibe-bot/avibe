@@ -44,7 +44,7 @@ const hubAgent: AgentSupply = {
   backend: 'claude', cli_present: true, mode: 'hub', menu_kind: 'fixed', selected_model_id: 'claude-opus-4-6', selected_model_explicit: true,
   sources: { order: ['src_a', 'src_b'], eligibility: [{ source_id: 'src_a', eligible: true }, { source_id: 'src_b', eligible: true }] },
   routes: { 'claude-opus-4-6': { hops: [{ source_id: 'src_a', model_id: 'claude-opus-4-6' }, { source_id: 'src_b', model_id: 'claude-opus-4-6' }] } },
-  supply_status: 'degraded', model_supply: [{ model_id: 'claude-opus-4-6', chain_length: 2, has_runnable_hop: true }], named_agents: [], builtin_models: ['claude-opus-4-6'], menu: null,
+  supply_status: 'degraded', model_supply: [{ model_id: 'claude-opus-4-6', chain_length: 2, has_runnable_hop: true }], named_agents: [{ name: 'claude', effective_model_id: 'claude-opus-4-6', supply_status: 'degraded' }], builtin_models: ['claude-opus-4-6'], menu: null,
 };
 
 afterEach(cleanup);
@@ -54,7 +54,31 @@ describe('AgentCard', () => {
     ['en', 'Gateway · Supply unavailable for now'],
     ['zh', '网关 · 供给暂不可用'],
   ] as const)('renders the waiting umbrella in %s', (lng, copy) => {
-    render(<I18nextProvider i18n={localeInstance(lng)}><AgentCard agents={[{ ...hubAgent, supply_status: 'waiting' }]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
+    render(<I18nextProvider i18n={localeInstance(lng)}><AgentCard agents={[{ ...hubAgent, named_agents: [{ name: 'claude', effective_model_id: 'claude-opus-4-6', supply_status: 'waiting' }] }]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
+
+    expect(screen.getByText(copy)).toBeTruthy();
+  });
+
+  it.each([
+    ['en', 'Gateway · Healthy'],
+    ['zh', '网关 · 正常'],
+  ] as const)('summarizes the backend Agents instead of the unrelated default-Agent selection in %s', (lng, copy) => {
+    render(<I18nextProvider i18n={localeInstance(lng)}><AgentCard agents={[{
+      ...hubAgent,
+      selected_model_id: null,
+      selected_model_explicit: false,
+      supply_status: null,
+      named_agents: [{ name: 'claude', effective_model_id: 'claude-sonnet-5', supply_status: 'ok' }],
+    }]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
+
+    expect(screen.getByText(copy)).toBeTruthy();
+  });
+
+  it.each([
+    ['en', 'Gateway · No Agent uses this backend'],
+    ['zh', '网关 · 暂无 Agent 使用'],
+  ] as const)('states when no enabled Agent uses the backend in %s', (lng, copy) => {
+    render(<I18nextProvider i18n={localeInstance(lng)}><AgentCard agents={[{ ...hubAgent, named_agents: [] }]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
 
     expect(screen.getByText(copy)).toBeTruthy();
   });

@@ -8,6 +8,7 @@ import { cn } from '@/lib/utils';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { collapsedModelRows, listedModelIds, modelChainKey, modelSupplyState, type ModelChainIndex, type ModelChainRead } from './modelRows';
 import { foldRegionRead } from './regionRead';
+import { agentGroupStatus } from './supply';
 import { agentHasLiveChainProjection, type FreshRuntimeProjection } from './runtimeLifecycle';
 import { currentChainLink, isTakeoverChain } from './takeover';
 import { ACCENT_ICON, ACCENT_TILE, backendVisual } from './vendorMeta';
@@ -104,7 +105,7 @@ const AgentModelCard: React.FC<{
   const hasTakeover = chainProjectionLive
     && allModels.some((modelId) => isTakeoverRead(chains[modelChainKey(agent.backend, modelId)]));
   const modeWord = t(`settings.models.gateway.group.mode.${agent.mode === 'hub' ? 'gateway' : 'direct'}`) as string;
-  const health = agent.supply_status ?? 'noSelection';
+  const health = agent.mode === 'hub' ? agentGroupStatus(agent.named_agents ?? []) : 'unused';
   const subtitle = agent.mode === 'direct'
     ? t('settings.models.gateway.group.subtitle.direct', { mode: modeWord }) as string
     : t('settings.models.gateway.group.subtitle.gateway', { mode: modeWord, health: t(`settings.models.gateway.group.status.${health}`) }) as string;

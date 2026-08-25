@@ -862,7 +862,7 @@
             "degraded": "降级",
             "waiting": "供给暂不可用",
             "interrupted": "无可用来源",
-            "noSelection": "未选型号"
+            "unused": "暂无 Agent 使用"
           },
           "emptyModels": "这个后端没有可用型号"
         }

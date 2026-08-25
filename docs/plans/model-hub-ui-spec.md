@@ -825,15 +825,15 @@ state exit; held intent never bypasses the evidence column.
 | §1.1 | Per-source `cooldown` | Source reports cooling `[spec §4.5]` | F5 — a rendered report, not a request | `upstream.state.unavailableRetry` while `retry_at` is still ahead, `upstream.state.unavailableDue` once it has passed `[derived]`, `legend.unavailable` | A later payload reports the source in a different state → that state. `retry_at` is when it becomes worth asking again, not evidence that asking worked, so nothing here promotes the source on a clock — and the two keys are that same fact said in copy: the clock running out changes the sentence and not the state |
 | §1.1 | Per-source `needs_action` | The source reports `needs_action` `[spec §4.5]` | F5 | `sourceDetail.status.needsAction.oauthExpired`, `sourceDetail.status.needsAction.balanceExhausted`, `sourceDetail.status.needsAction.credentialRevoked`, `sourceDetail.status.needsAction.accountBanned`, `upstream.repair.reauthorize`, `upstream.repair.replaceKey`, `upstream.repair.topUp`, `upstream.repair.contactVendor`, `upstream.repair.contactProvider` | A later payload reports the source in a different state → that state, whatever it says `[contract]`. The payload carries the source's current status and no history, so on a first load that already reads `needs_action` there is no prior state to go back to; and the recovery has a resulting status of its own that the authority writes — a usable refresh clears the blocker and lands `standby` `[contract]` — so remembering one here could only contradict it. Frame 12 registers the card-level repair: OAuth expiry → Reauthorizing; a revoked API key → Key entry; balance exhaustion or account ban on a known subscription vendor → the §1.4 static top-up or support destination, then Vendor recovery observation; the same two causes on an `api_key` Source → the non-linked service-provider fallback. None borrows another cause's action |
 | §1.1 | Per-source `error` | Unclassified failure `[spec §4.5]` | F5 | `sourceDetail.status.error`, `upstream.state.supplyStopped`; Hub `sourceDetail.action.refetch`, native `upstream.repair.reauthorize` | The source leaves `error` → whichever state the payload reports. Frame 12 reuses its blocked-card geometry rather than inventing another card: card → 06; Hub 重新拉取 → §1.6 Refetching; an unclassified `native_cli` login failure 重新授权 → §1.11 Reauth confirmation |
-| §1.1 | Group waiting | `supply_status: waiting`: no member is runnable and every blocker is either Source cooldown or process-available live connection backoff `[contract]` | F5 — no request of this state's can fail, and no elapsed time resolves it either | `gateway.group.status.waiting` — 供给暂不可用 / Supply unavailable for now | A later payload reports a runnable member → Ready or Takeover active. Every member's `retry_at` can pass with the group still waiting, so the exit is the next payload's reading and never the elapsed time. F5 says this state issues nothing, not that waiting is the cure |
-| §1.1 | Group interrupted — CLI unavailable | `supply_status` reads `interrupted` and the blocker is the native CLI that backend depends on being unreachable **in this process**, at any source health `[contract]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | The CLI becomes reachable → Ready. Waiting does not resolve this one, which is why it remains distinct from the self-healing `waiting` umbrella |
-| §1.1 | Group interrupted — a source needs action | `supply_status` reads `interrupted`, no member is runnable, and at least one blocker is a source in `needs_action` or `error` `[contract]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | The source leaves `needs_action` / `error` → Ready, or whichever rollup the chain then reads. Frame 12 owns the credential repair controls; 06 keeps 重新拉取 for a source whose stored credential still works `[contract]` |
-| §1.1 | Group interrupted — empty chain | `supply_status` reads `interrupted` because the capability chain for the pinned model has no members at all `[contract]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | A source is placed into that model's chain → Ready. Distinct from *Nothing pinned*, where there is no chain to be empty |
-| §1.1 | Group interrupted — a hop's source is gone | `supply_status` reads `interrupted`, no member is runnable, and at least one hop names a source that no longer exists `[contract]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | The payload stops reporting the blocker → Ready, or whichever rollup the chain then reads. Adding the source again produces a different source and does not re-satisfy the stored hop, so the exit is §1.2's explicit remove/change of that exact stale pair |
-| §1.1 | Group interrupted — a hop's model is no longer callable | `supply_status` reads `interrupted`, no member is runnable, and at least one hop pins a model its source no longer advertises `[contract]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | 重新拉取 on 06 puts the model back into that source's inventory → Ready, or whichever rollup the chain then reads. The contract keeps the hop visible and non-runnable until an explicit refresh or edit and never re-points it `[contract]`; §1.2 owns the explicit remove/change while allowing the unchanged stale pair to remain |
+| §1.1 | Group waiting | The enabled-Agent aggregate reads `waiting`: no `named_agents[]` member reads `ok` / `degraded`, and at least one reads `waiting` `[derived]` | F5 — no request of this state's can fail, and no elapsed time resolves it either | `gateway.group.status.waiting` — 供给暂不可用 / Supply unavailable for now | A later payload reports a usable Agent → Ready or Takeover active. Every underlying `retry_at` can pass with the group still waiting, so the exit is the next payload's reading and never the elapsed time. F5 says this state issues nothing, not that waiting is the cure |
+| §1.1 | Group interrupted — CLI unavailable | The enabled-Agent aggregate reads `interrupted`, no Agent is usable or waiting, and at least one member is blocked because the native CLI its chain depends on is unreachable **in this process** `[derived]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | The CLI becomes reachable → the next enabled-Agent aggregate. Waiting does not resolve this one, which is why it remains distinct from the self-healing `waiting` umbrella |
+| §1.1 | Group interrupted — a source needs action | The enabled-Agent aggregate reads `interrupted`, no Agent is usable or waiting, and at least one member is blocked by a source in `needs_action` or `error` `[derived]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | The source leaves `needs_action` / `error` → whichever aggregate the named Agents then produce. Frame 12 owns the credential repair controls; 06 keeps 重新拉取 for a source whose stored credential still works `[contract]` |
+| §1.1 | Group interrupted — empty chain | The enabled-Agent aggregate reads `interrupted`, no Agent is usable or waiting, and at least one member's effective model has an empty capability chain `[derived]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | A source is placed into that model's chain → whichever aggregate the named Agents then produce. Distinct from *No enabled Agent uses this backend*, where there is no Agent member and therefore no chain to be empty |
+| §1.1 | Group interrupted — a hop's source is gone | The enabled-Agent aggregate reads `interrupted`, no Agent is usable or waiting, and at least one member's chain names a source that no longer exists `[derived]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | The payload stops reporting the blocker → whichever aggregate the named Agents then produce. Adding the source again produces a different source and does not re-satisfy the stored hop, so the exit is §1.2's explicit remove/change of that exact stale pair |
+| §1.1 | Group interrupted — a hop's model is no longer callable | The enabled-Agent aggregate reads `interrupted`, no Agent is usable or waiting, and at least one member's chain pins a model its source no longer advertises `[derived]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | 重新拉取 on 06 puts the model back into that source's inventory → whichever aggregate the named Agents then produce. The contract keeps the hop visible and non-runnable until an explicit refresh or edit and never re-points it `[contract]`; §1.2 owns the explicit remove/change while allowing the unchanged stale pair to remain |
 | §1.1 | Backend has no usable source | Every candidate filtered out | F5 | `gateway.supply.none` | Any source becomes eligible; 来源顺序 → 03 |
 | §1.1 | Backend has no models | The group resolves to zero model rows `[derived]` | F5 | `gateway.group.emptyModels` | A model becomes available to that backend |
-| §1.1 | Nothing pinned | `mode` reads `hub` and `selected_model_id` is `null`, which is exactly when `supply_status` is `null` on the gateway `[contract]` | F5 — a rendered report, not a request | `gateway.group.subtitle.gateway`, `gateway.group.mode.gateway`, `gateway.group.status.noSelection` | A pinned model gives the rollup something to answer with → Ready, or whichever rollup state that reading names |
+| §1.1 | No enabled Agent uses this backend | `mode` reads `hub` and `named_agents` is empty `[contract]` | F5 — a rendered report, not a request | `gateway.group.subtitle.gateway`, `gateway.group.mode.gateway`, `gateway.group.status.unused` | An enabled Agent begins using this backend; its live rollup enters the aggregate and selects Ready, waiting, degraded or interrupted |
 | §1.1 | Per-model route unconfigured | The page-grain `model_supply` row reads `chain_length: 0`; this structural branch is evaluated before the forced `has_runnable_hop: false` reading `[contract]` | F5 for the page-grain statement; an outstanding or failed chain detail read remains F2 only for its other derived columns | server-owned `models.launch.route_unconfigured`, consumed verbatim | Render the existing route-unconfigured family in the current-text slot; never gold 供给已暂停 / Supply paused. A later page-grain payload with `chain_length > 0` leaves this structural state and is dispatched by `has_runnable_hop` |
 | §1.1 | Per-model supply paused | The page-grain `model_supply` row reads `chain_length > 0` and `has_runnable_hop: false` `[contract]` | F5 for the page-grain marker; an outstanding or failed chain detail read remains F2 only for its other derived columns | `legend.unavailable` in the existing current-text slot | Render 供给已暂停 / Supply paused immediately in `$--gold`; do not wait for the per-model chain read. A later page-grain payload with `has_runnable_hop: true` removes the marker; `chain_length: 0` instead enters Per-model route unconfigured. The chain read may still fill its other derived columns, but a pending or failed detail read cannot erase or replace this page-owned marker |
 | §1.1 | Takeover active | The chain read — `GET /api/models/agents/<backend>/chain?model=<id>` — returns non-null `current` different from `chain[0]`, while the head is unavailable for a recoverable quota/cooldown or live connection-backoff reason `[contract]` | F5 | `gateway.group.takenOver`, `gateway.row.currentTakeover`, `gateway.group.status.degraded` | Re-evaluate the complete predicate on every later chain payload. `current` back at the head → Ready. A head that is runnable / no longer recoverably unavailable also retires Takeover immediately under the derived-state predicate rule: if `current` still names the later hop, render the ordinary serving/current-hop projection without violet takeover ink or copy until a later payload changes `current`. A local clock alone changes no payload. This is frame 08 (§1.7) |
@@ -984,7 +984,7 @@ a different key.
 | `{{delay}}` | A rough interval, looking forward — how long until the automatic retry. Same shape as `{{time}}` and the opposite direction, which is why it is its own slot: one string says a fetch happened 3 分钟前, the other says a retry comes 3 分钟后, and a single "relative timestamp" covers both while meaning neither. | Always present in the one key that carries it, because a `retry_at` still ahead is what selects that key. **A `retry_at` that has passed cannot fill it** — the interval renders zero or negative — and that is an ordinary reading, not an edge: no row in this document promotes a source on a clock, so `cooldown` can be reported with its retry time behind it for as long as the next payload takes. That reading renders `upstream.state.unavailableDue`, which is the absence rule's 「a state that cannot fill it uses a different key」 applied to a slot that may not be dropped. | `upstream.state.unavailableRetry` |
 | `{{request}}` | The request that failed, as `METHOD path`. | Always present in the remaining consumer, which is selected only for a request-backed §1.9 step. Source observation exposes no request member. | `adopt.fail.detail` |
 | `{{status}}` | The HTTP status that request returned. | **Absent when the §1.9 request had no HTTP response.** The separator drops with it. Source observation exposes no status member. | `adopt.fail.detail` |
-| `{{health}}` | One of exactly five words — `gateway.group.status.ok`, `gateway.group.status.degraded`, `gateway.group.status.waiting`, `gateway.group.status.interrupted`, `gateway.group.status.noSelection`. The first four are `supply_status` readings; the fifth is Hub mode with nothing pinned to roll up, which is a state of this backend and not a health of its supply. Supply health, not an HTTP status: nothing here is a code, and the group renders it whether or not any request was made. | Always present | `gateway.group.subtitle.gateway` |
+| `{{health}}` | One of exactly five words — `gateway.group.status.ok`, `gateway.group.status.degraded`, `gateway.group.status.waiting`, `gateway.group.status.interrupted`, `gateway.group.status.unused`. The first four are the closed aggregate over `named_agents[].supply_status`; the fifth means no enabled Agent uses this backend. Supply health, not an HTTP status: nothing here is a code, and the group renders it whether or not any request was made. | Always present | `gateway.group.subtitle.gateway` |
 | `{{reason}}` | The §1.9 classified cause, from that state's closed and total copy set. No consumer interpolates an upstream string here. Source observation exposes no reason member. | Always present | `adopt.fail.detail` |
 | `{{mode}}` | One of exactly two words — `gateway.group.mode.direct` or `gateway.group.mode.gateway`. The subtitle interpolates the word rather than carrying two whole strings, because the health half varies independently of it. | Always present | `gateway.group.subtitle.direct`, `gateway.group.subtitle.gateway` |
 | `{{backends}}` | The backends that have this source configured into a route, by product name, joined by `、` / `,` — `adopted_by`'s projection, grouped and de-duplicated, never a computation over live chains (§1.0). | Always present — `upstream.state.supplying` is entered only when the list is non-empty; a source no backend has configured is 备用 instead | `upstream.state.supplying` |
@@ -1476,7 +1476,7 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | `gateway.group.status.degraded` `[contract]` | 降级 | Degraded |
 | `gateway.group.status.waiting` `[contract]` | 供给暂不可用 | Supply unavailable for now |
 | `gateway.group.status.interrupted` `[contract]` | 无可用来源 | No source is available |
-| `gateway.group.status.noSelection` `[derived]` | 未选型号 | No model selected |
+| `gateway.group.status.unused` `[derived]` | 暂无 Agent 使用 | No Agent uses this backend |
 | `gateway.group.takenOver` | 接管中 | Taken over |
 | `gateway.supply.none` `[derived]` | 没有可用来源 | No usable source |
 | `gateway.supply.unread` `[derived]` | 后端供给情况没读到 · 网关本身正常 | Could not read this backend's supply · the gateway itself is fine |
@@ -1495,26 +1495,22 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | `legend.takeover` | 接管中 · 临时改走 | Taken over · temporarily rerouted |
 | `legend.unavailable` | 供给已暂停 | Supply paused |
 
-**The mode word is read off `AgentSupply.mode` and the health word off
-`AgentSupply.supply_status`, and neither ever stands in for the other** `[contract]`. The
-group header renders the outer rollup — the backend's, for the model it is pinned to —
-and that field is nullable for two different reasons. Direct mode produces `null` because
-nothing is being arbitrated. Hub mode produces `null` too, whenever `selected_model_id`
-is `null`, because there is nothing yet to roll up — `agent-supply.schema.json` does not
-merely allow that pairing, it requires it. Reading 直连 off the null therefore tells a user their backend
-bypasses the gateway while its persisted `mode` reads `hub` — a false statement about the
-one fact this subtitle exists to carry, and false exactly for the backend a user has
-switched on but not finished configuring. So `mode` decides the first word every time,
-`supply_status` only ever decides the second, and the missing rollup is a word of its own:
+**The mode word is read off `AgentSupply.mode`; the health word is the closed aggregate
+over `AgentSupply.named_agents`, and neither ever stands in for the other** `[contract]`.
+The backend-level `supply_status` describes only the model named by
+`selected_by_agent`; it becomes null whenever the global default Agent belongs to another
+backend and therefore cannot truthfully describe this group. The header never reads that
+field. Direct mode renders the mode alone. Gateway mode evaluates every enabled named
+Agent on this backend:
 
-| `AgentSupply.mode` `[contract]` | `AgentSupply.supply_status` `[contract]` | Subtitle | Key |
+| `AgentSupply.mode` `[contract]` | `named_agents[].supply_status` `[contract]` | Subtitle | Key |
 | --- | --- | --- | --- |
 | `direct` | not read — Direct arbitrates nothing, so it rolls nothing up | 直连 | `gateway.group.subtitle.direct` + `gateway.group.mode.direct` |
-| `hub` | `ok` | 网关 · 正常 | `gateway.group.subtitle.gateway` + `gateway.group.status.ok` |
-| `hub` | `degraded` | 网关 · 降级 | `gateway.group.subtitle.gateway` + `gateway.group.status.degraded` |
-| `hub` | `waiting` | 网关 · 供给暂不可用 | `gateway.group.subtitle.gateway` + `gateway.group.status.waiting` |
-| `hub` | `interrupted` | 网关 · 无可用来源 | `gateway.group.subtitle.gateway` + `gateway.group.status.interrupted` |
-| `hub` | `null` | 网关 · 未选型号 | `gateway.group.subtitle.gateway` + `gateway.group.status.noSelection` |
+| `hub` | empty `named_agents` | 网关 · 暂无 Agent 使用 | `gateway.group.subtitle.gateway` + `gateway.group.status.unused` |
+| `hub` | every member is `ok` | 网关 · 正常 | `gateway.group.subtitle.gateway` + `gateway.group.status.ok` |
+| `hub` | at least one member is `ok` / `degraded`, but not every member is `ok` | 网关 · 降级 | `gateway.group.subtitle.gateway` + `gateway.group.status.degraded` |
+| `hub` | no member is `ok` / `degraded`, and at least one is `waiting` | 网关 · 供给暂不可用 | `gateway.group.subtitle.gateway` + `gateway.group.status.waiting` |
+| `hub` | every remaining member is `interrupted` / `null` | 网关 · 无可用来源 | `gateway.group.subtitle.gateway` + `gateway.group.status.interrupted` |
 
 **All four `[contract]` words are transcribed** `[contract]`.
 正常 / 降级 / 无可用来源 remain `model-hub.md` §4.5's verbatim labels. The frozen
@@ -1522,10 +1518,10 @@ switched on but not finished configuring. So `mode` decides the first word every
 connection-backoff chains, while per-Source rows retain their distinct causes. It states
 only present availability and promises neither a recovery time nor a recovery outcome.
 
-`gateway.supply.none` is not a fifth word, because it is not the same grain `[derived]`.
-The four above are the backend rollup rendered into the group head's status line, which
-§4.5 governs. `gateway.supply.none` is a body line under a group that has no source at
-all — a statement about that backend's inventory, not a reading of `supply_status`, which
+`gateway.supply.none` is not a sixth word, because it is not the same grain `[derived]`.
+The five above are the enabled-Agent aggregate rendered into the group head's status line.
+`gateway.supply.none` is a body line under a group that has no source at all — a statement
+about that backend's inventory, not a reading of enabled-Agent supply, which
 is why it appears in neither the `{{health}}` slot's closed set (§0.9) nor the table
 above. Its 没有可用来源 sitting one character from `interrupted`'s 无可用来源 is the near
 miss that grain distinction has to survive: the status word answers 「这个后端现在供得上
@@ -1542,20 +1538,13 @@ to keep — unread copy and 重试 on a first paint, the rollups already drawn o
 one — which is the same split §1.0's *Sources unread* makes one read over, and the reason
 those two rows are mirrors rather than one row with two moods.
 
-**This document renders the backend's rollup and no other grain** `[frame]`.
-`agent-supply.schema.json` declares the status name twice, and the inner one —
-`AgentSupply.named_agents[].supply_status` — is a named Agent's own rollup for its own
-explicit model. It holds independently of its backend's: an Agent pinned to a model no
-source can serve reads `interrupted` inside a backend whose rollup reads `ok`. That
-divergence is real and this release does not surface it, because no frame draws a
-named-Agent row — §1.0 and §1.1 inventory backend rows and their menu-model rows, and
-nothing else. Requiring one anyway is how this section read until this round, and it left
-an implementer with a rendering obligation and nowhere to render it, whose only reachable
-discharge was to put the group's word beside an Agent's name — the one thing the
-divergence makes wrong. So the requirement is withdrawn rather than relocated: the group
-header states the backend's rollup, §1.1 and §1.7 render that one mapping and state none
-of their own, and a per-Agent surface is a frame somebody has to draw before this file
-can specify what it says.
+**This document renders one group aggregate and no named-Agent row** `[frame]`.
+`AgentSupply.named_agents[].supply_status` remains each named Agent's own rollup for its
+own explicit model. The group consumes every member through the table above, but it does
+not print an individual Agent name or assign the aggregate back to one Agent. Per-Agent
+detail remains a separate surface that needs its own frame. The top-level
+`selected_model_id` / `supply_status` pair remains useful for describing the next default
+turn, but it is deliberately outside this group-header projection.
 
 The four non-null values differ in *what a person can do about it*, which is why
 collapsing them loses the only thing the word is for: `ok` is serving from the intended
@@ -5562,35 +5551,31 @@ is cyan there.
 means different things in each.** Wires: cyan = 原生, mint = 网关供给, violet =
 接管, `#FFFFFF26` = 已启用 · 当前未被使用, gold = 供给已暂停. State text:
 mint = 使用中 / 正常, gold = 降级 / 暂不可用 / 冷却 / 供给暂不可用, rose = 需处理 /
-异常 / 无可用来源, muted = 备用 / 未选型号, cyan = 原生 provenance only, violet-tint
+异常 / 无可用来源, muted = 备用 / 暂无 Agent 使用, cyan = 原生 provenance only, violet-tint
 `#7C5BFFCC` = a takeover hop label. The group-status vocabulary (§1.1) is assigned here
 in full — 正常 mint, 降级 gold, 供给暂不可用 gold, 无可用来源 rose,
-未选型号 muted — and
+暂无 Agent 使用 muted — and
 the split worth stating is §4.5's: a wait that heals itself takes the same gold as every
 other wait, one that does not takes rose, and the fifth is not a fault at all, because
-nothing is pinned and no supply's health is being reported.
+no enabled Agent uses this backend.
 *Why:* a wire describes a *relation between two things*; state text describes *one
 thing's condition*. Collapsing them into one legend forces both to be wrong somewhere —
 gold as a relation means supply stopped, gold as a condition means degraded, and those
 are not the same claim. §1.0's ink table is the single place both are written down.
 
 **D-22 — A group head's status line is `<mode> · <status>` on the gateway and the mode
-word alone in Direct, and the two words are read from two different fields.** 网关 · 正常,
-网关 · 降级, 网关 · 供给暂不可用, 网关 · 无可用来源,
-网关 · 未选型号 — and bare 直连, because a
+word alone in Direct; mode comes from `mode`, while status comes from the closed
+`named_agents` aggregate.** 网关 · 正常, 网关 · 降级, 网关 · 供给暂不可用,
+网关 · 无可用来源, 网关 · 暂无 Agent 使用 — and bare 直连, because a
 direct backend arbitrates nothing and so has no supply whose health could be reported.
-§1.0's C-6 is the total mapping, `supply_status` `null` included, and no other surface
-derives a status line of its own.
+§1.0's C-6 is the total mapping, and no other surface derives a status line of its own.
 *Why:* mode and health are independently variable and users confuse them constantly —
 "is it on the gateway" and "is it working" are different questions, and a single word
-answers whichever one the reader happened to be asking. `null` is where that separation
-earns itself, because it arrives for two unrelated reasons: Direct, which arbitrates
-nothing, and a gateway with nothing pinned yet. Splitting on the field that actually
-differs is what keeps 未选型号 inside 网关 — an earlier revision read the mode word off
-the null instead and rendered 直连 for a backend whose `mode` says 网关, and one before
-that rendered 直连 · 正常, inventing a health verdict about a supply path that does not
-exist. Reporting 正常 for something the product is not doing is how a status line stops
-being evidence.
+answers whichever one the reader happened to be asking. The old header read the
+top-level `supply_status`; when the global default Agent belonged to Codex, Claude's group
+therefore rendered 未选型号 even while an enabled Claude Agent had a healthy explicit
+model and Route. Aggregating the already-authoritative `named_agents` projection keeps
+the header at backend grain without inventing a backend-wide selected model.
 
 **D-23 — The legend swatch may deviate from the ink it stands for, only downward in
 alpha, and only where the wire's own alpha is below the legibility floor.** The
