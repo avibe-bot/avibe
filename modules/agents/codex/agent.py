@@ -1656,9 +1656,14 @@ class CodexAgent(BaseAgent):
                     runtime_env: dict[str, str] | None = None
                     runtime_fingerprint = "direct"
                     if launch is not None:
-                        from modules.agents.model_hub import build_codex_hub_launch
+                        from modules.agents.model_hub import prepare_codex_hub_launch
 
-                        runtime_args, runtime_env = build_codex_hub_launch([], os.environ.copy(), launch)
+                        runtime_args, runtime_env = await prepare_codex_hub_launch(
+                            [],
+                            os.environ.copy(),
+                            launch,
+                            binary=self.codex_config.binary,
+                        )
                         runtime_fingerprint = launch.fingerprint
                     transport = CodexTransport(
                         binary=self.codex_config.binary,

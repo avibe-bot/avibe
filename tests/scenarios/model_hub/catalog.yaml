@@ -102,11 +102,11 @@ scenarios:
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_protocol_002_contract_exposes_only_the_three_authoritative_transports
   - id: MH-PROTOCOL-003
-    name: Codex Responses Lite capability survives turn gateway filtering
+    name: Codex Model Hub launches use standard Responses provider capabilities
     status: covered
     kind: compatibility
     layer: scenario
-    test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_protocol_003_codex_responses_lite_capability_reaches_engine
+    test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_protocol_003_codex_hub_uses_standard_responses_catalog
   - id: MH-AC29-001
     name: A persisted import-shaped Source survives canonical serialization and reload
     status: covered

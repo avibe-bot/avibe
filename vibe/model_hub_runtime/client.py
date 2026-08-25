@@ -43,14 +43,7 @@ _OFFICIAL_BASE_URLS = {
     "openai": "https://api.openai.com/v1",
     "codex": "https://api.openai.com/v1",
 }
-_PROTOCOL_HEADERS = frozenset(
-    {
-        "anthropic-beta",
-        "anthropic-version",
-        "openai-beta",
-        "x-openai-internal-codex-responses-lite",
-    }
-)
+_PROTOCOL_HEADERS = frozenset({"anthropic-beta", "anthropic-version", "openai-beta"})
 logger = logging.getLogger(__name__)
 
 

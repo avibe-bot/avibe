@@ -40,6 +40,7 @@ from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
 from modules.agents.model_hub import (
     ModelHubRuntimeRouter,
+    _codex_hub_catalog_bytes,
     bind_launch,
     bind_persisted_launch,
     persisted_launch_identity,
@@ -593,40 +594,32 @@ def test_turn_gateway_preserves_only_protocol_capability_headers(tmp_path: Path)
     asyncio.run(exercise())
 
 
-def test_mh_protocol_003_codex_responses_lite_capability_reaches_engine(tmp_path: Path) -> None:
-    """MH-PROTOCOL-003: preserve Codex's Responses Lite marker and no private sibling headers."""
+def test_mh_protocol_003_codex_hub_uses_standard_responses_catalog() -> None:
+    """MH-PROTOCOL-003: provider-private Codex capabilities stop before the Gateway."""
 
-    async def exercise() -> None:
-        adapter = AdapterBoundaryFake([AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"ok":true}')])
-        store = MemoryStore(_config(_source("src_primary1")))
-        service = _service(
-            tmp_path,
-            store,
-            adapter,
-            now=lambda: datetime(2026, 7, 25, tzinfo=timezone.utc),
-        )
-        gateway = ModelHubTurnGateway(service)
-        try:
-            base_url, token = await gateway.endpoint("codex")
-            async with aiohttp.ClientSession(trust_env=False) as client:
-                async with client.post(
-                    f"{base_url}/v1/responses",
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "x-openai-internal-codex-responses-lite": "true",
-                        "x-codex-private": "never-forward",
-                    },
-                    json={"model": _requested_model("codex"), "input": [], "stream": False},
-                ) as response:
-                    assert response.status == 200
-            request = adapter.requests[0]
-            assert getattr(request, "headers") == {
-                "x-openai-internal-codex-responses-lite": "true",
+    catalog = _codex_hub_catalog_bytes(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "slug": "gpt-5.6-luna",
+                        "use_responses_lite": True,
+                        "multi_agent_version": "v1",
+                        "tool_mode": "code_mode_only",
+                        "prefer_websockets": True,
+                        "model_messages": {"instructions_template": "preserved"},
+                    }
+                ]
             }
-        finally:
-            await gateway.close()
+        ).encode()
+    )
+    model = json.loads(catalog)["models"][0]
 
-    asyncio.run(exercise())
+    assert model["use_responses_lite"] is False
+    assert model["multi_agent_version"] is None
+    assert model["tool_mode"] is None
+    assert model["prefer_websockets"] is False
+    assert model["model_messages"] == {"instructions_template": "preserved"}
 
 
 def test_mh_evt_002_switch_events_survive_router_and_service_restart(tmp_path: Path) -> None:

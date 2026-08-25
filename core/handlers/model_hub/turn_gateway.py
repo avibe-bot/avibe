@@ -79,7 +79,6 @@ _PROTOCOL_HEADERS: Final = frozenset(
         "anthropic-beta",
         "anthropic-version",
         "openai-beta",
-        "x-openai-internal-codex-responses-lite",
     }
 )
 
