@@ -199,6 +199,11 @@ New Workbench delivery snapshots use core-owned identity:
 - `message_merge_identity` includes `message_kind` in addition to its existing
   `author_id`, author, source, type, scope, and native-message fields.
 
+Web-push ownership is not automatically a Memory principal: Workbench
+`author_id` is Memory-trusted only after strict direct-loopback or authenticated
+remote HTTP admission. A third identity/authority P1 on this PR triggers the
+circuit breaker and spec review before any further implementation.
+
 This preserves the current safety properties:
 
 - deliveries from different authenticated authors never merge;
