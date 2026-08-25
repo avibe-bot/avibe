@@ -3869,6 +3869,8 @@
       "interrupted": "已中断 · 第 {{count}} 步停止",
       "expand": "展开执行过程",
       "collapse": "收起执行过程",
+      "enable": "开启 Agent 执行过程显示",
+      "disable": "关闭 Agent 执行过程显示",
       "showCall": "展开详情",
       "hideCall": "收起详情",
       "jumpToLatest": "跳到最新",

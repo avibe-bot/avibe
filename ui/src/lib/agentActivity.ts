@@ -120,6 +120,7 @@ export const initialLiveActivity = (): LiveActivityState => ({
 
 export type LiveActivityEvent =
   | { type: 'turn_start' }
+  | { type: 'reset' }
   | { type: 'row'; row: ActivityRow; now: number }
   | { type: 'settle' }
   | { type: 'clear_for_gen'; gen: number }
@@ -145,6 +146,10 @@ export const liveActivityReducer = (
     case 'turn_start':
       // New turn → new generation with a fresh empty buffer (any stale rows from the
       // previous generation are dropped by construction).
+      return { gen: state.gen + 1, settled: false, rows: [], startedAt: null };
+    case 'reset':
+      // Turning Activity off invalidates every in-flight refresh from the visible
+      // generation. Re-enabling may then hydrate only the current durable turn.
       return { gen: state.gen + 1, settled: false, rows: [], startedAt: null };
     case 'row':
       if (state.settled) {

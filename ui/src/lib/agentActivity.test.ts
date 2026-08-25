@@ -358,6 +358,22 @@ describe('liveActivityReducer (generation invariant)', () => {
     expect(s.startedAt).toBeNull();
   });
 
+  it('reset invalidates the visible generation and clears every live field', () => {
+    let s = liveActivityReducer(initialLiveActivity(), { type: 'turn_start' });
+    s = liveActivityReducer(s, { type: 'row', row: row('a'), now: 1 });
+    const visibleGen = s.gen;
+    s = liveActivityReducer(s, { type: 'reset' });
+    expect(s).toEqual({ gen: visibleGen + 1, settled: false, rows: [], startedAt: null });
+
+    const stale = liveActivityReducer(s, {
+      type: 'rehydrate_for_gen',
+      gen: visibleGen,
+      rows: [row('stale')],
+      startedAt: 1,
+    });
+    expect(stale.rows).toEqual([]);
+  });
+
   it('rows append within a generation; the first stamps startedAt', () => {
     let s = liveActivityReducer(initialLiveActivity(), { type: 'turn_start' });
     s = liveActivityReducer(s, { type: 'row', row: row('a'), now: 100 });

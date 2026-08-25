@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
     getWorkbenchPrefs: vi.fn(),
     listSessionMessages: vi.fn(),
     listSessionQueue: vi.fn(),
+    mutateConfig: vi.fn(),
     onSessionArchived: vi.fn(),
   },
   events: null as null | {
@@ -206,6 +207,7 @@ describe('ChatPage transcript hydration', () => {
     mocks.api.getWorkbenchPrefs.mockResolvedValue({});
     mocks.api.listSessionMessages.mockResolvedValue({ messages: [] });
     mocks.api.listSessionQueue.mockResolvedValue([]);
+    mocks.api.mutateConfig.mockResolvedValue({ ui: {} });
     mocks.api.onSessionArchived.mockReturnValue(() => {});
   });
 
@@ -490,5 +492,60 @@ describe('ChatPage transcript hydration', () => {
 
     await waitFor(() => expect(screen.getByText('chat.agentActivity.running')).toBeTruthy());
     expect(screen.queryByText('chat.agentActivity.interrupted')).toBeNull();
+  });
+
+  it('uses the thinking dots and the Activity header as shortcuts for the global display setting', async () => {
+    const openGroup = {
+      id: 'current-turn',
+      anchor_message_id: null,
+      anchor_position: 'after' as const,
+      open: true,
+      status: 'running' as const,
+      steps: 1,
+      duration_ms: null,
+    };
+    mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+    mocks.api.getSessionBootstrap.mockResolvedValue({
+      ...bootstrapPayload('session-new'),
+      turn_state: { ...idleTurnState, foreground: 'running', in_flight: true },
+    });
+    mocks.api.getSessionActivity.mockResolvedValue({ groups: [openGroup] });
+    mocks.api.getSessionActivityGroup.mockResolvedValue({
+      ...openGroup,
+      rows: [{
+        id: 'current-step',
+        kind: 'assistant',
+        text: 'current work step',
+        created_at: '2026-08-25T00:00:00Z',
+      }],
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-new']}>
+        <Routes>
+          <Route path="/chat/:sessionId" element={<ChatPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const enable = await screen.findByRole('button', { name: 'chat.agentActivity.enable' });
+    expect(enable.className).toContain('cursor-pointer');
+    act(() => enable.click());
+
+    await waitFor(() => expect(mocks.api.mutateConfig).toHaveBeenCalledWith([
+      { kind: 'set', path: ['ui', 'show_agent_activity'], value: true },
+    ]));
+    await waitFor(() => expect(screen.getByText('current work step')).toBeTruthy());
+
+    const disable = screen.getByRole('button', { name: 'chat.agentActivity.disable' });
+    expect(disable.className).toContain('size-6');
+    expect(disable.className).toContain('border-border');
+    act(() => disable.click());
+
+    await waitFor(() => expect(mocks.api.mutateConfig).toHaveBeenCalledWith([
+      { kind: 'set', path: ['ui', 'show_agent_activity'], value: false },
+    ]));
+    await waitFor(() => expect(screen.queryByText('current work step')).toBeNull());
+    expect(screen.getByRole('button', { name: 'chat.agentActivity.enable' })).toBeTruthy();
   });
 });
