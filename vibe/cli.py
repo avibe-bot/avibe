@@ -479,7 +479,7 @@ def _print_memory_cli_error(operation: str, code: str, *, as_json: bool, languag
 def _memory_cli_body(response: object, *, fallback: str) -> tuple[dict | None, str | None]:
     """Validate the closed controller response shape used by ``vibe memory``."""
 
-    from core.memory.types import is_memory_error_code
+    from vibe.memory_contract import is_memory_error_code
 
     if not isinstance(response, dict):
         return None, "memory_provider_response_invalid"

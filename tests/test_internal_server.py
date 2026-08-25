@@ -493,7 +493,7 @@ def test_memory_status_unknown_failure_uses_stable_envelope() -> None:
 
 
 def test_memory_projects_unknown_lifecycle_failure_uses_stable_envelope() -> None:
-    from core.memory.http_headers import CALLER_SESSION_HEADER
+    from vibe.memory_http_headers import CALLER_SESSION_HEADER
 
     controller = _build_controller_double()
     controller.memory_scope_for_cli_session.return_value = (
@@ -704,7 +704,7 @@ def test_memory_archive_session_returns_closed_failure_codes(
 
 
 def test_memory_recovery_reads_resolve_only_signed_ui_operators() -> None:
-    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
     from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
     secret = "test-memory-ui-secret"
@@ -805,7 +805,7 @@ def test_memory_recovery_reads_resolve_only_signed_ui_operators() -> None:
 
 
 def test_memory_search_accepts_bounded_agentic_policy_from_cli_session() -> None:
-    from core.memory.http_headers import CALLER_SESSION_HEADER
+    from vibe.memory_http_headers import CALLER_SESSION_HEADER
 
     captured: list[tuple] = []
 
@@ -867,7 +867,7 @@ def test_memory_search_accepts_bounded_agentic_policy_from_cli_session() -> None
 
 
 def test_memory_list_binds_cli_session_and_uses_exact_provider_page() -> None:
-    from core.memory.http_headers import CALLER_SESSION_HEADER
+    from vibe.memory_http_headers import CALLER_SESSION_HEADER
 
     runtime = SimpleNamespace(
         list_memory_projects=Mock(return_value=("default", "notes")),
@@ -909,7 +909,7 @@ def test_memory_list_binds_cli_session_and_uses_exact_provider_page() -> None:
 
 
 def test_memory_list_reports_unavailable_store_before_named_project_validation() -> None:
-    from core.memory.http_headers import CALLER_SESSION_HEADER
+    from vibe.memory_http_headers import CALLER_SESSION_HEADER
 
     runtime = SimpleNamespace(
         available=False,
@@ -945,7 +945,7 @@ def test_memory_list_reports_unavailable_store_before_named_project_validation()
 
 
 def test_memory_list_rejects_all_for_cli_at_controller_boundary() -> None:
-    from core.memory.http_headers import CALLER_SESSION_HEADER
+    from vibe.memory_http_headers import CALLER_SESSION_HEADER
 
     runtime = SimpleNamespace(
         list_all_episodes_payload=AsyncMock(),
@@ -981,7 +981,7 @@ def test_memory_list_rejects_all_for_cli_at_controller_boundary() -> None:
 
 def test_memory_list_all_is_available_only_to_signed_ui_principal() -> None:
     """MEMORY-LIST-003, MEMORY-LIST-008."""
-    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
     from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
     secret = "test-memory-ui-secret"
@@ -1040,7 +1040,7 @@ def test_memory_list_all_is_available_only_to_signed_ui_principal() -> None:
 
 
 def test_memory_list_rejects_agent_origin_for_cli_callers() -> None:
-    from core.memory.http_headers import CALLER_SESSION_HEADER
+    from vibe.memory_http_headers import CALLER_SESSION_HEADER
 
     runtime = SimpleNamespace(list_episodes_payload=AsyncMock())
     controller = _build_controller_double()
@@ -1076,7 +1076,7 @@ def test_memory_list_rejects_agent_origin_for_cli_callers() -> None:
 
 
 def test_memory_list_rejects_invalid_aggregate_cursor_at_controller_boundary() -> None:
-    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
     from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
     secret = "test-memory-ui-secret"
@@ -1122,7 +1122,7 @@ def test_memory_list_rejects_invalid_aggregate_cursor_at_controller_boundary() -
 
 
 def test_memory_list_rejects_surrogate_aggregate_cursor_at_controller_boundary() -> None:
-    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
     from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
     secret = "test-memory-ui-secret"
@@ -1168,7 +1168,7 @@ def test_memory_list_rejects_surrogate_aggregate_cursor_at_controller_boundary()
 
 
 def test_memory_list_accepts_maximum_aggregate_cursor_transport_bound() -> None:
-    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
     from core.memory.runtime import MEMORY_LIST_CURSOR_MAX_BYTES
     from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
@@ -1293,7 +1293,7 @@ def test_memory_preflight_uses_controller_lifecycle_when_runtime_is_disabled() -
         MemoryProcessingConfig,
         memory_config_to_payload,
     )
-    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
     from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
     secret = "test-memory-ui-secret"
@@ -1355,7 +1355,7 @@ def test_memory_data_operations_require_signed_ui_operator(
     method_name: str,
     operation: str,
 ) -> None:
-    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
     from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER
 
     secret = "test-memory-ui-secret"
@@ -1403,7 +1403,7 @@ def test_memory_data_operations_require_exact_loss_confirmation(
     method_name: str,
     operation: str,
 ) -> None:
-    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
     from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
     secret = "test-memory-ui-secret"
@@ -1458,7 +1458,7 @@ def test_memory_data_operations_return_distinct_final_result(
     method_name: str,
     operation: str,
 ) -> None:
-    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
     from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
     secret = "test-memory-ui-secret"
@@ -1496,7 +1496,7 @@ def test_memory_data_operations_return_distinct_final_result(
 
 def test_memory_reconfigure_forwards_the_cas_snapshot() -> None:
     from config.v2_config import MemoryConfig, memory_config_to_payload
-    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
     from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
     secret = "test-memory-ui-secret"
@@ -1567,7 +1567,7 @@ def test_memory_reconfigure_forwards_the_cas_snapshot() -> None:
     ],
 )
 def test_memory_repair_maps_controller_status(result: dict, expected_status: int) -> None:
-    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
     from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
     secret = "test-memory-ui-secret"
@@ -1600,7 +1600,7 @@ def test_memory_repair_maps_controller_status(result: dict, expected_status: int
 
 
 def test_processing_record_degrades_signed_operator_lookup_failure() -> None:
-    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
     from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
     secret = "test-memory-ui-secret"
@@ -1661,7 +1661,7 @@ def test_processing_record_degrades_signed_operator_lookup_failure() -> None:
 
 
 def test_processing_record_route_leaves_operator_lookup_to_runtime() -> None:
-    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
     from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
     secret = "test-memory-ui-secret"
@@ -1717,7 +1717,7 @@ def test_processing_record_route_leaves_operator_lookup_to_runtime() -> None:
 
 
 def test_native_processing_record_routes_authorize_the_selected_project() -> None:
-    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
     from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
     principal_id = "u-11111111111111111111111111111111"
@@ -1789,7 +1789,7 @@ def test_memory_remember_route_rejects_capture_queued_across_runtime_replacement
 
     from core.controller import Controller
     from core.memory import CaptureAccepted
-    from core.memory.http_headers import CALLER_SESSION_HEADER
+    from vibe.memory_http_headers import CALLER_SESSION_HEADER
 
     class Module:
         def __init__(self) -> None:

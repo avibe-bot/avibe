@@ -265,6 +265,62 @@ assert not BLOCKED.intersection(sys.modules)
     assert _memory_state_entries(tmp_path / "home") == []
 
 
+def test_host_surfaces_import_with_evacuated_memory_leaves_blocked(
+    tmp_path: Path,
+) -> None:
+    script = r'''
+import importlib.abc
+import sys
+
+ALLOWED_HOST_LEAVES = {"core.memory.admission_metadata"}
+
+
+class BlockMemoryImplementation(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        del path, target
+        if (
+            fullname.startswith("core.memory.")
+            and fullname not in ALLOWED_HOST_LEAVES
+        ):
+            raise ImportError(f"blocked optional Memory implementation: {fullname}")
+        return None
+
+
+sys.meta_path.insert(0, BlockMemoryImplementation())
+
+from config.v2_config import V2Config
+from core import internal_server, system_prompt_injection
+from vibe import cli, internal_client, ui_memory_routes
+
+assert V2Config is not None
+assert internal_server is not None
+assert system_prompt_injection is not None
+assert cli is not None
+assert internal_client is not None
+assert ui_memory_routes is not None
+loaded_memory_children = {
+    name for name in sys.modules if name.startswith("core.memory.")
+}
+assert loaded_memory_children == ALLOWED_HOST_LEAVES
+'''
+    environment = os.environ.copy()
+    environment["AVIBE_HOME"] = str(tmp_path / "home")
+    environment["HOME"] = str(tmp_path)
+    environment["PYTHONPATH"] = str(ROOT)
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "record_relative_path",

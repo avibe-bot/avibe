@@ -7,7 +7,7 @@ import sqlite3
 
 import pytest
 
-from core.memory.project_ids import MAX_NAMED_MEMORY_PROJECTS
+from vibe.memory_project_ids import MAX_NAMED_MEMORY_PROJECTS
 from core.memory.store import (
     MEMORY_STORE_SCHEMA_VERSION,
     MemoryStore,

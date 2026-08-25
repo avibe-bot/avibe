@@ -27,10 +27,10 @@ from typing import Any, AsyncIterator, Literal, Optional
 import httpx
 
 from config import paths
-from core.memory.processing_record import (
+from vibe.memory_contract import (
+    MAX_AGENTIC_TIMEOUT_SECONDS,
     PROCESSING_RECORD_TRANSPORT_TIMEOUT_SECONDS,
 )
-from core.memory.types import MAX_AGENTIC_TIMEOUT_SECONDS
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +53,8 @@ _CHECK_POSIX_SOCKET_MODE = os.name != "nt"
 MEMORY_READ_TIMEOUT_SECONDS = 25.0
 MEMORY_SEARCH_TIMEOUT_SECONDS = 55.0
 MEMORY_STATUS_TIMEOUT_SECONDS = MEMORY_READ_TIMEOUT_SECONDS
-# Processing Record owns its complete identity/journal/provider/store work
-# budget; the transport imports that bound so the two processes cannot drift.
+# The host contract owns the transport deadline; its relationship test keeps it
+# outside the implementation's complete identity/journal/provider/store budget.
 MEMORY_PROCESSING_RECORD_TIMEOUT_SECONDS = (
     PROCESSING_RECORD_TRANSPORT_TIMEOUT_SECONDS
 )
@@ -918,13 +918,13 @@ def _memory_cli_session_headers(session_id: str | None) -> dict[str, str] | None
     session_id = str(session_id or "").strip()
     if not session_id:
         return None
-    from core.memory.http_headers import CALLER_SESSION_HEADER
+    from vibe.memory_http_headers import CALLER_SESSION_HEADER
 
     return {CALLER_SESSION_HEADER: session_id}
 
 
 def _memory_user_key_headers(method: str, path: str, user_key: str) -> dict[str, str]:
-    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
     from vibe.memory_ui_access import (
         MEMORY_UI_PROOF_HEADER,
         build_ui_read_proof,

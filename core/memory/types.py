@@ -7,10 +7,16 @@ import math
 from dataclasses import dataclass
 from typing import Any, Literal, TypeAlias
 
+from vibe.memory_contract import (
+    CLOSED_MEMORY_ERROR_CODES,
+    MAX_AGENTIC_TIMEOUT_SECONDS,
+    MemoryErrorCode,
+    is_memory_error_code,
+)
+
 MemoryKind = Literal["profile", "episode", "fact"]
 MemoryOrigin = Literal["user", "agent"]
 RecallMode = Literal["auto", "keyword", "vector", "hybrid", "agentic"]
-MAX_AGENTIC_TIMEOUT_SECONDS = 30.0
 MemoryContentKind = Literal["image", "audio", "doc", "pdf", "html", "email"]
 MemoryFailureKind = Literal[
     "boot_recovery",
@@ -18,88 +24,6 @@ MemoryFailureKind = Literal[
     "distillation_rejected",
     "result_unknown",
 ]
-MemoryErrorCode = Literal[
-    "memory_disabled",
-    "memory_invalid_input",
-    "memory_access_denied",
-    "memory_input_too_large",
-    "memory_queue_full",
-    "memory_low_disk_space",
-    "memory_store_unavailable",
-    "memory_runtime_missing",
-    "memory_runtime_unsupported",
-    "memory_runtime_install_failed",
-    "memory_reconcile_failed",
-    "memory_wake_failed",
-    "memory_runtime_busy",
-    "memory_permission_denied",
-    "memory_disk_unavailable",
-    "memory_sidecar_unavailable",
-    "memory_provider_timeout",
-    "memory_provider_response_invalid",
-    "memory_capability_unavailable",
-    "memory_processing_failed",
-    "memory_loss_confirmation_required",
-    "memory_local_data_unusable",
-    "memory_legacy_recovery_required",
-    "memory_embedding_unavailable",
-    "memory_llm_unavailable",
-    "memory_rerank_unavailable",
-    "memory_multimodal_unavailable",
-    "memory_repair_failed",
-    "memory_repair_not_required",
-    "memory_delete_data_failed",
-    "memory_reconfigure_failed",
-    "memory_operation_in_progress",
-]
-
-# Transport vocabulary, wider than the persistable one: errors such as
-# ``memory_access_denied``, ``memory_reconcile_failed``, and
-# ``memory_wake_failed`` never reaches a stored ``last_error`` column.
-CLOSED_MEMORY_ERROR_CODES = frozenset(
-    {
-        "memory_disabled",
-        "memory_invalid_input",
-        "memory_access_denied",
-        "memory_input_too_large",
-        "memory_queue_full",
-        "memory_low_disk_space",
-        "memory_store_unavailable",
-        "memory_runtime_missing",
-        "memory_runtime_unsupported",
-        "memory_runtime_install_failed",
-        "memory_reconcile_failed",
-        "memory_wake_failed",
-        "memory_runtime_busy",
-        "memory_permission_denied",
-        "memory_disk_unavailable",
-        "memory_sidecar_unavailable",
-        "memory_provider_timeout",
-        "memory_provider_response_invalid",
-        "memory_capability_unavailable",
-        "memory_processing_failed",
-        "memory_loss_confirmation_required",
-        "memory_local_data_unusable",
-        "memory_legacy_recovery_required",
-        "memory_embedding_unavailable",
-        "memory_llm_unavailable",
-        "memory_rerank_unavailable",
-        "memory_multimodal_unavailable",
-        "memory_repair_failed",
-        "memory_repair_not_required",
-        "memory_delete_data_failed",
-        "memory_reconfigure_failed",
-        "memory_operation_in_progress",
-    }
-)
-
-
-def is_memory_error_code(value: object) -> bool:
-    """Return whether *value* is a closed Memory error code."""
-
-    return isinstance(value, str) and value in CLOSED_MEMORY_ERROR_CODES
-
-
 @dataclass(frozen=True)
 class MemoryPreflightDiagnostic:
     side: Literal["embedding", "llm", "rerank", "multimodal"]

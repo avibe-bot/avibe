@@ -126,7 +126,7 @@ class CaptureAdmission:
         """Return the default Memory project. User turns do not use workdir."""
 
         del facts
-        from core.memory.project_ids import DEFAULT_MEMORY_PROJECT_ID
+        from vibe.memory_project_ids import DEFAULT_MEMORY_PROJECT_ID
 
         return DEFAULT_MEMORY_PROJECT_ID
 
