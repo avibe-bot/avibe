@@ -593,7 +593,9 @@ def test_turn_gateway_preserves_only_protocol_capability_headers(tmp_path: Path)
     asyncio.run(exercise())
 
 
-def test_turn_gateway_preserves_codex_responses_lite_capability(tmp_path: Path) -> None:
+def test_mh_protocol_003_codex_responses_lite_capability_reaches_engine(tmp_path: Path) -> None:
+    """MH-PROTOCOL-003: preserve Codex's Responses Lite marker and no private sibling headers."""
+
     async def exercise() -> None:
         adapter = AdapterBoundaryFake([AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"ok":true}')])
         store = MemoryStore(_config(_source("src_primary1")))
