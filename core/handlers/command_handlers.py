@@ -162,14 +162,6 @@ class CommandHandlers(BaseHandler):
         adapter = getattr(self.controller, "memory_adapter", None)
         offer = getattr(adapter, "offer", None)
         if not callable(offer):
-            runtime = getattr(self.controller, "memory_runtime", None)
-            offer = getattr(runtime, "offer_barrier", None)
-            if not callable(offer):
-                return
-            try:
-                offer(session_anchor)
-            except Exception:
-                logger.debug("Session reset observation failed", exc_info=True)
             return
         try:
             offer(SessionReset(session_anchor))

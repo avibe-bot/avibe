@@ -43,6 +43,7 @@ from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.message_output import MessageOutput
 from core.memory_adapter import (
     DisabledMemoryAdapter,
+    EnabledMemoryAdapter,
     MemoryCaptureAdapter,
     SessionArchived,
 )
@@ -555,7 +556,7 @@ class Controller:
         if memory_config.enabled:
             self.memory_runtime = self._create_memory_runtime(memory_config)
             self.memory_module = self.memory_runtime.module
-            self.memory_adapter = None
+            self.memory_adapter = EnabledMemoryAdapter(self)
             self._memory_runtime_generation = 1
         self._migrate_discord_guild_scope_from_config()
 
@@ -839,7 +840,11 @@ class Controller:
             self._memory_runtime_temporary = temporary
         self.memory_runtime = runtime
         self.memory_module = runtime.module
-        self.memory_adapter = None if capture_enabled else DisabledMemoryAdapter()
+        if capture_enabled:
+            if not isinstance(self.memory_adapter, EnabledMemoryAdapter):
+                self.memory_adapter = EnabledMemoryAdapter(self)
+        else:
+            self.memory_adapter = DisabledMemoryAdapter()
 
     def _clear_memory_runtime_locked(self, runtime: "MemoryRuntime") -> None:
         """Release a runtime only after its close proof is visible."""
@@ -855,6 +860,13 @@ class Controller:
             )
         if getattr(self, "_memory_runtime_lease_count", 0) != 0:
             raise RuntimeError("Cannot release Memory while runtime leases remain")
+        adapter = getattr(self, "memory_adapter", None)
+        quiesce = getattr(adapter, "quiesce_memory_capture_tasks", None)
+        if callable(quiesce):
+            quiesce()
+        cancel = getattr(adapter, "cancel_memory_capture_tasks_nowait", None)
+        if callable(cancel):
+            cancel()
         self.memory_runtime = None
         self.memory_module = None
         self.memory_adapter = DisabledMemoryAdapter()
@@ -1015,7 +1027,8 @@ class Controller:
                     await self._close_memory_runtime_locked(runtime, retire=False)
                     self._recheck_disabled_memory_cleanup_locked()
                 else:
-                    self.memory_adapter = None
+                    if not isinstance(self.memory_adapter, EnabledMemoryAdapter):
+                        self.memory_adapter = EnabledMemoryAdapter(self)
             return result
 
     async def capture_memory(self, request: CaptureRequest) -> CaptureReceipt:
@@ -1620,8 +1633,8 @@ class Controller:
         """Attempt every Memory shutdown stage within one finite shared budget."""
 
         self._memory_destructive_quiescing = True
-        handler = getattr(self, "message_handler", None)
-        quiesce = getattr(handler, "quiesce_memory_capture_tasks", None)
+        adapter = getattr(self, "memory_adapter", None)
+        quiesce = getattr(adapter, "quiesce_memory_capture_tasks", None)
         if callable(quiesce):
             quiesce()
 
@@ -1633,7 +1646,7 @@ class Controller:
         if getattr(self, "_memory_reconcile_task", None) is not None:
             stages.append(("startup reconciliation", self._cancel_memory_reconcile_task))
 
-        cancel_capture = getattr(handler, "cancel_memory_capture_tasks", None)
+        cancel_capture = getattr(adapter, "cancel_memory_capture_tasks", None)
         if callable(cancel_capture):
             stages.append(("capture cancellation", cancel_capture))
         stages.append(
@@ -3248,12 +3261,6 @@ class Controller:
             offer = getattr(adapter, "offer", None)
             if callable(offer):
                 offer(SessionArchived(raw_session_id))
-            else:
-                # Removed once enabled capture is fully owned by the adapter.
-                runtime = getattr(self, "memory_runtime", None)
-                legacy_offer = getattr(runtime, "offer_barrier", None)
-                if callable(legacy_offer):
-                    legacy_offer(raw_session_id)
         except Exception:
             logger.debug("archive: session observation failed", exc_info=True)
         finally:

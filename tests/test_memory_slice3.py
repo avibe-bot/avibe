@@ -17,7 +17,6 @@ import pytest
 
 from config.v2_config import MemoryConfig, MemoryEndpointConfig, MemoryProcessingConfig
 from core.controller import Controller
-from core.handlers.message_handler import MessageHandler
 from core.memory import (
     CaptureAccepted,
     CaptureAttachment,
@@ -29,6 +28,7 @@ from core.memory import (
 from core.memory.admission import InboundTurnFacts
 from core.memory.everos import FakeMemoryProvider
 from core.memory.store import MemoryStore
+from core.memory_adapter import EnabledMemoryAdapter, TurnAccepted
 from modules.im.base import FileAttachment, MessageContext
 from modules.im.message_facts import (
     is_original_human_discord_attachment,
@@ -151,6 +151,7 @@ def _controller(*, user=None):
     }
     controller.memory_module = _CaptureModule()
     controller.memory_runtime = _Runtime(controller.memory_module)
+    controller.memory_adapter = EnabledMemoryAdapter(controller)
     controller.get_cwd = lambda _context: "/tmp/project"
     return controller
 
@@ -167,50 +168,66 @@ def _context(platform: str, *, user_id: str = "user-1", ordinary=True, **payload
     )
 
 
-def test_message_handler_retains_memory_capture_task_until_completion() -> None:
-    handler = MessageHandler.__new__(MessageHandler)
-    handler._memory_capture_tasks = set()
-
+def test_enabled_adapter_retains_memory_capture_task_until_completion() -> None:
     async def run() -> None:
         release = asyncio.Event()
-        task = asyncio.create_task(release.wait())
+        controller = SimpleNamespace(
+            capture_user_memory=lambda *_args, **_kwargs: release.wait(),
+        )
+        adapter = EnabledMemoryAdapter(controller)
+        adapter.offer(TurnAccepted(_context("slack"), "remember", "session", 0))
+        (task,) = adapter.capture_tasks
         reference = weakref.ref(task)
-        handler._track_memory_capture_task(task)
         del task
         gc.collect()
 
         assert reference() is not None
-        assert len(handler._memory_capture_tasks) == 1
+        assert len(adapter.capture_tasks) == 1
 
         release.set()
         await reference()
         await asyncio.sleep(0)
-        assert handler._memory_capture_tasks == set()
+        assert adapter.capture_tasks == set()
 
     asyncio.run(run())
 
 
-def test_message_handler_cancels_and_joins_memory_capture_tasks() -> None:
-    handler = MessageHandler.__new__(MessageHandler)
-    handler._memory_capture_tasks = set()
-    released = Mock()
-
+def test_enabled_adapter_cancels_and_joins_memory_capture_tasks() -> None:
     async def run() -> None:
         started = asyncio.Event()
+        retained_lease = Mock()
+        attachment_lease = Mock()
+        attachment_lease.retain.return_value = retained_lease
 
-        async def capture() -> None:
+        async def capture(*_args, **_kwargs) -> None:
             started.set()
             await asyncio.Event().wait()
 
-        task = asyncio.create_task(capture())
-        handler._track_memory_capture_task(task, attachment_lease=released)
+        controller = SimpleNamespace(
+            capture_user_memory=capture,
+            reserve_memory_attachment_capture=lambda *_args: SimpleNamespace(
+                config_generation=1,
+                release=Mock(),
+            ),
+        )
+        adapter = EnabledMemoryAdapter(controller)
+        adapter.offer(
+            TurnAccepted(
+                _context("slack"),
+                "remember",
+                "session",
+                0,
+                attachment_lease,
+            )
+        )
+        (task,) = adapter.capture_tasks
         await started.wait()
 
-        await handler.cancel_memory_capture_tasks()
+        await adapter.cancel_memory_capture_tasks()
 
         assert task.cancelled()
-        assert handler._memory_capture_tasks == set()
-        released.release.assert_called_once_with()
+        assert adapter.capture_tasks == set()
+        retained_lease.release.assert_called_once_with()
 
     asyncio.run(run())
 

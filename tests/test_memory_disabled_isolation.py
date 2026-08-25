@@ -17,7 +17,7 @@ from config.v2_compat import to_app_config
 from config.v2_config import V2Config
 from core.controller import Controller
 from core.memory import CaptureRequest, CaptureSkipped
-from core.memory_adapter import DisabledMemoryAdapter
+from core.memory_adapter import DisabledMemoryAdapter, EnabledMemoryAdapter
 from vibe.memory_contract import (
     MemoryRuntimeCloseUnprovedError,
     MemoryStoreUnavailableError,
@@ -103,7 +103,7 @@ from config import paths
 from config.v2_compat import to_app_config
 from config.v2_config import V2Config
 from core.controller import Controller
-from core.memory_adapter import DisabledMemoryAdapter
+from core.memory_adapter import DisabledMemoryAdapter, TurnAccepted
 from modules.im import MessageContext
 
 config = to_app_config(V2Config.from_payload({
@@ -150,17 +150,16 @@ async def offer_capture() -> None:
         channel_id="session-1",
         platform="avibe",
         message_id="message-1",
-        is_ordinary_text=True,
+        is_original_human_text=True,
     )
     before = set(asyncio.all_tasks())
-    controller.message_handler._schedule_text_only_memory_capture(
-        context,
-        "remember nothing",
-        "session-1",
-        expected_snapshot=None,
+    controller.memory_adapter.offer(
+        TurnAccepted(context, "remember nothing", "session-1", None)
     )
     created = set(asyncio.all_tasks()).difference(before)
-    assert offered == [(context, "remember nothing", "session-1")]
+    assert offered == [
+        TurnAccepted(context, "remember nothing", "session-1", None)
+    ]
     assert not any(task.get_name().startswith("memory-") for task in created)
 
 
@@ -435,7 +434,7 @@ async def test_memory_reconcile_lazily_enters_and_leaves_enabled_runtime(
     assert created == [enabled]
     assert controller.memory_runtime is runtime
     assert controller.memory_module is runtime.module
-    assert controller.memory_adapter is None
+    assert isinstance(controller.memory_adapter, EnabledMemoryAdapter)
     assert controller.config.memory.enabled is True
 
     disabled = replace(enabled, enabled=False)
@@ -1278,7 +1277,7 @@ async def test_memory_indep_015_shutdown_bounds_all_memory_stages_under_one_budg
             cancelled.append(name)
             await release.wait()
 
-    class _MessageHandler:
+    class _MemoryAdapter:
         def quiesce_memory_capture_tasks(self) -> None:
             started.append("capture-registration")
 
@@ -1289,7 +1288,7 @@ async def test_memory_indep_015_shutdown_bounds_all_memory_stages_under_one_budg
         async def close(self) -> None:
             await stubborn_stage("runtime")
 
-    controller.message_handler = _MessageHandler()
+    controller.memory_adapter = _MemoryAdapter()
     controller.memory_runtime = _MemoryRuntime()
 
     async def join_destructive_transactions() -> None:

@@ -13,13 +13,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 async def _wait_capture_tasks(handler) -> None:
-    while handler._memory_capture_tasks:
-        tasks = tuple(handler._memory_capture_tasks)
+    adapter = handler.controller.memory_adapter
+    while adapter.capture_tasks:
+        tasks = tuple(adapter.capture_tasks)
         await asyncio.gather(*tasks, return_exceptions=True)
-        handler._memory_capture_tasks.difference_update(tasks)
+        await asyncio.sleep(0)
 
 from modules.im import MessageContext
 from modules.sessions_facade import SessionsFacade
+from core.memory_adapter import EnabledMemoryAdapter, TurnAccepted
 from core.processing_indicator import ProcessingIndicatorService
 
 
@@ -198,6 +200,7 @@ class _StubController:
         self.command_handler = type("Cmd", (), {"handle_start": staticmethod(lambda context, args: None)})()
         self.agent_auth_service = type("Auth", (), {})()
         self.processing_indicator = ProcessingIndicatorService(self)
+        self.memory_adapter = EnabledMemoryAdapter(self)
 
     def update_thread_message_id(self, context):
         return None
@@ -1223,14 +1226,11 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             platform="slack",
         )
 
-        handler._schedule_text_only_memory_capture(
-            context,
-            "remember this",
-            "base-session",
-            expected_snapshot=0,
+        controller.memory_adapter.offer(
+            TurnAccepted(context, "remember this", "base-session", 0)
         )
 
-        assert handler._memory_capture_tasks == set()
+        assert controller.memory_adapter.capture_tasks == set()
 
     async def test_text_memory_capacity_is_released_when_setup_raises(self):
         class Reservation:
@@ -1262,15 +1262,12 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             platform="slack",
         )
 
-        handler._schedule_text_only_memory_capture(
-            context,
-            "remember this",
-            "base-session",
-            expected_snapshot=0,
+        controller.memory_adapter.offer(
+            TurnAccepted(context, "remember this", "base-session", 0)
         )
 
         assert reservation.released == 1
-        assert handler._memory_capture_tasks == set()
+        assert controller.memory_adapter.capture_tasks == set()
 
     async def test_text_memory_terminal_capacity_drops_before_scheduling(self):
         class Reservation:
@@ -1298,16 +1295,13 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             platform="slack",
         )
 
-        handler._schedule_text_only_memory_capture(
-            context,
-            "remember this",
-            "base-session",
-            expected_snapshot=0,
+        controller.memory_adapter.offer(
+            TurnAccepted(context, "remember this", "base-session", 0)
         )
 
         controller.capture_user_memory.assert_not_called()
         assert reservation.released == 1
-        assert handler._memory_capture_tasks == set()
+        assert controller.memory_adapter.capture_tasks == set()
 
     async def test_attachment_memory_terminal_capacity_drops_before_lease_retain(self):
         from modules.im.base import FileAttachment
@@ -1372,7 +1366,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         lease.retain.assert_not_called()
         controller.capture_user_memory.assert_not_awaited()
         assert reservation.released == 1
-        assert handler._memory_capture_tasks == set()
+        assert controller.memory_adapter.capture_tasks == set()
 
     async def test_text_memory_capture_starts_before_agent_route_resolution(self):
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
@@ -1411,7 +1405,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         controller.capture_user_memory = AsyncMock()
         handler = MessageHandler(controller)
         handler.set_session_handler(_StubSessionHandler())
-        handler.quiesce_memory_capture_tasks()
+        controller.memory_adapter.quiesce_memory_capture_tasks()
         context = MessageContext(
             user_id="U1",
             channel_id="C1",
@@ -1424,7 +1418,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         controller.capture_user_memory.assert_not_called()
         lifecycle_admission.release.assert_not_called()
         controller.session_turns.acquire_lifecycle_admission.assert_not_awaited()
-        assert handler._memory_capture_tasks == set()
+        assert controller.memory_adapter.capture_tasks == set()
 
     async def test_attachment_capture_uses_anchor_before_agent_variant_namespace(self):
         from modules.im.base import FileAttachment
@@ -1850,7 +1844,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         )
         await asyncio.wait_for(acquisition_started.wait(), timeout=1.0)
         await asyncio.wait_for(task, timeout=1.0)
-        await handler.cancel_memory_capture_tasks()
+        await controller.memory_adapter.cancel_memory_capture_tasks()
 
         lease.retain.assert_called_once_with()
         retained_lease.release.assert_called()
@@ -1922,13 +1916,13 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             handler.handle_user_message(context, "remember this")
         )
         await asyncio.wait_for(acquisition_started.wait(), timeout=1.0)
-        handler.quiesce_memory_capture_tasks()
-        await handler.cancel_memory_capture_tasks()
+        controller.memory_adapter.quiesce_memory_capture_tasks()
+        await controller.memory_adapter.cancel_memory_capture_tasks()
         release_acquisition.set()
         await asyncio.wait_for(turn, timeout=1.0)
 
         controller.capture_user_memory.assert_not_awaited()
-        assert handler._memory_capture_tasks == set()
+        assert controller.memory_adapter.capture_tasks == set()
 
     async def test_cancelled_attachment_registration_removes_real_lease_directory(
         self,
@@ -1973,8 +1967,6 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             attachments_root=root / "attachments",
         ).materialize(context, Downloader())
         leased_path = Path(batch.attachments[0].local_path)
-        retained_lease = batch.lease.retain()
-        batch.lease.release()
         assert leased_path.exists()
 
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
@@ -1990,24 +1982,26 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             deliver=AsyncMock(),
             acquire_lifecycle_admission=acquire_lifecycle_admission,
         )
-        controller.capture_user_memory = AsyncMock()
-        handler = MessageHandler(controller)
-
-        async def capture_write() -> None:
-            await controller.capture_user_memory(context, "remember this", "base-session")
-
-        handler._schedule_memory_capture_task(
-            session_id="base-session",
-            expected_snapshot=0,
-            capture=capture_write(),
-            attachment_lease=retained_lease,
+        controller.reserve_memory_attachment_capture = Mock(
+            return_value=_capture_reservation()
         )
+        controller.capture_user_memory = AsyncMock()
+        controller.memory_adapter.offer(
+            TurnAccepted(
+                context,
+                "remember this",
+                "base-session",
+                0,
+                batch.lease,
+            )
+        )
+        batch.lease.release()
         await asyncio.wait_for(acquisition_started.wait(), timeout=1.0)
-        await handler.cancel_memory_capture_tasks()
+        await controller.memory_adapter.cancel_memory_capture_tasks()
 
         assert not leased_path.exists()
         assert list((root / "attachments" / "im").iterdir()) == []
-        controller.capture_user_memory.assert_not_called()
+        controller.capture_user_memory.assert_not_awaited()
 
     async def test_shutdown_cancels_inflight_capture_and_removes_real_lease_directory(
         self,
@@ -2052,30 +2046,38 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             attachments_root=root / "attachments",
         ).materialize(context, Downloader())
         leased_path = Path(batch.attachments[0].local_path)
-        retained_lease = batch.lease.retain()
-        batch.lease.release()
         assert leased_path.exists()
 
-        handler = MessageHandler(
-            _StubController(platform="slack", ack_mode="reaction", typing_result=True)
+        controller = _StubController(
+            platform="slack", ack_mode="reaction", typing_result=True
+        )
+        controller.reserve_memory_attachment_capture = Mock(
+            return_value=_capture_reservation()
         )
         capture_started = asyncio.Event()
 
-        async def capture() -> None:
+        async def capture(*_args, **_kwargs) -> None:
             capture_started.set()
             await asyncio.Event().wait()
 
-        capture_task = asyncio.create_task(capture())
-        handler._track_memory_capture_task(
-            capture_task,
-            attachment_lease=retained_lease,
+        controller.capture_user_memory = capture
+        controller.memory_adapter.offer(
+            TurnAccepted(
+                context,
+                "remember this",
+                "base-session",
+                0,
+                batch.lease,
+            )
         )
+        batch.lease.release()
+        (capture_task,) = controller.memory_adapter.capture_tasks
         await capture_started.wait()
 
-        await handler.cancel_memory_capture_tasks()
+        await controller.memory_adapter.cancel_memory_capture_tasks()
 
         assert capture_task.cancelled()
-        assert handler._memory_capture_tasks == set()
+        assert controller.memory_adapter.capture_tasks == set()
         assert not leased_path.exists()
         assert list((root / "attachments" / "im").iterdir()) == []
 
