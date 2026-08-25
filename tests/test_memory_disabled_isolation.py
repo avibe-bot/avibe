@@ -456,6 +456,7 @@ async def test_memory_reconcile_lazily_enters_and_leaves_enabled_runtime(
     class _Runtime:
         def __init__(self) -> None:
             self.module = object()
+            self.available = True
             self.closed = False
 
         async def reconcile(self, config) -> dict[str, object]:
@@ -548,7 +549,7 @@ async def test_disabled_preflight_uses_one_temporary_runtime() -> None:
             self.closed = True
 
     runtime = _Runtime()
-    controller._create_memory_runtime = lambda config: runtime
+    controller._create_memory_runtime = lambda config, **_kwargs: runtime
 
     assert await controller.preflight_memory(candidate) == {"ok": True}
     assert calls == [candidate]
@@ -567,6 +568,7 @@ async def test_disabled_install_owns_runtime_until_successful_close() -> None:
     controller.memory_module = None
     controller._memory_reconcile_task = None
     events: list[str] = []
+    loader_flags: list[bool] = []
 
     class _Runtime:
         def __init__(self) -> None:
@@ -588,9 +590,15 @@ async def test_disabled_install_owns_runtime_until_successful_close() -> None:
             self.closed = True
 
     runtime = _Runtime()
-    controller._create_memory_runtime = lambda config: runtime
+
+    def create_runtime(config, **kwargs):
+        loader_flags.append(bool(kwargs["allow_disabled"]))
+        return runtime
+
+    controller._create_memory_runtime = create_runtime
 
     assert await controller.install_memory_runtime() == {"ok": True}
+    assert loader_flags == [True]
     assert events == ["install", "retire", "close"]
     assert controller.memory_runtime is None
     assert controller.memory_module is None
@@ -630,7 +638,9 @@ async def test_cancelled_install_does_not_cancel_shared_disabled_cleanup() -> No
 
     cleanup_task = asyncio.create_task(cleanup())
     controller._memory_disabled_cleanup_task = cleanup_task
-    controller._create_memory_runtime = lambda config: created.append(config) or _Runtime()
+    controller._create_memory_runtime = (
+        lambda config, **_kwargs: created.append(config) or _Runtime()
+    )
 
     first = asyncio.create_task(controller.install_memory_runtime())
     await cleanup_started.wait()
@@ -677,7 +687,7 @@ async def test_temporary_close_failure_retains_fenced_controller_ownership() -> 
 
     runtime = _Runtime()
 
-    def create(config):
+    def create(config, **_kwargs):
         created.append(config)
         return runtime
 
@@ -713,7 +723,7 @@ async def test_disabled_status_reports_retained_fenced_runtime_truthfully() -> N
         retired=True,
     )
     controller.memory_runtime = runtime
-    controller._create_memory_runtime = lambda _config: pytest.fail(
+    controller._create_memory_runtime = lambda _config, **_kwargs: pytest.fail(
         "disabled status must not construct Memory"
     )
 
@@ -750,7 +760,7 @@ async def test_temporary_close_without_closed_proof_retains_ownership() -> None:
             return None
 
     runtime = _Runtime()
-    controller._create_memory_runtime = lambda _config: runtime
+    controller._create_memory_runtime = lambda _config, **_kwargs: runtime
 
     with pytest.raises(RuntimeError, match="closed proof"):
         await controller.preflight_memory(
@@ -800,7 +810,7 @@ async def test_disable_close_failure_fences_rollback_and_destructive_reuse() -> 
     controller.memory_runtime = runtime
     controller.memory_module = runtime.module
 
-    def create(config):
+    def create(config, **_kwargs):
         created.append(config)
         raise AssertionError("rollback must not construct a second runtime")
 
@@ -880,7 +890,7 @@ async def test_disabled_dashboard_reads_do_not_construct_runtime() -> None:
     controller._memory_disabled_cleanup_task = None
     factory_calls: list[object] = []
 
-    def create_runtime(config):
+    def create_runtime(config, **_kwargs):
         factory_calls.append(config)
         raise AssertionError("disabled dashboard reads must not construct Memory")
 
@@ -926,7 +936,7 @@ async def test_disabled_wake_and_remember_are_host_derived_without_runtime() -> 
     controller.memory_adapter = DisabledMemoryAdapter()
     controller.memory_runtime = None
     controller.memory_module = None
-    controller._create_memory_runtime = lambda _config: pytest.fail(
+    controller._create_memory_runtime = lambda _config, **_kwargs: pytest.fail(
         "disabled outcomes must not construct Memory"
     )
 
@@ -957,7 +967,7 @@ async def test_disabled_store_backed_read_is_gated_before_runtime_construction()
     controller.memory_module = None
     controller._memory_reconcile_task = None
 
-    controller._create_memory_runtime = lambda _config: pytest.fail(
+    controller._create_memory_runtime = lambda _config, **_kwargs: pytest.fail(
         "disabled reads must not construct Memory"
     )
 
@@ -1027,7 +1037,7 @@ async def test_enabled_status_reprojects_when_disabled_before_borrow() -> None:
         await borrow_release.wait()
 
     controller._await_disabled_memory_cleanup = await_cleanup
-    controller._create_memory_runtime = lambda _config: pytest.fail(
+    controller._create_memory_runtime = lambda _config, **_kwargs: pytest.fail(
         "status must re-project disabled state before constructing Memory"
     )
     status_task = asyncio.create_task(controller.memory_status_payload())
@@ -1247,7 +1257,7 @@ async def test_concurrent_temporary_borrows_share_runtime_until_final_release() 
             self.close_calls += 1
             self.closed = True
 
-    def create_runtime(_config) -> _Runtime:
+    def create_runtime(_config, **_kwargs) -> _Runtime:
         runtime = _Runtime()
         created.append(runtime)
         return runtime
@@ -1311,7 +1321,7 @@ async def test_temporary_borrows_do_not_share_different_configs() -> None:
         async def close(self) -> None:
             self.closed = True
 
-    def create_runtime(config) -> _Runtime:
+    def create_runtime(config, **_kwargs) -> _Runtime:
         created.append(config)
         return _Runtime(config)
 

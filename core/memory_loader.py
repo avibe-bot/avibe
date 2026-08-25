@@ -16,7 +16,12 @@ MEMORY_RUNTIME_PROTOCOL_VERSION = 1
 _PROTOCOL_ATTR = "MEMORY_RUNTIME_PROTOCOL_VERSION"
 
 
-def load_memory_runtime(config: Any, **runtime_kwargs: Any) -> Any:
+def load_memory_runtime(
+    config: Any,
+    *,
+    allow_disabled: bool = False,
+    **runtime_kwargs: Any,
+) -> Any:
     """Load and construct the fixed Memory runtime for an enabled snapshot.
 
     This module intentionally imports no implementation module at import time.
@@ -24,7 +29,7 @@ def load_memory_runtime(config: Any, **runtime_kwargs: Any) -> Any:
     so a missing/broken optional implementation cannot affect core startup.
     """
 
-    if not bool(getattr(config, "enabled", False)):
+    if not bool(getattr(config, "enabled", False)) and not allow_disabled:
         return None
     try:
         implementation = importlib.import_module(MEMORY_RUNTIME_ENTRYPOINT)
@@ -50,5 +55,17 @@ def load_memory_runtime(config: Any, **runtime_kwargs: Any) -> Any:
     if runtime is None:
         raise MemoryPluginUnavailableError(
             "Memory implementation returned no runtime"
+        )
+    try:
+        module = getattr(runtime, "module", None)
+        close = getattr(runtime, "close", None)
+        has_available = hasattr(runtime, "available")
+    except Exception as exc:
+        raise MemoryPluginIncompatibleError(
+            "Memory implementation runtime contract is incompatible"
+        ) from exc
+    if module is None or not callable(close) or not has_available:
+        raise MemoryPluginIncompatibleError(
+            "Memory implementation runtime contract is incompatible"
         )
     return runtime

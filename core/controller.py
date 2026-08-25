@@ -604,11 +604,17 @@ class Controller:
 
         self.config.memory = deepcopy(memory_config)
 
-    def _create_memory_runtime(self, memory_config: MemoryConfig):
+    def _create_memory_runtime(
+        self,
+        memory_config: MemoryConfig,
+        *,
+        allow_disabled: bool = False,
+    ):
         """Load the optional Memory implementation only for an enabled runtime."""
 
         return load_memory_runtime(
             memory_config,
+            allow_disabled=allow_disabled,
             processing_event=self._log_memory_processing_event,
             on_config_settled=self._adopt_settled_memory_config,
         )
@@ -965,7 +971,10 @@ class Controller:
                 plugin_error = getattr(self, "_memory_plugin_error", None)
                 if plugin_error is not None:
                     raise plugin_error
-                runtime = self._create_memory_runtime(selected_config)
+                runtime = self._create_memory_runtime(
+                    selected_config,
+                    allow_disabled=allow_disabled,
+                )
                 self._attach_memory_runtime_locked(
                     runtime,
                     capture_enabled=bool(self.config.memory.enabled),
@@ -1589,7 +1598,10 @@ class Controller:
                 )
             temporary = runtime is None
             if temporary:
-                runtime = self._create_memory_runtime(self.config.memory)
+                runtime = self._create_memory_runtime(
+                    self.config.memory,
+                    allow_disabled=True,
+                )
                 self._attach_memory_runtime_locked(
                     runtime,
                     capture_enabled=bool(self.config.memory.enabled),
