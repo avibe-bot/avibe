@@ -1888,7 +1888,7 @@ export type DependencyItem = {
 
 export type DependenciesResult = { ok: boolean; deps: DependencyItem[] };
 
-// Memory plugin contract: docs/plans/memory-plugin-system.md.
+// Current Memory contract: docs/MEMORY.md.
 // Keys are write-only: GET never returns a usable `api_key`, only `has_api_key`.
 export type MemoryRerankProvider = 'deepinfra' | 'vllm' | 'dashscope';
 

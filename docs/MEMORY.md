@@ -1,8 +1,89 @@
 # Memory
 
-Avibe Memory distills eligible Workbench and private-IM messages into a
-per-user profile, episodes, and facts. Open **Settings > Memory** to inspect its
-Processing Record, current profile, search results, and settings.
+This is the canonical product and architecture contract for the current Memory
+system. Superseded Memory design plans are available in Git history only; they
+must not be treated as current behavior.
+
+Avibe Memory distills eligible Workbench and private-IM messages into scoped
+User and Agent profiles, episodes, and facts. Open **Settings > Memory** to
+inspect its Processing Record, current profiles, search results, and settings.
+
+## Design philosophy
+
+The refactored Memory system follows one priority: **keep Avibe and its Agent
+available, then preserve Memory data on a best-effort basis**. EverOS runs as an
+isolated child service that Avibe can wake, stop, replace, or explicitly repair.
+Memory intake may be lost when the process crashes, restarts, is replaced, or is
+overloaded; the design aims to retain data in ordinary operation, not to provide
+zero-loss or exactly-once delivery.
+
+The following rules are architectural invariants:
+
+1. **Memory is optional to the main product path.** Memory latency or failure
+   must not make chat, the Agent, `/new`, archive, replacement, or shutdown
+   unavailable. Lifecycle offers and barriers therefore stay bounded and
+   non-blocking.
+2. **Acceptance is not persistence.** An accepted capture has entered bounded,
+   process-local work. It does not prove EverOS received or persisted it. Avibe
+   keeps no durable outbox, replay ledger, or per-call delivery workflow.
+3. **Resources and retries are bounded.** Admission, attachment preparation,
+   provider calls, pending flushes, and restart attempts all have finite limits.
+   At capacity, Memory may drop work while the primary product continues.
+4. **EverOS native data is the only Memory content truth.** Search, profiles,
+   episodes, facts, and the Processing Record are projections of retained
+   native data. Avibe does not maintain a parallel Provider Call Log,
+   correlation ledger, or reconstructed history to make incomplete evidence
+   look complete.
+5. **Each lifecycle responsibility has one owner.** Admission belongs to
+   `CaptureAdmission` and `MemoryModule`; product policy belongs to
+   `MemoryRuntime`; volatile delivery belongs to `BestEffortMemoryWriter`;
+   child ownership and restart budgeting belong to `EverOSSupervisor`; one
+   launch attempt belongs to `EverOSProcess`. Callers do not borrow their
+   internals.
+6. **Wake is the one non-destructive availability path.** Initial startup,
+   manual retry, service restart, and crash recovery all reuse bounded Wake.
+   Wake never deletes Memory data and never starts a replacement before the old
+   owned process is proved stopped.
+7. **Data loss requires explicit authority.** Repair, Delete data, and
+   identity-invalidating configuration require exact `confirm_loss: true`,
+   stop proof, and confined deletion. Ambiguity fails closed instead of widening
+   the delete surface or silently falling back.
+8. **Identity and diagnostic truth stay explicit.** User and Agent owners are
+   server-derived and isolated. Partial or missing native evidence is reported
+   as `partial` or `unavailable`; a possibly submitted provider result is never
+   replayed.
+
+## Current architecture
+
+Platform adapters classify native events but do not own Memory business logic.
+They normalize each event into `InboundTurnFacts`; `CaptureAdmission` treats
+those facts as untrusted and rechecks identity, platform, event shape, and
+settings before admitting a capture. `MemoryModule` owns the admitted product
+operation and its scoped read behavior.
+
+| Component | Single responsibility |
+| --- | --- |
+| Platform adapters | Classify native events and normalize transport-specific facts without deciding Memory business eligibility. |
+| `CaptureAdmission` | Revalidate untrusted inbound facts and make the single capture-admission decision. |
+| `MemoryModule` | Derive owner/project scope and expose admitted capture and read semantics without exposing storage internals. |
+| `BestEffortMemoryWriter` | Owns bounded, ordered, volatile capture delivery and flush attempts. |
+| `MemoryRuntime` | Owns public state, configuration policy, operation exclusion, and destructive-operation admission. |
+| `EverOSSupervisor` | Exclusively owns the current child, readiness, bounded Wake/restart recovery, stop proof, and released-orphan reconciliation. |
+| `EverOSProcess` | Adapts one private EverOS launch attempt, its process identity, UDS readiness, resource bounds, and termination. |
+| Native readers | Read caller-authorized EverOS profiles, episodes, facts, runs, and indexing state without creating another source of truth. |
+
+The data and lifecycle paths remain separate and short:
+
+`eligible input -> CaptureAdmission -> MemoryModule -> bounded writer -> private EverOS UDS`
+
+`MemoryRuntime -> EverOSSupervisor -> one EverOSProcess attempt`
+
+Reads use the same private EverOS service and its active native root.
+`memory.sqlite` retains stable Avibe identity and project-catalog facts plus a
+bounded metadata row for timestamp, capture-outcome, and processing-fault
+diagnostics. It contains no Memory payload and is not a delivery queue or
+recovery state machine. The later sections define the product behavior at these
+seams.
 
 ## User and Agent memory ownership
 
@@ -155,11 +236,18 @@ An Embedding identity change invalidates the native root. Saving such a change
 uses the same explicit accepted-loss boundary and unified reset; there is no
 candidate config, rebuild marker, retry stage, or fallback to old settings.
 
-Released `recovery_intent`, `embedding_change_pending`, cloud transition, and
-Clear-state shapes are compatibility input only. Their retired stages are not
-serialized or resumed. Unsafe compatibility evidence collapses into an internal
-`repair_required` fence that ordinary saves preserve until a successful
-destructive Repair clears it.
+When a working custom installation first receives organization-managed Memory
+capability, Avibe persists `cloud.transition_notice_pending` as an
+acknowledgement fence and keeps the current custom source selected until the
+user explicitly confirms the identity-changing reset. This flag records a
+pending user decision, not capture delivery or resumable recovery progress, and
+does not promise to retain capture while the decision is pending.
+
+Released `recovery_intent`, `embedding_change_pending`,
+`transition_rebuild_owned`, and Clear-state shapes are compatibility input only.
+Their retired execution stages are not serialized or resumed. Unsafe
+compatibility evidence collapses into an internal `repair_required` fence that
+ordinary saves preserve until a successful destructive Repair clears it.
 
 ## Best-effort capture
 
@@ -170,12 +258,16 @@ and a bounded pending-flush tracker (256 sessions, 100 message IDs per session).
 Idle, age, and count thresholds are fixed at five minutes, thirty minutes, and
 100 acknowledgements.
 
-Admission writes only stable identity facts to `memory.sqlite`: the install
-scope key, epoch, provider timestamp watermark, and project catalog. After v4
-migration the only application tables are `memory_meta` and `memory_projects`;
-released queue, lease, settlement, attachment-reference, and recovery tables
-are discarded without provider I/O. Older v0-v3 shapes preserve identity and
-project facts, deriving legacy project rows from their former capture data.
+Persistence is metadata-only. `memory.sqlite` stores the install scope key,
+epoch, provider-root id, provider timestamp watermark, project catalog, capture
+summaries (`missed_count`, `last_success_at`, `last_error`, and their
+timestamps), and bounded processing-fault diagnostics. These fields summarize
+local state; they contain no message payload or per-call delivery workflow.
+After v4 migration the only application tables are `memory_meta` and
+`memory_projects`; released queue, lease, settlement, attachment-reference, and
+recovery tables are discarded without provider I/O. Older v0-v3 shapes preserve
+identity and project facts, deriving legacy project rows from their former
+capture data.
 
 Lifecycle offers and barriers are non-blocking. `/new`, archive, runtime
 replacement, and shutdown never wait for capture delivery. Work still preparing

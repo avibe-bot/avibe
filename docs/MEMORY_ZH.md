@@ -1,7 +1,67 @@
 # 记忆
 
-Avibe 记忆会把符合条件的 Workbench 和私聊消息提炼为按用户隔离的画像、事件与事实。
-在**设置 > 记忆**中可以查看状态、当前画像、搜索结果、设置和处理日志。
+本文是当前 Memory 系统唯一有效的产品与架构契约。已被取代的 Memory 设计方案只保留在
+Git 历史中，不再代表当前行为。
+
+Avibe 记忆会把符合条件的 Workbench 和私聊消息提炼为按范围隔离的用户与 Agent 画像、
+事件和事实。在**设置 > 记忆**中可以查看状态、当前画像、搜索结果、设置和处理记录。
+
+## 设计理念
+
+重构后的 Memory 只有一个优先级：**先保证 Avibe 与 Agent 可用，再尽力保留 Memory
+数据**。EverOS 作为隔离的子服务运行，Avibe 可以唤起、停止、替换，或在用户明确确认后
+修复它。进程崩溃、重启、替换或过载时允许丢失尚未完成的 Memory 输入；系统追求大多数
+正常场景不丢数据，而不承诺零丢失或 exactly-once 投递。
+
+以下规则是架构不变量：
+
+1. **Memory 不得拖垮主链路。** Memory 的延迟或故障不能让聊天、Agent、`/new`、归档、
+   运行时替换或关机不可用；生命周期 offer 与 barrier 必须有界且不阻塞。
+2. **接受不等于持久化。** 捕获被接受，只表示进入了有界的进程内工作，不代表 EverOS
+   已经接收或持久化。Avibe 不维护持久 outbox、重放账本或逐调用投递工作流。
+3. **资源与重试必须有界。** 准入、附件准备、提供方调用、待 flush 状态和重启尝试都有
+   固定上限。容量耗尽时可以丢弃 Memory 工作，但主产品必须继续运行。
+4. **EverOS 原生数据是唯一 Memory 内容事实源。** 搜索、画像、事件、事实和处理记录都
+   投影已保留的原生数据。Avibe 不再维护平行的 Provider Call Log、关联账本或补造的
+   历史记录。
+5. **每项生命周期职责只有一个 owner。** `CaptureAdmission` 与 `MemoryModule` 负责
+   准入；`MemoryRuntime` 负责产品策略；`BestEffortMemoryWriter` 负责易失投递；
+   `EverOSSupervisor` 负责子进程归属和重启预算；`EverOSProcess` 只负责单次启动。
+   调用方不能借用这些组件的内部状态。
+6. **Wake 是唯一非破坏性可用路径。** 初始启动、手动重试、服务重启和崩溃恢复都复用
+   有界 Wake。Wake 永不删除 Memory 数据，且在证明旧受管进程停止前不会启动替代进程。
+7. **数据丢失必须得到明确授权。** 修复、删除数据和使身份失效的配置变更都要求精确的
+   `confirm_loss: true`、停止证明和受限删除。遇到歧义时 fail closed，不扩大删除范围，
+   也不静默回退。
+8. **身份与诊断必须诚实。** 用户和 Agent owner 由服务端派生并互相隔离。原生证据缺失
+   或不完整时明确报告 `partial` 或 `unavailable`；可能已经提交的结果绝不重放。
+
+## 当前架构
+
+平台适配器负责对原生事件分类，但不拥有 Memory 业务逻辑。它们把事件规范化为
+`InboundTurnFacts`；`CaptureAdmission` 将这些事实视为不可信输入，在准入前重新校验身份、
+平台、事件形状与设置。`MemoryModule` 负责已准入的产品操作及其范围化读取行为。
+
+| 组件 | 唯一职责 |
+| --- | --- |
+| 平台适配器 | 分类原生事件并规范化 transport 事实，但不决定 Memory 业务准入。 |
+| `CaptureAdmission` | 复核不可信的入站事实，并作出唯一的捕获准入决定。 |
+| `MemoryModule` | 派生 owner/project 范围，提供已准入的捕获与读取语义，不暴露存储内部。 |
+| `BestEffortMemoryWriter` | 负责有界、有序、易失的捕获投递和 flush 尝试。 |
+| `MemoryRuntime` | 负责公开状态、配置策略、操作互斥和破坏性操作准入。 |
+| `EverOSSupervisor` | 独占当前子进程、就绪状态、有界 Wake/重启恢复、停止证明和旧版本孤儿协调。 |
+| `EverOSProcess` | 适配一次私有 EverOS 启动，包括进程身份、UDS 就绪、资源限制和终止。 |
+| 原生读取器 | 在授权范围内投影 EverOS 画像、事件、事实、运行和索引状态，不创建第二事实源。 |
+
+数据与生命周期路径保持分离且简短：
+
+`符合条件的输入 -> CaptureAdmission -> MemoryModule -> 有界 writer -> 私有 EverOS UDS`
+
+`MemoryRuntime -> EverOSSupervisor -> 一次 EverOSProcess 启动`
+
+读取使用同一个私有 EverOS 服务及其当前原生数据根。`memory.sqlite` 保留稳定的 Avibe
+身份与项目目录事实，以及一行有界的时间戳、捕获结果和处理故障诊断元数据；它不包含
+Memory 消息载荷，也不承担投递队列或恢复状态机。后续章节定义这些边界上的具体产品行为。
 
 ## 用户与 Agent 记忆归属
 
@@ -54,10 +114,13 @@ LLM、Embedding 或重排序服务。
 
 ## 可选重排序端点
 
-**设置 > 记忆**中的第三个处理端点是可选项。要启用固定 Memory Runtime 的重排序能力，
-必须同时填写 Base URL、模型和 API Key；添加或更改端点会在保存前执行同样的有界预检。
-三个字段全部留空时会继续使用标准记忆搜索层级。移除已保存的重排序端点会清除这三个值，
-但不会重建 Embedding 索引。
+**设置 > 记忆**中的第三个处理端点是可选项。选择一个 EverOS 重排序提供方
+（`deepinfra`、`vllm` 或 `dashscope`），并同时配置该提供方的 Base URL、模型与 API Key。
+添加或更改端点会在保存前执行提供方对应的有界预检。旧配置若没有 `provider`，默认沿用
+DeepInfra 协议；但省略 `provider` 且主机为 Bailian workspace（`*.maas.aliyuncs.com`）时，
+会推断为 DashScope。所有字段留空时继续使用标准记忆搜索层级。移除端点会同时清除提供方
+和端点字段，但不会重建 Embedding 索引。DashScope 当前只支持 `gte-rerank-v2`，Base URL
+必须是 `https://dashscope.aliyuncs.com` 或 Bailian workspace 主机。
 
 ## 处理记录
 
@@ -79,10 +142,12 @@ Call Log，记录可以不完整或丢失。包含 `memory.diagnostics.log_provi
 有界的 PendingFlush 跟踪器（最多 256 个 session、每个 100 个消息 ID）；空闲、年龄和
 数量阈值固定为 5 分钟、30 分钟和 100 次确认。
 
-准入事务只写入稳定身份事实：安装 scope key、epoch、提供方时间戳水位线和项目目录。
-v4 之后 `memory.sqlite` 只有 `memory_meta` 与 `memory_projects` 两张应用表。v0-v3
-迁移会保留身份和项目事实，并从旧捕获数据推导项目行；队列、租约、结算、附件引用和
-恢复表会在没有提供方 I/O 的情况下丢弃。
+持久化仅包含元数据。`memory.sqlite` 保存安装 scope key、epoch、provider-root id、提供方
+时间戳水位线、项目目录、捕获摘要（`missed_count`、`last_success_at`、`last_error` 及其
+时间戳）和有界的处理故障诊断。这些字段只概括本地状态，不包含消息载荷或逐调用投递
+工作流。v4 之后只有 `memory_meta` 与 `memory_projects` 两张应用表。v0-v3 迁移会保留身份
+与项目事实，并从旧捕获数据推导项目行；队列、租约、结算、附件引用和恢复表会在没有
+提供方 I/O 的情况下丢弃。
 
 生命周期 offer 和 barrier 都不会阻塞。`/new`、归档、运行时替换和关机不会等待捕获
 投递；仍在准备中或属于旧 authority generation 的捕获可能丢失或失效。替换和关机
@@ -129,6 +194,26 @@ API、内部 API、客户端与 Controller 每一层都要求精确的 `confirm_
 Embedding 身份变更会使原生数据根失效，因此保存时使用同一个明确接受丢失的边界与统一重置。
 系统不再保留候选配置、重建标记、重试阶段，也不会静默回退到旧设置。
 
-已发布的 `recovery_intent`、`embedding_change_pending`、cloud transition 与 Clear 状态仅作
-兼容输入，其已退役阶段不会再次序列化或续跑。不安全的兼容证据会折叠为内部
-`repair_required` 围栏；普通保存会保留该围栏，直到一次成功的破坏性修复将其清除。
+当一个正常工作的 custom 安装首次获得组织托管的 Memory 能力时，Avibe 会持久化
+`cloud.transition_notice_pending` 作为确认围栏，并在用户明确确认身份变更重置前继续选择
+当前 custom 来源。该字段只记录待处理的用户决定，不表示捕获投递或可续跑的恢复进度，
+也不承诺在等待确认期间保留捕获。
+
+已发布的 `recovery_intent`、`embedding_change_pending`、`transition_rebuild_owned` 与 Clear
+状态仅作兼容输入，其已退役执行阶段不会再次序列化或续跑。不安全的兼容证据会折叠为
+内部 `repair_required` 围栏；普通保存会保留该围栏，直到一次成功的破坏性修复将其清除。
+
+## 召回策略
+
+召回使用一套封闭策略，模式只能是 `auto`、`keyword`、`vector`、`hybrid` 或
+`agentic`。只有最近一次可信的 EverOS health 明确报告 Embedding 能力时，`auto` 才选择
+hybrid，否则使用 keyword。显式请求 vector 或 hybrid 但能力缺失时 fail closed。一次
+请求最多调用一次提供方搜索，不会换模式重试。
+
+Agentic 召回只通过 CLI 提供，并且要求 health 明确报告 Embedding、LLM 与 rerank 能力，
+且没有关闭 `agentic_search`。它只发起一次请求，由 sidecar 执行最长 30 秒的墙钟超时；
+能力不可用时 fail closed。EverOS 1.2.3 尚不强制模型调用次数和 token 上限，因此这些策略
+字段目前只是声明式边界，而不是 Avibe 独立执行的提供方预算。
+
+当前 session overlay 只能使用运行时提供的可信调用者 session；调用者不能传入任意提供方
+filter 或 session ID。

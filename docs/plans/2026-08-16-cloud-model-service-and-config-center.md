@@ -85,13 +85,17 @@ A **ModelServiceConfig** exists per scope owner and contains up to one slot per 
 | Capability | Consumed by | Upstream wire shape |
 | --- | --- | --- |
 | `asr` | voice transcription + dictation (+ optional `realtime_model`) | DashScope-compatible `chat/completions` with `input_audio`; realtime WS |
-| `chat` | memory LLM, voice transcript cleanup | OpenAI `chat/completions` (streaming supported) |
+| `chat` | fallback memory LLM, voice transcript cleanup | OpenAI `chat/completions` (streaming supported) |
 | `embedding` | memory embeddings | OpenAI `embeddings` |
 | `multimodal` | memory IM-attachment/vision capture | OpenAI `chat/completions` |
 
 Each slot: `provider_label` (display), `base_url`, `model`, `api_key` (write-only),
 `realtime_model` + `realtime_url` (asr only, optional — realtime is available iff **both** are
 set; the realtime WS endpoint is a distinct URL, not derived from the HTTP `base_url`), `enabled`.
+
+At the client boundary, status exposes the effective `memory_llm` capability and its source.
+`chat_fallback` follows the Chat slot; a `dedicated` Memory LLM may remain available while Chat is
+disabled.
 
 **Unset multimodal**: there is no server-side fallback. The client leaves the sidecar's multimodal
 endpoint unset, so the engine itself falls back to its chat endpoint (everos's own behavior); the
@@ -376,53 +380,40 @@ shape is not extended for this.
   client-local and never appears in the server payload (§8.2).
 - **Memory**: in `organization`/`platform` modes, the runtime feeds the sidecar cloud endpoints +
   `mak_` key via the existing `EVEROS_*` env plumbing (`core/memory/process.py`); `custom` mode is
-  the unchanged current path. Mode changes route through the existing settings-change ladder.
+  the unchanged current path. All Memory lifecycle and data-loss behavior is governed by the
+  canonical [`docs/MEMORY.md`](../MEMORY.md) contract; this plan does not define a second queue,
+  rebuild, or recovery protocol. Mode changes route through the existing settings-change ladder.
   Cloud mode injects **fixed model aliases** into `EVEROS_*__MODEL` (the proxy selects the real
   upstream model and ignores client-sent names); the embedding alias embeds `embedding_identity`
-  so provider-call diagnostics stay distinguishable across identity changes. Cloud memory mode
-  requires **both** `chat` and `embedding` enabled in the bound scope — anything less counts as
-  no memory capability (the no-transition rule below applies), since the engine cannot start
-  without a complete LLM + embedding pair. If an **active** cloud scope later disables either
-  slot, member instances pause memory processing (capture keeps queuing in the durable outbox),
-  surface the capability-off state, and resume automatically when the org re-enables the pair —
-  never a silent fallback to `custom` or platform. The resume passes through the standard identity
-  check: an embedding identity that changed while paused gates on the rebuild-confirmation flow
-  before processing restarts.
-- **Embedding identity**: the cloud config's `embedding_identity` participates in the sidecar's
-  vector-space identity exactly like a local embedding config change — an org admin changing the
-  embedding slot triggers the existing rebuild flow on every member instance, with the admin UI
-  warning about exactly this blast radius before saving.
-- **Rotation & key-change semantics (verified against code, 2026-08-16)**: an API-key change
-  (slot key or mak; base_url/model unchanged) is non-identity on both sides — Avibe's identity is
-  exactly `(embedding.base_url, embedding.model)` (`core/memory/runtime.py:3721-3735`, docstring:
-  "Non-identity fields (API keys, LLM settings) may change … without invalidating a completed
-  rebuild"), and everos 1.2.3 never persists any provider fingerprint (key lives only in process
-  env → `@functools.cache`d settings → singleton HTTP client; EVEROS_ROOT holds no config-derived
-  state; embedding dimension is the code constant 1024). A key change therefore applies through
-  the existing managed settings ladder: preflight probe child with candidate env → quiesce (30 s;
-  in-flight flushes awaited via `asyncio.shield`, durable outbox, no double-write) → graceful
-  sidecar restart. A failed probe leaves the old sidecar running and rolls the config back.
+  so server-side usage remains distinguishable across identity changes. Cloud Memory requires an
+  effective Memory LLM plus Embedding: current status uses `capabilities.memory_llm`; an older
+  cache without that field falls back to `capabilities.chat`. `memory_llm_source` distinguishes a
+  dedicated endpoint from Chat fallback. If an active cloud scope loses either effective
+  capability, member instances surface `degraded` and new capture may be lost; there is no durable
+  outbox. They retry through bounded non-destructive Wake when the capability returns and never
+  silently fall back to `custom` or platform.
+- **Embedding identity**: `MemoryConfig.runtime_embedding_identity()` returns
+  `("custom", embedding.base_url, embedding.model)` for custom processing and
+  `("cloud", applied_embedding_identity or embedding_identity, None)` for cloud processing.
+  The source tag makes every `custom ↔ cloud` switch identity-changing even when endpoint text
+  happens to match. A managed embedding identity change requires exact `confirm_loss` and the
+  unified destructive reset on every member instance.
+- **Rotation & key-change semantics**: API keys are excluded from the runtime embedding identity.
+  A sidecar-held key change uses bounded preflight → bounded volatile-writer quiesce →
+  non-destructive Wake. Pending capture can be lost during replacement, and no old configuration
+  or delivery work is replayed after the new configuration is authoritative.
   These managed-restart semantics apply only to keys the sidecar itself holds (custom-mode slot
   keys, the mak). **Org/platform slot keys live server-side only**: rotating them requires no
   client action, restarts nothing, and changes nothing in the status payload.
-- **Mode-switch semantics**: switching `custom ↔ cloud` changes the base_url the sidecar sees and
-  is an identity change by definition unless the upstream is identical — the existing
-  rebuild-confirmation flow governs it. In cloud modes the client's identity input is the status
-  payload's `embedding_identity` (upstream base_url+model), never the proxy URL — so org upstream
-  changes propagate as rebuilds, and mak rotation does not.
 - **Enterprise-attachment transition**: when an instance whose memory runs in `custom` mode becomes
-  enterprise-managed, the client pauses memory processing (capture keeps queuing in the durable
-  outbox; nothing is lost), surfaces a one-time transition notice, and performs the identity change
-  through the same rebuild-confirmation flow on the user's acknowledgment — forced management
-  changes the model source, but the rebuild is never silent. If the org provides no **cloud memory
-  capability** (the chat + embedding pair not both enabled — embedding-only and chat-only orgs
-  alike), no transition fires: an existing working `custom`
-  configuration keeps running unchanged (the org has not provided a replacement model source), and
-  the manual editor stays hidden only for *new* configuration; the transition applies when the org
-  later enables memory slots. **Custom preservation is grandfathering only**, not a new-configuration
-  entitlement: a fresh install attached to an organization without the memory pair renders the
-  managed read-only state with Memory unavailable until the organization enables both slots — it
-  never exposes manual setup and never falls back to the platform scope (PM ruling 2026-08-17).
+  enterprise-managed and the organization has complete Memory capability, the client persists
+  `cloud.transition_notice_pending`, exposes the acknowledgement UI, and keeps the current custom
+  runtime selected until the user supplies exact `confirm_loss`. This is one durable confirmation
+  fence, not a delivery or resumable recovery stage; capture remains accepted-loss while it is
+  pending. Without effective Memory LLM + Embedding, no transition fires: an existing working
+  custom configuration is grandfathered. A fresh managed install instead shows Memory unavailable
+  until the organization supplies both effective capabilities; it never exposes manual setup or
+  falls back to platform scope.
 - **Settings UI (Memory)**: three states per §5.3. Copy through `ui/src/i18n/{en,zh}.json`; show
   state, not mechanism; the enterprise state is one sentence, not a tour.
 - **Voice**: no changes.
@@ -464,7 +455,8 @@ required.
 ```json
 {
   "mode": "organization",
-  "capabilities": { "asr": true, "chat": true, "embedding": true, "multimodal": false },
+  "capabilities": { "asr": true, "chat": true, "embedding": true, "multimodal": false, "memory_llm": true },
+  "memory_llm_source": "chat_fallback",
   "embedding_identity": "emb-9f3ac2",
   "quota": { "enforced": false },
   "revision": 12
@@ -474,10 +466,13 @@ required.
 `mode` ∈ `organization | platform`. `embedding_identity` is an opaque hash of the embedding slot's
 (base_url, model) and changes iff vector-space identity changes. It is `null` exactly when
 `capabilities.embedding` is false because the embedding slot itself is missing, disabled, or
-unavailable through the shared effectiveness predicate. A chat-only degradation leaves the healthy
-embedding capability and identity intact; the released client pauses cloud memory through its
-existing `chat && embedding` pair predicate. Before serializing a saved scope, the endpoint consumes
-that predicate for every enabled slot and immediately discards any plaintext. It includes the
+unavailable through the shared effectiveness predicate. `memory_llm_source` is `dedicated` or
+`chat_fallback`; `capabilities.memory_llm` is the effective Memory LLM result, so a dedicated source
+may remain true while `capabilities.chat` is false, whereas Chat fallback requires both values to
+match. The client admits cloud Memory only when the effective Memory LLM, Embedding, nonempty
+`embedding_identity`, proxy URL, and model key are available. Before serializing a saved scope, the
+endpoint consumes the shared effectiveness predicate for every enabled slot and immediately
+discards any plaintext. It includes the
 platform scope's approved legacy-env recovery only when the normalized saved and env provider
 addresses match; organization scope never receives that recovery. A slot with neither decryptable
 saved custody nor eligible recovery is reported unavailable and the response adds a per-slot reason
