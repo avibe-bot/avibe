@@ -17,7 +17,7 @@ from config.v2_compat import to_app_config
 from config.v2_config import V2Config
 from core.controller import Controller
 from core.memory import CaptureRequest, CaptureSkipped
-from core.memory_adapter import DisabledMemoryAdapter, EnabledMemoryAdapter
+from core.memory_adapter import DisabledMemoryAdapter, EnabledMemoryAdapter, TurnAccepted
 from vibe.memory_contract import (
     MemoryRuntimeCloseUnprovedError,
     MemoryStoreUnavailableError,
@@ -394,6 +394,8 @@ async def test_memory_reconcile_lazily_enters_and_leaves_enabled_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     created: list[object] = []
+    capture_started = asyncio.Event()
+    capture_stopped = asyncio.Event()
 
     class _Runtime:
         def __init__(self) -> None:
@@ -407,6 +409,7 @@ async def test_memory_reconcile_lazily_enters_and_leaves_enabled_runtime(
             }
 
         async def close(self) -> None:
+            assert capture_stopped.is_set()
             self.closed = True
 
     runtime = _Runtime()
@@ -436,6 +439,20 @@ async def test_memory_reconcile_lazily_enters_and_leaves_enabled_runtime(
     assert controller.memory_module is runtime.module
     assert isinstance(controller.memory_adapter, EnabledMemoryAdapter)
     assert controller.config.memory.enabled is True
+
+    async def capture_user_memory(*_args, **_kwargs) -> None:
+        capture_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            capture_stopped.set()
+
+    controller.reserve_memory_capture_capacity = lambda *_args: None
+    controller.capture_user_memory = capture_user_memory
+    controller.memory_adapter.offer(
+        TurnAccepted(object(), "remember this", "session-1", 0)
+    )
+    await capture_started.wait()
 
     disabled = replace(enabled, enabled=False)
     assert await controller.reconcile_memory(disabled) == {

@@ -1023,6 +1023,17 @@ class Controller:
             if result.get("ok") is True:
                 self.config.memory = memory_config
                 if not memory_config.enabled:
+                    adapter = getattr(self, "memory_adapter", None)
+                    quiesce = getattr(adapter, "quiesce_memory_capture_tasks", None)
+                    if callable(quiesce):
+                        quiesce()
+                    cancel_capture = getattr(
+                        adapter,
+                        "cancel_memory_capture_tasks",
+                        None,
+                    )
+                    if callable(cancel_capture):
+                        await cancel_capture()
                     self.memory_adapter = DisabledMemoryAdapter()
                     await self._close_memory_runtime_locked(runtime, retire=False)
                     self._recheck_disabled_memory_cleanup_locked()

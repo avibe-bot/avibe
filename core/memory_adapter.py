@@ -143,7 +143,9 @@ class EnabledMemoryAdapter:
                 options["attachment_reservation"] = reservation
 
             capture_memory = getattr(self._controller, "capture_user_memory", None)
-            if not callable(capture_memory) or not event.text.strip():
+            if not callable(capture_memory) or (
+                not is_attachment and not event.text.strip()
+            ):
                 self._release(retained_lease)
                 self._release(reservation)
                 return

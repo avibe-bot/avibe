@@ -133,6 +133,7 @@ def _reserve_submission(
     content: dict | None = None,
     metadata: dict | None = None,
     native_message_id: str | None = None,
+    message_kind: str | None = None,
 ):
     delivery_id = message_deliveries.new_delivery_id()
     row = message_deliveries.insert_delivery(
@@ -153,6 +154,7 @@ def _reserve_submission(
             metadata=metadata,
             author_name=author_name,
             native_message_id=native_message_id,
+            message_kind=message_kind,
         ),
         dispatch_text=text,
         dedupe_key=(
@@ -2799,6 +2801,73 @@ def test_dispatch_async_starts_authorized_remote_reservation(
         stored = message_deliveries.get_delivery(conn, remote["id"])
     assert stored is not None
     assert stored["state"] == "accepted"
+
+
+def test_dispatch_async_restores_message_kind_from_reserved_delivery(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_durable_message_kind",
+    )
+    with engine.begin() as conn:
+        reserved = _reserve_submission(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session["id"],
+            text="durable quick reply",
+            message_kind="quick_reply",
+        )
+
+    observed: list[MessageContext] = []
+    dispatch_kinds: list[object] = []
+    build_dispatch_payload = internal_server._build_dispatch_payload
+
+    async def observe_dispatch_payload(payload):
+        dispatch_kinds.append(payload.get("message_kind"))
+        return await build_dispatch_payload(payload)
+
+    monkeypatch.setattr(
+        internal_server,
+        "_build_dispatch_payload",
+        observe_dispatch_payload,
+    )
+    controller = None
+
+    async def handler(context, _text):
+        observed.append(context)
+        controller.mark_turn_complete(context)
+
+    controller = _build_controller_double(handler)
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.post(
+                "/internal/dispatch_async",
+                json={
+                    "session_id": session["id"],
+                    "text": "stale request text",
+                    "user_message_id": reserved["id"],
+                    "message_kind": "original",
+                },
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 202
+    assert dispatch_kinds == ["quick_reply"]
+    assert len(observed) == 1
+    assert observed[0].message_kind == "quick_reply"
+    assert observed[0].is_original_human_text is False
+
+
 def test_dispatch_async_persists_acceptance_before_a_lost_response_replay(
     monkeypatch,
     tmp_path,

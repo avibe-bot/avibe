@@ -891,6 +891,7 @@ def create_app(
             "metadata": dict(delivery_payload.get("metadata") or {}),
             "author_id": delivery_payload.get("author_id"),
             "author_name": delivery_payload.get("author_name"),
+            "message_kind": delivery_payload.get("message_kind"),
         }
         try:
             text, context = await _build_dispatch_payload(dispatch_payload)

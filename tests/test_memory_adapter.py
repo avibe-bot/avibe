@@ -82,6 +82,40 @@ async def test_enabled_adapter_retains_attachment_before_scheduling_capture() ->
 
 
 @pytest.mark.asyncio
+async def test_enabled_adapter_captures_attachment_without_caption() -> None:
+    retained = Mock()
+    lease = Mock(retain=Mock(return_value=retained))
+    reservation = SimpleNamespace(
+        capacity_blocked=False,
+        config_generation=7,
+        release=Mock(),
+    )
+    captured: list[tuple[str, dict[str, object]]] = []
+
+    async def capture(_context, text, _session_id, **kwargs) -> None:
+        captured.append((text, kwargs))
+
+    adapter = EnabledMemoryAdapter(
+        _controller(reservation=reservation, capture=capture)
+    )
+
+    adapter.offer(TurnAccepted(object(), "", "session-1", 0, lease))
+    await _wait_for_captures(adapter)
+
+    assert captured == [
+        (
+            "",
+            {
+                "attachment_reservation": reservation,
+                "attachment_config_generation": 7,
+                "attachment_lease": retained,
+            },
+        )
+    ]
+    retained.release.assert_called_once_with()
+
+
+@pytest.mark.asyncio
 async def test_enabled_adapter_retain_failure_falls_back_to_text_only() -> None:
     lease = Mock()
     lease.retain.side_effect = RuntimeError("pin unavailable")
