@@ -18,10 +18,10 @@ from core.memory.observations import AddAck, AddRejected
 from core.memory.types import RecallItems, RecallPolicy, memory_item_payload
 from modules.im.base import FileAttachment
 from modules.im.message_facts import (
-    is_ordinary_discord_attachment,
-    is_ordinary_feishu_attachment,
-    is_ordinary_telegram_attachment,
-    is_ordinary_wechat_attachment,
+    is_original_human_discord_attachment,
+    is_original_human_feishu_attachment,
+    is_original_human_telegram_attachment,
+    is_original_human_wechat_attachment,
 )
 from tests.scenario_harness.memory_im_attachments import (
     PNG_BYTES,
@@ -474,9 +474,9 @@ def _platform_attachment_fact(platform: str, file: FileAttachment) -> bool:
             message_snapshots=(),
             is_system=lambda: False,
         )
-        return is_ordinary_discord_attachment(message, [file])
+        return is_original_human_discord_attachment(message, [file])
     if platform == "telegram":
-        return is_ordinary_telegram_attachment(
+        return is_original_human_telegram_attachment(
             {
                 "from": {"id": "U1", "is_bot": False},
                 "document": {"file_id": "native-file", "file_name": file.name},
@@ -484,7 +484,7 @@ def _platform_attachment_fact(platform: str, file: FileAttachment) -> bool:
             [file],
         )
     if platform == "lark":
-        return is_ordinary_feishu_attachment(
+        return is_original_human_feishu_attachment(
             {
                 "sender": {"sender_type": "user"},
                 "message": {"message_type": "file"},
@@ -493,7 +493,7 @@ def _platform_attachment_fact(platform: str, file: FileAttachment) -> bool:
             [file],
             shared_text=None,
         )
-    return is_ordinary_wechat_attachment(
+    return is_original_human_wechat_attachment(
         {
             "from_user_id": "U1",
             "item_list": [

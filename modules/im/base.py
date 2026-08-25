@@ -6,6 +6,8 @@ from abc import ABC, abstractmethod
 from typing import Optional, Callable, Dict, Any, List, Tuple, Literal, cast
 from dataclasses import dataclass
 
+from core.delivery_target import MessageKind
+
 from .download_target import open_download_target
 
 logger = logging.getLogger(__name__)
@@ -46,10 +48,11 @@ class MessageContext:
     files: Optional[List[FileAttachment]] = None  # List of file attachments
     # Inbound adapters set this only after classifying their native event.
     # None is intentionally fail-closed for Memory capture and commands.
-    is_ordinary_text: Optional[bool] = None
+    is_original_human_text: Optional[bool] = None
     # Attachment turns use a separate native-event classification so adding
     # files never widens the existing ordinary-text contract.
-    is_ordinary_attachment: Optional[bool] = None
+    is_original_human_attachment: Optional[bool] = None
+    message_kind: MessageKind = "unknown"
 
 
 @dataclass

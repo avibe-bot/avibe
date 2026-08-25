@@ -15,7 +15,7 @@ from core.memory.module import MIN_FREE_DISK_BYTES, MemoryModule
 from core.memory.store import MemoryStore
 from core.memory.types import MemoryItem
 from modules.im.base import FileAttachment, FileDownloadResult, MessageContext
-from modules.im.message_facts import is_ordinary_slack_attachment, is_ordinary_slack_text
+from modules.im.message_facts import is_original_human_slack_attachment, is_original_human_slack_text
 
 
 PRINCIPAL = "u-11111111111111111111111111111111"
@@ -203,8 +203,8 @@ class MemoryIMAttachmentScenarioHarness:
             message_id="native-1",
             platform_specific={"platform": "slack", "is_dm": self.is_dm},
             files=files,
-            is_ordinary_text=is_ordinary_slack_text(event, files),
-            is_ordinary_attachment=is_ordinary_slack_attachment(event, files),
+            is_original_human_text=is_original_human_slack_text(event, files),
+            is_original_human_attachment=is_original_human_slack_attachment(event, files),
         )
         self.last_context = context
         self.downloader = _SlackDownloader(

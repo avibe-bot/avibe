@@ -27,7 +27,7 @@ from core.memory.attachments import workbench_capture_attachments
 from core.memory.types import CaptureAttachment, CaptureRequest, CaptureSkipped
 from core.handlers.inbound_attachments import InboundAttachmentMaterializer
 from modules.im.base import FileAttachment, FileDownloadResult, MessageContext
-from modules.im.message_facts import is_ordinary_workbench_text
+from modules.im.message_facts import is_original_human_workbench_text
 
 
 PRINCIPAL = "u-" + ("1" * 32)
@@ -480,7 +480,7 @@ def test_workbench_attachment_only_turn_is_captured(monkeypatch, tmp_path: Path)
     attachment = tmp_path / "attachments" / "avibe" / "receipt.pdf"
     attachment.parent.mkdir(parents=True)
     attachment.write_bytes(b"pdf")
-    ordinary = is_ordinary_workbench_text(
+    ordinary = is_original_human_workbench_text(
         {"content": {"attachments": [{"token": "receipt"}]}},
         None,
     )
@@ -592,7 +592,7 @@ def test_workbench_office_uploads_require_soffice_and_convertible_bytes(
 
 def test_workbench_turn_of_only_unparseable_uploads_is_not_captured(monkeypatch, tmp_path: Path) -> None:
     uploads = _uploads_dir(monkeypatch, tmp_path)
-    ordinary = is_ordinary_workbench_text(
+    ordinary = is_original_human_workbench_text(
         {"content": {"attachments": [{"token": "export"}]}},
         None,
     )
@@ -681,14 +681,15 @@ def test_merge_identity_normalizes_unusable_metadata(
     assert is_cli_admitted(metadata) is expected[2]
 
 
-def test_delivery_store_shares_metadata_keys_without_capture_admission() -> None:
-    """Storage can name the keys without loading CaptureAdmission or aiohttp."""
+def test_delivery_store_uses_only_legacy_translation_without_capture_admission() -> None:
+    """Storage can translate released rows without loading Memory runtime code."""
 
     script = """
 import sys
 from storage import message_deliveries
-from core.memory.admission_metadata import MEMORY_USER_ID_METADATA
-assert message_deliveries.MEMORY_USER_ID_METADATA is MEMORY_USER_ID_METADATA
+from core.memory.admission_metadata import legacy_message_kind
+assert message_deliveries.legacy_message_kind is legacy_message_kind
+assert not hasattr(message_deliveries, "MEMORY_USER_ID_METADATA")
 assert "core.memory.admission" not in sys.modules
 assert "core.memory.im_attachments" not in sys.modules
 assert "core.memory.module" not in sys.modules
@@ -737,16 +738,16 @@ assert "aiohttp" not in sys.modules
 
 
 def test_workbench_submits_are_classified_beside_their_im_siblings() -> None:
-    assert is_ordinary_workbench_text({"text": "hello"}, None) is True
-    assert is_ordinary_workbench_text({"text": "hello"}, "msg-7") is False
+    assert is_original_human_workbench_text({"text": "hello"}, None) is True
+    assert is_original_human_workbench_text({"text": "hello"}, "msg-7") is False
     assert (
-        is_ordinary_workbench_text(
+        is_original_human_workbench_text(
             {"content": {"attachments": [{"token": "upload-1"}]}},
             None,
         )
         is True
     )
-    assert is_ordinary_workbench_text({"files": [{"name": "a.png"}]}, None) is True
-    assert is_ordinary_workbench_text({"metadata": {"forwarded": True}}, None) is False
-    assert is_ordinary_workbench_text({"metadata": {"forward_origin": "chat"}}, None) is False
-    assert is_ordinary_workbench_text("not a payload", None) is False
+    assert is_original_human_workbench_text({"files": [{"name": "a.png"}]}, None) is True
+    assert is_original_human_workbench_text({"metadata": {"forwarded": True}}, None) is False
+    assert is_original_human_workbench_text({"metadata": {"forward_origin": "chat"}}, None) is False
+    assert is_original_human_workbench_text("not a payload", None) is False

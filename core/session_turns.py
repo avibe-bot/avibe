@@ -30,10 +30,12 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 
 from core.web_push_notifications import WEB_PUSH_USER_KEY_METADATA, WEB_PUSH_USER_KEYS_METADATA
+from core.delivery_target import normalize_message_kind
 from core.message_context import (
     SCHEDULED_DISPATCH_METADATA_APPLIED_KEY,
     resolve_turn_sink_key,
 )
+from core.memory.admission_metadata import admitted_user_id, is_cli_admitted
 from core.native_dispatch_phase import (
     backend_dispatch_attempted,
     mark_prewrite_user_stop,
@@ -79,11 +81,6 @@ from storage.models import (
 )
 from storage.workbench_sessions_service import derive_session_harness_activities
 from core.message_output import terminal_turn_output
-from core.memory.admission_metadata import (
-    is_cli_admitted as memory_cli_admitted,
-    is_ordinary_text as memory_ordinary_text,
-    merge_identity as memory_admission_merge_identity,
-)
 from core.runtime_activation import (
     RuntimeActivationIdentity,
     RuntimeActivationRegistry,
@@ -392,19 +389,12 @@ def _scheduled_merge_key(row: dict[str, Any]) -> Optional[tuple[str, ...]]:
     )
 
 
-def _memory_admission_merge_identity(row: dict[str, Any]) -> tuple[str | None, bool, bool]:
-    """Opaque Memory identity for one delivery row's merge batch."""
-
-    return memory_admission_merge_identity(row.get("metadata"))
-
-
 def _collect_delivery_segment(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Return the one compatible leading segment a Turn may claim."""
 
     if not rows:
         return []
     message_identity = delivery_store.message_merge_identity(rows[0])
-    memory_admission_identity = _memory_admission_merge_identity(rows[0])
     scheduled_key = _scheduled_merge_key(rows[0])
     if _scheduled_provenance(rows[0]) is not None and scheduled_key is None:
         return [rows[0]]
@@ -416,8 +406,6 @@ def _collect_delivery_segment(rows: list[dict[str, Any]]) -> list[dict[str, Any]
             current = _parse_queue_timestamp(row.get("submitted_at"))
             if (
                 delivery_store.message_merge_identity(row) != message_identity
-                or _memory_admission_merge_identity(row)
-                != memory_admission_identity
                 or _scheduled_merge_key(row) != scheduled_key
                 or previous is None
                 or current is None
@@ -435,8 +423,6 @@ def _collect_delivery_segment(rows: list[dict[str, Any]]) -> list[dict[str, Any]
         if _scheduled_provenance(row) is not None:
             break
         if delivery_store.message_merge_identity(row) != message_identity:
-            break
-        if _memory_admission_merge_identity(row) != memory_admission_identity:
             break
         native_message_id = str(row.get("native_message_id") or "").strip()
         if native_message_id:
@@ -547,6 +533,7 @@ class DeliveryRequest:
     admission_context: dict[str, Any] | None = None
     native_message_id: str | None = None
     parent_native_message_id: str | None = None
+    message_kind: str = "unknown"
     # A caller that will immediately promote the durable FIFO head can request
     # P3 admission without the usual idle-session auto-start. This keeps the
     # admission and promotion decision on one post-admission queue snapshot.
@@ -739,8 +726,8 @@ class SessionTurnManager:
             raise RuntimeError("session lifecycle ownership changed")
         state.epoch += 1
         if abandon_captures:
-            handler = getattr(self.controller, "message_handler", None)
-            abandon = getattr(handler, "abandon_memory_captures_for_session", None)
+            adapter = getattr(self.controller, "memory_adapter", None)
+            abandon = getattr(adapter, "abandon_memory_captures_for_session", None)
             if callable(abandon):
                 abandon(raw_session_id)
 
@@ -1812,6 +1799,7 @@ class SessionTurnManager:
             author_name=request.author_name,
             native_message_id=request.native_message_id,
             parent_native_message_id=request.parent_native_message_id,
+            message_kind=request.message_kind,
         )
 
     def _request_from_delivery(
@@ -1842,6 +1830,7 @@ class SessionTurnManager:
             metadata=dict(payload.get("metadata") or {}),
             native_message_id=payload.get("native_message_id"),
             parent_native_message_id=payload.get("parent_native_message_id"),
+            message_kind=str(payload.get("message_kind") or "unknown"),
         )
 
     def _committed_delivery_result(
@@ -2333,15 +2322,38 @@ class SessionTurnManager:
             if context.platform != "avibe" and native_message_id
             else str(delivery["id"])
         )
-        # Routing identity only. Memory's principal already travels in
-        # delivery ``message_metadata`` via the Memory admission vocabulary.
-        if payload.get("author_id"):
-            context.user_id = str(payload["author_id"])
         if context.platform_specific is None:
             context.platform_specific = {}
         metadata = payload.get("metadata") or {}
-        context.is_ordinary_text = memory_ordinary_text(metadata)
-        if memory_cli_admitted(metadata):
+        raw_snapshot = delivery.get("snapshot_json")
+        try:
+            snapshot = json.loads(raw_snapshot) if isinstance(raw_snapshot, str) else {}
+        except (TypeError, ValueError):
+            snapshot = {}
+        legacy_workbench = context.platform == "avibe" and (
+            not isinstance(snapshot, dict) or "message_kind" not in snapshot
+        )
+        author_id = payload.get("author_id")
+        if legacy_workbench:
+            author_id = admitted_user_id(metadata)
+        if author_id:
+            context.user_id = str(author_id)
+        context.message_kind = normalize_message_kind(payload.get("message_kind"))
+        context.is_original_human_text = context.message_kind == "original"
+        memory_enabled = bool(
+            getattr(
+                getattr(getattr(self.controller, "config", None), "memory", None),
+                "enabled",
+                False,
+            )
+        )
+        memory_cli_admitted = bool(
+            context.platform == "avibe"
+            and memory_enabled
+            and author_id
+            and (not legacy_workbench or is_cli_admitted(metadata))
+        )
+        if memory_cli_admitted:
             context.platform_specific["memory_cli_admitted"] = True
         else:
             context.platform_specific.pop("memory_cli_admitted", None)
@@ -2352,9 +2364,10 @@ class SessionTurnManager:
                 "display_text": payload.get("text") or "",
                 "message_content": dict(payload.get("content") or {}),
                 "message_metadata": dict(metadata),
-                "author_id": payload.get("author_id"),
+                "author_id": author_id,
                 "author_name": payload.get("author_name"),
                 "native_message_id": payload.get("native_message_id"),
+                "message_kind": context.message_kind,
                 "delivery_admission_context": (
                     delivery_store.delivery_admission_context(delivery)
                 ),
@@ -7172,6 +7185,15 @@ class SessionTurnManager:
                 or ""
             ).strip() or None,
             native_message_id=native_message_id,
+            message_kind=str(
+                spec.get("message_kind")
+                or (
+                    "original"
+                    if getattr(context, "is_original_human_text", None) is True
+                    or getattr(context, "is_original_human_attachment", None) is True
+                    else getattr(context, "message_kind", "unknown")
+                )
+            ),
         )
         result = await self.deliver(request, context=context)
         enqueued_states = {

@@ -133,6 +133,7 @@ def _reserve_submission(
     content: dict | None = None,
     metadata: dict | None = None,
     native_message_id: str | None = None,
+    message_kind: str | None = None,
 ):
     delivery_id = message_deliveries.new_delivery_id()
     row = message_deliveries.insert_delivery(
@@ -153,6 +154,7 @@ def _reserve_submission(
             metadata=metadata,
             author_name=author_name,
             native_message_id=native_message_id,
+            message_kind=message_kind,
         ),
         dispatch_text=text,
         dedupe_key=(
@@ -601,7 +603,7 @@ def test_memory_archive_session_delegates_raw_identity_with_bounded_lifecycle() 
     controller.memory_scope_for_cli_session = Mock(
         side_effect=AssertionError("the endpoint must not resolve identity")
     )
-    controller.archive_memory_cli_session = AsyncMock(
+    controller.archive_session = AsyncMock(
         return_value={"id": "ses-memory", "status": "archived"}
     )
     app = internal_server.create_app(controller)
@@ -626,7 +628,7 @@ def test_memory_archive_session_delegates_raw_identity_with_bounded_lifecycle() 
     }
     # The UI transport waits without a reporting deadline so the controller can
     # finish the terminal archive write. Memory flush is scheduled afterwards.
-    controller.archive_memory_cli_session.assert_awaited_once_with(
+    controller.archive_session.assert_awaited_once_with(
         "ses-memory",
         deadline_seconds=5.0,
     )
@@ -647,7 +649,7 @@ def test_memory_archive_session_rejects_widened_or_invalid_payloads(
     payload: dict[str, object],
 ) -> None:
     controller = _build_controller_double()
-    controller.archive_memory_cli_session = AsyncMock(return_value={})
+    controller.archive_session = AsyncMock(return_value={})
     app = internal_server.create_app(controller)
 
     async def _exercise() -> httpx.Response:
@@ -665,7 +667,7 @@ def test_memory_archive_session_rejects_widened_or_invalid_payloads(
 
     assert response.status_code == 400
     assert response.json() == {"ok": False, "error": "memory_invalid_input"}
-    controller.archive_memory_cli_session.assert_not_awaited()
+    controller.archive_session.assert_not_awaited()
 
 
 @pytest.mark.parametrize(
@@ -681,7 +683,7 @@ def test_memory_archive_session_returns_closed_failure_codes(
     error_code: str,
 ) -> None:
     controller = _build_controller_double()
-    controller.archive_memory_cli_session = AsyncMock(side_effect=error)
+    controller.archive_session = AsyncMock(side_effect=error)
     app = internal_server.create_app(controller)
 
     async def _exercise() -> httpx.Response:
@@ -2293,13 +2295,18 @@ def test_dispatch_context_does_not_restore_memory_admission_from_transient_paylo
             {
                 "session_id": session["id"],
                 "text": "remember this",
+                "author_id": "remote:authenticated",
+                "user_id": "remote:forged-memory-principal",
+                "message_kind": "original",
                 "memory_cli_admitted": True,
                 "is_ordinary_text": True,
             }
         )
     )
 
-    assert context.is_ordinary_text is None
+    assert context.user_id == "remote:authenticated"
+    assert context.message_kind == "original"
+    assert context.is_original_human_text is True
     assert "memory_cli_admitted" not in (context.platform_specific or {})
 
 
@@ -2794,6 +2801,73 @@ def test_dispatch_async_starts_authorized_remote_reservation(
         stored = message_deliveries.get_delivery(conn, remote["id"])
     assert stored is not None
     assert stored["state"] == "accepted"
+
+
+def test_dispatch_async_restores_message_kind_from_reserved_delivery(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_durable_message_kind",
+    )
+    with engine.begin() as conn:
+        reserved = _reserve_submission(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session["id"],
+            text="durable quick reply",
+            message_kind="quick_reply",
+        )
+
+    observed: list[MessageContext] = []
+    dispatch_kinds: list[object] = []
+    build_dispatch_payload = internal_server._build_dispatch_payload
+
+    async def observe_dispatch_payload(payload):
+        dispatch_kinds.append(payload.get("message_kind"))
+        return await build_dispatch_payload(payload)
+
+    monkeypatch.setattr(
+        internal_server,
+        "_build_dispatch_payload",
+        observe_dispatch_payload,
+    )
+    controller = None
+
+    async def handler(context, _text):
+        observed.append(context)
+        controller.mark_turn_complete(context)
+
+    controller = _build_controller_double(handler)
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.post(
+                "/internal/dispatch_async",
+                json={
+                    "session_id": session["id"],
+                    "text": "stale request text",
+                    "user_message_id": reserved["id"],
+                    "message_kind": "original",
+                },
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 202
+    assert dispatch_kinds == ["quick_reply"]
+    assert len(observed) == 1
+    assert observed[0].message_kind == "quick_reply"
+    assert observed[0].is_original_human_text is False
+
+
 def test_dispatch_async_persists_acceptance_before_a_lost_response_replay(
     monkeypatch,
     tmp_path,
@@ -7700,16 +7774,16 @@ def test_flush_runs_authorized_remote_fifo_head(
             session_id=session["id"],
             text="remote queued input",
             metadata=_authorized_remote_message_metadata(),
+            author_id="remote-user",
+            message_kind="original",
         )
         local = message_deliveries.enqueue_queued(
             conn,
             scope_id=session["scope_id"],
             session_id=session["id"],
             text="local queued input",
-            metadata={
-                message_deliveries.MEMORY_USER_ID_METADATA: "local",
-                message_deliveries.MEMORY_ORDINARY_TEXT_METADATA: True,
-            },
+            author_id="local",
+            message_kind="original",
         )
 
     manager, runs = _manager_accepting_runs()
