@@ -184,6 +184,7 @@ export const SettingsLayout: React.FC = () => {
   const [memoryVisible, setMemoryVisible] = useState(false);
   const [channelSettingsVisible, setChannelSettingsVisible] = useState(false);
   const atRoot = location.pathname === '/settings' || location.pathname === '/settings/';
+  const isModelHub = location.pathname === '/settings/models';
 
   useEffect(() => {
     if (!capabilities.can_manage_instance) return;
@@ -331,7 +332,12 @@ export const SettingsLayout: React.FC = () => {
         </nav>
 
         <section className={clsx('min-w-0 flex-1 overflow-y-auto', atRoot && 'hidden md:block')}>
-          <div className="mx-auto w-full max-w-[1180px] px-4 pb-[calc(1.25rem+env(safe-area-inset-bottom))] pt-5 md:px-6 md:pb-7 md:pt-7 lg:px-8">
+          <div
+            className={clsx(
+              'w-full px-4 pb-[calc(1.25rem+env(safe-area-inset-bottom))] pt-5 md:px-6 md:pb-7 md:pt-7 lg:px-8',
+              isModelHub ? 'min-h-full' : 'mx-auto max-w-[1180px]',
+            )}
+          >
             {!atRoot && (
               <NavLink
                 to="/settings"
