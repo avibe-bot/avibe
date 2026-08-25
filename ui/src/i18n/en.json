@@ -862,7 +862,7 @@
             "degraded": "Degraded",
             "waiting": "Supply unavailable for now",
             "interrupted": "No source is available",
-            "noSelection": "No model selected"
+            "unused": "No Agent uses this backend"
           },
           "emptyModels": "This backend has no models"
         }

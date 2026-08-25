@@ -240,7 +240,8 @@ export type AgentSupply = {
   /** Exact configured Route for each menu model. Runtime reads this verbatim. */
   routes?: Record<string, AgentRoute> | null;
   /** Rollup over `sources.order` for the current selection. null in direct mode
-   *  and whenever `selected_model_id` is null. */
+   *  and whenever `selected_model_id` is null. This is not a backend-wide
+   *  rollup; group summaries derive from `named_agents`. */
   supply_status?: SupplyStatus | null;
   /** Supply depth per selectable model. null when mode=direct. */
   model_supply?: ModelSupply[] | null;
