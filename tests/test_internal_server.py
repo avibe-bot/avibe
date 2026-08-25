@@ -7705,16 +7705,16 @@ def test_flush_runs_authorized_remote_fifo_head(
             session_id=session["id"],
             text="remote queued input",
             metadata=_authorized_remote_message_metadata(),
+            author_id="remote-user",
+            message_kind="original",
         )
         local = message_deliveries.enqueue_queued(
             conn,
             scope_id=session["scope_id"],
             session_id=session["id"],
             text="local queued input",
-            metadata={
-                message_deliveries.MEMORY_USER_ID_METADATA: "local",
-                message_deliveries.MEMORY_ORDINARY_TEXT_METADATA: True,
-            },
+            author_id="local",
+            message_kind="original",
         )
 
     manager, runs = _manager_accepting_runs()

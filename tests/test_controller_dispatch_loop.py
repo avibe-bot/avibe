@@ -378,8 +378,10 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
             stopped["runtime"] = True
             stop_order.append("memory-runtime")
 
-    class _MessageHandler:
+    class _MemoryAdapter:
         def quiesce_memory_capture_tasks(self) -> None:
+            if stopped["capture-registration"]:
+                return
             stopped["capture-registration"] = True
             stop_order.append("capture-registration")
 
@@ -392,7 +394,7 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
     controller.runtime_work_supervisor = _Supervisor("supervisor")
     controller.watch_service = _WatchStopper("watch")
     controller.runtime_command_watcher = _Stopper("runtime")
-    controller.message_handler = _MessageHandler()
+    controller.memory_adapter = _MemoryAdapter()
     memory_runtime = _MemoryRuntime()
     controller.memory_runtime = memory_runtime
 

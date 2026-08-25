@@ -7174,9 +7174,9 @@ class SessionTurnManager:
                 spec.get("message_kind")
                 or (
                     "original"
-                    if context.is_original_human_text is True
-                    or context.is_original_human_attachment is True
-                    else context.message_kind
+                    if getattr(context, "is_original_human_text", None) is True
+                    or getattr(context, "is_original_human_attachment", None) is True
+                    else getattr(context, "message_kind", "unknown")
                 )
             ),
         )
