@@ -43,6 +43,8 @@ MemoryErrorCode = Literal[
     "memory_delete_data_failed",
     "memory_reconfigure_failed",
     "memory_operation_in_progress",
+    "memory_plugin_unavailable",
+    "memory_plugin_incompatible",
 ]
 
 # This transport vocabulary is wider than the persistable failure vocabulary.
@@ -80,6 +82,8 @@ CLOSED_MEMORY_ERROR_CODES = frozenset(
         "memory_delete_data_failed",
         "memory_reconfigure_failed",
         "memory_operation_in_progress",
+        "memory_plugin_unavailable",
+        "memory_plugin_incompatible",
     }
 )
 
@@ -96,3 +100,11 @@ class MemoryStoreUnavailableError(RuntimeError):
 
 class MemoryRuntimeCloseUnprovedError(RuntimeError):
     """Controller ownership remains fenced because runtime close was unproved."""
+
+
+class MemoryPluginUnavailableError(RuntimeError):
+    """The optional Memory implementation is absent or cannot be constructed."""
+
+
+class MemoryPluginIncompatibleError(RuntimeError):
+    """The optional Memory implementation exposes an unsupported protocol."""

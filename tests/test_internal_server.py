@@ -525,6 +525,50 @@ def test_memory_projects_unknown_lifecycle_failure_uses_stable_envelope() -> Non
     }
 
 
+@pytest.mark.parametrize(
+    ("error_type", "expected_code"),
+    [
+        ("MemoryPluginUnavailableError", "memory_plugin_unavailable"),
+        ("MemoryPluginIncompatibleError", "memory_plugin_incompatible"),
+    ],
+)
+def test_memory_projects_plugin_failure_uses_stable_plugin_envelope(
+    error_type: str,
+    expected_code: str,
+) -> None:
+    from core import internal_server as server
+    from vibe.memory_http_headers import CALLER_SESSION_HEADER
+    from vibe.memory_contract import (
+        MemoryPluginIncompatibleError,
+        MemoryPluginUnavailableError,
+    )
+
+    error_class = {
+        "MemoryPluginUnavailableError": MemoryPluginUnavailableError,
+        "MemoryPluginIncompatibleError": MemoryPluginIncompatibleError,
+    }[error_type]
+    controller = _build_controller_double()
+    controller.memory_scope_for_cli_session.return_value = (
+        "u-11111111111111111111111111111111",
+        "default",
+    )
+    controller.memory_projects_payload = AsyncMock(side_effect=error_class("injected"))
+    app = server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.get(
+                "/internal/memory/projects",
+                headers={CALLER_SESSION_HEADER: "session-1"},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 503
+    assert response.json() == {"status": "failed", "error": expected_code}
+
+
 def test_memory_install_route_delegates_to_controller_lifecycle() -> None:
     controller = _build_controller_double()
     controller.memory_runtime = None

@@ -821,6 +821,8 @@
         "deleteDataFailed": "记忆数据删除失败",
         "reconfigureFailed": "记忆重新配置失败",
         "operationInProgress": "另一项记忆操作正在进行",
+        "pluginUnavailable": "记忆实现不可用",
+        "pluginIncompatible": "记忆实现不兼容",
         "unknown": "未知原因"
       },
       "fault": {

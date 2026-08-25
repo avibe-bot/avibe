@@ -475,6 +475,7 @@ async def test_memory_reconcile_lazily_enters_and_leaves_enabled_runtime(
         return runtime
 
     runtime_module = types.ModuleType("core.memory.runtime")
+    runtime_module.MEMORY_RUNTIME_PROTOCOL_VERSION = 1
     runtime_module.create_memory_runtime = create_memory_runtime
     monkeypatch.setitem(sys.modules, "core.memory.runtime", runtime_module)
 

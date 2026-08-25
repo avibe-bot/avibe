@@ -1,5 +1,7 @@
 """Core controller that coordinates between modules and handlers"""
 
+from __future__ import annotations
+
 import asyncio
 import concurrent.futures
 import json
@@ -42,6 +44,7 @@ from core.message_context import build_context_session_key
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.message_output import MessageOutput
 from core.memory_adapter import (
+    DisabledCaptureReceipt,
     DisabledMemoryAdapter,
     EnabledMemoryAdapter,
     MemoryCaptureAdapter,
@@ -59,30 +62,44 @@ from core.show_git import ShowGitCheckpointService
 from core.update_checker import UpdateChecker
 from core.watches import ManagedWatchService
 from core.vibe_agents import VibeAgent, VibeAgentStore
-from core.memory import CaptureAccepted, CaptureReceipt, CaptureRequest, CaptureSkipped
-import core.memory.admission as memory_admission
-from core.memory.admission import (
-    WORKBENCH_PLATFORM,
-    CaptureAdmission,
-    InboundTurnFacts,
-)
 from core.blocking import run_blocking
 from config.memory_operation_lock import MemoryOperationBusy, MemoryOperationLease
 from core.attachment_telemetry import log_attachment_capture
+from core.memory_loader import load_memory_runtime
 from vibe.i18n import get_supported_languages, t as i18n_t
 from vibe.memory_contract import (
+    MemoryPluginIncompatibleError,
+    MemoryPluginUnavailableError,
     MemoryRuntimeCloseUnprovedError,
     MemoryStoreUnavailableError,
 )
 from vibe.runtime import mark_service_instance_started
 
 if TYPE_CHECKING:
+    from core.memory.admission import CaptureAdmission, InboundTurnFacts
     from core.memory.runtime import MemoryRuntime
+    from core.memory.types import CaptureReceipt, CaptureRequest
 
 logger = logging.getLogger(__name__)
 
 _RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS = 10.0
 _MEMORY_SHUTDOWN_BUDGET_SECONDS = 15.0
+
+
+def _load_memory_admission_module() -> Any:
+    """Import Memory admission only after the enabled loader has succeeded."""
+
+    from core.memory import admission
+
+    return admission
+
+
+def _load_memory_capture_types() -> tuple[type, type, type]:
+    """Resolve implementation receipt types only on an enabled capture path."""
+
+    from core.memory import CaptureAccepted, CaptureRequest, CaptureSkipped
+
+    return CaptureAccepted, CaptureRequest, CaptureSkipped
 @dataclass(frozen=True, slots=True)
 class _MemoryRuntimeLease:
     runtime: "MemoryRuntime"
@@ -552,12 +569,18 @@ class Controller:
         self.memory_adapter: MemoryCaptureAdapter | None = DisabledMemoryAdapter()
         self.memory_runtime = None
         self.memory_module = None
+        self._memory_plugin_error: MemoryPluginUnavailableError | MemoryPluginIncompatibleError | None = None
         self._memory_runtime_generation = 0
         if memory_config.enabled:
-            self.memory_runtime = self._create_memory_runtime(memory_config)
-            self.memory_module = self.memory_runtime.module
-            self.memory_adapter = EnabledMemoryAdapter(self)
-            self._memory_runtime_generation = 1
+            try:
+                self.memory_runtime = self._create_memory_runtime(memory_config)
+            except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
+                self._memory_plugin_error = exc
+                logger.warning("Memory plugin unavailable during startup: %s", exc)
+            else:
+                self.memory_module = self.memory_runtime.module
+                self.memory_adapter = EnabledMemoryAdapter(self)
+                self._memory_runtime_generation = 1
         self._migrate_discord_guild_scope_from_config()
 
         # Migrate legacy per-channel language into global config
@@ -584,9 +607,7 @@ class Controller:
     def _create_memory_runtime(self, memory_config: MemoryConfig):
         """Load the optional Memory implementation only for an enabled runtime."""
 
-        from core.memory.runtime import create_memory_runtime
-
-        return create_memory_runtime(
+        return load_memory_runtime(
             memory_config,
             processing_event=self._log_memory_processing_event,
             on_config_settled=self._adopt_settled_memory_config,
@@ -840,6 +861,7 @@ class Controller:
             self._memory_runtime_temporary = temporary
         self.memory_runtime = runtime
         self.memory_module = runtime.module
+        self._memory_plugin_error = None
         if capture_enabled:
             if not isinstance(self.memory_adapter, EnabledMemoryAdapter):
                 self.memory_adapter = EnabledMemoryAdapter(self)
@@ -940,6 +962,9 @@ class Controller:
                 await condition.wait()
             temporary = runtime is None
             if temporary:
+                plugin_error = getattr(self, "_memory_plugin_error", None)
+                if plugin_error is not None:
+                    raise plugin_error
                 runtime = self._create_memory_runtime(selected_config)
                 self._attach_memory_runtime_locked(
                     runtime,
@@ -1046,7 +1071,11 @@ class Controller:
         """Capture through the replacement gate so stale modules cannot write."""
 
         if not self.config.memory.enabled:
-            return CaptureSkipped(reason="memory_disabled")
+            return DisabledCaptureReceipt()
+        _CaptureAccepted, _CaptureRequest, CaptureSkipped = (
+            _load_memory_capture_types()
+        )
+        del _CaptureAccepted, _CaptureRequest
         observed_generation = getattr(self, "_memory_runtime_generation", 0)
         async with self._memory_replacement_lock():
             if (
@@ -2972,6 +3001,8 @@ class Controller:
     def _memory_admission(self) -> CaptureAdmission:
         # ``getattr`` keeps a controller assembled without a Memory runtime
         # failing closed inside the admission module rather than raising here.
+        from core.memory.admission import CaptureAdmission
+
         return CaptureAdmission(
             principals=getattr(self, "memory_runtime", None),
             bindings=_SettingsUserBindings(getattr(self, "platform_settings_managers", None)),
@@ -2988,6 +3019,8 @@ class Controller:
         attachment_config_generation: object = None,
         include_workdir: bool = True,
     ) -> InboundTurnFacts:
+        from core.memory.admission import InboundTurnFacts
+
         payload = context.platform_specific if isinstance(context.platform_specific, dict) else {}
         metadata = payload.get("message_metadata")
         metadata = metadata if isinstance(metadata, dict) else {}
@@ -3030,6 +3063,8 @@ class Controller:
         )
 
     def memory_capture_admitted(self, context: MessageContext) -> bool:
+        if not bool(getattr(getattr(self.config, "memory", None), "enabled", False)):
+            return False
         return self._memory_admission().admits(
             self._memory_turn_facts(context, include_workdir=False)
         )
@@ -3041,6 +3076,9 @@ class Controller:
     ) -> object | None:
         """Reserve writer capacity and exact-session order before retaining a lease."""
 
+        if not bool(getattr(getattr(self.config, "memory", None), "enabled", False)):
+            return None
+        memory_admission = _load_memory_admission_module()
         admission = self._memory_admission()
         facts = self._memory_turn_facts(
             context,
@@ -3145,6 +3183,8 @@ class Controller:
     ) -> object | None:
         """Reserve one writer slot before a text capture task is scheduled."""
 
+        if not bool(getattr(getattr(self.config, "memory", None), "enabled", False)):
+            return None
         admission = self._memory_admission()
         facts = self._memory_turn_facts(
             context,
@@ -3180,6 +3220,8 @@ class Controller:
         )
 
     def memory_principal_for_context(self, context: MessageContext) -> Optional[str]:
+        if not bool(getattr(getattr(self.config, "memory", None), "enabled", False)):
+            return None
         return self._memory_admission().principal_for(
             self._memory_turn_facts(context, include_workdir=False)
         )
@@ -3187,6 +3229,8 @@ class Controller:
     def configure_memory_cli_session(self, context: MessageContext, *, admitted: bool) -> bool:
         """Associate an admitted Agent session with its Memory read/write scope."""
 
+        if not bool(getattr(getattr(self.config, "memory", None), "enabled", False)):
+            return False
         from core.caller_context import caller_context_from_platform_payload
 
         payload = context.platform_specific if isinstance(context.platform_specific, dict) else {}
@@ -3212,6 +3256,8 @@ class Controller:
     def memory_scope_for_cli_session(self, session_id: str) -> Optional[tuple[str, str]]:
         """Return the principal and project owned by an admitted Agent session."""
 
+        if not bool(getattr(getattr(self.config, "memory", None), "enabled", False)):
+            return None
         from vibe.memory_project_ids import DEFAULT_MEMORY_PROJECT_ID
         from core.memory.store import is_principal_id, is_project_id
 
@@ -3530,6 +3576,13 @@ class Controller:
         held_admission: object = None,
         capacity_reservation: object = None,
     ) -> None:
+        from core.memory.admission import CaptureAdmission, WORKBENCH_PLATFORM
+
+        memory_admission = _load_memory_admission_module()
+        CaptureAccepted, CaptureRequest, _CaptureSkipped = (
+            _load_memory_capture_types()
+        )
+        del _CaptureSkipped
         platform = CaptureAdmission.platform_of(facts)
         if admission.admits_attachment_turn(facts):
             status = facts.attachment_capture_status

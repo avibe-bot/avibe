@@ -36,6 +36,20 @@ class SessionArchived:
     session_id: str
 
 
+@dataclass(frozen=True, slots=True, eq=False)
+class DisabledCaptureReceipt:
+    """Host-owned skipped result returned without importing Memory types."""
+
+    reason: str = "memory_disabled"
+    status: str = "skipped"
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            getattr(other, "status", None) == self.status
+            and getattr(other, "reason", None) == self.reason
+        )
+
+
 MemoryEvent: TypeAlias = TurnAccepted | SessionReset | SessionArchived
 
 
