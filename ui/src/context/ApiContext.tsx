@@ -510,6 +510,7 @@ export type ApiContextType = {
   getConfig: () => Promise<any>;
   getPlatformCatalog: () => Promise<any>;
   mutateConfig: (mutations: readonly ConfigMutation[]) => Promise<any>;
+  waitForConfigMutations: () => Promise<void>;
   onConfigChanged: (handler: (config: unknown) => void) => () => void;
   getSettings: (platform?: string) => Promise<any>;
   saveSettings: (payload: any, platform?: string) => Promise<any>;
@@ -2586,6 +2587,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const { t } = useTranslation();
   const readCacheRef = useRef(new Map<string, { expiresAt: number; promise: Promise<any> }>());
   const configChangedHandlersRef = useRef(new Set<(config: unknown) => void>());
+  // Config is one global document. Keep one provider-lifetime commit order so
+  // route changes cannot discard an in-flight write or let a later save land first.
+  const configMutationTailRef = useRef<Promise<unknown>>(Promise.resolve());
   const eventSourceRef = useRef<EventSource | null>(null);
   const eventHandlersRef = useRef(new Set<WorkbenchEventHandlers>());
   const eventConnectionRef = useRef<{ sub_id: number; source?: 'browser' | 'controller' } | null>(null);
@@ -3550,10 +3554,25 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const value: ApiContextType = useMemo(() => ({
     getConfig: () => getCachedJson('/api/config', CONFIG_CACHE_TTL_MS),
     getPlatformCatalog: () => getJson('/api/platforms'),
-    mutateConfig: async (mutations) => {
-      const config = await postJson('/api/config', configMutationsToPayload(mutations));
-      convergeConfig(config);
-      return config;
+    mutateConfig: (mutations) => {
+      const mutation = configMutationTailRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          const config = await postJson('/api/config', configMutationsToPayload(mutations));
+          convergeConfig(config);
+          return config;
+        });
+      configMutationTailRef.current = mutation;
+      return mutation;
+    },
+    waitForConfigMutations: async () => {
+      // Include writes appended while the current tail is settling; return only
+      // when the provider's queue is actually idle.
+      while (true) {
+        const pending = configMutationTailRef.current;
+        await pending.catch(() => undefined);
+        if (pending === configMutationTailRef.current) return;
+      }
     },
     onConfigChanged,
     getSettings: (platform) => getJson(platform ? `/api/settings?platform=${encodeURIComponent(platform)}` : '/api/settings'),

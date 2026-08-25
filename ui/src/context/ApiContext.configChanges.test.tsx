@@ -30,6 +30,16 @@ const response = (payload: unknown, status = 200) => new Response(JSON.stringify
   headers: { 'Content-Type': 'application/json' },
 });
 
+const deferred = <T,>() => {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+};
+
 beforeEach(() => {
   capturedApi = null;
   apiFetch.mockReset();
@@ -78,5 +88,50 @@ describe('ApiProvider config convergence', () => {
     apiFetch.mockResolvedValueOnce(response({ ...savedConfig, language: 'en' }));
     await capturedApi!.mutateConfig([setConfigField(['language'], 'en')]);
     expect(changed).toHaveBeenCalledOnce();
+  });
+
+  it('serializes mutations and preserves the fence across consumer remounts', async () => {
+    const firstResponse = deferred<Response>();
+    const view = render(<ApiProvider><CaptureApi /></ApiProvider>);
+    await waitFor(() => expect(capturedApi).not.toBeNull());
+    apiFetch
+      .mockImplementationOnce(() => firstResponse.promise)
+      .mockResolvedValueOnce(response({ language: 'en' }));
+
+    const first = capturedApi!.mutateConfig([setConfigField(['language'], 'zh')]);
+    const second = capturedApi!.mutateConfig([setConfigField(['language'], 'en')]);
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(1));
+
+    view.rerender(<ApiProvider><div /></ApiProvider>);
+    capturedApi = null;
+    view.rerender(<ApiProvider><CaptureApi /></ApiProvider>);
+    await waitFor(() => expect(capturedApi).not.toBeNull());
+    let fenceSettled = false;
+    const fence = capturedApi!.waitForConfigMutations().then(() => {
+      fenceSettled = true;
+    });
+    await Promise.resolve();
+    expect(fenceSettled).toBe(false);
+
+    firstResponse.resolve(response({ language: 'zh' }));
+    await first;
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(2));
+    await second;
+    await fence;
+    expect(fenceSettled).toBe(true);
+  });
+
+  it('continues the mutation queue after a failed save', async () => {
+    render(<ApiProvider><CaptureApi /></ApiProvider>);
+    await waitFor(() => expect(capturedApi).not.toBeNull());
+    apiFetch
+      .mockResolvedValueOnce(response({ detail: 'save failed' }, 500))
+      .mockResolvedValueOnce(response({ language: 'en' }));
+
+    const failed = capturedApi!.mutateConfig([setConfigField(['language'], 'zh')]);
+    const recovered = capturedApi!.mutateConfig([setConfigField(['language'], 'en')]);
+    await expect(failed).rejects.toThrow();
+    await expect(recovered).resolves.toEqual({ language: 'en' });
+    expect(apiFetch).toHaveBeenCalledTimes(2);
   });
 });

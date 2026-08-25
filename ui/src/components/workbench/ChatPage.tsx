@@ -630,9 +630,6 @@ export const ChatPage: React.FC = () => {
   const [showAgentActivity, setShowAgentActivity] = useState(false);
   const showAgentActivityRef = useRef(false);
   showAgentActivityRef.current = showAgentActivity;
-  // Config saves execute on worker threads. Preserve click order locally so an
-  // older request can never persist after a newer visibility choice.
-  const agentActivityConfigWriteRef = useRef<Promise<unknown>>(Promise.resolve());
   const confirmedAgentActivityVisibilityRef = useRef(false);
   const agentActivityVisibilityRequestRef = useRef(0);
   const [activityGroups, setActivityGroups] = useState<ActivityGroup[]>([]);
@@ -838,10 +835,9 @@ export const ChatPage: React.FC = () => {
       applyAgentActivityVisibility(enabled);
       const request = ++agentActivityVisibilityRequestRef.current;
 
-      const pendingWrite = agentActivityConfigWriteRef.current
-        .catch(() => undefined)
-        .then(() => api.mutateConfig([setConfigField(['ui', 'show_agent_activity'], enabled)]));
-      agentActivityConfigWriteRef.current = pendingWrite;
+      const pendingWrite = api.mutateConfig([
+        setConfigField(['ui', 'show_agent_activity'], enabled),
+      ]);
       void pendingWrite
         .then(() => {
           confirmedAgentActivityVisibilityRef.current = enabled;
@@ -1423,7 +1419,7 @@ export const ChatPage: React.FC = () => {
       // This component is reused across chat routes. A visibility click from the
       // previous route must settle before the next bootstrap reads global config,
       // otherwise the new chat can reinstall the pre-click value.
-      await agentActivityConfigWriteRef.current.catch(() => undefined);
+      await api.waitForConfigMutations();
       if (!requestIsCurrent()) return;
       // Initial chat open needs the same recent tail window, queue, draft,
       // route/config state, and current turn state. Fetch them as one bootstrap
