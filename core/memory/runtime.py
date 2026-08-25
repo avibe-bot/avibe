@@ -350,6 +350,7 @@ class MemoryRuntime:
         # enter an EverOSPort only inside the owned child probe/sidecar.
         self._provider = EverOSPort(self._socket_path)
         self._runtime_error: str | None = None
+        self._released_ownership_blocked = False
         self._needs_repair_reason: str | None = (
             "memory_legacy_recovery_required"
             if config.legacy_needs_repair
@@ -722,12 +723,24 @@ class MemoryRuntime:
         """Best-effort compatibility cleanup for ordinary non-destructive flows."""
 
         async with self._reconcile_lock:
+            was_blocked = self._released_ownership_blocked
             try:
                 required_no_follow_flag()
             except ConfinedFilesystemError as exc:
                 logger.warning("Recorded EverOS recovery is unavailable: %s", exc)
+                self._released_ownership_blocked = True
+                self._runtime_error = "memory_sidecar_unavailable"
                 return False
-            return await self._supervisor.reconcile_orphans()
+            reconciled = await self._supervisor.reconcile_orphans()
+            if not reconciled and self._supervisor.status.retains_configuration:
+                # The current supervisor-owned child is not released ownership.
+                reconciled = True
+            self._released_ownership_blocked = not reconciled
+            if not reconciled:
+                self._runtime_error = "memory_sidecar_unavailable"
+            elif was_blocked and self._runtime_error == "memory_sidecar_unavailable":
+                self._runtime_error = None
+            return reconciled
 
     async def reconcile(self, config: MemoryConfig) -> dict[str, Any]:
         """Apply persisted config without restarting the Avibe service."""
@@ -743,7 +756,12 @@ class MemoryRuntime:
         # sidecar is exactly the boot that may face one from the run before it.
         # Takes and releases the reconcile lock itself; the lock this method
         # acquires later is a separate, sequential acquisition.
-        await self._reconcile_released_ownership()
+        if not await self._reconcile_released_ownership():
+            return {
+                "ok": False,
+                "state": "needs_repair" if self.needs_repair else "degraded",
+                "error": "memory_sidecar_unavailable",
+            }
         if not self.available:
             # A transient store failure must not close Memory forever: every
             # reconciliation is another chance to open it.
@@ -1096,9 +1114,13 @@ class MemoryRuntime:
         payload = _runtime_health_payload(runtime)
         payload["state"] = self.runtime_state()
         payload["reason"] = (
-            self._needs_repair_reason
-            if self.needs_repair
-            else self._runtime_error
+            self._runtime_error
+            if self._released_ownership_blocked
+            else (
+                self._needs_repair_reason
+                if self.needs_repair
+                else self._runtime_error
+            )
         )
         payload["attachment_capture"] = {
             "status": _attachment_capture_status(
@@ -1115,6 +1137,8 @@ class MemoryRuntime:
     ]:
         if self.needs_repair:
             return "needs_repair"
+        if self._released_ownership_blocked:
+            return "degraded"
         if not self._config.enabled:
             return "disabled"
         if self._artifact_installing or self._reconcile_lock.locked():
@@ -1964,7 +1988,12 @@ class MemoryRuntime:
 
             # Even disabled or repair-fenced startup must stop a sidecar recorded
             # by the previous Avibe process before returning.
-            await self._reconcile_released_ownership()
+            if not await self._reconcile_released_ownership():
+                return {
+                    "ok": False,
+                    "state": "needs_repair" if self.needs_repair else "degraded",
+                    "error": "memory_sidecar_unavailable",
+                }
             if (
                 self._wake_config.enabled
                 and not self.available

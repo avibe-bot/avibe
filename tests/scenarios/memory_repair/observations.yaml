@@ -6,7 +6,9 @@ observations:
       - MEMORY-WAKE-001
       - MEMORY-WAKE-002
       - MEMORY-WAKE-201
-    observation: Startup, explicit Wake, and unexpected child recovery share one volatile non-destructive path; failures never route into Repair.
+      - MEMORY-WAKE-202
+      - MEMORY-WAKE-203
+    observation: Startup, explicit Wake, and unexpected child recovery share one volatile non-destructive path; retained ownership is stopped before replacement, reconciliation failures stay visible, and failures never route into Repair.
   - id: MEMORY-REPAIR-OBS-002
     scenarios:
       - MEMORY-REPAIR-201

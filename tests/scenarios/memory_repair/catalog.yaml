@@ -5,6 +5,7 @@ capability:
   canonical_tests:
     - tests/test_ui_memory_routes.py
     - tests/test_memory_wake.py
+    - tests/test_memory_supervisor.py
     - tests/test_controller_memory_data_reset.py
     - tests/test_internal_server.py
     - tests/test_internal_client.py
@@ -70,6 +71,42 @@ scenarios:
     then: Wake repairs the artifact, replaces the child, and preserves the existing root
     expected_outputs:
       - A replacement running child and intact Memory data
+  - id: MEMORY-WAKE-202
+    name: Retained execution re-enters bounded Wake without overlapping owners
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_memory_supervisor.py::test_retained_child_reenters_bounded_wake_before_replacement
+    related_tests:
+      - tests/test_memory_supervisor.py::test_retained_child_exhausts_recovery_without_dual_ownership
+    actor: Memory runtime supervisor
+    trigger: The direct EverOS child exits while its process tree may remain
+    conditions:
+      - The supervisor still retains authority for the prior execution
+    given: An unexpected exit cannot initially prove that the owned process tree stopped
+    when: Volatile bounded recovery re-enters Wake
+    then: Wake retries stop proof before replacement and exhausts its budget without overlap when proof remains unavailable
+    expected_outputs:
+      - One running replacement after proven stop, or one retained degraded owner after bounded failure
+  - id: MEMORY-WAKE-203
+    name: Released ownership failure remains visible across startup gates
+    status: covered
+    kind: safety
+    layer: contract
+    test: tests/test_memory_wake.py::test_orphan_recovery_degrades_without_no_follow_but_reset_fails_closed
+    related_tests:
+      - tests/test_memory_wake.py::test_reconcile_reports_released_ownership_failure
+      - tests/test_memory_wake.py::test_repair_fenced_wake_reports_released_ownership_failure
+      - tests/test_memory_confined_filesystem.py::test_memory_persistence_fails_closed_without_no_follow_before_touching_path
+    actor: Memory runtime
+    trigger: Startup cannot safely reconcile released EverOS ownership
+    conditions:
+      - Memory may be disabled or already fenced for Repair
+    given: Released ownership cannot be verified or reaped safely
+    when: Wake or config reconciliation reaches an early lifecycle return
+    then: The operation reports the ownership failure instead of a successful disabled or ordinary repair-only result
+    expected_outputs:
+      - Degraded or needs_repair state with memory_sidecar_unavailable
   - id: MEMORY-REPAIR-201
     name: Repair requires exact accepted-loss confirmation and genuine eligibility
     status: covered
