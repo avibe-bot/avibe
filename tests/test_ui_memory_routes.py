@@ -525,3 +525,60 @@ def test_processing_record_routes_remain_native_and_provider_log_free(
     route_paths = {route.path for route in app.routes}
     assert "/api/memory/calls" not in route_paths
     assert "/api/memory/provider-calls" not in route_paths
+
+
+def test_memory_list_route_forwards_agent_origin(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """MEMORY-LIST-008: Settings can select the derived Agent owner."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config()
+    calls: list[dict[str, object]] = []
+
+    async def memory_list(**kwargs):
+        calls.append(kwargs)
+        return {
+            "status_code": 200,
+            "body": {"status": "ok", "items": [], "warnings": []},
+        }
+
+    monkeypatch.setattr(internal_client, "memory_list", memory_list)
+    client = app.test_client()
+    response = client.post(
+        "/api/memory/list",
+        json={
+            "project": "write",
+            "page": 1,
+            "limit": 20,
+            "origin": "agent",
+        },
+        headers=csrf_headers(client, BASE_URL),
+        **_request_options(),
+    )
+
+    assert response.status_code == 200
+    assert calls == [
+        {
+            "user_key": "avibe:local",
+            "project": "write",
+            "page": 1,
+            "cursor": None,
+            "limit": 20,
+            "origin": "agent",
+        }
+    ]
+
+    invalid = client.post(
+        "/api/memory/list",
+        json={"project": "write", "page": 1, "origin": ["agent"]},
+        headers=csrf_headers(client, BASE_URL),
+        **_request_options(),
+    )
+    assert invalid.status_code == 400
+    assert invalid.get_json() == {
+        "status": "failed",
+        "error": "memory_invalid_input",
+    }
+    assert len(calls) == 1

@@ -141,3 +141,85 @@ def test_captured_processed_episodes_list_through_cli_with_exact_page_boundary(
     assert second["count"] == 1
     assert all(item["project"] == "notes" for item in first["items"] + second["items"])
     assert all(item["subject"] != "foreign" for item in first["items"] + second["items"])
+
+
+def test_settings_can_browse_agent_episodes_without_crossing_owner_scopes(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Scenario: MEMORY-LIST-008."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe-home"))
+    provider = _CapturedEpisodeProvider(
+        add_results=deque(
+            (
+                AddAck(request_id="add-user", status="extracted"),
+                AddAck(request_id="add-agent", status="extracted"),
+            )
+        )
+    )
+    effective_home = tmp_path / "avibe-home"
+    effective_home.mkdir(mode=0o700)
+    module = MemoryModule(
+        MemoryStore(effective_home / "state" / "memory.sqlite"),
+        provider,
+        enabled=True,
+        disk_free_bytes=lambda: MIN_FREE_DISK_BYTES,
+        effective_home=effective_home,
+    )
+
+    async def _exercise() -> tuple[dict, dict]:
+        for request in (
+            CaptureRequest(
+                "user-episode",
+                "session",
+                PRINCIPAL,
+                "write",
+                "user_input",
+                "user-owned",
+                1_000,
+            ),
+            CaptureRequest(
+                "agent-episode",
+                "session",
+                PRINCIPAL,
+                "write",
+                "agent",
+                "agent-owned",
+                2_000,
+            ),
+        ):
+            assert await module.capture(request) == CaptureAccepted()
+        await module.wait_writer_idle_for_tests()
+        runtime = object.__new__(MemoryRuntime)
+        runtime._module = module
+        runtime._retired = False
+        return (
+            await runtime.list_episodes_payload(
+                PRINCIPAL,
+                "write",
+                page=1,
+                page_size=20,
+                origin="user",
+            ),
+            await runtime.list_episodes_payload(
+                PRINCIPAL,
+                "write",
+                page=1,
+                page_size=20,
+                origin="agent",
+            ),
+        )
+
+    user_page, agent_page = asyncio.run(_exercise())
+
+    assert [(item["body"], item["origin"]) for item in user_page["items"]] == [
+        ("user-owned", "user")
+    ]
+    assert [(item["body"], item["origin"]) for item in agent_page["items"]] == [
+        ("agent-owned", "agent")
+    ]
+    assert [request[0] for request in provider.list_requests] == [
+        PRINCIPAL,
+        f"{PRINCIPAL}-agent",
+    ]

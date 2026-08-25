@@ -54,6 +54,7 @@ describe('ApiProvider Memory listing transport', () => {
       page: 3,
       cursor: 'ignored-for-single-project',
       limit: 7,
+      origin: 'agent',
     });
     await capturedApi!.listMemoryEpisodes('all', {
       page: 9,
@@ -66,7 +67,7 @@ describe('ApiProvider Memory listing transport', () => {
       path,
       body: JSON.parse(String(init?.body)),
     }))).toEqual([
-      { path: '/api/memory/list', body: { project: 'notes', limit: 7, page: 3 } },
+      { path: '/api/memory/list', body: { project: 'notes', limit: 7, page: 3, origin: 'agent' } },
       { path: '/api/memory/list', body: { project: 'all', limit: 20, cursor: 'opaque-page-2' } },
       { path: '/api/memory/list', body: { project: 'all', limit: 20 } },
     ]);

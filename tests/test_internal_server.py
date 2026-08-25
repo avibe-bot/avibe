@@ -790,6 +790,7 @@ def test_memory_list_rejects_all_for_cli_at_controller_boundary() -> None:
 
 
 def test_memory_list_all_is_available_only_to_signed_ui_principal() -> None:
+    """MEMORY-LIST-003, MEMORY-LIST-008."""
     from core.memory.http_headers import MEMORY_USER_KEY_HEADER
     from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
@@ -827,7 +828,12 @@ def test_memory_list_all_is_available_only_to_signed_ui_principal() -> None:
                         user_key=user_key,
                     ),
                 },
-                json={"project": "all", "cursor": "cursor-token", "limit": 7},
+                json={
+                    "project": "all",
+                    "cursor": "cursor-token",
+                    "limit": 7,
+                    "origin": "agent",
+                },
             )
 
     response = asyncio.run(_exercise())
@@ -839,7 +845,44 @@ def test_memory_list_all_is_available_only_to_signed_ui_principal() -> None:
         "u-22222222222222222222222222222222",
         cursor="cursor-token",
         limit=7,
+        origin="agent",
     )
+
+
+def test_memory_list_rejects_agent_origin_for_cli_callers() -> None:
+    from core.memory.http_headers import CALLER_SESSION_HEADER
+
+    runtime = SimpleNamespace(list_episodes_payload=AsyncMock())
+    controller = _build_controller_double()
+    controller.memory_scope_for_cli_session.return_value = (
+        "u-11111111111111111111111111111111",
+        "default",
+    )
+    controller.memory_runtime = runtime
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                "/internal/memory/list",
+                headers={CALLER_SESSION_HEADER: "ses-memory-list"},
+                json={
+                    "project": "default",
+                    "page": 1,
+                    "limit": 20,
+                    "origin": "agent",
+                },
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "status": "failed",
+        "error": "memory_invalid_input",
+    }
+    runtime.list_episodes_payload.assert_not_awaited()
 
 
 def test_memory_list_rejects_invalid_aggregate_cursor_at_controller_boundary() -> None:

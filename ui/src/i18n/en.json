@@ -4471,6 +4471,7 @@
       "partial": "Some user, Agent, or project Memory sources could not be searched. These results may be incomplete.",
       "truncated": "Search stopped before every project was checked. These results may be incomplete.",
       "browse": {
+        "originLabel": "Memory owner",
         "sortLabel": "Episode order",
         "newestFirst": "Newest first",
         "episodes": "Episodes",

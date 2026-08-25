@@ -592,6 +592,7 @@ def test_memory_list_async_signs_ui_aggregate_cursor(monkeypatch, socket_path):
                 project="all",
                 cursor="cursor-token",
                 limit=9,
+                origin="agent",
                 socket_path=socket_path,
             )
 
@@ -603,6 +604,7 @@ def test_memory_list_async_signs_ui_aggregate_cursor(monkeypatch, socket_path):
         "limit": 9,
         "project": "all",
         "cursor": "cursor-token",
+        "origin": "agent",
     }
     assert captured["user_key"] == "avibe:remote:user-list"
     assert captured["proof"] == ui_access.build_ui_read_proof(

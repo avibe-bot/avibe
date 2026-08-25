@@ -403,6 +403,32 @@ describe('MemorySearchPanel browse and search modes', () => {
     expect(screen.getByText('Legacy result')).toBeTruthy();
   });
 
+  it('[MEMORY-LIST-008] browses Agent episodes through the explicit owner selector', async () => {
+    api.listMemoryEpisodes.mockImplementation((_project: string, options: { origin?: string }) =>
+      Promise.resolve(listResult([
+        episode({
+          id: 'agent-entry',
+          body: 'Agent-owned episode',
+          summary: 'Agent-owned episode',
+          origin: options.origin === 'agent' ? 'agent' : 'user',
+        }),
+      ])),
+    );
+    const user = userEvent.setup();
+
+    render(<MemorySearchPanel enabled />);
+    await screen.findByText('Agent-owned episode');
+    await user.click(screen.getByRole('radio', { name: 'memory.origin.agent' }));
+
+    await waitFor(() => expect(api.listMemoryEpisodes).toHaveBeenLastCalledWith('default', {
+      page: 1,
+      cursor: null,
+      limit: 20,
+      origin: 'agent',
+    }));
+    expect(screen.getAllByText('memory.origin.agent')).toHaveLength(2);
+  });
+
   it('shows the Memory-closed state without issuing list calls', () => {
     render(<MemorySearchPanel enabled={false} />);
 

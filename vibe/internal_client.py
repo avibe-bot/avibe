@@ -680,6 +680,7 @@ async def memory_list(
     page: int | None = None,
     cursor: str | None = None,
     limit: int = 20,
+    origin: Literal["user", "agent"] | None = None,
     socket_path: Optional[Path] = None,
     timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
@@ -690,6 +691,8 @@ async def memory_list(
         payload["page"] = page
     if cursor is not None:
         payload["cursor"] = cursor
+    if origin is not None:
+        payload["origin"] = origin
     return await _memory_request(
         "POST",
         "/internal/memory/list",

@@ -14,11 +14,13 @@ import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
 import { Card, CardContent } from '../../ui/card';
 import { Input } from '../../ui/input';
+import { SegmentedRadio } from '../../ui/segmented';
 import { Select } from '../../ui/select';
 import { useApi } from '../../../context/ApiContext';
 import type {
   MemoryListItem,
   MemoryListResult,
+  MemoryOrigin,
   MemoryRecallResult,
 } from '../../../context/ApiContext';
 import { copyTextToClipboard } from '../../../lib/utils';
@@ -43,7 +45,7 @@ function episodeTitle(item: MemoryListItem): string {
 }
 
 function episodeIdentity(item: MemoryListItem): string {
-  return JSON.stringify([item.project, item.id]);
+  return JSON.stringify([item.origin, item.project, item.id]);
 }
 
 function formatEpisodeTimestamp(value: string): string {
@@ -64,13 +66,19 @@ export const MemorySearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) =
   const api = useApi();
   const [query, setQuery] = useState('');
   const [project, setProject] = useState('default');
+  const [browseOrigin, setBrowseOrigin] = useState<MemoryOrigin>('user');
   const [projects, setProjects] = useState<Array<{ id: string; kind: string }>>(
     FALLBACK_PROJECTS,
   );
   const [browsePage, setBrowsePage] = useState(1);
   const [cursorByPage, setCursorByPage] = useState<Record<number, string | null>>({ 1: null });
   const browseRequestRef = useRef(0);
-  const browsePositionRef = useRef({ project: 'default', page: 1, cursor: null as string | null });
+  const browsePositionRef = useRef({
+    project: 'default',
+    origin: 'user' as MemoryOrigin,
+    page: 1,
+    cursor: null as string | null,
+  });
   const [selectedEpisodeKey, setSelectedEpisodeKey] = useState<string | null>(null);
   const [copiedEpisodeKey, setCopiedEpisodeKey] = useState<string | null>(null);
   const browseMode = !query.trim();
@@ -93,9 +101,19 @@ export const MemorySearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) =
   });
 
   const browseRead = useCallback(
-    async (selected: string, page: number, cursor: string | null) => {
+    async (
+      selected: string,
+      origin: MemoryOrigin,
+      page: number,
+      cursor: string | null,
+    ) => {
       const request = ++browseRequestRef.current;
-      const result = await api.listMemoryEpisodes(selected, { page, cursor, limit: PAGE_SIZE });
+      const result = await api.listMemoryEpisodes(selected, {
+        page,
+        cursor,
+        limit: PAGE_SIZE,
+        ...(origin === 'agent' ? { origin } : {}),
+      });
       if (
         request === browseRequestRef.current
         && selected === 'all'
@@ -119,7 +137,7 @@ export const MemorySearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) =
     loading: browsing,
     loaded: browsed,
     reload: browse,
-  } = useMemoryResource<MemoryListOk, [string, number, string | null]>({
+  } = useMemoryResource<MemoryListOk, [string, MemoryOrigin, number, string | null]>({
     read: browseRead,
     failureMessageKey: 'memory.search.browse.loadFailed',
     enabled,
@@ -142,15 +160,24 @@ export const MemorySearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) =
   useEffect(() => {
     if (!enabled || !browseMode) return;
     const position = browsePositionRef.current;
-    const page = position.project === project ? position.page : 1;
-    const cursor = position.project === project ? position.cursor : null;
-    browsePositionRef.current = { project, page, cursor };
-    void browse(project, page, cursor);
-  }, [browse, browseMode, enabled, project]);
+    const sameScope = position.project === project && position.origin === browseOrigin;
+    const page = sameScope ? position.page : 1;
+    const cursor = sameScope ? position.cursor : null;
+    browsePositionRef.current = { project, origin: browseOrigin, page, cursor };
+    void browse(project, browseOrigin, page, cursor);
+  }, [browse, browseMode, browseOrigin, enabled, project]);
 
-  const resetBrowseNavigation = (selectedProject = project) => {
+  const resetBrowseNavigation = (
+    selectedProject = project,
+    selectedOrigin = browseOrigin,
+  ) => {
     browseRequestRef.current += 1;
-    browsePositionRef.current = { project: selectedProject, page: 1, cursor: null };
+    browsePositionRef.current = {
+      project: selectedProject,
+      origin: selectedOrigin,
+      page: 1,
+      cursor: null,
+    };
     setCursorByPage({ 1: null });
     setBrowsePage(1);
     setSelectedEpisodeKey(null);
@@ -167,20 +194,20 @@ export const MemorySearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) =
     if (nextPage < 1 || nextPage === browsePage) return;
     const cursor = project === 'all' ? cursorByPage[nextPage] : null;
     if (project === 'all' && cursor === undefined) return;
-    browsePositionRef.current = { project, page: nextPage, cursor };
+    browsePositionRef.current = { project, origin: browseOrigin, page: nextPage, cursor };
     setBrowsePage(nextPage);
     setSelectedEpisodeKey(null);
     setCopiedEpisodeKey(null);
-    void browse(project, nextPage, cursor);
+    void browse(project, browseOrigin, nextPage, cursor);
   };
 
   const retryBrowsePage = () => {
     const cursor = project === 'all' ? cursorByPage[browsePage] : null;
     if (project === 'all' && cursor === undefined) return;
-    browsePositionRef.current = { project, page: browsePage, cursor };
+    browsePositionRef.current = { project, origin: browseOrigin, page: browsePage, cursor };
     setSelectedEpisodeKey(null);
     setCopiedEpisodeKey(null);
-    void browse(project, browsePage, cursor);
+    void browse(project, browseOrigin, browsePage, cursor);
   };
 
   const searchItems = searchData?.items ?? null;
@@ -297,14 +324,29 @@ export const MemorySearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) =
           ))}
         </Select>
         {browseMode ? (
-          <Select
-            value="newest"
-            onChange={() => undefined}
-            aria-label={t('memory.search.browse.sortLabel')}
-            wrapperClassName="lg:w-44"
-          >
-            <option value="newest">{t('memory.search.browse.newestFirst')}</option>
-          </Select>
+          <>
+            <SegmentedRadio<MemoryOrigin>
+              value={browseOrigin}
+              onChange={(nextOrigin) => {
+                resetBrowseNavigation(project, nextOrigin);
+                setBrowseOrigin(nextOrigin);
+              }}
+              options={[
+                { id: 'user', label: t('memory.origin.user') },
+                { id: 'agent', label: t('memory.origin.agent') },
+              ]}
+              ariaLabel={t('memory.search.browse.originLabel')}
+              className="lg:w-64"
+            />
+            <Select
+              value="newest"
+              onChange={() => undefined}
+              aria-label={t('memory.search.browse.sortLabel')}
+              wrapperClassName="lg:w-44"
+            >
+              <option value="newest">{t('memory.search.browse.newestFirst')}</option>
+            </Select>
+          </>
         ) : (
           <Button onClick={runSearch} disabled={searching || !query.trim()}>
             {searching ? <Loader2 className="size-3.5 animate-spin" /> : <SearchIcon className="size-3.5" />}
@@ -382,9 +424,16 @@ export const MemorySearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) =
                       className={`block w-full border-b border-border px-4 py-3 text-left last:border-b-0 hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ${selected ? 'bg-mint/[0.06]' : ''}`}
                     >
                       <div className="mb-1.5 flex items-center justify-between gap-3">
-                        <Badge variant={selected ? 'success' : 'outline'} className="max-w-[60%] truncate font-mono text-[9.5px] uppercase">
-                          {item.project === 'default' ? t('memory.search.projectDefault') : item.project}
-                        </Badge>
+                        <div className="flex min-w-0 items-center gap-1.5">
+                          <Badge variant={selected ? 'success' : 'outline'} className="max-w-40 truncate font-mono text-[9.5px] uppercase">
+                            {item.project === 'default' ? t('memory.search.projectDefault') : item.project}
+                          </Badge>
+                          {memoryOriginLabelKey(item.origin) ? (
+                            <Badge variant="outline" className="shrink-0">
+                              {t(memoryOriginLabelKey(item.origin)!)}
+                            </Badge>
+                          ) : null}
+                        </div>
                         <time dateTime={item.timestamp} className="shrink-0 font-mono text-[10.5px] text-muted">
                           {formatEpisodeTimestamp(item.timestamp)}
                         </time>

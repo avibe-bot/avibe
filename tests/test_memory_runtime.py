@@ -354,3 +354,32 @@ def test_runtime_store_is_identity_only(tmp_path: Path) -> None:
             if not str(row[0]).startswith("sqlite_")
         }
     assert tables == {"memory_meta", "memory_projects"}
+
+
+def test_aggregate_list_cursor_is_bound_to_selected_owner() -> None:
+    """MEMORY-LIST-008: a user cursor cannot resume Agent browsing."""
+
+    projects = ("default",)
+    user_fingerprint = runtime_module._memory_list_catalog_fingerprint(
+        "u-11111111111111111111111111111111",
+        projects,
+        origin="user",
+    )
+    cursor = runtime_module._encode_memory_list_cursor(
+        user_fingerprint,
+        {"default": None},
+        {"default": 1},
+        {"default": None},
+    )
+    agent_fingerprint = runtime_module._memory_list_catalog_fingerprint(
+        "u-11111111111111111111111111111111",
+        projects,
+        origin="agent",
+    )
+
+    with pytest.raises(ValueError, match="invalid Memory list cursor"):
+        runtime_module._decode_memory_list_cursor(
+            cursor,
+            projects=projects,
+            fingerprint=agent_fingerprint,
+        )

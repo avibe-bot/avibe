@@ -4471,6 +4471,7 @@
       "partial": "部分用户记忆、Agent 记忆或项目记忆来源未能搜索，结果可能不完整。",
       "truncated": "搜索在查完所有项目前停止，结果可能不完整。",
       "browse": {
+        "originLabel": "记忆来源",
         "sortLabel": "记忆片段排序",
         "newestFirst": "最新优先",
         "episodes": "记忆片段",
