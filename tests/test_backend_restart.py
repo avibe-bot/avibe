@@ -164,6 +164,34 @@ def test_idle_refresh_failure_is_propagated_before_ack() -> None:
     asyncio.run(run())
 
 
+def test_active_restart_preflight_failure_is_propagated_before_ack() -> None:
+    async def run() -> None:
+        service = _AgentService()
+        service.active = True
+        controller = _controller(service)
+        refresh = AsyncMock()
+        preflight = AsyncMock(side_effect=RuntimeError("catalog export failed"))
+        coordinator = BackendRestartCoordinator(
+            controller,
+            refresh,
+            preflight=preflight,
+            drain_timeout=1,
+        )
+
+        with pytest.raises(RuntimeError, match="catalog export failed"):
+            await coordinator.request_restart("opencode")
+
+        preflight.assert_awaited_once_with("opencode")
+        refresh.assert_not_awaited()
+        assert service.draining is False
+        controller.session_turns.end_backend_drain.assert_awaited_once_with(
+            "opencode",
+            resume_deferred=False,
+        )
+
+    asyncio.run(run())
+
+
 def test_controller_reconciles_requested_backends_once_in_order() -> None:
     async def run() -> None:
         coordinator = SimpleNamespace(request_restart=AsyncMock(side_effect=["restarted", "draining"]))

@@ -32,11 +32,13 @@ class BackendRestartCoordinator:
         controller: Any,
         refresh: Callable[[str, bool], Awaitable[None]],
         *,
+        preflight: Callable[[str], Awaitable[None]] | None = None,
         drain_timeout: float | None = None,
         poll_interval: float = _POLL_INTERVAL_SECONDS,
     ) -> None:
         self.controller = controller
         self._refresh = refresh
+        self._preflight = preflight
         self._drain_timeout = _configured_drain_timeout() if drain_timeout is None else max(0.0, drain_timeout)
         self._poll_interval = max(0.001, poll_interval)
         self._tasks: dict[str, asyncio.Task[None]] = {}
@@ -48,6 +50,8 @@ class BackendRestartCoordinator:
         async with lock:
             existing = self._tasks.get(backend)
             if existing is not None and not existing.done():
+                if self._preflight is not None:
+                    await self._preflight(backend)
                 return "draining"
 
             agent_service = self.controller.agent_service
@@ -56,6 +60,8 @@ class BackendRestartCoordinator:
             session_turns.begin_backend_drain(backend)
             try:
                 await agent_service.prepare_backend_restart(backend)
+                if self._preflight is not None:
+                    await self._preflight(backend)
             except Exception:
                 agent_service.end_backend_drain(backend)
                 await session_turns.end_backend_drain(backend, resume_deferred=False)

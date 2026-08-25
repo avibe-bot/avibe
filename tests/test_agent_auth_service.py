@@ -1661,7 +1661,8 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
 
         await service._refresh_backend_runtime("codex")
 
-        service._load_backend_runtime_config.assert_called_once_with("codex")
+        self.assertEqual(service._load_backend_runtime_config.call_count, 2)
+        service._load_backend_runtime_config.assert_called_with("codex")
         controller.agent_service.register.assert_called_once()
         registered = controller.agent_service.agents["codex"]
         self.assertEqual(registered.name, "codex")

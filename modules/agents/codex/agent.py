@@ -1597,6 +1597,23 @@ class CodexAgent(BaseAgent):
                 if wait_for_active_turns:
                     pass
                 else:
+                    runtime_args: list[str] = []
+                    runtime_env: dict[str, str] | None = None
+                    runtime_fingerprint = "direct"
+                    if launch is not None:
+                        from modules.agents.model_hub import build_codex_hub_launch
+                        from vibe import backend_model_catalog
+
+                        runtime_args, runtime_env = build_codex_hub_launch(
+                            [],
+                            os.environ.copy(),
+                            launch,
+                            model_catalog_path=(
+                                backend_model_catalog.ready_codex_hub_catalog_path()
+                            ),
+                        )
+                        runtime_fingerprint = launch.fingerprint
+
                     # Stop stale transport if any
                     if existing:
                         async def replacement_is_safe() -> bool:
@@ -1652,22 +1669,6 @@ class CodexAgent(BaseAgent):
                                 cwd,
                             )
 
-                    runtime_args: list[str] = []
-                    runtime_env: dict[str, str] | None = None
-                    runtime_fingerprint = "direct"
-                    if launch is not None:
-                        from modules.agents.model_hub import build_codex_hub_launch
-                        from vibe import backend_model_catalog
-
-                        runtime_args, runtime_env = build_codex_hub_launch(
-                            [],
-                            os.environ.copy(),
-                            launch,
-                            model_catalog_path=(
-                                backend_model_catalog.ready_codex_hub_catalog_path()
-                            ),
-                        )
-                        runtime_fingerprint = launch.fingerprint
                     transport = CodexTransport(
                         binary=self.codex_config.binary,
                         cwd=cwd,

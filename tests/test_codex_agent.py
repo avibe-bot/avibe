@@ -3988,13 +3988,60 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
             agent._runtime_ownership_snapshot_for_cwd = Mock(
                 return_value=SimpleNamespace(blocks_transport_replacement=True)
             )
-            launch = SimpleNamespace(fingerprint="hub:replacement")
+            launch = SimpleNamespace(
+                channel="hub",
+                fingerprint="hub:replacement",
+                gateway_base_url="http://127.0.0.1:8317",
+                gateway_token="ephemeral-token",
+            )
 
-            with self.assertRaisesRegex(RuntimeError, "durable owner"):
-                await agent._get_or_create_transport(cwd, launch)
+            with patch(
+                "vibe.backend_model_catalog.ready_codex_hub_catalog_path",
+                return_value=Path(cwd) / "codex-hub-catalog.json",
+            ):
+                with self.assertRaisesRegex(RuntimeError, "durable owner"):
+                    await agent._get_or_create_transport(cwd, launch)
 
             existing.stop.assert_not_awaited()
             self.assertIs(agent._transports[cwd], existing)
+
+    async def test_missing_hub_catalog_preserves_existing_transport_and_threads(self):
+        agent = self._agent()
+        with tempfile.TemporaryDirectory() as cwd:
+            existing = SimpleNamespace(
+                is_initialized=True,
+                runtime_fingerprint="direct",
+                stop=AsyncMock(),
+            )
+            agent._transports[cwd] = existing
+            agent._transport_cwd_inodes[cwd] = os.stat(cwd).st_ino
+            agent._session_mgr = SimpleNamespace(
+                sessions_for_cwd=Mock(return_value=["session-1"]),
+                invalidate_thread=Mock(),
+            )
+            agent._turn_registry = SimpleNamespace(
+                clear_session=Mock(),
+                get_active_turn=Mock(return_value=None),
+            )
+            agent._clear_thread_developer_instructions = Mock()
+            launch = SimpleNamespace(
+                channel="hub",
+                fingerprint="hub:replacement",
+                gateway_base_url="http://127.0.0.1:8317",
+                gateway_token="ephemeral-token",
+            )
+
+            with patch(
+                "vibe.backend_model_catalog.ready_codex_hub_catalog_path",
+                return_value=None,
+            ):
+                with self.assertRaisesRegex(ValueError, "provider-safe model catalog"):
+                    await agent._get_or_create_transport(cwd, launch)
+
+            existing.stop.assert_not_awaited()
+            self.assertIs(agent._transports[cwd], existing)
+            agent._session_mgr.invalidate_thread.assert_not_called()
+            agent._turn_registry.clear_session.assert_not_called()
 
     async def test_stale_transport_stop_failure_retains_exact_generation(self):
         import tempfile

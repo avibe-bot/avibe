@@ -370,6 +370,7 @@ class Controller:
         self.backend_restart_coordinator = BackendRestartCoordinator(
             self,
             self.agent_auth_service._apply_backend_runtime_refresh,
+            preflight=self.agent_auth_service._prepare_backend_runtime_refresh,
         )
 
         self.vibe_agent_store = VibeAgentStore()

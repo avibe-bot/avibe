@@ -1978,7 +1978,19 @@ class AgentAuthService:
         if coordinator is not None:
             await coordinator.request_restart(backend)
             return
+        await self._prepare_backend_runtime_refresh(backend)
         await self._apply_backend_runtime_refresh(backend, False)
+
+    async def _prepare_backend_runtime_refresh(self, backend: str) -> None:
+        if backend != "codex":
+            return
+        agent_service = getattr(self.controller, "agent_service", None)
+        refresh_runtime_config = getattr(agent_service, "refresh_runtime_config", None)
+        if not callable(refresh_runtime_config):
+            return
+        runtime_config = self._load_backend_runtime_config(backend)
+        if runtime_config is not None:
+            await self._prepare_codex_hub_catalog(runtime_config)
 
     @staticmethod
     async def _prepare_codex_hub_catalog(runtime_config: Any) -> None:
@@ -1998,15 +2010,8 @@ class AgentAuthService:
         try:
             refresh_runtime_config = getattr(agent_service, "refresh_runtime_config", None)
             runtime_config = None
-            if backend == "codex" and callable(refresh_runtime_config):
-                runtime_config = self._load_backend_runtime_config(backend)
-                if runtime_config is None:
-                    await self._unregister_disabled_backend_agent(backend)
-                    return
-                await self._prepare_codex_hub_catalog(runtime_config)
             if callable(refresh_runtime_config):
-                if runtime_config is None:
-                    runtime_config = self._load_backend_runtime_config(backend)
+                runtime_config = self._load_backend_runtime_config(backend)
                 if runtime_config is None:
                     await self._unregister_disabled_backend_agent(backend)
                     return
