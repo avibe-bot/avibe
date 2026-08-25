@@ -593,6 +593,40 @@ def test_turn_gateway_preserves_only_protocol_capability_headers(tmp_path: Path)
     asyncio.run(exercise())
 
 
+def test_turn_gateway_preserves_codex_responses_lite_capability(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        adapter = AdapterBoundaryFake([AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"ok":true}')])
+        store = MemoryStore(_config(_source("src_primary1")))
+        service = _service(
+            tmp_path,
+            store,
+            adapter,
+            now=lambda: datetime(2026, 7, 25, tzinfo=timezone.utc),
+        )
+        gateway = ModelHubTurnGateway(service)
+        try:
+            base_url, token = await gateway.endpoint("codex")
+            async with aiohttp.ClientSession(trust_env=False) as client:
+                async with client.post(
+                    f"{base_url}/v1/responses",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "x-openai-internal-codex-responses-lite": "true",
+                        "x-codex-private": "never-forward",
+                    },
+                    json={"model": _requested_model("codex"), "input": [], "stream": False},
+                ) as response:
+                    assert response.status == 200
+            request = adapter.requests[0]
+            assert getattr(request, "headers") == {
+                "x-openai-internal-codex-responses-lite": "true",
+            }
+        finally:
+            await gateway.close()
+
+    asyncio.run(exercise())
+
+
 def test_mh_evt_002_switch_events_survive_router_and_service_restart(tmp_path: Path) -> None:
     """MH-EVT-002: persisted cooldown causality survives process-local state loss."""
 

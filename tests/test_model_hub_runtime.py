@@ -3342,6 +3342,72 @@ def test_engine_client_does_not_apply_a_total_turn_timeout(tmp_path: Path) -> No
     asyncio.run(run())
 
 
+def test_engine_client_forwards_codex_responses_lite_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        captured_headers: dict[str, str] = {}
+        reads = iter([b'{"error":{"type":"invalid_request_error"}}', b""])
+
+        class Content:
+            async def read(self, _size: int) -> bytes:
+                return next(reads)
+
+        class Response:
+            status = 400
+            content = Content()
+            headers = {"Content-Type": "application/json"}
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, headers=None, **_kwargs):
+                captured_headers.update(headers or {})
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_kwargs: Session())
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="openai",
+            protocol="openai_responses",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=("codex",),
+            model_ids=("gpt-5.6-luna",),
+            prefix="source-fixture123",
+        )
+
+        await EngineClient(
+            EngineConnection(
+                base_url="http://127.0.0.1:15220",
+                management_key="management-key",
+                gateway_token="gateway-token",
+            )
+        ).invoke(
+            source,
+            "gpt-5.6-luna",
+            {},
+            stream=False,
+            request_headers={
+                "x-openai-internal-codex-responses-lite": "true",
+                "authorization": "Bearer upstream-must-not-cross",
+                "x-codex-private": "never-forward",
+            },
+        )
+
+        assert captured_headers == {
+            "x-openai-internal-codex-responses-lite": "true",
+            "Authorization": "Bearer gateway-token",
+            "Content-Type": "application/json",
+        }
+
+    asyncio.run(run())
+
+
 def test_engine_client_marks_loopback_stream_disconnect_as_engine_down(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
