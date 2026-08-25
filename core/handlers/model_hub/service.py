@@ -652,6 +652,24 @@ class ModelHubService:
                 return requested_model
         return ""
 
+    def _agent_model_ids(
+        self,
+        agent: ModelHubAgentSupplyConfig,
+        requested_model: str,
+    ) -> list[str]:
+        primary = (
+            list(_builtin_model_ids(agent.backend))
+            if agent.menu_kind == "fixed"
+            else list(agent.menu.checked if agent.menu else ())
+        )
+        seen: set[str] = set()
+        model_ids: list[str] = []
+        for model_id in [*primary, requested_model, *agent.routes]:
+            if model_id and model_id not in seen:
+                seen.add(model_id)
+                model_ids.append(model_id)
+        return model_ids
+
     def _unavailable_native_sources(
         self,
         config: ModelHubConfig,
@@ -3685,20 +3703,27 @@ class ModelHubService:
         config: ModelHubConfig,
         backend: str,
         model_id: str,
+        *,
+        now: Optional[datetime] = None,
+        unavailable_source_ids: Optional[frozenset[str]] = None,
     ) -> dict:
         agent = self._agent(config, backend)
         if agent.mode == "direct":
             raise self._direct_mode_error()
-        now = self.now()
-        unavailable = self._unavailable_native_sources(
-            config,
-            cast(BackendName, backend),
+        observed_at = now or self.now()
+        unavailable = (
+            unavailable_source_ids
+            if unavailable_source_ids is not None
+            else self._unavailable_native_sources(
+                config,
+                cast(BackendName, backend),
+            )
         )
         resolution = resolve_model_hub_turn(
             config,
             cast(BackendName, backend),
             model_id,
-            now=now,
+            now=observed_at,
             unavailable_source_ids=unavailable,
         )
         chain: list[dict] = []
@@ -3755,6 +3780,30 @@ class ModelHubService:
         if backend not in MODEL_HUB_BACKENDS or not isinstance(model_id, str) or not model_id:
             raise ModelHubError("mapping_target_unavailable", status=409)
         return self._agent_chain(self.store.load(), backend, model_id)
+
+    def agent_chains(self, backend: str) -> list[dict]:
+        if backend not in MODEL_HUB_BACKENDS:
+            raise ModelHubError("mapping_target_unavailable", status=409)
+        config = self.store.load()
+        agent = self._agent(config, backend)
+        if agent.mode == "direct":
+            raise self._direct_mode_error()
+        requested_model = self._requested_model(agent)
+        observed_at = self.now()
+        unavailable_source_ids = self._unavailable_native_sources(
+            config,
+            cast(BackendName, backend),
+        )
+        return [
+            self._agent_chain(
+                config,
+                backend,
+                model_id,
+                now=observed_at,
+                unavailable_source_ids=unavailable_source_ids,
+            )
+            for model_id in self._agent_model_ids(agent, requested_model)
+        ]
 
     @staticmethod
     def _probe_request(
