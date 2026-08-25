@@ -496,7 +496,7 @@ def test_memory_projects_unknown_lifecycle_failure_uses_stable_envelope() -> Non
     assert response.status_code == 503
     assert response.json() == {
         "status": "failed",
-        "error": "memory_processing_failed",
+        "error": "memory_store_unavailable",
     }
 
 

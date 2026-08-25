@@ -1492,7 +1492,7 @@ def create_app(
             logger.warning("internal memory project list failed")
             return JSONResponse(
                 status_code=503,
-                content={"status": "failed", "error": "memory_processing_failed"},
+                content={"status": "failed", "error": "memory_store_unavailable"},
             )
 
     @app.post("/internal/memory/search")
