@@ -376,45 +376,45 @@ shape is not extended for this.
   client-local and never appears in the server payload (§8.2).
 - **Memory**: in `organization`/`platform` modes, the runtime feeds the sidecar cloud endpoints +
   `mak_` key via the existing `EVEROS_*` env plumbing (`core/memory/process.py`); `custom` mode is
-  the unchanged current path. Mode changes route through the existing settings-change ladder.
+  the unchanged current path. All Memory lifecycle and data-loss behavior is governed by the
+  canonical [`docs/MEMORY.md`](../MEMORY.md) contract; this plan does not define a second queue,
+  rebuild, or recovery protocol. Mode changes route through the existing settings-change ladder.
   Cloud mode injects **fixed model aliases** into `EVEROS_*__MODEL` (the proxy selects the real
   upstream model and ignores client-sent names); the embedding alias embeds `embedding_identity`
-  so provider-call diagnostics stay distinguishable across identity changes. Cloud memory mode
+  so server-side usage remains distinguishable across identity changes. Cloud memory mode
   requires **both** `chat` and `embedding` enabled in the bound scope — anything less counts as
   no memory capability (the no-transition rule below applies), since the engine cannot start
   without a complete LLM + embedding pair. If an **active** cloud scope later disables either
-  slot, member instances pause memory processing (capture keeps queuing in the durable outbox),
-  surface the capability-off state, and resume automatically when the org re-enables the pair —
-  never a silent fallback to `custom` or platform. The resume passes through the standard identity
-  check: an embedding identity that changed while paused gates on the rebuild-confirmation flow
-  before processing restarts.
+  slot, member instances surface `degraded` and new capture may be lost; there is no durable
+  outbox. They retry through bounded non-destructive Wake when the pair is available again and
+  never silently fall back to `custom` or platform. If the embedding identity changed while
+  unavailable, resumption requires the normal explicit `confirm_loss` configuration boundary.
 - **Embedding identity**: the cloud config's `embedding_identity` participates in the sidecar's
   vector-space identity exactly like a local embedding config change — an org admin changing the
-  embedding slot triggers the existing rebuild flow on every member instance, with the admin UI
-  warning about exactly this blast radius before saving.
+  embedding slot requires the existing destructive reset confirmation on every member instance,
+  with the admin UI warning about exactly this blast radius before saving.
 - **Rotation & key-change semantics (verified against code, 2026-08-16)**: an API-key change
   (slot key or mak; base_url/model unchanged) is non-identity on both sides — Avibe's identity is
-  exactly `(embedding.base_url, embedding.model)` (`core/memory/runtime.py:3721-3735`, docstring:
-  "Non-identity fields (API keys, LLM settings) may change … without invalidating a completed
-  rebuild"), and everos 1.2.3 never persists any provider fingerprint (key lives only in process
+  exactly `(embedding.base_url, embedding.model)` (`core/memory/runtime.py`, docstring:
+  "Non-identity fields (API keys, LLM settings) may change … without invalidating the native
+  root"), and everos 1.2.3 never persists any provider fingerprint (key lives only in process
   env → `@functools.cache`d settings → singleton HTTP client; EVEROS_ROOT holds no config-derived
   state; embedding dimension is the code constant 1024). A key change therefore applies through
-  the existing managed settings ladder: preflight probe child with candidate env → quiesce (30 s;
-  in-flight flushes awaited via `asyncio.shield`, durable outbox, no double-write) → graceful
-  sidecar restart. A failed probe leaves the old sidecar running and rolls the config back.
+  the existing managed settings ladder: bounded preflight → bounded volatile-writer quiesce →
+  non-destructive Wake. Pending capture can be lost during replacement, and no old configuration
+  or delivery work is replayed after the new configuration is authoritative.
   These managed-restart semantics apply only to keys the sidecar itself holds (custom-mode slot
   keys, the mak). **Org/platform slot keys live server-side only**: rotating them requires no
   client action, restarts nothing, and changes nothing in the status payload.
 - **Mode-switch semantics**: switching `custom ↔ cloud` changes the base_url the sidecar sees and
   is an identity change by definition unless the upstream is identical — the existing
-  rebuild-confirmation flow governs it. In cloud modes the client's identity input is the status
-  payload's `embedding_identity` (upstream base_url+model), never the proxy URL — so org upstream
-  changes propagate as rebuilds, and mak rotation does not.
+  explicit `confirm_loss` reset boundary governs it. In cloud modes the client's identity input is
+  the status payload's `embedding_identity` (upstream base_url+model), never the proxy URL — so org upstream
+  changes propagate as destructive identity resets, and mak rotation does not.
 - **Enterprise-attachment transition**: when an instance whose memory runs in `custom` mode becomes
-  enterprise-managed, the client pauses memory processing (capture keeps queuing in the durable
-  outbox; nothing is lost), surfaces a one-time transition notice, and performs the identity change
-  through the same rebuild-confirmation flow on the user's acknowledgment — forced management
-  changes the model source, but the rebuild is never silent. If the org provides no **cloud memory
+  enterprise-managed, the client surfaces that changing the model source is destructive and
+  requires exact `confirm_loss`; it does not promise to retain capture while waiting and does not
+  persist a transition workflow. If the org provides no **cloud memory
   capability** (the chat + embedding pair not both enabled — embedding-only and chat-only orgs
   alike), no transition fires: an existing working `custom`
   configuration keeps running unchanged (the org has not provided a replacement model source), and

@@ -5,7 +5,7 @@ reaches the Memory store. It used to be spread over six `Controller` methods
 carrying a nullable `is_ordinary_text` bool between layers, which meant the
 rule could only be exercised through a `Controller`.
 
-The contract in `docs/plans/memory-plugin-system.md` already says that
+The contract in `docs/MEMORY.md` says that
 "platform adapters classify native events but do not own Memory business
 logic". This module is the other half of that sentence: surfaces normalize
 their native event into `InboundTurnFacts`, and `CaptureAdmission` alone turns

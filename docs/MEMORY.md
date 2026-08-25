@@ -1,8 +1,79 @@
 # Memory
 
-Avibe Memory distills eligible Workbench and private-IM messages into a
-per-user profile, episodes, and facts. Open **Settings > Memory** to inspect its
-Processing Record, current profile, search results, and settings.
+This is the canonical product and architecture contract for the current Memory
+system. Superseded Memory design plans are available in Git history only; they
+must not be treated as current behavior.
+
+Avibe Memory distills eligible Workbench and private-IM messages into scoped
+User and Agent profiles, episodes, and facts. Open **Settings > Memory** to
+inspect its Processing Record, current profiles, search results, and settings.
+
+## Design philosophy
+
+The refactored Memory system follows one priority: **keep Avibe and its Agent
+available, then preserve Memory data on a best-effort basis**. EverOS runs as an
+isolated child service that Avibe can wake, stop, replace, or explicitly repair.
+Memory intake may be lost when the process crashes, restarts, is replaced, or is
+overloaded; the design aims to retain data in ordinary operation, not to provide
+zero-loss or exactly-once delivery.
+
+The following rules are architectural invariants:
+
+1. **Memory is optional to the main product path.** Memory latency or failure
+   must not make chat, the Agent, `/new`, archive, replacement, or shutdown
+   unavailable. Lifecycle offers and barriers therefore stay bounded and
+   non-blocking.
+2. **Acceptance is not persistence.** An accepted capture has entered bounded,
+   process-local work. It does not prove EverOS received or persisted it. Avibe
+   keeps no durable outbox, replay ledger, or per-call delivery workflow.
+3. **Resources and retries are bounded.** Admission, attachment preparation,
+   provider calls, pending flushes, and restart attempts all have finite limits.
+   At capacity, Memory may drop work while the primary product continues.
+4. **EverOS native data is the only Memory content truth.** Search, profiles,
+   episodes, facts, and the Processing Record are projections of retained
+   native data. Avibe does not maintain a parallel Provider Call Log,
+   correlation ledger, or reconstructed history to make incomplete evidence
+   look complete.
+5. **Each lifecycle responsibility has one owner.** Admission belongs to
+   `CaptureAdmission` and `MemoryModule`; product policy belongs to
+   `MemoryRuntime`; volatile delivery belongs to `BestEffortMemoryWriter`;
+   child ownership and restart budgeting belong to `EverOSSupervisor`; one
+   launch attempt belongs to `EverOSProcess`. Callers do not borrow their
+   internals.
+6. **Wake is the one non-destructive availability path.** Initial startup,
+   manual retry, service restart, and crash recovery all reuse bounded Wake.
+   Wake never deletes Memory data and never starts a replacement before the old
+   owned process is proved stopped.
+7. **Data loss requires explicit authority.** Repair, Delete data, and
+   identity-invalidating configuration require exact `confirm_loss: true`,
+   stop proof, and confined deletion. Ambiguity fails closed instead of widening
+   the delete surface or silently falling back.
+8. **Identity and diagnostic truth stay explicit.** User and Agent owners are
+   server-derived and isolated. Partial or missing native evidence is reported
+   as `partial` or `unavailable`; a possibly submitted provider result is never
+   replayed.
+
+## Current architecture
+
+| Component | Single responsibility |
+| --- | --- |
+| `CaptureAdmission` / `MemoryModule` | Keep Memory business policy out of transports, validate product requests, derive owner/project scope, and expose capture and read semantics. |
+| `BestEffortMemoryWriter` | Owns bounded, ordered, volatile capture delivery and flush attempts. |
+| `MemoryRuntime` | Owns public state, configuration policy, operation exclusion, and destructive-operation admission. |
+| `EverOSSupervisor` | Exclusively owns the current child, readiness, bounded Wake/restart recovery, stop proof, and released-orphan reconciliation. |
+| `EverOSProcess` | Adapts one private EverOS launch attempt, its process identity, UDS readiness, resource bounds, and termination. |
+| Native readers | Read caller-authorized EverOS profiles, episodes, facts, runs, and indexing state without creating another source of truth. |
+
+The data and lifecycle paths remain separate and short:
+
+`eligible input -> CaptureAdmission -> MemoryModule -> bounded writer -> private EverOS UDS`
+
+`MemoryRuntime -> EverOSSupervisor -> one EverOSProcess attempt`
+
+Reads use the same private EverOS service and its active native root.
+`memory.sqlite` retains only stable Avibe identity and project-catalog facts; it
+is not a delivery queue or recovery state machine. The later sections define
+the product behavior at these seams.
 
 ## User and Agent memory ownership
 
