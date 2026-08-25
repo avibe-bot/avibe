@@ -319,7 +319,9 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
     viewer_examples = (
         ("GET", "/api/memory/settings"),
         ("PATCH", "/api/memory/settings"),
-        ("POST", "/api/memory/runtime/restart"),
+        ("POST", "/api/memory/runtime/wake"),
+        ("POST", "/api/memory/repair"),
+        ("POST", "/api/memory/delete-data"),
         ("POST", "/api/memory/future-capability"),
         ("POST", "/api/sessions/session-1/mark-read"),
         ("DELETE", "/api/terminal/term-1"),

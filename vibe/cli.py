@@ -399,10 +399,12 @@ def _memory_cli_language() -> str:
     return _configured_cli_language()
 
 
-_MEMORY_CLI_SOURCE_STATE_I18N_KEYS = {
-    "available": "memory.cli.sourceState.available",
-    "stale": "memory.cli.sourceState.stale",
-    "unavailable": "memory.cli.sourceState.unavailable",
+_MEMORY_CLI_RUNTIME_STATE_I18N_KEYS = {
+    "disabled": "memory.cli.runtimeState.disabled",
+    "starting": "memory.cli.runtimeState.starting",
+    "running": "memory.cli.runtimeState.running",
+    "degraded": "memory.cli.runtimeState.degraded",
+    "needs_repair": "memory.cli.runtimeState.needsRepair",
 }
 _MEMORY_CLI_PROVIDER_STATE_I18N_KEYS = {
     "ok": "memory.cli.providerState.ok",
@@ -424,14 +426,27 @@ _MEMORY_CLI_REASON_I18N_KEYS = {
     "memory_runtime_unsupported": "memory.cli.reason.runtimeUnsupported",
     "memory_runtime_install_failed": "memory.cli.reason.runtimeInstallFailed",
     "memory_reconcile_failed": "memory.cli.reason.reconcileFailed",
-    "memory_restart_failed": "memory.cli.reason.restartFailed",
+    "memory_wake_failed": "memory.cli.reason.wakeFailed",
+    "memory_runtime_busy": "memory.cli.reason.runtimeBusy",
+    "memory_permission_denied": "memory.cli.reason.permissionDenied",
+    "memory_disk_unavailable": "memory.cli.reason.diskUnavailable",
+    "memory_local_data_unusable": "memory.cli.reason.localDataUnusable",
+    "memory_legacy_recovery_required": "memory.cli.reason.legacyRecoveryRequired",
     "memory_sidecar_unavailable": "memory.cli.reason.sidecarUnavailable",
     "memory_provider_timeout": "memory.cli.reason.providerTimeout",
     "memory_provider_response_invalid": "memory.cli.reason.providerResponseInvalid",
     "memory_capability_unavailable": "memory.cli.reason.capabilityUnavailable",
     "memory_processing_failed": "memory.cli.reason.processingFailed",
-    "memory_clear_failed": "memory.cli.reason.clearFailed",
-    "memory_factory_reset_failed": "memory.cli.reason.factoryResetFailed",
+    "memory_loss_confirmation_required": "memory.cli.reason.lossConfirmationRequired",
+    "memory_embedding_unavailable": "memory.cli.reason.embeddingUnavailable",
+    "memory_llm_unavailable": "memory.cli.reason.llmUnavailable",
+    "memory_rerank_unavailable": "memory.cli.reason.rerankUnavailable",
+    "memory_multimodal_unavailable": "memory.cli.reason.multimodalUnavailable",
+    "memory_repair_failed": "memory.cli.reason.repairFailed",
+    "memory_repair_not_required": "memory.cli.reason.repairNotRequired",
+    "memory_delete_data_failed": "memory.cli.reason.deleteDataFailed",
+    "memory_reconfigure_failed": "memory.cli.reason.reconfigureFailed",
+    "memory_operation_in_progress": "memory.cli.reason.operationInProgress",
 }
 
 
@@ -482,19 +497,17 @@ def _print_memory_cli_human(operation: str, result: dict, *, language: str) -> N
         print(i18n_t("memory.cli.remembered", language))
         return
     if operation == "status":
-        source = result.get("source")
-        source_state = source.get("status") if isinstance(source, dict) else None
-        source_state_label = _memory_cli_label(
-            source_state if source_state is not None else "unavailable",
-            keys=_MEMORY_CLI_SOURCE_STATE_I18N_KEYS,
-            fallback_key="memory.cli.sourceState.unknown",
+        runtime_state_label = _memory_cli_label(
+            result.get("state"),
+            keys=_MEMORY_CLI_RUNTIME_STATE_I18N_KEYS,
+            fallback_key="memory.cli.runtimeState.unknown",
             language=language,
         )
         print(
             i18n_t(
                 "memory.cli.status",
                 language,
-                state=source_state_label,
+                state=runtime_state_label,
             )
         )
         health = result.get("health")
@@ -534,7 +547,7 @@ def _print_memory_cli_human(operation: str, result: dict, *, language: str) -> N
                     state=attachment_state_label,
                 )
             )
-        reason = source.get("reason") if isinstance(source, dict) else None
+        reason = result.get("reason")
         if isinstance(reason, str) and reason:
             reason_label = _memory_cli_label(
                 reason,
@@ -545,10 +558,16 @@ def _print_memory_cli_human(operation: str, result: dict, *, language: str) -> N
             print(i18n_t("memory.cli.sourceReason", language, reason=reason_label))
         return
 
+    warnings = result.get("warnings")
     if operation == "list":
-        warnings = result.get("warnings")
         if isinstance(warnings, list) and "memory_list_truncated" in warnings:
             print(i18n_t("memory.cli.listWarning.truncated", language), file=sys.stderr)
+    elif (
+        operation in {"search", "profile"}
+        and isinstance(warnings, list)
+        and "memory_search_partial" in warnings
+    ):
+        print(i18n_t("memory.cli.readWarning.partial", language), file=sys.stderr)
 
     items = result.get("items")
     if not isinstance(items, list) or not items:
@@ -581,7 +600,16 @@ def _print_memory_cli_human(operation: str, result: dict, *, language: str) -> N
         if not isinstance(text, str):
             continue
         date = item.get("date")
-        prefix = f"{date} " if isinstance(date, str) and date else ""
+        origin = item.get("origin")
+        origin_prefix = ""
+        if operation in {"search", "profile"} and origin in {"user", "agent", "both"}:
+            origin_prefix = i18n_t(
+                "memory.cli.originPrefix",
+                language,
+                origin=i18n_t(f"memory.cli.origin.{origin}", language),
+            )
+        date_prefix = f"{date} " if isinstance(date, str) and date else ""
+        prefix = f"{origin_prefix}{date_prefix}"
         print(f"{prefix}{text}")
 
 

@@ -15,19 +15,25 @@ describe('dependencyHasInstallAction', () => {
 });
 
 describe('memoryRuntimeSidecarRunning', () => {
-  it('is true only for a successful status whose sidecar source is available', () => {
-    expect(memoryRuntimeSidecarRunning({
-      status: 'ok',
-      source: { status: 'available', observed_at: '2026-08-18T14:44:35.331Z', reason: null },
-      health: null,
-    })).toBe(true);
-  });
-
+  it.each(['starting', 'running', 'degraded'] as const)(
+    'fails closed for the active or uncertain %s state',
+    (state) => {
+      expect(memoryRuntimeSidecarRunning({
+        status: 'ok',
+        state,
+        reason: null,
+        source: { status: 'unavailable', observed_at: null, reason: null },
+        health: null,
+      })).toBe(true);
+    },
+  );
   it('stays false when Memory is enabled but the sidecar is not reachable', () => {
     expect(memoryRuntimeSidecarRunning(null)).toBe(false);
     expect(memoryRuntimeSidecarRunning({ status: 'failed', error: 'memory_sidecar_unavailable' })).toBe(false);
     expect(memoryRuntimeSidecarRunning({
       status: 'ok',
+      state: 'disabled',
+      reason: 'memory_disabled',
       source: { status: 'unavailable', observed_at: null, reason: 'memory_sidecar_unavailable' },
       health: null,
     })).toBe(false);

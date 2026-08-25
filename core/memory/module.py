@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import re
 import shutil
@@ -20,10 +21,10 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Literal, TypeVar
 from config import paths
 from core.memory.blocking import run_blocking
 from core.memory.attachments import (
+    AttachmentCleanupUnprovenError,
     AttachmentPinError,
     AttachmentPinStore,
     PinnedBundle,
-    encode_pinned_bundle,
 )
 from core.memory.provider_root import ProviderRoot
 from core.memory.everos import (
@@ -37,8 +38,10 @@ from core.memory.project_ids import (
     is_writable_memory_project_id,
 )
 from core.memory.store import (
-    MAX_NONTERMINAL_QUEUE_ROWS,
     MemoryStore,
+    VolatileAdmission,
+    derive_assistant_memory_owner_id,
+    is_memory_owner_id,
     is_principal_id,
 )
 from core.memory.types import (
@@ -49,23 +52,28 @@ from core.memory.types import (
     CaptureRequest,
     CaptureSkipped,
     MemoryErrorCode,
-    MemoryFailureLogEntry,
     MemoryItem,
     MemoryItems,
     MemoryListItem,
     MemoryListPage,
     MemoryListResult,
+    MemoryOrigin,
     MemoryProfile,
     MemoryProfileExplicitInfo,
     MemoryProfileTrait,
     MemoryResult,
     OperationFailed,
+    ProviderSearchItem,
     RecallItems,
     RecallPolicy,
     RecallResult,
     is_memory_error_code,
 )
-from core.memory.worker import MemoryWorker, ProcessingEvent
+from core.memory.writer import (
+    BestEffortMemoryWriter,
+    CaptureOfferOutcome,
+    WriterReservation,
+)
 
 if TYPE_CHECKING:
     from core.inbound_attachment_lease import InboundAttachmentLease
@@ -85,7 +93,6 @@ MAX_PROVIDER_ITEM_BYTES = 64 * 1024
 MAX_PROVIDER_RESULT_BYTES = 256 * 1024
 MAX_PROVIDER_RESULT_ITEMS = 20
 PROVIDER_READ_TIMEOUT_SECONDS = 20.0
-CLEAR_DRAIN_TIMEOUT_SECONDS = 5.0
 
 
 class _HeldCaptureAdmission:
@@ -139,7 +146,7 @@ class _CaptureReservation:
 
 
 logger = logging.getLogger(__name__)
-_SessionLifecycleResult = TypeVar("_SessionLifecycleResult")
+_ProviderReadResult = TypeVar("_ProviderReadResult")
 
 
 _ROOT_LIFECYCLE_LOCKS: dict[str, asyncio.Lock] = {}
@@ -155,7 +162,7 @@ class MemorySessionLifecycleBusyError(RuntimeError):
 
 
 class MemoryModule:
-    """Own local capture, direct reads, status, and clear without exposing internals."""
+    """Own local capture and direct reads without exposing storage internals."""
 
     def __init__(
         self,
@@ -165,11 +172,10 @@ class MemoryModule:
         enabled: bool | Callable[[], bool] = False,
         disk_free_bytes: Callable[[], int] | None = None,
         provider_root: Path | None = None,
-        maintenance_open: Callable[[], bool] | None = None,
         provider_root_owner: ProviderRoot | None = None,
-        clear_drain_timeout_seconds: float = CLEAR_DRAIN_TIMEOUT_SECONDS,
-        processing_event: ProcessingEvent | None = None,
-        worker: MemoryWorker | None = None,
+        processing_event: Callable[..., Awaitable[bool]] | None = None,
+        ambiguous_stop_reap: Callable[[], Awaitable[bool] | bool] | None = None,
+        writer: BestEffortMemoryWriter | None = None,
         attachment_store: AttachmentPinStore | None = None,
         effective_home: Path | None = None,
     ) -> None:
@@ -188,8 +194,6 @@ class MemoryModule:
             self._provider_root,
             effective_home=self._effective_home,
         )
-        self._maintenance_open = maintenance_open or (lambda: False)
-        self._clear_drain_timeout_seconds = _positive_timeout(clear_drain_timeout_seconds)
         self._lifecycle_lock = asyncio.Lock()
         self._capture_admission_locks: weakref.WeakValueDictionary[
             tuple[str, str, str], asyncio.Lock
@@ -198,25 +202,41 @@ class MemoryModule:
             tuple[str, str, str], _CaptureReservation
         ] = {}
         self._invalid_capture_admission_lock = asyncio.Lock()
-        self._clear_active = False
         self._retired = False
-        self._attachment_store = attachment_store or AttachmentPinStore(
-            effective_home=self._effective_home
-        )
-        self._worker = worker or MemoryWorker(
+        attachments_available = False
+        self._attachment_store: AttachmentPinStore | None = None
+        try:
+            self._attachment_store = attachment_store or AttachmentPinStore(
+                effective_home=self._effective_home
+            )
+        except AttachmentPinError:
+            logger.warning(
+                "Memory attachment storage is unavailable; text capture remains enabled"
+            )
+        else:
+            try:
+                self._attachment_store.clear_all()
+                attachments_available = True
+            except AttachmentPinError:
+                logger.warning(
+                    "Memory attachment startup cleanup failed; text capture remains enabled"
+                )
+        self._writer = writer or BestEffortMemoryWriter(
             store=store,
             provider=provider,
             enabled=self._is_enabled,
             processing_event=processing_event,
             attachment_store=self._attachment_store,
-            attachment_admission_lock=self._root_lifecycle_lock(),
+            ambiguous_stop_reap=ambiguous_stop_reap,
         )
+        if not attachments_available:
+            self._writer.disable_attachment_intake()
 
     @property
-    def maintenance_active(self) -> bool:
-        """Whether Runtime-owned maintenance currently fences module work."""
+    def attachment_intake_enabled(self) -> bool:
+        """Whether new attachment captures can enter the volatile writer."""
 
-        return self._clear_active
+        return self._writer.attachments_enabled
 
     @property
     def retired(self) -> bool:
@@ -228,18 +248,7 @@ class MemoryModule:
         """Permanently close this module to stale callers before root deletion."""
 
         self._retired = True
-        self._clear_active = True
-        self._worker.pause_claims()
-
-    def enter_maintenance(self) -> None:
-        """Fence capture and reads before a maintenance transition begins."""
-
-        self._clear_active = True
-
-    def leave_maintenance(self) -> None:
-        """Reopen capture and reads after maintenance ownership is released."""
-
-        self._clear_active = False
+        self._writer.pause_intake()
 
     @asynccontextmanager
     async def lifecycle(self) -> AsyncIterator[None]:
@@ -279,274 +288,53 @@ class MemoryModule:
             lock.release()
 
     def pause_claims(self) -> None:
-        """Synchronously fence new add and flush claims."""
+        """Synchronously fence new volatile writer admissions."""
 
-        self._worker.pause_claims()
+        self._writer.pause_intake()
 
     async def quiesce_claims(self, *, timeout_seconds: float | None = None) -> bool:
         """Fence claims and join in-flight add and flush work under one deadline."""
 
-        if timeout_seconds is None:
-            return await self._worker.pause_and_wait()
-        return await self._worker.pause_and_wait(timeout_seconds=timeout_seconds)
+        return await self._writer.quiesce(
+            timeout_seconds=30.0 if timeout_seconds is None else timeout_seconds
+        )
 
-    async def quiesce_claims_for_clear(self) -> bool:
+    async def quiesce_claims_for_destructive_reset(self) -> bool:
         """Fence claims using the module's configured destructive-work budget."""
 
-        return await self._worker.pause_and_wait(
-            timeout_seconds=self._clear_drain_timeout_seconds
-        )
+        return await self._writer.quiesce(timeout_seconds=5.0)
 
     def resume_claims(self) -> None:
         """Permit add and flush claims after lifecycle recovery succeeds."""
 
-        self._worker.resume_claims()
+        self._writer.resume_intake()
 
-    def begin_activation(self, *, new_lease: bool = False) -> None:
-        """Require recovery before the next drain, optionally rotating lease ownership."""
+    async def close_writer(self) -> None:
+        """Drop volatile work during shutdown or runtime replacement."""
 
-        if new_lease:
-            self._worker.begin_new_lease_activation()
-            return
-        self._worker.begin_activation()
+        await self._writer.close()
 
-    async def drain(self) -> int:
-        """Run one bounded worker drain through the module interface."""
-
-        return await self._worker.drain()
-
-    async def prepare_shutdown(self) -> None:
-        """Settle in-process flush work without initiating provider writes."""
-
-        await self._worker.prepare_shutdown()
-
-    async def clear_attachments(self) -> None:
-        """Remove every module-owned pinned attachment during destructive clear."""
-
-        await run_blocking(self._attachment_store.clear_all)
-
-    async def final_flush(
+    def reserve_capture_capacity(
         self,
-        *,
-        principal_id: str,
-        project_id: str,
-        raw_session_id: str,
-        deadline_seconds: float = 5.0,
-    ) -> bool:
-        """Fence capture and flush one trusted canonical session by deadline."""
+    ) -> WriterReservation | Literal["full", "disabled", "unavailable"]:
+        """Claim one volatile capture slot before deferred work starts."""
 
-        if not self._is_enabled() or self.maintenance_active or self._is_maintenance_open():
-            return False
-        timeout = _positive_timeout(deadline_seconds)
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
-        barrier = self.reserve_capture_admission(
-            principal_id=principal_id,
-            project_id=project_id,
-            session_id=raw_session_id,
-        )
-        admission_lock = self._capture_admission_lock(
-            principal_id=principal_id,
-            project_id=project_id,
-            session_id=raw_session_id,
-        )
-        acquired = False
-        try:
-            await self._wait_for_capture_reservation(barrier, deadline)
-            await asyncio.wait_for(
-                admission_lock.acquire(),
-                timeout=max(deadline - loop.time(), 0.001),
-            )
-            acquired = True
-            return await self._final_flush_under_admission(
-                principal_id=principal_id,
-                project_id=project_id,
-                raw_session_id=raw_session_id,
-                deadline=deadline,
-            )
-        except asyncio.TimeoutError:
-            return False
-        finally:
-            if acquired:
-                admission_lock.release()
-            self.cancel_capture_reservation(barrier)
+        return self._writer.reserve_pending()
 
-    async def run_session_lifecycle(
-        self,
-        *,
-        principal_id: str,
-        project_id: str,
-        raw_session_id: str,
-        operation: Callable[[], Awaitable[_SessionLifecycleResult]],
-        deadline_seconds: float = 5.0,
-    ) -> _SessionLifecycleResult:
-        """Flush if capture is quiet, then run the transition; fail open on timeout."""
+    def release_capture_capacity(self, reservation: object) -> None:
+        """Release a pending slot that was not handed to the writer queue."""
 
-        if not self._is_enabled() or self.maintenance_active or self._is_maintenance_open():
-            return await operation()
-        timeout = _positive_timeout(deadline_seconds)
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
-        barrier = self.reserve_capture_admission(
-            principal_id=principal_id,
-            project_id=project_id,
-            session_id=raw_session_id,
-        )
-        admission_lock = self._capture_admission_lock(
-            principal_id=principal_id,
-            project_id=project_id,
-            session_id=raw_session_id,
-        )
-        acquired = False
-        try:
-            try:
-                await self._wait_for_capture_reservation(barrier, deadline)
-                await asyncio.wait_for(
-                    admission_lock.acquire(),
-                    timeout=max(deadline - loop.time(), 0.001),
-                )
-                acquired = True
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "memory capture admission did not quiesce before the "
-                    "deadline; skipping final flush session=%s",
-                    raw_session_id,
-                )
-                return await operation()
-            await self._final_flush_under_admission(
-                principal_id=principal_id,
-                project_id=project_id,
-                raw_session_id=raw_session_id,
-                deadline=deadline,
-            )
-            return await operation()
-        finally:
-            if acquired:
-                admission_lock.release()
-            self.cancel_capture_reservation(barrier)
+        if isinstance(reservation, WriterReservation):
+            if reservation.active and not reservation.handed_off:
+                reservation.abandon()
 
-    async def run_session_scopes_lifecycle(
-        self,
-        *,
-        scopes: tuple[tuple[str, str], ...],
-        raw_session_id: str,
-        operation: Callable[[], Awaitable[_SessionLifecycleResult]],
-        deadline_seconds: float = 5.0,
-    ) -> _SessionLifecycleResult:
-        """Flush all session scopes and run one transition under every fence."""
+    async def wait_writer_idle_for_tests(self, *, timeout_seconds: float = 5.0) -> None:
+        await self._writer.wait_idle_for_tests(timeout_seconds=timeout_seconds)
 
-        canonical_scopes = tuple(dict.fromkeys(scopes))
-        if (
-            not canonical_scopes
-            or not isinstance(raw_session_id, str)
-            or not raw_session_id
-            or any(
-                not is_principal_id(principal_id) or not is_persisted_memory_project_id(project_id)
-                for principal_id, project_id in canonical_scopes
-            )
-        ):
-            raise ValueError("invalid canonical Memory session scopes")
-        if not self._is_enabled():
-            return await operation()
-        if self.maintenance_active or self._is_maintenance_open():
-            logger.warning(
-                "memory session lifecycle unavailable during maintenance; "
-                "skipping final flush session=%s",
-                raw_session_id,
-            )
-            result = await operation()
-            return False if isinstance(result, bool) else result
+    def offer_barrier(self, raw_session_id: str) -> str:
+        """Offer a provider barrier without waiting for capture delivery."""
 
-        timeout = _positive_timeout(deadline_seconds)
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
-        barriers = [
-            self.reserve_capture_admission(
-                principal_id=principal_id,
-                project_id=project_id,
-                session_id=raw_session_id,
-            )
-            for principal_id, project_id in canonical_scopes
-        ]
-        locks = [
-            self._capture_admission_lock(
-                principal_id=principal_id,
-                project_id=project_id,
-                session_id=raw_session_id,
-            )
-            for principal_id, project_id in canonical_scopes
-        ]
-        acquired: list[asyncio.Lock] = []
-        try:
-            try:
-                for barrier in barriers:
-                    await self._wait_for_capture_reservation(barrier, deadline)
-                for admission_lock in locks:
-                    remaining = deadline - loop.time()
-                    if remaining <= 0:
-                        raise asyncio.TimeoutError
-                    await asyncio.wait_for(admission_lock.acquire(), timeout=remaining)
-                    acquired.append(admission_lock)
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "memory capture admission did not quiesce before the "
-                    "deadline; skipping final flush session=%s",
-                    raw_session_id,
-                )
-                result = await operation()
-                return False if isinstance(result, bool) else result
-            flush_succeeded = True
-            for principal_id, project_id in canonical_scopes:
-                flush_succeeded = (
-                    await self._final_flush_under_admission(
-                        principal_id=principal_id,
-                        project_id=project_id,
-                        raw_session_id=raw_session_id,
-                        deadline=deadline,
-                    )
-                    and flush_succeeded
-                )
-            result = await operation()
-            if isinstance(result, bool):
-                return result and flush_succeeded
-            return result
-        finally:
-            for admission_lock in reversed(acquired):
-                admission_lock.release()
-            for barrier in reversed(barriers):
-                self.cancel_capture_reservation(barrier)
-
-    async def _final_flush_under_admission(
-        self,
-        *,
-        principal_id: str,
-        project_id: str,
-        raw_session_id: str,
-        deadline: float,
-    ) -> bool:
-        if not self._is_enabled() or self.maintenance_active or self._is_maintenance_open():
-            return False
-        try:
-            session_ref = await self._store_call(
-                self._store.provider_session_ref,
-                principal_id=principal_id,
-                project_ref=project_id,
-                session_id=raw_session_id,
-            )
-            remaining = deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                return False
-            return await self._worker.coordinator.final_flush(
-                session_ref,
-                deadline_seconds=remaining,
-            )
-        except asyncio.TimeoutError:
-            return False
-        except (TypeError, ValueError):
-            return False
-        except Exception:
-            logger.warning("Memory final flush failed")
-            return False
+        return self._writer.offer_barrier(raw_session_id)
 
     def replace_provider(self, provider: MemoryProviderPort) -> None:
         """Swap the provider shared by direct reads and claim delivery.
@@ -557,7 +345,7 @@ class MemoryModule:
         """
 
         self._provider = provider
-        self._worker.replace_provider(provider)
+        self._writer.replace_provider(provider)
 
     async def capture(
         self,
@@ -565,6 +353,7 @@ class MemoryModule:
         *,
         source_lease: InboundAttachmentLease | None = None,
         admission: object = None,
+        capacity_reservation: object = None,
     ) -> CaptureReceipt:
         """Validate and persist one source capture without touching the provider."""
 
@@ -572,43 +361,61 @@ class MemoryModule:
             return CaptureSkipped(reason="memory_operation_in_progress")
         if not self._is_enabled():
             return CaptureSkipped(reason="memory_disabled")
-        if self._clear_active or self._is_maintenance_open():
-            return CaptureSkipped(reason="memory_clear_failed")
+        if self._retired:
+            return CaptureSkipped(reason="memory_operation_in_progress")
 
-        admission_lock = self._capture_lock_for_request(request)
-        if admission is None:
-            key = self._capture_admission_key(
-                principal_id=getattr(request, "principal_id", None),
-                project_id=getattr(request, "project_id", None),
-                session_id=getattr(request, "session_id", None),
-            )
-            if key is not None:
-                reservation = self.reserve_capture_admission(
-                    principal_id=key[0],
-                    project_id=key[1],
-                    session_id=key[2],
+        reservation = capacity_reservation
+        if reservation is None:
+            reservation = self.reserve_capture_capacity()
+        if isinstance(reservation, str):
+            if reservation == "full":
+                return await self._skipped_with_missed("memory_queue_full")
+            if reservation == "unavailable":
+                return await self._skipped_with_missed("memory_sidecar_unavailable")
+            return CaptureSkipped(reason="memory_operation_in_progress")
+        if not isinstance(reservation, WriterReservation):
+            return await self._skipped_with_missed("memory_invalid_input")
+
+        try:
+            admission_lock = self._capture_lock_for_request(request)
+            if admission is None:
+                key = self._capture_admission_key(
+                    principal_id=getattr(request, "principal_id", None),
+                    project_id=getattr(request, "project_id", None),
+                    session_id=getattr(request, "session_id", None),
                 )
-                async with self.capture_admission(
-                    principal_id=key[0],
-                    project_id=key[1],
-                    session_id=key[2],
-                    reservation=reservation,
-                ):
+                if key is not None:
+                    capture_admission = self.reserve_capture_admission(
+                        principal_id=key[0],
+                        project_id=key[1],
+                        session_id=key[2],
+                    )
+                    async with self.capture_admission(
+                        principal_id=key[0],
+                        project_id=key[1],
+                        session_id=key[2],
+                        reservation=capture_admission,
+                    ):
+                        return await self._capture_with_admission(
+                            request,
+                            source_lease=source_lease,
+                            capacity_reservation=reservation,
+                        )
+                async with admission_lock:
                     return await self._capture_with_admission(
                         request,
                         source_lease=source_lease,
+                        capacity_reservation=reservation,
                     )
-            async with admission_lock:
-                return await self._capture_with_admission(
-                    request,
-                    source_lease=source_lease,
-                )
-        if not self._owns_capture_admission(admission, request, admission_lock):
-            return await self._skipped_with_missed("memory_invalid_input")
-        return await self._capture_with_admission(
-            request,
-            source_lease=source_lease,
-        )
+            if not self._owns_capture_admission(admission, request, admission_lock):
+                return await self._skipped_with_missed("memory_invalid_input")
+            return await self._capture_with_admission(
+                request,
+                source_lease=source_lease,
+                capacity_reservation=reservation,
+            )
+        finally:
+            self.release_capture_capacity(reservation)
 
     @asynccontextmanager
     async def capture_admission(
@@ -719,14 +526,15 @@ class MemoryModule:
         request: CaptureRequest,
         *,
         source_lease: InboundAttachmentLease | None,
+        capacity_reservation: WriterReservation,
     ) -> CaptureReceipt:
         async with self._root_lifecycle_lock():
             if self._retired:
                 return CaptureSkipped(reason="memory_operation_in_progress")
             if not self._is_enabled():
                 return CaptureSkipped(reason="memory_disabled")
-            if self._clear_active or self._is_maintenance_open():
-                return CaptureSkipped(reason="memory_clear_failed")
+            if self._retired:
+                return CaptureSkipped(reason="memory_operation_in_progress")
             if not isinstance(request, CaptureRequest):
                 return await self._skipped_with_missed("memory_invalid_input")
 
@@ -734,6 +542,12 @@ class MemoryModule:
             validation_error = self._capture_validation_error(request, normalized_text)
             if validation_error is not None:
                 return await self._skipped_with_missed(validation_error)
+            if (
+                request.attachments
+                and not self._writer.attachments_enabled
+                and not normalized_text.strip()
+            ):
+                return await self._skipped_with_missed("memory_store_unavailable")
 
             try:
                 disk_free = int(await asyncio.to_thread(self._disk_free_bytes))
@@ -745,6 +559,7 @@ class MemoryModule:
                 request,
                 normalized_text,
                 source_lease=source_lease,
+                capacity_reservation=capacity_reservation,
             )
 
     def _capture_lock_for_request(self, request: object) -> asyncio.Lock:
@@ -778,99 +593,150 @@ class MemoryModule:
         normalized_text: str,
         *,
         source_lease: InboundAttachmentLease | None,
+        capacity_reservation: WriterReservation,
     ) -> CaptureReceipt:
-        """Pin and enqueue one validated capture under the provider-root fence."""
+        """Reserve, pin, and offer one capture to the volatile writer."""
+
+        try:
+            digest = await self._store_call(
+                self._store.source_message_digest,
+                request.source_message_id,
+            )
+        except Exception:
+            return OperationFailed(error="memory_store_unavailable")
+        binding = capacity_reservation.bind_digest(digest)
+        if binding == "duplicate":
+            return CaptureDuplicate()
+        if binding == "unavailable":
+            return await self._skipped_with_missed("memory_sidecar_unavailable")
+        if binding == "disabled":
+            return CaptureSkipped(reason="memory_operation_in_progress")
+        reservation = capacity_reservation
 
         pinned_bundle: PinnedBundle | None = None
-        if request.attachments:
-            try:
+        try:
+            if request.attachments and self._writer.attachments_enabled:
                 if source_lease is None:
                     pinned_bundle = await run_blocking(
                         self._attachment_store.pin,
                         request.attachments,
+                        on_cancel_result=self._release_cancelled_pinned_bundle,
+                        on_cancel_error=self._handle_cancelled_attachment_failure,
                     )
                 else:
                     pinned_bundle = await run_blocking(
                         self._attachment_store.pin,
                         request.attachments,
                         source_lease=source_lease,
+                        on_cancel_result=self._release_cancelled_pinned_bundle,
+                        on_cancel_error=self._handle_cancelled_attachment_failure,
                     )
-            except Exception as error:
-                if normalized_text.strip():
-                    return await self._capture_under_root(
-                        replace(
-                            request,
-                            attachments=(),
-                            attachment_config_generation=None,
-                        ),
-                        normalized_text,
-                        source_lease=None,
-                    )
-                if isinstance(error, AttachmentPinError):
-                    return await self._capture_pin_failure(error.error)
-                if isinstance(error, UnicodeError):
-                    return await self._skipped_with_missed("memory_invalid_input")
-                return OperationFailed(error="memory_store_unavailable")
-
-        try:
-            attachment_payload = (
-                encode_pinned_bundle(pinned_bundle)
-                if pinned_bundle is not None
-                else None
-            )
-            result = await self._store_call(
-                self._store.enqueue_request,
+            admission = await self._store_call(
+                self._store.admit_volatile_capture,
                 source_message_id=request.source_message_id,
                 session_id=request.session_id,
                 principal_id=request.principal_id,
                 project_ref=request.project_id,
                 provenance=request.provenance,
-                payload_text=normalized_text,
-                payload_attachments=attachment_payload,
-                attachment_bundle_id=(
-                    pinned_bundle.bundle_id if pinned_bundle is not None else None
-                ),
-                attachment_bundle_relative_path=(
-                    pinned_bundle.relative_path if pinned_bundle is not None else None
-                ),
-                attachment_file_count=(
-                    len(pinned_bundle.attachments) if pinned_bundle is not None else 0
-                ),
-                attachment_total_bytes=(
-                    pinned_bundle.total_bytes if pinned_bundle is not None else 0
-                ),
                 occurred_at_ms=request.occurred_at_ms,
                 max_provider_timestamp_ms=MAX_PROVIDER_TIMESTAMP_MS,
-                nonterminal_limit=MAX_NONTERMINAL_QUEUE_ROWS,
             )
-        except UnicodeError:
-            if pinned_bundle is not None:
-                await self._release_unadmitted_bundle(pinned_bundle.bundle_id)
-            return await self._skipped_with_missed("memory_invalid_input")
-        except Exception:
-            if pinned_bundle is not None:
-                await self._release_unadmitted_bundle(pinned_bundle.bundle_id)
+        except asyncio.CancelledError:
+            await self._release_unadmitted_capture(reservation, pinned_bundle)
+            raise
+        except Exception as error:
+            if isinstance(error, AttachmentCleanupUnprovenError):
+                self._writer.disable_attachment_intake()
+            if isinstance(error, AttachmentPinError) and normalized_text.strip() and request.attachments:
+                try:
+                    admission = await self._store_call(
+                        self._store.admit_volatile_capture,
+                        source_message_id=request.source_message_id,
+                        session_id=request.session_id,
+                        principal_id=request.principal_id,
+                        project_ref=request.project_id,
+                        provenance=request.provenance,
+                        occurred_at_ms=request.occurred_at_ms,
+                        max_provider_timestamp_ms=MAX_PROVIDER_TIMESTAMP_MS,
+                    )
+                except asyncio.CancelledError:
+                    await self._release_unadmitted_capture(reservation, pinned_bundle)
+                    raise
+                except Exception:
+                    pass
+                else:
+                    return await self._complete_capture_admission(
+                        reservation,
+                        admission,
+                        text=normalized_text,
+                        bundle=None,
+                    )
+            await self._release_unadmitted_capture(reservation, pinned_bundle)
+            if isinstance(error, AttachmentPinError) and normalized_text.strip() and request.attachments:
+                return CaptureSkipped(reason="memory_store_unavailable")
+            if isinstance(error, AttachmentPinError):
+                return await self._capture_pin_failure(error.error)
+            if isinstance(error, UnicodeError):
+                return await self._skipped_with_missed("memory_invalid_input")
             return OperationFailed(error="memory_store_unavailable")
 
-        if result.outcome == "accepted":
+        return await self._complete_capture_admission(
+            reservation,
+            admission,
+            text=normalized_text,
+            bundle=pinned_bundle,
+        )
+
+    async def _complete_capture_admission(
+        self,
+        reservation: WriterReservation,
+        admission: VolatileAdmission,
+        *,
+        text: str,
+        bundle: PinnedBundle | None,
+    ) -> CaptureReceipt:
+        if admission.outcome == "accepted":
+            return await self._offer_admitted_capture(
+                reservation,
+                admission,
+                text=text,
+                bundle=bundle,
+            )
+
+        await self._release_unadmitted_capture(reservation, bundle)
+        if admission.outcome in {"project_limit", "timestamp_invalid"}:
+            return CaptureSkipped(reason="memory_invalid_input")
+        if admission.outcome == "clear_in_progress":
+            return CaptureSkipped(reason="memory_operation_in_progress")
+        return OperationFailed(error="memory_store_unavailable")
+
+    async def _offer_admitted_capture(
+        self,
+        reservation: WriterReservation,
+        admission: VolatileAdmission,
+        *,
+        text: str,
+        bundle: PinnedBundle | None,
+    ) -> CaptureReceipt:
+        outcome: CaptureOfferOutcome = self._writer.offer_capture(
+            reservation,
+            admission,
+            text=text,
+            attachments=(),
+            bundle=bundle,
+        )
+        if outcome == "queued":
             return CaptureAccepted(
                 captured_attachment_count=(
-                    len(pinned_bundle.attachments)
-                    if pinned_bundle is not None
-                    else 0
+                    len(bundle.attachments) if bundle is not None else 0
                 )
             )
-        if pinned_bundle is not None:
-            await self._release_unadmitted_bundle(pinned_bundle.bundle_id)
-        if result.outcome == "duplicate":
-            return CaptureDuplicate()
-        if result.outcome == "queue_full":
-            return CaptureSkipped(reason="memory_queue_full")
-        if result.outcome == "timestamp_invalid":
-            return CaptureSkipped(reason="memory_invalid_input")
-        if result.outcome == "project_limit":
-            return CaptureSkipped(reason="memory_invalid_input")
-        return CaptureSkipped(reason="memory_clear_failed")
+        await self._release_unadmitted_capture(reservation, bundle)
+        if outcome == "full":
+            return await self._skipped_with_missed("memory_queue_full")
+        if outcome == "unavailable":
+            return await self._skipped_with_missed("memory_sidecar_unavailable")
+        return await self._skipped_with_missed("memory_operation_in_progress")
 
     async def _capture_pin_failure(self, error: MemoryErrorCode) -> CaptureReceipt:
         if error == "memory_store_unavailable":
@@ -884,11 +750,41 @@ class MemoryModule:
         return OperationFailed(error="memory_store_unavailable")
 
     async def _release_unadmitted_bundle(self, bundle_id: str) -> None:
-        try:
-            await run_blocking(self._attachment_store.release, bundle_id)
-        except Exception:
-            # It has no DB reference and boot reconciliation removes the orphan.
+        if self._attachment_store is None:
+            self._writer.disable_attachment_intake()
             return
+        try:
+            await run_blocking(
+                self._attachment_store.release,
+                bundle_id,
+                on_cancel_error=lambda _error: self._writer.disable_attachment_intake(),
+            )
+        except Exception:
+            self._writer.disable_attachment_intake()
+
+    async def _release_unadmitted_capture(
+        self,
+        reservation: WriterReservation,
+        bundle: PinnedBundle | None,
+    ) -> None:
+        try:
+            if bundle is not None:
+                await self._release_unadmitted_bundle(bundle.bundle_id)
+        finally:
+            reservation.abandon()
+
+    def _release_cancelled_pinned_bundle(self, bundle: PinnedBundle) -> None:
+        if self._attachment_store is None:
+            self._writer.disable_attachment_intake()
+            return
+        try:
+            self._attachment_store.release(bundle.bundle_id)
+        except Exception:
+            self._writer.disable_attachment_intake()
+
+    def _handle_cancelled_attachment_failure(self, error: BaseException) -> None:
+        if isinstance(error, AttachmentCleanupUnprovenError):
+            self._writer.disable_attachment_intake()
 
     async def search(
         self,
@@ -898,7 +794,7 @@ class MemoryModule:
         project_id: str,
         limit: int = DEFAULT_SEARCH_LIMIT,
     ) -> MemoryResult:
-        """Compatibility wrapper for the default one-run hybrid recall policy."""
+        """Compatibility wrapper for the default hybrid recall policy."""
 
         try:
             policy = RecallPolicy(mode="hybrid", max_results=limit)
@@ -924,7 +820,7 @@ class MemoryModule:
         current_session_id: str | None = None,
         effective_mode: Literal["keyword", "vector", "hybrid", "agentic"] | None = None,
     ) -> RecallResult:
-        """Execute one capability-gated recall decision and at most one search."""
+        """Execute one capability-gated, dual-owner recall decision."""
 
         if not self._is_enabled():
             return OperationFailed(error="memory_disabled")
@@ -941,8 +837,8 @@ class MemoryModule:
         if len(query_bytes) > MAX_QUERY_BYTES:
             return OperationFailed(error="memory_input_too_large")
 
-        if self._clear_active or self._is_maintenance_open():
-            return OperationFailed(error="memory_clear_failed")
+        if self._retired:
+            return OperationFailed(error="memory_operation_in_progress")
 
         agentic_started = (
             monotonic()
@@ -1017,17 +913,29 @@ class MemoryModule:
             except Exception:
                 return OperationFailed(error="memory_store_unavailable")
             if meta.clear_in_progress:
-                return OperationFailed(error="memory_clear_failed")
-            session_ref = None
+                return OperationFailed(error="memory_operation_in_progress")
+            owner_ids = (
+                principal_id,
+                derive_assistant_memory_owner_id(principal_id),
+            )
+            session_refs = [None, None]
             if policy.include_current_session:
                 if not isinstance(current_session_id, str) or not current_session_id.strip():
                     return OperationFailed(error="memory_invalid_input")
                 try:
-                    session_ref = await self._store_call(
-                        self._store.provider_session_ref,
-                        principal_id=principal_id,
-                        project_ref=project_id,
-                        session_id=current_session_id.strip(),
+                    session_refs = list(
+                        await asyncio.gather(
+                            *(
+                                self._store_call(
+                                    self._store.provider_session_ref,
+                                    principal_id=principal_id,
+                                    project_ref=project_id,
+                                    session_id=current_session_id.strip(),
+                                    memory_owner_id=owner_id,
+                                )
+                                for owner_id in owner_ids
+                            )
+                        )
                     )
                 except ValueError:
                     return OperationFailed(error="memory_access_denied")
@@ -1062,30 +970,69 @@ class MemoryModule:
                 provider_timeout = _remaining_timeout(agentic_deadline)
             else:
                 provider_timeout = None
-            result = await self._provider_read(
-                lambda: self._provider.search(
-                    principal_id,
-                    project_id,
-                    normalized_query,
-                    policy.max_results,
-                    method=effective_mode,
-                    include_profile=policy.include_profile,
-                    session_ref=session_ref,
-                    timeout_seconds=provider_timeout,
-                    agentic_telemetry=agentic_telemetry,
-                ),
-                timeout_seconds=provider_timeout,
+            leg_methods = (
+                effective_mode,
+                "hybrid" if effective_mode == "agentic" else effective_mode,
             )
-        if isinstance(result, OperationFailed):
-            return result
-        bounded = self._bounded_items(result, limit=policy.max_results)
-        if isinstance(bounded, OperationFailed):
-            return bounded
+            results = await asyncio.gather(
+                *(
+                    self._provider_read(
+                        lambda owner_id=owner_id, method=method, session_ref=session_ref, index=index: self._provider.search(
+                            owner_id,
+                            project_id,
+                            normalized_query,
+                            policy.max_results,
+                            method=method,
+                            include_profile=policy.include_profile,
+                            session_ref=session_ref,
+                            timeout_seconds=provider_timeout if index == 0 else None,
+                            agentic_telemetry=agentic_telemetry if index == 0 else None,
+                        ),
+                        timeout_seconds=provider_timeout,
+                    )
+                    for index, (owner_id, method, session_ref) in enumerate(
+                        zip(owner_ids, leg_methods, session_refs)
+                    )
+                )
+            )
+        successful: list[tuple[ProviderSearchItem, ...]] = []
+        leg_succeeded: list[bool] = []
+        first_failure: OperationFailed | None = None
+        for owner_id, result in zip(owner_ids, results):
+            if isinstance(result, OperationFailed):
+                if first_failure is None:
+                    first_failure = result
+                successful.append(())
+                leg_succeeded.append(False)
+                continue
+            bounded = self._bounded_provider_search_items(
+                result,
+                owner_id=owner_id,
+                limit=policy.max_results,
+            )
+            if isinstance(bounded, OperationFailed):
+                if first_failure is None:
+                    first_failure = bounded
+                successful.append(())
+                leg_succeeded.append(False)
+                continue
+            successful.append(bounded)
+            leg_succeeded.append(True)
+        succeeded_count = sum(leg_succeeded)
+        if succeeded_count == 0:
+            return first_failure or OperationFailed(error="memory_processing_failed")
+        merged = _merge_owner_search_items(
+            user_items=successful[0],
+            assistant_items=successful[1],
+            same_method=leg_methods[0] == leg_methods[1],
+            limit=policy.max_results,
+        )
         return RecallItems(
-            items=bounded.items,
+            items=merged,
             requested_mode=requested_mode,
             effective_mode=effective_mode,
-            current_session_overlay=session_ref is not None,
+            current_session_overlay=any(ref is not None for ref in session_refs),
+            warnings=("memory_search_partial",) if succeeded_count == 1 else (),
         )
 
     async def resolve_recall_mode(
@@ -1146,8 +1093,8 @@ class MemoryModule:
             return OperationFailed(error="memory_access_denied")
         if not is_new_stored_memory_project_id(project_id):
             return OperationFailed(error="memory_access_denied")
-        if self._clear_active or self._is_maintenance_open():
-            return OperationFailed(error="memory_clear_failed")
+        if self._retired:
+            return OperationFailed(error="memory_operation_in_progress")
 
         async with self._lifecycle_lock:
             if not self._is_enabled():
@@ -1157,11 +1104,37 @@ class MemoryModule:
             except Exception:
                 return OperationFailed(error="memory_store_unavailable")
             if meta.clear_in_progress:
-                return OperationFailed(error="memory_clear_failed")
-            result = await self._provider_read(lambda: self._provider.profile(principal_id, project_id))
-        return result if isinstance(result, OperationFailed) else self._bounded_items(
-            result,
-            limit=MAX_PROVIDER_RESULT_ITEMS,
+                return OperationFailed(error="memory_operation_in_progress")
+            owner_ids = (
+                principal_id,
+                derive_assistant_memory_owner_id(principal_id),
+            )
+            results = await asyncio.gather(
+                *(
+                    self._provider_read(lambda owner_id=owner_id: self._provider.profile(owner_id, project_id))
+                    for owner_id in owner_ids
+                )
+            )
+        items: list[MemoryItem] = []
+        first_failure: OperationFailed | None = None
+        succeeded = 0
+        for origin, result in zip(("user", "agent"), results):
+            if isinstance(result, OperationFailed):
+                if first_failure is None:
+                    first_failure = result
+                continue
+            bounded = self._bounded_items(result, limit=MAX_PROVIDER_RESULT_ITEMS)
+            if isinstance(bounded, OperationFailed):
+                if first_failure is None:
+                    first_failure = bounded
+                continue
+            succeeded += 1
+            items.extend(replace(item, origin=origin) for item in bounded.items)
+        if succeeded == 0:
+            return first_failure or OperationFailed(error="memory_processing_failed")
+        return MemoryItems(
+            items=tuple(items),
+            warnings=("memory_search_partial",) if succeeded == 1 else (),
         )
 
     async def list_episodes(
@@ -1171,6 +1144,7 @@ class MemoryModule:
         project_id: str,
         page: int = 1,
         page_size: int = MAX_LIST_PAGE_SIZE,
+        origin: MemoryOrigin = "user",
     ) -> MemoryListResult:
         """Return one bounded page of processed episodes or a closed error."""
 
@@ -1179,6 +1153,7 @@ class MemoryModule:
             project_id=project_id,
             page=page,
             page_size=page_size,
+            origin=origin,
         )
         if invalid is not None:
             return invalid
@@ -1188,6 +1163,7 @@ class MemoryModule:
                 project_id=project_id,
                 page=page,
                 page_size=page_size,
+                origin=origin,
             )
 
     @asynccontextmanager
@@ -1206,8 +1182,8 @@ class MemoryModule:
 
             return result
 
-        if self._clear_active or self._is_maintenance_open():
-            yield unavailable("memory_clear_failed")
+        if self._retired:
+            yield unavailable("memory_operation_in_progress")
             return
         remaining = deadline - monotonic()
         if remaining <= 0:
@@ -1222,8 +1198,8 @@ class MemoryModule:
             yield unavailable("memory_provider_timeout")
             return
         try:
-            if self._clear_active or self._is_maintenance_open():
-                yield unavailable("memory_clear_failed")
+            if self._retired:
+                yield unavailable("memory_operation_in_progress")
                 return
             try:
                 meta = await self._store_call(self._store.ensure_meta)
@@ -1231,7 +1207,7 @@ class MemoryModule:
                 yield unavailable("memory_store_unavailable")
                 return
             if meta.clear_in_progress:
-                yield unavailable("memory_clear_failed")
+                yield unavailable("memory_operation_in_progress")
                 return
             if monotonic() >= deadline:
                 yield unavailable("memory_provider_timeout")
@@ -1247,6 +1223,7 @@ class MemoryModule:
         project_id: str,
         page: int,
         page_size: int,
+        origin: MemoryOrigin,
     ) -> OperationFailed | None:
         if not self._is_enabled():
             return OperationFailed(error="memory_disabled")
@@ -1261,10 +1238,11 @@ class MemoryModule:
             or isinstance(page_size, bool)
             or not isinstance(page_size, int)
             or not 1 <= page_size <= MAX_LIST_PAGE_SIZE
+            or origin not in ("user", "agent")
         ):
             return OperationFailed(error="memory_invalid_input")
-        if self._clear_active or self._is_maintenance_open():
-            return OperationFailed(error="memory_clear_failed")
+        if self._retired:
+            return OperationFailed(error="memory_operation_in_progress")
         return None
 
     async def _list_episodes_under_lifecycle(
@@ -1274,12 +1252,14 @@ class MemoryModule:
         project_id: str,
         page: int,
         page_size: int,
+        origin: MemoryOrigin,
     ) -> MemoryListResult:
         invalid = self._list_request_error(
             principal_id=principal_id,
             project_id=project_id,
             page=page,
             page_size=page_size,
+            origin=origin,
         )
         if invalid is not None:
             return invalid
@@ -1288,12 +1268,13 @@ class MemoryModule:
         except Exception:
             return OperationFailed(error="memory_store_unavailable")
         if meta.clear_in_progress:
-            return OperationFailed(error="memory_clear_failed")
+            return OperationFailed(error="memory_operation_in_progress")
         return await self._list_episodes_after_store_check(
             principal_id=principal_id,
             project_id=project_id,
             page=page,
             page_size=page_size,
+            origin=origin,
         )
 
     async def _list_episodes_after_store_check(
@@ -1303,18 +1284,25 @@ class MemoryModule:
         project_id: str,
         page: int,
         page_size: int,
+        origin: MemoryOrigin,
     ) -> MemoryListResult:
         invalid = self._list_request_error(
             principal_id=principal_id,
             project_id=project_id,
             page=page,
             page_size=page_size,
+            origin=origin,
         )
         if invalid is not None:
             return invalid
+        owner_id = (
+            principal_id
+            if origin == "user"
+            else derive_assistant_memory_owner_id(principal_id)
+        )
         result = await self._provider_list_read(
             lambda: self._provider.list_episodes(
-                principal_id,
+                owner_id,
                 project_id,
                 page,
                 page_size,
@@ -1322,22 +1310,18 @@ class MemoryModule:
         )
         if isinstance(result, OperationFailed):
             return result
-        return self._bounded_list_page(
+        bounded = self._bounded_list_page(
             result,
             project_id=project_id,
             page=page,
             page_size=page_size,
         )
-
-    async def failure_log(self, *, limit: int = 50) -> tuple[MemoryFailureLogEntry, ...]:
-        """Return terminal failure history while fencing its bounded compaction."""
-
-        if self._clear_active or self._is_maintenance_open():
-            return ()
-        async with self._root_lifecycle_lock():
-            if self._clear_active or self._is_maintenance_open():
-                return ()
-            return await self._store_call(self._store.failure_log, limit=limit)
+        if isinstance(bounded, OperationFailed):
+            return bounded
+        return replace(
+            bounded,
+            items=tuple(replace(item, origin=origin) for item in bounded.items),
+        )
 
     async def _skipped_with_missed(self, error: MemoryErrorCode) -> CaptureReceipt:
         try:
@@ -1349,10 +1333,10 @@ class MemoryModule:
 
     async def _provider_read(
         self,
-        operation: Callable[[], Awaitable[tuple[MemoryItem, ...]]],
+        operation: Callable[[], Awaitable[tuple[_ProviderReadResult, ...]]],
         *,
         timeout_seconds: float | None = None,
-    ) -> tuple[MemoryItem, ...] | OperationFailed:
+    ) -> tuple[_ProviderReadResult, ...] | OperationFailed:
         try:
             return await asyncio.wait_for(
                 operation(),
@@ -1364,6 +1348,49 @@ class MemoryModule:
             return OperationFailed(error=_provider_error_code(failure, "memory_processing_failed"))
         except Exception:
             return OperationFailed(error="memory_processing_failed")
+
+    def _bounded_provider_search_items(
+        self,
+        items: tuple[ProviderSearchItem, ...],
+        *,
+        owner_id: str,
+        limit: int,
+    ) -> tuple[ProviderSearchItem, ...] | OperationFailed:
+        if not isinstance(items, tuple) or len(items) > limit or not is_memory_owner_id(owner_id):
+            return OperationFailed(error="memory_provider_response_invalid")
+        bounded = self._bounded_items(tuple(item.item for item in items), limit=limit) if all(
+            isinstance(item, ProviderSearchItem) for item in items
+        ) else OperationFailed(error="memory_provider_response_invalid")
+        if isinstance(bounded, OperationFailed):
+            return bounded
+        for item in items:
+            if (
+                item.queried_owner != owner_id
+                or item.item.origin is not None
+                or isinstance(item.provider_rank, bool)
+                or not isinstance(item.provider_rank, int)
+                or item.provider_rank < 0
+                or (
+                    item.score is not None
+                    and (
+                        isinstance(item.score, bool)
+                        or not isinstance(item.score, (int, float))
+                        or not math.isfinite(item.score)
+                    )
+                )
+                or (
+                    item.episode_id is not None
+                    and (
+                        not isinstance(item.episode_id, str)
+                        or not item.episode_id
+                        or (episode_id_bytes := _utf8_bytes(item.episode_id)) is None
+                        or len(episode_id_bytes) > 256
+                    )
+                )
+                or (item.timestamp is not None and _list_timestamp_instant(item.timestamp) is None)
+            ):
+                return OperationFailed(error="memory_provider_response_invalid")
+        return items
 
     async def _provider_list_read(
         self,
@@ -1426,6 +1453,7 @@ class MemoryModule:
                 not isinstance(item, MemoryListItem)
                 or item.kind != "episode"
                 or item.project != project_id
+                or item.origin is not None
                 or not _valid_list_identifier(item.id)
                 or item.id in seen_ids
                 or instant is None
@@ -1482,6 +1510,8 @@ class MemoryModule:
                 if profile_bytes is None:
                     return OperationFailed(error="memory_provider_response_invalid")
                 total_bytes += profile_bytes
+            if item.origin not in {None, "user", "agent", "both"}:
+                return OperationFailed(error="memory_provider_response_invalid")
             if total_bytes > MAX_PROVIDER_RESULT_BYTES:
                 return OperationFailed(error="memory_provider_response_invalid")
         return MemoryItems(items=items)
@@ -1550,12 +1580,6 @@ class MemoryModule:
             return False
         return bool(value)
 
-    def _is_maintenance_open(self) -> bool:
-        try:
-            return bool(self._maintenance_open())
-        except Exception:
-            return True
-
     def _root_lifecycle_lock(self) -> asyncio.Lock:
         return _ROOT_LIFECYCLE_LOCKS.setdefault(self._provider_root_key, asyncio.Lock())
 
@@ -1614,6 +1638,81 @@ class MemoryModule:
     def _valid_identifier(value: str) -> bool:
         encoded = _utf8_bytes(value)
         return bool(value.strip()) and encoded is not None and len(encoded) <= MAX_CAPTURE_IDENTIFIER_BYTES
+
+
+def _merge_owner_search_items(
+    *,
+    user_items: tuple[ProviderSearchItem, ...],
+    assistant_items: tuple[ProviderSearchItem, ...],
+    same_method: bool,
+    limit: int,
+) -> tuple[MemoryItem, ...]:
+    if same_method:
+        ranked: list[tuple[ProviderSearchItem, Literal["user", "agent"]]] = [
+            *((item, "user") for item in user_items),
+            *((item, "agent") for item in assistant_items),
+        ]
+        ranked.sort(key=lambda value: _same_method_rank_key(value[0]))
+    else:
+        user_ranked = sorted(user_items, key=_per_leg_rank_key)
+        assistant_ranked = sorted(assistant_items, key=_per_leg_rank_key)
+        ranked = []
+        for index in range(max(len(user_ranked), len(assistant_ranked))):
+            if index < len(user_ranked):
+                ranked.append((user_ranked[index], "user"))
+            if index < len(assistant_ranked):
+                ranked.append((assistant_ranked[index], "agent"))
+
+    merged: list[MemoryItem] = []
+    seen: dict[str, int] = {}
+    for provider_item, origin in ranked:
+        item = replace(provider_item.item, origin=origin)
+        normalized_text = MemoryModule._normalize_text(item.text)
+        existing_index = seen.get(normalized_text)
+        if existing_index is not None:
+            existing = merged[existing_index]
+            if existing.origin != origin:
+                merged[existing_index] = replace(existing, origin="both")
+            continue
+        if len(merged) >= limit:
+            continue
+        seen[normalized_text] = len(merged)
+        merged.append(item)
+    return tuple(merged)
+
+
+def _same_method_rank_key(item: ProviderSearchItem) -> tuple[object, ...]:
+    timestamp = _list_timestamp_instant(item.timestamp)
+    timestamp_value = timestamp.timestamp() if timestamp is not None else float("-inf")
+    normalized_text = MemoryModule._normalize_text(item.item.text)
+    if item.score is not None:
+        return (
+            0,
+            -float(item.score),
+            -timestamp_value,
+            item.episode_id or normalized_text,
+            item.provider_rank,
+            normalized_text,
+        )
+    return (
+        1,
+        item.provider_rank,
+        -timestamp_value,
+        item.episode_id or normalized_text,
+        normalized_text,
+    )
+
+
+def _per_leg_rank_key(item: ProviderSearchItem) -> tuple[object, ...]:
+    timestamp = _list_timestamp_instant(item.timestamp)
+    timestamp_value = timestamp.timestamp() if timestamp is not None else float("-inf")
+    normalized_text = MemoryModule._normalize_text(item.item.text)
+    return (
+        item.provider_rank,
+        -timestamp_value,
+        item.episode_id or normalized_text,
+        normalized_text,
+    )
 
 
 def _profile_text_bytes(value: object) -> bytes | None:

@@ -27,9 +27,8 @@ from core.memory.process import (
     _STARTUP_TIMEOUT_SECONDS,
     _STOP_TIMEOUT_SECONDS,
 )
-from core.memory.worker import ADD_TIMEOUT_SECONDS
+ADD_TIMEOUT_SECONDS = 30.0
 from vibe.internal_client import (
-    MEMORY_FINAL_FLUSH_TIMEOUT_SECONDS,
     MEMORY_FAILURES_TIMEOUT_SECONDS,
     MEMORY_INSTALL_TIMEOUT_SECONDS,
     MEMORY_PROCESSING_RECORD_TIMEOUT_SECONDS,
@@ -39,18 +38,18 @@ from vibe.internal_client import (
     MEMORY_STATUS_TIMEOUT_SECONDS,
     MEMORY_MAINTENANCE_TIMEOUT_SECONDS,
     memory_archive_session,
-    memory_clear,
+    memory_delete_data,
     memory_profile,
-    memory_final_flush,
     memory_failures,
     memory_maintenance,
     memory_processing_record,
     memory_profile_sync,
-    memory_restart,
+    memory_repair,
     memory_search,
     memory_search_sync,
     memory_status,
     memory_status_sync,
+    memory_wake,
 )
 
 
@@ -138,18 +137,10 @@ def test_search_clients_outlast_capability_probe_and_provider_search() -> None:
         )
 
 
-def test_final_flush_client_outlasts_the_controller_deadline() -> None:
-    assert MEMORY_FINAL_FLUSH_TIMEOUT_SECONDS > 5.0
-    assert (
-        inspect.signature(memory_final_flush).parameters["timeout"].default
-        == MEMORY_FINAL_FLUSH_TIMEOUT_SECONDS
-    )
-
-
 def test_session_archive_client_has_no_reporting_timeout() -> None:
     # The archive commit includes unbounded local filesystem/SQLite work. The
     # reporting transport must await that terminal write instead of returning a
-    # retryable-looking failure mid-commit. Memory flush is not on this round-trip.
+    # retryable-looking failure mid-commit.
     assert "timeout" not in inspect.signature(memory_archive_session).parameters
 
 
@@ -167,12 +158,9 @@ def test_reconcile_client_outlasts_every_bounded_lifecycle_step() -> None:
     assert MEMORY_RECONCILE_TIMEOUT_SECONDS > _reconcile_lifecycle_budget_seconds()
 
 
-def test_restart_client_has_no_reporting_timeout() -> None:
-    assert "timeout" not in inspect.signature(memory_restart).parameters
-
-
-def test_clear_clients_have_no_reporting_timeout() -> None:
-    assert "timeout" not in inspect.signature(memory_clear).parameters
+def test_memory_operations_have_no_reporting_timeout() -> None:
+    for operation in (memory_wake, memory_repair, memory_delete_data):
+        assert "timeout" not in inspect.signature(operation).parameters
 
 
 def test_install_client_covers_the_dependency_job_budget() -> None:

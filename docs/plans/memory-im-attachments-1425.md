@@ -84,7 +84,7 @@ replacement nor same-inode modification can substitute bytes after acquisition.
 
 The message handler materializes before scheduling Memory capture. Agent delivery
 and Memory retain independent lease references, so Agent cleanup, retry, or
-durable-delivery failure cannot race the Memory pin. Downloads are sequential or
+Memory capture failure cannot race the Memory pin. Downloads are sequential or
 at most two concurrent and keep the existing 30-second per-file timeout.
 
 Slack, Discord, and Feishu/Lark use their existing authenticated streaming path
@@ -118,10 +118,10 @@ manifest v1 and the store schema do not change.
 Prepared captures use the existing path:
 
 ```text
-MemoryModule -> durable outbox -> coordinator -> EverOSPort.add(ContentItem[]) -> flush
+MemoryModule -> bounded writer -> EverOSPort.add(ContentItem[]) -> flush
 ```
 
-The outbox and logs may contain only sanitized display name, closed content kind
+Writer inputs and logs may contain only sanitized display name, closed content kind
 and extension, byte count, bundle-relative metadata, keyed source digests, and
 closed skip reasons. They must not contain native URLs, credentials, encryption
 material, raw attachment bytes, absolute source paths, filenames supplied for
@@ -167,9 +167,7 @@ embeddings or restart Avibe.
 `MemoryPreflightDiagnostic.side` adds `multimodal`. Its real compatibility probe is
 a generated 64x64 PNG request with no user data. Missing optional configuration does
 not block Memory enablement. Insight-reader and preflight redaction include the
-independent multimodal URL and key; a configured parse may produce a bounded,
-redacted `multimodal_llm` record, while an unconfigured skip produces no provider
-add or call-log row.
+independent multimodal URL and key; an unconfigured skip produces no provider add.
 
 The settings API carries the optional Multimodal endpoint with the same write-only-key
 and clear semantics as rerank. Either optional endpoint can be cleared while Memory
@@ -257,18 +255,18 @@ Slack until slice 5 adds contract evidence for the other four adapters.
 - The retained reference lives until the asynchronous Memory capture finishes.
   The Memory module pins through the descriptor-backed lease before enqueueing;
   the ordinary Agent consumer independently adopts its source files. This keeps
-  one native download while preventing Agent cleanup or durable-delivery failure
+  one native download while preventing Agent cleanup or Memory capture failure
   from racing the Memory pin.
 - Capture reads current attachment readiness only after the closed DM admission
   gates pass. `not_configured` and `unavailable` retain eligible text but produce
-  no attachment pin, provider attachment, or call-log row. Attachment-only turns
+  no attachment pin or provider attachment. Attachment-only turns
   with no surviving item are skipped.
 - Per-attachment selection uses the closed format and limit table. A rejected
   sibling does not remove eligible text or valid siblings. Attachment telemetry
   reports only the attempt's total, captured, and dropped counts; it does not
   attribute reasons to individual files.
-- The hermetic Slack scenario drives the shared materializer, admission, durable
-  pin/outbox worker, fake EverOS add/flush, redacted multimodal call log, and
+- The hermetic Slack scenario drives the shared materializer, admission, volatile
+  pin/writer, fake EverOS add/flush, a test-only invocation observation, and
   `vibe memory search`. It proves a single adapter download and zero temp or
   Memory-bundle residue after successful processing.
 
@@ -380,7 +378,7 @@ The canonical capability is `memory_im_attachment_capture` under
   added, flushed, extracted, and retrievable through `vibe memory search`;
 - `MEMORY-IM-ATTACH-002`: group and unbound denial performs no Memory acquisition;
 - `MEMORY-IM-ATTACH-003`: absent multimodal configuration captures eligible text
-  only and creates no attachment provider/call-log activity; and
+  only and creates no attachment provider activity; and
 - `MEMORY-IM-ATTACH-004`: count, per-file, total-size, unsupported-type, and partial
   download failures preserve valid siblings and leave no temp or bundle leak;
 - `MEMORY-IM-ATTACH-005`: a native human Discord file share reaches attachment
@@ -407,8 +405,8 @@ running Avibe services, real user paths, or production state.
    absent configuration retains the locked `not_configured` projection.
 3. Shared leased materializer, bounded Telegram/WeChat acquisition, and pin-source
    generalization. IM capture stays gated.
-4. Attachment classification/admission and the Slack closed loop with call-log
-   proof. This slice adds Slack to the platform allowlist only after the capture path
+4. Attachment classification/admission and the Slack closed loop with test-only
+   provider-invocation proof. This slice adds Slack to the platform allowlist only after the capture path
    and its closed-loop evidence land, revealing the endpoint card when Slack is
    enabled and enabling health-derived readiness without a user-facing toggle.
 5. Discord, Telegram, Feishu/Lark, and WeChat enablement and contract tests, plus

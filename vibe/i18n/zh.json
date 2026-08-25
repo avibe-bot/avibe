@@ -754,7 +754,7 @@
         "profile": "显示记忆档案",
         "list": "列出已处理的记忆片段",
         "search": "搜索本地记忆",
-        "remember": "将长期个人信息加入队列",
+        "remember": "提交个人信息供记忆系统尽力处理",
         "query": "搜索内容",
         "project": "记忆项目：default，或 billing 这类小写 slug",
         "page": "页码（从 1 开始）",
@@ -765,14 +765,16 @@
         "json": "输出机器可读格式"
       },
       "error": "记忆 {operation} 失败：{code}",
-      "status": "记忆来源：{state}",
+      "status": "记忆：{state}",
       "provider": "EverOS {version}：{state}",
       "attachmentCapture": "IM 附件捕获：{state}",
       "sourceReason": "来源原因：{reason}",
-      "sourceState": {
-        "available": "可用",
-        "stale": "数据已过期",
-        "unavailable": "不可用",
+      "runtimeState": {
+        "disabled": "已停用",
+        "starting": "正在启动",
+        "running": "运行中",
+        "degraded": "已降级",
+        "needsRepair": "需要修复",
         "unknown": "未知"
       },
       "providerState": {
@@ -798,14 +800,27 @@
         "runtimeUnsupported": "记忆运行时不受支持",
         "runtimeInstallFailed": "记忆运行时安装失败",
         "reconcileFailed": "记忆协调失败",
-        "restartFailed": "记忆重启失败",
+        "wakeFailed": "记忆唤醒失败，未删除数据",
+        "runtimeBusy": "记忆无法安全停止",
+        "permissionDenied": "记忆数据路径权限不足",
+        "diskUnavailable": "记忆磁盘不可用",
+        "localDataUnusable": "本地记忆数据需要修复",
+        "legacyRecoveryRequired": "旧版恢复状态需要明确修复",
         "sidecarUnavailable": "记忆 sidecar 不可用",
         "providerTimeout": "记忆服务请求超时",
         "providerResponseInvalid": "记忆服务响应无效",
         "capabilityUnavailable": "记忆能力不可用",
         "processingFailed": "记忆处理失败",
-        "clearFailed": "清除记忆失败",
-        "factoryResetFailed": "记忆初始化失败",
+        "lossConfirmationRequired": "需要确认接受记忆数据丢失",
+        "embeddingUnavailable": "记忆向量服务不可用",
+        "llmUnavailable": "记忆语言模型不可用",
+        "rerankUnavailable": "记忆重排服务不可用",
+        "multimodalUnavailable": "记忆多模态处理不可用",
+        "repairFailed": "记忆修复失败",
+        "repairNotRequired": "记忆无需修复",
+        "deleteDataFailed": "记忆数据删除失败",
+        "reconfigureFailed": "记忆重新配置失败",
+        "operationInProgress": "另一项记忆操作正在进行",
         "unknown": "未知原因"
       },
       "fault": {
@@ -813,9 +828,18 @@
         "engine": "记忆引擎内部错误，可尝试修复记忆运行时。"
       },
       "empty": "未找到记忆条目。",
-      "remembered": "记忆已加入队列。",
+      "originPrefix": "[{origin}] ",
+      "origin": {
+        "user": "用户记忆",
+        "agent": "Agent 记忆",
+        "both": "用户 + Agent"
+      },
+      "remembered": "记忆请求已确认；系统将尽力处理，但不保证持久保存。",
       "listWarning": {
         "truncated": "记忆列表已达到服务排序上限，后续页面可能不完整。"
+      },
+      "readWarning": {
+        "partial": "部分用户记忆、Agent 记忆或项目记忆来源未能加载，结果可能不完整。"
       },
       "partialRestartWarning": "记忆设置内容暂不可用：Web UI 已重启，但服务仍在运行，\n  两者共享的记忆访问凭证仅存在于运行中的进程内。\n  请先运行 'vibe stop'，再运行 'vibe'，以同时重启两者。"
     }

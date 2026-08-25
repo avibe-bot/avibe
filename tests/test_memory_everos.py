@@ -33,7 +33,11 @@ from core.memory.everos import (
     ProviderCapture,
     attachment_add_rejection_proves_no_write,
 )
-from core.memory.store import _provider_session_ref
+from core.memory.store import (
+    MemoryStore,
+    _provider_session_ref,
+    derive_assistant_memory_owner_id,
+)
 from core.memory.types import (
     MemoryListItem,
     MemoryListPage,
@@ -94,7 +98,7 @@ def _thinking_chat_completion(*, role: str = "assistant", finish_reason: str | N
     }
 
 
-def _health_envelope(recorder) -> dict:
+def _health_envelope() -> dict:
     return {
         "status": "ok",
         "version": "1.2.3",
@@ -107,7 +111,6 @@ def _health_envelope(recorder) -> dict:
         },
         "disabled_features": [],
         "cascade": None,
-        "recorder": recorder,
     }
 
 
@@ -119,7 +122,7 @@ def test_health_accepts_additive_typed_capabilities_and_surfaces_rerank_state(
     rerank: bool,
     disabled_features: list[str],
 ) -> None:
-    payload = _health_envelope({"state": "active", "reason": None})
+    payload = _health_envelope()
     payload["capabilities"]["future_capability"] = False
     payload["capabilities"]["rerank"] = rerank
     payload["disabled_features"] = disabled_features
@@ -139,7 +142,7 @@ def test_health_accepts_additive_typed_capabilities_and_surfaces_rerank_state(
 
 
 def test_health_rejects_a_truncated_core_capability_set() -> None:
-    payload = _health_envelope({"state": "active", "reason": None})
+    payload = _health_envelope()
     del payload["capabilities"]["parser"]
 
     def handler(_request: httpx.Request) -> httpx.Response:
@@ -549,6 +552,20 @@ def test_flush_treats_unsupported_2xx_status_as_unknown(caplog) -> None:
     assert "flush returned an unsupported status value" in caplog.text
 
 
+@pytest.mark.parametrize("request_id", ["", "x" * 129])
+def test_flush_rejects_invalid_success_receipt(request_id: str) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"request_id": request_id, "data": {"status": "extracted"}},
+        )
+
+    with _sidecar_transport(handler):
+        result = asyncio.run(EverOSPort(Path("/tmp/everos.sock")).flush(SESSION_REF))
+
+    assert result == FlushUnknown(reason="transport")
+
+
 @pytest.mark.parametrize(
     ("response", "expected"),
     [
@@ -738,14 +755,92 @@ def test_search_uses_public_search_only_and_maps_episode_and_nested_fact() -> No
             },
         )
     ]
-    assert items[0].kind == "episode"
-    assert items[0].text == "Preferred language\nThe owner uses Python."
-    assert items[0].date == "2026-07-22"
-    assert items[1].kind == "fact"
-    assert items[1].text == "Uses Python for automation."
+    assert items[0].item.kind == "episode"
+    assert items[0].item.text == "Preferred language\nThe owner uses Python."
+    assert items[0].item.date == "2026-07-22"
+    assert items[0].score is None
+    assert items[0].episode_id is None
+    assert items[0].provider_rank == 0
+    assert items[0].queried_owner == PRINCIPAL
+    assert items[1].item.kind == "fact"
+    assert items[1].item.text == "Uses Python for automation."
+
+
+def test_assistant_owner_crosses_add_search_and_profile_provider_contract() -> None:
+    """MEMORY-SEARCH-008, MEMORY-SEARCH-009, MEMORY-SEARCH-011 stay scoped."""
+
+    assistant_owner = "u-11111111111111111111111111111111-agent"
+    session_ref = ProviderSessionRef(
+        principal_id=assistant_owner,
+        epoch=0,
+        project_ref=PROJECT,
+        session_id="src--assistant-owner--e0",
+    )
+    requests: list[tuple[str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        requests.append((request.url.path, payload))
+        if request.url.path.endswith("/add"):
+            return httpx.Response(
+                200,
+                json={"request_id": "add-assistant", "data": {"status": "accumulated"}},
+            )
+        if request.url.path.endswith("/search"):
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "episodes": [
+                            {
+                                "id": "episode-agent",
+                                "user_id": assistant_owner,
+                                "summary": "Agent-owned memory",
+                                "score": 0.75,
+                                "timestamp": "2026-08-21T10:00:00Z",
+                            },
+                            {"id": "wrong-owner", "user_id": PRINCIPAL, "summary": "must not leak"},
+                        ]
+                    }
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "profiles": [
+                        {"user_id": assistant_owner, "profile_data": {"summary": "Agent profile"}},
+                        {"user_id": PRINCIPAL, "profile_data": {"summary": "must not leak"}},
+                    ]
+                }
+            },
+        )
+
+    async def run():
+        provider = EverOSPort(Path("/tmp/everos.sock"))
+        added = await provider.add(ProviderCapture(session_ref, "记住发布计划", 1_725_000_001_234))
+        searched = await provider.search(assistant_owner, PROJECT, "发布", 5)
+        profile = await provider.profile(assistant_owner, PROJECT)
+        return added, searched, profile
+
+    with _sidecar_transport(handler):
+        added, searched, profile = asyncio.run(run())
+
+    assert added == AddAck(request_id="add-assistant", status="accumulated")
+    assert requests[0][1]["messages"][0]["sender_id"] == assistant_owner
+    assert requests[1][1]["user_id"] == assistant_owner
+    assert requests[2][1]["user_id"] == assistant_owner
+    assert len(searched) == 1
+    assert searched[0].queried_owner == assistant_owner
+    assert searched[0].score == 0.75
+    assert searched[0].episode_id == "episode-agent"
+    assert searched[0].timestamp == "2026-08-21T10:00:00Z"
+    assert [item.text for item in profile] == ['{"summary":"Agent profile"}']
 
 
 def test_agentic_search_retains_allowlisted_round_metadata() -> None:
+    """MEMORY-SEARCH-010: agentic recall uses one bounded provider leg."""
+
     requests: list[dict] = []
     sidecar_timeouts: list[float] = []
     telemetry = AgenticRecallTelemetry()
@@ -1804,7 +1899,6 @@ def test_processing_preflight_rejects_unhashable_finish_reason() -> None:
 
 def test_processing_preflight_probes_configured_rerank_endpoint() -> None:
     requests: list[httpx.Request] = []
-    recorded: list[dict[str, object]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
@@ -1826,7 +1920,6 @@ def test_processing_preflight_probes_configured_rerank_endpoint() -> None:
             rerank_base_url="https://rerank.example.test/v1/inference",
             rerank_model="Qwen/Qwen3-Reranker-4B",
             rerank_api_key="rerank-secret",
-            preflight_call_recorder=lambda **kwargs: recorded.append(kwargs),
         ).preflight()
 
     real_async_client = httpx.AsyncClient
@@ -1847,8 +1940,6 @@ def test_processing_preflight_probes_configured_rerank_endpoint() -> None:
         "documents": ["OK"],
     }
     assert requests[-1].headers["authorization"] == "Bearer rerank-secret"
-    assert recorded[-1]["model"] == "Qwen/Qwen3-Reranker-4B"
-    assert "model" not in recorded[-1]["request"]
 
 
 def test_processing_preflight_probes_vllm_rerank_endpoint() -> None:
@@ -1986,7 +2077,6 @@ def test_processing_preflight_probes_configured_multimodal_endpoint() -> None:
     """MEMORY-IM-ATTACH-001: opt-in is admitted with synthetic image data only."""
 
     requests: list[httpx.Request] = []
-    recorded: list[dict[str, object]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
@@ -2009,7 +2099,6 @@ def test_processing_preflight_probes_configured_multimodal_endpoint() -> None:
             multimodal_base_url="https://vision.example.test/v1",
             multimodal_model="vision-model",
             multimodal_api_key="vision-secret",
-            preflight_call_recorder=lambda **kwargs: recorded.append(kwargs),
         ).preflight()
 
     real_async_client = httpx.AsyncClient
@@ -2044,8 +2133,6 @@ def test_processing_preflight_probes_configured_multimodal_endpoint() -> None:
         "da1cbcc0076a2b589fd4d5b79d7fd171d6dff91f4d708d8dec041f4a6e60734f"
     )
     assert requests[-1].headers["authorization"] == "Bearer vision-secret"
-    assert recorded[-1]["side"] == "multimodal"
-    assert recorded[-1]["model"] == "vision-model"
 
 
 def test_processing_preflight_returns_typed_multimodal_failure() -> None:
@@ -2214,40 +2301,6 @@ def test_processing_preflight_accepts_large_bounded_embedding_vectors() -> None:
     assert result.ok is True
 
 
-def test_processing_preflight_records_actual_call_duration() -> None:
-    recorded: list[dict[str, object]] = []
-
-    def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(503, json={"error": {"code": "unavailable"}})
-
-    async def run():
-        return await EverOSPort(
-            Path("/tmp/everos.sock"),
-            llm_base_url="https://llm.example.test/v1",
-            llm_model="chat",
-            llm_api_key="secret",
-            embedding_base_url="https://embed.example.test/v1",
-            embedding_model="embed",
-            embedding_api_key="secret",
-            preflight_call_recorder=lambda **kwargs: recorded.append(kwargs),
-        ).preflight()
-
-    real_async_client = httpx.AsyncClient
-    with (
-        patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type,
-        patch("core.memory.everos._elapsed_ms", return_value=321),
-    ):
-        client_type.side_effect = lambda **kwargs: real_async_client(
-            transport=httpx.MockTransport(handler), **kwargs
-        )
-        result = asyncio.run(run())
-
-    assert result.ok is False
-    assert len(recorded) == 2
-    assert {item["duration_ms"] for item in recorded} == {321}
-    assert all(isinstance(item["started_at_ms"], int) for item in recorded)
-
-
 def test_processing_health_rejects_llm_probe_without_completion_content() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/chat/completions"):
@@ -2283,53 +2336,15 @@ def test_processing_health_uses_owned_child_callback_when_present() -> None:
     assert calls == [None]
 
 
-@pytest.mark.parametrize(
-    ("recorder", "expected"),
-    [
-        ({"state": "active", "reason": None}, {"state": "active", "reason": None}),
-        (
-            {"state": "degraded", "reason": "call_log_corrupt"},
-            {"state": "degraded", "reason": "call_log_corrupt"},
-        ),
-        (
-            {"state": "disabled", "reason": "writer_failures"},
-            {"state": "disabled", "reason": "writer_failures"},
-        ),
-        (
-            {"state": "future", "reason": "new_reason"},
-            {"state": "degraded", "reason": "writer_failures"},
-        ),
-        (None, {"state": "degraded", "reason": "writer_failures"}),
-    ],
-)
-def test_recorder_health_validates_the_closed_sidecar_projection(recorder, expected) -> None:
-    def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=_health_envelope(recorder))
+def test_health_ignores_retired_recorder_projection() -> None:
+    payload = _health_envelope()
+    payload["recorder"] = {"state": "future", "reason": "retired"}
 
-    with _sidecar_transport(handler):
-        health = asyncio.run(EverOSPort(Path("/tmp/everos.sock")).recorder_health())
+    with _sidecar_transport(lambda _request: httpx.Response(200, json=payload)):
+        snapshot = asyncio.run(EverOSPort(Path("/tmp/everos.sock")).health_snapshot())
 
-    assert health == expected
-
-
-def test_recorder_health_degrades_transport_and_invalid_json() -> None:
-    responses = iter(
-        [
-            httpx.Response(200, content=b"not-json"),
-            httpx.Response(503, content=b"unavailable"),
-        ]
-    )
-
-    with _sidecar_transport(lambda _request: next(responses)):
-        provider = EverOSPort(Path("/tmp/everos.sock"))
-        assert asyncio.run(provider.recorder_health()) == {
-            "state": "degraded",
-            "reason": "writer_failures",
-        }
-        assert asyncio.run(provider.recorder_health()) == {
-            "state": "degraded",
-            "reason": "writer_failures",
-        }
+    assert not hasattr(snapshot, "recorder")
+    assert "recorder" not in snapshot.payload()
 
 
 def test_sidecar_failure_logs_never_contain_capture_or_response_canaries(caplog) -> None:

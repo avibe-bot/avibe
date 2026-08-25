@@ -49,7 +49,6 @@ from core.memory.everos import (
     processing_probe_deadline_seconds,
 )
 from core.memory.secret_scrubber import scrub_text
-from core.memory.types import MemoryErrorCode
 
 
 logger = logging.getLogger(__name__)
@@ -108,9 +107,6 @@ async def _probe_stderr_tail(task: asyncio.Task[bytes] | None, *, settings: Ever
 
 _STARTUP_TIMEOUT_SECONDS = 30.0
 _STOP_TIMEOUT_SECONDS = 10.0
-_HEALTHY_RESET_SECONDS = 5 * 60.0
-_RESTART_DELAYS_SECONDS = (1.0, 5.0, 30.0, 120.0)
-_MAX_CONSECUTIVE_FAILURES = 5
 # Reconcile's transport budget must cover the worst derived probe-child deadline.
 _PROCESSING_PROBE_TIMEOUT_SECONDS = PROCESSING_PROBE_MAX_DEADLINE_SECONDS
 _PROCESSING_PROBE_STDERR_BYTES = 2048
@@ -118,17 +114,23 @@ _SOCKET_MODE = 0o600
 _OWNER_DIR_MODE = 0o700
 _SAFETY_MONITOR_INTERVAL_SECONDS = 0.2
 _TREE_INSPECTION_INTERVAL_SECONDS = 1.0
-_HEALTH_OBSERVATION_INTERVAL_SECONDS = 5.0
 _SIDECAR_RECORD_FILENAME = "everos.sidecar.json"
 _SIDECAR_RECORD_MAX_BYTES = 4 * 1024
 _SIDECAR_ENTRYPOINT_MODULE = "core.memory.sidecar"
-_REBUILD_ENTRYPOINT_MODULE = "core.memory.rebuild_child"
-_REBUILD_LOCK_PREFIX = "cascade-rebuild-"
-_REBUILD_LOCK_DIRECTORY = ".avibe-memory-locks"
+_PROVIDER_LOCK_PREFIX = "cascade-rebuild-"
+_SYNC_RECORD_PREFIX = "cascade-sync-"
+_SYNC_RECORD_MAX_BYTES = 16 * 1024
+_SYNC_NONCE_ENV = "AVIBE_MEMORY_SYNC_NONCE"
+_SYNC_PARENT_PID_ENV = "AVIBE_MEMORY_SYNC_PARENT_PID"
+_SYNC_PARENT_CREATE_TIME_ENV = "AVIBE_MEMORY_SYNC_PARENT_CREATE_TIME"
+_SYNC_PARENT_UID_ENV = "AVIBE_MEMORY_SYNC_PARENT_UID"
+_SYNC_ARGV = ("-I", "-m", "everos.entrypoints.cli.main", "cascade", "sync")
+_PROVIDER_LOCK_DIRECTORY = ".avibe-memory-locks"
 _PROVIDER_LOCK_RETRY_INTERVAL_SECONDS = 0.05
-_REBUILD_HANDSHAKE_TIMEOUT_SECONDS = 30.0
-_REBUILD_TIMEOUT_SECONDS = 30 * 60.0
-_PLANNED_REAP_TOKEN_TTL_SECONDS = _REBUILD_TIMEOUT_SECONDS
+_SIDECAR_ROLE = "sidecar"
+_RELEASED_REBUILD_ROLE = "cascade_rebuild"
+_RELEASED_SYNC_ROLE = "cascade_sync"
+_RELEASED_REBUILD_ENTRYPOINT_MODULE = "core.memory.rebuild_child"
 
 _IdentityFieldT = TypeVar("_IdentityFieldT")
 
@@ -151,34 +153,15 @@ class EverOSProcessSettings:
     multimodal_model: str | None = None
     multimodal_api_key: str | None = field(default=None, repr=False)
     timezone: str | None = None
-    call_log_db_path: Path | None = None
 
 
 class _ProcessKind(Enum):
     SIDECAR = "sidecar"
     PROCESSING_PROBE = "processing_probe"
-    CASCADE_REBUILD = "cascade_rebuild"
-    CASCADE_SYNC = "cascade_sync"
-
-
-class _MemoryChildRole(Enum):
-    SIDECAR = "sidecar"
-    CASCADE_REBUILD = "cascade_rebuild"
-    CASCADE_SYNC = "cascade_sync"
-
-
-class RebuildProcessResult(str, Enum):
-    """Closed outcomes from one owned EverOS cascade rebuild child."""
-
-    COMPLETED = "completed"
-    ROOT_BUSY = "root_busy"
-    INTERRUPTED = "interrupted"
-    TIMED_OUT = "timed_out"
-    FAILED = "failed"
 
 
 class _ProviderRootBusy(RuntimeError):
-    """Another process owns the provider root's rebuild lifecycle."""
+    """Another process owns the provider-root coordination lock."""
 
 
 class _ProviderRootLock:
@@ -228,210 +211,6 @@ class _ProviderRootLock:
             os.close(descriptor)
 
 
-class _PlannedReapTokens:
-    """One-shot provider-root handoffs backed by a live issuer lease."""
-
-    def __init__(self, provider_root: Path) -> None:
-        self._provider_root = provider_root
-
-    def _layout(self) -> tuple[Path, Path, str]:
-        """Resolve the secure namespace only after its provider parent exists."""
-
-        lock_path = _provider_rebuild_lock_path(provider_root=self._provider_root)
-        return (
-            lock_path.parent.parent,
-            lock_path.parent,
-            f"{lock_path.name}.handoff-",
-        )
-
-    def record(self, pid: int, created_at: float) -> _PlannedReapLease:
-        confinement_root, directory, prefix = self._layout()
-        path = self._path(directory, prefix, pid, created_at)
-        ensure_private_directory(
-            confinement_root,
-            directory,
-            harden_confinement_root=False,
-        )
-        created = False
-        created = False
-        try:
-            descriptor = create_confined_file(
-                confinement_root,
-                path,
-            )
-            created = True
-        except ConfinedFilesystemError:
-            # Rediscovery can name the same exact sidecar twice. A secure token
-            # is idempotent; a symlink, special file, or loose mode still fails.
-            descriptor = self._open_writable(confinement_root, directory, path)
-        try:
-            import fcntl
-
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            info = os.fstat(descriptor)
-            os.ftruncate(descriptor, 0)
-            os.write(descriptor, b"pending\n")
-            os.fsync(descriptor)
-        except BaseException:
-            info = os.fstat(descriptor)
-            os.close(descriptor)
-            if created:
-                self._remove(path, (info.st_dev, info.st_ino))
-            raise
-        return _PlannedReapLease(
-            tokens=self,
-            descriptor=descriptor,
-            path=path,
-            identity=(info.st_dev, info.st_ino),
-        )
-
-    @staticmethod
-    def _open_writable(confinement_root: Path, directory: Path, path: Path) -> int:
-        parent = open_confined_directory(confinement_root, directory)
-        try:
-            descriptor = os.open(
-                path.name,
-                os.O_RDWR | required_no_follow_flag() | int(getattr(os, "O_CLOEXEC", 0)),
-                dir_fd=parent,
-            )
-            info = os.fstat(descriptor)
-            if (
-                not stat.S_ISREG(info.st_mode)
-                or stat.S_IMODE(info.st_mode) != 0o600
-                or (hasattr(os, "getuid") and info.st_uid != os.getuid())
-            ):
-                os.close(descriptor)
-                raise ConfinedFilesystemError("planned-reap token is unsafe")
-            return descriptor
-        except OSError as error:
-            raise ConfinedFilesystemError("planned-reap token cannot be opened safely") from error
-        finally:
-            os.close(parent)
-
-    def consume(self, pid: int, created_at: float) -> bool:
-        try:
-            confinement_root, directory, prefix = self._layout()
-            path = self._path(directory, prefix, pid, created_at)
-            descriptor = open_confined_regular_file(
-                confinement_root,
-                path,
-            )
-        except (ConfinedFilesystemError, OSError):
-            return False
-        info = os.fstat(descriptor)
-        expected_identity = (info.st_dev, info.st_ino)
-        active_issuer = False
-        acquired = False
-        import fcntl
-
-        try:
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                active_issuer = True
-            else:
-                acquired = True
-            os.lseek(descriptor, 0, os.SEEK_SET)
-            state = os.read(descriptor, 256).decode("ascii", errors="ignore").strip()
-            removed = self._remove(path, expected_identity)
-        finally:
-            if acquired:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
-            os.close(descriptor)
-        committed = False
-        if state.startswith("committed:") and not active_issuer:
-            try:
-                committed = float(state.split(":", 1)[1]) >= time.time()
-            except (ValueError, IndexError):
-                committed = False
-        return removed and (active_issuer or committed)
-
-    def _remove(self, path: Path, expected_identity: tuple[int, int]) -> bool:
-        confinement_root, directory, _prefix = self._layout()
-        parent: int | None = None
-        try:
-            parent = open_confined_directory(
-                confinement_root,
-                directory,
-            )
-            remove_anchored_entry(
-                parent,
-                path.name,
-                expected_identity=expected_identity,
-            )
-        except ConfinedFilesystemError:
-            return False
-        finally:
-            if parent is not None:
-                os.close(parent)
-        return True
-
-    @staticmethod
-    def _path(
-        directory: Path,
-        prefix: str,
-        pid: int,
-        created_at: float,
-    ) -> Path:
-        generation = hashlib.sha256(
-            f"{pid}:{float(created_at).hex()}".encode("ascii")
-        ).hexdigest()
-        return directory / f"{prefix}{generation}"
-
-
-class _PlannedReapLease:
-    """Descriptor lease proving a planned-reap issuer is still active."""
-
-    def __init__(
-        self,
-        *,
-        tokens: _PlannedReapTokens,
-        descriptor: int,
-        path: Path,
-        identity: tuple[int, int],
-    ) -> None:
-        self._tokens = tokens
-        self._descriptor = descriptor
-        self._path = path
-        self._identity = identity
-        self._committed = False
-
-    @property
-    def committed(self) -> bool:
-        return self._committed
-
-    def commit(self) -> None:
-        """Authenticate that the planned target was actually signalled."""
-
-        descriptor = self._descriptor
-        if descriptor is None:
-            raise RuntimeError("planned-reap issuer lease is no longer held")
-        payload = f"committed:{time.time() + _PLANNED_REAP_TOKEN_TTL_SECONDS:.6f}\n".encode(
-            "ascii"
-        )
-        os.lseek(descriptor, 0, os.SEEK_SET)
-        os.ftruncate(descriptor, 0)
-        os.write(descriptor, payload)
-        os.fsync(descriptor)
-        self._committed = True
-
-    def release(self, *, remove_token: bool = True) -> bool:
-        descriptor = self._descriptor
-        if descriptor is None:
-            return False
-        self._descriptor = None
-        removed = False
-        try:
-            if remove_token:
-                removed = self._tokens._remove(self._path, self._identity)
-            import fcntl
-
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-        finally:
-            os.close(descriptor)
-        return removed
-
-
 async def _wait_for_provider_root_lock(
     root_lock: _ProviderRootLock,
     *,
@@ -476,23 +255,22 @@ class _ProcessHost(Protocol):
         *,
         socket_path: Path,
         provider_root: Path,
-        role: _MemoryChildRole | None = None,
+        role: str | None = None,
     ) -> tuple[dict[int, float], list[int]]: ...
 
     def find_sidecars(self, *, socket_path: Path) -> dict[int, float]: ...
 
     def find_sidecars_by_root(self, *, provider_root: Path) -> dict[int, float]: ...
 
-    def find_rebuilds(
+    def find_syncs(
         self,
         *,
         provider_root: Path,
-        python: Path | None,
+        python: Path,
+        nonce: str,
     ) -> dict[int, float]: ...
 
     def live(self, identities: Mapping[int, float]) -> dict[int, float]: ...
-
-    async def wait_for_stopped(self, pid: int, timeout_seconds: float) -> bool: ...
 
     def signal(
         self,
@@ -531,7 +309,7 @@ class EverOSProcess:
         stop_timeout_seconds: float = _STOP_TIMEOUT_SECONDS,
         on_ready: Callable[[], Awaitable[None] | None] | None = None,
         before_start: Callable[[], Awaitable[None] | None] | None = None,
-        on_reaped: Callable[[], Awaitable[None] | None] | None = None,
+        on_unexpected_exit: Callable[[], Awaitable[None] | None] | None = None,
         _host: _ProcessHost | None = None,
     ) -> None:
         self._python = Path(python)
@@ -576,83 +354,30 @@ class EverOSProcess:
         self._process_group: int | None = None
         self._watch_task: asyncio.Task[None] | None = None
         self._monitor_task: asyncio.Task[None] | None = None
-        self._restart_task: asyncio.Task[None] | None = None
         self._retained_provider_root_lock: _ProviderRootLock | None = None
         self._owned_processes: dict[int, float] = {}
         self._on_ready = on_ready
         self._before_start = before_start
-        self._on_reaped = on_reaped
+        self._on_unexpected_exit = on_unexpected_exit
         self._desired_running = False
         self._starting = False
         self._down = False
-        self._consecutive_failures = 0
-        self._started_at: float | None = None
-        self._healthy_since: float | None = None
-        self._last_error: MemoryErrorCode | None = None
-
-    @property
-    def socket_path(self) -> Path:
-        return self._socket_path
-
-
-    @property
-    def provider_root(self) -> Path:
-        return self._provider_root
 
     @property
     def running(self) -> bool:
         return self._process is not None and self._process.returncode is None
 
     @property
-    def starting(self) -> bool:
-        return self._starting
-
-    @property
-    def down(self) -> bool:
-        return self._down
-
-    @property
-    def restart_authorized(self) -> bool:
-        """Whether this supervisor still owns a current or future launch."""
-
-        watch_task = self._watch_task
-        restart_task = self._restart_task
-        return bool(
-            self._desired_running
-            and not self._down
-            and (
-                self.running
-                or self._starting
-                or (watch_task is not None and not watch_task.done())
-                or (restart_task is not None and not restart_task.done())
-            )
-        )
-
-    @property
     def retains_active_config(self) -> bool:
-        """Whether owned execution can still use this supervisor's settings."""
+        """Whether this adapter retains execution that Stop must still prove ended."""
 
         return bool(
             self._process is not None
             or self._owned_processes
-            or self.restart_authorized
         )
 
-    @property
-    def last_error(self) -> MemoryErrorCode | None:
-        return self._last_error
-
-    @property
-    def consecutive_failures(self) -> int:
-        return self._consecutive_failures
-
-    def set_settings(self, settings: EverOSProcessSettings) -> None:
-        """Replace launch settings before an explicit reconciliation/start."""
-
-        self._settings = settings
-
     async def start(self) -> bool:
-        """Request an owned sidecar; failed starts enter bounded supervision."""
+        """Attempt one owned sidecar launch; the supervisor owns all retries."""
 
         async with self._lifecycle_lock:
             self._desired_running = True
@@ -664,12 +389,8 @@ class EverOSProcess:
             if self._process is not None:
                 self._desired_running = False
                 self._down = True
-                self._last_error = "memory_sidecar_unavailable"
                 return False
             if self._down:
-                # A caller can explicitly retry a down sidecar, but that must
-                # not erase the crash budget. Only observed health earns that
-                # reset, otherwise repeated settings saves could restart forever.
                 self._down = False
         if not await self._await_before_start():
             return False
@@ -683,10 +404,6 @@ class EverOSProcess:
 
         async with self._lifecycle_lock:
             self._desired_running = False
-            restart_task = self._restart_task
-            self._restart_task = None
-            if restart_task is not None and restart_task is not asyncio.current_task():
-                restart_task.cancel()
             process = self._process
             process_group = self._process_group
             owned_processes = dict(self._owned_processes)
@@ -706,8 +423,6 @@ class EverOSProcess:
             self._process = None
             self._process_group = None
             self._owned_processes = {}
-            self._started_at = None
-            self._healthy_since = None
             self._watch_task = None
             self._monitor_task = None
             if watch_task is not None and watch_task is not asyncio.current_task():
@@ -719,8 +434,6 @@ class EverOSProcess:
             self._retained_provider_root_lock = None
             if retained_root_lock is not None:
                 retained_root_lock.release()
-            if process is not None:
-                await self._notify_reaped()
 
     async def processing_healthy(self) -> bool:
         """Probe processing from a short-lived child with the scrubbed key env."""
@@ -771,7 +484,7 @@ class EverOSProcess:
             )
             return False
         except asyncio.CancelledError:
-            # ``MemoryWorker`` bounds this probe independently. Do not let that
+            # The bounded Memory writer bounds this probe independently. Do not let that
             # timeout orphan an owned child with the credential environment.
             try:
                 await self._terminate_owned_tree(
@@ -808,7 +521,6 @@ class EverOSProcess:
     async def _start_locked(self) -> bool:
         self._starting = True
         self._down = False
-        self._last_error = None
         try:
             self._validate_launch_inputs()
             await self._ownership.reap(discover_missing=True)
@@ -816,7 +528,7 @@ class EverOSProcess:
             self._prepare_owned_directories()
             self._write_generated_config()
             self._remove_owned_socket()
-            child_env = self._child_environment(role=_MemoryChildRole.SIDECAR)
+            child_env = self._child_environment(role=_SIDECAR_ROLE)
             process, spawn_interrupted = await _finish_handoff_despite_cancellation(
                 self._host.spawn(
                     _ProcessKind.SIDECAR,
@@ -838,8 +550,6 @@ class EverOSProcess:
             )
             if spawn_interrupted:
                 raise asyncio.CancelledError
-            self._started_at = time.monotonic()
-            self._healthy_since = None
             await self._wait_for_ready(process)
             self._secure_socket()
             self._assert_no_tcp_listener(process.pid)
@@ -863,17 +573,14 @@ class EverOSProcess:
                     )
                 except Exception:
                     # Keep both the child identity and provider-root lock so a
-                    # rebuild cannot enter before Stop retries the cleanup.
+                    # No other owner can enter before Stop retries cleanup.
                     self._down = True
-                    self._last_error = "memory_sidecar_unavailable"
                     self._starting = False
                     raise
                 self._ownership.retire_if_group_is_clear(process.pid, process_group)
             self._process = None
             self._process_group = None
             self._owned_processes = {}
-            self._started_at = None
-            self._healthy_since = None
             watch_task = self._watch_task
             self._watch_task = None
             monitor_task = self._monitor_task
@@ -884,16 +591,11 @@ class EverOSProcess:
                 monitor_task.cancel()
             self._remove_owned_socket()
             self._starting = False
-            await _finish_cleanup_despite_cancellation(self._notify_reaped())
             raise
         except _ProviderRootBusy:
             self._starting = False
-            self._last_error = "memory_provider_root_busy"
-            if self._desired_running:
-                self._restart_task = asyncio.create_task(
-                    self._restart_after(_PROVIDER_LOCK_RETRY_INTERVAL_SECONDS),
-                    name="memory-everos-root-busy-retry",
-                )
+            self._desired_running = False
+            self._down = True
             return False
         except Exception:
             # Every start failure collapses into `memory_sidecar_unavailable`, and
@@ -920,7 +622,6 @@ class EverOSProcess:
                 # here could overlap the unreaped one and share its root/socket.
                 self._desired_running = False
                 self._down = True
-                self._last_error = "memory_sidecar_unavailable"
                 self._starting = False
                 return False
             if process is not None:
@@ -932,8 +633,6 @@ class EverOSProcess:
             self._process = None
             self._process_group = None
             self._owned_processes = {}
-            self._started_at = None
-            self._healthy_since = None
             watch_task = self._watch_task
             self._watch_task = None
             monitor_task = self._monitor_task
@@ -947,11 +646,12 @@ class EverOSProcess:
             # A launch may fail before subprocess creation. The runtime still
             # needs the handoff: ``before_start`` already released host
             # retention and cleanup has proved this supervisor owns no child.
-            await self._notify_reaped()
-            self._record_start_failure_locked()
+            self._desired_running = False
+            self._down = True
             return False
+
     async def _start_with_provider_lock(self) -> bool:
-        """Serialize sidecar admission with every rebuild of this provider root."""
+        """Serialize sidecar admission with other provider-root owners."""
 
         async with self._lifecycle_lock:
             if not self._desired_running or self.running or self._down or self._process is not None:
@@ -978,8 +678,8 @@ class EverOSProcess:
             async with self._lifecycle_lock:
                 self._starting = False
                 if self._desired_running:
-                    await self._notify_reaped()
-                    self._record_start_failure_locked()
+                    self._desired_running = False
+                    self._down = True
             return False
         if not acquired:
             async with self._lifecycle_lock:
@@ -1018,7 +718,6 @@ class EverOSProcess:
             if self._socket_path.exists():
                 self._secure_socket()
                 if await client.health():
-                    self._record_health_observation(True)
                     return
             await asyncio.sleep(0.05)
         raise RuntimeError("sidecar readiness timed out")
@@ -1028,7 +727,6 @@ class EverOSProcess:
         async with self._lifecycle_lock:
             if process is not self._process:
                 return
-            healthy_since = self._healthy_since
             process_group = self._process_group
             owned_processes = dict(self._owned_processes)
             monitor_task = self._monitor_task
@@ -1042,53 +740,37 @@ class EverOSProcess:
                 # A direct child that exits can still leave a same-group helper
                 # alive. Never overlap a fresh sidecar with an unreaped tree.
                 self._down = True
-                self._last_error = "memory_sidecar_unavailable"
                 self._desired_running = False
                 self._starting = False
+                self._schedule_unexpected_exit_notification()
+                return
+            try:
+                self._ownership.retire_if_group_is_clear(process.pid, process_group)
+            except Exception:
+                self._down = True
+                self._desired_running = False
+                self._starting = False
+                self._schedule_unexpected_exit_notification()
                 return
             self._process = None
             self._process_group = None
             self._owned_processes = {}
-            self._started_at = None
-            self._healthy_since = None
             self._monitor_task = None
             if monitor_task is not None and monitor_task is not asyncio.current_task():
                 monitor_task.cancel()
             self._remove_owned_socket()
-            self._ownership.retire_if_group_is_clear(process.pid, process_group)
             self._starting = False
-            await self._notify_reaped()
-            planned_reap = (
-                process.pid in owned_processes
-                and self._ownership.consume_planned_reap(
-                    process.pid,
-                    owned_processes[process.pid],
-                )
-            )
-            if healthy_since is not None and time.monotonic() - healthy_since >= _HEALTHY_RESET_SECONDS:
-                self._consecutive_failures = 0
             if not self._desired_running:
                 return
-            if planned_reap:
-                # Provider-root reconciliation terminates a supervised sidecar
-                # before taking over its root. That is an ownership handoff, not
-                # a child crash: restart through the shared lock without spending
-                # the bounded crash budget while the rebuild remains active.
-                self._last_error = None
-                self._restart_task = asyncio.create_task(
-                    self._restart_after(0.0),
-                    name="memory-everos-restart",
-                )
-                return
-            self._record_start_failure_locked()
+            self._desired_running = False
+            self._down = True
+        await self._notify_unexpected_exit()
 
     async def _monitor_child(self, process: asyncio.subprocess.Process) -> None:
         """Keep tracking descendants and reject any later TCP listener."""
 
         try:
-            client = EverOSPort(self._socket_path, sidecar_timeout_seconds=2.0)
             next_tree_inspection = time.monotonic()
-            next_health_observation = time.monotonic()
             while process is self._process and process.returncode is None:
                 observed_at = time.monotonic()
                 if observed_at >= next_tree_inspection:
@@ -1100,15 +782,13 @@ class EverOSProcess:
                     next_tree_inspection = observed_at + _TREE_INSPECTION_INTERVAL_SECONDS
                 elif not _host_identity_is_live(self._host, process.pid, self._owned_processes):
                     raise RuntimeError("sidecar ownership changed during monitoring")
-                if observed_at >= next_health_observation:
-                    self._record_health_observation(await client.health(), observed_at=observed_at)
-                    next_health_observation = observed_at + _HEALTH_OBSERVATION_INTERVAL_SECONDS
                 await asyncio.sleep(_SAFETY_MONITOR_INTERVAL_SECONDS)
         except asyncio.CancelledError:
             return
         except Exception:
             if not self._desired_running:
                 return
+            notify_unexpected_exit = False
             recorded_stamp = (
                 self._owned_processes.get(process.pid) if process.pid is not None else None
             )
@@ -1130,7 +810,6 @@ class EverOSProcess:
                     return
                 self._desired_running = False
                 self._down = True
-                self._last_error = "memory_sidecar_unavailable"
                 process_group = self._process_group
                 try:
                     await self._terminate_owned_tree(
@@ -1140,38 +819,24 @@ class EverOSProcess:
                     )
                 except Exception:
                     logger.warning("EverOS sidecar safety shutdown did not reap the child tree")
+                    self._schedule_unexpected_exit_notification()
+                    return
+                try:
+                    self._ownership.retire_if_group_is_clear(
+                        process.pid,
+                        process_group,
+                    )
+                except Exception:
+                    self._schedule_unexpected_exit_notification()
                     return
                 self._process = None
                 self._process_group = None
                 self._owned_processes = {}
-                self._started_at = None
-                self._healthy_since = None
                 self._monitor_task = None
                 self._remove_owned_socket()
-                self._ownership.retire_if_group_is_clear(process.pid, process_group)
-                await self._notify_reaped()
-
-    def _record_start_failure_locked(self) -> None:
-        self._consecutive_failures += 1
-        self._last_error = "memory_sidecar_unavailable"
-        if self._consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
-            self._down = True
-            return
-        self._down = False
-        delay = _RESTART_DELAYS_SECONDS[min(self._consecutive_failures - 1, len(_RESTART_DELAYS_SECONDS) - 1)]
-        self._restart_task = asyncio.create_task(self._restart_after(delay), name="memory-everos-restart")
-
-    async def _restart_after(self, delay_seconds: float) -> None:
-        try:
-            await asyncio.sleep(delay_seconds)
-            async with self._lifecycle_lock:
-                if not self._desired_running or self.running or self._down:
-                    return
-            if not await self._await_before_start():
-                return
-            await self._start_with_provider_lock()
-        except asyncio.CancelledError:
-            return
+                notify_unexpected_exit = self._on_unexpected_exit is not None
+            if notify_unexpected_exit:
+                await self._notify_unexpected_exit()
 
     def _validate_launch_inputs(self) -> None:
         if os.name != "posix" or not self._python.is_file():
@@ -1195,7 +860,7 @@ class EverOSProcess:
         )
 
     def _provider_root_lock(self) -> _ProviderRootLock:
-        lock_path = _provider_rebuild_lock_path(provider_root=self._provider_root)
+        lock_path = _provider_root_lock_path(provider_root=self._provider_root)
         return _ProviderRootLock(
             confinement_root=lock_path.parent.parent,
             path=lock_path,
@@ -1209,7 +874,7 @@ class EverOSProcess:
             settings=self._settings,
         )
 
-    def _child_environment(self, *, role: _MemoryChildRole | None = None) -> dict[str, str]:
+    def _child_environment(self, *, role: str | None = None) -> dict[str, str]:
         return _memory_child_environment(
             python=self._python,
             memory_dir=self._memory_dir,
@@ -1298,19 +963,6 @@ class EverOSProcess:
             stop_timeout_seconds=self._stop_timeout_seconds,
         )
 
-    def _record_health_observation(self, healthy: bool, *, observed_at: float | None = None) -> None:
-        """Track continuous, observed health before resetting crash supervision."""
-
-        now = time.monotonic() if observed_at is None else observed_at
-        if not healthy:
-            self._healthy_since = None
-            return
-        if self._healthy_since is None:
-            self._healthy_since = now
-            return
-        if now - self._healthy_since >= _HEALTHY_RESET_SECONDS:
-            self._consecutive_failures = 0
-
     async def _notify_ready(self) -> None:
         callback = self._on_ready
         if callback is None:
@@ -1321,6 +973,25 @@ class EverOSProcess:
                 await result
         except Exception:
             logger.warning("EverOS sidecar ready callback failed")
+
+    async def _notify_unexpected_exit(self) -> None:
+        callback = self._on_unexpected_exit
+        if callback is None:
+            return
+        try:
+            result = callback()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.warning("EverOS sidecar unexpected-exit callback failed")
+
+    def _schedule_unexpected_exit_notification(self) -> None:
+        if self._on_unexpected_exit is None:
+            return
+        asyncio.create_task(
+            self._notify_unexpected_exit(),
+            name="memory-everos-unexpected-exit-notification",
+        )
 
     async def _notify_before_start(self) -> None:
         callback = self._before_start
@@ -1341,20 +1012,9 @@ class EverOSProcess:
             async with self._lifecycle_lock:
                 if self._process is None and self._desired_running:
                     self._starting = False
-                    self._record_start_failure_locked()
-            await self._notify_reaped()
+                    self._desired_running = False
+                    self._down = True
             return False
-
-    async def _notify_reaped(self) -> None:
-        callback = self._on_reaped
-        if callback is None:
-            return
-        try:
-            result = callback()
-            if inspect.isawaitable(result):
-                await result
-        except Exception:
-            logger.warning("EverOS sidecar reaped callback failed")
 
     def _timezone_for_root(self) -> str:
         configured = _iana_timezone(self._settings.timezone)
@@ -1364,242 +1024,55 @@ class EverOSProcess:
         return existing or _local_iana_timezone()
 
 
-class EverOSRebuildProcess:
-    """Run and fully reap one role-owned EverOS cascade rebuild."""
+class _RecordedSidecarReaper:
+    """Reap an authenticated sidecar record when no supervisor exists."""
 
     def __init__(
         self,
-        python: Path | str | None,
         *,
-        provider_root: Path | str | None = None,
-        effective_home: Path | str | None = None,
-        settings: EverOSProcessSettings | None = None,
-        provider_root_guard: Callable[[], None] | None = None,
-        timeout_seconds: float = _REBUILD_TIMEOUT_SECONDS,
+        provider_root: Path | str,
+        effective_home: Path | str,
         stop_timeout_seconds: float = _STOP_TIMEOUT_SECONDS,
         _host: _ProcessHost | None = None,
     ) -> None:
-        self._python = (
-            Path(os.path.abspath(os.fspath(python)))
-            if python is not None
-            else None
-        )
-        effective_home_path = (
-            Path(effective_home) if effective_home is not None else paths.get_vibe_remote_dir()
-        )
-        filesystem_root = ConfinedRoot.from_home(effective_home_path)
+        filesystem_root = ConfinedRoot.from_home(effective_home)
         self._effective_home = filesystem_root.physical_home
         self._memory_dir = self._effective_home / "memory"
-        self._attachments_root = attachment_pin_root(self._effective_home)
-        provider_root_path = (
-            Path(provider_root) if provider_root is not None else self._memory_dir / "everos-root"
-        )
-        self._provider_root = (
-            filesystem_root.confine_if_child(provider_root_path)
-            or Path(os.path.abspath(os.fspath(provider_root_path)))
-        )
+        self._provider_root = filesystem_root.confine(provider_root)
         self._socket_path = self._memory_dir / ".rt" / "everos.sock"
-        self._settings = settings or EverOSProcessSettings()
-        self._provider_root_guard = provider_root_guard
-        self._timeout_seconds = _positive_timeout(timeout_seconds, _REBUILD_TIMEOUT_SECONDS)
-        self._stop_timeout_seconds = _positive_timeout(
-            stop_timeout_seconds,
-            _STOP_TIMEOUT_SECONDS,
-        )
         self._host = _SystemProcessHost() if _host is None else _host
         self._ownership = SidecarOwnership(
             record_path=sidecar_record_path(self._memory_dir),
             socket_path=self._socket_path,
             provider_root=self._provider_root,
-            stop_timeout_seconds=self._stop_timeout_seconds,
-            role=_MemoryChildRole.CASCADE_REBUILD,
-            python=self._python,
+            stop_timeout_seconds=_positive_timeout(
+                stop_timeout_seconds,
+                _STOP_TIMEOUT_SECONDS,
+            ),
+            python=None,
             _host=self._host,
         )
 
     async def reconcile_orphan(self) -> None:
-        """Reap any managed child that could still own this provider root."""
-
         _ensure_owner_directory(self._memory_dir)
         _require_provider_root_access_path(self._provider_root)
         root_lock = self._provider_root_lock()
         root_lock.acquire()
         try:
-            await self._reconcile_orphan_exclusive()
+            interrupted = await _finish_cleanup_despite_cancellation(
+                self._ownership.reap(discover_missing=True)
+            )
+            if interrupted:
+                raise asyncio.CancelledError
         finally:
-            try:
-                self._ownership.release_planned_reaps()
-            finally:
-                root_lock.release()
-
-    async def _reconcile_orphan_exclusive(self) -> None:
-        """Reap one managed child while the provider-root lock is held."""
-
-        interrupted = await _finish_cleanup_despite_cancellation(
-            self._ownership.reap(discover_missing=True)
-        )
-        if interrupted:
-            raise asyncio.CancelledError
+            root_lock.release()
 
     def _provider_root_lock(self) -> _ProviderRootLock:
-        lock_path = _provider_rebuild_lock_path(provider_root=self._provider_root)
+        lock_path = _provider_root_lock_path(provider_root=self._provider_root)
         return _ProviderRootLock(
             confinement_root=lock_path.parent.parent,
             path=lock_path,
         )
-
-    async def run(self) -> RebuildProcessResult:
-        """Run the pinned rebuild command and release only after tree cleanup."""
-
-        try:
-            if (
-                os.name != "posix"
-                or self._python is None
-                or not self._python.is_file()
-                or not _rebuild_settings_complete(self._settings)
-            ):
-                return RebuildProcessResult.FAILED
-            # The default provider root is below this Avibe-owned directory, so
-            # its parent must exist before the adjacent lock can be resolved.
-            # Provider data itself remains untouched until after lock admission.
-            _ensure_owner_directory(self._memory_dir)
-            _require_provider_root_access_path(self._provider_root)
-            root_lock = self._provider_root_lock()
-            root_lock.acquire()
-        except _ProviderRootBusy:
-            return RebuildProcessResult.ROOT_BUSY
-        except Exception:
-            logger.exception("EverOS cascade rebuild admission failed")
-            return RebuildProcessResult.FAILED
-        try:
-            return await self._run_exclusive()
-        finally:
-            try:
-                self._ownership.release_planned_reaps()
-            finally:
-                root_lock.release()
-
-    async def _run_exclusive(self) -> RebuildProcessResult:
-        """Own the provider root from orphan reconciliation through retirement."""
-
-        process: asyncio.subprocess.Process | None = None
-        process_group: int | None = None
-        identities: dict[int, float] = {}
-        try:
-            await self._reconcile_orphan_exclusive()
-            guard = self._provider_root_guard
-            if guard is None:
-                raise RuntimeError("memory provider root is not claimed")
-            guard()
-            _prepare_memory_child_directories(
-                memory_dir=self._memory_dir,
-                provider_root=self._provider_root,
-                settings=self._settings,
-            )
-            _write_memory_child_config(
-                memory_dir=self._memory_dir,
-                provider_root=self._provider_root,
-                attachments_root=self._attachments_root,
-                settings=self._settings,
-            )
-            process, spawn_interrupted = await _finish_handoff_despite_cancellation(
-                self._host.spawn(
-                    _ProcessKind.CASCADE_REBUILD,
-                    self._python,
-                    cwd=self._memory_dir,
-                    env=_memory_child_environment(
-                        python=self._python,
-                        memory_dir=self._memory_dir,
-                        provider_root=self._provider_root,
-                        attachments_root=self._attachments_root,
-                        settings=self._settings,
-                        role=_MemoryChildRole.CASCADE_REBUILD,
-                    ),
-                ),
-            )
-            process_group = self._host.process_group(process.pid)
-            identities = self._host.snapshot_tree(process.pid, process_group)
-            stopped, handshake_interrupted = await _finish_handoff_despite_cancellation(
-                self._host.wait_for_stopped(
-                    process.pid,
-                    _REBUILD_HANDSHAKE_TIMEOUT_SECONDS,
-                )
-            )
-            if not _refresh_owned_process_tree(
-                self._host,
-                identities,
-                process.pid,
-                process_group,
-            ):
-                raise RuntimeError("could not establish rebuild process ownership")
-            if not stopped:
-                raise RuntimeError("rebuild child did not enter ownership handshake")
-            self._ownership.record_launch(
-                process.pid,
-                identities[process.pid],
-                process_group,
-            )
-            _release_rebuild_child(process)
-            if spawn_interrupted or handshake_interrupted:
-                result = RebuildProcessResult.INTERRUPTED
-            else:
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=self._timeout_seconds)
-                except asyncio.TimeoutError:
-                    result = RebuildProcessResult.TIMED_OUT
-                except asyncio.CancelledError:
-                    result = RebuildProcessResult.INTERRUPTED
-                else:
-                    result = _rebuild_result_for_exit_code(process.returncode)
-        except asyncio.CancelledError:
-            result = RebuildProcessResult.INTERRUPTED
-        except Exception:
-            logger.exception("EverOS cascade rebuild failed")
-            result = RebuildProcessResult.FAILED
-
-        if process is None:
-            return result
-        try:
-            cleanup_interrupted = await _finish_cleanup_despite_cancellation(
-                _terminate_owned_process_tree(
-                    self._host,
-                    process,
-                    process_group=process_group,
-                    owned_processes=identities,
-                    stop_timeout_seconds=self._stop_timeout_seconds,
-                )
-            )
-            retire_interrupted = await _finish_cleanup_despite_cancellation(
-                self._ownership.retire_reaped_launch(
-                    process.pid,
-                    process_group=process_group,
-                )
-            )
-        except Exception:
-            logger.exception("EverOS cascade rebuild cleanup failed")
-            return RebuildProcessResult.FAILED
-        if cleanup_interrupted or retire_interrupted:
-            return RebuildProcessResult.INTERRUPTED
-        return result
-
-
-def _rebuild_result_for_exit_code(exit_code: int | None) -> RebuildProcessResult:
-    if exit_code == 0:
-        return RebuildProcessResult.COMPLETED
-    if exit_code == 3:
-        return RebuildProcessResult.ROOT_BUSY
-    if exit_code == 130:
-        return RebuildProcessResult.INTERRUPTED
-    return RebuildProcessResult.FAILED
-
-
-def _release_rebuild_child(process: asyncio.subprocess.Process) -> None:
-    """Release a bootstrap only after this parent has persisted ownership."""
-
-    try:
-        process.send_signal(signal.SIGCONT)
-    except ProcessLookupError:
-        pass
 
 
 def _provider_root_coordination_path(
@@ -1628,17 +1101,17 @@ def _provider_root_coordination_path(
     root_identity = hashlib.sha256(root_identity.encode("utf-8")).hexdigest()
     return (
         canonical_parent
-        / _REBUILD_LOCK_DIRECTORY
+        / _PROVIDER_LOCK_DIRECTORY
         / f"{prefix}{root_identity}{suffix}"
     )
 
 
-def _provider_rebuild_lock_path(*, provider_root: Path) -> Path:
-    """Bind rebuild serialization to the canonical root location."""
+def _provider_root_lock_path(*, provider_root: Path) -> Path:
+    """Bind cross-version provider serialization to the canonical root."""
 
     return _provider_root_coordination_path(
         provider_root=provider_root,
-        prefix=_REBUILD_LOCK_PREFIX,
+        prefix=_PROVIDER_LOCK_PREFIX,
         suffix=".lock",
     )
 
@@ -1753,7 +1226,6 @@ class SidecarOwnership:
         socket_path: Path,
         provider_root: Path,
         stop_timeout_seconds: float = _STOP_TIMEOUT_SECONDS,
-        role: _MemoryChildRole = _MemoryChildRole.SIDECAR,
         python: Path | None = None,
         _host: _ProcessHost | None = None,
     ) -> None:
@@ -1761,69 +1233,8 @@ class SidecarOwnership:
         self._socket_path = Path(socket_path)
         self._provider_root = Path(provider_root)
         self._stop_timeout_seconds = _positive_timeout(stop_timeout_seconds, _STOP_TIMEOUT_SECONDS)
-        self._role = role
         self._python = Path(python) if python is not None else None
         self._host = _SystemProcessHost() if _host is None else _host
-        self._planned_reaps = _PlannedReapTokens(self._provider_root)
-        self._planned_reap_leases: dict[tuple[int, str], _PlannedReapLease] = {}
-
-    def record_planned_reap(self, pid: int, created_at: float) -> None:
-        """Persist an exact one-shot handoff before terminating a live sidecar."""
-
-        key = self._planned_reap_key(pid, created_at)
-        if key not in self._planned_reap_leases:
-            self._planned_reap_leases[key] = self._planned_reaps.record(
-                pid,
-                created_at,
-            )
-
-    def commit_planned_reap(self, pid: int, created_at: float) -> None:
-        """Persist authenticated success before releasing the issuer lease."""
-
-        lease = self._planned_reap_leases.get(
-            self._planned_reap_key(pid, created_at),
-        )
-        if lease is None:
-            raise RuntimeError("planned-reap issuer lease is missing")
-        lease.commit()
-
-    def consume_planned_reap(self, pid: int, created_at: float) -> bool:
-        """Consume this process generation's handoff, if one was recorded."""
-
-        lease = self._planned_reap_leases.pop(
-            self._planned_reap_key(pid, created_at),
-            None,
-        )
-        if lease is not None:
-            return lease.release()
-        return self._planned_reaps.consume(pid, created_at)
-
-    def cancel_planned_reap(self, pid: int, created_at: float) -> None:
-        """Revoke a handoff that failed before signalling its exact target."""
-
-        lease = self._planned_reap_leases.pop(
-            self._planned_reap_key(pid, created_at),
-            None,
-        )
-        if lease is not None:
-            lease.release()
-
-    def release_planned_reaps(self) -> None:
-        """End every remaining issuer lease before releasing root ownership."""
-
-        leases = tuple(self._planned_reap_leases.values())
-        self._planned_reap_leases.clear()
-        for lease in leases:
-            try:
-                lease.release(remove_token=not lease.committed)
-            except Exception:
-                # Closing the descriptor still revokes the issuer lease. An
-                # unlocked leftover token is stale and cannot suppress a crash.
-                logger.warning("Could not remove a stale planned-reap token")
-
-    @staticmethod
-    def _planned_reap_key(pid: int, created_at: float) -> tuple[int, str]:
-        return pid, float(created_at).hex()
 
     def record_launch(self, pid: int, created_at: float, process_group: int | None) -> None:
         """Persist the launched child's identity so a later boot can reap an orphan.
@@ -1852,7 +1263,7 @@ class SidecarOwnership:
             pid,
             created_at,
             process_group,
-            role=self._role,
+            role=_SIDECAR_ROLE,
             python=self._python,
         )
 
@@ -1862,7 +1273,7 @@ class SidecarOwnership:
         created_at: float,
         process_group: int | None,
         *,
-        role: _MemoryChildRole | None,
+        role: str | None,
         python: Path | None,
     ) -> None:
         record: dict[str, object] = {
@@ -1882,7 +1293,7 @@ class SidecarOwnership:
             # as epoch seconds. Omit a wall value rather than invent one.
             record["create_time"] = wall_create_time
         if role is not None:
-            record["role"] = role.value
+            record["role"] = role
             record["python"] = str(python) if python is not None else None
         payload = json.dumps(
             record,
@@ -1923,7 +1334,7 @@ class SidecarOwnership:
             _remove_sidecar_record(self.record_path)
             return
         recorded_role = _recorded_child_role(record)
-        if recorded_role is None:
+        if recorded_role not in {_SIDECAR_ROLE, _RELEASED_REBUILD_ROLE}:
             raise RuntimeError(
                 "recorded EverOS child role could not be verified "
                 f"(pid {pid}, record {self.record_path})"
@@ -1970,26 +1381,16 @@ class SidecarOwnership:
                 f"(pid {pid}, record {self.record_path})"
             )
 
-        logger.warning("Reaping an orphaned EverOS %s left by a previous Avibe run", recorded_role.value)
-        planned_sidecar_reap = (
-            self._role is _MemoryChildRole.CASCADE_REBUILD
-            and recorded_role is _MemoryChildRole.SIDECAR
+        logger.warning(
+            "Reaping an orphaned EverOS %s left by a previous Avibe run",
+            recorded_role,
         )
-        if planned_sidecar_reap:
-            self.record_planned_reap(pid, confirmed_create_time)
-        terminated = False
-        try:
-            terminated = await self._terminate_orphan_tree(
-                pid,
-                confirmed_create_time,
-            )
-        finally:
-            if planned_sidecar_reap and not terminated:
-                self.cancel_planned_reap(pid, confirmed_create_time)
+        terminated = await self._terminate_orphan_tree(
+            pid,
+            confirmed_create_time,
+        )
         if not terminated:
             raise RuntimeError(f"orphaned sidecar did not exit (pid {pid}, record {self.record_path})")
-        if planned_sidecar_reap:
-            self.commit_planned_reap(pid, confirmed_create_time)
         # The recorded root is gone, but a helper it spawned after the last
         # rediscovery is not among the identities that proved it. With the leader
         # dead, that is exactly the sweep below, and it fails the launch rather
@@ -2045,7 +1446,7 @@ class SidecarOwnership:
         record: object,
         *,
         leader_pid: int,
-        role: _MemoryChildRole | None,
+        role: str | None,
     ) -> None:
         """Reap what an exited recorded leader left behind in its own group.
 
@@ -2094,9 +1495,9 @@ class SidecarOwnership:
                 foreign,
             )
         if not owned:
-            if foreign and role is _MemoryChildRole.CASCADE_REBUILD:
+            if foreign:
                 raise RuntimeError(
-                    "orphaned rebuild group could not be verified "
+                    "orphaned sidecar group could not be verified "
                     f"(leader pid {leader_pid}, group {group}, record {self.record_path})"
                 )
             return
@@ -2115,9 +1516,9 @@ class SidecarOwnership:
                 "orphaned sidecar group did not exit "
                 f"(leader pid {leader_pid}, group {group}, record {self.record_path})"
             )
-        if foreign and role is _MemoryChildRole.CASCADE_REBUILD:
+        if foreign:
             raise RuntimeError(
-                "orphaned rebuild group could not be verified "
+                "orphaned sidecar group could not be verified "
                 f"(leader pid {leader_pid}, group {group}, record {self.record_path})"
             )
 
@@ -2150,7 +1551,7 @@ class SidecarOwnership:
         record = _read_sidecar_record(self.record_path)
         if (
             _recorded_sidecar_pid(record) != leader_pid
-            or _recorded_child_role(record) is not self._role
+            or _recorded_child_role(record) != _SIDECAR_ROLE
             or _recorded_sidecar_group(
                 record,
                 socket_path=self._socket_path,
@@ -2160,55 +1561,26 @@ class SidecarOwnership:
         ):
             return
         if process_group is not None:
-            claimed, _foreign = self._host.recorded_group_members(
+            claimed, foreign = self._host.recorded_group_members(
                 process_group,
                 socket_path=self._socket_path,
                 provider_root=self._provider_root,
-                role=self._role,
+                role=_SIDECAR_ROLE,
             )
-            if claimed:
+            if claimed or foreign:
                 logger.warning(
-                    "Keeping the EverOS ownership record: process group %s still holds %s of ours (%s), record %s",
+                    "Keeping the EverOS ownership record: process group %s still holds claimed=%s unverifiable=%s, record %s",
                     process_group,
-                    len(claimed),
                     sorted(claimed),
+                    foreign,
                     self.record_path,
                 )
+                if foreign:
+                    raise RuntimeError(
+                        "sidecar process group could not be verified "
+                        f"(group {process_group}, record {self.record_path})"
+                    )
                 return
-        _remove_sidecar_record(self.record_path)
-
-    async def retire_reaped_launch(
-        self,
-        leader_pid: int,
-        *,
-        process_group: int | None,
-    ) -> None:
-        """Sweep late owned helpers before retiring a completed one-shot child."""
-
-        record = _read_sidecar_record(self.record_path)
-        if (
-            _recorded_sidecar_pid(record) != leader_pid
-            or _recorded_child_role(record) is not self._role
-        ):
-            raise RuntimeError(
-                "active EverOS child ownership record changed before cleanup "
-                f"(pid {leader_pid}, record {self.record_path})"
-            )
-        recorded_group = _recorded_sidecar_group(
-            record,
-            socket_path=self._socket_path,
-            provider_root=self._provider_root,
-        )
-        if recorded_group != process_group:
-            raise RuntimeError(
-                "active EverOS child process group changed before cleanup "
-                f"(pid {leader_pid}, record {self.record_path})"
-            )
-        await self._reap_recorded_group_without_leader(
-            record,
-            leader_pid=leader_pid,
-            role=self._role,
-        )
         _remove_sidecar_record(self.record_path)
 
     async def _reap_unidentified_child(self) -> None:
@@ -2229,37 +1601,16 @@ class SidecarOwnership:
         orphan, and a tree that will not exit fails the launch and keeps the record.
         """
 
-        sidecar_anchors = self._host.find_sidecars(socket_path=self._socket_path)
-        root_sidecar_anchors = self._host.find_sidecars_by_root(
+        socket_anchors = self._host.find_sidecars(socket_path=self._socket_path)
+        root_anchors = self._host.find_sidecars_by_root(
             provider_root=self._provider_root
         )
-        root_only_sidecars = set(root_sidecar_anchors).difference(sidecar_anchors)
-        sidecar_anchors.update(root_sidecar_anchors)
-        sidecars = [
-            (_MemoryChildRole.SIDECAR, pid, created_at)
-            for pid, created_at in sidecar_anchors.items()
-        ]
-        rebuilds = [
-            (_MemoryChildRole.CASCADE_REBUILD, pid, created_at)
-            for pid, created_at in self._host.find_rebuilds(
-                provider_root=self._provider_root,
-                python=None,
-            ).items()
-        ]
-        candidates = rebuilds or sidecars
-        if not candidates:
+        root_only = set(root_anchors).difference(socket_anchors)
+        socket_anchors.update(root_anchors)
+        if not socket_anchors:
             return
-        if rebuilds and (sidecars or len(rebuilds) != 1):
-            raise RuntimeError(
-                "ambiguous EverOS child ownership discovery "
-                f"(pids {sorted(pid for _role, pid, _created_at in rebuilds + sidecars)})"
-            )
-        for role, pid, created_at in sorted(candidates, key=lambda candidate: candidate[1]):
-            if (
-                self._role is _MemoryChildRole.SIDECAR
-                and role is _MemoryChildRole.SIDECAR
-                and pid in root_only_sidecars
-            ):
+        for pid, created_at in sorted(socket_anchors.items()):
+            if pid in root_only:
                 identity = self._host.inspect_identity(pid)
                 if (
                     identity is None
@@ -2267,7 +1618,7 @@ class SidecarOwnership:
                     or identity.cmdline is None
                     or not _cmdline_matches_role(
                         identity.cmdline,
-                        role=role,
+                        role=_SIDECAR_ROLE,
                         socket_path=self._socket_path,
                     )
                 ):
@@ -2275,39 +1626,10 @@ class SidecarOwnership:
                         "a live sidecar already owns this provider root"
                     )
             logger.warning(
-                "Reaping an EverOS %s an unusable ownership record could not identify (pid %s)",
-                role.value,
+                "Reaping an EverOS sidecar an unusable ownership record could not identify (pid %s)",
                 pid,
             )
             identities = {pid: created_at}
-            discovered_python = self._python
-            if role is _MemoryChildRole.CASCADE_REBUILD:
-                identity = self._host.inspect_identity(pid)
-                getuid = getattr(os, "getuid", None)
-                own_uid = getuid() if callable(getuid) else None
-                if (
-                    identity is None
-                    or identity.stamp != created_at
-                    or identity.cmdline is None
-                    or not identity.cmdline
-                    or not _cmdline_matches_role(
-                        identity.cmdline,
-                        role=role,
-                        socket_path=self._socket_path,
-                        python=None,
-                    )
-                    or (own_uid is not None and identity.uid != own_uid)
-                    or identity.environment is None
-                    or not _provider_roots_match(
-                        identity.environment.get("EVEROS_ROOT"),
-                        self._provider_root,
-                    )
-                    or identity.environment.get("AVIBE_MEMORY_CHILD_ROLE") != role.value
-                ):
-                    raise RuntimeError(
-                        f"rebuild child identity could not be verified (pid {pid})"
-                    )
-                discovered_python = Path(identity.cmdline[0])
             # Helpers are reached through the anchor's own group rather than by
             # widening the machine-wide test, because membership is what makes the
             # looser per-member claim safe.
@@ -2316,12 +1638,8 @@ class SidecarOwnership:
                 pid,
                 created_at,
                 group,
-                role=None if role is _MemoryChildRole.SIDECAR else role,
-                python=(
-                    discovered_python
-                    if role is _MemoryChildRole.CASCADE_REBUILD
-                    else None
-                ),
+                role=None,
+                python=None,
             )
             foreign: list[int] = []
             if group is not None:
@@ -2329,44 +1647,30 @@ class SidecarOwnership:
                     group,
                     socket_path=self._socket_path,
                     provider_root=self._provider_root,
-                    role=None if role is _MemoryChildRole.SIDECAR else role,
+                    role=None,
                 )
                 _merge_owned_processes(identities, claimed)
                 if foreign:
                     logger.warning(
-                        "Leaving %s process(es) in EverOS %s group %s alone: %s",
+                        "Leaving %s process(es) in EverOS sidecar group %s alone: %s",
                         len(foreign),
-                        role.value,
                         group,
                         foreign,
                     )
-            planned_sidecar_reap = (
-                self._role is _MemoryChildRole.CASCADE_REBUILD
-                and role is _MemoryChildRole.SIDECAR
+            terminated, later_foreign = await self._terminate_claimed_processes(
+                group,
+                identities,
+                role=_SIDECAR_ROLE,
             )
-            if planned_sidecar_reap:
-                self.record_planned_reap(pid, created_at)
-            terminated = False
-            try:
-                terminated, later_foreign = await self._terminate_claimed_processes(
-                    group,
-                    identities,
-                    role=role,
-                )
-            finally:
-                if planned_sidecar_reap and not terminated:
-                    self.cancel_planned_reap(pid, created_at)
             foreign = sorted(set(foreign).union(later_foreign))
             if not terminated:
                 raise RuntimeError(
-                    f"EverOS {role.value} left by an unusable record did not exit "
+                    "EverOS sidecar left by an unusable record did not exit "
                     f"(pid {pid}, record {self.record_path})"
                 )
-            if planned_sidecar_reap:
-                self.commit_planned_reap(pid, created_at)
-            if foreign and role is _MemoryChildRole.CASCADE_REBUILD:
+            if foreign:
                 raise RuntimeError(
-                    "orphaned rebuild group could not be verified "
+                    "orphaned sidecar group could not be verified "
                     f"(leader pid {pid}, group {group}, record {self.record_path})"
                 )
 
@@ -2375,7 +1679,7 @@ class SidecarOwnership:
         process_group: int | None,
         identities: dict[int, float],
         *,
-        role: _MemoryChildRole | None = None,
+        role: str | None = None,
     ) -> tuple[bool, list[int]]:
         """Signal claimed processes until none of them is left.
 
@@ -2407,6 +1711,339 @@ class SidecarOwnership:
             if await self._host.wait_for_exit(identities, timeout_seconds):
                 return True, sorted(foreign)
         return False, sorted(foreign)
+
+
+def legacy_sync_record_path(provider_root: Path | str) -> Path:
+    """Return the released provider-root-scoped sync ownership path."""
+
+    return _provider_root_coordination_path(
+        provider_root=provider_root,
+        prefix=_SYNC_RECORD_PREFIX,
+        suffix=".json",
+    )
+
+
+class _ReleasedSyncReaper:
+    """Consume released sync ownership without restoring sync orchestration."""
+
+    def __init__(
+        self,
+        *,
+        provider_root: Path | str,
+        effective_home: Path | str,
+        stop_timeout_seconds: float = _STOP_TIMEOUT_SECONDS,
+        _host: _ProcessHost | None = None,
+    ) -> None:
+        filesystem_root = ConfinedRoot.from_home(effective_home)
+        self._effective_home = filesystem_root.physical_home
+        self._memory_dir = self._effective_home / "memory"
+        self._provider_root = filesystem_root.confine(provider_root)
+        self._socket_path = self._memory_dir / ".rt" / "everos.sock"
+        self._host = _SystemProcessHost() if _host is None else _host
+        self._record_path = legacy_sync_record_path(self._provider_root)
+        self._stop_timeout_seconds = _positive_timeout(
+            stop_timeout_seconds,
+            _STOP_TIMEOUT_SECONDS,
+        )
+
+    async def reconcile_orphan(self) -> None:
+        _ensure_owner_directory(self._memory_dir)
+        _require_provider_root_access_path(self._provider_root)
+        lock_path = _provider_root_lock_path(provider_root=self._provider_root)
+        lock = _ProviderRootLock(confinement_root=lock_path.parent.parent, path=lock_path)
+        lock.acquire()
+        try:
+            record = _read_sidecar_record(
+                self._record_path,
+                max_bytes=_SYNC_RECORD_MAX_BYTES,
+            )
+            if record is None:
+                if _sidecar_record_exists(self._record_path):
+                    raise RuntimeError("released sync ownership record is unsafe")
+                return
+            validated = _validate_legacy_sync_record(
+                record,
+                provider_root=self._provider_root,
+                socket_path=self._socket_path,
+            )
+            if self._recorded_parent_is_live(validated):
+                raise RuntimeError("released sync is still owned by a live parent")
+            interrupted = await _finish_cleanup_despite_cancellation(
+                self._reconcile_exclusive(validated)
+            )
+            if interrupted:
+                raise asyncio.CancelledError
+        finally:
+            lock.release()
+
+    def _recorded_parent_is_live(self, record: Mapping[str, Any]) -> bool:
+        identity = self._host.inspect_identity(int(record["parent_pid"]))
+        if identity is None or record.get("cleanup_failed") is True:
+            return False
+        expected_uid = record.get("parent_uid")
+        if expected_uid is not None:
+            if identity.uid is None:
+                raise RuntimeError("released sync parent identity is unavailable")
+            if identity.uid != expected_uid:
+                return False
+        if "parent_starttime_ticks" in record:
+            if not _is_identity_stamp(identity.stamp):
+                raise RuntimeError("released sync parent identity is unavailable")
+            return float(identity.stamp) == float(record["parent_starttime_ticks"])
+        if not _is_identity_stamp(identity.wall_create_time):
+            raise RuntimeError("released sync parent identity is unavailable")
+        return float(identity.wall_create_time) == float(record["parent_create_time"])
+
+    async def _reconcile_exclusive(self, record: Mapping[str, Any]) -> None:
+        identities: dict[int, float] = {}
+        if record["state"] == "pending":
+            candidates = self._host.find_syncs(
+                provider_root=self._provider_root,
+                python=Path(record["argv"][0]),
+                nonce=str(record["nonce"]),
+            )
+            if not candidates:
+                _remove_legacy_sync_record(self._record_path)
+                return
+            if len(candidates) != 1:
+                raise RuntimeError("released pending sync ownership is ambiguous")
+            pid, created_at = next(iter(candidates.items()))
+            identity = self._host.inspect_identity(pid)
+            _validate_legacy_sync_identity(
+                identity,
+                record,
+                created_at=created_at,
+                provider_root=self._provider_root,
+                require_argv=True,
+            )
+            group = self._host.process_group(pid)
+            if group is None:
+                raise RuntimeError("released pending sync process group is unavailable")
+            identities[pid] = created_at
+        else:
+            pid = int(record["pid"])
+            group = int(record["process_group"])
+            identity = self._host.inspect_identity(pid)
+            if identity is not None:
+                verdict = _classify_recorded_child(
+                    record,
+                    identity,
+                    socket_path=self._socket_path,
+                    provider_root=self._provider_root,
+                    role=_RELEASED_SYNC_ROLE,
+                )
+                if verdict is _RecordedSidecar.NOT_OURS:
+                    _remove_legacy_sync_record(self._record_path)
+                    return
+                if verdict is _RecordedSidecar.UNVERIFIABLE:
+                    raise RuntimeError("released finalized sync identity is unavailable")
+                if not _is_identity_stamp(identity.stamp):
+                    raise RuntimeError("released finalized sync identity is unavailable")
+                _validate_legacy_sync_identity(
+                    identity,
+                    record,
+                    created_at=float(identity.stamp),
+                    provider_root=self._provider_root,
+                    require_argv=True,
+                )
+                identities[pid] = float(identity.stamp)
+
+        if hasattr(os, "getpgrp") and group == os.getpgrp():
+            raise RuntimeError("released sync process group is unsafe")
+        self._merge_validated_group(record, group, identities)
+        await self._terminate_group(record, group, identities)
+        remaining: dict[int, float] = {}
+        self._merge_validated_group(record, group, remaining)
+        if self._host.live(remaining):
+            raise RuntimeError("released sync process group did not exit")
+        _remove_legacy_sync_record(self._record_path)
+
+    def _merge_validated_group(
+        self,
+        record: Mapping[str, Any],
+        group: int,
+        identities: dict[int, float],
+    ) -> None:
+        claimed, foreign = self._host.recorded_group_members(
+            group,
+            socket_path=self._socket_path,
+            provider_root=self._provider_root,
+            role=_RELEASED_SYNC_ROLE,
+        )
+        if foreign:
+            raise RuntimeError("released sync process group is unverifiable")
+        for pid, created_at in claimed.items():
+            identity = self._host.inspect_identity(pid)
+            if identity is None:
+                continue
+            _validate_legacy_sync_identity(
+                identity,
+                record,
+                created_at=created_at,
+                provider_root=self._provider_root,
+                require_argv=pid == record.get("pid"),
+            )
+            identities.setdefault(pid, created_at)
+
+    async def _terminate_group(
+        self,
+        record: Mapping[str, Any],
+        group: int,
+        identities: dict[int, float],
+    ) -> None:
+        rounds = (
+            (signal.SIGTERM, self._stop_timeout_seconds),
+            (
+                getattr(signal, "SIGKILL", signal.SIGTERM),
+                min(self._stop_timeout_seconds, 3.0),
+            ),
+        )
+        for signum, timeout_seconds in rounds:
+            if self._host.live(identities):
+                self._merge_validated_group(record, group, identities)
+            self._host.signal(identities, signum, process_group=group)
+            if await self._host.wait_for_exit(identities, timeout_seconds):
+                return
+        raise RuntimeError("released sync process group did not exit")
+
+
+class ReleasedEverOSOrphanReconciler:
+    """One compatibility boundary for process records shipped before PR 4.
+
+    This adapter only consumes released ownership records. It never launches a
+    rebuild or sync child and never writes workflow state.
+    """
+
+    def __init__(
+        self,
+        *,
+        provider_root: Path | str,
+        effective_home: Path | str,
+        stop_timeout_seconds: float = _STOP_TIMEOUT_SECONDS,
+        _host: _ProcessHost | None = None,
+    ) -> None:
+        host = _SystemProcessHost() if _host is None else _host
+        arguments = {
+            "provider_root": provider_root,
+            "effective_home": effective_home,
+            "stop_timeout_seconds": stop_timeout_seconds,
+            "_host": host,
+        }
+        self._released_sync = _ReleasedSyncReaper(**arguments)
+        self._sidecar = _RecordedSidecarReaper(**arguments)
+
+    async def reconcile_orphans(self) -> None:
+        await self._released_sync.reconcile_orphan()
+        await self._sidecar.reconcile_orphan()
+
+
+def _validate_legacy_sync_record(
+    record: object,
+    *,
+    provider_root: Path,
+    socket_path: Path,
+) -> Mapping[str, Any]:
+    if not isinstance(record, dict):
+        raise RuntimeError("released sync ownership record is invalid")
+    if (
+        record.get("role") != _RELEASED_SYNC_ROLE
+        or not _provider_roots_match(record.get("provider_root"), provider_root)
+        or not _paths_match(record.get("socket_path"), socket_path)
+        or record.get("state") not in {"pending", "finalized"}
+    ):
+        raise RuntimeError("released sync ownership record is invalid")
+    nonce = record.get("nonce")
+    argv = record.get("argv")
+    cleanup_failed = record.get("cleanup_failed", False)
+    if (
+        not isinstance(cleanup_failed, bool)
+        or not isinstance(nonce, str)
+        or len(nonce) != 64
+        or any(character not in "0123456789abcdef" for character in nonce)
+        or not isinstance(argv, list)
+        or len(argv) != len(_SYNC_ARGV) + 1
+        or not isinstance(argv[0], str)
+        or not Path(argv[0]).is_absolute()
+        or tuple(argv[1:]) != _SYNC_ARGV
+    ):
+        raise RuntimeError("released sync ownership record is invalid")
+    parent_pid = record.get("parent_pid")
+    parent_uid = record.get("parent_uid")
+    create_time = record.get("create_time")
+    if (
+        not isinstance(parent_pid, int)
+        or isinstance(parent_pid, bool)
+        or parent_pid <= 1
+        or not _is_identity_stamp(record.get("parent_create_time"))
+        or (create_time is not None and not _is_identity_stamp(create_time))
+        or (
+            parent_uid is not None
+            and (
+                not isinstance(parent_uid, int)
+                or isinstance(parent_uid, bool)
+                or parent_uid < 0
+            )
+        )
+        or (
+            "parent_starttime_ticks" in record
+            and not _is_identity_stamp(record.get("parent_starttime_ticks"))
+        )
+    ):
+        raise RuntimeError("released sync ownership record is invalid")
+    if record["state"] == "finalized" and (
+        not isinstance(record.get("pid"), int)
+        or isinstance(record.get("pid"), bool)
+        or int(record["pid"]) <= 1
+        or not isinstance(record.get("process_group"), int)
+        or isinstance(record.get("process_group"), bool)
+        or int(record["process_group"]) <= 1
+        or (
+            "starttime_ticks" not in record
+            and not _is_identity_stamp(record.get("create_time"))
+        )
+    ):
+        raise RuntimeError("released sync ownership record is invalid")
+    if "starttime_ticks" in record and not _is_identity_stamp(
+        record.get("starttime_ticks")
+    ):
+        raise RuntimeError("released sync ownership record is invalid")
+    return record
+
+
+def _validate_legacy_sync_identity(
+    identity: _ProcessIdentity | None,
+    record: Mapping[str, Any],
+    *,
+    created_at: float,
+    provider_root: Path,
+    require_argv: bool,
+) -> None:
+    if (
+        identity is None
+        or not _is_identity_stamp(created_at)
+        or identity.stamp != created_at
+    ):
+        raise RuntimeError("released sync identity is unavailable")
+    if require_argv and identity.cmdline != tuple(record["argv"]):
+        raise RuntimeError("released sync identity is unavailable")
+    expected_uid = record.get("parent_uid")
+    if expected_uid is not None and identity.uid != expected_uid:
+        raise RuntimeError("released sync identity is unavailable")
+    environment = identity.environment
+    if environment is None:
+        raise RuntimeError("released sync identity is unavailable")
+    expected_parent_uid = "" if expected_uid is None else str(expected_uid)
+    if (
+        not _provider_roots_match(environment.get("EVEROS_ROOT"), provider_root)
+        or environment.get("AVIBE_MEMORY_CHILD_ROLE")
+        != _RELEASED_SYNC_ROLE
+        or environment.get(_SYNC_NONCE_ENV) != record["nonce"]
+        or environment.get(_SYNC_PARENT_PID_ENV) != str(record["parent_pid"])
+        or environment.get(_SYNC_PARENT_CREATE_TIME_ENV)
+        != float(record["parent_create_time"]).hex()
+        or environment.get(_SYNC_PARENT_UID_ENV) != expected_parent_uid
+    ):
+        raise RuntimeError("released sync identity is unavailable")
 
 
 def _settings_complete(settings: EverOSProcessSettings) -> bool:
@@ -2450,17 +2087,6 @@ def _endpoint_settings_complete(*values: str | None) -> bool:
     return all(isinstance(value, str) and bool(value.strip()) for value in values)
 
 
-def _rebuild_settings_complete(settings: EverOSProcessSettings) -> bool:
-    return all(
-        isinstance(value, str) and bool(value.strip())
-        for value in (
-            settings.embedding_base_url,
-            settings.embedding_model,
-            settings.embedding_api_key,
-        )
-    )
-
-
 def _prepare_memory_child_directories(
     *,
     memory_dir: Path,
@@ -2478,8 +2104,6 @@ def _prepare_memory_child_directories(
         memory_dir / ".child-home" / ".local" / "state",
         memory_dir / "generated",
     ]
-    if settings.call_log_db_path is not None:
-        directories.append(settings.call_log_db_path.parent)
     for directory in directories:
         _ensure_owner_directory(directory)
     _require_private_provider_root(provider_root)
@@ -2560,7 +2184,7 @@ def _memory_child_environment(
     provider_root: Path,
     attachments_root: Path,
     settings: EverOSProcessSettings,
-    role: _MemoryChildRole | None,
+    role: str | None,
 ) -> dict[str, str]:
     child_home = memory_dir / ".child-home"
     env = {
@@ -2614,10 +2238,8 @@ def _memory_child_environment(
         )
     ):
         env[MULTIMODAL_EXPLICIT_ENV] = "1"
-    if settings.call_log_db_path is not None:
-        env["AVIBE_MEMORY_CALL_LOG_DB"] = str(settings.call_log_db_path)
     if role is not None:
-        env["AVIBE_MEMORY_CHILD_ROLE"] = role.value
+        env["AVIBE_MEMORY_CHILD_ROLE"] = role
     return env
 
 
@@ -2901,24 +2523,36 @@ def _recorded_sidecar_pid(record: object) -> int | None:
     return pid
 
 
-def _recorded_child_role(record: object) -> _MemoryChildRole | None:
+def _recorded_child_role(record: object) -> str | None:
     if not isinstance(record, dict):
         return None
     role = record.get("role")
     if role is None:
         # Records written before role-aware ownership always describe a sidecar.
-        return _MemoryChildRole.SIDECAR
-    try:
-        return _MemoryChildRole(role)
-    except (TypeError, ValueError):
-        return None
+        return _SIDECAR_ROLE
+    return (
+        role
+        if role in {_SIDECAR_ROLE, _RELEASED_REBUILD_ROLE, _RELEASED_SYNC_ROLE}
+        else None
+    )
 
 
 def _recorded_child_python(record: object) -> Path | None:
     if not isinstance(record, dict):
         return None
     value = record.get("python")
-    return Path(value) if isinstance(value, str) and value else None
+    if isinstance(value, str) and value:
+        return Path(value)
+    argv = record.get("argv")
+    if (
+        record.get("role") == _RELEASED_SYNC_ROLE
+        and isinstance(argv, list)
+        and len(argv) == len(_SYNC_ARGV) + 1
+        and isinstance(argv[0], str)
+        and tuple(argv[1:]) == _SYNC_ARGV
+    ):
+        return Path(argv[0])
+    return None
 
 
 def _record_for_this_installation(
@@ -3006,7 +2640,7 @@ def _recorded_group_members(
     *,
     socket_path: Path,
     provider_root: Path,
-    role: _MemoryChildRole | None = None,
+    role: str | None = None,
 ) -> tuple[dict[int, float], list[int]]:
     """Split a recorded group's live members into ours and ones to leave alone.
 
@@ -3039,7 +2673,7 @@ def _process_names_owned_runtime(
     *,
     socket_path: Path,
     provider_root: Path,
-    role: _MemoryChildRole | None = None,
+    role: str | None = None,
 ) -> bool:
     """Whether a live process ties itself to this installation's sidecar runtime.
 
@@ -3072,7 +2706,7 @@ def _process_names_owned_runtime(
         provider_root,
     ):
         return False
-    return role is None or environment.get("AVIBE_MEMORY_CHILD_ROLE") == role.value
+    return role is None or environment.get("AVIBE_MEMORY_CHILD_ROLE") == role
 
 
 def _disclosed_process_environment(process: psutil.Process) -> Mapping[str, str] | None:
@@ -3110,7 +2744,7 @@ def _cmdline_is_sidecar(cmdline: tuple[str, ...]) -> bool:
 def _cmdline_matches_role(
     cmdline: tuple[str, ...],
     *,
-    role: _MemoryChildRole,
+    role: str,
     socket_path: Path,
     python: Path | None = None,
 ) -> bool:
@@ -3118,7 +2752,7 @@ def _cmdline_matches_role(
         return False
     if python is not None and cmdline[0] != str(python):
         return False
-    if role is _MemoryChildRole.SIDECAR:
+    if role == _SIDECAR_ROLE:
         return (
             cmdline[1:4]
             == (
@@ -3129,7 +2763,7 @@ def _cmdline_matches_role(
             and len(cmdline) == 5
             and _paths_match(cmdline[4], socket_path)
         )
-    if role is _MemoryChildRole.CASCADE_SYNC:
+    if role == _RELEASED_SYNC_ROLE:
         return cmdline[1:] == (
             "-I",
             "-m",
@@ -3137,13 +2771,15 @@ def _cmdline_matches_role(
             "cascade",
             "sync",
         )
-    return cmdline[1:] == (
-        "-m",
-        _REBUILD_ENTRYPOINT_MODULE,
-        "cascade",
-        "rebuild",
-        "--yes",
-    )
+    if role == _RELEASED_REBUILD_ROLE:
+        return cmdline[1:] == (
+            "-m",
+            _RELEASED_REBUILD_ENTRYPOINT_MODULE,
+            "cascade",
+            "rebuild",
+            "--yes",
+        )
+    return False
 
 
 def _legacy_sidecar_record(record: object) -> bool:
@@ -3159,7 +2795,7 @@ def _cmdline_matches_recorded_child(
     cmdline: tuple[str, ...] | None,
     *,
     socket_path: Path,
-    role: _MemoryChildRole,
+    role: str,
 ) -> bool | None:
     """Whether a disclosed cmdline matches the record.
 
@@ -3196,7 +2832,7 @@ def _legacy_create_time_mismatch_verdict(
     *,
     socket_path: Path,
     provider_root: Path,
-    role: _MemoryChildRole,
+    role: str,
 ) -> _RecordedSidecar | None:
     """Resolve a legacy wall-clock ``create_time`` mismatch.
 
@@ -3239,7 +2875,7 @@ def _classify_recorded_child(
     *,
     socket_path: Path,
     provider_root: Path,
-    role: _MemoryChildRole,
+    role: str,
 ) -> _RecordedSidecar:
     recorded_create_time = _recorded_sidecar_create_time(
         record,
@@ -3290,7 +2926,7 @@ def _classify_recorded_child(
                 identity.environment.get("EVEROS_ROOT"),
                 provider_root,
             )
-            or identity.environment.get("AVIBE_MEMORY_CHILD_ROLE") != role.value
+            or identity.environment.get("AVIBE_MEMORY_CHILD_ROLE") != role
         ):
             return _RecordedSidecar.NOT_OURS
     if live_recorded_stamp is None or command_match is None:
@@ -3328,16 +2964,20 @@ def _classify_recorded_sidecar(
         identity,
         socket_path=socket_path,
         provider_root=provider_root,
-        role=_MemoryChildRole.SIDECAR,
+        role=_SIDECAR_ROLE,
     )
 
 
-def _read_sidecar_record(path: Path) -> object | None:
+def _read_sidecar_record(
+    path: Path,
+    *,
+    max_bytes: int = _SIDECAR_RECORD_MAX_BYTES,
+) -> object | None:
     try:
         info = path.lstat()
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
             return None
-        if info.st_size > _SIDECAR_RECORD_MAX_BYTES:
+        if info.st_size > max_bytes:
             return None
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError):
@@ -3357,6 +2997,21 @@ def _sidecar_record_exists(path: Path) -> bool:
     except OSError:
         return False
     return True
+
+
+def _remove_legacy_sync_record(path: Path) -> None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise RuntimeError("released sync ownership record cannot be inspected") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise RuntimeError("released sync ownership record is unsafe")
+    try:
+        path.unlink()
+    except OSError as exc:
+        raise RuntimeError("released sync ownership record cannot be retired") from exc
 
 
 def _processes_serving_owned_socket(*, socket_path: Path) -> dict[int, float]:
@@ -3434,61 +3089,9 @@ def _processes_serving_owned_root(*, provider_root: Path) -> dict[int, float]:
         ):
             continue
         role = environment.get("AVIBE_MEMORY_CHILD_ROLE")
-        if role not in (None, _MemoryChildRole.SIDECAR.value):
+        if role not in (None, _SIDECAR_ROLE):
             continue
         claimed[candidate.pid] = -1.0 if created_at is None else float(created_at)
-    return claimed
-
-
-def _processes_rebuilding_owned_root(
-    *,
-    provider_root: Path,
-    python: Path | None = None,
-) -> dict[int, float]:
-    """Discover exact role-bearing rebuild children for crash recovery."""
-
-    claimed: dict[int, float] = {}
-    own_pid = os.getpid()
-    getuid = getattr(os, "getuid", None)
-    own_uid = getuid() if callable(getuid) else None
-    for candidate in psutil.process_iter():
-        if candidate.pid == own_pid:
-            continue
-        try:
-            uid = _process_real_uid(candidate)
-            if own_uid is not None and uid is not None and uid != own_uid:
-                continue
-            cmdline = _disclosed_identity_field(candidate.cmdline)
-            if cmdline is None:
-                continue
-            rendered = tuple(str(value) for value in cmdline)
-            if not _cmdline_matches_role(
-                rendered,
-                role=_MemoryChildRole.CASCADE_REBUILD,
-                socket_path=Path(),
-                python=python,
-            ):
-                continue
-            created_at = _disclosed_identity_field(lambda: _process_creation_stamp(candidate))
-            environment = _disclosed_process_environment(candidate)
-        except psutil.NoSuchProcess:
-            continue
-        except psutil.Error:
-            continue
-        if own_uid is not None and uid is None:
-            raise RuntimeError(f"rebuild child uid could not be verified (pid {candidate.pid})")
-        if created_at is None or environment is None:
-            raise RuntimeError(f"rebuild child identity could not be verified (pid {candidate.pid})")
-        if (
-            not _provider_roots_match(
-                environment.get("EVEROS_ROOT"),
-                provider_root,
-            )
-            or environment.get("AVIBE_MEMORY_CHILD_ROLE")
-            != _MemoryChildRole.CASCADE_REBUILD.value
-        ):
-            continue
-        claimed[candidate.pid] = float(created_at)
     return claimed
 
 
@@ -3498,7 +3101,7 @@ def _processes_syncing_owned_root(
     python: Path,
     nonce: str,
 ) -> dict[int, float]:
-    """Discover the exact nonce-bearing sync child for pending recovery."""
+    """Discover one exact released nonce-bearing sync child."""
 
     claimed: dict[int, float] = {}
     own_pid = os.getpid()
@@ -3525,13 +3128,15 @@ def _processes_syncing_owned_root(
         rendered = tuple(str(value) for value in cmdline)
         if not _cmdline_matches_role(
             rendered,
-            role=_MemoryChildRole.CASCADE_SYNC,
+            role=_RELEASED_SYNC_ROLE,
             socket_path=Path(),
             python=python,
         ):
             continue
         try:
-            created_at = _disclosed_identity_field(lambda: _process_creation_stamp(candidate))
+            created_at = _disclosed_identity_field(
+                lambda: _process_creation_stamp(candidate)
+            )
             environment = _disclosed_process_environment(candidate)
         except psutil.NoSuchProcess:
             continue
@@ -3540,15 +3145,21 @@ def _processes_syncing_owned_root(
                 f"sync child identity could not be verified (pid {candidate.pid})"
             ) from exc
         if own_uid is not None and uid is None:
-            raise RuntimeError(f"sync child uid could not be verified (pid {candidate.pid})")
+            raise RuntimeError(
+                f"sync child uid could not be verified (pid {candidate.pid})"
+            )
         if created_at is None or environment is None:
             raise RuntimeError(
                 f"sync child identity could not be verified (pid {candidate.pid})"
             )
         if (
-            not _provider_roots_match(environment.get("EVEROS_ROOT"), provider_root)
-            or environment.get("AVIBE_MEMORY_CHILD_ROLE") != _MemoryChildRole.CASCADE_SYNC.value
-            or environment.get("AVIBE_MEMORY_SYNC_NONCE") != nonce
+            not _provider_roots_match(
+                environment.get("EVEROS_ROOT"),
+                provider_root,
+            )
+            or environment.get("AVIBE_MEMORY_CHILD_ROLE")
+            != _RELEASED_SYNC_ROLE
+            or environment.get(_SYNC_NONCE_ENV) != nonce
         ):
             continue
         claimed[candidate.pid] = float(created_at)
@@ -3944,26 +3555,7 @@ class _SystemProcessHost:
         socket_path: Path | None = None,
         capture_stderr: bool = False,
     ) -> asyncio.subprocess.Process:
-        if kind is _ProcessKind.CASCADE_REBUILD:
-            arguments = [
-                str(python),
-                "-m",
-                _REBUILD_ENTRYPOINT_MODULE,
-                "cascade",
-                "rebuild",
-                "--yes",
-            ]
-        elif kind is _ProcessKind.CASCADE_SYNC:
-            arguments = [
-                str(python),
-                "-I",
-                "-m",
-                "everos.entrypoints.cli.main",
-                "cascade",
-                "sync",
-            ]
-        else:
-            arguments = [str(python), "-m", _SIDECAR_ENTRYPOINT_MODULE]
+        arguments = [str(python), "-m", _SIDECAR_ENTRYPOINT_MODULE]
         if kind is _ProcessKind.SIDECAR:
             if socket_path is None:
                 raise ValueError("sidecar launch requires a socket path")
@@ -3995,7 +3587,7 @@ class _SystemProcessHost:
         *,
         socket_path: Path,
         provider_root: Path,
-        role: _MemoryChildRole | None = None,
+        role: str | None = None,
     ) -> tuple[dict[int, float], list[int]]:
         return _recorded_group_members(
             process_group,
@@ -4009,17 +3601,6 @@ class _SystemProcessHost:
 
     def find_sidecars_by_root(self, *, provider_root: Path) -> dict[int, float]:
         return _processes_serving_owned_root(provider_root=provider_root)
-
-    def find_rebuilds(
-        self,
-        *,
-        provider_root: Path,
-        python: Path | None,
-    ) -> dict[int, float]:
-        return _processes_rebuilding_owned_root(
-            provider_root=provider_root,
-            python=python,
-        )
 
     def find_syncs(
         self,
@@ -4036,22 +3617,6 @@ class _SystemProcessHost:
 
     def live(self, identities: Mapping[int, float]) -> dict[int, float]:
         return _live_owned_processes(identities)
-
-    async def wait_for_stopped(self, pid: int, timeout_seconds: float) -> bool:
-        deadline = asyncio.get_running_loop().time() + max(timeout_seconds, 0.0)
-        while True:
-            try:
-                status = psutil.Process(pid).status()
-            except (psutil.NoSuchProcess, psutil.ZombieProcess):
-                return False
-            except psutil.Error as exc:
-                raise RuntimeError("could not verify rebuild child handshake") from exc
-            if status == psutil.STATUS_STOPPED:
-                return True
-            remaining = deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                return False
-            await asyncio.sleep(min(0.01, remaining))
 
     def signal(
         self,
@@ -4099,22 +3664,16 @@ class _SystemProcessHost:
 
 @runtime_checkable
 class EverOSProcessPort(Protocol):
-    """What the runtime needs from a supervised sidecar, and nothing more.
+    """The narrow child seam owned exclusively by ``EverOSSupervisor``.
 
-    Deliberately seven members over ``EverOSProcess``'s ~990 lines: the runtime
-    never inspects the child tree, the generated config, or the signal handling.
+    Deliberately five members over the concrete process adapter: callers never
+    inspect the child tree, generated config, or signal handling.
     Keeping those out of this interface is what lets tests substitute a fake
     instead of patching ``psutil``, ``os``, and private attributes.
     """
 
     @property
     def running(self) -> bool: ...
-
-    @property
-    def starting(self) -> bool: ...
-
-    @property
-    def restart_authorized(self) -> bool: ...
 
     @property
     def retains_active_config(self) -> bool: ...
@@ -4127,11 +3686,10 @@ class EverOSProcessPort(Protocol):
 
 
 class EverOSProcessFactory(Protocol):
-    """Construct one supervised sidecar per reconciliation.
+    """Construct one private child for the supervisor.
 
-    A factory rather than an instance because the runtime builds a fresh child
-    for every enabled reconciliation, and a short-lived one for the enablement
-    probe. Mirrors ``EverOSProcess.__init__``.
+    A factory rather than an instance keeps process test injection below the
+    capability boundary. Mirrors ``EverOSProcess.__init__``.
     """
 
     def __call__(
@@ -4145,13 +3703,13 @@ class EverOSProcessFactory(Protocol):
         provider_root_guard: Callable[[], None] | None = None,
         on_ready: Callable[[], Awaitable[None] | None] | None = None,
         before_start: Callable[[], Awaitable[None] | None] | None = None,
-        on_reaped: Callable[[], Awaitable[None] | None] | None = None,
+        on_unexpected_exit: Callable[[], Awaitable[None] | None] | None = None,
     ) -> EverOSProcessPort: ...
 
 
 @dataclass
 class FakeEverOSProcess:
-    """In-process sidecar fake for runtime contract tests.
+    """In-process child fake for supervisor contract tests.
 
     Mirrors the real supervisor's observable contract: a successful ``start``
     fires ``on_ready``, exactly as ``EverOSProcess`` does once its child answers
@@ -4166,7 +3724,7 @@ class FakeEverOSProcess:
     processing_healthy_flag: bool = True
     on_ready: Callable[[], Awaitable[None] | None] | None = None
     before_start: Callable[[], Awaitable[None] | None] | None = None
-    on_reaped: Callable[[], Awaitable[None] | None] | None = None
+    on_unexpected_exit: Callable[[], Awaitable[None] | None] | None = None
     # Launch inputs the factory captured, for tests asserting on child settings.
     python: Path | None = None
     provider_root: Path | None = None
@@ -4175,11 +3733,7 @@ class FakeEverOSProcess:
     starts: int = 0
     stops: int = 0
     stopped: bool = False
-    _running: bool = True
-    _starting: bool = False
-    _down: bool = False
-    _desired_running: bool = True
-    _restart_pending: bool = False
+    _running: bool = False
     _process_tree_retained: bool = False
 
     @property
@@ -4187,30 +3741,11 @@ class FakeEverOSProcess:
         return self._running
 
     @property
-    def starting(self) -> bool:
-        return self._starting
-
-    @property
-    def down(self) -> bool:
-        return self._down
-
-    @property
-    def restart_authorized(self) -> bool:
-        return bool(
-            self._desired_running
-            and not self._down
-            and (self._running or self._starting or self._restart_pending)
-        )
-
-    @property
     def retains_active_config(self) -> bool:
-        return self._running or self._process_tree_retained or self.restart_authorized
+        return self._running or self._process_tree_retained
 
     async def start(self) -> bool:
         self.starts += 1
-        self._desired_running = True
-        self._down = False
-        self._restart_pending = False
         self._process_tree_retained = False
         before_start = self.before_start
         if before_start is not None:
@@ -4218,42 +3753,33 @@ class FakeEverOSProcess:
             if inspect.isawaitable(result):
                 await result
         if self.start_failure is not None:
-            self._desired_running = False
-            self._down = True
             self._running = False
-            await self._notify_reaped()
             raise self.start_failure
         started = self.start_results.popleft() if self.start_results else True
         self._running = started
-        self._starting = False
         if started:
             await self.ready()
-        else:
-            self._restart_pending = True
-            await self._notify_reaped()
         return started
 
     async def stop(self) -> None:
         self.stops += 1
         self.stopped = True
         owned_execution = self._running or self._process_tree_retained
-        self._desired_running = False
-        self._restart_pending = False
         self._running = False
-        self._starting = False
         if self.stop_failure is not None:
             self._process_tree_retained = owned_execution
             raise self.stop_failure
         self._process_tree_retained = False
-        await self._notify_reaped()
 
-    async def _notify_reaped(self) -> None:
-        on_reaped = self.on_reaped
-        if on_reaped is None:
-            return
-        result = on_reaped()
-        if inspect.isawaitable(result):
-            await result
+    async def unexpected_exit(self) -> None:
+        """Simulate a reaped child that the supervisor did not stop."""
+
+        self._running = False
+        callback = self.on_unexpected_exit
+        if callback is not None:
+            result = callback()
+            if inspect.isawaitable(result):
+                await result
 
     async def processing_healthy(self) -> bool:
         if self.processing_healthy_results:
@@ -4275,7 +3801,7 @@ class FakeEverOSProcessFactory:
     """Hand out ``FakeEverOSProcess`` instances and remember every one.
 
     Satisfies ``EverOSProcessFactory``. ``supervised`` holds only the sidecars the
-    runtime actually supervises — a process built without ``on_ready`` is the
+    supervisor owns; a process built without ``on_ready`` is the
     short-lived enablement probe, not a managed child.
     """
 
@@ -4297,13 +3823,13 @@ class FakeEverOSProcessFactory:
         provider_root_guard: Callable[[], None] | None = None,
         on_ready: Callable[[], Awaitable[None] | None] | None = None,
         before_start: Callable[[], Awaitable[None] | None] | None = None,
-        on_reaped: Callable[[], Awaitable[None] | None] | None = None,
+        on_unexpected_exit: Callable[[], Awaitable[None] | None] | None = None,
     ) -> EverOSProcessPort:
         del effective_home, socket_path
         process = self.template()
         process.on_ready = on_ready
         process.before_start = before_start
-        process.on_reaped = on_reaped
+        process.on_unexpected_exit = on_unexpected_exit
         process.python = Path(python)
         process.provider_root = Path(provider_root) if provider_root is not None else None
         process.provider_root_guard = provider_root_guard
@@ -4316,13 +3842,3 @@ class FakeEverOSProcessFactory:
     @property
     def last(self) -> FakeEverOSProcess | None:
         return self.created[-1] if self.created else None
-
-
-def __getattr__(name: str) -> object:
-    """Lazily expose the auxiliary sync process without a module cycle."""
-
-    if name in {"EverOSSyncProcess", "SyncProcessResult", "sync_record_path"}:
-        from core.memory import sync_process
-
-        return getattr(sync_process, name)
-    raise AttributeError(name)

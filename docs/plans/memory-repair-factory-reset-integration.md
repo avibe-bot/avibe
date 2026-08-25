@@ -1,5 +1,9 @@
 # Memory Repair / Factory Reset Integration
 
+> Historical design. Superseded by
+> [`memory-unified-recovery-pr3.md`](./memory-unified-recovery-pr3.md); the live
+> Repair and Factory Reset integration described below was removed.
+
 Do not apply these edits until PR #1332 lands with its current review fixes.
 The final integration worker must preserve both operations' retained-task and
 closed-response contracts while adding the gates below.

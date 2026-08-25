@@ -88,12 +88,29 @@ _SMOKE_SCRIPT = (
     "print(platform.python_version())\n"
 )
 _SCRUBBER_ADMISSION_SCRIPT = (
-    "from core.memory.everos_insight import install_error_scrubbers\n"
+    "from core.memory.secret_scrubber import install_error_scrubbers\n"
     "install_error_scrubbers()\n"
+)
+_PROVIDER_ROOT_REPAIR_MARKERS = (
+    "incompatible",
+    "does not match",
+    "not empty",
+    "sentinel is unsafe",
+    "sentinel is invalid",
+    "metadata is invalid",
 )
 
 
 logger = logging.getLogger(__name__)
+
+
+def _provider_root_failure_reason(error: ProviderRootError) -> str | None:
+    """Classify only a proven incompatible local root as repairable."""
+
+    detail = str(error).lower()
+    if any(marker in detail for marker in _PROVIDER_ROOT_REPAIR_MARKERS):
+        return "memory_local_data_unusable"
+    return None
 
 
 MemoryArtifactCandidate = ProviderRootMetadata
@@ -102,6 +119,10 @@ MemoryProviderRootState = ProviderRootState
 
 class MemoryRuntimeActivationError(RuntimeError):
     """Closed failure raised before an unsafe Memory runtime pointer cutover."""
+
+    def __init__(self, message: str, *, reason: str | None = None) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 MemoryArtifactActivationCoordinator = Callable[
@@ -504,7 +525,7 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Failed to refresh Memory runtime pointer")
                 return self._failure(
-                    self._reason("pointer_write_failed"),
+                    getattr(exc, "reason", None) or self._reason("pointer_write_failed"),
                     manifest=manifest,
                     archive=archive,
                     message=str(exc),
@@ -526,6 +547,12 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         try:
             root_state = self._provider_root.inspect(candidate)
         except ProviderRootError as error:
+            repair_reason = _provider_root_failure_reason(error)
+            if repair_reason is not None:
+                raise MemoryRuntimeActivationError(
+                    str(error),
+                    reason=repair_reason,
+                ) from error
             # A durable factory-reset fence may intentionally leave an old,
             # incompatible root in place until the retry deletes it. Let the
             # lifecycle coordinator decide whether pointer-only repair is safe;
@@ -564,6 +591,29 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             commit()
             return
         coordinator(candidate, root_state, commit, rollback)
+
+    def _failure_for_install_exception(
+        self,
+        error: Exception,
+        *,
+        manifest: ManagedRuntimeManifest,
+        archive: ManagedRuntimeArchive,
+    ) -> dict[str, Any]:
+        """Keep local-root incompatibility visible to Memory Wake."""
+
+        reason = getattr(error, "reason", None)
+        if isinstance(reason, str) and reason:
+            return self._failure(
+                reason,
+                manifest=manifest,
+                archive=archive,
+                message=str(error),
+            )
+        return super()._failure_for_install_exception(
+            error,
+            manifest=manifest,
+            archive=archive,
+        )
 
     def _candidate_from_manifest(self, manifest: ManagedRuntimeManifest) -> MemoryArtifactCandidate:
         provider_root_format = manifest.payload.get("provider_root_format")

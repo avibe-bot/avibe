@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Literal, TypeAlias
 
 MemoryKind = Literal["profile", "episode", "fact"]
+MemoryOrigin = Literal["user", "agent"]
 RecallMode = Literal["auto", "keyword", "vector", "hybrid", "agentic"]
 MAX_AGENTIC_TIMEOUT_SECONDS = 30.0
 MemoryContentKind = Literal["image", "audio", "doc", "pdf", "html", "email"]
@@ -15,7 +16,6 @@ MemoryFailureKind = Literal[
     "boot_recovery",
     "delivery_abandoned",
     "distillation_rejected",
-    "recorder_degraded",
     "result_unknown",
 ]
 MemoryErrorCode = Literal[
@@ -30,28 +30,32 @@ MemoryErrorCode = Literal[
     "memory_runtime_unsupported",
     "memory_runtime_install_failed",
     "memory_reconcile_failed",
-    "memory_restart_failed",
+    "memory_wake_failed",
+    "memory_runtime_busy",
+    "memory_permission_denied",
+    "memory_disk_unavailable",
     "memory_sidecar_unavailable",
     "memory_provider_timeout",
     "memory_provider_response_invalid",
     "memory_capability_unavailable",
     "memory_processing_failed",
-    "memory_clear_failed",
-    "memory_embedding_rebuild_required",
-    "memory_rebuild_failed",
+    "memory_loss_confirmation_required",
+    "memory_local_data_unusable",
+    "memory_legacy_recovery_required",
     "memory_embedding_unavailable",
     "memory_llm_unavailable",
     "memory_rerank_unavailable",
     "memory_multimodal_unavailable",
-    "memory_rebuild_root_busy",
-    "memory_factory_reset_failed",
     "memory_repair_failed",
+    "memory_repair_not_required",
+    "memory_delete_data_failed",
+    "memory_reconfigure_failed",
     "memory_operation_in_progress",
 ]
 
 # Transport vocabulary, wider than the persistable one: errors such as
 # ``memory_access_denied``, ``memory_reconcile_failed``, and
-# ``memory_restart_failed`` never reach a stored ``last_error`` column.
+# ``memory_wake_failed`` never reaches a stored ``last_error`` column.
 CLOSED_MEMORY_ERROR_CODES = frozenset(
     {
         "memory_disabled",
@@ -65,22 +69,26 @@ CLOSED_MEMORY_ERROR_CODES = frozenset(
         "memory_runtime_unsupported",
         "memory_runtime_install_failed",
         "memory_reconcile_failed",
-        "memory_restart_failed",
+        "memory_wake_failed",
+        "memory_runtime_busy",
+        "memory_permission_denied",
+        "memory_disk_unavailable",
         "memory_sidecar_unavailable",
         "memory_provider_timeout",
         "memory_provider_response_invalid",
         "memory_capability_unavailable",
         "memory_processing_failed",
-        "memory_clear_failed",
-        "memory_embedding_rebuild_required",
-        "memory_rebuild_failed",
+        "memory_loss_confirmation_required",
+        "memory_local_data_unusable",
+        "memory_legacy_recovery_required",
         "memory_embedding_unavailable",
         "memory_llm_unavailable",
         "memory_rerank_unavailable",
         "memory_multimodal_unavailable",
-        "memory_rebuild_root_busy",
-        "memory_factory_reset_failed",
         "memory_repair_failed",
+        "memory_repair_not_required",
+        "memory_delete_data_failed",
+        "memory_reconfigure_failed",
         "memory_operation_in_progress",
     }
 )
@@ -110,7 +118,7 @@ class MemoryPreflightDiagnostic:
 
 @dataclass(frozen=True)
 class ProviderSessionRef:
-    """Canonical provider identity persisted by Avibe's Memory outbox."""
+    """Canonical provider identity; ``principal_id`` carries the Memory owner."""
 
     principal_id: str
     epoch: int
@@ -322,6 +330,19 @@ class MemoryItem:
     date: str | None = None
     profile: MemoryProfile | None = None
     project: str | None = None
+    origin: Literal["user", "agent", "both"] | None = None
+
+
+@dataclass(frozen=True)
+class ProviderSearchItem:
+    """Provider-only search metadata used to merge owner-scoped legs."""
+
+    item: MemoryItem
+    score: float | None
+    episode_id: str | None
+    timestamp: str | None
+    provider_rank: int
+    queried_owner: str
 
 
 def memory_profile_payload(profile: MemoryProfile) -> dict[str, Any]:
@@ -362,6 +383,8 @@ def memory_item_payload(item: MemoryItem) -> dict[str, Any]:
         payload["profile"] = memory_profile_payload(item.profile)
     if item.project is not None:
         payload["project"] = item.project
+    if item.origin is not None:
+        payload["origin"] = item.origin
     return payload
 
 
@@ -386,6 +409,7 @@ class MemoryListItem:
     timestamp: str
     project: str
     kind: Literal["episode"] = "episode"
+    origin: MemoryOrigin | None = None
 
 
 @dataclass(frozen=True)
@@ -418,6 +442,7 @@ def memory_list_page_payload(result: MemoryListPage) -> dict[str, Any]:
                 "body": item.body,
                 "timestamp": item.timestamp,
                 "project": item.project,
+                **({"origin": item.origin} if item.origin is not None else {}),
             }
             for item in result.items
         ],

@@ -34,6 +34,6 @@ for every Avibe-owned descendant.
   transaction semantics, provider sentinel semantics, or child lifecycle;
 - no change to explicitly configured provider roots or socket paths outside the
   effective home;
-- the remaining caller audit (`operation_lock`, call-log storage, artifacts,
+- the remaining caller audit (`operation_lock`, retired provider-call storage cleanup, artifacts,
   clear intent, and factory reset) stays tracked by #1520 and is not declared
   complete by this first slice.

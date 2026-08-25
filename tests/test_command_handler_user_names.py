@@ -299,19 +299,14 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
             [("wx-chat", "🆕 已开启新的会话。你下一条消息会从全新对话开始。")],
         )
 
-    async def test_new_flushes_before_clear_and_continues_after_failed_flush(self):
+    async def test_new_clears_without_waiting_for_memory_delivery(self):
         controller = _StubController({"display_name": "小王"})
         calls = []
-
-        async def _final_flush(context, raw_session_id, *, deadline_seconds):
-            calls.append(("flush", context, raw_session_id, deadline_seconds))
-            raise RuntimeError("provider unavailable")
 
         async def _clear_sessions(session_key):
             calls.append(("clear", session_key))
             return {}
 
-        controller.final_flush_memory_session = _final_flush
         controller.agent_service.clear_sessions = _clear_sessions  # type: ignore[attr-defined]
         handler = CommandHandlers(controller)
         context = MessageContext(user_id="wx-user", channel_id="wx-chat", platform="wechat")
@@ -320,16 +315,12 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             calls,
-            [
-                ("flush", context, "wechat_wx-chat", 5.0),
-                ("clear", "wechat::wx-chat"),
-            ],
+            [("clear", "wechat::wx-chat")],
         )
         self.assertEqual(len(controller.im_client.sent_messages), 1)
 
-    async def test_new_holds_memory_session_fence_through_reset(self):
+    async def test_new_offers_memory_barrier_without_fencing_reset(self):
         controller = _StubController({"display_name": "Alex"})
-        admission_lock = asyncio.Lock()
         reset_entered = asyncio.Event()
         release_reset = asyncio.Event()
         capture_enqueued = asyncio.Event()
@@ -343,10 +334,9 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
             deadline_seconds,
         ):
             self.assertEqual(raw_session_id, "wechat_wx-chat")
-            self.assertEqual(deadline_seconds, 5.0)
-            async with admission_lock:
-                calls.append(("flush", context))
-                return await operation()
+            self.assertEqual(deadline_seconds, 0.0)
+            calls.append(("barrier", context))
+            return await operation()
 
         async def _clear_sessions(session_key):
             calls.append(("clear", session_key))
@@ -355,9 +345,8 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
             return {}
 
         async def _capture_same_session():
-            async with admission_lock:
-                calls.append(("capture", "wechat_wx-chat"))
-                capture_enqueued.set()
+            calls.append(("capture", "wechat_wx-chat"))
+            capture_enqueued.set()
 
         controller.run_memory_session_lifecycle = _run_lifecycle
         controller.agent_service.clear_sessions = _clear_sessions  # type: ignore[attr-defined]
@@ -373,22 +362,23 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
         capture_task = asyncio.create_task(_capture_same_session())
         await asyncio.sleep(0)
 
-        self.assertFalse(capture_enqueued.is_set())
+        self.assertTrue(capture_enqueued.is_set())
         release_reset.set()
         await new_task
         await capture_task
         self.assertEqual(
             calls,
             [
-                ("flush", context),
+                ("barrier", context),
                 ("clear", "wechat::wx-chat"),
                 ("capture", "wechat_wx-chat"),
             ],
         )
 
-    async def test_new_waits_for_an_admitted_turn_capture_before_reset(self):
+    async def test_new_does_not_wait_for_an_admitted_turn_capture_before_reset(self):
         controller = _StubController({"display_name": "Alex"})
-        turn_lock = asyncio.Lock()
+        capture_started = asyncio.Event()
+        release_capture = asyncio.Event()
         reset_entered = asyncio.Event()
 
         class _TurnManager:
@@ -400,9 +390,8 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
                 deadline_seconds,
             ):
                 self_outer.assertEqual(raw_session_id, "wechat_wx-chat")
-                self_outer.assertEqual(deadline_seconds, 5.0)
-                async with turn_lock:
-                    return await operation()
+                self_outer.assertEqual(deadline_seconds, 0.0)
+                return await operation()
 
         self_outer = self
         controller.session_turns = _TurnManager()
@@ -419,14 +408,18 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
             platform="wechat",
         )
 
-        await turn_lock.acquire()
-        new_task = asyncio.create_task(handler.handle_new(context))
-        await asyncio.sleep(0)
-        self.assertFalse(reset_entered.is_set())
+        async def _admitted_capture() -> None:
+            capture_started.set()
+            await release_capture.wait()
 
-        turn_lock.release()
+        capture_task = asyncio.create_task(_admitted_capture())
+        await capture_started.wait()
+        new_task = asyncio.create_task(handler.handle_new(context))
+        await asyncio.wait_for(reset_entered.wait(), timeout=1.0)
+        self.assertFalse(capture_task.done())
         await new_task
-        self.assertTrue(reset_entered.is_set())
+        release_capture.set()
+        await capture_task
 
     async def _run_new_with_memory_lifecycle_error(
         self,
@@ -444,7 +437,7 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
             *,
             deadline_seconds,
         ):
-            self.assertEqual(deadline_seconds, 5.0)
+            self.assertEqual(deadline_seconds, 0.0)
             raise error
 
         controller.run_memory_session_lifecycle = _busy_lifecycle
@@ -470,18 +463,13 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
             [("wx-chat", "❌ 清除会话时出错：provider unavailable")],
         )
 
-    async def test_new_does_not_flush_a_fallback_session_anchor(self):
+    async def test_new_does_not_offer_memory_for_a_fallback_session_anchor(self):
         controller = _StubController({"display_name": "Alex"})
-        flush_calls = []
         clear_base_calls = []
-
-        async def _final_flush(*args, **kwargs):
-            flush_calls.append((args, kwargs))
 
         def _raise_for_missing_canonical_anchor(_context):
             raise RuntimeError("session identity unavailable")
 
-        controller.final_flush_memory_session = _final_flush
         controller.session_handler.get_base_session_id = _raise_for_missing_canonical_anchor
         controller.sessions = type(
             "Sessions",
@@ -493,7 +481,6 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
 
         await handler.handle_new(context)
 
-        self.assertEqual(flush_calls, [])
         self.assertEqual(clear_base_calls, [("slack::C1", "slack_M1")])
 
     async def test_new_command_reports_paused_bound_definitions(self):
@@ -699,7 +686,7 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
             *,
             deadline_seconds,
         ):
-            call_order.append("flush")
+            call_order.append("barrier")
             flush_calls.append((context, raw_session_id, deadline_seconds))
             return await operation()
 
@@ -738,8 +725,8 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
             [("-100123", "🆕 已开启新的会话。你下一条消息会从全新对话开始。")],
         )
         self.assertEqual(controller.im_client.sent_contexts[0].thread_id, "99")
-        self.assertEqual(flush_calls, [(context, "telegram_-100123_1", 5.0)])
-        self.assertEqual(call_order, ["flush", "topic"])
+        self.assertEqual(flush_calls, [(context, "telegram_-100123_1", 0.0)])
+        self.assertEqual(call_order, ["barrier", "topic"])
 
     async def test_slack_dm_start_skips_channel_info_lookup(self):
         controller = _StubController({"display_name": "Alex"})

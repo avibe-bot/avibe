@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,7 +13,6 @@ from core.memory import everos
 from core.memory.everos import MULTIMODAL_EXPLICIT_ENV
 from core.memory import sidecar
 from core.memory.sidecar import (
-    _RecorderHealthProjection,
     _processing_healthy_from_child_environment,
     _request_rejection,
 )
@@ -85,8 +84,8 @@ def test_sidecar_server_bounds_graceful_shutdown(monkeypatch, tmp_path: Path) ->
     assert captured["timeout_graceful_shutdown"] == 1
     assert captured["round_logger_level"] == logging.INFO
     assert round_logger.level == original_round_logger_level
-    assert isinstance(captured["app"], sidecar._RecorderHealthProjection)
-    assert isinstance(captured["app"]._app, sidecar._AgenticDeadlineProjection)
+    assert isinstance(captured["app"], sidecar._AgenticDeadlineProjection)
+    assert not hasattr(sidecar, "_RecorderHealthProjection")
 
 
 def test_agentic_deadline_projection_cancels_downstream_and_preserves_round() -> None:
@@ -231,7 +230,7 @@ def test_sidecar_rejects_artifact_before_everos_can_persist_diagnostics(
     assert imported is False
 
 
-def test_sidecar_prepares_recorder_before_import_and_wraps_existing_lifespan(
+def test_sidecar_installs_canonical_scrubber_without_provider_call_state(
     monkeypatch, tmp_path: Path
 ) -> None:
     import uvicorn
@@ -265,30 +264,9 @@ def test_sidecar_prepares_recorder_before_import_and_wraps_existing_lifespan(
             events.append("create-app")
             return app
 
-    class _Handle:
-        def start(self) -> None:
-            events.append("recorder-start")
-
-        async def close(self, *, timeout: float) -> None:
-            events.append(("recorder-close", timeout))
-
-        @contextmanager
-        def boundary_request(self):
-            events.append("boundary-enter")
-            try:
-                yield
-            finally:
-                events.append("boundary-exit")
-
-    handle = _Handle()
-
-    def prepare(path: Path):
-        events.append(("prepare", path))
-        return handle
-
     class _Config:
-        def __init__(self, _app, **_kwargs):
-            return None
+        def __init__(self, projected_app, **_kwargs):
+            assert isinstance(projected_app, sidecar._AgenticDeadlineProjection)
 
     class _Server:
         def __init__(self, _config):
@@ -308,7 +286,6 @@ def test_sidecar_prepares_recorder_before_import_and_wraps_existing_lifespan(
         "install_error_scrubbers",
         lambda: events.append("install-error-scrubbers"),
     )
-    monkeypatch.setattr(sidecar, "prepare_call_recorder", prepare)
     monkeypatch.setattr(
         sidecar.importlib,
         "import_module",
@@ -318,21 +295,15 @@ def test_sidecar_prepares_recorder_before_import_and_wraps_existing_lifespan(
     monkeypatch.setattr(uvicorn, "Config", _Config)
     monkeypatch.setattr(uvicorn, "Server", _Server)
     monkeypatch.setenv("AVIBE_MEMORY_ATTACHMENTS_ROOT", str(tmp_path / "attachments"))
-    db_path = tmp_path / "call-log.db"
-    monkeypatch.setenv("AVIBE_MEMORY_CALL_LOG_DB", str(db_path))
-
     sidecar.serve(tmp_path / "everos.sock")
 
     assert events == [
         "install-error-scrubbers",
-        ("prepare", db_path),
         "import-app",
         "create-app",
-        "recorder-start",
         "everos-start",
         "inside",
         "everos-stop",
-        ("recorder-close", 1.0),
     ]
 
     class _Request:
@@ -380,77 +351,6 @@ def test_sidecar_prepares_recorder_before_import_and_wraps_existing_lifespan(
         )
 
     asyncio.run(exercise_guard())
-    assert "boundary-enter" not in events
-
-
-def test_sidecar_projects_recorder_state_through_existing_health_response() -> None:
-    async def app(scope, _receive, send) -> None:
-        assert scope["path"] == "/health"
-        await send(
-            {
-                "type": "http.response.start",
-                "status": 200,
-                "headers": [(b"content-type", b"application/json")],
-            }
-        )
-        await send(
-            {
-                "type": "http.response.body",
-                "body": b'{"status":"ok","version":"1.2.3"}',
-            }
-        )
-
-    class _Handle:
-        health = {"state": "degraded", "reason": "call_log_corrupt"}
-
-    messages: list[dict] = []
-
-    async def run() -> None:
-        async def send(message: dict) -> None:
-            messages.append(message)
-
-        projection = _RecorderHealthProjection(app, _Handle())
-        await projection(
-            {"type": "http", "method": "GET", "path": "/health"},
-            None,
-            send,
-        )
-
-    asyncio.run(run())
-
-    body = json.loads(messages[1]["body"])
-    assert body == {
-        "status": "ok",
-        "version": "1.2.3",
-        "recorder": {"state": "degraded", "reason": "call_log_corrupt"},
-    }
-
-
-def test_sidecar_projects_disabled_recorder_when_capture_is_off() -> None:
-    async def app(_scope, _receive, send) -> None:
-        await send({"type": "http.response.start", "status": 200, "headers": []})
-        await send({"type": "http.response.body", "body": b'{"status":"ok"}'})
-
-    messages: list[dict] = []
-
-    async def run() -> None:
-        async def send(message: dict) -> None:
-            messages.append(message)
-
-        await _RecorderHealthProjection(app, None)(
-            {"type": "http", "method": "GET", "path": "/health"},
-            None,
-            send,
-        )
-
-    asyncio.run(run())
-
-    assert json.loads(messages[1]["body"])["recorder"] == {
-        "state": "disabled",
-        "reason": None,
-    }
-
-
 def test_sidecar_guard_allows_derived_principals_and_memory_scope() -> None:
     principal = "u-11111111111111111111111111111111"
     payload = json.dumps(
@@ -484,7 +384,7 @@ def test_sidecar_guard_allows_derived_principals_and_memory_scope() -> None:
     ).encode()
     get = json.dumps(
         {
-            "user_id": "u-22222222222222222222222222222222",
+            "user_id": principal,
             "app_id": "avibe",
             "project_id": "default",
             "memory_type": "profile",
@@ -497,6 +397,22 @@ def test_sidecar_guard_allows_derived_principals_and_memory_scope() -> None:
     assert _request_rejection("POST", "/api/v2/memory/add", payload) is None
     assert _request_rejection("POST", "/api/v2/memory/search", search) is None
     assert _request_rejection("POST", "/api/v2/memory/get", get) is None
+    assistant_owner = f"{principal}-agent".encode()
+    assert _request_rejection(
+        "POST",
+        "/api/v2/memory/add",
+        payload.replace(principal.encode(), assistant_owner),
+    ) is None
+    assert _request_rejection(
+        "POST",
+        "/api/v2/memory/search",
+        search.replace(principal.encode(), assistant_owner),
+    ) is None
+    assert _request_rejection(
+        "POST",
+        "/api/v2/memory/get",
+        get.replace(principal.encode(), assistant_owner),
+    ) is None
     assert _request_rejection("POST", "/api/v2/memory/add", payload.replace(principal.encode(), b"owner-1")) == "add"
     assert _request_rejection("POST", "/api/v2/memory/add", payload.replace(PROJECT.encode(), b"personal")) == "add"
     assert _request_rejection("POST", "/api/v1/memory/add", payload) == "route"

@@ -138,31 +138,13 @@ class CommandHandlers(BaseHandler):
             base_id = context.message_id or context.channel_id or context.user_id
         return f"{platform}_{base_id}", None
 
-    async def _final_flush_for_new(self, context: MessageContext, session_anchor: Optional[str]) -> None:
-        final_flush = getattr(self.controller, "final_flush_memory_session", None)
-        if not session_anchor or not callable(final_flush):
-            return
-        try:
-            await final_flush(context, session_anchor, deadline_seconds=5.0)
-        except Exception:
-            logger.debug("Memory final flush failed before /new", exc_info=True)
-
     async def _run_memory_lifecycle_for_new(
         self,
         context: MessageContext,
         session_anchor: Optional[str],
         operation: Callable[[], Awaitable[_NewSessionResult]],
     ) -> _NewSessionResult:
-        """Run `/new`, waiting briefly for capture then failing open."""
-
-        budget = 5.0
-        deadline_at = time.monotonic() + budget
-
-        def remaining_seconds() -> float:
-            leftover = deadline_at - time.monotonic()
-            if leftover >= budget - 0.05:
-                return budget
-            return max(leftover, 0.001)
+        """Run `/new` without waiting for volatile Memory delivery."""
 
         async def run_memory_lifecycle() -> _NewSessionResult:
             lifecycle = getattr(
@@ -175,10 +157,8 @@ class CommandHandlers(BaseHandler):
                     context,
                     session_anchor,
                     operation,
-                    deadline_seconds=remaining_seconds(),
+                    deadline_seconds=0.0,
                 )
-
-            await self._final_flush_for_new(context, session_anchor)
             return await operation()
 
         turn_manager = getattr(self.controller, "session_turns", None)
@@ -187,7 +167,7 @@ class CommandHandlers(BaseHandler):
             return await turn_lifecycle(
                 session_anchor,
                 run_memory_lifecycle,
-                deadline_seconds=budget,
+                deadline_seconds=0.0,
             )
         return await run_memory_lifecycle()
 

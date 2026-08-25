@@ -1766,7 +1766,8 @@
     "bind_code_limit_reached": "Too many active bind codes. Revoke an unused code before creating another.",
     "memory_disabled": "Memory is disabled, or this connection can't reach it.",
     "memory_invalid_input": "That Memory request wasn't valid.",
-    "memory_log_entry_not_found": "That Memory processing entry is no longer available.",
+    "memory_processing_record_entry_not_found": "That Memory processing entry is no longer available.",
+    "memory_failure_history_unavailable": "Detailed Memory failure history is unavailable.",
     "memory_access_denied": "This caller isn't allowed to read that Memory data.",
     "memory_input_too_large": "That input is too large for Memory.",
     "memory_queue_full": "The Memory queue is full right now.",
@@ -1782,20 +1783,22 @@
     "memory_provider_response_invalid": "Memory returned an invalid response.",
     "memory_capability_unavailable": "Memory models are temporarily unavailable. Try again when the configured model service is available.",
     "memory_processing_failed": "Memory processing failed.",
-    "memory_clear_failed": "Clearing Memory data failed.",
-    "memory_clear_marker_unreadable": "Memory Clear state could not be read. Run Clear again to repair it.",
-    "memory_clear_legacy_state_requires_rerun": "An older Memory Clear state needs to be replaced. Run Clear again to continue.",
-    "memory_restart_failed": "Restarting the Memory engine failed.",
+    "memory_wake_failed": "Memory service could not start. No data was deleted.",
+    "memory_runtime_busy": "Memory is still handling work and could not stop safely.",
+    "memory_permission_denied": "Memory cannot access its local data path. Fix the path permissions; Repair is not available for this fault.",
+    "memory_disk_unavailable": "Memory cannot use the local disk. Restore disk access or free space; Repair is not available for this fault.",
+    "memory_loss_confirmation_required": "Accept Memory data loss explicitly to continue.",
+    "memory_local_data_unusable": "The confined local Memory data root is unusable or incompatible and needs Repair.",
+    "memory_legacy_recovery_required": "An older recovery state requires one explicit destructive Repair.",
     "memory_runtime_unpublished": "This Avibe version hasn't published a memory runtime yet.",
     "memory_runtime_manifest_missing": "The memory runtime manifest is missing.",
     "memory_runtime_manifest_unavailable": "The memory runtime manifest couldn't be downloaded.",
     "memory_runtime_archive_unavailable": "The memory runtime download isn't available right now.",
-    "memory_rebuild_failed": "Rebuilding the Memory index failed. Retry when ready; your markdown memory is still kept.",
-    "memory_repair_failed": "Repairing the Memory index failed. Check the current health and try again when ready.",
-    "memory_rebuild_root_busy": "Another process is using the Memory root. Wait and retry the rebuild.",
+    "memory_repair_failed": "Memory repair failed. No unproved path was deleted.",
+    "memory_repair_not_required": "Repair is available only when the local Memory data root genuinely needs repair.",
+    "memory_delete_data_failed": "Memory data could not be deleted safely. Check the per-root result.",
+    "memory_reconfigure_failed": "Memory settings could not be applied with a fresh native data root.",
     "memory_operation_in_progress": "A Memory operation is already in progress. Wait for it to finish.",
-    "memory_factory_reset_failed": "Reinitializing Memory could not finish. Memory data may be partially deleted; retry from Settings → Dependencies.",
-    "memory_embedding_rebuild_required": "Changing the embedding endpoint or model rebuilds the Memory index. Confirm to continue.",
     "memory_embedding_unavailable": "The embedding provider is unavailable",
     "memory_llm_unavailable": "The LLM provider is unavailable",
     "memory_rerank_unavailable": "The reranking provider is unavailable",
@@ -4176,10 +4179,56 @@
   "memory": {
     "title": "Memory",
     "betaTitle": "Memory · Beta",
-    "subtitle": "Avibe builds a personal memory from your conversations and your Agent's work, so it understands you better over time. Review, search, or clear it here.",
+    "subtitle": "Avibe builds a personal memory from your conversations and your Agent's work, so it understands you better over time. Review, search, or delete it here.",
+    "runtimeState": {
+      "disabled": "Disabled",
+      "starting": "Starting",
+      "running": "Running",
+      "degraded": "Degraded",
+      "needs_repair": "Needs repair"
+    },
+    "runtimeAction": {
+      "moreActions": "More Memory actions",
+      "retryButton": "Retry startup",
+      "retryRunning": "Retrying…",
+      "restartButton": "Restart Memory service",
+      "restartRunning": "Restarting…",
+      "restartDescription": "Stops and restarts EverOS without deleting Memory data.",
+      "completed": "Memory service is ready.",
+      "failed": "Memory service could not start. No Memory data was deleted."
+    },
+    "repair": {
+      "button": "Repair Memory",
+      "running": "Repairing…",
+      "confirmTitle": "Repair Memory and accept data loss?",
+      "confirmDescription": "Repair permanently deletes the confined local Memory data roots and starts them fresh. Memory settings, credentials, stable identity, the installed runtime, and original chats are kept.",
+      "confirmLabel": "Accept loss and repair",
+      "completed": "Memory was repaired and its native data path is ready.",
+      "failed": "Memory repair failed. Deleted data cannot be restored."
+    },
+    "deleteData": {
+      "button": "Delete Memory data",
+      "confirmTitle": "Delete Memory data for this installation?",
+      "confirmDescription": "This permanently deletes the confined local Memory data roots for every user and project on this installation. Settings, credentials, stable identity, the installed runtime, and original chats are kept.",
+      "confirmLabel": "Accept loss and delete",
+      "completed": "Memory data was deleted.",
+      "failed": "Memory data could not be deleted safely.",
+      "rootResultsTitle": "Deletion result by data root",
+      "rootStatus": {
+        "deleted": "Deleted",
+        "remaining": "Still present",
+        "absent": "Not present",
+        "failed": "Not deleted"
+      }
+    },
+    "origin": {
+      "user": "User memory",
+      "agent": "Agent memory",
+      "both": "User + Agent"
+    },
     "setup": {
       "runtimeRequired": "Install the Memory runtime first",
-      "runtimeRequiredHint": "Install or repair Memory from Dependencies. You can still disable Memory or clear stored data below."
+      "runtimeRequiredHint": "Install or repair the Memory runtime from Dependencies. You can still disable Memory or delete stored data below."
     },
     "tabs": {
       "processingRecord": "Processing Record",
@@ -4203,7 +4252,6 @@
         "syncing": "Syncing",
         "degraded": "Degraded",
         "down": "Down",
-        "clearing": "Clearing",
         "error": "Error"
       },
       "syncing": "Syncing",
@@ -4215,16 +4263,12 @@
       "deadHint": "The Memory engine never confirmed receiving this message.",
       "missed": "Missed",
       "fault": {
-        "credential": "The Memory engine cannot call the configured model endpoint. Check API key balance and permissions.",
-        "engine": "The Memory engine reported an internal error. Restarting it usually clears the fault."
+        "credential": "The Memory engine cannot call the configured model endpoint. Check API key balance and permissions."
       },
       "faultAction": {
         "credential": "Open credential settings"
       },
       "dismissFault": "Dismiss processing alert",
-      "restartEngine": "Restart engine",
-      "engineRestartCompleted": "Memory engine restarted.",
-      "engineRestartFailed": "Memory engine restart failed.",
       "providerTitle": "Memory engine (EverOS)",
       "providerSubtitle": "Latest processing result",
       "observation": {
@@ -4252,7 +4296,6 @@
           "boot_recovery": "Startup recovery",
           "delivery_abandoned": "Send failed (given up)",
           "distillation_rejected": "Processing rejected",
-          "recorder_degraded": "Call log issue",
           "result_unknown": "Result unknown"
         }
       }
@@ -4261,18 +4304,6 @@
       "title": "Processing Record",
       "description": "How the Memory engine is running, how fresh its data is, and any issues it hit while processing.",
       "refresh": "Refresh",
-      "repair": {
-        "action": "Repair index",
-        "running": "Repairing…",
-        "confirmTitle": "Repair the Memory index?",
-        "confirmDescription": "Repair rescans Markdown memory and drains pending work while the live Memory sidecar stays available. Embedding work may use API quota.",
-        "confirmLabel": "Repair index",
-        "healthResult": "Health after repair",
-        "healthy": "Healthy",
-        "completed": "Memory index repair completed.",
-        "completedWithWarnings": "Memory index repair completed with health warnings.",
-        "failed": "Memory index repair failed."
-      },
       "runtime": {
         "title": "Engine status",
         "help": "The Memory engine runs in the background on this machine and turns your messages into memories. This shows how it's doing.",
@@ -4291,12 +4322,6 @@
         "disabledFeaturesHelp": "Engine features that aren't turned on. This usually doesn't affect everyday use.",
         "disabledFeaturesHelpLabel": "About features not enabled",
         "noneDisabled": "No separately disabled features reported.",
-        "cascade": "Processing queue",
-        "cascadeHelp": "Messages wait in a queue and the engine turns them into memories one by one. This shows the queue's progress and failure counts; retryable failures retry automatically, while permanently failed items do not.",
-        "cascadeHelpLabel": "About the processing queue",
-        "recorder": "Call log",
-        "recorderHelp": "When recording is active, the call log keeps model-call details for troubleshooting. Degraded or off recording may omit new calls.",
-        "recorderHelpLabel": "About the call log",
         "noFacts": "Nothing to show yet.",
         "fact": {
           "capability": {
@@ -4308,21 +4333,6 @@
             "agenticSearch": "Agentic search",
             "knowledge": "Knowledge base"
           },
-          "cascade": {
-            "healthy": "Running normally",
-            "reasons": "Issue reasons",
-            "pending": "Waiting to process",
-            "failedPermanent": "Failed (won't retry)",
-            "failedRetryable": "Failed (will retry)",
-            "drainConsecutiveFailures": "Consecutive failures",
-            "unrecoverableTotal": "Total given up",
-            "optimizeFailureStreak": "Consecutive optimization failures",
-            "pruneStaleSeconds": "Remove data older than"
-          },
-          "recorder": {
-            "state": "Status",
-            "reason": "Reason"
-          },
           "boolean": {
             "true": "Yes",
             "false": "No"
@@ -4331,28 +4341,14 @@
             "hoursMinutes": "{{hours}}h {{minutes}}m",
             "minutesSeconds": "{{minutes}}m {{seconds}}s",
             "seconds": "{{seconds}}s"
-          },
-          "cascadeReason": {
-            "drainFailures": "Queue processing failed",
-            "optimizeStuck": "Optimization task stuck",
-            "pruneStale": "Old-data cleanup stuck",
-            "healthProbeFailed": "Health check failed",
-            "unknown": "Unknown"
-          },
-          "recorderState": {
-            "active": "Recording normally",
-            "degraded": "Partial issues",
-            "disabled": "Off"
-          },
-          "recorderReason": {
-            "writerFailures": "Write failures",
-            "serializationFailed": "Couldn't save data",
-            "callLogCorrupt": "Call log corrupt"
           }
         }
       },
       "source": {
-        "health": "Engine health"
+        "health": "Engine health",
+        "memcells": "Native messages",
+        "runs": "Native runs",
+        "semantic": "Linked memories"
       },
       "sourceState": {
         "available": "Available",
@@ -4360,6 +4356,51 @@
         "stale": "Stale",
         "unknown": "Unknown",
         "unavailable": "Unavailable"
+      },
+      "reason": {
+        "busy": "Source data is busy",
+        "memory_failure_history_unavailable": "Capture failure history is not retained",
+        "native_memcells_unavailable": "Native messages cannot be read",
+        "native_runs_unavailable": "Native runs cannot be read",
+        "native_semantic_unavailable": "Linked memory files cannot be read",
+        "payload_projection_limit": "The original payload exceeds the display limit",
+        "payload_unavailable": "The original payload is unavailable",
+        "payload_malformed": "The retained payload does not match the native schema",
+        "authorized_user_payload_unavailable": "No authorized user payload item is available",
+        "unauthorized_or_bounded_items_omitted": "Unauthorized or over-limit payload items were omitted",
+        "native_runs_missing_or_retained": "Linked native runs are missing or were retained away",
+        "native_run_retention_bounded": "Native run history is retention-bounded",
+        "semantic_results_not_user_scoped": "Linked memories are unavailable for this owner scope",
+        "semantic_results_missing_or_retained": "Linked memories are missing or were retained away",
+        "semantic_projection_bounded": "Linked memory content was bounded for display",
+        "current_state_not_user_scoped": "Current state is unavailable for this owner scope",
+        "current_state_unavailable": "Current profile and index state are unavailable",
+        "index_state_unavailable": "Current index state is unavailable",
+        "index_state_missing_or_retained": "Current index state is missing or was retained away",
+        "index_state_incomplete": "Some linked index state is missing or outside the display bound",
+        "unknown": "Native data is unavailable or incomplete"
+      },
+      "runStatus": {
+        "running": "Running",
+        "success": "Succeeded",
+        "failed": "Failed",
+        "dead_letter": "Stopped permanently",
+        "crashed": "Crashed",
+        "unknown": "Unknown"
+      },
+      "profileStatus": {
+        "present": "Present",
+        "missing": "Missing"
+      },
+      "indexStatus": {
+        "available": "Available",
+        "partial": "Partial",
+        "unavailable": "Unavailable",
+        "pending": "Pending",
+        "processing": "Processing",
+        "done": "Done",
+        "failed": "Failed",
+        "unknown": "Unknown"
       },
       "sourceReason": "Reason: {{reason}}",
       "sourceNotObserved": "Not observed",
@@ -4373,7 +4414,7 @@
         "title": "Provider checks",
         "help": "These installation-level checks validate the configured language, embedding, and optional reranking providers. They are not attached to any conversation.",
         "helpLabel": "About provider checks",
-        "description": "Recent checks made while validating Memory settings or a rebuild.",
+        "description": "Recent checks made while validating Memory settings.",
         "empty": "No provider checks recorded.",
         "unavailable": "Provider checks are temporarily unavailable."
       },
@@ -4408,18 +4449,42 @@
         "generation": "Data version",
         "requestId": "Request ID"
       },
-      "clearInProgress": {
-        "title": "Clear Memory Data is in progress",
-        "description": "Memory remains fenced while the deletion completes automatically.",
-        "explicitRetryDescription": "Clear did not finish automatically. Run Clear Memory Data again to retry or replace the failed operation.",
-        "deleting": "Deleting Memory data",
-        "failed": "Clear needs another attempt",
-        "loadFailed": "Couldn't load Clear maintenance state."
-      },
       "timeline": {
         "title": "Recent processing",
         "help": "How recent messages were turned into memories, step by step.",
         "helpLabel": "About recent processing"
+      },
+      "records": {
+        "description": "Authorized native messages and the retained processing facts linked directly to them.",
+        "loading": "Loading native processing records…",
+        "loadFailed": "Couldn't load native processing records.",
+        "detailFailed": "Couldn't load this processing record.",
+        "empty": "No authorized native messages are available.",
+        "loadMore": "Load more",
+        "back": "Back to records",
+        "noPreview": "Authorized user payload is unavailable.",
+        "omittedBytes": "+{{formattedBytes}} bytes omitted",
+        "runCount": "{{count}} runs",
+        "sourceNotice": "{{section}} is {{state}} ({{reason}}).",
+        "project": "Project",
+        "projectLabel": "Memory project",
+        "projectDefault": "Default",
+        "session": "Session",
+        "owner": "Owner",
+        "created": "Created",
+        "payload": "Original user payload",
+        "runs": "Native runs",
+        "semantic": "Linked Episodes and Atomic Facts",
+        "current": "Current state",
+        "currentUnattributed": "Profile and index state are current and unattributed; they are not historical run results.",
+        "profile": "Profile",
+        "indexing": "Indexing",
+        "updated": "Updated",
+        "strategy": "Strategy",
+        "status": "Status",
+        "attempt": "Attempt",
+        "started": "Started",
+        "unavailable": "This section is unavailable or has been retained away."
       }
     },
     "profile": {
@@ -4427,6 +4492,7 @@
       "loading": "Loading profile…",
       "empty": "No profile yet — keep chatting, then check back once messages have been processed.",
       "loadFailed": "Couldn't load your profile.",
+      "partial": "One profile source could not be loaded. The profile shown here may be incomplete.",
       "warningUnavailable": "A profile isn't available from this provider yet. This is expected, not an error — try Search instead, or check back later.",
       "disabledHint": "Enable Memory to view your profile.",
       "refresh": "Refresh",
@@ -4449,9 +4515,10 @@
       "projectLabel": "Memory project",
       "projectDefault": "Default",
       "projectAll": "All my projects",
-      "partial": "Some projects could not be searched. These results may be incomplete.",
+      "partial": "Some user, Agent, or project Memory sources could not be searched. These results may be incomplete.",
       "truncated": "Search stopped before every project was checked. These results may be incomplete.",
       "browse": {
+        "originLabel": "Memory owner",
         "sortLabel": "Episode order",
         "newestFirst": "Newest first",
         "episodes": "Episodes",
@@ -4476,112 +4543,6 @@
         "openDetail": "Open episode: {{title}}"
       }
     },
-    "log": {
-      "description": "See the processing history for created Memory entries across every user and project on this installation.",
-      "loading": "Loading processing log…",
-      "loadFailed": "Couldn't load the processing log.",
-      "detailLoading": "Loading processing details…",
-      "detailFailed": "Couldn't load processing details.",
-      "detailUnavailable": "Processing details are unavailable.",
-      "forbidden": "This processing log isn't available on the current connection.",
-      "disabledHint": "Enable Memory to view its processing log.",
-      "empty": "No processed Memory entries yet.",
-      "unlinkedTitle": "Calls without Memory entries",
-      "unlinkedLoading": "Loading retained calls…",
-      "unlinkedLoadFailed": "Couldn't load calls without Memory entries.",
-      "unlinkedEmpty": "No retained calls without a Memory entry were found.",
-      "unlinkedRecorderIncomplete": "Call recording is {{state}}. This list may be incomplete.",
-      "unlinkedRecorderIncompleteWithReason": "Call recording is {{state}} ({{reason}}). This list may be incomplete.",
-      "unlinkedRetention": "Call evidence expires after {{days}} days or when more than {{maxRows}} newer calls are retained.",
-      "unlinkedTruncated": "Only the newest retained calls are shown.",
-      "refresh": "Refresh",
-      "loadMore": "Load more",
-      "limitReached": "Showing the first {{count}} entries. Refresh to see the newest processing activity.",
-      "back": "Back to processing log",
-      "messages": "{{count}} messages",
-      "runs": "{{count}} runs",
-      "providerCalls": "{{count}} calls",
-      "projectId": "Project ID",
-      "userId": "User ID",
-      "noPreview": "No text preview available.",
-      "recorderDegraded": "New model calls aren't being logged right now. Existing entries are still readable.",
-      "recorderCorrupt": "The model call log is corrupt. Use Clear Memory Data to remove it before logging can resume.",
-      "clearAction": "Open Clear Memory Data",
-      "sectionUnavailable": "{{section}} is unavailable ({{reason}}). Other sections may still be complete.",
-      "sectionPartial": "{{section}} is partially available ({{reason}}).",
-      "sectionStale": "{{section}} is stale ({{reason}}).",
-      "sectionUnknown": "{{section}} availability is unknown ({{reason}}).",
-      "section": {
-        "everos": "Timeline data",
-        "capture": "Message tracking",
-        "calls": "Model calls"
-      },
-      "timeline": "Processing timeline",
-      "step": {
-        "capture": "Collected and sent",
-        "memcell": "Memory snippet created",
-        "strategy": "Memory strategy"
-      },
-      "reason": {
-        "missing": "source data is missing",
-        "busy": "source data is busy",
-        "malformed": "source data is malformed",
-        "expired": "attribution has expired",
-        "runsMissing": "processing runs are missing",
-        "runsBusy": "processing runs are busy",
-        "runsMalformed": "processing runs are malformed"
-      },
-      "status": {
-        "created": "Created",
-        "mixed": "Mixed",
-        "pending": "Pending",
-        "processing": "Processing",
-        "delivered": "Delivered",
-        "dead": "Stopped",
-        "running": "Running",
-        "ok": "Succeeded",
-        "success": "Succeeded",
-        "failed": "Failed",
-        "deadLetter": "Stopped after retries",
-        "crashed": "Crashed",
-        "error": "Error",
-        "present": "Present",
-        "missing": "Missing",
-        "notSeen": "Not seen",
-        "indexed": "Indexed"
-      },
-      "callKind": {
-        "llm": "Language model",
-        "multimodalLlm": "Multimodal model",
-        "embedding": "Embedding model",
-        "rerank": "Reranking model"
-      },
-      "callStage": {
-        "processingPreflight": "Provider check",
-        "boundary": "Request preparation",
-        "strategy": "Strategy",
-        "cascade": "Building memories",
-        "episodeExtract": "Episode extraction",
-        "parse": "Image/file parsing"
-      },
-      "callSummary": "{{kind}} · {{status}}",
-      "profileTrigger": "Triggered profile run",
-      "unavailable": "Unavailable: {{reason}}",
-      "omittedSteps": "{{count}} older timeline steps omitted.",
-      "callDetails": "Model calls",
-      "callsNotRecorded": "Model calls weren't logged or have expired.",
-      "omittedCalls": "{{count}} older model calls omitted.",
-      "droppedCalls": "{{count}} model calls before this row weren't kept.",
-      "copyCall": "Copy request and response",
-      "finishReason": "Finish reason",
-      "usage": "Input / output tokens",
-      "request": "Request",
-      "response": "Response",
-      "currentState": "Current Memory state",
-      "currentProfile": "Profile",
-      "currentIndexing": "Indexing",
-      "currentStateOnly": "This is current state, not a historical snapshot of this processing run."
-    },
     "settings": {
       "loading": "Loading settings…",
       "loadFailed": "Couldn't load Memory settings.",
@@ -4597,18 +4558,18 @@
       "customEndpointsDescription": "Your own provider, models and keys.",
       "useAvibeCloud": "Use Avibe Cloud",
       "organizationManaged": "Models are managed by your organization.",
-      "organizationTransitionTitle": "Your organization now manages Memory models",
-      "organizationTransitionDescription": "Memory processing is paused. Confirm the change to rebuild the local index with your organization's embedding model; queued messages are kept.",
-      "organizationTransitionAction": "Review and rebuild",
+      "organizationTransitionTitle": "Memory model identity changed",
+      "organizationTransitionDescription": "Memory capture is paused. Accept local Memory data loss to switch to the new model identity and start a fresh native root.",
+      "organizationTransitionAction": "Review and reset",
       "cloudPausedTitle": "Cloud Memory models are unavailable",
-      "cloudPausedDescription": "Memory processing is paused and new messages keep queuing. It resumes automatically when both cloud chat and embedding models are available.",
+      "cloudPausedDescription": "Memory capture is paused; volatile queued work may be discarded and new messages are not accepted for capture. Capture resumes automatically when both cloud chat and embedding models are available.",
       "dependencyNotReady": "The memory-runtime dependency isn't ready yet. Install or repair it from Settings → Dependencies, then try enabling Memory again.",
       "goToDependencies": "Open Dependencies",
       "llmTitle": "Language model (LLM)",
       "llmHelp": "Memory uses this model to read your messages and summarize them into memories. Enter an OpenAI-compatible base URL, model name, and API key.",
       "llmHelpLabel": "About the language model",
       "embeddingTitle": "Embedding model",
-      "embeddingHelp": "Memory uses this model to index memories so you can search them. Changing the embedding endpoint or model requires rebuilding the index.",
+      "embeddingHelp": "Memory uses this model to index memories so you can search them. Changing its endpoint or model requires accepting deletion of the current local Memory data.",
       "embeddingHelpLabel": "About the embedding model",
       "rerankTitle": "Reranking model (optional)",
       "rerankHelp": "Memory uses this model to score search results for advanced recall. Choose the EverOS rerank provider, then enter that provider's base URL, model name, and API key.",
@@ -4641,98 +4602,31 @@
       "saved": "Memory settings saved.",
       "disclosureTitle": "About Memory",
       "disclosure": [
-        "When on, your Workbench messages and authorized users' private messages are distilled into memories. Your Agent can also proactively save durable notes without being asked, including preferences, corrections, decisions, and lasting facts about your machine or accounts found in files, forwarded or shared content, or other non-plain content.",
-        "The local Memory queue keeps raw messages and attachment copies while they wait to process. If a submission needs manual recovery, those copies can remain after processing stops.",
+        "When on, your Workbench messages and authorized users' private messages are offered for Memory capture. Your Agent can also submit long-lived notes for best-effort capture without being asked, including preferences, corrections, decisions, and lasting facts about your machine or accounts found in files, forwarded or shared content, or other non-plain content.",
+        "Memory capture is bounded and process-local: raw messages are not queued durably, and temporary attachment copies are cleaned after use or at startup. Saturation, failure, shutdown, or restart may lose work; ambiguous provider outcomes are not replayed.",
         "To build memories, message content is sent to the model endpoints configured above, and Search sends queries there too. These endpoints are separate from your Agent's models, and their providers handle the data under their own policies.",
-        "Avibe's local Memory store stays on this machine and includes scrubbed model-call diagnostics for every user and project on this installation. Diagnostics can contain sensitive conversation text and are kept for up to 14 days or 5,000 calls. Copies sent to model endpoints are outside this local store. Turning Memory off pauses it — it doesn't delete anything.",
-        "Clear Memory Data deletes Avibe-managed Memory data for every user and project on this machine, including profiles, memories, and messages waiting to process. It can't take back content already sent to model endpoints or touch original chat histories.",
+        "Avibe's local Memory store stays on this machine and includes best-effort native Processing Records with original submitted items, processing status, attempts, timestamps, scrubbed errors, and directly linked memories. Records can be incomplete or lost. Copies sent to model endpoints are outside this local store. Turning Memory off pauses it — it doesn't delete anything.",
+        "Delete Memory data deletes Avibe-managed Memory data for every user and project on this machine, including profiles, memories, native processing data, and temporary attachment copies. It can't take back content already sent to model endpoints or touch original chat histories.",
         "Accounts on different platforms each have their own separate memory; they aren't linked."
       ],
       "cloudDisclosure": [
-        "When on, your Workbench messages and authorized users' private messages are distilled into memories. Your Agent can also proactively save durable notes without being asked, including preferences, corrections, decisions, and lasting facts about your machine or accounts found in files, forwarded or shared content, or other non-plain content.",
-        "The local Memory queue keeps raw messages and attachment copies while they wait to process. If a submission needs manual recovery, those copies can remain after processing stops.",
+        "When on, your Workbench messages and authorized users' private messages are offered for Memory capture. Your Agent can also submit long-lived notes for best-effort capture without being asked, including preferences, corrections, decisions, and lasting facts about your machine or accounts found in files, forwarded or shared content, or other non-plain content.",
+        "Memory capture is bounded and process-local: raw messages are not queued durably, and temporary attachment copies are cleaned after use or at startup. Saturation, failure, shutdown, or restart may lose work; ambiguous provider outcomes are not replayed.",
         "To build memories, message content is sent to the cloud models selected by Avibe or your organization, and Search sends queries to that cloud service too. These models are separate from your Agent's models, and the cloud service handles data under its policies.",
-        "Avibe's local Memory store stays on this machine and includes scrubbed model-call diagnostics for every user and project on this installation. Diagnostics can contain sensitive conversation text and are kept for up to 14 days or 5,000 calls. Copies sent to model endpoints are outside this local store. Turning Memory off pauses it — it doesn't delete anything.",
-        "Clear Memory Data deletes Avibe-managed Memory data for every user and project on this machine, including profiles, memories, and messages waiting to process. It can't take back content already sent to model endpoints or touch original chat histories.",
+        "Avibe's local Memory store stays on this machine and includes best-effort native Processing Records with original submitted items, processing status, attempts, timestamps, scrubbed errors, and directly linked memories. Records can be incomplete or lost. Copies sent to model endpoints are outside this local store. Turning Memory off pauses it — it doesn't delete anything.",
+        "Delete Memory data deletes Avibe-managed Memory data for every user and project on this machine, including profiles, memories, native processing data, and temporary attachment copies. It can't take back content already sent to model endpoints or touch original chat histories.",
         "Accounts on different platforms each have their own separate memory; they aren't linked."
       ],
       "disclosureAttachment": "When the IM attachment processing endpoint is configured, eligible attachments from bound direct messages are also sent to that provider.",
       "cloudDisclosureAttachment": "When cloud multimodal processing is available, eligible attachments from bound direct messages are also sent to the cloud model service.",
       "clearKeyLabel": "Clear the saved key",
-      "rebuildRequiredTitle": "Memory index rebuild required",
-      "rebuildRequiredDescription": "Your embedding endpoint or model change is saved. The Memory engine can't restart until the rebuild finishes.",
-      "rebuildConfirmTitle": "Rebuild Memory index?",
-      "rebuildConfirmDescription": "Changing the embedding endpoint or model requires rebuilding the index. Your memories are kept, but the rebuild can take a while and may use embedding API credit.",
-      "rebuildConfirmLabel": "Save and rebuild",
-      "retryRebuild": "Retry rebuild",
-      "retryingRebuild": "Rebuilding…",
-      "rebuildCompleted": "Memory index rebuild completed.",
-      "rebuildFailed": "Memory index rebuild failed.",
-      "embeddingIdentityHint": "Changing the embedding endpoint or model rebuilds the local index. Your memories are kept.",
+      "lossConfirmTitle": "Save settings and accept Memory data loss?",
+      "lossConfirmDescription": "This identity change permanently deletes the confined local Memory data roots and starts them fresh with the new settings. The previous data cannot be recovered.",
+      "lossConfirmLabel": "Accept loss and save",
+      "resetCompleted": "Memory settings were saved and the fresh native data path is ready.",
+      "embeddingIdentityHint": "Changing the embedding endpoint or model permanently deletes current local Memory data and starts a fresh native root.",
       "rerankIdentityHint": "Leave the rerank fields empty to keep the standard Memory search tier. DashScope currently accepts only gte-rerank-v2.",
       "multimodalIdentityHint": "A complete base URL, model, and API key is the opt-in. Leave all three empty to keep IM attachment capture off."
-    },
-    "clear": {
-      "button": "Clear Memory Data",
-      "confirmTitle": "Clear Memory Data for this installation?",
-      "confirmDescription": "This deletes Avibe-managed Memory data for every user and project on this machine, including profiles, distilled memories, and messages waiting to process.",
-      "removesTitle": "This deletes:",
-      "removes": [
-        "Profiles and all memory entries for every user and project",
-        "Local search indexes and caches",
-        "Everything in the processing queue",
-        "Model-call diagnostic logs"
-      ],
-      "keepsTitle": "This does not delete:",
-      "keeps": [
-        "Original chat histories",
-        "Content already sent to the model endpoints",
-        "Copies or backups you made yourself",
-        "Anything outside the Memory folder (like logs and backups)",
-        "Physical traces on the disk (this is not a secure wipe)"
-      ],
-      "confirmLabel": "Clear Memory Data",
-      "clearing": "Clearing…",
-      "cleared": "Memory data cleared.",
-      "failed": "Clear failed."
-    },
-    "factoryReset": {
-      "button": "Reinitialize Memory",
-      "retry": "Retry initialization",
-      "artifactRepairRequired": "Reinitializing Memory is unavailable until the pinned Memory artifact is installed and ready. Repair it first.",
-      "dependenciesHint": "Permanently deletes local Memory data and related operational state. Settings and the installed runtime are retained.",
-      "settingsUnavailable": "Memory settings are unavailable. Re-check before reinitializing.",
-      "confirmTitle": "Reinitialize Memory?",
-      "confirmDescription": "This permanently deletes local Memory data and related operational state, then attempts to start a brand-new Memory engine. Even if deletion succeeds, the new engine may fail to start and the old data will not be restored. Memory settings, credentials, the installed runtime, and original chats are kept.",
-      "confirmLabel": "Reinitialize Memory",
-      "deletesTitle": "This attempts to permanently delete:",
-      "roots": {
-        "primaryStorage": {
-          "label": "Primary Memory storage",
-          "description": "May include profiles, facts, indexes, call diagnostics, and runtime files"
-        },
-        "memoryStateStorage": {
-          "label": "Memory state storage",
-          "description": "May include processing queues, recovery progress, and coordination state"
-        }
-      },
-      "technicalPath": "Technical path: {{path}}",
-      "retainsTitle": "This keeps:",
-      "retains": [
-        "Memory settings and credentials",
-        "The pinned, installed Memory artifact",
-        "Original Avibe chats and data outside these storage locations"
-      ],
-      "resultTitle": "Memory initialization result",
-      "resultCompleted": "The new Memory engine is ready. The storage-location report below is authoritative.",
-      "rootOutcome": "{{label}}: {{deleted}}",
-      "unknownRoot": "unknown root",
-      "deleted": "deleted",
-      "partial": "partially deleted",
-      "absent": "absent",
-      "retained": "retained",
-      "completed": "Memory initialization completed.",
-      "failed": "Memory initialization failed. Check the result and retry when ready."
     },
     "kind": {
       "profile": "Profile",

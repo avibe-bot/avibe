@@ -22,7 +22,7 @@ _MEMORY_HELP_BY_LANGUAGE = {
             "Show the Memory profile",
             "List processed Memory episodes",
             "Search local Memory",
-            "Queue durable personal context",
+            "Submit personal context for best-effort capture",
         ),
         "status": ("Print machine-readable output",),
         "profile": ("Print machine-readable output",),
@@ -46,7 +46,7 @@ _MEMORY_HELP_BY_LANGUAGE = {
             "显示记忆档案",
             "列出已处理的记忆片段",
             "搜索本地记忆",
-            "将长期个人信息加入队列",
+            "提交个人信息供记忆系统尽力处理",
         ),
         "status": ("输出机器可读格式",),
         "profile": ("输出机器可读格式",),
@@ -214,6 +214,38 @@ def test_memory_list_human_surfaces_truncation_warning(
     captured = capsys.readouterr()
     assert warning in captured.err
     assert "2026-08-14T12:00:00Z Subject" in captured.out
+
+
+@pytest.mark.parametrize("operation", ["search", "profile"])
+@pytest.mark.parametrize(
+    ("language", "warning"),
+    [
+        (
+            "en",
+            "Some user, Agent, or project Memory sources could not be loaded. Results may be incomplete.",
+        ),
+        ("zh", "部分用户记忆、Agent 记忆或项目记忆来源未能加载，结果可能不完整。"),
+    ],
+)
+def test_memory_read_human_surfaces_partial_warning(
+    operation,
+    language,
+    warning,
+    capsys,
+) -> None:
+    cli._print_memory_cli_human(
+        operation,
+        {
+            "status": "ok",
+            "items": [{"kind": "fact", "text": "Visible result", "date": None}],
+            "warnings": ["memory_search_partial"],
+        },
+        language=language,
+    )
+
+    captured = capsys.readouterr()
+    assert warning in captured.err
+    assert "Visible result" in captured.out
 
 
 def test_memory_list_parser_defaults_match_everos_page_semantics() -> None:
@@ -390,11 +422,8 @@ def test_memory_cli_human_output_uses_configured_i18n(monkeypatch, capsys) -> No
             "status_code": 200,
             "body": {
                 "status": "ok",
-                "source": {
-                    "status": "stale",
-                    "observed_at": "2026-08-08T12:00:00Z",
-                    "reason": "memory_sidecar_unavailable",
-                },
+                "state": "degraded",
+                "reason": "memory_sidecar_unavailable",
                 "health": {
                     "status": "ok",
                     "version": "1.2.3",
@@ -410,11 +439,38 @@ def test_memory_cli_human_output_uses_configured_i18n(monkeypatch, capsys) -> No
 
     assert cli.cmd_memory(args) == 0
     assert capsys.readouterr().out.splitlines() == [
-        "记忆来源：数据已过期",
+        "记忆：已降级",
         "EverOS 1.2.3：正常",
         "IM 附件捕获：可用",
         "来源原因：记忆 sidecar 不可用",
     ]
+
+
+def test_memory_cli_human_labels_origins_and_preserves_legacy_items(capsys) -> None:
+    cli._print_memory_cli_human(
+        "search",
+        {
+            "items": [
+                {"kind": "fact", "text": "Direct", "date": "2026-08-21", "origin": "user"},
+                {"kind": "fact", "text": "Recorded", "date": None, "origin": "agent"},
+                {"kind": "fact", "text": "Shared", "date": None, "origin": "both"},
+                {"kind": "fact", "text": "Legacy", "date": None},
+            ]
+        },
+        language="en",
+    )
+
+    assert capsys.readouterr().out.splitlines() == [
+        "[User memory] 2026-08-21 Direct",
+        "[Agent memory] Recorded",
+        "[User + Agent] Shared",
+        "Legacy",
+    ]
+
+
+def test_memory_prompt_explains_owner_labels_and_profile_separation() -> None:
+    assert "label `origin` as `user`, `agent`, or `both`" in _MEMORY_CLI_PROMPT
+    assert "never merge them into one attributed profile" in _MEMORY_CLI_PROMPT
 
 
 def test_memory_cli_human_status_uses_localized_fallbacks_for_unknown_tokens(
@@ -430,7 +486,8 @@ def test_memory_cli_human_status_uses_localized_fallbacks_for_unknown_tokens(
             "status_code": 200,
             "body": {
                 "status": "ok",
-                "source": {"status": "future_state", "reason": "future_reason"},
+                "state": "future_state",
+                "reason": "future_reason",
                 "health": {"status": "future_health"},
             },
         },
@@ -439,7 +496,7 @@ def test_memory_cli_human_status_uses_localized_fallbacks_for_unknown_tokens(
     assert cli.cmd_memory(args) == 0
     output = capsys.readouterr().out.splitlines()
     assert output == [
-        "记忆来源：未知",
+        "记忆：未知",
         "EverOS 未知版本：未知",
         "来源原因：未知原因",
     ]
@@ -479,6 +536,58 @@ def test_memory_remember_exits_zero_only_for_queued_outcomes(
     result = json.loads(capsys.readouterr().out)
     assert result["ok"] is True
     assert result["result"]["status"] == outcome
+
+
+@pytest.mark.parametrize(
+    ("language", "expected"),
+    [
+        (
+            "en",
+            "Memory request acknowledged for best-effort processing; persistence is not guaranteed.",
+        ),
+        ("zh", "记忆请求已确认；系统将尽力处理，但不保证持久保存。"),
+    ],
+)
+@pytest.mark.parametrize("outcome", ["accepted", "duplicate"])
+def test_memory_remember_human_output_never_confirms_persistence(
+    monkeypatch,
+    capsys,
+    language,
+    expected,
+    outcome,
+) -> None:
+    args = cli.build_parser().parse_args(["memory", "remember", "keep this"])
+    monkeypatch.setattr(cli, "_memory_cli_language", lambda: language)
+    monkeypatch.setattr(
+        internal_client,
+        "memory_remember_sync",
+        lambda text, **_kwargs: {"status_code": 200, "body": {"status": outcome}},
+    )
+
+    assert cli.cmd_memory(args) == 0
+    assert capsys.readouterr().out.strip() == expected
+
+
+def test_top_level_memory_guides_disclose_best_effort_process_local_delivery() -> None:
+    docs_root = Path(__file__).parents[1] / "docs"
+    guides = {
+        path
+        for path in docs_root.glob("*.md")
+        if "vibe memory" in path.read_text(encoding="utf-8")
+    }
+
+    assert guides
+    for guide in guides:
+        text = guide.read_text(encoding="utf-8")
+        if guide.stem.endswith("_ZH"):
+            assert "尽力" in text
+            assert "进程内" in text
+            assert "不保证" in text
+        else:
+            lowered = text.lower()
+            assert "best-effort" in lowered
+            assert "process-local" in lowered
+            assert "not guarantee" in lowered
 
 
 @pytest.mark.parametrize(

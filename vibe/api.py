@@ -17,10 +17,11 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from http.client import HTTPSConnection
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Optional
 
 import yaml
 from sqlalchemy import select
@@ -1174,27 +1175,29 @@ def save_config(
 def save_memory_config(
     memory_payload: dict,
     *,
-    recovery_intent: Literal["rebuild", "factory_reset"] | None = None,
     expected: MemoryConfig | None = None,
 ) -> V2Config:
     """Persist Memory settings only from the direct-loopback Memory route.
 
     When *expected* is provided, the write is a narrow cross-process transaction:
-    the on-disk Memory candidate+marker unit must still match *expected* or the
+    the on-disk Memory candidate must still match *expected* or the
     save raises ``MemoryConfigStaleWrite`` without changing the file. Process-local
     locks alone cannot protect UI saves from Controller settlement write-back.
     """
 
     if not isinstance(memory_payload, dict):
         raise ValueError("Memory config payload must be an object")
-    payload = dict(memory_payload)
-    payload["recovery_intent"] = recovery_intent
-    candidate = memory_config_from_payload(payload)
+    candidate = memory_config_from_payload(dict(memory_payload))
 
     def replace_memory(current: MemoryConfig) -> MemoryConfig:
         if expected is not None and current != expected:
             raise MemoryConfigStaleWrite("memory candidate changed")
-        return candidate
+        return replace(
+            candidate,
+            legacy_needs_repair=(
+                current.legacy_needs_repair or candidate.legacy_needs_repair
+            ),
+        )
 
     lease = MemoryOperationLease()
     lease.acquire()

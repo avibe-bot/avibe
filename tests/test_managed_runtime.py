@@ -23,6 +23,7 @@ from core.managed_runtime import (
 )
 from core.memory import artifact as memory_artifact
 from core.memory.artifact import MemoryArtifactManager, MemoryRuntimeActivationError
+from core.memory.provider_root import ProviderRootError
 from vibe.model_hub_runtime.installer import EngineRuntimeManager
 
 
@@ -683,6 +684,27 @@ def test_memory_force_pointer_failure_preserves_active_install_and_retry_repairs
     assert repaired_pointer["manifest_sha256"] == repaired_metadata["manifest_sha256"]
     assert repaired_pointer["manifest_sha256"] != original_pointer["manifest_sha256"]
     assert repaired_pointer["install_dir"] == installed["install_dir"]
+
+
+def test_memory_incompatible_provider_root_failure_is_repair_classified(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest_path = _write_subclass_runtime_fixture(tmp_path, "memory")
+    manager = _subclass_runtime_manager(tmp_path, "memory", manifest_path, monkeypatch)
+    assert isinstance(manager, MemoryArtifactManager)
+    assert manager.ensure()["ok"] is True
+
+    def reject_incompatible_root(_candidate) -> None:
+        raise ProviderRootError("memory provider root format is incompatible")
+
+    monkeypatch.setattr(manager._provider_root, "inspect", reject_incompatible_root)
+
+    failed = manager.ensure(force=True)
+
+    assert failed["ok"] is False
+    assert failed["reason"] == "memory_local_data_unusable"
 
 
 def test_memory_force_repair_rollback_preserves_the_active_install_directory(
