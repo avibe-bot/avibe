@@ -133,6 +133,7 @@ class CodexAgent(BaseAgent):
         self._registered_runtime = registered_runtime
         self._model_hub_catalog_path: Path | None = None
         self._model_hub_catalog_lock = asyncio.Lock()
+        self._model_hub_catalog_generation = 0
 
         # cwd → CodexTransport (one persistent process per working dir)
         self._transports: Dict[str, CodexTransport] = {}
@@ -797,16 +798,10 @@ class CodexAgent(BaseAgent):
 
     async def refresh_runtime_config(self, codex_config: Any) -> None:
         """Reload persisted runtime config before respawning app-server transports."""
-        from vibe import backend_model_catalog
-
-        async with self._model_hub_catalog_lock:
-            model_hub_catalog_path = await asyncio.to_thread(
-                backend_model_catalog.prepare_codex_hub_catalog,
-                codex_config.binary,
-            )
-            self.codex_config = codex_config
-            self.controller.config.codex = codex_config
-            self._model_hub_catalog_path = model_hub_catalog_path
+        self.codex_config = codex_config
+        self.controller.config.codex = codex_config
+        self._model_hub_catalog_generation += 1
+        self._model_hub_catalog_path = None
         await self.refresh_auth_state()
 
     async def prepare_model_hub_runtime(self) -> Path:
@@ -816,15 +811,21 @@ class CodexAgent(BaseAgent):
         async with self._model_hub_catalog_lock:
             if self._model_hub_catalog_path is not None:
                 return self._model_hub_catalog_path
+            generation = self._model_hub_catalog_generation
+            binary = self.codex_config.binary
             try:
                 path = await asyncio.to_thread(
                     backend_model_catalog.prepare_codex_hub_catalog,
-                    self.codex_config.binary,
+                    binary,
                 )
             except Exception as exc:
                 raise CodexModelHubCatalogUnavailableError(
                     "Codex Model Hub catalog preparation failed"
                 ) from exc
+            if self._model_hub_catalog_generation != generation:
+                raise CodexModelHubCatalogUnavailableError(
+                    "Codex Model Hub catalog generation changed during preparation"
+                )
             self._model_hub_catalog_path = path
             return path
 
