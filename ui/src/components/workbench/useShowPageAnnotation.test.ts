@@ -128,6 +128,8 @@ describe('useShowPageAnnotation shortcut', () => {
 
     dialog.remove();
     const trigger = frameDocument.createElement('button');
+    trigger.setAttribute('aria-haspopup', 'menu');
+    trigger.setAttribute('aria-expanded', 'true');
     frameDocument.body.append(trigger);
     trigger.focus();
     const menu = frameDocument.createElement('div');
@@ -136,6 +138,29 @@ describe('useShowPageAnnotation shortcut', () => {
     const menuEvent = dispatchAnnotationShortcut(iframe.contentWindow!);
     expect(menuEvent.defaultPrevented).toBe(false);
     expect(postMessage).not.toHaveBeenCalled();
+  });
+
+  it('does not mistake a persistent iframe navigation menu for an open overlay', () => {
+    const { iframe } = mountBridge();
+    const postMessage = vi.spyOn(iframe.contentWindow!, 'postMessage');
+    const frameDocument = iframe.contentDocument!;
+    reportState(iframe, false);
+    postMessage.mockClear();
+
+    const menu = frameDocument.createElement('div');
+    menu.setAttribute('role', 'menu');
+    frameDocument.body.append(menu);
+    const pageButton = frameDocument.createElement('button');
+    frameDocument.body.append(pageButton);
+    pageButton.focus();
+
+    const event = dispatchAnnotationShortcut(iframe.contentWindow!);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(postMessage).toHaveBeenCalledWith(
+      { type: 'avibe:annotation:control', action: 'enable' },
+      window.location.origin,
+    );
   });
 
   it('leaves parent and iframe chords alone when this Show Page is not in front', () => {
@@ -197,7 +222,7 @@ describe('useShowPageAnnotation host Escape forwarding', () => {
     reportState(iframe, true);
 
     const openPopover = document.createElement('div');
-    openPopover.dataset.state = 'open';
+    openPopover.dataset.shortcutOverlay = 'open';
     const popoverTarget = document.createElement('button');
     openPopover.append(popoverTarget);
     document.body.append(openPopover);
@@ -227,6 +252,7 @@ describe('useShowPageAnnotation host Escape forwarding', () => {
 
     const menu = document.createElement('div');
     menu.setAttribute('role', 'menu');
+    menu.dataset.shortcutOverlay = 'open';
     const menuItem = document.createElement('button');
     menu.append(menuItem);
     document.body.append(menu);
@@ -243,6 +269,7 @@ describe('useShowPageAnnotation host Escape forwarding', () => {
 
     const menu = document.createElement('div');
     menu.setAttribute('role', 'menu');
+    menu.dataset.shortcutOverlay = 'open';
     document.body.append(menu);
     const invokingButton = document.createElement('button');
     document.body.append(invokingButton);

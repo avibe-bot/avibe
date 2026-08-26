@@ -1434,7 +1434,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                   Boolean(voiceRetainedSession),
                 )}
                 aria-label={t('chat.compose.voice')}
-                title={voiceShortcutHint}
+                title={voiceShortcutAvailable ? voiceShortcutHint : t('chat.compose.voice')}
                 className="size-9 shrink-0"
               >
                 <Mic className="size-4" />
@@ -1447,7 +1447,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 size="icon"
                 onClick={stopRecording}
                 aria-label={t('chat.compose.stopRecording')}
-                title={voiceShortcutHint}
+                title={voiceShortcutAvailable ? voiceShortcutHint : t('chat.compose.stopRecording')}
                 className="h-9 w-12 shrink-0"
               >
                 <Check className="size-[18px]" strokeWidth={2.5} />

@@ -55,10 +55,13 @@ void i18n.use(initReactI18next).init({
   interpolation: { escapeValue: false },
 });
 
-const renderComposer = (sessionId = 'shortcut-session') => render(
+const renderComposer = (
+  sessionId = 'shortcut-session',
+  state: { disabled?: boolean; voiceShortcutActive?: boolean } = {},
+) => render(
   <I18nextProvider i18n={i18n}>
     <ToastProvider>
-      <Composer sessionId={sessionId} onSend={() => undefined} />
+      <Composer sessionId={sessionId} onSend={() => undefined} {...state} />
     </ToastProvider>
   </I18nextProvider>,
 );
@@ -117,11 +120,22 @@ describe('Composer voice shortcut', () => {
     await screen.findByRole('button', { name: en.chat.compose.voice });
     await act(async () => undefined);
 
-    const menu = document.createElement('div');
-    menu.setAttribute('role', 'menu');
-    document.body.append(menu);
+    const menuTrigger = document.createElement('button');
+    menuTrigger.setAttribute('aria-haspopup', 'menu');
+    menuTrigger.setAttribute('aria-expanded', 'true');
+    document.body.append(menuTrigger);
     fireEvent.keyDown(window, { code: 'KeyZ', altKey: true });
 
+    expect(voiceMocks.getUserMedia).not.toHaveBeenCalled();
+  });
+
+  it('does not advertise or handle the shortcut when voice input is disabled', async () => {
+    renderComposer('disabled-shortcut-session', { disabled: true });
+    const mic = await screen.findByRole('button', { name: en.chat.compose.voice });
+
+    expect(mic.hasAttribute('disabled')).toBe(true);
+    expect(mic.getAttribute('title')).toBe(en.chat.compose.voice);
+    fireEvent.keyDown(window, { code: 'KeyZ', altKey: true });
     expect(voiceMocks.getUserMedia).not.toHaveBeenCalled();
   });
 });

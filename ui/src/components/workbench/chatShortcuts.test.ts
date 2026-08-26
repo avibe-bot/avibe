@@ -76,15 +76,29 @@ describe('inForegroundSurface', () => {
 describe('inShortcutBlockingOverlay', () => {
   it('claims a shortcut inside an open overlay', () => {
     expect(inShortcutBlockingOverlay(
-      elWithClosest((selector) => selector.includes('[data-state="open"]')),
+      elWithClosest((selector) => selector.includes('[role="dialog"]')),
     )).toBe(true);
   });
 
   it('claims a shortcut while a menu is open even if focus stayed on its trigger', () => {
     expect(inShortcutBlockingOverlay(
       elWithClosest(() => false),
-      { querySelector: vi.fn().mockReturnValue({}) } as unknown as Pick<Document, 'querySelector'>,
+      {
+        querySelector: vi.fn((selector: string) => (
+          selector.includes('[aria-expanded="true"][aria-haspopup]') ? {} : null
+        )),
+      } as unknown as Pick<Document, 'querySelector'>,
     )).toBe(true);
+  });
+
+  it('does not mistake a persistent ARIA menu for an open overlay', () => {
+    const matchesBareMenu = (selector: string) => selector.split(', ').includes('[role="menu"]');
+    expect(inShortcutBlockingOverlay(
+      elWithClosest(matchesBareMenu),
+      {
+        querySelector: vi.fn((selector: string) => (matchesBareMenu(selector) ? {} : null)),
+      } as unknown as Pick<Document, 'querySelector'>,
+    )).toBe(false);
   });
 
   it('leaves the unobstructed chat surface to the active shortcut owner', () => {
