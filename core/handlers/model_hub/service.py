@@ -5072,21 +5072,26 @@ class ModelHubService:
     ) -> Mapping[str, Any]:
         requested = ModelHubService._request_reasoning_effort(request)
         model = next((item for item in source.models if item.id == model_id), None)
-        exact = (
-            requested
-            if requested is not None
+        if (
+            requested is not None
             and model is not None
             and requested in model.reasoning_efforts
-            else None
-        )
+        ):
+            return request
+
         payload = dict(request)
         changed = False
         if "reasoning_effort" in payload:
-            payload["reasoning_effort"] = exact
+            payload.pop("reasoning_effort")
             changed = True
         reasoning = payload.get("reasoning")
         if isinstance(reasoning, Mapping) and "effort" in reasoning:
-            payload["reasoning"] = {**reasoning, "effort": exact}
+            filtered_reasoning = dict(reasoning)
+            filtered_reasoning.pop("effort")
+            if filtered_reasoning:
+                payload["reasoning"] = filtered_reasoning
+            else:
+                payload.pop("reasoning")
             changed = True
         if not changed:
             return request

@@ -865,7 +865,7 @@ def test_runtime_filters_reasoning_effort_for_each_exact_hop(tmp_path):
     )
     service, _store, _ = _service(tmp_path, config, adapter)
     request = ModelHubRequest(
-        {"reasoning": {"effort": "high"}},
+        {"reasoning": {"effort": "high", "summary": "auto"}},
         protocol="openai_responses",
         headers={"x-test": "preserved"},
     )
@@ -879,10 +879,52 @@ def test_runtime_filters_reasoning_effort_for_each_exact_hop(tmp_path):
     )
 
     assert resolved.source_id == second.id
-    assert adapter.invocation_requests[0]["reasoning"] == {"effort": "high"}
-    assert adapter.invocation_requests[1]["reasoning"] == {"effort": None}
+    assert adapter.invocation_requests[0]["reasoning"] == {
+        "effort": "high",
+        "summary": "auto",
+    }
+    assert adapter.invocation_requests[1]["reasoning"] == {"summary": "auto"}
     assert adapter.invocation_requests[1].protocol == "openai_responses"
     assert adapter.invocation_requests[1].headers == {"x-test": "preserved"}
+
+
+def test_runtime_omits_unsupported_direct_reasoning_effort(tmp_path):
+    source = _source("src_effort003", ("upstream-model",))
+    config = _config([source])
+    config.agents["claude"].routes["claude-opus-4-6"] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, "upstream-model"),)
+    )
+    adapter = FakeAdapter()
+    adapter.outcomes.append(
+        RawCallOutcome(
+            kind=RawOutcomeKind.SUCCESS,
+            http_status=200,
+            error_code=None,
+            redacted_message=None,
+            stream_started=False,
+            model_id="upstream-model",
+            source_id=source.id,
+        )
+    )
+    service, _store, _ = _service(tmp_path, config, adapter)
+    request = ModelHubRequest(
+        {"reasoning_effort": "high"},
+        protocol="openai_chat",
+        headers={"x-test": "preserved"},
+    )
+
+    resolved = asyncio.run(
+        service.resolve(
+            backend="claude",
+            model_id="claude-opus-4-6",
+            request=request,
+        )
+    )
+
+    assert resolved.source_id == source.id
+    assert "reasoning_effort" not in adapter.invocation_requests[0]
+    assert adapter.invocation_requests[0].protocol == "openai_chat"
+    assert adapter.invocation_requests[0].headers == {"x-test": "preserved"}
 
 
 def test_runtime_does_not_alias_unpersisted_claude_request():
