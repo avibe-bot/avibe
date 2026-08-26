@@ -7,7 +7,7 @@ export default function IntegrationHome() {
       <p agent-note="Preserve the verified release source">Annotated content</p>
       <nav>
         <a href="reports/daily?view=week&timezone=Asia%2FShanghai">Daily report</a>
-        <a href="/show/ses-issue-1617/reports/daily?view=week">Same-page private link</a>
+        <a href="/show/__SESSION_ID__/reports/daily?view=week">Same-page private link</a>
         <a href="/show/private-neighbor/secret?credential=NEVER_EXPOSE">Other private link</a>
       </nav>
     </main>

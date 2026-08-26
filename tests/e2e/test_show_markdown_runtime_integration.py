@@ -4,15 +4,16 @@ import json
 import os
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
 
 import pytest
 import requests
 
 
-SESSION_ID = "ses-issue-1617"
 CALLER_SECRET = "AVIBE_CALLER_SECRET_NEVER_FORWARD"
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "show_markdown_integration"
+REGRESSION_METADATA = Path("/var/lib/avibe-regression/metadata.json")
 
 
 def _vibe(*args: str) -> dict:
@@ -25,13 +26,30 @@ def _vibe(*args: str) -> dict:
     return json.loads(result.stdout)
 
 
-def _install_fixture() -> Path:
-    workspace = Path(_vibe("show", "path", "--session-id", SESSION_ID)["path"])
+def _assert_isolated_regression(expected_slug: str) -> None:
+    assert os.environ.get("VIBE_DEPLOYMENT_ENV") == "regression"
+    metadata = json.loads(REGRESSION_METADATA.read_text())
+    assert metadata["target"] == "worktree"
+    assert metadata["slug"] == expected_slug
+    assert metadata["project"] == f"avr-wt-{expected_slug}"
+    assert metadata["instance"] == f"avibe-wt-{expected_slug}"
+
+
+def _create_workspace(session_id: str) -> Path:
+    workspace = Path(_vibe("show", "path", "--session-id", session_id)["path"])
+    assert workspace.resolve().is_relative_to((Path.home() / ".avibe" / "show-pages").resolve())
+    return workspace
+
+
+def _install_fixture(workspace: Path, session_id: str) -> None:
     for relative in (Path("src/pages"), Path("api")):
         destination = workspace / relative
         shutil.rmtree(destination, ignore_errors=True)
         shutil.copytree(FIXTURE_ROOT / relative, destination)
-    return workspace
+    index = workspace / "src/pages/index.tsx"
+    source = index.read_text()
+    assert source.count("__SESSION_ID__") == 1
+    index.write_text(source.replace("__SESSION_ID__", session_id))
 
 
 def _assert_markdown(response: requests.Response, *, cache: str | None = None) -> str:
@@ -53,15 +71,17 @@ def _assert_html(response: requests.Response) -> None:
 @pytest.mark.integration
 def test_published_show_runtime_renders_private_and_public_markdown() -> None:
     base_url = os.environ.get("AVIBE_SHOW_MARKDOWN_BASE_URL")
+    expected_slug = os.environ.get("AVIBE_SHOW_MARKDOWN_EXPECT_REGRESSION_SLUG")
     expected_runtime = os.environ.get("AVIBE_SHOW_MARKDOWN_EXPECT_RUNTIME_VERSION")
     expected_manifest = os.environ.get("AVIBE_SHOW_MARKDOWN_EXPECT_MANIFEST_SHA256")
     expected_archive = os.environ.get("AVIBE_SHOW_MARKDOWN_EXPECT_ARCHIVE_SHA256")
-    if not base_url or not expected_runtime or not expected_manifest or not expected_archive:
+    if not base_url or not expected_slug or not expected_runtime or not expected_manifest or not expected_archive:
         pytest.skip(
-            "set the Show Markdown base URL, runtime version, manifest digest, and archive digest "
+            "set the Show Markdown base URL, regression slug, runtime version, manifest digest, and archive digest "
             "inside an isolated Incus regression environment"
         )
 
+    _assert_isolated_regression(expected_slug)
     runtime_status = _vibe("runtime", "status")
     assert runtime_status["manifest"]["runtime_version"] == expected_runtime
     assert runtime_status["manifest"]["sha256"] == expected_manifest
@@ -82,9 +102,11 @@ def test_published_show_runtime_renders_private_and_public_markdown() -> None:
         assert not any(shutil.which(target) for target in browser_targets)
         assert not list(browser_cache.glob("chromium_headless_shell-*"))
 
-    _install_fixture()
-    _vibe("show", "update", "--session-id", SESSION_ID, "--visibility", "private")
-    private_url = f"{base_url.rstrip('/')}/show/{SESSION_ID}/"
+    session_id = f"sesmd{uuid.uuid4().hex[:16]}"
+    workspace = _create_workspace(session_id)
+    _install_fixture(workspace, session_id)
+    _vibe("show", "update", "--session-id", session_id, "--visibility", "private")
+    private_url = f"{base_url.rstrip('/')}/show/{session_id}/"
     markdown_headers = {"Accept": "text/markdown"}
     caller_headers = {
         **markdown_headers,
@@ -115,6 +137,8 @@ def test_published_show_runtime_renders_private_and_public_markdown() -> None:
         assert "Daily report" in report_body
         assert "week" in report_body
         assert "Asia/Shanghai" in report_body
+        assert "Identity probe" in report_body
+        assert "ready" in report_body
         assert CALLER_SECRET not in report_body
         assert report_body.count("none") >= 3
 
@@ -122,7 +146,7 @@ def test_published_show_runtime_renders_private_and_public_markdown() -> None:
             "show",
             "update",
             "--session-id",
-            SESSION_ID,
+            session_id,
             "--visibility",
             "public",
         )
@@ -141,9 +165,14 @@ def test_published_show_runtime_renders_private_and_public_markdown() -> None:
         assert "Daily report" in public_report_body
         assert "week" in public_report_body
         assert "Asia/Shanghai" in public_report_body
+        assert "Identity probe" in public_report_body
+        assert "ready" in public_report_body
         assert CALLER_SECRET not in public_report_body
 
         if expected_browserless:
             assert len(list(browser_cache.glob("chromium_headless_shell-*"))) == 1
     finally:
-        _vibe("show", "update", "--session-id", SESSION_ID, "--visibility", "offline")
+        try:
+            _vibe("show", "update", "--session-id", session_id, "--visibility", "offline")
+        finally:
+            shutil.rmtree(workspace)
