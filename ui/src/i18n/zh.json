@@ -667,6 +667,7 @@
         "title": "模型",
         "running": "网关运行中",
         "stopped": "网关已关闭",
+        "unavailable": "网关已开启，当前不可用",
         "degraded": "网关降级运行",
         "unread": "网关状态未读到",
         "notStarted": "网关已关闭",
@@ -690,6 +691,10 @@
           "down": {
             "title": "模型网关已关闭",
             "body": "上一次启动没有就绪。开启网关即可重试。"
+          },
+          "enabledDown": {
+            "title": "模型网关已开启，但当前不可用",
+            "body": "开启状态已经保存。关闭后重新开启即可立即重试。"
           },
           "notInstalled": {
             "title": "模型网关尚未安装",

@@ -534,13 +534,14 @@ def _oauth_payload(
     return payload
 
 
-def _runtime_payload(status: EngineStatus) -> dict:
+def _runtime_payload(status: EngineStatus, *, enabled: bool) -> dict:
     # Import lazily to avoid the runtime adapter's dependency back on this service module.
     from vibe.model_hub_runtime.installer import EngineRuntimeManager
 
     manager = EngineRuntimeManager()
     return {
         "contract_version": 6,
+        "enabled": enabled,
         "host_platform": status.host_platform or manager.host_platform(),
         "manifest": manager.contract_manifest(),
         "status": {
@@ -628,6 +629,7 @@ class ModelHubService:
         self._engine_preparation_failed = False
         self._runtime_install_reconcile_lock = asyncio.Lock()
         self._runtime_install_reconciled = False
+        self._runtime_lifecycle_lock = asyncio.Lock()
 
     @staticmethod
     def _source(config: ModelHubConfig, source_id: str) -> ModelHubSourceConfig:
@@ -973,8 +975,19 @@ class ModelHubService:
             self._runtime_install_reconciled = True
             return recovered if isinstance(recovered, EngineStatus) else None
 
+    async def recover_runtime_intent(self) -> None:
+        """Restore the runtime only when the user left it enabled."""
+
+        async with self._runtime_lifecycle_lock:
+            await self.reconcile_runtime_installation()
+            if not self.store.load().enabled:
+                return
+            await self._prepare_engine_for_demand()
+            await self._engine_call(self.adapter.start())
+
     async def stop(self) -> None:
-        await self.adapter.stop()
+        async with self._runtime_lifecycle_lock:
+            await self.adapter.stop()
 
     @staticmethod
     def _credential_was_already_revoked(error: Exception) -> bool:
@@ -4580,48 +4593,66 @@ class ModelHubService:
         status = await self.reconcile_runtime_installation()
         if status is None:
             status = await self._engine_call(self.adapter.status())
-        return _runtime_payload(self._runtime_status_after_demand(status))
+        return _runtime_payload(
+            self._runtime_status_after_demand(status),
+            enabled=self.store.load().enabled,
+        )
 
     async def runtime_install(self) -> dict:
-        status = await self.reconcile_runtime_installation()
-        if status is None:
-            status = await self._engine_call(self.adapter.status())
-        status = self._runtime_status_after_demand(status)
-        if status.health is not EngineHealth.NOT_INSTALLED:
-            return _runtime_payload(status)
-        install = getattr(self.adapter, "install", None)
-        if not callable(install):
-            raise ModelHubError("engine_down", status=503)
-        return _runtime_payload(await self._engine_call(install()))
+        async with self._runtime_lifecycle_lock:
+            status = await self.reconcile_runtime_installation()
+            if status is None:
+                status = await self._engine_call(self.adapter.status())
+            status = self._runtime_status_after_demand(status)
+            enabled = self.store.load().enabled
+            if status.health is not EngineHealth.NOT_INSTALLED:
+                return _runtime_payload(status, enabled=enabled)
+            install = getattr(self.adapter, "install", None)
+            if not callable(install):
+                raise ModelHubError("engine_down", status=503)
+            return _runtime_payload(
+                await self._engine_call(install()),
+                enabled=enabled,
+            )
 
     async def runtime_start(self) -> dict:
-        await self.reconcile_runtime_installation()
-        await self._prepare_engine_for_demand()
-        status = await self._engine_call(self.adapter.start())
-        return _runtime_payload(status)
+        async with self._runtime_lifecycle_lock:
+            await self.reconcile_runtime_installation()
+            async with self._mutation_lock:
+                previous = self.store.load()
+                updated = self._clone_config(previous)
+                updated.enabled = True
+                self._save_projection_neutral(previous, updated)
+            await self._prepare_engine_for_demand()
+            status = await self._engine_call(self.adapter.start())
+            return _runtime_payload(status, enabled=True)
 
     async def runtime_stop(self) -> dict:
-        await self.reconcile_runtime_installation()
-        async with self._mutation_lock:
-            config = self.store.load()
-            hub_backends = sorted(
-                backend
-                for backend, agent in config.agents.items()
-                if agent.mode == "hub"
-            )
-            if hub_backends:
-                raise ModelHubError(
-                    "runtime_in_use",
-                    status=409,
-                    data={"backends": hub_backends},
+        async with self._runtime_lifecycle_lock:
+            await self.reconcile_runtime_installation()
+            async with self._mutation_lock:
+                previous = self.store.load()
+                hub_backends = sorted(
+                    backend
+                    for backend, agent in previous.agents.items()
+                    if agent.mode == "hub"
                 )
-            stop_runtime = getattr(self.adapter, "stop_runtime", None)
-            if not callable(stop_runtime):
-                raise ModelHubError("engine_down", status=503)
-            status = await self._engine_call(stop_runtime())
-            if status.health is EngineHealth.INSTALLING:
-                raise ModelHubError("runtime_busy", status=409)
-            return _runtime_payload(status)
+                if hub_backends:
+                    raise ModelHubError(
+                        "runtime_in_use",
+                        status=409,
+                        data={"backends": hub_backends},
+                    )
+                stop_runtime = getattr(self.adapter, "stop_runtime", None)
+                if not callable(stop_runtime):
+                    raise ModelHubError("engine_down", status=503)
+                status = await self._engine_call(stop_runtime())
+                if status.health is EngineHealth.INSTALLING:
+                    raise ModelHubError("runtime_busy", status=409)
+                updated = self._clone_config(previous)
+                updated.enabled = False
+                self._save_projection_neutral(previous, updated)
+                return _runtime_payload(status, enabled=False)
 
     def migration_scan(self) -> dict:
         config = self.store.load()

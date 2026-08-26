@@ -274,6 +274,67 @@ describe('SettingsModelsPage surface branches', () => {
     expect(await screen.findAllByRole('tab')).toHaveLength(3);
   });
 
+  it('keeps the persisted gateway switch on while its process is unavailable', async () => {
+    const unavailable = {
+      ...runtime,
+      enabled: true,
+      status: { ...runtime.status, health: 'down' as const },
+    };
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([
+      directAgent('claude'),
+      directAgent('codex'),
+      directAgent('opencode'),
+    ]);
+    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(unavailable);
+    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+
+    render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <SettingsModelsPage />
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    const toggle = await screen.findByRole('switch', { name: /Turn model gateway off|关闭模型网关/i });
+    expect(toggle.getAttribute('aria-checked')).toBe('true');
+    expect(await screen.findByText(/^Model gateway is enabled but unavailable$|^模型网关已开启，但当前不可用$/i)).toBeTruthy();
+    expect(screen.queryAllByRole('tab')).toHaveLength(0);
+  });
+
+  it('still allows persisted enablement to be turned off on an unsupported host', async () => {
+    const unsupported = {
+      ...runtime,
+      enabled: true,
+      manifest: { ...runtime.manifest, resolution: 'unsupported' as const },
+      status: { ...runtime.status, health: 'not_installed' as const },
+    };
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([
+      directAgent('claude'),
+      directAgent('codex'),
+      directAgent('opencode'),
+    ]);
+    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(unsupported);
+    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+    const stopped = { ...unsupported, enabled: false };
+    const stop = vi.spyOn(modelsApi, 'stopRuntime').mockResolvedValue(stopped);
+
+    render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <SettingsModelsPage />
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    const toggle = await screen.findByRole('switch', { name: /Turn model gateway off|关闭模型网关/i });
+    expect((toggle as HTMLButtonElement).disabled).toBe(false);
+    await userEvent.click(toggle);
+    await waitFor(() => expect(stop).toHaveBeenCalledOnce());
+  });
+
   it('stops an unused running gateway and hides its retained configuration', async () => {
     renderPage([retainedSource]);
     const stopped = { ...runtime, status: { ...runtime.status, health: 'not_started' as const } };

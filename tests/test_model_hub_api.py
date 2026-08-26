@@ -826,6 +826,7 @@ def test_runtime_status_observes_engine_without_starting_it(tmp_path):
 
     assert adapter.start_calls == 0
     assert adapter.status_calls == 1
+    assert runtime["enabled"] is False
     assert runtime["status"]["health"] == "ok"
     assert runtime["status"]["verified"] is True
 
@@ -847,11 +848,13 @@ def test_runtime_status_reports_packaged_engine_manifest(tmp_path):
 
 
 def test_runtime_start_is_explicit_and_returns_v4_status(tmp_path):
-    service, _store, adapter = _service(tmp_path)
+    service, store, adapter = _service(tmp_path)
 
     runtime = asyncio.run(service.runtime_start())
 
     assert adapter.start_calls == 1
+    assert store.config.enabled is True
+    assert runtime["enabled"] is True
     assert runtime["contract_version"] == 6
     assert runtime["status"]["health"] == "ok"
     _assert_valid("runtime-dependency.schema.json", runtime)
@@ -871,14 +874,38 @@ def test_runtime_stop_requires_every_backend_to_be_direct(tmp_path):
 
 def test_runtime_stop_returns_explicit_not_started_state(tmp_path):
     service, store, adapter = _service(tmp_path)
+    store.config.enabled = True
     for agent in store.config.agents.values():
         agent.mode = "direct"
 
     runtime = asyncio.run(service.runtime_stop())
 
     assert adapter.stop_runtime_calls == 1
+    assert store.config.enabled is False
+    assert runtime["enabled"] is False
     assert runtime["status"]["health"] == "not_started"
     _assert_valid("runtime-dependency.schema.json", runtime)
+
+
+def test_runtime_recovery_starts_only_for_persisted_user_intent(tmp_path):
+    service, store, adapter = _service(tmp_path)
+
+    asyncio.run(service.recover_runtime_intent())
+
+    assert adapter.start_calls == 0
+
+    store.config.enabled = True
+    restarted = ModelHubService(
+        store=store,
+        adapter=adapter,
+        events=BoundedEventLog(tmp_path / "restarted-events.json"),
+        oauth_flows=OAuthFlowRegistry(tmp_path / "restarted-oauth-flows.json"),
+        revocations=CredentialRevocationJournal(tmp_path / "restarted-revocations.json"),
+    )
+
+    asyncio.run(restarted.recover_runtime_intent())
+
+    assert adapter.start_calls == 1
 
 
 def test_runtime_start_syncs_sources_before_starting_once(tmp_path):

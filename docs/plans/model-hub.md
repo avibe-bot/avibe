@@ -818,7 +818,10 @@ dead-end error string.
 2026-08-11).** `host_platform` is detected on the Avibe server, never from the browser,
 and installation is supported exactly when it equals one
 `manifest.assets[].platform`. The install route and status reads mirror this closed
-state set; prose cannot add another runtime health value.
+state set; prose cannot add another runtime health value. `RuntimeDependency.enabled`
+is orthogonal persisted user intent: it defaults to false when absent, explicit Start
+sets it true, explicit Stop sets it false, and service startup starts the runtime only
+when it is true. A transient process loss changes health, never this switch state.
 
 | Decision | Meaning | Entry and exit rule | `status.error_key` |
 | --- | --- | --- | --- |
