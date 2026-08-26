@@ -6,6 +6,7 @@ import clsx from 'clsx';
 import {
   actionShortcutsEqual,
   defaultActionShortcuts,
+  isAltGraphShortcutEvent,
   isReservedActionShortcut,
   isPlainEscape,
   shortcutFromKeyboardEvent,
@@ -42,6 +43,10 @@ export const SettingsShortcutsPage: React.FC = () => {
       captureRequestRef.current += 1;
       setCapturing(null);
       setError(null);
+      return;
+    }
+    if (isAltGraphShortcutEvent(event.nativeEvent)) {
+      setError({ id, message: t('settings.shortcuts.reserved') });
       return;
     }
 

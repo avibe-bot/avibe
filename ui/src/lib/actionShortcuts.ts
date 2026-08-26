@@ -21,7 +21,7 @@ export type ActionShortcuts = Record<ActionShortcutId, ActionShortcut>;
 type ShortcutEvent = Pick<
   KeyboardEvent,
   'altKey' | 'code' | 'ctrlKey' | 'key' | 'metaKey' | 'shiftKey'
->;
+> & Partial<Pick<KeyboardEvent, 'getModifierState'>>;
 
 type KeyboardLayoutProvider = {
   getLayoutMap: () => Promise<Pick<Map<string, string>, 'get'>>;
@@ -169,7 +169,12 @@ export function isPlainEscape(
   );
 }
 
+export function isAltGraphShortcutEvent(event: Pick<ShortcutEvent, 'getModifierState'>): boolean {
+  return event.getModifierState?.('AltGraph') === true;
+}
+
 export function shortcutFromKeyboardEvent(event: ShortcutEvent): ActionShortcut | null {
+  if (isAltGraphShortcutEvent(event)) return null;
   const shortcut: ActionShortcut = {
     code: event.code,
     displayKey: normalizedDisplayKey(event.key),
@@ -190,15 +195,8 @@ export async function shortcutFromKeyboardEventWithLayout(
       : (navigator as Navigator & { keyboard?: KeyboardLayoutProvider }).keyboard
   ),
 ): Promise<ActionShortcut | null> {
-  // Snapshot before awaiting: callers commonly pass React's native event.
-  const shortcut = shortcutFromKeyboardEvent({
-    altKey: event.altKey,
-    code: event.code,
-    ctrlKey: event.ctrlKey,
-    key: event.key,
-    metaKey: event.metaKey,
-    shiftKey: event.shiftKey,
-  });
+  // Read the native event before awaiting; the returned shortcut is the snapshot.
+  const shortcut = shortcutFromKeyboardEvent(event);
   if (!shortcut || !keyboard) return shortcut;
   try {
     const layout = await keyboard.getLayoutMap();
@@ -211,7 +209,8 @@ export async function shortcutFromKeyboardEventWithLayout(
 
 export function actionShortcutMatches(event: ShortcutEvent, shortcut: ActionShortcut): boolean {
   return (
-    event.code === shortcut.code
+    !isAltGraphShortcutEvent(event)
+    && event.code === shortcut.code
     && event.altKey === shortcut.altKey
     && event.ctrlKey === shortcut.ctrlKey
     && event.metaKey === shortcut.metaKey
@@ -278,6 +277,23 @@ export function isReservedActionShortcut(
     && !shortcut.altKey
     && shortcut.ctrlKey !== shortcut.metaKey
   );
+}
+
+export function resolveActionShortcutsForLayout(
+  shortcuts: ActionShortcuts,
+  layoutKeys: Partial<Record<ActionShortcutId, string>>,
+): ActionShortcuts {
+  const defaults = defaultActionShortcuts();
+  const resolve = (id: ActionShortcutId): ActionShortcut => {
+    const layoutKey = normalizedDisplayKey(layoutKeys[id]);
+    const candidate = layoutKey ? { ...shortcuts[id], displayKey: layoutKey } : shortcuts[id];
+    return isReservedActionShortcut(id, candidate) ? defaults[id] : candidate;
+  };
+  const voiceInput = resolve('voiceInput');
+  const showPageAnnotation = resolve('showPageAnnotation');
+  return actionShortcutsEqual(voiceInput, showPageAnnotation)
+    ? defaults
+    : { voiceInput, showPageAnnotation };
 }
 
 const SYMBOL_KEY_LABELS: Readonly<Record<string, string>> = {
@@ -442,5 +458,14 @@ export function useActionShortcuts(): ActionShortcuts {
     shortcutSnapshot,
     () => defaultSnapshot,
   );
-  return useMemo(() => normalizeActionShortcuts(JSON.parse(snapshot)), [snapshot]);
+  const stored = useMemo(() => normalizeActionShortcuts(JSON.parse(snapshot)), [snapshot]);
+  const voiceInputLayoutKey = useActiveLayoutKey(stored.voiceInput.code);
+  const annotationLayoutKey = useActiveLayoutKey(stored.showPageAnnotation.code);
+  return useMemo(
+    () => resolveActionShortcutsForLayout(stored, {
+      voiceInput: voiceInputLayoutKey,
+      showPageAnnotation: annotationLayoutKey,
+    }),
+    [annotationLayoutKey, stored, voiceInputLayoutKey],
+  );
 }

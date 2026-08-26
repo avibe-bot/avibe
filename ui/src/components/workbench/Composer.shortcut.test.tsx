@@ -128,6 +128,7 @@ describe('Composer voice shortcut', () => {
     const menuTrigger = document.createElement('button');
     menuTrigger.setAttribute('aria-haspopup', 'menu');
     menuTrigger.setAttribute('aria-expanded', 'true');
+    Object.defineProperty(menuTrigger, 'checkVisibility', { value: () => true });
     document.body.append(menuTrigger);
     fireEvent.keyDown(window, { code: 'KeyZ', altKey: true });
 

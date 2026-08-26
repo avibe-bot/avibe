@@ -49,6 +49,16 @@ describe('isArchiveSessionChord', () => {
 const elWithClosest = (matches: (selector: string) => boolean): Element =>
   ({ closest: (selector: string) => (matches(selector) ? ({} as Element) : null) }) as unknown as Element;
 
+const overlay = (visible: boolean): Element => ({
+  checkVisibility: () => visible,
+}) as unknown as Element;
+
+const rootWithOverlays = (
+  resolve: (selector: string) => Element[],
+): Pick<Document, 'querySelectorAll'> => ({
+  querySelectorAll: vi.fn(resolve),
+}) as unknown as Pick<Document, 'querySelectorAll'>;
+
 // ── Codex review (ChatPage.tsx:1897) ─────────────────────────────────────────
 // The chat stays MOUNTED under app windows and dialogs, so a window-level chord
 // bound on "ChatPage is mounted" fired for keystrokes that belonged to the surface
@@ -83,21 +93,26 @@ describe('inShortcutBlockingOverlay', () => {
   it('claims a shortcut while a menu is open even if focus stayed on its trigger', () => {
     expect(inShortcutBlockingOverlay(
       elWithClosest(() => false),
-      {
-        querySelector: vi.fn((selector: string) => (
-          selector.includes('[aria-expanded="true"][aria-haspopup]') ? {} : null
-        )),
-      } as unknown as Pick<Document, 'querySelector'>,
+      rootWithOverlays((selector) => (
+        selector.includes('[aria-expanded="true"][aria-haspopup]') ? [overlay(true)] : []
+      )),
     )).toBe(true);
+  });
+
+  it('ignores expanded controls inside CSS-hidden desktop chrome', () => {
+    expect(inShortcutBlockingOverlay(
+      elWithClosest(() => false),
+      rootWithOverlays((selector) => (
+        selector.includes('[aria-expanded="true"][aria-haspopup]') ? [overlay(false)] : []
+      )),
+    )).toBe(false);
   });
 
   it('does not mistake a persistent ARIA menu for an open overlay', () => {
     const matchesBareMenu = (selector: string) => selector.split(', ').includes('[role="menu"]');
     expect(inShortcutBlockingOverlay(
       elWithClosest(matchesBareMenu),
-      {
-        querySelector: vi.fn((selector: string) => (matchesBareMenu(selector) ? {} : null)),
-      } as unknown as Pick<Document, 'querySelector'>,
+      rootWithOverlays((selector) => (matchesBareMenu(selector) ? [overlay(true)] : [])),
     )).toBe(false);
   });
 
@@ -107,24 +122,20 @@ describe('inShortcutBlockingOverlay', () => {
     );
     expect(inShortcutBlockingOverlay(
       elWithClosest(() => false),
-      {
-        querySelector: vi.fn((selector: string) => (hasBareCapture(selector) ? {} : null)),
-      } as unknown as Pick<Document, 'querySelector'>,
+      rootWithOverlays((selector) => (hasBareCapture(selector) ? [overlay(true)] : [])),
     )).toBe(false);
     expect(inShortcutBlockingOverlay(
       elWithClosest(() => false),
-      {
-        querySelector: vi.fn((selector: string) => (
-          selector.split(', ').includes('[data-shortcut-capture="active"]') ? {} : null
-        )),
-      } as unknown as Pick<Document, 'querySelector'>,
+      rootWithOverlays((selector) => (
+        selector.split(', ').includes('[data-shortcut-capture="active"]') ? [overlay(true)] : []
+      )),
     )).toBe(true);
   });
 
   it('leaves the unobstructed chat surface to the active shortcut owner', () => {
     expect(inShortcutBlockingOverlay(
       elWithClosest(() => false),
-      { querySelector: vi.fn().mockReturnValue(null) } as unknown as Pick<Document, 'querySelector'>,
+      rootWithOverlays(() => []),
     )).toBe(false);
   });
 });

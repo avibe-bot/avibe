@@ -12,6 +12,7 @@ import {
   isPlainEscape,
   isReservedActionShortcut,
   readActionShortcuts,
+  resolveActionShortcutsForLayout,
   shortcutFromKeyboardEvent,
   shortcutFromKeyboardEventWithLayout,
   writeActionShortcuts,
@@ -63,6 +64,25 @@ describe('action shortcuts', () => {
     const shortcut = shortcutFromKeyboardEvent(chord({ code: 'KeyV', key: 'v', altKey: true }))!;
     expect(actionShortcutMatches(chord({ code: 'KeyV', key: 'v', altKey: true }), shortcut)).toBe(true);
     expect(actionShortcutMatches(chord({ code: 'KeyV', key: 'V', altKey: true, shiftKey: true }), shortcut)).toBe(false);
+  });
+
+  it('never captures or matches AltGraph text entry as a Ctrl+Alt action', () => {
+    const ctrlAlt = shortcutFromKeyboardEvent(chord({
+      code: 'KeyQ',
+      key: 'q',
+      altKey: true,
+      ctrlKey: true,
+    }))!;
+    const altGraph = chord({
+      code: 'KeyQ',
+      key: '@',
+      altKey: true,
+      ctrlKey: true,
+      getModifierState: (modifier: string) => modifier === 'AltGraph',
+    });
+
+    expect(shortcutFromKeyboardEvent(altGraph)).toBeNull();
+    expect(actionShortcutMatches(altGraph, ctrlAlt)).toBe(false);
   });
 
   it('keeps matching the physical code while displaying the active layout key', async () => {
@@ -130,6 +150,25 @@ describe('action shortcuts', () => {
       { getLayoutMap: async () => new Map([['KeyK', 'j']]) },
     );
     expect(isReservedActionShortcut('voiceInput', remappedPhysicalK!)).toBe(false);
+  });
+
+  it('falls back while the active layout turns a saved chord into a shell command', () => {
+    const shortcuts = defaultActionShortcuts();
+    shortcuts.voiceInput = shortcutFromKeyboardEvent(chord({
+      code: 'KeyV',
+      key: 'v',
+      ctrlKey: true,
+    }))!;
+
+    const dvorak = resolveActionShortcutsForLayout(shortcuts, {
+      voiceInput: 'k',
+      showPageAnnotation: 'q',
+    });
+    expect(dvorak.voiceInput).toEqual(defaultActionShortcuts().voiceInput);
+    expect(dvorak.showPageAnnotation.displayKey).toBe('Q');
+
+    const qwerty = resolveActionShortcutsForLayout(shortcuts, { voiceInput: 'v' });
+    expect(qwerty.voiceInput).toMatchObject({ code: 'KeyV', displayKey: 'V', ctrlKey: true });
   });
 
   it('persists valid settings and degrades malformed or colliding storage to defaults', () => {

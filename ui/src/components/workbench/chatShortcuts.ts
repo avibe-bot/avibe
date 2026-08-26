@@ -64,11 +64,19 @@ export function inForegroundSurface(el: Element | null): boolean {
  */
 export function inShortcutBlockingOverlay(
   el: Element | null,
-  root?: Pick<Document, 'querySelector'>,
+  root?: Pick<Document, 'querySelectorAll'>,
 ): boolean {
+  const visibleRootOverlay = Array.from(
+    root?.querySelectorAll(SHORTCUT_OPEN_OVERLAY_SELECTOR) ?? [],
+  ).some((overlay) => {
+    const checkVisibility = (overlay as Element & { checkVisibility?: () => boolean }).checkVisibility;
+    return typeof checkVisibility === 'function'
+      ? checkVisibility.call(overlay)
+      : overlay.getClientRects().length > 0;
+  });
   return (
     !!el?.closest?.(SHORTCUT_BLOCKING_TARGET_SELECTOR)
-    || !!root?.querySelector(SHORTCUT_OPEN_OVERLAY_SELECTOR)
+    || visibleRootOverlay
   );
 }
 

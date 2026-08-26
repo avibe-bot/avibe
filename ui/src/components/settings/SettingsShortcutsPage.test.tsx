@@ -6,7 +6,12 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import en from '../../i18n/en.json';
-import { readActionShortcuts } from '../../lib/actionShortcuts';
+import {
+  defaultActionShortcuts,
+  readActionShortcuts,
+  shortcutFromKeyboardEvent,
+  writeActionShortcuts,
+} from '../../lib/actionShortcuts';
 import { SettingsShortcutsPage } from './SettingsShortcutsPage';
 
 const i18n = createInstance();
@@ -72,6 +77,33 @@ describe('SettingsShortcutsPage', () => {
     expect(annotation.textContent).toContain('Alt+R');
   });
 
+  it('stops advertising a saved chord when a layout change makes it shell-reserved', async () => {
+    let layout = new Map([['KeyV', 'v'], ['KeyZ', 'z'], ['KeyX', 'x']]);
+    const keyboard = Object.assign(new EventTarget(), {
+      getLayoutMap: async () => layout,
+    });
+    Object.defineProperty(navigator, 'keyboard', { configurable: true, value: keyboard });
+    const shortcuts = defaultActionShortcuts();
+    shortcuts.voiceInput = shortcutFromKeyboardEvent(new KeyboardEvent('keydown', {
+      code: 'KeyV',
+      key: 'v',
+      ctrlKey: true,
+    }))!;
+    writeActionShortcuts(shortcuts);
+    renderPage();
+
+    const voice = screen.getByRole('button', { name: 'Change Chat voice input shortcut' });
+    await waitFor(() => expect(voice.textContent).toContain('Ctrl+V'));
+
+    layout = new Map([['KeyV', 'k'], ['KeyZ', 'y'], ['KeyX', 'q']]);
+    keyboard.dispatchEvent(new Event('layoutchange'));
+    await waitFor(() => expect(voice.textContent).toContain('Alt+Y'));
+
+    layout = new Map([['KeyV', 'v'], ['KeyZ', 'z'], ['KeyX', 'x']]);
+    keyboard.dispatchEvent(new Event('layoutchange'));
+    await waitFor(() => expect(voice.textContent).toContain('Ctrl+V'));
+  });
+
   it('rejects modifierless, reserved, and duplicate chords without changing storage', () => {
     renderPage();
     const voice = screen.getByRole('button', { name: 'Change Chat voice input shortcut' });
@@ -84,6 +116,19 @@ describe('SettingsShortcutsPage', () => {
     expect(screen.getByRole('alert').textContent).toBe('Include Option, Command, or Control.');
 
     fireEvent.keyDown(voice, { code: 'KeyW', altKey: true });
+    expect(screen.getByRole('alert').textContent).toBe('This shortcut is already used by Avibe.');
+
+    const altGraph = new KeyboardEvent('keydown', {
+      bubbles: true,
+      code: 'KeyQ',
+      key: '@',
+      altKey: true,
+      ctrlKey: true,
+    });
+    Object.defineProperty(altGraph, 'getModifierState', {
+      value: (modifier: string) => modifier === 'AltGraph',
+    });
+    fireEvent(voice, altGraph);
     expect(screen.getByRole('alert').textContent).toBe('This shortcut is already used by Avibe.');
 
     fireEvent.keyDown(voice, { code: 'KeyX', altKey: true });

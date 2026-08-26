@@ -270,6 +270,7 @@ describe('useShowPageAnnotation host Escape forwarding', () => {
     const menu = document.createElement('div');
     menu.setAttribute('role', 'menu');
     menu.dataset.shortcutOverlay = 'open';
+    Object.defineProperty(menu, 'checkVisibility', { value: () => true });
     document.body.append(menu);
     const invokingButton = document.createElement('button');
     document.body.append(invokingButton);
