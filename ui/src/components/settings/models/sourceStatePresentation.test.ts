@@ -2,7 +2,16 @@ import { describe, expect, it } from 'vitest';
 
 import { sourceStatePresentation, type SourceStateSurface } from './sourceStatePresentation';
 import { SOURCE_STATUSES } from './types';
-import type { SourceState, SourceStatus } from './types';
+import type { SourceState, SourceStatus, SupplyChannel } from './types';
+
+/**
+ * How each supply channel reaches the `native` flag both callers pass — stated as
+ * a total Record so a channel added later has to say which reading it takes.
+ */
+const CHANNEL_IS_NATIVE: Readonly<Record<SupplyChannel, boolean>> = {
+  native_cli: true,
+  hub: false,
+};
 
 const state = (status: SourceStatus, over: Partial<SourceState> = {}): SourceState => ({
   status,
@@ -84,6 +93,32 @@ describe('sourceStatePresentation', () => {
       labelKey: 'settings.models.sourceDetail.status.standbyHintLabel',
       bodyKey: 'settings.models.sourceDetail.status.standbyHint',
     });
+  });
+
+  // The hint promises one transition, so it is honest only if every supply
+  // channel can make it — and both can, for the same reason: adoption is read off
+  // route hops, and a source of either channel is a route candidate exactly while
+  // its agent is in Gateway mode. 「Supplying … (native)」 is that transition's own
+  // landing state, which is why naming the mode is what keeps the sentence true
+  // for a native source rather than what excludes it.
+  it('promises a transition every supply channel can make', () => {
+    for (const native of Object.values(CHANNEL_IS_NATIVE)) {
+      expect(sourceStatePresentation(state('standby'), 'detail', 'en', 0, {
+        known: true,
+        backends: [],
+        native,
+      }).hint).toBeTruthy();
+
+      const adopted = sourceStatePresentation(state('active'), 'card', 'en', 0, {
+        known: true,
+        backends: ['Claude Code'],
+        native,
+      });
+      expect(adopted.key).toBe(native
+        ? 'settings.models.upstream.state.supplyingNative'
+        : 'settings.models.upstream.state.supplying');
+      expect(adopted.hint).toBeUndefined();
+    }
   });
 
   it('maps each needs-action cause to the copy register', () => {
