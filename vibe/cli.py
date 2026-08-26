@@ -51,6 +51,7 @@ from core.scheduled_tasks import (
 )
 from core.caller_context import caller_context_from_env, caller_resource_user_context
 from core.command_runner import command_line_preview
+from core.install_integrity import verify_python_environment, verify_site_packages
 from core.vibe_agents import AgentArchivedEditError, AgentArchiveError, AgentNameValidationError, AgentReferenceRewriteError, VibeAgent, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
 from core.watches import (
     DEFAULT_RETRY_EXIT_CODE,
@@ -68,11 +69,14 @@ from vibe.upgrade import (
     CURRENT_VIBE_EXECUTABLE_ENV,
     LEGACY_PACKAGE_NAME,
     PACKAGE_NAME,
+    activate_upgrade_candidate,
+    atomic_uv_install_root,
     build_upgrade_plan,
     cache_running_vibe_path,
     get_latest_version_info,
     get_safe_cwd,
     should_skip_show_runtime_prepare,
+    UPGRADE_INSTALL_TIMEOUT_SECONDS,
 )
 from storage.db import create_sqlite_engine
 from storage.background import (
@@ -11829,6 +11833,19 @@ def _uv_tool_site_packages_for_vibe(vibe_path: Path) -> list[Path]:
             seen_roots.add(key)
             tool_roots.append(resolved)
 
+    # Atomic upgrades keep each validated uv environment in a durable
+    # generation directory and switch only the stable PATH launcher.  Resolve
+    # that generation directly so doctor inspects the active candidate just as
+    # it inspects a conventional ``~/.local/share/uv/tools/<package>`` root.
+    try:
+        generation_root = atomic_uv_install_root().expanduser().resolve()
+        generation = vibe_path.expanduser().resolve().relative_to(generation_root).parts[0]
+    except (OSError, ValueError, IndexError):
+        generation = None
+    if generation:
+        for package_name in UV_TOOL_PACKAGE_NAMES:
+            add_tool_root(generation_root / generation / "tools" / package_name)
+
     parts = vibe_path.parts
     try:
         tools_index = parts.index("tools")
@@ -11993,6 +12010,28 @@ def _local_cli_installation_items() -> list[dict]:
             )
         else:
             _add_doctor_item(items, "pass", f"uv tool installation is not editable: {site_packages}")
+
+        # A successful package-manager exit only proves that its metadata was
+        # written.  RECORD is the wheel-level evidence that every installed
+        # file is still present and unchanged; this is what catches an
+        # interrupted dependency copy such as a half-written lark-oapi tree.
+        if any(site_packages.glob("*.dist-info")):
+            integrity = verify_site_packages(site_packages)
+            if integrity.ok:
+                _add_doctor_item(
+                    items,
+                    "pass",
+                    f"Python package files are intact: {integrity.detail}",
+                    code="installation.package_integrity",
+                )
+            else:
+                _add_doctor_item(
+                    items,
+                    "fail",
+                    f"Python package integrity check failed: {integrity.detail}",
+                    "Run `vibe upgrade` to install a new verified environment, or rerun the Avibe installer if the current CLI cannot start.",
+                    code="installation.package_integrity",
+                )
 
         alembic_dir = site_packages / "storage" / "alembic"
         versions_dir = alembic_dir / "versions"
@@ -14394,8 +14433,26 @@ def cmd_upgrade():
     safe_cwd = get_safe_cwd()
 
     try:
-        result = subprocess.run(plan.command, capture_output=True, text=True, env=plan.env, cwd=safe_cwd)
+        result = subprocess.run(
+            plan.command,
+            capture_output=True,
+            text=True,
+            env=plan.env,
+            cwd=safe_cwd,
+            timeout=UPGRADE_INSTALL_TIMEOUT_SECONDS,
+        )
         if result.returncode == 0:
+            if plan.activation is not None:
+                try:
+                    activate_upgrade_candidate(plan.activation)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"\033[31mUpgrade candidate failed integrity verification: {exc}\033[0m")
+                    return 1
+            elif plan.method == "pip":
+                integrity = verify_python_environment(sys.executable)
+                if not integrity.ok:
+                    print(f"\033[31mUpgrade installed an incomplete Python environment: {integrity.detail}\033[0m")
+                    return 1
             print("\033[32mUpgrade successful!\033[0m")
             if runtime_was_running:
                 try:

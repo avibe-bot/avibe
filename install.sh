@@ -19,7 +19,17 @@ PACKAGE_NAME="avibe-os"
 NODE_MINIMUM_REQUIREMENT="20.19+ or 22.12+"
 VIBE_BIN_PATH=""
 VIBE_TOOL_BIN_DIR=""
+VIBE_CANDIDATE_BIN_PATH=""
 ORIGINAL_PATH="$PATH"
+if [ -n "${AVIBE_HOME:-}" ]; then
+    AVIBE_RUNTIME_HOME="$AVIBE_HOME"
+elif [ -e "$HOME/.avibe" ] || [ -L "$HOME/.avibe" ]; then
+    AVIBE_RUNTIME_HOME="$HOME/.avibe"
+elif [ -e "$HOME/.vibe_remote" ] || [ -L "$HOME/.vibe_remote" ]; then
+    AVIBE_RUNTIME_HOME="$HOME/.vibe_remote"
+else
+    AVIBE_RUNTIME_HOME="$HOME/.avibe"
+fi
 REMOTE_ACCESS_PAIRING_KEY=""
 REMOTE_ACCESS_PAIRED=""
 
@@ -403,11 +413,29 @@ install_node_optional() {
 }
 
 uv_tool_install() {
-    if [ -n "$VIBE_TOOL_BIN_DIR" ]; then
-        UV_TOOL_BIN_DIR="$VIBE_TOOL_BIN_DIR" uv tool install "$@"
-    else
-        uv tool install "$@"
+    # uv writes a tool environment in place.  Give every attempt its own
+    # durable generation and activate its launcher only after uv exits
+    # successfully, so an interrupted copy cannot damage the active install.
+    local generation_root="$AVIBE_RUNTIME_HOME/runtime/install-generations/$(date +%s)-$$-${RANDOM}"
+    local generation_tools="$generation_root/tools"
+    local generation_bin="$generation_root/bin"
+    local stable_bin_dir="${VIBE_TOOL_BIN_DIR:-$HOME/.local/bin}"
+    mkdir -p "$generation_tools" "$generation_bin" "$stable_bin_dir"
+
+    if UV_TOOL_DIR="$generation_tools" UV_TOOL_BIN_DIR="$generation_bin" uv tool install "$@"; then
+        VIBE_CANDIDATE_BIN_PATH="$generation_bin/vibe"
+        if [ ! -x "$VIBE_CANDIDATE_BIN_PATH" ]; then
+            warn "uv completed but the candidate vibe launcher was not created"
+            return 1
+        fi
+        local replacement="$stable_bin_dir/.vibe.avibe-${RANDOM}.new"
+        ln -s "$VIBE_CANDIDATE_BIN_PATH" "$replacement"
+        mv -f "$replacement" "$stable_bin_dir/vibe"
+        VIBE_TOOL_BIN_DIR="$stable_bin_dir"
+        VIBE_BIN_PATH="$stable_bin_dir/vibe"
+        return 0
     fi
+    return 1
 }
 
 install_package_candidate() {

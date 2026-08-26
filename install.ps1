@@ -251,7 +251,57 @@ function Invoke-NativeCommand {
 function Invoke-UvToolInstallAttempt {
     param([string[]]$Arguments)
 
-    return Invoke-NativeCommand -FilePath "uv" -Arguments (@("tool", "install") + $Arguments)
+    $defaultHome = Join-Path $env:USERPROFILE ".avibe"
+    $legacyHome = Join-Path $env:USERPROFILE ".vibe_remote"
+    $runtimeHome = if ($env:AVIBE_HOME) {
+        $env:AVIBE_HOME
+    } elseif (Test-Path $defaultHome) {
+        $defaultHome
+    } elseif (Test-Path $legacyHome) {
+        $legacyHome
+    } else {
+        $defaultHome
+    }
+    $generationRoot = Join-Path (Join-Path $runtimeHome "runtime\install-generations") ([Guid]::NewGuid().ToString("N"))
+    $generationTools = Join-Path $generationRoot "tools"
+    $generationBin = Join-Path $generationRoot "bin"
+    $stableBin = Join-Path $env:USERPROFILE ".local\bin"
+    New-Item -ItemType Directory -Force -Path $generationTools, $generationBin, $stableBin | Out-Null
+
+    $previousToolDir = $env:UV_TOOL_DIR
+    $previousToolBinDir = $env:UV_TOOL_BIN_DIR
+    try {
+        $env:UV_TOOL_DIR = $generationTools
+        $env:UV_TOOL_BIN_DIR = $generationBin
+        $result = Invoke-NativeCommand -FilePath "uv" -Arguments (@("tool", "install") + $Arguments)
+        if (-not $result.Success) {
+            return $result
+        }
+
+        $candidate = Join-Path $generationBin "vibe.exe"
+        if (-not (Test-Path $candidate)) {
+            return @{
+                Success = $false
+                ExitCode = 1
+                Output = "uv completed but the candidate vibe launcher was not created"
+            }
+        }
+
+        $replacement = Join-Path $stableBin ("vibe.exe.avibe-" + [Guid]::NewGuid().ToString("N") + ".new")
+        try {
+            New-Item -ItemType SymbolicLink -Path $replacement -Target $candidate -ErrorAction Stop | Out-Null
+        } catch {
+            # Developer mode is not required for a normal Windows install. A
+            # hard link preserves the candidate bytes while still allowing an
+            # atomic Move-Item activation on the same volume.
+            New-Item -ItemType HardLink -Path $replacement -Target $candidate -ErrorAction Stop | Out-Null
+        }
+        Move-Item -Force -Path $replacement -Destination (Join-Path $stableBin "vibe.exe")
+        return $result
+    } finally {
+        if ($null -eq $previousToolDir) { Remove-Item Env:UV_TOOL_DIR -ErrorAction SilentlyContinue } else { $env:UV_TOOL_DIR = $previousToolDir }
+        if ($null -eq $previousToolBinDir) { Remove-Item Env:UV_TOOL_BIN_DIR -ErrorAction SilentlyContinue } else { $env:UV_TOOL_BIN_DIR = $previousToolBinDir }
+    }
 }
 
 function Install-Vibe {

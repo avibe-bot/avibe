@@ -12,6 +12,7 @@ import socket
 import ssl
 import stat
 import subprocess
+import sys
 import threading
 import time
 import urllib.parse
@@ -52,6 +53,7 @@ from config.v2_settings import (
 from config.v2_sessions import SessionsStore
 from config.platform_registry import get_platform_descriptor
 from core import latest_version_cache
+from core.install_integrity import verify_python_environment
 from core.memory.operation_lock import MemoryOperationBusy, MemoryOperationLease
 from vibe.opencode_config import (
     get_opencode_config_paths,
@@ -60,11 +62,13 @@ from vibe.opencode_config import (
 )
 from vibe.build_identity import get_build_identity
 from vibe.upgrade import (
+    activate_upgrade_candidate,
     build_upgrade_plan,
     get_latest_version_info,
     get_running_vibe_path,
     get_safe_cwd,
     should_skip_show_runtime_prepare,
+    UPGRADE_INSTALL_TIMEOUT_SECONDS,
 )
 from vibe.restart_supervisor import schedule_restart
 from vibe import backend_model_catalog
@@ -6133,11 +6137,35 @@ def do_upgrade(auto_restart: bool = True) -> dict:
             plan.command,
             capture_output=True,
             text=True,
-            timeout=120,
+            # A wheel install copies the complete candidate environment before
+            # it can be activated.  The old 120s bound interrupted that copy
+            # in-place and left metadata claiming a package tree that no longer
+            # existed.  The candidate is isolated now; this is only a bound for
+            # a genuinely hung resolver/download.
+            timeout=UPGRADE_INSTALL_TIMEOUT_SECONDS,
             env=plan.env,
             cwd=safe_cwd,
         )
         if result.returncode == 0:
+            if plan.activation is not None:
+                try:
+                    activate_upgrade_candidate(plan.activation)
+                except Exception as exc:  # noqa: BLE001
+                    return {
+                        "ok": False,
+                        "message": "Upgrade candidate failed integrity verification",
+                        "output": str(exc),
+                        "restarting": False,
+                    }
+            elif plan.method == "pip":
+                integrity = verify_python_environment(sys.executable)
+                if not integrity.ok:
+                    return {
+                        "ok": False,
+                        "message": "Upgrade installed an incomplete Python environment",
+                        "output": integrity.detail,
+                        "restarting": False,
+                    }
             restarting = False
             restart_failed = False
             runtime_output = None

@@ -88,6 +88,9 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
         fi
         EOF
         chmod +x "$bin_dir/vibe"
+        if [ "${{VIBE_TEST_UV_FAIL:-}}" = "1" ]; then
+            exit 17
+        fi
         """,
     )
 
@@ -179,6 +182,13 @@ def _vibe_version(env: dict[str, str], *, cwd: Path = REPO_ROOT) -> subprocess.C
     return _run("vibe version", cwd=cwd, env=env)
 
 
+def _assert_staged_uv_bin(uv_log: Path, home_dir: Path) -> None:
+    staged = Path(uv_log.read_text(encoding="utf-8"))
+    assert staged.is_absolute()
+    assert staged.name == "bin"
+    assert staged.parent.parent == home_dir / ".avibe" / "runtime" / "install-generations"
+
+
 def test_install_script_keeps_vibe_available_on_current_path(tmp_path):
     home_dir = tmp_path / "home"
     home_dir.mkdir()
@@ -202,6 +212,27 @@ def test_install_script_keeps_vibe_available_on_current_path(tmp_path):
     assert version_result.returncode == 0, version_result.stdout + version_result.stderr
     assert "avibe-os 9.9.9" in version_result.stdout
     assert uv_log.read_text(encoding="utf-8")
+
+
+def test_install_script_keeps_active_launcher_when_uv_install_fails(tmp_path):
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    path_dir = tmp_path / "path-bin"
+    path_dir.mkdir()
+    uv_log = tmp_path / "uv-tool-bin-dir.txt"
+    active = path_dir / "vibe"
+    _write_executable(active, "#!/usr/bin/env bash\necho stable\n")
+    _write_fake_uv(path_dir / "uv", uv_log)
+
+    env = os.environ.copy()
+    env["HOME"] = str(home_dir)
+    env["PATH"] = os.pathsep.join([str(path_dir), "/usr/bin", "/bin"])
+    env["VIBE_TEST_UV_FAIL"] = "1"
+
+    install_result = _install(env)
+
+    assert install_result.returncode != 0
+    assert active.read_text(encoding="utf-8") == "#!/usr/bin/env bash\necho stable\n"
 
 
 def test_install_script_pairs_and_starts_with_verified_vibe_path(tmp_path):
@@ -489,7 +520,7 @@ def test_install_script_prefers_original_path_order(tmp_path):
     install_result = _install(env, cwd=tmp_path)
 
     assert install_result.returncode == 0, install_result.stdout + install_result.stderr
-    assert uv_log.read_text(encoding="utf-8") == str(first_dir)
+    _assert_staged_uv_bin(uv_log, home_dir)
 
 
 def test_install_script_skips_relative_path_entries_for_tool_bin(tmp_path):
@@ -534,7 +565,7 @@ def test_install_script_skips_virtualenv_bin_dirs(tmp_path):
     install_result = _install(env, cwd=tmp_path)
 
     assert install_result.returncode == 0, install_result.stdout + install_result.stderr
-    assert uv_log.read_text(encoding="utf-8") == str(stable_bin)
+    _assert_staged_uv_bin(uv_log, home_dir)
     assert not (venv_bin / "vibe").exists()
 
 
@@ -560,7 +591,7 @@ def test_install_script_skips_pyenv_and_mise_bin_dirs(tmp_path):
     install_result = _install(env, cwd=tmp_path)
 
     assert install_result.returncode == 0, install_result.stdout + install_result.stderr
-    assert uv_log.read_text(encoding="utf-8") == str(stable_bin)
+    _assert_staged_uv_bin(uv_log, home_dir)
     assert not (pyenv_bin / "vibe").exists()
     assert not (mise_bin / "vibe").exists()
 
@@ -585,7 +616,7 @@ def test_install_script_skips_pyenv_shims_dir(tmp_path):
     install_result = _install(env, cwd=tmp_path)
 
     assert install_result.returncode == 0, install_result.stdout + install_result.stderr
-    assert uv_log.read_text(encoding="utf-8") == str(stable_bin)
+    _assert_staged_uv_bin(uv_log, home_dir)
     assert not (shims_dir / "vibe").exists()
 
 
@@ -607,7 +638,7 @@ def test_install_script_prefers_bin_over_sbin(tmp_path):
     install_result = _install(env, cwd=tmp_path)
 
     assert install_result.returncode == 0, install_result.stdout + install_result.stderr
-    assert uv_log.read_text(encoding="utf-8") == str(bin_dir)
+    _assert_staged_uv_bin(uv_log, home_dir)
     assert not (sbin_dir / "vibe").exists()
 
 
@@ -676,7 +707,7 @@ def test_install_script_reinstalls_when_existing_uv_is_x86_on_apple_silicon(tmp_
 
     assert install_result.returncode == 0, install_result.stdout + install_result.stderr
     assert "Found x86_64 uv on Apple Silicon" in install_result.stdout
-    assert uv_log.read_text(encoding="utf-8") == str(path_dir)
+    _assert_staged_uv_bin(uv_log, home_dir)
 
 
 def test_install_script_omits_retry_all_errors_for_older_curl(tmp_path):
@@ -751,7 +782,7 @@ def test_install_script_accepts_universal_uv_with_arm64e_slice_on_apple_silicon(
     assert install_result.returncode == 0, install_result.stdout + install_result.stderr
     assert "Found x86_64 uv on Apple Silicon" not in install_result.stdout
     assert "uv is already installed" in install_result.stdout
-    assert uv_log.read_text(encoding="utf-8") == str(path_dir)
+    _assert_staged_uv_bin(uv_log, home_dir)
 
 
 def test_install_script_checks_uv_symlink_target_architecture_on_apple_silicon(tmp_path):
@@ -800,7 +831,7 @@ def test_install_script_checks_uv_symlink_target_architecture_on_apple_silicon(t
 
     assert install_result.returncode == 0, install_result.stdout + install_result.stderr
     assert "Found x86_64 uv on Apple Silicon" in install_result.stdout
-    assert uv_log.read_text(encoding="utf-8") == str(path_dir)
+    _assert_staged_uv_bin(uv_log, home_dir)
 
 
 def test_install_script_ignores_arch_tokens_in_uv_path_prefix(tmp_path):
@@ -848,4 +879,4 @@ def test_install_script_ignores_arch_tokens_in_uv_path_prefix(tmp_path):
 
     assert install_result.returncode == 0, install_result.stdout + install_result.stderr
     assert "Found x86_64 uv on Apple Silicon" in install_result.stdout
-    assert uv_log.read_text(encoding="utf-8") == str(path_dir)
+    _assert_staged_uv_bin(uv_log, home_dir)

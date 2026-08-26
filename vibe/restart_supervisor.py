@@ -30,6 +30,8 @@ from vibe.upgrade import (
     LEGACY_PACKAGE_NAME,
     PACKAGE_NAME,
     RollbackTarget,
+    activate_launcher_target,
+    atomic_uv_install_root,
     _names_a_published_release,
     build_upgrade_plan,
     get_restart_command,
@@ -627,6 +629,14 @@ def _roll_back_failed_upgrade(
     """
 
     version = rollback_to.version
+    restore_stable_launcher = False
+    if vibe_path:
+        try:
+            restore_stable_launcher = Path(vibe_path).expanduser().resolve().is_relative_to(
+                atomic_uv_install_root().expanduser().resolve()
+            )
+        except (OSError, RuntimeError, ValueError):
+            restore_stable_launcher = False
     rollback: dict = {"target_version": version, "state": "running", "started_at": _now_iso()}
     record(rollback)
     write(f"rolling back to {version}: no service is running after the failed restart")
@@ -655,42 +665,60 @@ def _roll_back_failed_upgrade(
         write(f"cannot roll back to {version}: the failed generation did not stop")
         return rollback
 
-    try:
-        plan = build_upgrade_plan(vibe_path=vibe_path, version=version, package_name=rollback_to.package)
-    except Exception as exc:
-        rollback.update(state="failed", error=f"cannot build a pinned install for {version}: {exc}")
+    # A staged upgrade leaves the previous tool generation untouched. Reuse it
+    # directly during rollback; reinstalling the old wheel would reintroduce a
+    # long, mutable operation into the one path that exists to recover quickly.
+    if restore_stable_launcher and vibe_path and Path(rollback_to.launcher.main).is_file():
+        rollback["install"] = {"method": "atomic", "ok": True, "reused": True}
         record(rollback)
-        return rollback
+        write(f"reusing the previous {version} generation")
+    else:
+        try:
+            plan = build_upgrade_plan(vibe_path=vibe_path, version=version, package_name=rollback_to.package)
+        except Exception as exc:
+            rollback.update(state="failed", error=f"cannot build a pinned install for {version}: {exc}")
+            record(rollback)
+            return rollback
 
-    rollback["install"] = {"method": plan.method, "ok": None}
-    record(rollback)
-    try:
-        result = subprocess.run(
-            plan.command,
-            capture_output=True,
-            text=True,
-            env=plan.env,
-            cwd=get_safe_cwd(),
-            timeout=_ROLLBACK_INSTALL_TIMEOUT_SECONDS,
-        )
-    except Exception as exc:
-        rollback["install"] = {"method": plan.method, "ok": False, "error": str(exc)}
-        rollback.update(state="failed", error=f"installing {version} failed: {exc}")
+        rollback["install"] = {"method": plan.method, "ok": None}
         record(rollback)
-        return rollback
-    if result.returncode != 0:
-        # The installer's own stderr, trimmed: it is the only account of why the
-        # rollback could not proceed, and the full text can be megabytes of
-        # resolver output.
-        detail = (result.stderr or result.stdout or "").strip()[-2000:]
-        rollback["install"] = {"method": plan.method, "ok": False, "error": detail or f"exit code {result.returncode}"}
-        rollback.update(state="failed", error=f"installing {version} failed with exit code {result.returncode}")
+        try:
+            result = subprocess.run(
+                plan.command,
+                capture_output=True,
+                text=True,
+                env=plan.env,
+                cwd=get_safe_cwd(),
+                timeout=_ROLLBACK_INSTALL_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            rollback["install"] = {"method": plan.method, "ok": False, "error": str(exc)}
+            rollback.update(state="failed", error=f"installing {version} failed: {exc}")
+            record(rollback)
+            return rollback
+        if result.returncode != 0:
+            # The installer's own stderr, trimmed: it is the only account of why the
+            # rollback could not proceed, and the full text can be megabytes of
+            # resolver output.
+            detail = (result.stderr or result.stdout or "").strip()[-2000:]
+            rollback["install"] = {"method": plan.method, "ok": False, "error": detail or f"exit code {result.returncode}"}
+            rollback.update(state="failed", error=f"installing {version} failed with exit code {result.returncode}")
+            record(rollback)
+            write(f"pinned install of {version} failed: {detail}")
+            return rollback
+        rollback["install"] = {"method": plan.method, "ok": True}
         record(rollback)
-        write(f"pinned install of {version} failed: {detail}")
-        return rollback
-    rollback["install"] = {"method": plan.method, "ok": True}
-    record(rollback)
-    write(f"installed {version} using {plan.method}")
+        write(f"installed {version} using {plan.method}")
+
+    if restore_stable_launcher and vibe_path:
+        try:
+            activate_launcher_target(vibe_path, rollback_to.launcher.main)
+        except Exception as exc:  # noqa: BLE001
+            rollback.update(state="failed", error=f"restoring the active launcher failed: {exc}")
+            record(rollback)
+            return rollback
+        rollback["launcher"] = {"restored": True, "path": rollback_to.launcher.main}
+        record(rollback)
 
     try:
         rollback["database"] = _restore_database_for_rollback(backup_watermark, write)

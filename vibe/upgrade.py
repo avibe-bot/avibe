@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -13,7 +14,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple, cast
+from uuid import uuid4
 
+from config import paths as config_paths
+from core.install_integrity import IntegrityResult, verify_python_environment
 from vibe import runtime as runtime_mod
 
 
@@ -26,6 +30,7 @@ CURRENT_VIBE_EXECUTABLE_ENV = "VIBE_CURRENT_EXECUTABLE"
 SHOW_RUNTIME_SKIP_ENV = "VIBE_INSTALL_SKIP_SHOW_RUNTIME"
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 UV_FALLBACK_BIN_DIRS = (".local/bin", ".cargo/bin")
+UPGRADE_INSTALL_TIMEOUT_SECONDS = 30 * 60
 # A spec that names nothing but a package, so appending ``==<version>`` to it
 # yields a requirement rather than a broken string. PEP 508 names only:
 # anything with a path separator, a URL scheme, extras, a marker, or a version
@@ -84,6 +89,101 @@ class UpgradePlan:
     env: dict[str, str] | None
     method: str
     rollback_to: RollbackTarget | None = None
+    activation: "AtomicActivation | None" = None
+
+
+@dataclass(frozen=True)
+class AtomicActivation:
+    """A validated candidate and the stable launcher it will replace."""
+
+    launcher: Path
+    candidate_launcher: Path
+
+
+def atomic_uv_install_root() -> Path:
+    """Return the durable root for versioned uv tool environments."""
+
+    return config_paths.get_vibe_remote_dir() / "runtime" / "install-generations"
+
+
+def _staged_uv_environment(vibe_path: str | None) -> tuple[Path, Path, AtomicActivation | None]:
+    generation = atomic_uv_install_root() / uuid4().hex
+    tools_dir = generation / "tools"
+    bin_dir = generation / "bin"
+    if not vibe_path:
+        return tools_dir, bin_dir, None
+
+    launcher = Path(vibe_path).expanduser()
+    # Only replace a stable launcher link. A direct path into a virtualenv may
+    # be the user's intentional installation and cannot be switched safely by
+    # replacing the file the current process is executing.
+    if not launcher.is_symlink():
+        return tools_dir, bin_dir, None
+    candidate = bin_dir / launcher.name
+    return tools_dir, bin_dir, AtomicActivation(launcher=launcher, candidate_launcher=candidate)
+
+
+def _candidate_python(candidate_launcher: Path) -> Path | None:
+    roots = [candidate_launcher.parent]
+    with contextlib.suppress(OSError, RuntimeError):
+        resolved_parent = candidate_launcher.resolve().parent
+        if resolved_parent not in roots:
+            roots.append(resolved_parent)
+    names = ("python.exe", "python3.exe", "python3", "python") if os.name == "nt" else ("python3", "python")
+    for root in roots:
+        for name in names:
+            candidate = root / name
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return candidate
+    return None
+
+
+def verify_upgrade_candidate(activation: AtomicActivation) -> IntegrityResult:
+    """Prove a staged tool is runnable and its package tree is complete."""
+
+    candidate = activation.candidate_launcher
+    if not candidate.is_file() or not os.access(candidate, os.X_OK):
+        return IntegrityResult(False, failures=(f"candidate launcher missing: {candidate}",))
+    python = _candidate_python(candidate)
+    if python is None:
+        return IntegrityResult(False, failures=(f"candidate Python missing beside {candidate}",))
+    return verify_python_environment(python)
+
+
+def activate_upgrade_candidate(activation: AtomicActivation) -> None:
+    """Atomically switch the stable launcher to a validated candidate."""
+
+    result = verify_upgrade_candidate(activation)
+    if not result.ok:
+        raise RuntimeError(f"staged Avibe install failed integrity checks: {result.detail}")
+    launcher = activation.launcher
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    replacement = launcher.parent / f".{launcher.name}.avibe-{uuid4().hex}.new"
+    try:
+        replacement.symlink_to(activation.candidate_launcher)
+        os.replace(replacement, launcher)
+    except Exception:
+        with contextlib.suppress(OSError):
+            replacement.unlink()
+        raise
+
+
+def activate_launcher_target(launcher: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
+    """Atomically point a stable launcher at an already installed target."""
+
+    launcher_path = Path(launcher).expanduser()
+    target_path = Path(target).expanduser()
+    if not target_path.is_file() or not os.access(target_path, os.X_OK):
+        raise RuntimeError(f"rollback launcher is not executable: {target_path}")
+    launcher_path.parent.mkdir(parents=True, exist_ok=True)
+    replacement = launcher_path.parent / f".{launcher_path.name}.avibe-{uuid4().hex}.new"
+    try:
+        replacement.symlink_to(target_path)
+        os.replace(replacement, launcher_path)
+    except Exception:
+        with contextlib.suppress(OSError):
+            replacement.unlink()
+        raise
 
 
 def resolve_command_path(command: str | None, search_path: str | None = None) -> str | None:
@@ -459,7 +559,12 @@ def get_latest_version_info(current_version: str) -> dict:
 
 def is_uv_tool_install(python_executable: str | None = None) -> bool:
     executable = (python_executable or sys.executable or "").replace("\\", "/")
-    return "/uv/tools/" in executable
+    if "/uv/tools/" in executable:
+        return True
+    try:
+        return Path(executable).expanduser().resolve().is_relative_to(atomic_uv_install_root().resolve())
+    except (OSError, ValueError, RuntimeError):
+        return False
 
 
 def is_legacy_uv_tool_install(python_executable: str | None = None) -> bool:
@@ -789,9 +894,15 @@ def build_upgrade_plan(
 
     if is_uv_tool_install(executable) and uv_binary:
         env = dict(base_env or os.environ)
-        vibe_bin_dir = get_current_vibe_bin_dir(vibe_path)
-        if vibe_bin_dir:
-            env["UV_TOOL_BIN_DIR"] = vibe_bin_dir
+        atomic = None
+        if version is None:
+            tool_dir, bin_dir, atomic = _staged_uv_environment(vibe_path)
+            env["UV_TOOL_DIR"] = str(tool_dir)
+            env["UV_TOOL_BIN_DIR"] = str(bin_dir)
+        else:
+            vibe_bin_dir = get_current_vibe_bin_dir(vibe_path)
+            if vibe_bin_dir:
+                env["UV_TOOL_BIN_DIR"] = vibe_bin_dir
         command = [uv_binary, "tool", "install", package_spec]
         if not version:
             command.append("--upgrade")
@@ -802,6 +913,7 @@ def build_upgrade_plan(
             env=env,
             method="uv",
             rollback_to=rollback_to,
+            activation=atomic,
         )
 
     command = [executable, "-m", "pip", "install"]
