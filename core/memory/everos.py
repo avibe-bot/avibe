@@ -1267,7 +1267,7 @@ class EverOSPort:
         )
         deadline = started + request_timeout
         headers: dict[str, str] = {}
-        if timeout_seconds is not None:
+        if route == "/api/v2/memory/search":
             sidecar_timeout = max(
                 0.001,
                 request_timeout - _SIDECAR_TIMEOUT_RESPONSE_MARGIN_SECONDS,
@@ -1313,7 +1313,8 @@ class EverOSPort:
                         )
                         raise MemoryProviderFailure(
                             "memory_provider_timeout"
-                            if timeout_seconds is not None and response.status_code == 504
+                            if route == "/api/v2/memory/search"
+                            and response.status_code == 504
                             else (
                                 "memory_capability_unavailable"
                                 if capability_rejection and response.status_code == 422
@@ -1534,7 +1535,7 @@ async def _read_json_response(
         with tempfile.NamedTemporaryFile(mode="w+b", delete=False) as spool:
             path = spool.name
             await asyncio.wait_for(
-                _spool_response(response, spool),
+                _spool_response(response, spool, deadline=deadline),
                 timeout=_remaining_before_deadline(deadline),
             )
         remaining = _remaining_before_deadline(deadline)
@@ -1678,22 +1679,42 @@ def _remaining_before_deadline(deadline: float) -> float:
     return remaining
 
 
-async def _spool_response(response: httpx.Response, spool: BinaryIO) -> None:
+async def _spool_response(
+    response: httpx.Response,
+    spool: BinaryIO,
+    *,
+    deadline: float,
+) -> None:
     async for chunk in response.aiter_bytes(chunk_size=_RESPONSE_STREAM_CHUNK_BYTES):
-        await run_blocking(_write_response_spool_chunk, spool, chunk)
+        _remaining_before_deadline(deadline)
+        await run_blocking(_write_response_spool_chunk, spool, chunk, deadline)
+        _remaining_before_deadline(deadline)
 
 
-def _write_response_spool_chunk(spool: BinaryIO, chunk: bytes) -> None:
-    with _RESPONSE_SPOOL_LOCK:
+def _write_response_spool_chunk(
+    spool: BinaryIO,
+    chunk: bytes,
+    deadline: float,
+) -> None:
+    remaining = _remaining_before_deadline(deadline)
+    if not _RESPONSE_SPOOL_LOCK.acquire(timeout=remaining):
+        raise asyncio.TimeoutError
+    try:
+        _remaining_before_deadline(deadline)
         free_bytes = shutil.disk_usage(spool.name).free
+        _remaining_before_deadline(deadline)
         if free_bytes - len(chunk) < _MIN_RESPONSE_SPOOL_FREE_BYTES:
             raise OSError(errno.ENOSPC, "insufficient temporary storage for provider response")
         written = spool.write(chunk)
+        _remaining_before_deadline(deadline)
         if written != len(chunk):
             raise OSError(errno.EIO, "short write while spooling provider response")
         # Make the next free-space check account for this chunk even when the
         # file object uses buffered writes.
         spool.flush()
+        _remaining_before_deadline(deadline)
+    finally:
+        _RESPONSE_SPOOL_LOCK.release()
 
 
 async def _consume_response(response: httpx.Response) -> None:

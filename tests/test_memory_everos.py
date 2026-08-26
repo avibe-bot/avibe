@@ -11,6 +11,7 @@ import struct
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -1131,14 +1132,42 @@ def test_response_spool_writes_run_off_controller_event_loop(
             assert chunk_size == memory_everos._RESPONSE_STREAM_CHUNK_BYTES
             yield b"response"
 
-    def write(_spool, _chunk: bytes) -> None:
+    def write(_spool, _chunk: bytes, deadline: float) -> None:
+        assert deadline > time.monotonic()
         write_threads.append(threading.get_ident())
 
     monkeypatch.setattr(memory_everos, "_write_response_spool_chunk", write)
-    asyncio.run(memory_everos._spool_response(Response(), io.BytesIO()))
+    asyncio.run(
+        memory_everos._spool_response(
+            Response(),
+            io.BytesIO(),
+            deadline=time.monotonic() + 1,
+        )
+    )
 
     assert write_threads
     assert all(thread_id != controller_thread for thread_id in write_threads)
+
+
+def test_response_spool_writer_bounds_lock_wait_by_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BusyLock:
+        def acquire(self, *, timeout: float) -> bool:
+            assert 0 < timeout <= 1
+            return False
+
+        def release(self) -> None:
+            raise AssertionError("unacquired lock must not be released")
+
+    monkeypatch.setattr(memory_everos, "_RESPONSE_SPOOL_LOCK", BusyLock())
+
+    with pytest.raises(asyncio.TimeoutError):
+        memory_everos._write_response_spool_chunk(
+            io.BytesIO(),
+            b"response",
+            time.monotonic() + 1,
+        )
 
 
 def test_assistant_owner_crosses_add_search_and_profile_provider_contract() -> None:
@@ -1321,6 +1350,51 @@ def test_agentic_search_wall_clock_timeout_is_typed(
 
     assert failure.error == "memory_provider_timeout"
     assert telemetry.round == "unknown"
+
+
+def test_normal_search_propagates_deadline_to_sidecar_guard() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        timeout = float(request.headers[_AGENTIC_TIMEOUT_HEADER])
+        assert 0 < timeout < 20
+        return httpx.Response(200, json={"data": {"episodes": []}})
+
+    async def run() -> None:
+        result = await EverOSPort(Path("/tmp/everos.sock")).search(
+            PRINCIPAL,
+            PROJECT,
+            "ordinary query",
+            2,
+            method="keyword",
+        )
+        assert result == ()
+
+    with _sidecar_transport(handler):
+        asyncio.run(run())
+
+
+def test_normal_search_maps_sidecar_deadline_to_provider_timeout() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert _AGENTIC_TIMEOUT_HEADER in request.headers
+        return httpx.Response(
+            504,
+            json={"detail": "memory_request_timed_out"},
+        )
+
+    async def run() -> MemoryProviderFailure:
+        with pytest.raises(MemoryProviderFailure) as raised:
+            await EverOSPort(Path("/tmp/everos.sock")).search(
+                PRINCIPAL,
+                PROJECT,
+                "ordinary query",
+                2,
+                method="keyword",
+            )
+        return raised.value
+
+    with _sidecar_transport(handler):
+        failure = asyncio.run(run())
+
+    assert failure.error == "memory_provider_timeout"
 
 
 def test_agentic_search_maps_provider_422_to_closed_capability_error() -> None:

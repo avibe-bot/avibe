@@ -1919,55 +1919,65 @@ class MemoryRuntime:
             )
         if isinstance(effective_mode, OperationFailed):
             return effective_mode
-        for index, project_id in enumerate(projects):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                warnings.append("memory_search_truncated")
-                break
-            scope_policy = replace(
-                policy,
-                include_current_session=False,
-                include_profile=bool(policy.include_profile and index == 0),
-            )
-            try:
-                recall = (
-                    self.module._recall_admitted
-                    if admitted
-                    else self.module.recall
+        merge_worker = _TerminableMemoryWorker()
+        try:
+            for index, project_id in enumerate(projects):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    warnings.append("memory_search_truncated")
+                    break
+                scope_policy = replace(
+                    policy,
+                    include_current_session=False,
+                    include_profile=bool(policy.include_profile and index == 0),
                 )
-                result = await asyncio.wait_for(
-                    recall(
-                        query,
-                        policy=scope_policy,
-                        principal_id=principal_id,
-                        project_id=project_id,
-                        effective_mode=effective_mode,
-                    ),
-                    timeout=remaining,
-                )
-            except asyncio.TimeoutError:
-                warnings.append("memory_search_truncated")
-                break
-            if isinstance(result, OperationFailed):
-                if first_failure is None:
-                    first_failure = result
-                warnings.append("memory_search_partial")
-                continue
-            succeeded = True
-            effective_mode = result.effective_mode
-            warnings.extend(result.warnings)
-            collected = list(
-                _merge_search_items(
-                    [
-                        *collected,
-                        *(
-                            replace(item, project=project_id)
-                            for item in result.items
+                try:
+                    recall = (
+                        self.module._recall_admitted
+                        if admitted
+                        else self.module.recall
+                    )
+                    result = await asyncio.wait_for(
+                        recall(
+                            query,
+                            policy=scope_policy,
+                            principal_id=principal_id,
+                            project_id=project_id,
+                            effective_mode=effective_mode,
                         ),
-                    ],
-                    limit=policy.max_results,
-                )
-            )
+                        timeout=remaining,
+                    )
+                except asyncio.TimeoutError:
+                    warnings.append("memory_search_truncated")
+                    break
+                if isinstance(result, OperationFailed):
+                    if first_failure is None:
+                        first_failure = result
+                    warnings.append("memory_search_partial")
+                    continue
+                succeeded = True
+                effective_mode = result.effective_mode
+                warnings.extend(result.warnings)
+                try:
+                    collected = list(
+                        await _merge_search_items_isolated(
+                            [
+                                *collected,
+                                *(
+                                    replace(item, project=project_id)
+                                    for item in result.items
+                                ),
+                            ],
+                            limit=policy.max_results,
+                            deadline=deadline,
+                            worker=merge_worker,
+                        )
+                    )
+                except asyncio.TimeoutError:
+                    warnings.append("memory_search_truncated")
+                    break
+        finally:
+            await merge_worker.close()
         if not succeeded:
             return first_failure or RecallItems(
                 items=(),
@@ -2976,6 +2986,28 @@ def _merge_search_items(
     return tuple(merged)
 
 
+def _merge_search_items_worker(
+    items: tuple[MemoryItem, ...],
+    limit: int,
+) -> tuple[MemoryItem, ...]:
+    return _merge_search_items(items, limit=limit)
+
+
+async def _merge_search_items_isolated(
+    items: Iterable[MemoryItem],
+    *,
+    limit: int,
+    deadline: float,
+    worker: "_TerminableMemoryWorker",
+) -> tuple[MemoryItem, ...]:
+    return await worker.run(
+        _merge_search_items_worker,
+        tuple(items),
+        limit,
+        deadline=deadline,
+    )
+
+
 def _merge_memory_list_candidates(
     items: Iterable[MemoryListItem],
     *,
@@ -3220,16 +3252,32 @@ async def _run_memory_list_cursor_worker(
     *args: Any,
     deadline: float,
 ) -> Any:
-    pool: concurrent.futures.ProcessPoolExecutor | None = None
-    terminated = False
+    worker = _TerminableMemoryWorker()
     try:
+        return await worker.run(operation, *args, deadline=deadline)
+    finally:
+        await worker.close()
+
+
+class _TerminableMemoryWorker:
+    def __init__(self) -> None:
         context = multiprocessing.get_context("spawn")
-        pool = concurrent.futures.ProcessPoolExecutor(
+        self._pool = concurrent.futures.ProcessPoolExecutor(
             max_workers=1,
             mp_context=context,
         )
+        self._terminated = False
+
+    async def run(
+        self,
+        operation: Callable[..., Any],
+        *args: Any,
+        deadline: float,
+    ) -> Any:
+        if self._terminated:
+            raise asyncio.TimeoutError
         future = asyncio.get_running_loop().run_in_executor(
-            pool,
+            self._pool,
             operation,
             *args,
         )
@@ -3239,16 +3287,18 @@ async def _run_memory_list_cursor_worker(
                 raise asyncio.TimeoutError
             return await asyncio.wait_for(future, timeout=remaining)
         except (asyncio.TimeoutError, asyncio.CancelledError, BrokenProcessPool):
-            terminated = True
-            await asyncio.to_thread(_terminate_memory_list_cursor_pool, pool)
+            self._terminated = True
+            await asyncio.to_thread(_terminate_memory_worker_pool, self._pool)
             raise
-    finally:
-        if pool is not None and not terminated:
+
+    async def close(self) -> None:
+        if not self._terminated:
             await asyncio.to_thread(
-                pool.shutdown,
+                self._pool.shutdown,
                 wait=True,
                 cancel_futures=True,
             )
+            self._terminated = True
 
 
 def _spool_memory_list_cursor(cursor: object, deadline: float) -> str:
@@ -3443,7 +3493,7 @@ def _encode_memory_list_cursor_path(path: str) -> str:
     )
 
 
-def _terminate_memory_list_cursor_pool(
+def _terminate_memory_worker_pool(
     pool: concurrent.futures.ProcessPoolExecutor,
 ) -> None:
     processes = tuple((getattr(pool, "_processes", None) or {}).values())

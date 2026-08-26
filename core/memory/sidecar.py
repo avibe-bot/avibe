@@ -133,7 +133,15 @@ class _AgenticDeadlineProjection:
             path,
             scope.get("headers", []),
         )
-        spool = tempfile.TemporaryFile(mode="w+b")
+        try:
+            spool = tempfile.TemporaryFile(mode="w+b")
+        except OSError:
+            await _send_json_error(
+                send,
+                status=507,
+                detail="memory_temporary_storage_unavailable",
+            )
+            return
         try:
             try:
                 body_size = await _spool_request(
@@ -200,13 +208,22 @@ class _AgenticDeadlineProjection:
                     detail="memory_request_rejected",
                 )
                 return
-            if agentic_timeout is None:
+            if agentic_timeout is None and request_deadline is None:
                 await self._app(scope, replay_receive, send)
                 return
             if request_deadline is None:
+                assert isinstance(agentic_timeout, float)
                 request_deadline = time.monotonic() + agentic_timeout
 
-            response_spool = tempfile.TemporaryFile(mode="w+b")
+            try:
+                response_spool = tempfile.TemporaryFile(mode="w+b")
+            except OSError:
+                await _send_json_error(
+                    send,
+                    status=507,
+                    detail="memory_temporary_storage_unavailable",
+                )
+                return
             try:
                 response_start: dict[str, Any] | None = None
                 response_body_size = 0

@@ -4,6 +4,7 @@ import asyncio
 import concurrent.futures
 import sqlite3
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -673,14 +674,20 @@ async def test_all_project_search_incrementally_retains_only_final_limit(
     merge_sizes: list[int] = []
     real_merge = runtime_module._merge_search_items
 
-    def bounded_merge(items, *, limit: int):
+    async def bounded_merge(items, *, limit: int, deadline: float, worker):
+        assert deadline > time.monotonic()
+        assert isinstance(worker, runtime_module._TerminableMemoryWorker)
         buffered = list(items)
         merge_sizes.append(len(buffered))
         return real_merge(buffered, limit=limit)
 
     monkeypatch.setattr(runtime.module, "resolve_recall_mode", resolve_mode)
     monkeypatch.setattr(runtime.module, "recall", recall)
-    monkeypatch.setattr(runtime_module, "_merge_search_items", bounded_merge)
+    monkeypatch.setattr(
+        runtime_module,
+        "_merge_search_items_isolated",
+        bounded_merge,
+    )
 
     result = await runtime._recall_all_projects(
         "query",
@@ -697,6 +704,35 @@ async def test_all_project_search_incrementally_retains_only_final_limit(
     assert len(merge_sizes) == len(projects)
     assert max(merge_sizes) <= 40
     await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_all_project_search_merge_round_trips_through_process_worker() -> None:
+    worker = runtime_module._TerminableMemoryWorker()
+    try:
+        items = await runtime_module._merge_search_items_isolated(
+            (
+                MemoryItem(
+                    kind="episode",
+                    text="older",
+                    date="2026-08-25",
+                    project="default",
+                ),
+                MemoryItem(
+                    kind="episode",
+                    text="newer",
+                    date="2026-08-26",
+                    project="default",
+                ),
+            ),
+            limit=1,
+            deadline=time.monotonic() + 5,
+            worker=worker,
+        )
+    finally:
+        await worker.close()
+
+    assert [item.text for item in items] == ["newer"]
 
 
 @pytest.mark.asyncio

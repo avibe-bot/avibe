@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,6 +33,21 @@ def _agentic_search_body() -> bytes:
             "project_id": PROJECT,
             "query": "connect the clues",
             "method": "agentic",
+            "top_k": 8,
+            "include_profile": True,
+            "enable_llm_rerank": False,
+        }
+    ).encode()
+
+
+def _keyword_search_body() -> bytes:
+    return json.dumps(
+        {
+            "user_id": "u-11111111111111111111111111111111",
+            "app_id": "avibe",
+            "project_id": PROJECT,
+            "query": "ordinary query",
+            "method": "keyword",
             "top_k": 8,
             "include_profile": True,
             "enable_llm_rerank": False,
@@ -138,6 +154,150 @@ def test_agentic_deadline_projection_cancels_downstream_and_preserves_round() ->
     headers = dict(sent[0]["headers"])
     assert headers[sidecar._AGENTIC_ROUND_HEADER.lower().encode()] == b"round2"
     assert json.loads(sent[1]["body"]) == {"detail": "memory_request_timed_out"}
+
+
+def test_normal_search_deadline_cancels_downstream() -> None:
+    downstream_cancelled = asyncio.Event()
+    sent: list[dict] = []
+    request_messages = [
+        {
+            "type": "http.request",
+            "body": _keyword_search_body(),
+            "more_body": False,
+        }
+    ]
+
+    async def receive():
+        if request_messages:
+            return request_messages.pop(0)
+        return {"type": "http.disconnect"}
+
+    async def capture(message):
+        sent.append(message)
+
+    async def downstream(_scope, downstream_receive, _send):
+        assert (await downstream_receive())["body"] == _keyword_search_body()
+        try:
+            await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            downstream_cancelled.set()
+            raise
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/api/v2/memory/search",
+        "headers": [
+            (sidecar._AGENTIC_TIMEOUT_HEADER.lower().encode(), b"0.05"),
+        ],
+    }
+
+    asyncio.run(
+        sidecar._AgenticDeadlineProjection(downstream)(scope, receive, capture)
+    )
+
+    assert downstream_cancelled.is_set()
+    assert sent[0]["status"] == 504
+    assert json.loads(sent[1]["body"]) == {"detail": "memory_request_timed_out"}
+
+
+def test_sidecar_maps_request_spool_creation_failure_to_507(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    downstream_called = False
+    sent: list[dict] = []
+
+    async def receive():
+        return {
+            "type": "http.request",
+            "body": _keyword_search_body(),
+            "more_body": False,
+        }
+
+    async def capture(message):
+        sent.append(message)
+
+    async def downstream(_scope, _receive, _send):
+        nonlocal downstream_called
+        downstream_called = True
+
+    def fail_temporary_file(*_args, **_kwargs):
+        raise OSError("temporary storage unavailable")
+
+    monkeypatch.setattr(sidecar.tempfile, "TemporaryFile", fail_temporary_file)
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/api/v2/memory/search",
+        "headers": [],
+    }
+
+    asyncio.run(
+        sidecar._AgenticDeadlineProjection(downstream)(scope, receive, capture)
+    )
+
+    assert downstream_called is False
+    assert sent[0]["status"] == 507
+    assert json.loads(sent[1]["body"]) == {
+        "detail": "memory_temporary_storage_unavailable"
+    }
+
+
+def test_sidecar_maps_response_spool_creation_failure_to_507(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    downstream_called = False
+    sent: list[dict] = []
+    request_messages = [
+        {
+            "type": "http.request",
+            "body": _keyword_search_body(),
+            "more_body": False,
+        }
+    ]
+
+    async def receive():
+        if request_messages:
+            return request_messages.pop(0)
+        return {"type": "http.disconnect"}
+
+    async def capture(message):
+        sent.append(message)
+
+    async def downstream(_scope, _receive, _send):
+        nonlocal downstream_called
+        downstream_called = True
+
+    real_temporary_file = tempfile.TemporaryFile
+    calls = 0
+
+    def temporary_file(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("temporary storage unavailable")
+        return real_temporary_file(*args, **kwargs)
+
+    monkeypatch.setattr(sidecar.tempfile, "TemporaryFile", temporary_file)
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/api/v2/memory/search",
+        "headers": [
+            (sidecar._AGENTIC_TIMEOUT_HEADER.lower().encode(), b"1"),
+        ],
+    }
+
+    asyncio.run(
+        sidecar._AgenticDeadlineProjection(downstream)(scope, receive, capture)
+    )
+
+    assert downstream_called is False
+    assert calls == 2
+    assert sent[0]["status"] == 507
+    assert json.loads(sent[1]["body"]) == {
+        "detail": "memory_temporary_storage_unavailable"
+    }
 
 
 def test_agentic_deadline_includes_request_projection(
