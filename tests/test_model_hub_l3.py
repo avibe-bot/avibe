@@ -3774,6 +3774,81 @@ def test_gateway_uses_persisted_exact_hops_for_failover(
     asyncio.run(exercise())
 
 
+def test_gateway_keeps_prepared_route_during_overlapping_turns(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        requested_model = "claude-opus-4-8"
+        target_model = "gpt-5.6-luna"
+        source = _source(
+            "src_gptrelay01",
+            "GPT relay",
+            model_id=target_model,
+        )
+        outcome = _outcome(
+            RawOutcomeKind.SUCCESS,
+            status=200,
+            source_id=source.id,
+        )
+        response_body = (
+            b'{"id":"msg_fixture","type":"message","role":"assistant",'
+            b'"content":[{"type":"text","text":"ok"}],'
+            b'"model":"gpt-5.6-luna","stop_reason":"end_turn",'
+            b'"usage":{"input_tokens":1,"output_tokens":1}}'
+        )
+        service = _service(
+            tmp_path,
+            sources=[source],
+            live_handles=[LiveInvokeHandle(outcome, (response_body,))],
+        )
+        _canonicalize_fixed_test_routes(service)
+        service.store.config.agents["claude"].routes[requested_model] = ModelHubRouteConfig(
+            hops=(ModelHubRouteHopConfig(source.id, target_model),)
+        )
+        gateway = ModelHubTurnGateway(service)
+        first_base_url, first_token = await gateway.endpoint(
+            "claude",
+            process_scope="session:shared-claude",
+            turn_id="turn_overlap_first",
+            requested_model_id=requested_model,
+            resolved_model_id=target_model,
+            source_id=source.id,
+        )
+        second_base_url, second_token = await gateway.endpoint(
+            "claude",
+            process_scope="session:shared-claude",
+            turn_id="turn_overlap_second",
+            requested_model_id=requested_model,
+            resolved_model_id=target_model,
+            source_id=source.id,
+        )
+        assert first_base_url == second_base_url
+        assert first_token == second_token
+
+        try:
+            async with aiohttp.ClientSession(trust_env=False) as client:
+                response = await client.post(
+                    f"{second_base_url}/v1/messages",
+                    json={
+                        "model": target_model,
+                        "max_tokens": 1,
+                        "messages": [{"role": "user", "content": "ping"}],
+                        "stream": False,
+                    },
+                    headers={"x-api-key": second_token},
+                )
+                assert response.status == 200
+                await response.read()
+        finally:
+            await gateway.close()
+
+        assert service.adapter.invocations == [
+            (source.id, target_model, "claude"),
+        ]
+
+    asyncio.run(exercise())
+
+
 def test_gateway_model_outside_prepared_turn_fails_closed(
     tmp_path: Path,
 ) -> None:
