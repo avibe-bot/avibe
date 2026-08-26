@@ -117,7 +117,10 @@ def _codex_hub_catalog_bytes(raw_catalog: bytes) -> bytes:
 
 
 def _publish_codex_hub_catalog(raw_catalog: bytes) -> Path:
-    catalog = _codex_hub_catalog_bytes(raw_catalog)
+    return publish_codex_hub_catalog(_codex_hub_catalog_bytes(raw_catalog))
+
+
+def publish_codex_hub_catalog(catalog: bytes) -> Path:
     path = get_codex_hub_catalog_path()
     write_atomic(path, catalog)
     return path
@@ -168,10 +171,19 @@ def refresh_codex_hub_catalog_now(
     base_env: dict[str, str] | None = None,
 ) -> Path:
     try:
-        return _publish_codex_hub_catalog(_export_codex_bundled_catalog(binary, base_env))
+        return publish_codex_hub_catalog(prepare_codex_hub_catalog_bytes(binary, base_env))
     except Exception:
         get_codex_hub_catalog_path().unlink(missing_ok=True)
         raise
+
+
+def prepare_codex_hub_catalog_bytes(
+    binary: str,
+    base_env: dict[str, str] | None = None,
+) -> bytes:
+    """Validate and project one binary's catalog without publishing it."""
+
+    return _codex_hub_catalog_bytes(_export_codex_bundled_catalog(binary, base_env))
 
 
 def prepare_codex_hub_catalog(

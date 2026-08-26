@@ -133,14 +133,16 @@ def test_joined_preflight_queues_follow_up_before_reopening_drain() -> None:
         first_refresh_started = asyncio.Event()
         release_first_refresh = asyncio.Event()
         observed_drains: list[bool] = []
+        observed_prepared: list[str] = []
 
-        async def refresh(_backend: str, _forced: bool) -> None:
+        async def refresh(_backend: str, _forced: bool, prepared: object) -> None:
             observed_drains.append(service.draining)
+            observed_prepared.append(str(prepared))
             if len(observed_drains) == 1:
                 first_refresh_started.set()
                 await release_first_refresh.wait()
 
-        preflight = AsyncMock()
+        preflight = AsyncMock(side_effect=["generation-a", "generation-b"])
         coordinator = BackendRestartCoordinator(
             controller,
             refresh,
@@ -150,18 +152,69 @@ def test_joined_preflight_queues_follow_up_before_reopening_drain() -> None:
 
         first_request = asyncio.create_task(coordinator.request_restart("opencode"))
         await first_refresh_started.wait()
+        assert await first_request == "draining"
 
         assert await coordinator.request_restart("opencode") == "draining"
         assert service.draining is True
         release_first_refresh.set()
 
-        assert await first_request == "restarted"
+        await coordinator.wait("opencode")
         assert observed_drains == [True, True]
+        assert observed_prepared == ["generation-a", "generation-b"]
         assert preflight.await_count == 2
         controller.session_turns.end_backend_drain.assert_awaited_once_with(
             "opencode",
             resume_deferred=True,
         )
+        assert service.draining is False
+
+    asyncio.run(run())
+
+
+def test_failed_joined_preflight_cannot_change_the_generation_being_refreshed() -> None:
+    async def run() -> None:
+        service = _AgentService()
+        service.active = True
+        controller = _controller(service)
+        joined_preflight_started = asyncio.Event()
+        release_joined_preflight = asyncio.Event()
+        first_refresh_applied = asyncio.Event()
+        prepared_generations: list[str] = []
+        preflight_count = 0
+
+        async def preflight(_backend: str) -> str:
+            nonlocal preflight_count
+            preflight_count += 1
+            if preflight_count == 1:
+                return "generation-a"
+            joined_preflight_started.set()
+            await release_joined_preflight.wait()
+            raise RuntimeError("generation-b catalog failed")
+
+        async def refresh(_backend: str, _forced: bool, prepared: object) -> None:
+            prepared_generations.append(str(prepared))
+            first_refresh_applied.set()
+
+        coordinator = BackendRestartCoordinator(
+            controller,
+            refresh,
+            preflight=preflight,
+            drain_timeout=1,
+            poll_interval=0.001,
+        )
+
+        assert await coordinator.request_restart("opencode") == "draining"
+        joined = asyncio.create_task(coordinator.request_restart("opencode"))
+        await joined_preflight_started.wait()
+
+        service.active = False
+        await first_refresh_applied.wait()
+        release_joined_preflight.set()
+
+        with pytest.raises(RuntimeError, match="generation-b catalog failed"):
+            await joined
+        await coordinator.wait("opencode")
+        assert prepared_generations == ["generation-a"]
         assert service.draining is False
 
     asyncio.run(run())

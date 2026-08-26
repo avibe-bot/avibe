@@ -183,6 +183,23 @@ def test_codex_hub_catalog_preparation_exports_current_binary(monkeypatch, tmp_p
     assert calls == [("codex", None)]
 
 
+def test_codex_hub_catalog_bytes_are_not_published_until_committed(monkeypatch, tmp_path):
+    runtime_dir = tmp_path / "runtime"
+    monkeypatch.setattr(backend_model_catalog.paths, "get_runtime_dir", lambda: runtime_dir)
+    monkeypatch.setattr(
+        backend_model_catalog,
+        "_export_codex_bundled_catalog",
+        lambda _binary, _base_env=None: b'{"models":[{"slug":"gpt-test"}]}',
+    )
+
+    catalog = backend_model_catalog.prepare_codex_hub_catalog_bytes("/opt/codex")
+
+    assert backend_model_catalog.ready_codex_hub_catalog_path() is None
+    path = backend_model_catalog.publish_codex_hub_catalog(catalog)
+    assert path == backend_model_catalog.ready_codex_hub_catalog_path()
+    assert json.loads(path.read_text(encoding="utf-8"))["models"][0]["slug"] == "gpt-test"
+
+
 def test_codex_hub_catalog_refresh_invalidates_stale_artifact_on_failure(monkeypatch, tmp_path):
     runtime_dir = tmp_path / "runtime"
     monkeypatch.setattr(backend_model_catalog.paths, "get_runtime_dir", lambda: runtime_dir)

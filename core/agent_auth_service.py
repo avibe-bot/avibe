@@ -62,6 +62,12 @@ CLAUDE_PROBE_DISCONNECT_TIMEOUT_SECONDS = 3.0
 CLAUDE_PROBE_PROCESS_EXIT_GRACE_SECONDS = 0.2
 
 
+@dataclass(frozen=True)
+class _PreparedBackendRuntimeRefresh:
+    runtime_config: Any
+    codex_hub_catalog: bytes | None = None
+
+
 class BackendLoginInProgressError(RuntimeError):
     """Raised when a native credential already has a live login owner."""
 
@@ -1978,44 +1984,61 @@ class AgentAuthService:
         if coordinator is not None:
             await coordinator.request_restart(backend)
             return
-        await self._prepare_backend_runtime_refresh(backend)
-        await self._apply_backend_runtime_refresh(backend, False)
+        prepared = await self._prepare_backend_runtime_refresh(backend)
+        await self._apply_backend_runtime_refresh(backend, False, prepared)
 
-    async def _prepare_backend_runtime_refresh(self, backend: str) -> None:
+    async def _prepare_backend_runtime_refresh(
+        self,
+        backend: str,
+    ) -> _PreparedBackendRuntimeRefresh | None:
         if backend != "codex":
-            return
+            return None
         agent_service = getattr(self.controller, "agent_service", None)
         refresh_runtime_config = getattr(agent_service, "refresh_runtime_config", None)
         if not callable(refresh_runtime_config):
-            return
+            return None
         runtime_config = self._load_backend_runtime_config(backend)
+        catalog = None
         if runtime_config is not None:
-            await self._prepare_codex_hub_catalog(runtime_config)
+            catalog = await self._prepare_codex_hub_catalog(runtime_config)
+        return _PreparedBackendRuntimeRefresh(
+            runtime_config=runtime_config,
+            codex_hub_catalog=catalog,
+        )
 
     @staticmethod
-    async def _prepare_codex_hub_catalog(runtime_config: Any) -> None:
+    async def _prepare_codex_hub_catalog(runtime_config: Any) -> bytes:
         from vibe import backend_model_catalog
 
-        await asyncio.to_thread(
-            backend_model_catalog.refresh_codex_hub_catalog_now,
+        return await asyncio.to_thread(
+            backend_model_catalog.prepare_codex_hub_catalog_bytes,
             runtime_config.binary,
         )
 
-    async def _apply_backend_runtime_refresh(self, backend: str, force: bool = False) -> None:
+    async def _apply_backend_runtime_refresh(
+        self,
+        backend: str,
+        force: bool = False,
+        prepared: _PreparedBackendRuntimeRefresh | None = None,
+    ) -> None:
         agent_service = getattr(self.controller, "agent_service", None)
         runtime_tokens: dict[str, str] = {}
+        applied = False
         snapshot_tokens = getattr(agent_service, "runtime_turn_tokens_for_backend", None)
         if callable(snapshot_tokens):
             runtime_tokens = snapshot_tokens(backend)
         try:
             refresh_runtime_config = getattr(agent_service, "refresh_runtime_config", None)
-            runtime_config = None
+            runtime_config = prepared.runtime_config if prepared is not None else None
             if callable(refresh_runtime_config):
-                runtime_config = self._load_backend_runtime_config(backend)
+                if prepared is None:
+                    runtime_config = self._load_backend_runtime_config(backend)
                 if runtime_config is None:
                     await self._unregister_disabled_backend_agent(backend)
+                    applied = True
                     return
                 if runtime_config is not None and self._register_missing_backend_agent(backend, runtime_config):
+                    applied = True
                     return
                 if force and backend == "opencode":
                     agent = getattr(agent_service, "agents", {}).get(backend)
@@ -2023,9 +2046,11 @@ class AgentAuthService:
                     if callable(refresh_config):
                         await refresh_config(runtime_config, force=True)
                         self._sync_builtin_default_agents()
+                        applied = True
                         return
                 if runtime_config is not None and await refresh_runtime_config(backend, runtime_config):
                     self._sync_builtin_default_agents()
+                    applied = True
                     return
 
             agent = getattr(agent_service, "agents", {}).get(backend) if agent_service else None
@@ -2036,24 +2061,38 @@ class AgentAuthService:
                 if runtime_config is None:
                     return
                 await refresh_config(runtime_config)
+                applied = True
                 return
             if backend == "opencode":
                 if force:
                     await self._refresh_opencode_server(force=True)
                 else:
                     await self._refresh_opencode_server()
+                applied = True
                 return
             refresh = getattr(agent, "refresh_auth_state", None)
             if callable(refresh):
                 await refresh()
+            applied = True
         finally:
-            release_tokens = getattr(agent_service, "release_runtime_turn_tokens", None)
-            if callable(release_tokens):
-                release_tokens(runtime_tokens)
-            else:
-                release_turns = getattr(agent_service, "release_runtime_turns_for_backend", None)
-                if callable(release_turns):
-                    release_turns(backend)
+            try:
+                if applied and backend == "codex" and prepared is not None:
+                    from vibe import backend_model_catalog
+
+                    if prepared.runtime_config is None:
+                        backend_model_catalog.get_codex_hub_catalog_path().unlink(missing_ok=True)
+                    elif prepared.codex_hub_catalog is not None:
+                        backend_model_catalog.publish_codex_hub_catalog(
+                            prepared.codex_hub_catalog
+                        )
+            finally:
+                release_tokens = getattr(agent_service, "release_runtime_turn_tokens", None)
+                if callable(release_tokens):
+                    release_tokens(runtime_tokens)
+                else:
+                    release_turns = getattr(agent_service, "release_runtime_turns_for_backend", None)
+                    if callable(release_turns):
+                        release_turns(backend)
 
     async def _clear_backend_sessions_for_context(self, backend: str, context: MessageContext) -> None:
         agent_service = getattr(self.controller, "agent_service", None)

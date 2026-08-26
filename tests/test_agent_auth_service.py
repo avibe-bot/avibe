@@ -1532,7 +1532,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         controller.agent_service.agents["codex"] = SimpleNamespace(refresh_auth_state=AsyncMock())
         controller.agent_service.agents["claude"] = SimpleNamespace(refresh_auth_state=AsyncMock())
         service = AgentAuthService(controller)
-        service._prepare_codex_hub_catalog = AsyncMock()
+        service._prepare_codex_hub_catalog = AsyncMock(return_value=b"catalog")
         runtime_config = SimpleNamespace(binary="codex")
         service._load_backend_runtime_config = Mock(return_value=runtime_config)
         service._refresh_opencode_server = AsyncMock()
@@ -1585,7 +1585,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         controller.agent_service.refresh_runtime_config = AsyncMock(return_value=True)
         controller.agent_service.agents["codex"] = SimpleNamespace()
         service = AgentAuthService(controller)
-        service._prepare_codex_hub_catalog = AsyncMock()
+        service._prepare_codex_hub_catalog = AsyncMock(return_value=b"catalog")
         runtime_config = object()
         service._load_backend_runtime_config = Mock(return_value=runtime_config)
 
@@ -1651,6 +1651,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             nonlocal prepared
             self.assertIs(config, runtime_config)
             prepared = True
+            return b"catalog"
 
         service._prepare_codex_hub_catalog = AsyncMock(side_effect=prepare_catalog)
         def register_after_catalog(agent):
@@ -1661,7 +1662,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
 
         await service._refresh_backend_runtime("codex")
 
-        self.assertEqual(service._load_backend_runtime_config.call_count, 2)
+        self.assertEqual(service._load_backend_runtime_config.call_count, 1)
         service._load_backend_runtime_config.assert_called_with("codex")
         controller.agent_service.register.assert_called_once()
         registered = controller.agent_service.agents["codex"]
@@ -1710,7 +1711,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         service = AgentAuthService(controller)
         runtime_config = CodexCompatConfig(enabled=True, binary="/opt/codex", extra_args=[])
         service._load_backend_runtime_config = Mock(return_value=runtime_config)
-        service._prepare_codex_hub_catalog = AsyncMock()
+        service._prepare_codex_hub_catalog = AsyncMock(return_value=b"catalog")
         service._load_saved_enabled_backends = Mock(return_value=["codex"])
         service._sync_builtin_default_agents = Mock(wraps=service._sync_builtin_default_agents)
 

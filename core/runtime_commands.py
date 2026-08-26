@@ -104,6 +104,7 @@ class RuntimeCommandWatcher:
             entries = list(self._directory.iterdir())
         except FileNotFoundError:
             return
+        batches: dict[str, list[Path]] = {}
         for marker in entries:
             if not marker.is_file():
                 continue
@@ -125,7 +126,11 @@ class RuntimeCommandWatcher:
                 logger.debug("Ignoring unsupported backend marker: %s", backend)
                 marker.unlink(missing_ok=True)
                 continue
-            await self._handle_restart(backend, marker)
+            batches.setdefault(backend, []).append(marker)
+        if batches:
+            await asyncio.gather(
+                *(self._handle_restart_batch(backend, markers) for backend, markers in batches.items())
+            )
 
     @staticmethod
     def _maybe_evict_stale_err(err_marker: Path) -> None:
@@ -150,30 +155,37 @@ class RuntimeCommandWatcher:
             logger.debug("Could not evict stale err marker %s: %s", err_marker, exc)
 
     async def _handle_restart(self, backend: str, marker: Path) -> None:
-        metadata = self._read_marker_metadata(marker)
-        if metadata:
-            logger.info("Runtime command: refresh backend=%s metadata=%s", backend, metadata)
-        else:
-            logger.info("Runtime command: refresh backend=%s", backend)
+        await self._handle_restart_batch(backend, [marker])
+
+    async def _handle_restart_batch(self, backend: str, markers: list[Path]) -> None:
+        for marker in markers:
+            metadata = self._read_marker_metadata(marker)
+            if metadata:
+                logger.info("Runtime command: refresh backend=%s metadata=%s", backend, metadata)
+            else:
+                logger.info("Runtime command: refresh backend=%s", backend)
         handler: Optional[Callable[[str], Awaitable[None]]] = getattr(
             self.controller.agent_auth_service, "_refresh_backend_runtime", None
         )
         if handler is None:
-            logger.warning("AgentAuthService missing _refresh_backend_runtime; dropping marker")
-            self._fail_marker(marker, "refresh handler unavailable")
+            logger.warning("AgentAuthService missing _refresh_backend_runtime; dropping markers")
+            for marker in markers:
+                self._fail_marker(marker, "refresh handler unavailable")
             return
         try:
             await handler(backend)
         except Exception as exc:
             logger.error("Backend refresh failed for %s: %s", backend, exc, exc_info=True)
-            self._fail_marker(marker, str(exc) or exc.__class__.__name__)
+            for marker in markers:
+                self._fail_marker(marker, str(exc) or exc.__class__.__name__)
             return
         # Success path: silently drop the marker so the UI server reads the
         # absence-of-``.err`` as a clean ack.
-        try:
-            marker.unlink(missing_ok=True)
-        except OSError as exc:  # pragma: no cover - best-effort cleanup
-            logger.debug("Could not remove marker %s: %s", marker, exc)
+        for marker in markers:
+            try:
+                marker.unlink(missing_ok=True)
+            except OSError as exc:  # pragma: no cover - best-effort cleanup
+                logger.debug("Could not remove marker %s: %s", marker, exc)
 
     @staticmethod
     def _read_marker_metadata(marker: Path) -> dict:
@@ -190,8 +202,8 @@ class RuntimeCommandWatcher:
 
         The caller (``vibe.api._wait_for_controller_ack``) treats marker
         deletion as the ack and looks for ``marker.name + ".err"`` to decide
-        whether the refresh actually succeeded — otherwise the UI would
-        toast ``ok: true`` while the runtime is still stale.
+        whether the controller accepted the refresh — otherwise the UI would
+        toast ``ok: true`` after a synchronous failure or rejected preflight.
         """
         err_marker = marker.with_name(marker.name + ".err")
         try:

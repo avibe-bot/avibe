@@ -400,7 +400,17 @@ async def test_spawn_can_discard_supervisor_stderr(tmp_path: Path, monkeypatch) 
 
     async def fake_create_subprocess_exec(*_args, **kwargs):
         captured.update(kwargs)
-        return _FakeProcess(stderr=None)
+        process = _FakeProcess(stderr=None)
+        stdout = asyncio.StreamReader()
+        stdout.feed_data(b"ok\n")
+        stdout.feed_eof()
+        process.stdout = stdout
+
+        async def wait() -> int:
+            return 0
+
+        process.wait = wait
+        return process
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
 
@@ -409,6 +419,7 @@ async def test_spawn_can_discard_supervisor_stderr(tmp_path: Path, monkeypatch) 
         cwd=str(tmp_path),
         timeout_seconds=5,
         label="test discarded stderr",
+        max_output_bytes=1024,
         discard_stderr=True,
     )
 

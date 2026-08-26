@@ -48,4 +48,4 @@ def test_codex_controller_ack_budget_covers_catalog_export(monkeypatch, tmp_path
     monkeypatch.setattr(api, "_wait_for_controller_ack", wait_for_ack)
 
     assert api._request_controller_restart("codex") == (True, None)
-    assert captured["timeout"] > backend_model_catalog.CODEX_HUB_CATALOG_TIMEOUT_SECONDS
+    assert captured["timeout"] == (2 * backend_model_catalog.CODEX_HUB_CATALOG_TIMEOUT_SECONDS) + 5
