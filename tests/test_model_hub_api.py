@@ -2442,6 +2442,30 @@ def test_reorder_route_rejects_explicit_null_order(monkeypatch, tmp_path):
     assert payload["error"] == "invalid_source_order"
 
 
+@pytest.mark.parametrize(
+    ("body", "content_type"),
+    [(b"null", "application/json"), (b"null", "text/plain")],
+)
+def test_reorder_route_rejects_non_object_body(monkeypatch, tmp_path, body, content_type):
+    service, _, _ = _service(tmp_path)
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+    headers = {**csrf_headers(client, base_url), "content-type": content_type}
+
+    response = client.post(
+        "/api/models/agents/claude/chains/reorder",
+        content=body,
+        headers=headers,
+        base_url=base_url,
+    )
+
+    assert response.status_code == 400
+    payload = response.get_json()
+    _assert_envelope(payload, ok=False)
+    assert payload["error"] == "invalid_source_order"
+
+
 def test_ui_model_hub_default_is_controller_rpc_client(monkeypatch):
     monkeypatch.setattr(ui_server, "_MODEL_HUB_SERVICE", None)
 

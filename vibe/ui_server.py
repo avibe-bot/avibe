@@ -4593,6 +4593,8 @@ async def model_hub_agent_chains_reorder_post(backend):
     try:
         payload = request.json
         if payload is None:
+            if request.has_body:
+                raise ModelHubError("invalid_source_order")
             payload = {}
         if not isinstance(payload, dict) or set(payload) - {"order"}:
             raise ModelHubError("invalid_source_order")
