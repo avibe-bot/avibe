@@ -2,7 +2,7 @@
 name: background-watch-hook
 slug: background-watch-hook
 description: Use `vibe watch` to run a managed Harness waiter that returns to the same conversation later. Best for reviews, CI, files, logs, and other wait-now-continue-later workflows.
-version: 0.17.2
+version: 0.17.3
 ---
 
 # Background Watch Hook
@@ -202,6 +202,27 @@ cycle-oriented waiter may use exit code `75` only when its supervisor explicitly
 opts into retrying that code. Exit code `64` with the
 `avibe-watch: no-event` marker means a cycle finished with nothing worth an Agent
 turn.
+
+**A waiter detects change; the follow-up Agent Run makes the decision.** Keep that
+split when writing your own. A waiter that fires only once a composite gate is
+satisfied — CI green *and* a verdict bound to the exact head *and* zero unresolved
+threads — must match the shape of every signal in that gate, and it can only match
+the shapes its author has already seen. A wrong predicate then produces silence,
+which is indistinguishable from "nothing has happened yet", so it can sit on a retry
+exit code for hours after the state it was armed for arrived. The bundled waiters
+avoid that by reporting the change and leaving the judgment to the turn that has the
+whole picture. One caveat on the CI half: `render_actions_result` reports nothing
+while a requested workflow is missing, so a `--workflow` value that never matches —
+renamed, misspelled, or never triggered on this branch — never yields a CI event. PR
+activity still comes through, so the watch keeps firing; it is the CI verdict that
+silently never arrives. Check the name against a head that actually ran it.
+
+A predicate never seen to fire has not been tested. Verify it the way the delivery
+loop below is armed — seed the baseline, produce one event, confirm exit `0` — not by
+starting it on an event that already exists: an edge-triggered waiter is supposed to
+adopt that as its baseline, and one that fires there is level-triggered and will
+re-report forever. `--catch-up` is the bundled waiters' explicit replay mode for
+deliberately processing history.
 
 Run bundled waiters relative to the directory containing this loaded `SKILL.md`.
 The examples below use `BACKGROUND_WATCH_HOOK_DIR` for that directory:
@@ -441,10 +462,14 @@ GitHub-specific notes:
   so edits and deletions remain observable, reactions are filtered server-side with
   `content=+1`, and unchanged pages revalidate to `304`, which GitHub does not charge
   against the rate limit — an idle watch can poll for hours for free
-- PR activity also includes the special case where `chatgpt-codex-connector` or
-  `chatgpt-codex-connector[bot]` leaves a `+1` reaction on the PR body instead of
-  posting a comment; pass reactions remain visible even when `--event-limit` is
-  reached
+- a Codex verdict arrives in more than one shape and the waiter reports all of them:
+  findings as a review with inline comments, and a pass as either a `+1` reaction on
+  the PR body or a PR conversation comment. Pass reactions remain visible even when
+  `--event-limit` is reached. A predicate keyed to reviews alone never sees a pass.
+  Whether a reported pass *counts* — bot author, pass phrase, reviewed SHA against the
+  current head, and the different qualification a bodyless reaction carries — is a
+  judgment the follow-up turn makes against this repo's review rules, and is not
+  something a waiter should encode
 - PR activity also includes lifecycle changes on the PR itself, for example draft/ready, closed, reopened, or merged transitions
 - a changed PR head is reported as activity so a new push cannot leave the review
   loop asleep
