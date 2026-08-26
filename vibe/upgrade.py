@@ -130,6 +130,17 @@ def restart_is_pending() -> bool:
 
     path = runtime_mod.get_restart_status_path()
     payload = runtime_mod.read_json(path) or {}
+    return restart_record_is_pending(payload, path)
+
+
+def restart_record_is_pending(
+    payload: Mapping[str, object],
+    path: Path,
+    *,
+    grace_seconds: float = RESTART_PENDING_GRACE_SECONDS,
+) -> bool:
+    """Apply the restart ownership policy to one persisted status record."""
+
     if payload.get("state") not in {"scheduled", "running"}:
         return False
     supervisor_pid = payload.get("supervisor_pid")
@@ -137,14 +148,16 @@ def restart_is_pending() -> bool:
         started_at = payload.get("supervisor_started_at")
         if started_at is not None:
             current_started_at = runtime_mod.process_create_time(supervisor_pid)
-            if current_started_at is not None and current_started_at != started_at:
-                return False
-        return True
+            if current_started_at is not None:
+                return current_started_at == started_at
+        # Legacy records do not carry a process identity, and process metadata
+        # can be unavailable. In both cases a reused PID must not block upgrades
+        # for the lifetime of an unrelated process, so fall through to age.
     try:
         age = time.time() - path.stat().st_mtime
     except OSError:
         return False
-    return age <= RESTART_PENDING_GRACE_SECONDS
+    return age <= grace_seconds
 
 
 def _is_stable_launcher_path(launcher: Path) -> bool:
@@ -391,6 +404,52 @@ def atomic_activation_source_is_current(activation: AtomicActivation) -> bool:
     return _launcher_generation(activation.launcher, atomic_uv_install_root()) == activation.source_generation
 
 
+def activation_block_reason(activation: AtomicActivation) -> str | None:
+    """Return why an activation cannot own the current install boundary."""
+
+    if restart_is_pending():
+        return "restart_pending"
+    if not atomic_activation_source_is_current(activation):
+        return "superseded"
+    return None
+
+
+def _process_python_path(pid: int | None) -> Path | None:
+    if not pid:
+        return None
+    command = runtime_mod.get_process_command(pid)
+    if not command:
+        return None
+    try:
+        argv = [part.strip("\"'") for part in shlex.split(command, posix=(os.name != "nt"))]
+    except ValueError:
+        return None
+    if argv and Path(argv[0]).name.lower() == "systemd-run" and "--" in argv:
+        argv = argv[argv.index("--") + 1 :]
+    if not argv or not Path(argv[0]).name.lower().startswith("python"):
+        return None
+    return Path(argv[0]).expanduser()
+
+
+def running_install_paths() -> tuple[Path, ...]:
+    """Paths whose generations are still executing and therefore cannot be pruned."""
+
+    paths: list[Path] = [Path(sys.executable).expanduser()]
+    pids = [runtime_mod.resolve_service_owner_pid(include_starting=True)]
+    pids.extend(runtime_mod.extra_service_process_pids())
+    ui_pid_path = config_paths.get_runtime_ui_pid_path()
+    try:
+        ui_pid = int(ui_pid_path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        ui_pid = None
+    if ui_pid and runtime_mod.ui_pid_file_points_to_running_ui(ui_pid_path):
+        pids.append(ui_pid)
+    for pid in pids:
+        if (python_path := _process_python_path(pid)) is not None:
+            paths.append(python_path)
+    return tuple(dict.fromkeys(paths))
+
+
 def prune_atomic_uv_install_generations(
     *,
     keep: Iterable[Path] = (),
@@ -518,13 +577,25 @@ def activate_upgrade_candidate(activation: AtomicActivation) -> None:
         raise
     _update_launcher_generation_marker(launcher, activation.candidate_launcher, root)
     if _generation_for_path(activation.candidate_launcher, root) is not None:
-        keep_paths = [activation.candidate_launcher]
+        keep_paths = [activation.candidate_launcher, *running_install_paths()]
         if previous_target:
             keep_paths.append(previous_target)
         if previous_generation:
             keep_paths.append(previous_generation)
         keep = tuple(keep_paths)
         prune_atomic_uv_install_generations(keep=keep)
+
+
+def activate_installer_candidate(activation: AtomicActivation) -> None:
+    """Activate an installer candidate through the shared lifecycle owner."""
+
+    with atomic_upgrade_lock():
+        reason = activation_block_reason(activation)
+        if reason == "restart_pending":
+            raise RuntimeError("an Avibe restart is still in progress")
+        if reason == "superseded":
+            raise RuntimeError("the active Avibe generation changed while the installer was staging")
+        activate_upgrade_candidate(activation)
 
 
 def activate_launcher_target(launcher: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:

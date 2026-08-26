@@ -217,6 +217,82 @@ def test_prune_atomic_uv_install_generations_keeps_active_and_rollback(monkeypat
     assert not stale.parent.parent.exists()
 
 
+def test_activation_retains_the_generation_serving_a_live_process(monkeypatch, tmp_path):
+    from vibe import upgrade
+
+    root = tmp_path / "generations"
+    launcher = tmp_path / "bin" / "vibe"
+    previous = root / "previous" / "bin" / "vibe"
+    running_python = root / "running" / "tools" / "avibe-os" / "bin" / "python"
+    candidate = root / "candidate" / "bin" / "vibe"
+    stale = root / "stale" / "bin" / "vibe"
+    for path in (previous, running_python, candidate, stale):
+        path.parent.mkdir(parents=True)
+        path.write_text(path.parent.parent.name, encoding="utf-8")
+        path.chmod(0o755)
+    launcher.parent.mkdir(parents=True)
+    launcher.symlink_to(previous)
+    monkeypatch.setattr(upgrade, "atomic_uv_install_root", lambda: root)
+    monkeypatch.setattr(upgrade, "running_install_paths", lambda: (running_python,))
+    monkeypatch.setattr(upgrade, "verify_upgrade_candidate", lambda _activation: upgrade.IntegrityResult(True, 1))
+
+    upgrade.activate_upgrade_candidate(upgrade.AtomicActivation(launcher, candidate, root / "previous"))
+
+    assert launcher.resolve() == candidate.resolve()
+    assert previous.exists()
+    assert running_python.exists()
+    assert not stale.parent.parent.exists()
+
+
+def test_installer_activation_uses_the_shared_locked_boundary(monkeypatch, tmp_path):
+    from vibe import upgrade
+
+    events: list[str] = []
+
+    class Lock:
+        def __enter__(self):
+            events.append("lock-enter")
+
+        def __exit__(self, *_args):
+            events.append("lock-exit")
+
+    activation = upgrade.AtomicActivation(tmp_path / "vibe", tmp_path / "candidate")
+    monkeypatch.setattr(upgrade, "atomic_upgrade_lock", Lock)
+    monkeypatch.setattr(upgrade, "activation_block_reason", lambda _activation: None)
+    monkeypatch.setattr(upgrade, "activate_upgrade_candidate", lambda _activation: events.append("activate"))
+
+    upgrade.activate_installer_candidate(activation)
+
+    assert events == ["lock-enter", "activate", "lock-exit"]
+
+
+def test_installer_rejects_a_snapshot_superseded_by_runtime_activation(monkeypatch, tmp_path):
+    from vibe import upgrade
+
+    root = tmp_path / "generations"
+    launcher = tmp_path / "bin" / "vibe"
+    old = root / "old" / "bin" / "vibe"
+    runtime_candidate = root / "runtime" / "bin" / "vibe"
+    installer_candidate = root / "installer" / "bin" / "vibe"
+    for path in (old, runtime_candidate, installer_candidate):
+        path.parent.mkdir(parents=True)
+        path.write_text(path.parent.parent.name, encoding="utf-8")
+        path.chmod(0o755)
+    launcher.parent.mkdir(parents=True)
+    launcher.symlink_to(old)
+    installer_activation = upgrade.AtomicActivation(launcher, installer_candidate, root / "old")
+    monkeypatch.setattr(upgrade, "atomic_uv_install_root", lambda: root)
+    monkeypatch.setattr(upgrade, "running_install_paths", lambda: ())
+    monkeypatch.setattr(upgrade, "restart_is_pending", lambda: False)
+    monkeypatch.setattr(upgrade, "verify_upgrade_candidate", lambda _activation: upgrade.IntegrityResult(True, 1))
+
+    upgrade.activate_upgrade_candidate(upgrade.AtomicActivation(launcher, runtime_candidate, root / "old"))
+
+    with pytest.raises(RuntimeError, match="changed while the installer was staging"):
+        upgrade.activate_installer_candidate(installer_activation)
+    assert launcher.resolve() == runtime_candidate.resolve()
+
+
 def test_verify_upgrade_candidate_follows_uv_launcher_to_tool_environment(monkeypatch, tmp_path):
     from vibe import upgrade
 
@@ -382,7 +458,7 @@ def test_deferred_activation_dispatch_activates_then_schedules_restart(monkeypat
     calls: list[str] = []
     monkeypatch.setattr(cli.runtime, "pid_alive", lambda _pid: False)
     monkeypatch.setattr(cli, "atomic_upgrade_lock", lambda: nullcontext())
-    monkeypatch.setattr(cli, "atomic_activation_source_is_current", lambda _activation: True)
+    monkeypatch.setattr(cli, "activation_block_reason", lambda _activation: None)
     monkeypatch.setattr(cli, "activate_upgrade_candidate", lambda _activation: calls.append("activate"))
     monkeypatch.setattr(cli, "schedule_restart", lambda **_kwargs: calls.append("restart"))
 
@@ -400,6 +476,67 @@ def test_deferred_activation_dispatch_activates_then_schedules_restart(monkeypat
 
     assert result == 0
     assert calls == ["activate", "restart"]
+
+
+def test_deferred_activation_seeds_restart_before_releasing_install_lock(monkeypatch, tmp_path):
+    from vibe import cli
+
+    events: list[str] = []
+
+    class Lock:
+        def __enter__(self):
+            events.append("lock-enter")
+
+        def __exit__(self, *_args):
+            events.append("lock-exit")
+
+    monkeypatch.setattr(cli.runtime, "pid_alive", lambda _pid: False)
+    monkeypatch.setattr(cli, "atomic_upgrade_lock", Lock)
+    monkeypatch.setattr(cli, "activation_block_reason", lambda _activation: None)
+    monkeypatch.setattr(cli, "activate_upgrade_candidate", lambda _activation: events.append("activate"))
+    monkeypatch.setattr(cli, "schedule_restart", lambda **_kwargs: events.append("restart"))
+
+    result = cli._dispatch_deferred_upgrade_activation(
+        [
+            "--parent-pid",
+            "123",
+            "--launcher",
+            str(tmp_path / "vibe.exe"),
+            "--candidate",
+            str(tmp_path / "candidate.exe"),
+            "--restart",
+        ]
+    )
+
+    assert result == 0
+    assert events == ["lock-enter", "activate", "restart", "lock-exit"]
+
+
+def test_deferred_offline_activation_prepares_show_runtime(monkeypatch, tmp_path):
+    from vibe import cli
+
+    calls: list[str] = []
+    launcher = tmp_path / "vibe.exe"
+    monkeypatch.setattr(cli.runtime, "pid_alive", lambda _pid: False)
+    monkeypatch.setattr(cli, "atomic_upgrade_lock", lambda: nullcontext())
+    monkeypatch.setattr(cli, "activation_block_reason", lambda _activation: None)
+    monkeypatch.setattr(cli, "activate_upgrade_candidate", lambda _activation: calls.append("activate"))
+    monkeypatch.setattr(cli, "_prepare_show_runtime_after_install", lambda path: calls.append(f"prepare:{path}"))
+
+    result = cli._dispatch_deferred_upgrade_activation(
+        [
+            "--parent-pid",
+            "123",
+            "--launcher",
+            str(launcher),
+            "--candidate",
+            str(tmp_path / "candidate.exe"),
+            "--prepare-show-runtime",
+        ]
+    )
+
+    assert result == 0
+    assert calls == ["activate", f"prepare:{launcher}"]
 
 
 def test_deferred_upgrade_activation_uses_candidate_python(monkeypatch, tmp_path):
@@ -454,7 +591,7 @@ def test_deferred_activation_rejects_missing_source_when_launcher_changed(monkey
     calls: list[str] = []
     monkeypatch.setattr(cli.runtime, "pid_alive", lambda _pid: False)
     monkeypatch.setattr(cli, "atomic_upgrade_lock", lambda: nullcontext())
-    monkeypatch.setattr(cli, "atomic_activation_source_is_current", lambda _activation: False)
+    monkeypatch.setattr(cli, "activation_block_reason", lambda _activation: "superseded")
     monkeypatch.setattr(cli, "discard_atomic_uv_install_generation", lambda _path: calls.append("discard"))
     monkeypatch.setattr(cli, "activate_upgrade_candidate", lambda _activation: calls.append("activate"))
 
@@ -563,6 +700,17 @@ def test_restart_is_pending_until_the_seed_marker_is_terminal(monkeypatch, tmp_p
     assert restart_is_pending()
 
     runtime.write_json(status, {"state": "succeeded", "supervisor_pid": None})
+    assert not restart_is_pending()
+
+
+def test_legacy_restart_record_expires_even_when_its_pid_was_reused(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    status = runtime.get_restart_status_path()
+    status.parent.mkdir(parents=True)
+    runtime.write_json(status, {"state": "scheduled", "supervisor_pid": 456})
+    os.utime(status, (0, 0))
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 456)
+
     assert not restart_is_pending()
 
 

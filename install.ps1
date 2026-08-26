@@ -110,41 +110,6 @@ function Get-LauncherGeneration {
     }
 }
 
-function Remove-StaleInstallGenerations {
-    param(
-        [string]$RuntimeHome,
-        [string]$ActivePath,
-        [string]$PreviousPath
-    )
-
-    $root = Join-Path (Join-Path $RuntimeHome "runtime\install-generations") ""
-    if (-not (Test-Path -LiteralPath $root -PathType Container)) {
-        return
-    }
-    $liveGeneration = Get-LauncherGeneration -Launcher (Join-Path (Get-StableBinDirectory) "vibe.exe") -StableBin (Get-StableBinDirectory) -GenerationRoot $root
-    if ($liveGeneration) {
-        $ActivePath = Join-Path $liveGeneration "bin\vibe.exe"
-    }
-    $keep = @{}
-    foreach ($path in @($ActivePath, $PreviousPath)) {
-        if ($path) {
-            $generation = Get-GenerationPath -Path $path -GenerationRoot $root
-            if ($generation) {
-                $keep[$generation.ToUpperInvariant()] = $true
-            }
-        }
-    }
-    try {
-        Get-ChildItem -LiteralPath $root -Directory -ErrorAction Stop | ForEach-Object {
-            if (-not $keep.ContainsKey($_.FullName.ToUpperInvariant())) {
-                Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
-            }
-        }
-    } catch {
-        Write-Warning "Could not enumerate old Avibe install generations for cleanup."
-    }
-}
-
 function Invoke-WebScriptWithRetry {
     param([string]$Url)
 
@@ -386,127 +351,38 @@ function Invoke-UvToolInstallAttempt {
             }
         }
 
-        $integrity = Test-UvCandidate -Candidate $candidate -GenerationTools $generationTools -WorkingDirectory $runtimeHome
-        if (-not $integrity.Success) {
-            Remove-Item -LiteralPath $generationRoot -Recurse -Force -ErrorAction SilentlyContinue
-            return $integrity
-        }
-
         $previousPythonPath = $env:PYTHONPATH
         $previousPythonHome = $env:PYTHONHOME
         Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
         Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
         Push-Location $runtimeHome
         try {
-            $launcherProbe = Invoke-NativeCommand -FilePath $candidate -Arguments @("--help")
+            $activationArguments = @(
+                "__activate-install",
+                "--launcher", $stableLauncher,
+                "--candidate", $candidate
+            )
+            if ($previousGeneration) {
+                $activationArguments += @("--source-generation", $previousGeneration)
+            }
+            $activation = Invoke-NativeCommand -FilePath $candidate -Arguments $activationArguments
         } finally {
             Pop-Location
             if ($null -eq $previousPythonPath) { Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue } else { $env:PYTHONPATH = $previousPythonPath }
             if ($null -eq $previousPythonHome) { Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue } else { $env:PYTHONHOME = $previousPythonHome }
         }
-        if (-not $launcherProbe.Success) {
+        if (-not $activation.Success) {
             Remove-Item -LiteralPath $generationRoot -Recurse -Force -ErrorAction SilentlyContinue
             return @{
                 Success = $false
-                ExitCode = $launcherProbe.ExitCode
-                Output = if ($launcherProbe.Output) { $launcherProbe.Output } else { "candidate vibe launcher failed its startup probe" }
+                ExitCode = $activation.ExitCode
+                Output = if ($activation.Output) { $activation.Output } else { "candidate Avibe environment could not be activated" }
             }
         }
-
-        $replacement = Join-Path $stableBin ("vibe.exe.avibe-" + [Guid]::NewGuid().ToString("N") + ".new")
-        try {
-            New-Item -ItemType SymbolicLink -Path $replacement -Target $candidate -ErrorAction Stop | Out-Null
-        } catch {
-            # Developer mode is not required for a normal Windows install. A
-            # hard link preserves the candidate bytes while still allowing an
-            # atomic Move-Item activation on the same volume.
-            try {
-                New-Item -ItemType HardLink -Path $replacement -Target $candidate -ErrorAction Stop | Out-Null
-            } catch {
-                # Hard links cannot cross volumes. Copying to a temporary file
-                # in the stable bin keeps the final Move-Item atomic there.
-                Copy-Item -LiteralPath $candidate -Destination $replacement -Force -ErrorAction Stop
-            }
-        }
-        Move-Item -Force -Path $replacement -Destination (Join-Path $stableBin "vibe.exe")
-        try {
-            $marker = Join-Path $stableBin ".vibe.exe.avibe-generation"
-            $markerReplacement = Join-Path $stableBin (".vibe.exe.avibe-generation-" + [Guid]::NewGuid().ToString("N") + ".new")
-            Set-Content -LiteralPath $markerReplacement -Value $generationRoot -Encoding UTF8
-            Move-Item -Force -Path $markerReplacement -Destination $marker
-        } catch {
-            if ($markerReplacement) {
-                Remove-Item -LiteralPath $markerReplacement -Force -ErrorAction SilentlyContinue
-            }
-            Write-Warning "Activated the launcher, but could not record its generation for offline rollback."
-        }
-        Remove-StaleInstallGenerations -RuntimeHome $runtimeHome -ActivePath $candidate -PreviousPath $previousGeneration
         return $result
     } finally {
         if ($null -eq $previousToolDir) { Remove-Item Env:UV_TOOL_DIR -ErrorAction SilentlyContinue } else { $env:UV_TOOL_DIR = $previousToolDir }
         if ($null -eq $previousToolBinDir) { Remove-Item Env:UV_TOOL_BIN_DIR -ErrorAction SilentlyContinue } else { $env:UV_TOOL_BIN_DIR = $previousToolBinDir }
-    }
-}
-
-function Test-UvCandidate {
-    param(
-        [string]$Candidate,
-        [string]$GenerationTools,
-        [string]$WorkingDirectory
-    )
-
-    try {
-        $candidateTarget = (Resolve-Path -LiteralPath $Candidate -ErrorAction Stop).Path
-        $candidateBin = Split-Path -Parent $candidateTarget
-        $pythonCandidates = @(
-            (Join-Path $candidateBin "python.exe"),
-            (Join-Path $candidateBin "python3.exe"),
-            (Join-Path $GenerationTools "python.exe"),
-            (Join-Path $GenerationTools "python3.exe")
-        )
-        $candidatePython = $pythonCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-        if (-not $candidatePython) {
-            $candidatePython = Get-ChildItem -LiteralPath $GenerationTools -Recurse -File -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -in @("python.exe", "python3.exe") } |
-                Select-Object -First 1 -ExpandProperty FullName
-        }
-        if (-not $candidatePython) {
-            return @{
-                Success = $false
-                ExitCode = 1
-                Output = "could not find the candidate Python interpreter"
-            }
-        }
-
-        $probePath = Join-Path ([System.IO.Path]::GetTempPath()) ("avibe-integrity-" + [Guid]::NewGuid().ToString("N") + ".py")
-        $probeCode = @'
-from core.install_integrity import verify_python_environment
-result = verify_python_environment(__import__("sys").executable)
-print(result.detail)
-raise SystemExit(0 if result.ok else 1)
-'@
-        Set-Content -LiteralPath $probePath -Value $probeCode -Encoding utf8
-        Push-Location $WorkingDirectory
-        try {
-            $probe = Invoke-NativeCommand -FilePath $candidatePython -Arguments @($probePath)
-        } finally {
-            Pop-Location
-            Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue
-        }
-        if (-not $probe.Success) {
-            return @{
-                Success = $false
-                ExitCode = $probe.ExitCode
-                Output = if ($probe.Output) { $probe.Output } else { "candidate Avibe environment failed integrity checks" }
-            }
-        }
-        return $probe
-    } catch {
-        return @{
-            Success = $false
-            ExitCode = 1
-            Output = (($_ | Out-String).Trim())
-        }
     }
 }
 

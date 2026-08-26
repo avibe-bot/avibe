@@ -437,26 +437,26 @@ uv_tool_install() {
             rm -rf -- "$generation_root"
             return 1
         fi
-        if ! verify_uv_candidate "$VIBE_CANDIDATE_BIN_PATH"; then
-            warn "uv completed but the candidate Avibe environment failed integrity checks"
-            rm -rf -- "$generation_root"
-            return 1
+        local source_generation=""
+        source_generation="$(generation_path_for "$previous_target" || true)"
+        local activation_args=(
+            __activate-install
+            --launcher "$stable_bin_dir/vibe"
+            --candidate "$VIBE_CANDIDATE_BIN_PATH"
+        )
+        if [ -n "$source_generation" ]; then
+            activation_args+=(--source-generation "$source_generation")
         fi
-        local replacement="$stable_bin_dir/.vibe.avibe-${RANDOM}.new"
-        if ! ln -s "$VIBE_CANDIDATE_BIN_PATH" "$replacement"; then
-            warn "candidate Avibe launcher could not be staged for activation"
-            rm -rf -- "$generation_root"
-            return 1
-        fi
-        if ! mv -f "$replacement" "$stable_bin_dir/vibe"; then
-            warn "candidate Avibe launcher could not be activated"
-            rm -f -- "$replacement"
+        if ! (
+            cd "$AVIBE_RUNTIME_HOME" || exit 1
+            env -u PYTHONPATH -u PYTHONHOME "$VIBE_CANDIDATE_BIN_PATH" "${activation_args[@]}"
+        ); then
+            warn "candidate Avibe environment could not be activated"
             rm -rf -- "$generation_root"
             return 1
         fi
         VIBE_TOOL_BIN_DIR="$stable_bin_dir"
         VIBE_BIN_PATH="$stable_bin_dir/vibe"
-        prune_install_generations "$VIBE_CANDIDATE_BIN_PATH" "$previous_target"
         return 0
     fi
     rm -rf -- "$generation_root"
@@ -475,73 +475,6 @@ generation_path_for() {
             [ -n "$generation" ] && printf '%s/%s\n' "$root" "$generation"
             ;;
     esac
-}
-
-prune_install_generations() {
-    local active_path="$1"
-    local previous_path="$2"
-    local root="$AVIBE_RUNTIME_HOME/runtime/install-generations"
-    local stable_bin_dir="${VIBE_TOOL_BIN_DIR:-$HOME/.local/bin}"
-    local live_target live_generation active_generation previous_generation generation
-
-    [ -d "$root" ] || return 0
-    active_generation="$(generation_path_for "$active_path" || true)"
-    previous_generation="$(generation_path_for "$previous_path" || true)"
-    # The installer and runtime upgrades are separate processes. Re-read the
-    # launcher immediately before pruning so an activation that happened after
-    # this install was staged is retained.
-    live_target="$(resolve_binary_path "$stable_bin_dir/vibe" || true)"
-    live_generation="$(generation_path_for "$live_target" || true)"
-    if [ -n "$live_generation" ]; then
-        active_generation="$live_generation"
-    fi
-    for generation in "$root"/*; do
-        [ -d "$generation" ] || continue
-        if [ -n "$active_generation" ] && [ "$generation" = "$active_generation" ]; then
-            continue
-        fi
-        if [ -n "$previous_generation" ] && [ "$generation" = "$previous_generation" ]; then
-            continue
-        fi
-        rm -rf -- "$generation" || warn "could not prune old Avibe install generation $generation"
-    done
-}
-
-verify_uv_candidate() {
-    local candidate="$1"
-    local candidate_target candidate_bin candidate_python
-    candidate_target="$(resolve_binary_path "$candidate" || true)"
-    if [ -z "$candidate_target" ] || [ ! -e "$candidate_target" ]; then
-        return 1
-    fi
-    candidate_bin="$(dirname "$candidate_target")"
-    for candidate_python in "$candidate_bin/python3" "$candidate_bin/python"; do
-        if [ -x "$candidate_python" ]; then
-            break
-        fi
-        candidate_python=""
-    done
-    if [ -z "$candidate_python" ]; then
-        warn "could not find the candidate Python interpreter"
-        return 1
-    fi
-
-    local detail
-    detail="$(
-        cd "$AVIBE_RUNTIME_HOME" || exit 1
-        env -u PYTHONPATH -u PYTHONHOME "$candidate_python" -c 'from core.install_integrity import verify_python_environment; result = verify_python_environment(__import__("sys").executable); print(result.detail); raise SystemExit(0 if result.ok else 1)'
-    )" || {
-        [ -n "$detail" ] && warn "$detail"
-        return 1
-    }
-    if ! (
-        cd "$AVIBE_RUNTIME_HOME" || exit 1
-        env -u PYTHONPATH -u PYTHONHOME "$candidate" --help >/dev/null 2>&1
-    ); then
-        warn "candidate vibe launcher failed its startup probe"
-        return 1
-    fi
-    return 0
 }
 
 install_package_candidate() {
@@ -781,7 +714,7 @@ print_next_steps() {
         echo "  uv tool uninstall avibe-os       # current uv install"
         echo "  uv tool uninstall vibe-remote    # legacy uv install"
         echo "  pip uninstall avibe-os vibe-remote"
-        echo "  rm -f ~/.local/bin/vibe"
+        echo "  rm -f \"$VIBE_TOOL_BIN_DIR/vibe\" \"$VIBE_TOOL_BIN_DIR/.vibe.avibe-generation\""
         echo "  rm -rf \"\${AVIBE_HOME:-\$HOME/.avibe}/runtime/install-generations\""
         echo "  rm -rf ~/.avibe ~/.vibe_remote   # remove config and data"
         if ! is_vibe_immediately_available; then
@@ -820,7 +753,7 @@ print_next_steps() {
     echo "  uv tool uninstall avibe-os       # current uv install"
     echo "  uv tool uninstall vibe-remote    # legacy uv install"
     echo "  pip uninstall avibe-os vibe-remote"
-    echo "  rm -f ~/.local/bin/vibe"
+    echo "  rm -f \"$VIBE_TOOL_BIN_DIR/vibe\" \"$VIBE_TOOL_BIN_DIR/.vibe.avibe-generation\""
     echo "  rm -rf \"\${AVIBE_HOME:-\$HOME/.avibe}/runtime/install-generations\""
     echo "  rm -rf ~/.avibe ~/.vibe_remote   # remove config and data"
     echo ""

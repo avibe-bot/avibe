@@ -72,8 +72,9 @@ from vibe.upgrade import (
     AtomicActivation,
     DEFERRED_ACTIVATION_TIMEOUT_SECONDS,
     RollbackTarget,
+    activate_installer_candidate,
     activate_upgrade_candidate,
-    atomic_activation_source_is_current,
+    activation_block_reason,
     atomic_uv_install_root,
     atomic_upgrade_lock,
     build_upgrade_plan,
@@ -85,6 +86,7 @@ from vibe.upgrade import (
     _candidate_python,
     launcher_is_current_process,
     restart_is_pending,
+    restart_record_is_pending,
     discard_atomic_uv_install_generation,
     should_skip_show_runtime_prepare,
     UPGRADE_INSTALL_TIMEOUT_SECONDS,
@@ -1231,17 +1233,7 @@ def _service_install_family_items(*, detect_extra_processes: bool = True) -> lis
 def _restart_status_is_stale(payload: dict, path: Path) -> bool:
     state = payload.get("state")
     if state in {"scheduled", "running"}:
-        supervisor_pid = payload.get("supervisor_pid")
-        if isinstance(supervisor_pid, int) and runtime.pid_alive(supervisor_pid):
-            started_at = payload.get("supervisor_started_at")
-            if started_at is not None:
-                current_started_at = runtime.process_create_time(supervisor_pid)
-                return current_started_at is not None and current_started_at != started_at
-        try:
-            age = time.time() - path.stat().st_mtime
-        except OSError:
-            return False
-        return age > DOCTOR_RESTART_SEED_GRACE_SECONDS
+        return not restart_record_is_pending(payload, path, grace_seconds=DOCTOR_RESTART_SEED_GRACE_SECONDS)
 
     if state in {"succeeded", "failed", "error", "cancelled"}:
         try:
@@ -14453,7 +14445,7 @@ def cmd_upgrade():
             if restart_is_pending():
                 print("\033[31mUpgrade already has a restart in progress; wait for it to finish.\033[0m")
                 return 1
-            if plan.activation is not None and not atomic_activation_source_is_current(plan.activation):
+            if plan.activation is not None and activation_block_reason(plan.activation) == "superseded":
                 print("\033[31mUpgrade was superseded by another activation; retry the upgrade.\033[0m")
                 return 1
             result = subprocess.run(
@@ -14475,7 +14467,7 @@ def cmd_upgrade():
                             parent_pid=os.getpid(),
                             rollback_to=plan.rollback_to,
                             restart_required=runtime_was_running,
-                            prepare_show_runtime=runtime_was_running and not should_skip_show_runtime_prepare(),
+                            prepare_show_runtime=not should_skip_show_runtime_prepare(),
                         )
                         deferred_activation = True
                     else:
@@ -16776,21 +16768,7 @@ def _dispatch_deferred_upgrade_activation(argv: list[str]) -> int:
         candidate_launcher=Path(args.candidate),
         source_generation=source_generation,
     )
-    try:
-        with atomic_upgrade_lock():
-            if not atomic_activation_source_is_current(activation):
-                discard_atomic_uv_install_generation(activation.candidate_launcher)
-                print("deferred upgrade activation was superseded by another activation", file=sys.stderr)
-                return 1
-            activate_upgrade_candidate(activation)
-    except Exception as exc:
-        discard_atomic_uv_install_generation(activation.candidate_launcher)
-        print(f"deferred upgrade activation failed: {exc}", file=sys.stderr)
-        return 1
-
-    if not args.restart:
-        return 0
-    if args.rollback_to and (not args.rollback_python or not args.rollback_main):
+    if args.restart and args.rollback_to and (not args.rollback_python or not args.rollback_main):
         print("deferred upgrade restart is missing its rollback launcher", file=sys.stderr)
         return 1
     rollback_to = (
@@ -16802,17 +16780,60 @@ def _dispatch_deferred_upgrade_activation(argv: list[str]) -> int:
         if args.rollback_to
         else None
     )
+    activated = False
     try:
-        schedule_restart(
-            delay_seconds=0.0,
-            vibe_path=args.launcher,
-            trigger="upgrade",
-            prepare_show_runtime=args.prepare_show_runtime,
-            rollback_to=rollback_to,
-            python_executable=sys.executable,
-        )
+        with atomic_upgrade_lock():
+            reason = activation_block_reason(activation)
+            if reason == "restart_pending":
+                discard_atomic_uv_install_generation(activation.candidate_launcher)
+                print("deferred upgrade activation found another restart in progress", file=sys.stderr)
+                return 1
+            if reason == "superseded":
+                discard_atomic_uv_install_generation(activation.candidate_launcher)
+                print("deferred upgrade activation was superseded by another activation", file=sys.stderr)
+                return 1
+            activate_upgrade_candidate(activation)
+            activated = True
+            if args.restart:
+                schedule_restart(
+                    delay_seconds=0.0,
+                    vibe_path=args.launcher,
+                    trigger="upgrade",
+                    prepare_show_runtime=args.prepare_show_runtime,
+                    rollback_to=rollback_to,
+                    python_executable=sys.executable,
+                )
     except Exception as exc:
-        print(f"deferred upgrade restart scheduling failed: {exc}", file=sys.stderr)
+        if not activated:
+            discard_atomic_uv_install_generation(activation.candidate_launcher)
+            print(f"deferred upgrade activation failed: {exc}", file=sys.stderr)
+        else:
+            print(f"deferred upgrade restart scheduling failed: {exc}", file=sys.stderr)
+        return 1
+
+    if not args.restart and args.prepare_show_runtime:
+        _prepare_show_runtime_after_install(args.launcher)
+    return 0
+
+
+def _dispatch_installer_activation(argv: list[str]) -> int:
+    """Activate a staged one-command install through the shared Python owner."""
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--launcher", required=True)
+    parser.add_argument("--candidate", required=True)
+    parser.add_argument("--source-generation")
+    args = parser.parse_args(argv)
+    activation = AtomicActivation(
+        launcher=Path(args.launcher),
+        candidate_launcher=Path(args.candidate),
+        source_generation=Path(args.source_generation) if args.source_generation else None,
+    )
+    try:
+        activate_installer_candidate(activation)
+    except Exception as exc:
+        discard_atomic_uv_install_generation(activation.candidate_launcher)
+        print(f"installer activation failed: {exc}", file=sys.stderr)
         return 1
     return 0
 
@@ -16824,6 +16845,8 @@ def main():
         sys.exit(_dispatch_restart_supervisor(argv[1:]))
     if argv and argv[0] == "__activate-upgrade":
         sys.exit(_dispatch_deferred_upgrade_activation(argv[1:]))
+    if argv and argv[0] == "__activate-install":
+        sys.exit(_dispatch_installer_activation(argv[1:]))
     parser = build_parser()
     args = parser.parse_args()
 

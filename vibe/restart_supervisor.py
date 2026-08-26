@@ -1081,6 +1081,32 @@ def schedule_restart(
     rollback_to: RollbackTarget | None = None,
     python_executable: str | None = None,
 ) -> dict:
+    """Serialize every restart seed with install activation and pruning."""
+
+    with atomic_upgrade_lock():
+        return _schedule_restart_locked(
+            delay_seconds=delay_seconds,
+            vibe_path=vibe_path,
+            trigger=trigger,
+            scope=scope,
+            prepare_show_runtime=prepare_show_runtime,
+            memory_ui_secret=memory_ui_secret,
+            rollback_to=rollback_to,
+            python_executable=python_executable,
+        )
+
+
+def _schedule_restart_locked(
+    *,
+    delay_seconds: float,
+    vibe_path: str | None,
+    trigger: str,
+    scope: str,
+    prepare_show_runtime: bool,
+    memory_ui_secret: str | None,
+    rollback_to: RollbackTarget | None,
+    python_executable: str | None,
+) -> dict:
     """Spawn the detached restart job.
 
     `rollback_to` is the install currently on the machine, and passing it is what

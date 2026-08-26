@@ -51,7 +51,25 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
         cat > "$bin_dir/vibe" <<'EOF'
         #!/usr/bin/env bash
         set -euo pipefail
-        if [ "${{1:-}}" = "--help" ]; then
+        if [ "${{1:-}}" = "__activate-install" ]; then
+            if [ "${{VIBE_TEST_CANDIDATE_PROBE_FAIL:-}}" = "1" ]; then
+                echo "candidate import failed" >&2
+                exit 19
+            fi
+            shift
+            launcher=""
+            candidate=""
+            while [ "$#" -gt 0 ]; do
+                case "$1" in
+                    --launcher) launcher="$2"; shift 2 ;;
+                    --candidate) candidate="$2"; shift 2 ;;
+                    *) shift ;;
+                esac
+            done
+            replacement="${{launcher}}.new"
+            ln -s "$candidate" "$replacement"
+            mv -f "$replacement" "$launcher"
+        elif [ "${{1:-}}" = "--help" ]; then
             echo "usage: vibe"
         elif [ "${{1:-}}" = "version" ]; then
             echo "avibe-os 9.9.9"
@@ -535,18 +553,27 @@ def test_windows_installer_honors_configured_tool_bin_and_cross_volume_copy_fall
 
     assert "function Get-StableBinDirectory" in powershell
     assert "$configured = $env:UV_TOOL_BIN_DIR" in powershell
-    assert "Copy-Item -LiteralPath $candidate -Destination $replacement" in powershell
-    assert "function Remove-StaleInstallGenerations" in powershell
-    assert "Remove-StaleInstallGenerations -RuntimeHome $runtimeHome" in powershell
+    assert '"__activate-install"' in powershell
+    assert '$activationArguments += @("--source-generation", $previousGeneration)' in powershell
+    assert "function Remove-StaleInstallGenerations" not in powershell
+    assert "New-Item -ItemType HardLink" not in powershell
 
 
 def test_install_script_candidate_probes_ignore_python_path_overrides():
     script = INSTALL_SCRIPT.read_text(encoding="utf-8")
-    assert 'env -u PYTHONPATH -u PYTHONHOME "$candidate_python"' in script
-    assert 'env -u PYTHONPATH -u PYTHONHOME "$candidate" --help' in script
+    assert 'env -u PYTHONPATH -u PYTHONHOME "$VIBE_CANDIDATE_BIN_PATH" "${activation_args[@]}"' in script
+    assert 'activation_args+=(--source-generation "$source_generation")' in script
+    assert "verify_uv_candidate" not in script
     powershell = INSTALL_POWERSHELL.read_text(encoding="utf-8")
     assert "$previousPythonPath = $env:PYTHONPATH" in powershell
     assert "Remove-Item Env:PYTHONHOME" in powershell
+    assert "Test-UvCandidate" not in powershell
+
+
+def test_uninstall_instructions_use_the_selected_stable_bin():
+    script = INSTALL_SCRIPT.read_text(encoding="utf-8")
+    assert r'rm -f \"$VIBE_TOOL_BIN_DIR/vibe\"' in script
+    assert "rm -f ~/.local/bin/vibe" not in script
 
 
 def test_install_script_continues_when_show_runtime_prepare_fails(tmp_path):

@@ -64,8 +64,8 @@ from vibe.build_identity import get_build_identity
 from vibe.upgrade import (
     AtomicActivation,
     _candidate_python,
+    activation_block_reason,
     activate_upgrade_candidate,
-    atomic_activation_source_is_current,
     atomic_upgrade_lock,
     build_upgrade_plan,
     defer_upgrade_activation,
@@ -6162,7 +6162,7 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                     "output": "Wait for the pending restart to finish before starting another upgrade.",
                     "restarting": False,
                 }
-            if plan.activation is not None and not atomic_activation_source_is_current(plan.activation):
+            if plan.activation is not None and activation_block_reason(plan.activation) == "superseded":
                 return {
                     "ok": False,
                     "message": "Upgrade was superseded by another activation",
@@ -6193,11 +6193,7 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                             parent_pid=os.getpid(),
                             rollback_to=plan.rollback_to,
                             restart_required=auto_restart and runtime_was_running,
-                            prepare_show_runtime=(
-                                auto_restart
-                                and runtime_was_running
-                                and not should_skip_show_runtime_prepare()
-                            ),
+                            prepare_show_runtime=not should_skip_show_runtime_prepare(),
                         )
                         deferred_activation = True
                     else:
