@@ -211,10 +211,11 @@ the shapes its author has already seen. A wrong predicate then produces silence,
 which is indistinguishable from "nothing has happened yet", so it can sit on a retry
 exit code for hours after the state it was armed for arrived. The bundled waiters
 avoid that by reporting the change and leaving the judgment to the turn that has the
-whole picture. They keep one silent-pending mode of their own: a `--workflow` value
-that never matches — renamed, misspelled, or never triggered on this branch — holds a
-combined watch quiet indefinitely under `--timeout 0`, so check the name against a
-head that actually ran it before arming.
+whole picture. One caveat on the CI half: `render_actions_result` reports nothing
+while a requested workflow is missing, so a `--workflow` value that never matches —
+renamed, misspelled, or never triggered on this branch — never yields a CI event. PR
+activity still comes through, so the watch keeps firing; it is the CI verdict that
+silently never arrives. Check the name against a head that actually ran it.
 
 A predicate never seen to fire has not been tested. Verify it the way the delivery
 loop below is armed — seed the baseline, produce one event, confirm exit `0` — not by
@@ -461,15 +462,14 @@ GitHub-specific notes:
   so edits and deletions remain observable, reactions are filtered server-side with
   `content=+1`, and unchanged pages revalidate to `304`, which GitHub does not charge
   against the rate limit — an idle watch can poll for hours for free
-- a Codex verdict arrives in more than one shape, and the waiter watches all of them:
+- a Codex verdict arrives in more than one shape and the waiter reports all of them:
   findings as a review with inline comments, and a pass as either a `+1` reaction on
-  the PR body or a PR conversation comment carrying the pass phrase. Either shape is a
-  pass only when all three hold: the author is the Codex bot
-  (`chatgpt-codex-connector` / `chatgpt-codex-connector[bot]`), the pass phrase is
-  present, and the reviewed commit it names is the current head. A contributor quoting
-  a pass, and the bot's own pass on an earlier head, are both not one. Pass reactions
-  remain visible even when `--event-limit` is reached. A predicate keyed to reviews
-  alone never sees a pass
+  the PR body or a PR conversation comment. Pass reactions remain visible even when
+  `--event-limit` is reached. A predicate keyed to reviews alone never sees a pass.
+  Whether a reported pass *counts* — bot author, pass phrase, reviewed SHA against the
+  current head, and the different qualification a bodyless reaction carries — is a
+  judgment the follow-up turn makes against this repo's review rules, and is not
+  something a waiter should encode
 - PR activity also includes lifecycle changes on the PR itself, for example draft/ready, closed, reopened, or merged transitions
 - a changed PR head is reported as activity so a new push cannot leave the review
   loop asleep
