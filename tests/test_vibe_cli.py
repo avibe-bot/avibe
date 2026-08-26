@@ -1474,6 +1474,61 @@ def test_repair_duplicate_service_processes_starts_under_the_same_package_lease(
     assert mutation_lease_held is False
 
 
+def test_repair_duplicate_service_processes_resamples_promoted_owner(monkeypatch):
+    paths.ensure_data_dirs()
+    owners = iter([None, 2222])
+    owner_samples: list[int | None] = []
+
+    def resolve_owner(*, include_starting=False):
+        owner = next(owners)
+        owner_samples.append(owner)
+        return owner
+
+    def extra_pids(*, owner_pid=None):
+        return [2222] if owner_pid is None else []
+
+    monkeypatch.setattr(cli.runtime, "service_instance_lock_attached_to_process", lambda: False)
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", resolve_owner)
+    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", extra_pids)
+    monkeypatch.setattr(
+        cli.runtime,
+        "stop_pid",
+        lambda *args, **kwargs: pytest.fail("the promoted owner must not be stopped"),
+    )
+
+    result = cli._repair_duplicate_service_processes()
+
+    assert result["status"] == "skipped"
+    assert owner_samples == [None, 2222]
+
+
+def test_repair_duplicate_service_processes_uses_still_extra_resample(monkeypatch):
+    paths.ensure_data_dirs()
+    owners = iter([None, 1111])
+    stopped: list[int] = []
+
+    monkeypatch.setattr(cli.runtime, "service_instance_lock_attached_to_process", lambda: False)
+    monkeypatch.setattr(
+        cli.runtime,
+        "resolve_service_owner_pid",
+        lambda include_starting=False: next(owners),
+    )
+    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", lambda owner_pid=None: [2222])
+    monkeypatch.setattr(cli.runtime, "stop_pid", lambda pid, timeout=5: stopped.append(pid) or True)
+    monkeypatch.setattr(cli, "_write_refreshed_runtime_status", lambda: None)
+    monkeypatch.setattr(
+        cli,
+        "_start_service_after_repair",
+        lambda *args, **kwargs: pytest.fail("the resampled owner keeps the service running"),
+    )
+
+    result = cli._repair_duplicate_service_processes()
+
+    assert result["status"] == "repaired"
+    assert result["stopped_pids"] == [2222]
+    assert stopped == [2222]
+
+
 def _stub_repair_service_restart(monkeypatch, *, live_ui_pid):
     """Wire _start_service_after_repair onto fakes and record what each side got."""
 
@@ -1548,19 +1603,20 @@ def test_repair_still_reports_success_when_the_ui_restart_fails(monkeypatch):
 def test_repair_stale_install_runtime_stops_only_legacy_extra_process(monkeypatch):
     stopped = []
     refreshed = []
+    classified: list[int] = []
     paths.ensure_data_dirs()
     monkeypatch.setattr(cli.runtime, "service_instance_lock_attached_to_process", lambda: False)
     monkeypatch.setattr(cli, "_current_cli_install_family", lambda: cli.PACKAGE_NAME)
     monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1111)
     monkeypatch.setattr(cli.runtime, "extra_service_process_pids", lambda owner_pid=None: [2222])
-    monkeypatch.setattr(
-        cli.runtime,
-        "get_process_command",
-        lambda pid: {
+    def get_process_command(pid):
+        classified.append(pid)
+        return {
             1111: "/home/test/.local/share/uv/tools/avibe-os/bin/python service_main.py",
             2222: "/home/test/.local/share/uv/tools/vibe-remote/bin/python service_main.py",
-        }[pid],
-    )
+        }[pid]
+
+    monkeypatch.setattr(cli.runtime, "get_process_command", get_process_command)
     monkeypatch.setattr(cli.runtime, "stop_pid", lambda pid, timeout=5: stopped.append(pid) or True)
     monkeypatch.setattr(cli.runtime, "start_service", lambda: (_ for _ in ()).throw(AssertionError("must not restart current owner")))
     monkeypatch.setattr(cli, "_write_refreshed_runtime_status", lambda: refreshed.append(True))
@@ -1570,6 +1626,38 @@ def test_repair_stale_install_runtime_stops_only_legacy_extra_process(monkeypatc
     assert result["status"] == "repaired"
     assert stopped == [2222]
     assert refreshed == [True]
+    assert classified == [1111, 2222, 1111, 2222]
+
+
+def test_repair_stale_install_runtime_resamples_process_family(monkeypatch):
+    paths.ensure_data_dirs()
+    commands = iter(
+        [
+            "/home/test/.local/share/uv/tools/vibe-remote/bin/python service_main.py",
+            "/home/test/.local/share/uv/tools/avibe-os/bin/python service_main.py",
+        ]
+    )
+    classified: list[int] = []
+
+    def get_process_command(pid):
+        classified.append(pid)
+        return next(commands)
+
+    monkeypatch.setattr(cli.runtime, "service_instance_lock_attached_to_process", lambda: False)
+    monkeypatch.setattr(cli, "_current_cli_install_family", lambda: cli.PACKAGE_NAME)
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1111)
+    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", lambda owner_pid=None: [])
+    monkeypatch.setattr(cli.runtime, "get_process_command", get_process_command)
+    monkeypatch.setattr(
+        cli.runtime,
+        "stop_pid",
+        lambda *args, **kwargs: pytest.fail("a current-family process must not be stopped"),
+    )
+
+    result = cli._repair_stale_install_runtime()
+
+    assert result["status"] == "skipped"
+    assert classified == [1111, 1111]
 
 
 def test_repair_stale_install_runtime_restarts_when_legacy_owner_is_stopped(monkeypatch):
@@ -1778,28 +1866,50 @@ def test_doctor_lifecycle_repairs_report_package_lease_timeout(
     "target",
     ["duplicate-service-processes", "stale-install-runtime"],
 )
-@pytest.mark.parametrize("dry_run", [False, True])
-def test_doctor_lifecycle_repair_skip_and_dry_run_paths_do_not_take_package_lease(
+def test_doctor_lifecycle_repair_dry_run_does_not_take_package_lease(
     monkeypatch,
     target,
-    dry_run,
 ):
-    repair = _prepare_doctor_lifecycle_repair(
-        monkeypatch,
-        target,
-        detected=dry_run,
-    )
+    repair = _prepare_doctor_lifecycle_repair(monkeypatch, target)
 
     @contextmanager
     def forbidden_mutation_lock():
-        raise AssertionError("skip and dry-run paths must remain lock-free")
+        raise AssertionError("dry-run paths must remain lock-free")
         yield
 
     monkeypatch.setattr(cli, "package_mutation_lock", forbidden_mutation_lock)
 
-    result = repair(dry_run=dry_run)
+    result = repair(dry_run=True)
 
-    assert result["status"] == ("planned" if dry_run else "skipped")
+    assert result["status"] == "planned"
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["duplicate-service-processes", "stale-install-runtime"],
+)
+def test_doctor_lifecycle_repair_empty_resample_happens_under_package_lease(
+    monkeypatch,
+    target,
+):
+    repair = _prepare_doctor_lifecycle_repair(monkeypatch, target, detected=False)
+    mutation_lease_held = False
+
+    @contextmanager
+    def mutation_lock():
+        nonlocal mutation_lease_held
+        mutation_lease_held = True
+        try:
+            yield
+        finally:
+            mutation_lease_held = False
+
+    monkeypatch.setattr(cli, "package_mutation_lock", mutation_lock)
+
+    result = repair()
+
+    assert result["status"] == "skipped"
+    assert mutation_lease_held is False
 
 
 def test_repair_home_migration_skips_empty_home_without_initializing(monkeypatch, tmp_path):

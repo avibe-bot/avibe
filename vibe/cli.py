@@ -12250,9 +12250,9 @@ def _repair_duplicate_service_processes(*, dry_run: bool = False) -> dict:
 
     owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
     extra_pids = runtime.extra_service_process_pids(owner_pid=owner_pid)
-    if not extra_pids:
-        return _doctor_repair_result(target, "skipped", "No extra Avibe service process was detected.")
     if dry_run:
+        if not extra_pids:
+            return _doctor_repair_result(target, "skipped", "No extra Avibe service process was detected.")
         return _doctor_repair_result(
             target,
             "planned",
@@ -12266,6 +12266,10 @@ def _repair_duplicate_service_processes(*, dry_run: bool = False) -> dict:
         with package_mutation_lock():
             if restart_in_flight():
                 return _doctor_lifecycle_repair_blocked(target, "restart_in_progress")
+            owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
+            extra_pids = runtime.extra_service_process_pids(owner_pid=owner_pid)
+            if not extra_pids:
+                return _doctor_repair_result(target, "skipped", "No extra Avibe service process was detected.")
             for pid in extra_pids:
                 if runtime.stop_pid(pid, timeout=5):
                     stopped.append(pid)
@@ -12302,14 +12306,9 @@ def _repair_duplicate_service_processes(*, dry_run: bool = False) -> dict:
         )
 
 
-def _repair_stale_install_runtime(*, dry_run: bool = False) -> dict:
-    target = "stale-install-runtime"
-    if runtime.service_instance_lock_attached_to_process():
-        return _doctor_repair_result(target, "failed", "Run this repair from the CLI, not from inside the service process.")
-    if not _runtime_home_exists_for_repair():
-        return _doctor_repair_result(target, "skipped", "No runtime home exists yet; no service process state needs repair.")
-
-    current_family = _current_cli_install_family()
+def _stale_install_runtime_processes(
+    current_family: str | None,
+) -> tuple[int | None, list[int], list[int]]:
     owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
     service_pids = [pid for pid in [owner_pid] if pid]
     service_pids.extend(runtime.extra_service_process_pids(owner_pid=owner_pid))
@@ -12321,9 +12320,21 @@ def _repair_stale_install_runtime(*, dry_run: bool = False) -> dict:
             stale_pids.append(pid)
         elif family == PACKAGE_NAME:
             current_pids.append(pid)
-    if not stale_pids:
-        return _doctor_repair_result(target, "skipped", "No legacy vibe-remote service process was detected.")
+    return owner_pid, stale_pids, current_pids
+
+
+def _repair_stale_install_runtime(*, dry_run: bool = False) -> dict:
+    target = "stale-install-runtime"
+    if runtime.service_instance_lock_attached_to_process():
+        return _doctor_repair_result(target, "failed", "Run this repair from the CLI, not from inside the service process.")
+    if not _runtime_home_exists_for_repair():
+        return _doctor_repair_result(target, "skipped", "No runtime home exists yet; no service process state needs repair.")
+
+    current_family = _current_cli_install_family()
+    owner_pid, stale_pids, current_pids = _stale_install_runtime_processes(current_family)
     if dry_run:
+        if not stale_pids:
+            return _doctor_repair_result(target, "skipped", "No legacy vibe-remote service process was detected.")
         return _doctor_repair_result(
             target,
             "planned",
@@ -12337,6 +12348,9 @@ def _repair_stale_install_runtime(*, dry_run: bool = False) -> dict:
         with package_mutation_lock():
             if restart_in_flight():
                 return _doctor_lifecycle_repair_blocked(target, "restart_in_progress")
+            owner_pid, stale_pids, current_pids = _stale_install_runtime_processes(current_family)
+            if not stale_pids:
+                return _doctor_repair_result(target, "skipped", "No legacy vibe-remote service process was detected.")
             for pid in stale_pids:
                 if runtime.stop_pid(pid, timeout=5):
                     stopped.append(pid)
