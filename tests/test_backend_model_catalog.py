@@ -1,7 +1,9 @@
 import builtins
 import json
+import os
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -145,6 +147,35 @@ def test_codex_hub_catalog_export_uses_stable_supervisor(monkeypatch):
     assert captured["timeout_seconds"] == backend_model_catalog.CODEX_HUB_CATALOG_TIMEOUT_SECONDS
     assert captured["max_output_bytes"] == backend_model_catalog.CODEX_HUB_CATALOG_MAX_BYTES
     assert captured["discard_stderr"] is True
+
+
+def test_codex_hub_catalog_export_survives_deleted_service_cwd(monkeypatch, tmp_path):
+    captured = {}
+
+    async def run(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            exit_code=0,
+            stdout='{"models":[{"slug":"gpt-test"}]}',
+            stderr="",
+            timed_out=False,
+            stdout_truncated=False,
+        )
+
+    monkeypatch.setattr(backend_model_catalog, "run_supervised_command", run)
+    deleted_cwd = tmp_path / "deleted-service-cwd"
+    deleted_cwd.mkdir()
+    original_cwd = Path.cwd()
+    os.chdir(deleted_cwd)
+    deleted_cwd.rmdir()
+    try:
+        exported = backend_model_catalog._export_codex_bundled_catalog("/opt/codex")
+    finally:
+        os.chdir(original_cwd)
+
+    assert exported == b'{"models":[{"slug":"gpt-test"}]}'
+    assert Path(captured["cwd"]).is_dir()
+    assert captured["cwd"] != str(deleted_cwd)
 
 
 @pytest.mark.parametrize(

@@ -16,6 +16,7 @@ from config.atomic_io import write_atomic
 from core.command_runner import run_supervised_command
 from vibe.claude_model_catalog import DEFAULT_CLAUDE_MODEL_ALIASES, load_catalog_models
 from vibe.codex_config import get_codex_home
+from vibe.upgrade import get_safe_cwd
 
 
 REMOTE_CATALOG_URL_ENV = "AVIBE_BACKEND_MODEL_CATALOG_URL"
@@ -148,7 +149,7 @@ def _export_codex_bundled_catalog(
                 "-c",
                 "model_catalog_json=null",
             ],
-            cwd=os.getcwd(),
+            cwd=get_safe_cwd(),
             timeout_seconds=CODEX_HUB_CATALOG_TIMEOUT_SECONDS,
             label="Codex model catalog export",
             max_output_bytes=CODEX_HUB_CATALOG_MAX_BYTES,
