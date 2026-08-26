@@ -13,6 +13,7 @@ import stat
 import tarfile
 import tempfile
 import threading
+import time
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
@@ -42,6 +43,12 @@ from storage.lock import (
 logger = logging.getLogger(__name__)
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_MANIFEST_CACHE_RE = re.compile(r"^manifest-[0-9a-f]{16}\.json$")
+_ARCHIVE_MTIME_GUARD_SECONDS = 15 * 60
+_ARCHIVE_INSPECTION_FAILED = "archive_inspection_failed"
+_ARCHIVE_REMOVAL_FAILED = "archive_removal_failed"
+_PACKAGED_MANIFEST_LINEAGE = "packaged"
+_CUSTOM_MANIFEST_LINEAGE = "custom"
 _INSTALL_LOCKS: dict[str, threading.Lock] = {}
 _INSTALL_LOCKS_GUARD = threading.Lock()
 _ENSURE_FAILURE_SUFFIXES = frozenset(
@@ -83,6 +90,12 @@ def _is_exclusive_regular_file(info: os.stat_result) -> bool:
     return not (reparse and attrs & reparse)
 
 
+def _is_reparse_point(info: os.stat_result) -> bool:
+    attrs = getattr(info, "st_file_attributes", 0)
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return bool(reparse and attrs & reparse)
+
+
 @dataclass(frozen=True)
 class ManagedRuntimeArchive:
     platform: str
@@ -120,6 +133,15 @@ class ManagedRuntimeSpec:
     @property
     def metadata_filename(self) -> str:
         return f".avibe-{self.runtime_id}-runtime.json"
+
+
+@dataclass(frozen=True)
+class _ManagedRuntimeInstall:
+    path: Path
+    lineage: str
+    archive_name: str
+    archive_sha256: str
+    mtime: float
 
 
 class ManagedRuntimeManager:
@@ -546,6 +568,7 @@ class ManagedRuntimeManager:
                         "removed": [],
                         "reason": self._reason("clean_inspection_failed"),
                         "message": str(exc),
+                        "archives": self._skipped_archive_report(_ARCHIVE_INSPECTION_FAILED),
                     }
         try:
             file_lock = self._acquire_mutation_lock()
@@ -577,6 +600,7 @@ class ManagedRuntimeManager:
                 "removed": list(removed),
                 "reason": self._reason("clean_inspection_failed"),
                 "message": str(cop),
+                "archives": self._skipped_archive_report(_ARCHIVE_INSPECTION_FAILED),
             }
         finally:
             self._release_mutation_lock(file_lock)
@@ -760,13 +784,17 @@ class ManagedRuntimeManager:
         versions_dir = self.runtime_dir / "versions"
         current = self._current_install_dir(versions_dir)
         try:
-            versions_is_dir = stat.S_ISDIR(versions_dir.stat().st_mode)
+            versions_info = versions_dir.lstat()
         except FileNotFoundError:
             versions_is_dir = False
         except OSError as exc:
             # An uninspectable versions tree must not silently preview as
             # empty (misleading "0 entries") — surface an inspection failure.
             raise OSError(f"versions directory cannot be inspected: {versions_dir}") from exc
+        else:
+            if _is_reparse_point(versions_info) or not stat.S_ISDIR(versions_info.st_mode):
+                raise OSError(f"versions directory is not a confined directory: {versions_dir}")
+            versions_is_dir = True
 
         install_dirs = (
             {
@@ -780,32 +808,402 @@ class ManagedRuntimeManager:
         resolved_install_dirs = {path.resolve() for path in install_dirs}
         if current is not None and current not in resolved_install_dirs:
             raise OSError("current.json is unreadable")
-        protected = (
-            {current}
-            if current is not None
-            else resolved_install_dirs
+
+        downloads_present = self._downloads_namespace_present()
+        installs = (
+            self._read_managed_install_records(install_dirs)
+            if current is not None or downloads_present
+            else []
         )
+        records_by_path = {record.path.resolve(): record for record in installs}
+        if current is not None and current not in records_by_path:
+            raise OSError("current install metadata is unreadable")
 
-        for staging_dir in self.runtime_dir.glob("install-*"):
-            if staging_dir.is_dir():
-                if not dry_run:
-                    shutil.rmtree(staging_dir, ignore_errors=True)
-                removed.append(str(staging_dir))
+        protected = set(resolved_install_dirs) if current is None else {current}
+        keep_count = max(0, keep_previous)
+        if current is not None:
+            by_lineage: dict[str, list[_ManagedRuntimeInstall]] = {}
+            for record in installs:
+                by_lineage.setdefault(record.lineage, []).append(record)
+            current_lineage = records_by_path[current].lineage
+            for lineage, lineage_installs in by_lineage.items():
+                ranked = sorted(lineage_installs, key=lambda item: item.mtime, reverse=True)
+                if lineage == current_lineage:
+                    rollback = [record for record in ranked if record.path.resolve() != current]
+                    protected.update(record.path.resolve() for record in rollback[:keep_count])
+                elif ranked:
+                    # Packaged and custom sources each keep a head. Switching
+                    # source class must not erase the only locally recoverable
+                    # copy of the alternate lineage.
+                    protected.add(ranked[0].path.resolve())
+                    protected.update(record.path.resolve() for record in ranked[1 : keep_count + 1])
 
-        if not versions_is_dir:
-            return {"ok": True, "removed": removed}
-        candidates = sorted(
+        install_candidates = sorted(
             (path for path in install_dirs if path.resolve() not in protected),
             key=lambda path: path.stat().st_mtime,
             reverse=True,
         )
-        for path in candidates[max(0, keep_previous) :]:
-            if not dry_run:
-                shutil.rmtree(path, ignore_errors=True)
-            removed.append(str(path))
-        if not dry_run:
+        staging_candidates = self._staging_install_dirs()
+        removal_failed = False
+
+        for path in [*staging_candidates, *install_candidates]:
+            if dry_run:
+                removed.append(str(path))
+                continue
+            if self._remove_tree(path):
+                removed.append(str(path))
+            else:
+                removal_failed = True
+
+        if versions_is_dir and not dry_run:
             self._prune_empty_version_dirs(versions_dir)
-        return {"ok": True, "removed": removed}
+
+        removed_install_paths = {
+            path.resolve()
+            for path in install_candidates
+            if dry_run or not self._path_exists(path)
+        }
+        retained_installs = [
+            record for record in installs if record.path.resolve() not in removed_install_paths
+        ]
+        protected_archive_sha256s = {record.archive_sha256 for record in retained_installs}
+        if current is not None:
+            protected_archive_sha256s.add(self._current_archive_sha256())
+        known_archive_names = {
+            record.archive_name
+            for record in installs
+            if self._archive_name_is_candidate(record.archive_name)
+        }
+        archives = self._clean_downloaded_archives(
+            known_archive_names=known_archive_names,
+            protected_sha256s=protected_archive_sha256s,
+            dry_run=dry_run,
+        )
+        if archives["failed_count"]:
+            removal_failed = True
+        if archives.get("skipped_reason") == _ARCHIVE_INSPECTION_FAILED:
+            raise OSError("downloads directory cannot be inspected")
+
+        return {
+            "ok": not removal_failed,
+            "removed": removed,
+            "reason": self._reason("clean_removal_failed") if removal_failed else None,
+            "archives": archives,
+        }
+
+    def _downloads_namespace_present(self) -> bool:
+        downloads_dir = self.runtime_dir / "downloads"
+        try:
+            downloads_info = downloads_dir.lstat()
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise OSError(f"downloads directory cannot be inspected: {downloads_dir}") from exc
+        if _is_reparse_point(downloads_info) or not stat.S_ISDIR(downloads_info.st_mode):
+            raise OSError(f"downloads directory is not a confined directory: {downloads_dir}")
+        return True
+
+    def _read_managed_install_records(self, install_dirs: set[Path]) -> list[_ManagedRuntimeInstall]:
+        records: list[_ManagedRuntimeInstall] = []
+        for install_dir in install_dirs:
+            metadata_path = install_dir / self.spec.metadata_filename
+            try:
+                install_info = install_dir.lstat()
+                metadata_info = metadata_path.lstat()
+                if _is_reparse_point(install_info) or not stat.S_ISDIR(install_info.st_mode):
+                    raise OSError("install directory is not a directory")
+                if not _is_exclusive_regular_file(metadata_info):
+                    raise OSError("install metadata is not an exclusive regular file")
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                manifest_sha256 = metadata.get("manifest_sha256") if isinstance(metadata, dict) else None
+                archive_name = metadata.get("archive_name") if isinstance(metadata, dict) else None
+                archive_sha256 = metadata.get("archive_sha256") if isinstance(metadata, dict) else None
+                manifest_source = metadata.get("manifest_source") if isinstance(metadata, dict) else None
+                if (
+                    metadata.get("provider") != "manifest"
+                    or metadata.get("runtime_id") != self.spec.runtime_id
+                    or not isinstance(manifest_sha256, str)
+                    or not _SHA256_RE.fullmatch(manifest_sha256)
+                    or not isinstance(archive_name, str)
+                    or not archive_name
+                    or Path(archive_name).name != archive_name
+                    or not isinstance(archive_sha256, str)
+                    or not _SHA256_RE.fullmatch(archive_sha256)
+                    or not isinstance(manifest_source, str)
+                    or not manifest_source
+                ):
+                    raise ValueError("install metadata is incomplete")
+                lineage = (
+                    _PACKAGED_MANIFEST_LINEAGE
+                    if manifest_source.startswith("package:")
+                    else _CUSTOM_MANIFEST_LINEAGE
+                )
+                records.append(
+                    _ManagedRuntimeInstall(
+                        path=install_dir,
+                        lineage=lineage,
+                        archive_name=archive_name,
+                        archive_sha256=archive_sha256,
+                        mtime=install_info.st_mtime,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise OSError(f"install metadata is unreadable: {metadata_path}") from exc
+        return records
+
+    def _staging_install_dirs(self) -> list[Path]:
+        try:
+            runtime_info = self.runtime_dir.lstat()
+        except FileNotFoundError:
+            return []
+        except OSError as exc:
+            raise OSError(f"runtime directory cannot be inspected: {self.runtime_dir}") from exc
+        if _is_reparse_point(runtime_info) or not stat.S_ISDIR(runtime_info.st_mode):
+            raise OSError(f"runtime directory is not a confined directory: {self.runtime_dir}")
+        staging: list[Path] = []
+        try:
+            with os.scandir(self.runtime_dir) as entries:
+                for entry in entries:
+                    if entry.name.startswith("install-") and entry.is_dir(follow_symlinks=False):
+                        staging.append(self.runtime_dir / entry.name)
+        except OSError as exc:
+            raise OSError(f"runtime directory cannot be inspected: {self.runtime_dir}") from exc
+        return sorted(staging)
+
+    @staticmethod
+    def _path_exists(path: Path) -> bool:
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return False
+        return True
+
+    def _remove_tree(self, path: Path) -> bool:
+        try:
+            shutil.rmtree(path)
+            if self._path_exists(path):
+                raise OSError("path still exists after removal")
+        except OSError:
+            logger.warning("Failed to remove managed runtime directory %s", path, exc_info=True)
+            return False
+        return True
+
+    def _current_archive_sha256(self) -> str:
+        pointer_path = self.runtime_dir / "current.json"
+        try:
+            pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+            digest = pointer.get("archive_sha256") if isinstance(pointer, dict) else None
+            if not isinstance(digest, str) or not _SHA256_RE.fullmatch(digest):
+                raise ValueError("current pointer archive digest is invalid")
+            return digest
+        except Exception as exc:  # noqa: BLE001
+            raise OSError("current.json is unreadable") from exc
+
+    @staticmethod
+    def _archive_name_is_candidate(name: str) -> bool:
+        return (
+            _safe_metadata_value(name)
+            and Path(name).name == name
+            and not name.endswith(".tmp")
+            and not _MANIFEST_CACHE_RE.fullmatch(name)
+        )
+
+    @staticmethod
+    def _skipped_archive_report(reason: str) -> dict[str, Any]:
+        return {
+            "outcome": "skipped",
+            "removed_count": 0,
+            "removed_bytes": 0,
+            "candidate_count": 0,
+            "candidate_bytes": 0,
+            "failed_count": 0,
+            "skipped_reason": reason,
+        }
+
+    @staticmethod
+    def _archive_report(
+        *,
+        dry_run: bool,
+        candidate_count: int,
+        candidate_bytes: int,
+        removed_count: int,
+        removed_bytes: int,
+        failed_count: int,
+    ) -> dict[str, Any]:
+        report: dict[str, Any] = {
+            "outcome": "partial" if dry_run and candidate_count else "cleaned",
+            "removed_count": removed_count,
+            "removed_bytes": removed_bytes,
+            "candidate_count": candidate_count,
+            "candidate_bytes": candidate_bytes,
+            "failed_count": failed_count,
+            "skipped_reason": None,
+        }
+        if failed_count:
+            report["outcome"] = "partial" if removed_count else "skipped"
+            report["skipped_reason"] = _ARCHIVE_REMOVAL_FAILED
+        return report
+
+    @staticmethod
+    def _sha256_from_fd(fd: int) -> str:
+        digest = hashlib.sha256()
+        with os.fdopen(os.dup(fd), "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _clean_downloaded_archives(
+        self,
+        *,
+        known_archive_names: set[str],
+        protected_sha256s: set[str],
+        dry_run: bool,
+    ) -> dict[str, Any]:
+        downloads_dir = self.runtime_dir / "downloads"
+        try:
+            downloads_info = downloads_dir.lstat()
+        except FileNotFoundError:
+            return self._archive_report(
+                dry_run=dry_run,
+                candidate_count=0,
+                candidate_bytes=0,
+                removed_count=0,
+                removed_bytes=0,
+                failed_count=0,
+            )
+        except OSError as exc:
+            raise OSError("downloads directory cannot be inspected") from exc
+        if _is_reparse_point(downloads_info) or not stat.S_ISDIR(downloads_info.st_mode):
+            raise OSError("downloads directory is a symlink or not a directory")
+
+        mtime_floor = time.time() - _ARCHIVE_MTIME_GUARD_SECONDS
+        candidates: list[tuple[Path, int, str, int]] = []
+        if os.name == "nt":
+            identity = (downloads_info.st_dev, downloads_info.st_ino)
+            try:
+                with os.scandir(downloads_dir) as entries:
+                    names = sorted(entry.name for entry in entries)
+            except OSError as exc:
+                raise OSError("downloads directory cannot be inspected") from exc
+            for name in names:
+                if name not in known_archive_names:
+                    continue
+                path = downloads_dir / name
+                try:
+                    entry_info = path.lstat()
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    raise OSError(f"archive cannot be inspected: {name}") from exc
+                if not _is_exclusive_regular_file(entry_info) or entry_info.st_mtime > mtime_floor:
+                    continue
+                flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+                try:
+                    fd = os.open(path, flags)
+                    try:
+                        opened = os.fstat(fd)
+                        if (opened.st_dev, opened.st_ino) != (entry_info.st_dev, entry_info.st_ino):
+                            raise OSError("archive was replaced during inspection")
+                        archive_sha256 = self._sha256_from_fd(fd)
+                    finally:
+                        os.close(fd)
+                except OSError as exc:
+                    raise OSError(f"archive cannot be inspected: {name}") from exc
+                if archive_sha256 not in protected_sha256s:
+                    candidates.append((path, entry_info.st_size, name, entry_info.st_ino))
+
+            removed_count = 0
+            removed_bytes = 0
+            failed_count = 0
+            if not dry_run:
+                for path, size, _name, inode in candidates:
+                    try:
+                        current_dir = downloads_dir.lstat()
+                        if (
+                            _is_reparse_point(current_dir)
+                            or not stat.S_ISDIR(current_dir.st_mode)
+                            or (current_dir.st_dev, current_dir.st_ino) != identity
+                        ):
+                            raise OSError("downloads directory was replaced")
+                        current = path.lstat()
+                        if current.st_ino != inode or not _is_exclusive_regular_file(current):
+                            raise OSError("archive was replaced after inspection")
+                        path.unlink()
+                    except OSError:
+                        logger.warning("Failed to remove managed runtime archive %s", path, exc_info=True)
+                        failed_count += 1
+                        continue
+                    removed_count += 1
+                    removed_bytes += size
+            return self._archive_report(
+                dry_run=dry_run,
+                candidate_count=len(candidates),
+                candidate_bytes=sum(item[1] for item in candidates),
+                removed_count=removed_count,
+                removed_bytes=removed_bytes,
+                failed_count=failed_count,
+            )
+
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_DIRECTORY", 0)
+        dir_fd = os.open(downloads_dir, flags)
+        try:
+            opened_dir = os.fstat(dir_fd)
+            if (opened_dir.st_dev, opened_dir.st_ino) != (downloads_info.st_dev, downloads_info.st_ino):
+                raise OSError("downloads directory was replaced before scan")
+            with os.scandir(dir_fd) as entries:
+                names = sorted(entry.name for entry in entries)
+            for name in names:
+                if name not in known_archive_names:
+                    continue
+                try:
+                    entry_info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    raise OSError(f"archive cannot be inspected: {name}") from exc
+                if not _is_exclusive_regular_file(entry_info) or entry_info.st_mtime > mtime_floor:
+                    continue
+                file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                file_fd = os.open(name, file_flags, dir_fd=dir_fd)
+                try:
+                    opened_file = os.fstat(file_fd)
+                    if (opened_file.st_dev, opened_file.st_ino) != (
+                        entry_info.st_dev,
+                        entry_info.st_ino,
+                    ):
+                        raise OSError("archive was replaced during inspection")
+                    archive_sha256 = self._sha256_from_fd(file_fd)
+                finally:
+                    os.close(file_fd)
+                if archive_sha256 not in protected_sha256s:
+                    candidates.append((downloads_dir / name, entry_info.st_size, name, entry_info.st_ino))
+
+            removed_count = 0
+            removed_bytes = 0
+            failed_count = 0
+            if not dry_run:
+                for path, size, name, inode in candidates:
+                    try:
+                        current = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+                        if current.st_ino != inode or not _is_exclusive_regular_file(current):
+                            raise OSError("archive was replaced after inspection")
+                        os.unlink(name, dir_fd=dir_fd)
+                    except OSError:
+                        logger.warning("Failed to remove managed runtime archive %s", path, exc_info=True)
+                        failed_count += 1
+                        continue
+                    removed_count += 1
+                    removed_bytes += size
+            return self._archive_report(
+                dry_run=dry_run,
+                candidate_count=len(candidates),
+                candidate_bytes=sum(item[1] for item in candidates),
+                removed_count=removed_count,
+                removed_bytes=removed_bytes,
+                failed_count=failed_count,
+            )
+        finally:
+            os.close(dir_fd)
 
     def _manifest_installable(self, manifest: ManagedRuntimeManifest) -> bool:
         return True

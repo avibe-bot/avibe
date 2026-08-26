@@ -8,6 +8,7 @@ import os
 import shutil
 import stat
 import tarfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -176,6 +177,93 @@ def _resolve_subclass_runtime(manager: ManagedRuntimeManager, runtime_kind: str)
     if runtime_kind == "memory":
         return manager.resolve_python()  # type: ignore[attr-defined]
     return manager.resolve_engine_path()  # type: ignore[attr-defined]
+
+
+def _fixture_runtime_manager(
+    runtime_dir: Path,
+    *,
+    manifest_path: Path | None = None,
+    manifest_url: str | None = None,
+    offline: bool = False,
+) -> FixtureRuntimeManager:
+    return FixtureRuntimeManager(
+        spec=ManagedRuntimeSpec(
+            runtime_id="fixture",
+            manifest_resource="unused.json",
+            version_field="runtime_version",
+            default_bin_path="bin/runtime",
+        ),
+        runtime_dir=runtime_dir,
+        manifest_path=manifest_path,
+        manifest_url=manifest_url,
+        offline=offline,
+    )
+
+
+def _write_fixture_runtime_release(
+    root: Path,
+    manifest_path: Path,
+    *,
+    label: str,
+    version: str,
+    archive_name: str | None = None,
+) -> Path:
+    source_dir = root / "release-sources"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = source_dir / (archive_name or f"fixture-{label}.tar.gz")
+    binary_payload = version.encode("utf-8")
+    with tarfile.open(archive_path, "w:gz") as archive_file:
+        member = tarfile.TarInfo("bin/runtime")
+        member.mode = 0o755
+        member.size = len(binary_payload)
+        archive_file.addfile(member, io.BytesIO(binary_payload))
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "runtime_version": version,
+                "source": "fixture",
+                "archives": {
+                    managed_runtime.runtime_platform_tag(): {
+                        "name": archive_path.name,
+                        "url": archive_path.as_uri(),
+                        "sha256": hashlib.sha256(archive_path.read_bytes()).hexdigest(),
+                        "binary_sha256": hashlib.sha256(binary_payload).hexdigest(),
+                        "size": archive_path.stat().st_size,
+                        "bin_path": "bin/runtime",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return archive_path
+
+
+def _install_fixture_runtime_release(
+    manager: FixtureRuntimeManager,
+    root: Path,
+    manifest_path: Path,
+    *,
+    label: str,
+    version: str,
+    archive_name: str | None = None,
+) -> tuple[Path, Path]:
+    source_archive = _write_fixture_runtime_release(
+        root,
+        manifest_path,
+        label=label,
+        version=version,
+        archive_name=archive_name,
+    )
+    installed = manager.ensure()
+    assert installed["ok"] is True
+    return Path(installed["install_dir"]), manager.runtime_dir / "downloads" / source_archive.name
+
+
+def _age_path(path: Path) -> None:
+    stamp = time.time() - 3600
+    os.utime(path, (stamp, stamp))
 
 
 @pytest.mark.parametrize("runtime_kind", ["git", "memory", "model-hub"])
@@ -906,6 +994,332 @@ def test_clean_retains_current_plus_requested_previous_regardless_of_mtime_rank(
     assert current.is_dir()
     expected_remaining = set(previous) if dry_run else set(previous[:keep_previous])
     assert {path for path in previous if path.is_dir()} == expected_remaining
+
+
+def test_clean_retention_count_is_bounded_by_available_previous(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, current, previous = _retention_fixture(
+        tmp_path,
+        monkeypatch,
+        "git",
+        current_is_newest=False,
+    )
+    shutil.rmtree(previous[1])
+    shutil.rmtree(previous[2])
+
+    result = manager.clean(keep_previous=2)
+
+    assert result["ok"] is True
+    assert result["reason"] is None
+    assert result["removed"] == []
+    assert current.is_dir()
+    assert previous[0].is_dir()
+
+
+def test_clean_reclaims_name_addressed_archives_without_cross_lineage_loss(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    packaged_manifest = tmp_path / "packaged-manifest.json"
+    custom_manifest = tmp_path / "custom-manifest.json"
+    monkeypatch.setattr(managed_runtime.package_resources, "files", lambda _package: tmp_path)
+    packaged_manager = FixtureRuntimeManager(
+        spec=ManagedRuntimeSpec(
+            runtime_id="fixture",
+            manifest_resource=packaged_manifest.name,
+            version_field="runtime_version",
+            default_bin_path="bin/runtime",
+        ),
+        runtime_dir=runtime_dir,
+    )
+    old_packaged, old_packaged_archive = _install_fixture_runtime_release(
+        packaged_manager,
+        tmp_path,
+        packaged_manifest,
+        label="packaged-old",
+        version="packaged-old",
+    )
+    head_packaged, head_packaged_archive = _install_fixture_runtime_release(
+        packaged_manager,
+        tmp_path,
+        packaged_manifest,
+        label="packaged-head",
+        version="packaged-head",
+    )
+    custom_manager = _fixture_runtime_manager(runtime_dir, manifest_path=custom_manifest)
+    current_custom, current_custom_archive = _install_fixture_runtime_release(
+        custom_manager,
+        tmp_path,
+        custom_manifest,
+        label="custom-current",
+        version="custom-current",
+    )
+    for path, mtime in (
+        (old_packaged, 100),
+        (head_packaged, 200),
+        (current_custom, 300),
+    ):
+        os.utime(path, (mtime, mtime))
+    for archive_path in (
+        old_packaged_archive,
+        head_packaged_archive,
+        current_custom_archive,
+    ):
+        _age_path(archive_path)
+
+    preview = custom_manager.clean(keep_previous=0, dry_run=True)
+
+    assert preview["ok"] is True
+    assert preview["reason"] is None
+    assert preview["removed"] == [str(old_packaged)]
+    assert preview["archives"] == {
+        "outcome": "partial",
+        "removed_count": 0,
+        "removed_bytes": 0,
+        "candidate_count": 1,
+        "candidate_bytes": old_packaged_archive.stat().st_size,
+        "failed_count": 0,
+        "skipped_reason": None,
+    }
+
+    result = custom_manager.clean(keep_previous=0)
+
+    assert result["ok"] is True
+    assert result["reason"] is None
+    assert result["removed"] == [str(old_packaged)]
+    assert not old_packaged.exists()
+    assert not old_packaged_archive.exists()
+    assert head_packaged.is_dir() and head_packaged_archive.is_file()
+    assert current_custom.is_dir() and current_custom_archive.is_file()
+    assert result["archives"]["outcome"] == "cleaned"
+    assert result["archives"]["candidate_count"] == 1
+    assert result["archives"]["removed_count"] == 1
+    assert result["archives"]["removed_bytes"] == result["archives"]["candidate_bytes"]
+
+
+def test_clean_preserves_remote_manifest_cache_for_offline_resolution(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    manifest_path = tmp_path / "remote-manifest.json"
+    source_archive = _write_fixture_runtime_release(
+        tmp_path,
+        manifest_path,
+        label="current",
+        version="current",
+    )
+    manifest_url = manifest_path.as_uri()
+    online = _fixture_runtime_manager(runtime_dir, manifest_url=manifest_url)
+    installed = online.ensure()
+    assert installed["ok"] is True
+    cached_archive = runtime_dir / "downloads" / source_archive.name
+    manifest_caches = list((runtime_dir / "downloads").glob("manifest-*.json"))
+    assert len(manifest_caches) == 1
+    _age_path(cached_archive)
+    _age_path(manifest_caches[0])
+
+    result = online.clean(keep_previous=0)
+
+    assert result["ok"] is True
+    assert cached_archive.is_file()
+    assert manifest_caches[0].is_file()
+    manifest_path.unlink()
+    source_archive.unlink()
+    offline = _fixture_runtime_manager(runtime_dir, manifest_url=manifest_url, offline=True)
+    reused = offline.ensure()
+    assert reused["ok"] is True
+    assert reused["changed"] is False
+    assert Path(reused["install_dir"]) == Path(installed["install_dir"])
+
+
+def test_clean_archive_candidates_require_known_shape_maturity_and_unprotected_digest(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    manifest_path = tmp_path / "manifest.json"
+    manager = _fixture_runtime_manager(runtime_dir, manifest_path=manifest_path)
+    installed: dict[str, tuple[Path, Path]] = {}
+    releases = (
+        ("symlink", "symlink", None),
+        ("directory", "directory", None),
+        ("stale", "stale", None),
+        ("recent", "recent", None),
+        ("tmp", "tmp", "fixture-known.tmp"),
+        ("newline", "newline", "fixture-known.tgz\n"),
+        ("current", "current", None),
+    )
+    for index, (label, version, archive_name) in enumerate(releases, start=1):
+        installed[label] = _install_fixture_runtime_release(
+            manager,
+            tmp_path,
+            manifest_path,
+            label=label,
+            version=version,
+            archive_name=archive_name,
+        )
+        install_dir, _cache_path = installed[label]
+        os.utime(install_dir, (index * 100, index * 100))
+
+    outside = tmp_path / "outside-archive"
+    outside.write_bytes(b"outside")
+    symlink_cache = installed["symlink"][1]
+    symlink_cache.unlink()
+    symlink_cache.symlink_to(outside)
+    directory_cache = installed["directory"][1]
+    directory_cache.unlink()
+    directory_cache.mkdir()
+    stale_cache = installed["stale"][1]
+    _age_path(stale_cache)
+    tmp_cache = installed["tmp"][1]
+    _age_path(tmp_cache)
+    newline_cache = installed["newline"][1]
+    _age_path(newline_cache)
+    current_cache = installed["current"][1]
+    _age_path(current_cache)
+    unknown_cache = runtime_dir / "downloads" / "unknown-archive.tar.gz"
+    unknown_cache.write_bytes(b"unknown")
+    _age_path(unknown_cache)
+
+    result = manager.clean(keep_previous=0)
+
+    assert result["ok"] is True
+    assert result["archives"]["candidate_count"] == 1
+    assert result["archives"]["removed_count"] == 1
+    assert not stale_cache.exists()
+    assert installed["recent"][1].is_file()
+    assert symlink_cache.is_symlink() and outside.read_bytes() == b"outside"
+    assert directory_cache.is_dir()
+    assert tmp_cache.is_file()
+    assert newline_cache.is_file()
+    assert unknown_cache.is_file()
+    assert current_cache.is_file()
+
+
+def test_clean_fails_closed_for_unreadable_retained_archive_metadata(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    manifest_path = tmp_path / "manifest.json"
+    manager = _fixture_runtime_manager(runtime_dir, manifest_path=manifest_path)
+    rollback, rollback_archive = _install_fixture_runtime_release(
+        manager,
+        tmp_path,
+        manifest_path,
+        label="rollback",
+        version="rollback",
+    )
+    current, current_archive = _install_fixture_runtime_release(
+        manager,
+        tmp_path,
+        manifest_path,
+        label="current",
+        version="current",
+    )
+    rollback_metadata = rollback / manager.spec.metadata_filename
+    rollback_metadata.write_text("{", encoding="utf-8")
+    for archive_path in (rollback_archive, current_archive):
+        _age_path(archive_path)
+
+    result = manager.clean(keep_previous=1)
+
+    assert result["ok"] is False
+    assert result["reason"] == "fixture_clean_inspection_failed"
+    assert result["removed"] == []
+    assert result["archives"]["skipped_reason"] == "archive_inspection_failed"
+    assert rollback.is_dir() and rollback_archive.is_file()
+    assert current.is_dir() and current_archive.is_file()
+
+
+def test_clean_does_not_report_an_install_directory_that_removal_did_not_reclaim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    manifest_path = tmp_path / "manifest.json"
+    manager = _fixture_runtime_manager(runtime_dir, manifest_path=manifest_path)
+    stale, stale_archive = _install_fixture_runtime_release(
+        manager,
+        tmp_path,
+        manifest_path,
+        label="stale",
+        version="stale",
+    )
+    current, _current_archive = _install_fixture_runtime_release(
+        manager,
+        tmp_path,
+        manifest_path,
+        label="current",
+        version="current",
+    )
+    os.utime(stale, (100, 100))
+    os.utime(current, (200, 200))
+    _age_path(stale_archive)
+    real_rmtree = shutil.rmtree
+
+    def _refuse_one_target(path, *args, **kwargs):
+        if Path(path) == stale:
+            raise OSError("target is in use")
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", _refuse_one_target)
+    result = manager.clean(keep_previous=0)
+
+    assert result["ok"] is False
+    assert result["reason"] == "fixture_clean_removal_failed"
+    assert str(stale) not in result["removed"]
+    assert stale.is_dir()
+    assert stale_archive.is_file()
+    assert result["archives"]["candidate_count"] == 0
+
+
+def test_clean_archive_removal_failure_uses_shared_failure_and_archive_vocabulary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    manifest_path = tmp_path / "manifest.json"
+    manager = _fixture_runtime_manager(runtime_dir, manifest_path=manifest_path)
+    stale, stale_archive = _install_fixture_runtime_release(
+        manager,
+        tmp_path,
+        manifest_path,
+        label="stale",
+        version="stale",
+    )
+    current, _current_archive = _install_fixture_runtime_release(
+        manager,
+        tmp_path,
+        manifest_path,
+        label="current",
+        version="current",
+    )
+    os.utime(stale, (100, 100))
+    os.utime(current, (200, 200))
+    _age_path(stale_archive)
+    real_unlink = os.unlink
+
+    def _refuse_archive(path, *args, **kwargs):
+        if path == stale_archive.name and kwargs.get("dir_fd") is not None:
+            raise OSError("archive is in use")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", _refuse_archive)
+    result = manager.clean(keep_previous=0)
+
+    assert result["ok"] is False
+    assert result["reason"] == "fixture_clean_removal_failed"
+    assert result["removed"] == [str(stale)]
+    assert not stale.exists()
+    assert stale_archive.is_file()
+    assert result["archives"]["outcome"] == "skipped"
+    assert result["archives"]["candidate_count"] == 1
+    assert result["archives"]["removed_count"] == 0
+    assert result["archives"]["removed_bytes"] == 0
+    assert result["archives"]["failed_count"] == 1
+    assert result["archives"]["skipped_reason"] == "archive_removal_failed"
 
 
 @pytest.mark.parametrize(
