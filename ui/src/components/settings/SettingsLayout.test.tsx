@@ -103,16 +103,21 @@ afterEach(() => {
 });
 
 describe('SettingsLayout', () => {
-  it('keeps the mobile shell constrained so the route pane owns vertical scrolling', () => {
+  it('keeps the settings rail fixed while the route pane owns vertical scrolling', () => {
     renderLayout('/settings/replies');
 
     const routePane = screen.getByText('replies-body').closest('section');
     const shell = routePane?.parentElement?.parentElement;
+    const navigation = screen.getByRole('navigation', { name: 'settings.navigationLabel' });
 
     expect(routePane?.className).toContain('overflow-y-auto');
+    expect(navigation.className).not.toContain('overflow-y-auto');
+    expect(navigation.firstElementChild?.className).toContain('overflow-y-auto');
     expect(shell?.className).toContain('h-full');
     expect(shell?.className).toContain('min-h-0');
-    expect(shell?.className).toContain('md:h-auto');
+    expect(shell?.className).toContain('overflow-hidden');
+    expect(shell?.className).toContain('md:h-[var(--app-shell-h)]');
+    expect(shell?.className).not.toContain('md:h-auto');
     expect(shell?.className).not.toContain('min-h-full');
   });
 
