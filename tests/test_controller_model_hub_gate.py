@@ -66,11 +66,14 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
     monkeypatch.setattr(agent_model_hub, "ModelHubRuntimeRouter", Router)
     presence_probes = []
 
-    def resolve_cli_path(binary, *, include_npm_global=True):
-        presence_probes.append((binary, include_npm_global))
-        return f"/usr/bin/{binary}" if binary == "codex" else None
+    def resolve_cli_paths(binaries, *, include_npm_global=True):
+        presence_probes.append((binaries, include_npm_global))
+        return {
+            binary: f"/usr/bin/{binary}" if binary == "codex" else None
+            for binary in binaries
+        }
 
-    monkeypatch.setattr(api, "resolve_cli_path", resolve_cli_path)
+    monkeypatch.setattr(api, "resolve_cli_paths", resolve_cli_paths)
     controller = Controller.__new__(Controller)
     controller.config = SimpleNamespace(language="zh")
     controller.vibe_agent_store = SimpleNamespace(
@@ -90,11 +93,7 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
     assert captured["requested_model_override"]("claude") is None
     assert captured["cli_present_override"]("codex") is True
     assert captured["cli_present_override"]("claude") is False
-    assert presence_probes == [
-        ("claude", False),
-        ("codex", False),
-        ("opencode", False),
-    ]
+    assert presence_probes == [(["claude", "codex", "opencode"], True)]
     assert controller.model_hub_turn_gateway.language_provider() == "zh"
     assert calls == [
         ("gateway", service, controller.model_hub_turn_gateway.language_provider),

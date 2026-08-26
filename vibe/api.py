@@ -237,6 +237,16 @@ def _npm_global_binary_candidates(binary: str) -> list[Path]:
     if not binary or binary == "npm":
         return []
 
+    candidates: list[Path] = []
+    for prefix_path in _npm_global_prefixes():
+        for candidate in _npm_binary_candidates_for_prefix(prefix_path, binary):
+            if candidate not in candidates:
+                candidates.append(candidate)
+
+    return candidates
+
+
+def _npm_global_prefixes() -> list[Path]:
     npm_paths: list[Path] = []
     for candidate in _candidate_cli_paths("npm"):
         if _is_executable_file(candidate) and candidate not in npm_paths:
@@ -248,17 +258,13 @@ def _npm_global_binary_candidates(binary: str) -> list[Path]:
         if npm_candidate not in npm_paths:
             npm_paths.append(npm_candidate)
 
-    candidates: list[Path] = []
+    prefixes: list[Path] = []
     for npm_path in npm_paths:
         prefix_path = _npm_prefix_for(npm_path)
-        if prefix_path is None:
-            continue
+        if prefix_path is not None and prefix_path not in prefixes:
+            prefixes.append(prefix_path)
 
-        for candidate in _npm_binary_candidates_for_prefix(prefix_path, binary):
-            if candidate not in candidates:
-                candidates.append(candidate)
-
-    return candidates
+    return prefixes
 
 
 def _npm_prefix_for(npm_path: str | Path) -> Path | None:
@@ -423,6 +429,53 @@ def resolve_cli_path(
                 )
                 return fallback
     return None
+
+
+def resolve_cli_paths(
+    binaries: list[str],
+    *,
+    include_npm_global: bool = True,
+) -> dict[str, str | None]:
+    """Resolve a CLI batch while querying each npm installation only once."""
+
+    resolved = {
+        binary: resolve_cli_path(binary, include_npm_global=False)
+        for binary in binaries
+    }
+    if not include_npm_global or all(path is not None for path in resolved.values()):
+        return resolved
+
+    prefixes = _npm_global_prefixes()
+    for binary, path in resolved.items():
+        if path is not None or not binary:
+            continue
+        expanded = Path(os.path.expanduser(binary))
+        has_path_separator = os.sep in binary or (
+            os.altsep is not None and os.altsep in binary
+        )
+        lookup_name = (
+            expanded.name if expanded.is_absolute() or has_path_separator else binary
+        )
+        for prefix in prefixes:
+            npm_path = next(
+                (
+                    str(candidate)
+                    for candidate in _npm_binary_candidates_for_prefix(prefix, lookup_name)
+                    if _is_executable_file(candidate)
+                ),
+                None,
+            )
+            if npm_path is None:
+                continue
+            resolved[binary] = npm_path
+            if lookup_name != binary:
+                logger.info(
+                    "resolve_cli_paths: stored path %s missing; falling back to %s",
+                    binary,
+                    npm_path,
+                )
+            break
+    return resolved
 
 
 def _command_env_for(binary_path: str | None) -> dict[str, str]:

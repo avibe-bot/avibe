@@ -430,7 +430,7 @@ class Controller:
         from core.handlers.model_hub import create_default_service
         from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
         from modules.agents.model_hub import ModelHubRuntimeRouter
-        from vibe.api import resolve_cli_path
+        from vibe.api import resolve_cli_paths
 
         def default_vibe_agent_model(backend: str) -> Optional[str]:
             agent = self.vibe_agent_store.get_default_agent()
@@ -467,26 +467,30 @@ class Controller:
             except Exception:
                 logger.warning("Model Hub CLI config probe failed", exc_info=True)
                 v2_config = None
-            refreshed: dict[str, bool] = {}
+            configured_paths: dict[str, str] = {}
             for backend in ("claude", "codex", "opencode"):
                 backend_config = getattr(getattr(v2_config, "agents", None), backend, None)
-                configured_path = getattr(backend_config, "cli_path", None) or backend
-                try:
-                    refreshed[backend] = (
-                        resolve_cli_path(
-                            str(configured_path),
-                            include_npm_global=include_npm_global,
-                        )
-                        is not None
-                    )
-                except Exception:
-                    logger.warning("Model Hub CLI presence probe failed for %s", backend, exc_info=True)
-                    refreshed[backend] = False
+                configured_paths[backend] = str(
+                    getattr(backend_config, "cli_path", None) or backend
+                )
+            try:
+                resolved_paths = resolve_cli_paths(
+                    list(configured_paths.values()),
+                    include_npm_global=include_npm_global,
+                )
+            except Exception:
+                logger.warning("Model Hub CLI presence probe failed", exc_info=True)
+                resolved_paths = {}
+            refreshed = {
+                backend: resolved_paths.get(configured_path) is not None
+                for backend, configured_path in configured_paths.items()
+            }
             cli_presence = refreshed
 
-        # Seed the snapshot from bounded filesystem/PATH checks. Deeper npm
-        # discovery is refreshed off the request path by the RPC owner.
-        refresh_cli_presence(False)
+        # Seed the complete snapshot before the internal RPC surface exists.
+        # Batch resolution shares npm prefix discovery across all backends, so
+        # the first UI read is both accurate and free of subprocess work.
+        refresh_cli_presence(True)
 
         self.model_hub_service = create_default_service(
             requested_model_override=default_vibe_agent_model,

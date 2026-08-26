@@ -1586,6 +1586,48 @@ def test_detect_cli_finds_codex_in_npm_global_prefix(monkeypatch, tmp_path, only
     assert result["path"] == str(codex_path)
 
 
+def test_resolve_cli_paths_queries_npm_prefix_once_for_a_backend_batch(
+    monkeypatch,
+    tmp_path,
+    only_tmp_binaries,
+):
+    npm_path = tmp_path / "tools" / "npm"
+    npm_path.parent.mkdir(parents=True, exist_ok=True)
+    npm_path.write_text("#!/bin/sh\n")
+    npm_path.chmod(0o755)
+
+    prefix_path = tmp_path / ".npm-global"
+    expected = {}
+    for binary in ("claude", "codex", "opencode"):
+        path = prefix_path / "bin" / binary
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/bin/sh\n")
+        path.chmod(0o755)
+        expected[binary] = str(path)
+
+    calls = []
+
+    class CompletedProcess:
+        returncode = 0
+        stdout = f"{prefix_path}\n"
+        stderr = ""
+
+    def fake_run(cmd, **_kwargs):
+        calls.append(cmd)
+        return CompletedProcess()
+
+    monkeypatch.setattr(api.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(
+        api.shutil,
+        "which",
+        lambda binary: str(npm_path) if binary == "npm" else None,
+    )
+    monkeypatch.setattr(api.subprocess, "run", fake_run)
+
+    assert api.resolve_cli_paths(list(expected)) == expected
+    assert calls == [[str(npm_path), "config", "get", "prefix"]]
+
+
 def test_install_agent_returns_resolved_path(monkeypatch):
     class CompletedProcess:
         returncode = 0
