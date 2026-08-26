@@ -1152,6 +1152,28 @@ describe('SourceDetailPanel', () => {
     expect(touch).toMatch(/\.model-hub-source-tier-reveal \{ display: none; \}/);
   });
 
+  // The reveal is a paint, so what a tap has to find cannot be part of it: the
+  // cell owns the row's band whatever it is drawing, which is what lets the pill
+  // be removed on touch and lets a model with no tiers still be a target at all.
+  it('gives the tier cell the row band to be tapped in, whichever branch is drawing', () => {
+    const css = readFileSync(join(process.cwd(), 'src/components/settings/models/modelHubSurface.css'), 'utf8');
+    const base = css.slice(0, css.indexOf('@media (hover: hover)'));
+    expect(base).toMatch(/\.model-hub-source-tier-cell \{\s*min-height: calc\(var\(--model-hub-source-table-row-height\) - 2 \* var\(--model-hub-source-table-padding-y\)\);\s*\}/);
+    const pointer = css.slice(css.indexOf('@media (hover: hover)'), css.indexOf('@media (hover: none)'));
+    const touch = css.slice(css.indexOf('@media (hover: none)'), css.indexOf('.model-hub-source-tier-empty'));
+    for (const branch of [pointer, touch]) expect(branch).not.toMatch(/height/);
+
+    // And the class is on the control the tap opens, for a model with tiers and
+    // for one without — CSS nobody wears is not a hit area.
+    renderProtocol('openai_responses', [
+      source.models[0],
+      { id: 'model-b', display_name: null, origin: 'discovered', reasoning_efforts: [] },
+    ]);
+    for (const name of [/high/i, /No tiers set|未设置档位/i]) {
+      expect(screen.getByRole('button', { name }).className).toContain('model-hub-source-tier-cell');
+    }
+  });
+
   it('explains standby beside the label rather than in a place the reader must find', async () => {
     renderPanel([]);
     expect(screen.getByText(/^Standby$|^备用$/i)).toBeTruthy();

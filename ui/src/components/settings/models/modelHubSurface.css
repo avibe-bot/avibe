@@ -1024,12 +1024,20 @@
   font-size: var(--model-hub-source-tier-size);
   line-height: 15px;
 }
+/* The cell is the way into the editor, so its box is the row's band rather than
+   whatever its contents happen to measure — a model with no tiers offers only a
+   10.5px caption, and a touch device is shown no pill at all. Owned here, once,
+   outside both hover branches: the target a tap has to find cannot be decided by
+   what the row is currently drawing. */
+.model-hub-source-tier-cell {
+  min-height: calc(var(--model-hub-source-table-row-height) - 2 * var(--model-hub-source-table-padding-y));
+}
 /* The row's add affordance is drawn only while a pointer is on the row. It keeps
    the box it reserves either way, so revealing it moves no chip and changes no
    row height — the row answers a hover with fill alone. A keyboard reaches the
    cell by focus and gets the same reveal; a touch device has no hover to answer
-   with, so the pill is removed there rather than left as a blank gap, and the
-   cell itself stays the tappable way into the editor. */
+   with, so the pill is removed there rather than left as a blank gap, which the
+   cell can afford because the tappable box is the cell's own, not the pill's. */
 @media (hover: hover) {
   .model-hub-source-table-row:hover { background: var(--model-hub-wash-0a); }
   .model-hub-source-tier-reveal { opacity: 0; transition: opacity 120ms ease; }
