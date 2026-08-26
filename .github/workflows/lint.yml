@@ -145,7 +145,12 @@ jobs:
         with:
           version: "0.9.18"
           enable-cache: true
-          cache-dependency-glob: scripts/memory_runtime/uv.lock
+          cache-dependency-glob: |
+            uv.lock
+            scripts/memory_runtime/uv.lock
+
+      - name: Provision Avibe controller dependencies
+        run: uv sync --frozen --no-install-project
 
       - name: Provision pinned Memory Runtime
         run: uv sync --frozen --project scripts/memory_runtime
@@ -156,10 +161,7 @@ jobs:
         run: |
           set -o pipefail
           output="$RUNNER_TEMP/memory-insight-contract.log"
-          uv run --frozen --project scripts/memory_runtime \
-            --with 'pytest==9.0.3' --with 'pytest-asyncio==1.4.0' \
-            --with 'ijson==3.5.1' \
-            python -m pytest \
+          uv run --no-sync python -m pytest \
             tests/test_memory_wake.py::test_pinned_everos_runtime_wakes_through_production_sidecar \
             -ra | tee "$output"
           if grep -Eq '(^|[[:space:]])[0-9]+ skipped|SKIPPED' "$output"; then

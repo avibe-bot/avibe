@@ -26,8 +26,6 @@ from typing import Any, BinaryIO, Deque, Literal, Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
 import httpx
-import ijson
-from ijson.backends import python as ijson_python
 
 from core.memory.types import (
     CaptureAttachment,
@@ -76,6 +74,8 @@ _PROCESSING_TIMEOUT_SECONDS = PROCESSING_PROBE_REQUEST_TIMEOUT_SECONDS
 _PREFLIGHT_TIMEOUT_SECONDS = 30.0
 _RESPONSE_STREAM_CHUNK_BYTES = 64 * 1024
 _MIN_RESPONSE_SPOOL_FREE_BYTES = 512 * 1024 * 1024
+_RESPONSE_SPOOL_UNLINK_ATTEMPTS = 20
+_RESPONSE_SPOOL_UNLINK_DELAY_SECONDS = 0.05
 _CHAT_PROBE_MAX_TOKENS = 8
 _CHAT_PROBE_TERMINAL_FINISH_REASONS = frozenset(
     {"stop", "length", "content_filter", "tool_calls", "function_call"}
@@ -719,7 +719,6 @@ class EverOSPort:
                             schema=_WRITE_RESPONSE_SCHEMA,
                         )
                     except (
-                        ijson.JSONError,
                         OverflowError,
                         TypeError,
                         UnicodeError,
@@ -1217,7 +1216,6 @@ class EverOSPort:
             logger.warning("EverOS sidecar timeout route=%s latency_ms=%s", route, _elapsed_ms(started))
             raise MemoryProviderFailure("memory_provider_timeout") from exc
         except (
-            ijson.JSONError,
             OverflowError,
             TypeError,
             UnicodeError,
@@ -1271,7 +1269,6 @@ class EverOSPort:
         except (
             asyncio.TimeoutError,
             httpx.HTTPError,
-            ijson.JSONError,
             MemoryProviderFailure,
             OSError,
             OverflowError,
@@ -1333,7 +1330,6 @@ class EverOSPort:
                             schema=response_schema,
                         )
                     except (
-                        ijson.JSONError,
                         OverflowError,
                         TypeError,
                         UnicodeError,
@@ -1410,10 +1406,27 @@ async def _read_json_response(
             timeout=remaining,
         )
     finally:
+        await _remove_response_spool(path)
+
+
+async def _remove_response_spool(path: str) -> None:
+    if not path:
+        return
+    for attempt in range(_RESPONSE_SPOOL_UNLINK_ATTEMPTS):
         try:
             os.unlink(path)
+            return
         except FileNotFoundError:
-            pass
+            return
+        except PermissionError:
+            if attempt + 1 < _RESPONSE_SPOOL_UNLINK_ATTEMPTS:
+                await asyncio.sleep(_RESPONSE_SPOOL_UNLINK_DELAY_SECONDS)
+                continue
+            logger.warning("Memory response spool cleanup remained blocked")
+            return
+        except OSError:
+            logger.warning("Memory response spool cleanup failed")
+            return
 
 
 async def _discard_response(
@@ -1479,23 +1492,29 @@ async def _parse_spooled_json_async(
             raise ValueError(value)
         return value
     except (asyncio.TimeoutError, asyncio.CancelledError):
-        _terminate_json_parse_pool()
+        await asyncio.to_thread(_terminate_json_parse_pool, pool)
         raise
     except BrokenProcessPool:
-        _terminate_json_parse_pool()
+        await asyncio.to_thread(_terminate_json_parse_pool, pool)
         raise
 
 
-def _terminate_json_parse_pool() -> None:
+def _terminate_json_parse_pool(
+    pool: concurrent.futures.ProcessPoolExecutor | None = None,
+) -> None:
     global _JSON_PARSE_POOL
     with _JSON_PARSE_POOL_LOCK:
-        pool = _JSON_PARSE_POOL
-        _JSON_PARSE_POOL = None
-    if pool is None:
+        target = pool if pool is not None else _JSON_PARSE_POOL
+        if _JSON_PARSE_POOL is target:
+            _JSON_PARSE_POOL = None
+    if target is None:
         return
-    for process in (getattr(pool, "_processes", None) or {}).values():
+    processes = tuple((getattr(target, "_processes", None) or {}).values())
+    for process in processes:
         process.terminate()
-    pool.shutdown(wait=False, cancel_futures=True)
+    for process in processes:
+        process.join()
+    target.shutdown(wait=True, cancel_futures=True)
 
 
 def _parse_spooled_json_path(path: str, schema: _JSONSchema) -> tuple[bool, Any]:
@@ -1526,10 +1545,18 @@ def _is_profile_response_schema(schema: _JSONSchema) -> bool:
 
 
 def _parse_spooled_json(spool: BinaryIO, schema: _JSONSchema) -> Any:
+    # The managed EverOS child imports this module from the Avibe source tree,
+    # but response projection runs only in the main Avibe environment.
+    from ijson import JSONError
+    from ijson.backends import python as ijson_python
+
     spool.seek(0)
     parser = _ProjectedJSONParser(schema)
-    for event, value in ijson_python.basic_parse(spool, use_float=True):
-        parser.event(event, value)
+    try:
+        for event, value in ijson_python.basic_parse(spool, use_float=True):
+            parser.event(event, value)
+    except JSONError as exc:
+        raise ValueError("invalid JSON response") from exc
     return parser.finish()
 
 

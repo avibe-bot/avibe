@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import importlib.metadata
-import importlib.util
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -97,17 +96,24 @@ async def test_pinned_everos_runtime_wakes_through_production_sidecar(
     """MEMORY-WAKE-001: the pinned wheel satisfies production Wake and health."""
 
     required = os.environ.get("AVIBE_REQUIRE_MEMORY_RUNTIME_CONTRACT") == "1"
-    if importlib.util.find_spec("everos") is None:
-        if required:
-            pytest.fail("managed EverOS runtime is required for this contract")
-        pytest.skip("managed EverOS runtime is not installed")
-    assert importlib.metadata.version("everos") == EVEROS_VERSION
-
     runtime_python = Path.cwd() / "scripts" / "memory_runtime" / ".venv" / "bin" / "python"
     if not runtime_python.is_file():
         if required:
             pytest.fail("provisioned Memory runtime interpreter is missing")
         pytest.skip("provisioned Memory runtime interpreter is missing")
+    runtime_check = subprocess.run(
+        [
+            str(runtime_python),
+            "-c",
+            (
+                "from importlib.metadata import version; "
+                f"assert version('everos') == '{EVEROS_VERSION}'"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert runtime_check.returncode == 0, runtime_check.stderr
     monkeypatch.setenv("AVIBE_MEMORY_DEV_RUNTIME", str(runtime_python))
     with tempfile.TemporaryDirectory(prefix="avw-", dir="/tmp") as temporary:
         effective_home = Path(temporary).resolve()

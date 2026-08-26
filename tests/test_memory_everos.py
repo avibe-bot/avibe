@@ -6,7 +6,9 @@ import concurrent.futures
 import hashlib
 import io
 import json
+import subprocess
 import struct
+import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -62,6 +64,30 @@ SESSION_REF = ProviderSessionRef(
     session_id="src--one--e1",
 )
 WIRE_SESSION_ID = "src--one--e1"
+
+
+def test_everos_module_import_does_not_require_controller_json_parser() -> None:
+    script = """
+import builtins
+
+real_import = builtins.__import__
+
+def guarded_import(name, *args, **kwargs):
+    if name == "ijson" or name.startswith("ijson."):
+        raise ModuleNotFoundError(name)
+    return real_import(name, *args, **kwargs)
+
+builtins.__import__ = guarded_import
+import core.memory.everos
+"""
+
+    subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 def test_attachment_rejection_no_write_proof_matches_pinned_everos_version() -> None:
@@ -1515,6 +1541,35 @@ def test_response_spool_preserves_temporary_filesystem_free_space(
     assert not created_paths[0].exists()
 
 
+def test_response_spool_cleanup_retries_windows_handle_release_without_masking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[str] = []
+
+    def unlink(path: str) -> None:
+        attempts.append(path)
+        if len(attempts) == 1:
+            raise PermissionError("worker still holds the spool")
+
+    sleep = AsyncMock()
+    monkeypatch.setattr(memory_everos.os, "unlink", unlink)
+    monkeypatch.setattr(memory_everos.asyncio, "sleep", sleep)
+
+    async def run() -> None:
+        try:
+            raise asyncio.TimeoutError
+        finally:
+            await memory_everos._remove_response_spool("provider-response.json")
+
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(run())
+
+    assert attempts == ["provider-response.json", "provider-response.json"]
+    sleep.assert_awaited_once_with(
+        memory_everos._RESPONSE_SPOOL_UNLINK_DELAY_SECONDS
+    )
+
+
 def test_profile_skips_large_irrelevant_root_field_during_projection() -> None:
     payload = json.dumps(
         {
@@ -1629,7 +1684,7 @@ def test_cancelled_json_parse_terminates_worker_pool(
             return self.future
 
         def shutdown(self, *, wait: bool, cancel_futures: bool) -> None:
-            assert wait is False
+            assert wait is True
             assert cancel_futures is True
             self.shutdown_called = True
 
@@ -1654,6 +1709,30 @@ def test_cancelled_json_parse_terminates_worker_pool(
 
     assert executor.shutdown_called
     assert memory_everos._JSON_PARSE_POOL is None
+
+
+def test_stale_parser_pool_termination_preserves_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Executor:
+        def __init__(self) -> None:
+            self._processes = {}
+            self.shutdown_called = False
+
+        def shutdown(self, *, wait: bool, cancel_futures: bool) -> None:
+            assert wait is True
+            assert cancel_futures is True
+            self.shutdown_called = True
+
+    old = Executor()
+    replacement = Executor()
+    monkeypatch.setattr(memory_everos, "_JSON_PARSE_POOL", replacement)
+
+    memory_everos._terminate_json_parse_pool(old)
+
+    assert old.shutdown_called
+    assert not replacement.shutdown_called
+    assert memory_everos._JSON_PARSE_POOL is replacement
 
 
 def test_search_projects_content_only_episode() -> None:
