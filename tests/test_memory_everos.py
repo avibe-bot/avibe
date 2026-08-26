@@ -269,6 +269,44 @@ def test_add_and_flush_are_separate_and_parse_provider_envelopes() -> None:
     ]
 
 
+def test_sidecar_request_streams_large_json_without_materializing_encoded_copy() -> None:
+    query = "large profile context \n \u8d44\u6599\U0001f9e0" * (128 * 1024)
+    streamed_sizes: list[int] = []
+    streamed_body = bytearray()
+
+    class RecordingTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(
+            self,
+            request: httpx.Request,
+        ) -> httpx.Response:
+            assert request.headers["content-type"] == "application/json"
+            async for chunk in request.stream:
+                streamed_sizes.append(len(chunk))
+                streamed_body.extend(chunk)
+            return httpx.Response(
+                200,
+                json={"data": {"episodes": [], "profiles": []}},
+            )
+
+    async def run():
+        return await EverOSPort(Path("/tmp/everos.sock")).search(
+            PRINCIPAL,
+            PROJECT,
+            query,
+            1,
+        )
+
+    with patch(
+        "core.memory.everos.httpx.AsyncHTTPTransport",
+        return_value=RecordingTransport(),
+    ):
+        assert asyncio.run(run()) == ()
+
+    assert len(streamed_body) > 2 * 1024 * 1024
+    assert max(streamed_sizes) <= memory_everos._REQUEST_STREAM_CHUNK_BYTES
+    assert json.loads(streamed_body)["query"] == query
+
+
 def test_provider_capture_has_one_canonical_session_identity() -> None:
     capture = ProviderCapture(SESSION_REF, "capture", 1)
     scope_key = b"s" * 32

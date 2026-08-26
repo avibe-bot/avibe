@@ -553,6 +553,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         controller.reserve_memory_attachment_capture.assert_called_once_with(
             context,
             "base-session",
+            "remember this",
         )
         lease.retain.assert_called_once_with()
         retained_lease.release.assert_called_once_with()

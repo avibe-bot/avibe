@@ -207,6 +207,66 @@ def test_agentic_deadline_projection_returns_allowlisted_round_header() -> None:
     assert all(b"private query" not in value for value in headers.values())
 
 
+def test_agentic_deadline_projection_spools_large_response_before_replay() -> None:
+    response_body = b"x" * (2 * 1024 * 1024 + 1)
+    sent: list[dict] = []
+    request_messages = [
+        {
+            "type": "http.request",
+            "body": _agentic_search_body(),
+            "more_body": False,
+        }
+    ]
+
+    async def receive():
+        if request_messages:
+            return request_messages.pop(0)
+        return {"type": "http.disconnect"}
+
+    async def capture(message):
+        sent.append(message)
+
+    async def downstream(_scope, downstream_receive, send):
+        assert (await downstream_receive())["body"] == _agentic_search_body()
+        round_state = sidecar._AGENTIC_ROUND_STATE.get()
+        assert round_state is not None
+        round_state["round"] = "round1"
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"application/json")],
+            }
+        )
+        await send({"type": "http.response.body", "body": response_body})
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/api/v2/memory/search",
+        "headers": [
+            (sidecar._AGENTIC_TIMEOUT_HEADER.lower().encode(), b"1"),
+        ],
+    }
+    asyncio.run(
+        sidecar._AgenticDeadlineProjection(downstream)(scope, receive, capture)
+    )
+
+    assert sent[0]["type"] == "http.response.start"
+    headers = dict(sent[0]["headers"])
+    assert headers[sidecar._AGENTIC_ROUND_HEADER.lower().encode()] == b"round1"
+    body_messages = [
+        message for message in sent if message["type"] == "http.response.body"
+    ]
+    assert max(len(message.get("body", b"")) for message in body_messages) <= (
+        sidecar._SPOOL_REPLAY_CHUNK_BYTES
+    )
+    assert b"".join(message.get("body", b"") for message in body_messages) == (
+        response_body
+    )
+    assert body_messages[-1].get("more_body", False) is False
+
+
 def test_sidecar_rejects_artifact_before_everos_can_persist_diagnostics(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -381,6 +441,53 @@ def test_sidecar_streams_large_request_guard_through_disk_spool(
     assert max(loaded_json_bytes) < 1024
     assert sent[0]["status"] == 200
     assert not hasattr(sidecar, "_buffer_request")
+
+
+def test_sidecar_preserves_temporary_disk_reserve_while_spooling_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    downstream_called = False
+    sent: list[dict] = []
+    request_messages = [
+        {
+            "type": "http.request",
+            "body": _agentic_search_body(),
+            "more_body": False,
+        }
+    ]
+
+    async def receive():
+        if request_messages:
+            return request_messages.pop(0)
+        return {"type": "http.disconnect"}
+
+    async def capture(message):
+        sent.append(message)
+
+    async def downstream(_scope, _receive, _send):
+        nonlocal downstream_called
+        downstream_called = True
+
+    monkeypatch.setattr(
+        sidecar.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=sidecar._MIN_SPOOL_FREE_BYTES),
+    )
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/api/v2/memory/search",
+        "headers": [],
+    }
+    asyncio.run(
+        sidecar._AgenticDeadlineProjection(downstream)(scope, receive, capture)
+    )
+
+    assert downstream_called is False
+    assert sent[0]["status"] == 507
+    assert json.loads(sent[1]["body"]) == {
+        "detail": "memory_temporary_storage_unavailable"
+    }
 
 
 def test_sidecar_guard_allows_derived_principals_and_memory_scope() -> None:

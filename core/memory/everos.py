@@ -19,7 +19,7 @@ import tempfile
 import threading
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -74,6 +74,8 @@ PROCESSING_PROBE_MAX_DEADLINE_SECONDS = (
 )
 _PROCESSING_TIMEOUT_SECONDS = PROCESSING_PROBE_REQUEST_TIMEOUT_SECONDS
 _PREFLIGHT_TIMEOUT_SECONDS = 30.0
+_REQUEST_STREAM_CHUNK_BYTES = 64 * 1024
+_REQUEST_STRING_CHUNK_CHARS = 8 * 1024
 _RESPONSE_STREAM_CHUNK_BYTES = 64 * 1024
 _MIN_RESPONSE_SPOOL_FREE_BYTES = 512 * 1024 * 1024
 _RESPONSE_SPOOL_UNLINK_ATTEMPTS = 20
@@ -745,7 +747,8 @@ class EverOSPort:
                     method,
                     route,
                     deadline=deadline,
-                    json=payload,
+                    content=_stream_json_request(payload),
+                    headers={"content-type": "application/json"},
                 ) as response:
                     status_code = response.status_code
                     try:
@@ -1185,13 +1188,20 @@ class EverOSPort:
             self._sidecar_timeout_seconds,
         )
         deadline = started + request_timeout
-        headers = None
+        headers: dict[str, str] = {}
         if timeout_seconds is not None:
             sidecar_timeout = max(
                 0.001,
                 request_timeout - _SIDECAR_TIMEOUT_RESPONSE_MARGIN_SECONDS,
             )
-            headers = {_AGENTIC_TIMEOUT_HEADER: str(sidecar_timeout)}
+            headers[_AGENTIC_TIMEOUT_HEADER] = str(sidecar_timeout)
+        request_kwargs: dict[str, Any] = {"headers": headers or None}
+        if payload is not None:
+            headers["content-type"] = "application/json"
+            request_kwargs = {
+                "content": _stream_json_request(payload),
+                "headers": headers,
+            }
         transport = httpx.AsyncHTTPTransport(uds=str(self._socket_path))
         try:
             async with httpx.AsyncClient(
@@ -1208,8 +1218,7 @@ class EverOSPort:
                     method,
                     route,
                     deadline=deadline,
-                    json=payload,
-                    headers=headers,
+                    **request_kwargs,
                 ) as response:
                     round_value = response.headers.get(_AGENTIC_ROUND_HEADER)
                     if (
@@ -1516,6 +1525,72 @@ async def _stream_response_before_deadline(
             raise
     else:
         await stream.__aexit__(None, None, None)
+
+
+async def _stream_json_request(value: Any) -> AsyncIterator[bytes]:
+    for chunk in _iter_json_request(value):
+        yield chunk
+
+
+def _iter_json_request(value: Any) -> Iterator[bytes]:
+    if value is None:
+        yield b"null"
+        return
+    if value is True:
+        yield b"true"
+        return
+    if value is False:
+        yield b"false"
+        return
+    if isinstance(value, str):
+        yield from _iter_json_string(value)
+        return
+    if isinstance(value, (int, float)):
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        yield from _bounded_request_chunks(encoded)
+        return
+    if isinstance(value, dict):
+        yield b"{"
+        for index, (key, child) in enumerate(value.items()):
+            if not isinstance(key, str):
+                raise TypeError("sidecar JSON object keys must be strings")
+            if index:
+                yield b","
+            yield from _iter_json_string(key)
+            yield b":"
+            yield from _iter_json_request(child)
+        yield b"}"
+        return
+    if isinstance(value, (list, tuple)):
+        yield b"["
+        for index, child in enumerate(value):
+            if index:
+                yield b","
+            yield from _iter_json_request(child)
+        yield b"]"
+        return
+    raise TypeError(f"unsupported sidecar JSON value: {type(value).__name__}")
+
+
+def _iter_json_string(value: str) -> Iterator[bytes]:
+    yield b'"'
+    for offset in range(0, len(value), _REQUEST_STRING_CHUNK_CHARS):
+        encoded = json.dumps(
+            value[offset : offset + _REQUEST_STRING_CHUNK_CHARS],
+            ensure_ascii=False,
+        )[1:-1].encode("utf-8")
+        yield from _bounded_request_chunks(encoded)
+    yield b'"'
+
+
+def _bounded_request_chunks(encoded: bytes) -> Iterator[bytes]:
+    for offset in range(0, len(encoded), _REQUEST_STREAM_CHUNK_BYTES):
+        yield encoded[offset : offset + _REQUEST_STREAM_CHUNK_BYTES]
 
 
 def _remaining_before_deadline(deadline: float) -> float:

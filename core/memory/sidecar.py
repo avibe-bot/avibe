@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import codecs
 import contextvars
+import errno
 import importlib
 import json
 import logging
@@ -13,8 +14,10 @@ import math
 import mmap
 import os
 import re
+import shutil
 import stat
 import tempfile
+import threading
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any, Literal
@@ -49,7 +52,10 @@ _REQUEST_PATHS = frozenset(
         "/api/v2/memory/get",
     }
 )
-_REQUEST_REPLAY_CHUNK_BYTES = 64 * 1024
+_SPOOL_REPLAY_CHUNK_BYTES = 64 * 1024
+_REQUEST_REPLAY_CHUNK_BYTES = _SPOOL_REPLAY_CHUNK_BYTES
+_MIN_SPOOL_FREE_BYTES = 512 * 1024 * 1024
+_SPOOL_WRITE_LOCK = threading.Lock()
 
 
 def serve(uds: Path) -> None:
@@ -124,7 +130,15 @@ class _AgenticDeadlineProjection:
 
         spool = tempfile.TemporaryFile(mode="w+b")
         try:
-            body_size = await _spool_request(receive, spool)
+            try:
+                body_size = await _spool_request(receive, spool)
+            except OSError:
+                await _send_json_error(
+                    send,
+                    status=507,
+                    detail="memory_temporary_storage_unavailable",
+                )
+                return
             if body_size is None:
                 return
             payload = await run_blocking(_project_spooled_request, spool, path)
@@ -161,38 +175,73 @@ class _AgenticDeadlineProjection:
                 await self._app(scope, replay_receive, send)
                 return
 
-            response_messages: list[dict[str, Any]] = []
-
-            async def capture_send(message: dict[str, Any]) -> None:
-                response_messages.append(message)
-
-            round_state: dict[str, str] = {}
-            token = _AGENTIC_ROUND_STATE.set(round_state)
+            response_spool = tempfile.TemporaryFile(mode="w+b")
             try:
-                await asyncio.wait_for(
-                    self._app(scope, replay_receive, capture_send),
-                    timeout=agentic_timeout,
-                )
-            except asyncio.TimeoutError:
-                await _send_json_error(
-                    send,
-                    status=504,
-                    detail="memory_request_timed_out",
-                    agentic_round=round_state.get("round"),
-                )
-                return
-            finally:
-                _AGENTIC_ROUND_STATE.reset(token)
+                response_start: dict[str, Any] | None = None
+                response_body_size = 0
 
-            round_value = round_state.get("round")
-            if round_value in {"round1", "round2"}:
-                _append_response_header(
-                    response_messages,
-                    _AGENTIC_ROUND_HEADER,
-                    round_value,
+                async def capture_send(message: dict[str, Any]) -> None:
+                    nonlocal response_start, response_body_size
+                    message_type = message.get("type")
+                    if message_type == "http.response.start":
+                        if response_start is not None:
+                            raise RuntimeError("duplicate sidecar response start")
+                        response_start = dict(message)
+                        response_start["headers"] = list(message.get("headers", []))
+                        return
+                    if message_type != "http.response.body":
+                        raise RuntimeError("unsupported sidecar response message")
+                    chunk = message.get("body", b"")
+                    if not isinstance(chunk, bytes):
+                        raise TypeError("sidecar response body must be bytes")
+                    if chunk:
+                        await _spool_bytes(response_spool, chunk)
+                        response_body_size += len(chunk)
+
+                round_state: dict[str, str] = {}
+                token = _AGENTIC_ROUND_STATE.set(round_state)
+                try:
+                    await asyncio.wait_for(
+                        self._app(scope, replay_receive, capture_send),
+                        timeout=agentic_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    await _send_json_error(
+                        send,
+                        status=504,
+                        detail="memory_request_timed_out",
+                        agentic_round=round_state.get("round"),
+                    )
+                    return
+                except OSError:
+                    await _send_json_error(
+                        send,
+                        status=507,
+                        detail="memory_temporary_storage_unavailable",
+                        agentic_round=round_state.get("round"),
+                    )
+                    return
+                finally:
+                    _AGENTIC_ROUND_STATE.reset(token)
+
+                if response_start is None:
+                    raise RuntimeError("sidecar response start missing")
+                round_value = round_state.get("round")
+                if round_value in {"round1", "round2"}:
+                    response_start = _with_response_header(
+                        response_start,
+                        _AGENTIC_ROUND_HEADER,
+                        round_value,
+                    )
+                await send(response_start)
+                await run_blocking(response_spool.seek, 0)
+                await _replay_spooled_response(
+                    response_spool,
+                    body_size=response_body_size,
+                    send=send,
                 )
-            for message in response_messages:
-                await send(message)
+            finally:
+                response_spool.close()
         finally:
             spool.close()
 
@@ -209,7 +258,7 @@ async def _spool_request(receive: Any, spool: Any) -> int | None:
         if not isinstance(chunk, bytes):
             return None
         if chunk:
-            await run_blocking(spool.write, chunk)
+            await _spool_bytes(spool, chunk)
             body_size += len(chunk)
         if not message.get("more_body", False):
             await run_blocking(spool.flush)
@@ -248,6 +297,62 @@ def _spooled_request_receive(
     return receive
 
 
+async def _spool_bytes(spool: Any, chunk: bytes) -> None:
+    view = memoryview(chunk)
+    for offset in range(0, len(view), _SPOOL_REPLAY_CHUNK_BYTES):
+        await run_blocking(
+            _write_spool_chunk,
+            spool,
+            view[offset : offset + _SPOOL_REPLAY_CHUNK_BYTES],
+        )
+
+
+def _write_spool_chunk(spool: Any, chunk: memoryview) -> None:
+    with _SPOOL_WRITE_LOCK:
+        free_bytes = shutil.disk_usage(tempfile.gettempdir()).free
+        if free_bytes - len(chunk) < _MIN_SPOOL_FREE_BYTES:
+            raise OSError(
+                errno.ENOSPC,
+                "insufficient temporary storage for memory sidecar payload",
+            )
+        written = spool.write(chunk)
+        if written != len(chunk):
+            raise OSError(errno.EIO, "short write while spooling sidecar payload")
+        spool.flush()
+
+
+async def _replay_spooled_response(
+    spool: Any,
+    *,
+    body_size: int,
+    send: Any,
+) -> None:
+    delivered = 0
+    while delivered < body_size:
+        chunk = await run_blocking(
+            spool.read,
+            min(_SPOOL_REPLAY_CHUNK_BYTES, body_size - delivered),
+        )
+        if not isinstance(chunk, bytes) or not chunk:
+            raise OSError(errno.EIO, "short read while replaying sidecar response")
+        delivered += len(chunk)
+        await send(
+            {
+                "type": "http.response.body",
+                "body": chunk,
+                "more_body": delivered < body_size,
+            }
+        )
+    if body_size == 0:
+        await send(
+            {
+                "type": "http.response.body",
+                "body": b"",
+                "more_body": False,
+            }
+        )
+
+
 async def _send_json_error(
     send: Any,
     *,
@@ -277,25 +382,21 @@ async def _send_json_error(
     await send({"type": "http.response.body", "body": body})
 
 
-def _append_response_header(
-    messages: list[dict[str, Any]],
+def _with_response_header(
+    message: dict[str, Any],
     name: str,
     value: str,
-) -> None:
+) -> dict[str, Any]:
     encoded_name = name.lower().encode("ascii")
     encoded_value = value.encode("ascii")
-    for index, message in enumerate(messages):
-        if message.get("type") != "http.response.start":
-            continue
-        projected = dict(message)
-        projected["headers"] = [
-            (header_name, header_value)
-            for header_name, header_value in message.get("headers", [])
-            if header_name.lower() != encoded_name
-        ]
-        projected["headers"].append((encoded_name, encoded_value))
-        messages[index] = projected
-        return
+    projected = dict(message)
+    projected["headers"] = [
+        (header_name, header_value)
+        for header_name, header_value in message.get("headers", [])
+        if header_name.lower() != encoded_name
+    ]
+    projected["headers"].append((encoded_name, encoded_value))
+    return projected
 
 
 _ROOT_KEYS = {
