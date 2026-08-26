@@ -169,23 +169,31 @@ const TierEditor: React.FC<{
   const [draft, setDraft] = React.useState('');
   const [saving, setSaving] = React.useState(false);
   const [failedNext, setFailedNext] = React.useState<TierMutationIntent | null>(null);
+  const [returnFocus, setReturnFocus] = React.useState(false);
+  const inputRef = React.useRef<HTMLInputElement>(null);
+  const cellRef = React.useRef<HTMLButtonElement>(null);
   React.useEffect(() => setTiers(model.reasoning_efforts ?? []), [model.reasoning_efforts]);
   // Which row is open belongs to the table, not to the row — that is what makes
   // "one editor at a time" structural rather than a convention every collapse
-  // path has to remember. A row therefore drops its uncommitted draft and its
-  // unresolved failure when the table hands the editor to another row: the tier
-  // list was already rolled back to what the server holds, so what is dropped is
-  // a notice the user left by moving on, never a pending write.
+  // path has to remember. What the row drops on the way out is the uncommitted
+  // draft, and only that: a rolled-back write is not a draft, so it stays with
+  // the row that produced it (below) rather than with whoever holds the editor.
+  React.useEffect(() => { if (!editing) setDraft(''); }, [editing]);
+  // Escape is the one collapse the keyboard asks for, so it is the one that owes
+  // a place to land; a click elsewhere already chose one.
   React.useEffect(() => {
-    if (!editing) {
-      setDraft('');
-      setFailedNext(null);
-    }
-  }, [editing]);
+    if (editing || !returnFocus) return;
+    cellRef.current?.focus();
+    setReturnFocus(false);
+  }, [editing, returnFocus]);
 
   const commit = async (intent: TierMutationIntent): Promise<boolean> => {
     if (saving) return false;
     setSaving(true);
+    // Every in-editor control is transient — a suggestion becomes a chip, a chip
+    // disappears — so acting on one has to hand focus back to the field that
+    // outlives them all, before the element holding it unmounts onto the body.
+    (inputRef.current ?? cellRef.current)?.focus();
     try {
       return await trackMutation(async (latest, settlement) => {
         const payload = tierMutationPayload(latest, model.id, intent);
@@ -226,58 +234,81 @@ const TierEditor: React.FC<{
     if (!failedNext) return;
     if (await commit(failedNext) && failedNext.kind === 'add' && draft.trim() === failedNext.tier) setDraft('');
   };
+  // A rolled-back write is the row's own unfinished business: the tier list is
+  // already back to what the server holds, and 重试 is the only way forward from
+  // there. So the notice renders in whichever state the row is in and leaves only
+  // through a write that lands — never because the editor closed or moved on.
+  const failure = failedNext && (
+    <span className="model-hub-source-tier inline-flex items-center gap-1.5 text-destructive-ink">
+      {t('settings.models.sourceDetail.fail.tier')}
+      <button type="button" disabled={saving} onClick={() => void retry()} className="font-semibold underline underline-offset-2 disabled:opacity-50">{t('settings.models.sourceDetail.retry')}</button>
+    </span>
+  );
   if (!editing) {
     // The whole cell is the edit entry, which is what lets the add affordance be
     // drawn only under a pointer: 20 rows each carrying a permanent 「+ 添加档位」
     // pill turn an inventory table into a wall of buttons. It stays in the box it
     // reserves rather than being removed from it, so revealing it moves nothing.
     return (
-      <button
-        type="button"
-        className="model-hub-source-tier-cell flex min-w-0 flex-wrap items-center gap-1.5 text-left"
-        onClick={onEdit}
-      >
-        {tiers.length > 0 ? tiers.map((tier) => (
-          <span key={tier} className="model-hub-source-tier model-hub-source-tier-chip inline-flex rounded-full border border-border font-mono text-foreground">{tier}</span>
-        )) : <span className="model-hub-source-tier-empty">{t('settings.models.sourceDetail.tiers.empty')}</span>}
-        <span className="model-hub-source-tier model-hub-source-tier-add model-hub-source-tier-reveal inline-flex rounded-full border font-semibold">{t(tiers.length > 0 ? 'settings.models.sourceDetail.tiers.add' : 'settings.models.sourceDetail.tiers.addFirst')}</span>
-      </button>
+      <div className="flex min-w-0 flex-col gap-1.5">
+        <button
+          ref={cellRef}
+          type="button"
+          className="model-hub-source-tier-cell flex min-w-0 flex-wrap items-center gap-1.5 text-left"
+          onClick={onEdit}
+        >
+          {tiers.length > 0 ? tiers.map((tier) => (
+            <span key={tier} className="model-hub-source-tier model-hub-source-tier-chip inline-flex rounded-full border border-border font-mono text-foreground">{tier}</span>
+          )) : <span className="model-hub-source-tier-empty">{t('settings.models.sourceDetail.tiers.empty')}</span>}
+          <span className="model-hub-source-tier model-hub-source-tier-add model-hub-source-tier-reveal inline-flex rounded-full border font-semibold">{t(tiers.length > 0 ? 'settings.models.sourceDetail.tiers.add' : 'settings.models.sourceDetail.tiers.addFirst')}</span>
+        </button>
+        {failure}
+      </div>
     );
   }
   const suggestions = TIER_SUGGESTIONS[protocol].filter((tier) => !tiers.includes(tier));
+  // The editor collapses when focus leaves the editor, not when the input alone
+  // does. Keyed to the input, every control inside had to defend itself against
+  // its own focus — which a pointer can fake by refusing it and a keyboard
+  // cannot, so Tab closed the row before it could reach a suggestion at all.
+  // Containment is that same rule stated once, at the boundary it is about.
   return (
-    <div className="flex min-w-0 flex-col gap-1.5">
+    <div
+      className="flex min-w-0 flex-col gap-1.5"
+      onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) onClose(); }}
+      onKeyDown={(event) => {
+        if (event.key !== 'Escape') return;
+        event.preventDefault();
+        setDraft('');
+        setReturnFocus(true);
+        onClose();
+      }}
+    >
       <div className="flex min-w-0 flex-wrap items-center gap-1.5">
         {tiers.map((tier) => (
           <span key={tier} className="model-hub-source-tier model-hub-source-tier-chip inline-flex items-center gap-1 rounded-full border border-border font-mono text-foreground">
             {tier}
-            <button type="button" disabled={saving} onMouseDown={(event) => event.preventDefault()} onClick={() => void commit({ kind: 'remove', tier })} aria-label={t('settings.models.sourceDetail.tiers.remove', { tier }) as string} className="text-muted hover:text-foreground disabled:opacity-50">
+            <button type="button" disabled={saving} onClick={() => void commit({ kind: 'remove', tier })} aria-label={t('settings.models.sourceDetail.tiers.remove', { tier }) as string} className="text-muted hover:text-foreground disabled:opacity-50">
               <X className="size-2.5" />
             </button>
           </span>
         ))}
         <Input
+          ref={inputRef}
           autoFocus
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
-          onBlur={() => { if (!failedNext) onClose(); }}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') { event.preventDefault(); void add(); }
-            if (event.key === 'Escape') { event.preventDefault(); setDraft(''); event.currentTarget.blur(); }
-          }}
+          onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void add(); } }}
           disabled={saving}
           placeholder={t('settings.models.sourceDetail.tiers.inputHint') as string}
           className="model-hub-source-tier h-7 w-28 rounded-full border-mint/40 px-2.5"
         />
-        {/* A suggestion adds through the same path typing it would take, and holds
-            the input's focus while it does — the editor collapses on blur, so a
-            chip that took focus would close the row it was clicked in. */}
+        {/* A suggestion adds through the same path typing it would take. */}
         {suggestions.map((tier) => (
           <button
             key={tier}
             type="button"
             disabled={saving}
-            onMouseDown={(event) => event.preventDefault()}
             onClick={() => void commit({ kind: 'add', tier })}
             aria-label={t('settings.models.sourceDetail.tiers.suggest', { tier }) as string}
             className="model-hub-source-tier model-hub-source-tier-suggest inline-flex rounded-full border font-mono disabled:opacity-50"
@@ -285,10 +316,7 @@ const TierEditor: React.FC<{
             {tier}
           </button>
         ))}
-        {failedNext && <span className="model-hub-source-tier inline-flex items-center gap-1.5 text-destructive-ink">
-          {t('settings.models.sourceDetail.fail.tier')}
-          <button type="button" disabled={saving} onMouseDown={(event) => event.preventDefault()} onClick={() => void retry()} className="font-semibold underline underline-offset-2 disabled:opacity-50">{t('settings.models.sourceDetail.retry')}</button>
-        </span>}
+        {failure}
       </div>
       {/* The two questions a free-text field cannot answer by itself: whether
           anything validates what is typed, and what an empty row costs. */}

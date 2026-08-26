@@ -1085,6 +1085,59 @@ describe('SourceDetailPanel', () => {
     expect(document.activeElement).toBe(inputs[0]);
   });
 
+  // An editor is a place the keyboard moves around in, not only lands in. Keyed
+  // to the input's own blur, the collapse made every control inside it
+  // pointer-only: Tab left the field and took the editor with it.
+  it('lets the keyboard reach a suggestion and stays open around the write', async () => {
+    const update = vi.spyOn(modelsApi, 'updateModelReasoningEfforts').mockResolvedValueOnce({
+      ...source,
+      models: [{ ...source.models[0], reasoning_efforts: ['high', 'low'] }],
+    });
+    renderProtocol('openai_responses');
+    await userEvent.click(screen.getByRole('button', { name: /high/i }));
+    await userEvent.tab();
+    const suggestion = screen.getByRole('button', { name: /^Add low$|^添加 low$/ });
+    expect(document.activeElement).toBe(suggestion);
+
+    await userEvent.keyboard('{Enter}');
+    await waitFor(() => expect(update).toHaveBeenCalledWith(source.id, 'model-a', ['high', 'low']));
+    // The chip it was standing on is gone; focus is back on the one control the
+    // edit state cannot lose, not on the body with the editor closed behind it.
+    const input = screen.getByPlaceholderText(/Enter to add|回车添加/i);
+    expect(document.activeElement).toBe(input);
+  });
+
+  it('returns focus to the row it collapsed when Escape asked for it', async () => {
+    renderProtocol('openai_responses');
+    await userEvent.click(screen.getByRole('button', { name: /high/i }));
+    await userEvent.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByPlaceholderText(/Enter to add|回车添加/i)).toBeNull());
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: /high/i }));
+  });
+
+  // A write that was rolled back is the row's unfinished business, and 重试 is
+  // the only answer to it — so moving the editor elsewhere, which answers
+  // nothing, cannot be what takes the answer away.
+  it('keeps a failed write answerable after the editor moves to another row', async () => {
+    const update = vi.spyOn(modelsApi, 'updateModelReasoningEfforts').mockRejectedValueOnce(new Error('write failed'));
+    renderProtocol('openai_responses', [
+      source.models[0],
+      { id: 'model-b', display_name: null, origin: 'discovered', reasoning_efforts: [] },
+    ]);
+    await userEvent.click(screen.getByRole('button', { name: /high/i }));
+    await userEvent.type(screen.getByPlaceholderText(/Enter to add|回车添加/i), 'low{Enter}');
+    expect(await screen.findByText(/tier was not saved|档位没保存上/i)).toBeTruthy();
+
+    await userEvent.click(screen.getByRole('button', { name: /No tiers set|未设置档位/i }));
+    expect(screen.getAllByPlaceholderText(/Enter to add|回车添加/i)).toHaveLength(1);
+    expect(screen.getByText(/tier was not saved|档位没保存上/i)).toBeTruthy();
+
+    update.mockResolvedValueOnce({ ...source, models: [{ ...source.models[0], reasoning_efforts: ['high', 'low'] }] });
+    await userEvent.click(screen.getByRole('button', { name: /^Try again$|^重试$/i }));
+    await waitFor(() => expect(update).toHaveBeenLastCalledWith(source.id, 'model-a', ['high', 'low']));
+    await waitFor(() => expect(screen.queryByText(/tier was not saved|档位没保存上/i)).toBeNull());
+  });
+
   // Hover is a reveal, not a layout change, and the row answers it with fill
   // alone. Asserted against the stylesheet because jsdom resolves neither a media
   // query nor a hover state, and this half of the interaction is CSS-owned.
