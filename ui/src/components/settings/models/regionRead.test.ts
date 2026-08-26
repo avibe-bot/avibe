@@ -105,10 +105,11 @@ describe('RegionRead', () => {
     expect(dialog).not.toMatch(/runtime: RuntimeDependency \| null/);
   });
 
-  it('routes every per-model chain read through the per-backend latest authority', () => {
+  it('routes overview collections and exact chain reads through the per-backend latest authority', () => {
     const page = readFileSync(join(__dirname, 'SettingsModelsPage.tsx'), 'utf8');
     const definitionStart = page.indexOf('const readChainRequests');
     const definitionEnd = page.indexOf('\n\nconst settleAgentChainIndex');
+    const definitions = page.slice(definitionStart, definitionEnd);
     const withoutDefinition = `${page.slice(0, definitionStart)}${page.slice(definitionEnd)}`;
     const affectedRefresh = page.slice(
       page.indexOf('const refreshAffectedChains'),
@@ -123,6 +124,8 @@ describe('RegionRead', () => {
     expect(definitionStart).toBeGreaterThanOrEqual(0);
     expect(definitionEnd).toBeGreaterThan(definitionStart);
     expect(withoutDefinition).not.toMatch(/modelsApi\.getAgentChain/);
+    expect(definitions).toMatch(/modelsApi\.getAgentChains\(agent\.backend\)/);
+    expect(definitions).toMatch(/modelsApi\.getAgentChain\(backend, modelId\)/);
     expect(affectedRefresh).toMatch(/chainReadAuthority\.run[\s\S]*readChainRequests/);
     expect(landing).toMatch(/readers\.chains\(affectedChains\)/);
     expect(landing).not.toMatch(/getAgentChain/);

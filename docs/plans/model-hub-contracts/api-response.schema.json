@@ -22,6 +22,7 @@
     {"method": "POST", "path": "/api/models/agents/<backend>/chains/reorder", "response_schema": "AgentResponse", "exercise": {"path": "/api/models/agents/claude/chains/reorder", "status": 200}},
     {"method": "PATCH", "path": "/api/models/agents/<backend>/mode", "response_schema": "AgentResponse", "exercise": {"path": "/api/models/agents/claude/mode", "status": 200, "json": {"mode": "hub"}}},
     {"method": "PUT", "path": "/api/models/agents/opencode/menu", "response_schema": "AgentResponse", "exercise": {"path": "/api/models/agents/opencode/menu", "status": 200, "json": {"menu": {"view": "featured", "checked": []}}}},
+    {"method": "GET", "path": "/api/models/agents/<backend>/chains", "response_schema": "ChainListResponse", "exercise": {"path": "/api/models/agents/claude/chains", "status": 200}},
     {"method": "GET", "path": "/api/models/agents/<backend>/chain?model=<id>", "response_schema": "ChainResponse", "exercise": {"path": "/api/models/agents/claude/chain?model=claude-opus-4-6", "status": 200}},
     {"method": "PUT", "path": "/api/models/agents/<backend>/chain?model=<id>", "response_schema": "ChainMutationResponse", "exercise": {"path": "/api/models/agents/claude/chain?model=claude-opus-4-6", "status": 200, "json": {"hops": [{"source_id": "src_conform001", "model_id": "claude-opus-4-6"}]}}},
     {"method": "POST", "path": "/api/models/agents/<backend>/probe", "response_schema": "ProbeResponse", "exercise": {"path": "/api/models/agents/claude/probe", "status": 200, "json": {"model": "claude-opus-4-6"}}},
@@ -231,6 +232,16 @@
         "ok": {"const": true},
         "contract_version": {"const": 6},
         "chain": {"$ref": "model-hub/agent-chain.schema.json"}
+      }
+    },
+    "ChainListResponse": {
+      "type": "object",
+      "required": ["ok", "contract_version", "chains"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"const": true},
+        "contract_version": {"const": 6},
+        "chains": {"type": "array", "items": {"$ref": "model-hub/agent-chain.schema.json"}}
       }
     },
     "ChainMutationResponse": {

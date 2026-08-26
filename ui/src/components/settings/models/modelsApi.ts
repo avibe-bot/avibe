@@ -116,6 +116,8 @@ export type ModelsApi = {
   putAgentSources(backend: AgentBackend, body: AgentSourcesPut): Promise<AgentSupply>;
   /** Resolution chain for one model. Hub mode only — direct answers `direct_mode`. */
   getAgentChain(backend: AgentBackend, model: string): Promise<AgentChain>;
+  /** Complete overview chain projection for one Hub backend. */
+  getAgentChains(backend: AgentBackend): Promise<AgentChain[]>;
   /** Total replacement of the exact stored chain. */
   putAgentChain(backend: AgentBackend, model: string, body: AgentChainPut): Promise<AgentChainMutation>;
   /** One real request through the chain. Hub mode only, same reason. */
@@ -451,6 +453,7 @@ export const modelsApi: ModelsApi = {
   // `contract_version` is deliberately absent (unlike every other write here).
   putAgentSources: (backend, body) => call<{ agent: AgentSupply }>(`/api/models/agents/${backend}/sources`, jsonInit('PUT', body)).then((r) => r.agent),
   getAgentChain: (backend, model) => call<{ chain: AgentChain }>(`/api/models/agents/${backend}/chain?model=${encodeURIComponent(model)}`).then((r) => r.chain),
+  getAgentChains: (backend) => call<{ chains: AgentChain[] }>(`/api/models/agents/${backend}/chains`).then((r) => r.chains),
   putAgentChain: (backend, model, body) => call<AgentChainMutation>(`/api/models/agents/${backend}/chain?model=${encodeURIComponent(model)}`, jsonInit('PUT', body)),
   probeAgent: (backend, model) => call<{ probe: ProbeResult }>(`/api/models/agents/${backend}/probe`, jsonInit('POST', model ? { model } : {})).then((r) => r.probe),
   setAgentMode: (backend, mode) => call<{ agent?: AgentSupply } & AgentSupply>(`/api/models/agents/${backend}/mode`, jsonInit('PATCH', { mode })).then((r) => (r.agent ?? r) as AgentSupply),

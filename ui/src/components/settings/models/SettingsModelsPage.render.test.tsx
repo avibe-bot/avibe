@@ -545,7 +545,7 @@ describe('SettingsModelsPage surface branches', () => {
     vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([takeoverAgent]);
     vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
     vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
-    vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(takeoverChain);
+    vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([takeoverChain]);
 
     render(
       <ToastProvider>
@@ -558,6 +558,51 @@ describe('SettingsModelsPage surface branches', () => {
     expect(await screen.findByText(/^1 takeover active$|^1 处接管中$/i)).toBeTruthy();
     expect(screen.getByText(/^Taken over$|^接管中$/i)).toBeTruthy();
     expect(screen.getByText(/Now: Replacement source \(takeover\)|当前 Replacement source（接管）/i)).toBeTruthy();
+  });
+
+  it('[MH-OVERVIEW-001] reads overview chains once per backend and keeps exact reads for the route dialog', async () => {
+    const secondModel = 'gpt-5.6-terra';
+    const agent: AgentSupply = {
+      ...takeoverAgent,
+      builtin_models: [takeoverChain.model_id, secondModel],
+      model_supply: [takeoverChain.model_id, secondModel].map((model_id) => ({
+        model_id,
+        chain_length: 2,
+        has_runnable_hop: true,
+      })),
+      routes: {
+        ...takeoverAgent.routes,
+        [secondModel]: { hops: takeoverAgent.routes![takeoverChain.model_id].hops },
+      },
+    };
+    const secondChain: AgentChain = { ...takeoverChain, model_id: secondModel };
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([agent]);
+    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
+    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+    const overviewRead = vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([
+      takeoverChain,
+      secondChain,
+    ]);
+    const exactRead = vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(takeoverChain);
+
+    render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <SettingsModelsPage />
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    await waitFor(() => expect(overviewRead).toHaveBeenCalledOnce());
+    expect(overviewRead).toHaveBeenCalledWith('codex');
+    expect(exactRead).not.toHaveBeenCalled();
+
+    await userEvent.click(await screen.findByRole('button', {
+      name: /Open gpt-5\.6-sol route chain|打开 gpt-5\.6-sol 的路由链/i,
+    }));
+    await waitFor(() => expect(exactRead).toHaveBeenCalledOnce());
+    expect(exactRead).toHaveBeenCalledWith('codex', 'gpt-5.6-sol');
   });
 
   it('keeps a failed event read distinct from an empty history and retries it', async () => {
@@ -621,7 +666,7 @@ describe('SettingsModelsPage surface branches', () => {
     expect(screen.queryByRole('button', { name: /Gateway stopped|网关已停止/i })).toBeNull();
   });
 
-  it('lands the overview without waiting for a per-model chain read', async () => {
+  it('lands the overview without waiting for its backend chain collection', async () => {
     const hubAgent: AgentSupply = {
       ...takeoverAgent,
       backend: 'claude',
@@ -635,7 +680,7 @@ describe('SettingsModelsPage surface branches', () => {
     vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([hubAgent]);
     vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
     vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
-    vi.spyOn(modelsApi, 'getAgentChain').mockImplementation(() => new Promise(() => {}));
+    vi.spyOn(modelsApi, 'getAgentChains').mockImplementation(() => new Promise(() => {}));
 
     render(
       <ToastProvider>
@@ -697,6 +742,7 @@ describe('SettingsModelsPage surface branches', () => {
       vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([hubAgent]);
       vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
       vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+      const overviewRead = vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([affectedChain]);
       const chainRead = vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(affectedChain);
       if (action === 'edit') {
         vi.spyOn(modelsApi, 'patchSource').mockResolvedValueOnce({ source: updatedSource, ...impact });
@@ -712,7 +758,7 @@ describe('SettingsModelsPage surface branches', () => {
         </ToastProvider>,
       );
       await userEvent.click((await screen.findByText('Retained source')).closest('button') as HTMLButtonElement);
-      await waitFor(() => expect(chainRead).toHaveBeenCalled());
+      await waitFor(() => expect(overviewRead).toHaveBeenCalledOnce());
 
       await userEvent.click(screen.getByRole('button', { name: /Manage Retained source|管理 Retained source/i }));
       if (action === 'edit') {
@@ -767,7 +813,7 @@ describe('SettingsModelsPage surface branches', () => {
     const head = { ...retainedSource, id: 'src_head', display_name: 'Paused source', state: { status: 'cooldown' as const, retry_at: '2099-01-01T00:00:00Z', detail_key: null } };
     const relay = { ...retainedSource, id: 'src_relay', display_name: 'Replacement source', state: { status: 'active' as const, retry_at: null, detail_key: null } };
     const direct = { ...takeoverAgent, mode: 'direct' as const, sources: null, routes: null, supply_status: null, model_supply: null };
-    const pendingChain = deferred<AgentChain>();
+    const pendingChains = deferred<AgentChain[]>();
     vi.spyOn(modelsApi, 'listSources').mockResolvedValue([head, relay]);
     const agentRead = vi.spyOn(modelsApi, 'listAgents')
       .mockResolvedValueOnce([takeoverAgent])
@@ -775,7 +821,7 @@ describe('SettingsModelsPage surface branches', () => {
     vi.spyOn(modelsApi, 'setAgentMode').mockResolvedValueOnce(direct);
     vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
     vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
-    const chainRead = vi.spyOn(modelsApi, 'getAgentChain').mockImplementation(() => pendingChain.promise);
+    const chainRead = vi.spyOn(modelsApi, 'getAgentChains').mockImplementation(() => pendingChains.promise);
 
     render(
       <ToastProvider>
@@ -791,8 +837,8 @@ describe('SettingsModelsPage surface branches', () => {
     expect(await screen.findByRole('button', { name: /^Switch to Gateway$|^切换到网关$/i })).toBeTruthy();
 
     await act(async () => {
-      pendingChain.resolve(takeoverChain);
-      await pendingChain.promise;
+      pendingChains.resolve([takeoverChain]);
+      await pendingChains.promise;
     });
 
     expect(screen.queryByRole('button', { name: /route chain|路由链/i })).toBeNull();
@@ -816,9 +862,8 @@ describe('SettingsModelsPage surface branches', () => {
       .mockReturnValueOnce(pendingReconciliation.promise);
     vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
     vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
-    vi.spyOn(modelsApi, 'getAgentChain')
-      .mockReturnValueOnce(pendingOldChain.promise)
-      .mockResolvedValueOnce(takeoverChain);
+    vi.spyOn(modelsApi, 'getAgentChains').mockImplementation(() => pendingOldChain.promise.then((chain) => [chain]));
+    vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(takeoverChain);
     vi.spyOn(modelsApi, 'putAgentChain').mockResolvedValue({
       chain: committedChain,
       removed_hops: [],
@@ -858,6 +903,7 @@ describe('SettingsModelsPage surface branches', () => {
       .mockResolvedValueOnce([]);
     vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
     vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([takeoverChain]);
     vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(takeoverChain);
     vi.spyOn(modelsApi, 'putAgentChain').mockResolvedValue({
       chain: { ...takeoverChain, chain: [takeoverChain.chain[0]], current: takeoverChain.chain[0] },
@@ -900,7 +946,7 @@ describe('SettingsModelsPage surface branches', () => {
     vi.spyOn(modelsApi, 'listSources').mockResolvedValue([retainedSource]);
     vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
     vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
-    vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(takeoverChain);
+    vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([takeoverChain]);
     const setMode = vi.spyOn(modelsApi, 'setAgentMode').mockRejectedValueOnce(new TypeError('response lost'));
 
     render(
@@ -929,7 +975,7 @@ describe('SettingsModelsPage surface branches', () => {
     vi.spyOn(modelsApi, 'refreshSource').mockResolvedValueOnce({ source: head, discovered: head.models.length });
     vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
     vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
-    vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(takeoverChain);
+    vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([takeoverChain]);
 
     render(
       <ToastProvider>
@@ -960,7 +1006,7 @@ describe('SettingsModelsPage surface branches', () => {
       .mockRejectedValueOnce(new TypeError('runtime unread'));
     vi.spyOn(modelsApi, 'refreshSource').mockResolvedValueOnce({ source: head, discovered: head.models.length });
     vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
-    vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(takeoverChain);
+    vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([takeoverChain]);
 
     render(
       <ToastProvider>

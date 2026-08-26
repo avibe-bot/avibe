@@ -378,6 +378,12 @@ scenarios:
     kind: recovery
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py::test_mh_turn_takeover_is_silent_and_provenance_names_the_serving_hop
+  - id: MH-OVERVIEW-001
+    name: Overview batches model chains by backend and reserves exact reads for route editing
+    status: covered
+    kind: projection
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-OVERVIEW-001
   - id: MH-ENGINE-001
     name: Local engine loss is terminal without Source mutation or replay
     status: covered
