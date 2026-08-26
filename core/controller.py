@@ -1796,10 +1796,11 @@ class Controller:
         target_config: MemoryConfig | None = None,
         expected_config: MemoryConfig | None = None,
     ) -> dict[str, Any]:
-        from avibe_memory.data_reset import (
-            unchanged_memory_data_result,
-        )
         async with self._destructive_memory_runtime() as runtime:
+            from avibe_memory.data_reset import (
+                unchanged_memory_data_result,
+            )
+
             if operation == "repair" and not runtime.needs_repair:
                 return {
                     "ok": False,

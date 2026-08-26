@@ -117,6 +117,10 @@ _TREE_INSPECTION_INTERVAL_SECONDS = 1.0
 _SIDECAR_RECORD_FILENAME = "everos.sidecar.json"
 _SIDECAR_RECORD_MAX_BYTES = 4 * 1024
 _SIDECAR_ENTRYPOINT_MODULE = "avibe_memory.sidecar"
+_RELEASED_SIDECAR_ENTRYPOINT_MODULE = "core.memory.sidecar"
+_SIDECAR_ENTRYPOINT_MODULES = frozenset(
+    {_SIDECAR_ENTRYPOINT_MODULE, _RELEASED_SIDECAR_ENTRYPOINT_MODULE}
+)
 _PROVIDER_LOCK_PREFIX = "cascade-rebuild-"
 _SYNC_RECORD_PREFIX = "cascade-sync-"
 _SYNC_RECORD_MAX_BYTES = 16 * 1024
@@ -130,7 +134,7 @@ _PROVIDER_LOCK_RETRY_INTERVAL_SECONDS = 0.05
 _SIDECAR_ROLE = "sidecar"
 _RELEASED_REBUILD_ROLE = "cascade_rebuild"
 _RELEASED_SYNC_ROLE = "cascade_sync"
-_RELEASED_REBUILD_ENTRYPOINT_MODULE = "avibe_memory.rebuild_child"
+_RELEASED_REBUILD_ENTRYPOINT_MODULE = "core.memory.rebuild_child"
 
 _IdentityFieldT = TypeVar("_IdentityFieldT")
 
@@ -2727,17 +2731,18 @@ def _disclosed_process_environment(process: psutil.Process) -> Mapping[str, str]
 
 
 def _cmdline_serves_socket(cmdline: tuple[str, ...], socket_path: Path) -> bool:
-    if _SIDECAR_ENTRYPOINT_MODULE not in cmdline or "--uds" not in cmdline:
+    if not _SIDECAR_ENTRYPOINT_MODULES.intersection(cmdline) or "--uds" not in cmdline:
         return False
     index = cmdline.index("--uds")
     return index + 1 < len(cmdline) and _paths_match(cmdline[index + 1], socket_path)
 
 
 def _cmdline_is_sidecar(cmdline: tuple[str, ...]) -> bool:
-    return len(cmdline) == 5 and cmdline[1:4] == (
-        "-m",
-        _SIDECAR_ENTRYPOINT_MODULE,
-        "--uds",
+    return (
+        len(cmdline) == 5
+        and cmdline[1] == "-m"
+        and cmdline[2] in _SIDECAR_ENTRYPOINT_MODULES
+        and cmdline[3] == "--uds"
     )
 
 
@@ -2754,13 +2759,10 @@ def _cmdline_matches_role(
         return False
     if role == _SIDECAR_ROLE:
         return (
-            cmdline[1:4]
-            == (
-                "-m",
-                _SIDECAR_ENTRYPOINT_MODULE,
-                "--uds",
-            )
-            and len(cmdline) == 5
+            len(cmdline) == 5
+            and cmdline[1] == "-m"
+            and cmdline[2] in _SIDECAR_ENTRYPOINT_MODULES
+            and cmdline[3] == "--uds"
             and _paths_match(cmdline[4], socket_path)
         )
     if role == _RELEASED_SYNC_ROLE:

@@ -11,6 +11,7 @@ import pytest
 from avibe_memory.confined_filesystem import ConfinedFilesystemError
 from avibe_memory.process import (
     _ProcessIdentity,
+    _cmdline_is_sidecar,
     _memory_child_environment,
     EverOSProcessSettings,
     FakeEverOSProcess,
@@ -151,13 +152,18 @@ def _sidecar_record(home: Path) -> tuple[Path, dict[str, object]]:
     return path, record
 
 
-def _sidecar_identity(home: Path, record: dict[str, object]) -> _ProcessIdentity:
+def _sidecar_identity(
+    home: Path,
+    record: dict[str, object],
+    *,
+    entrypoint: str = "avibe_memory.sidecar",
+) -> _ProcessIdentity:
     return _ProcessIdentity(
         stamp=10.5,
         cmdline=(
             str(record["python"]),
             "-m",
-            "avibe_memory.sidecar",
+            entrypoint,
             "--uds",
             str(record["socket_path"]),
         ),
@@ -187,7 +193,7 @@ def _released_rebuild_identity(
         cmdline=(
             str(record["python"]),
             "-m",
-            "avibe_memory.rebuild_child",
+            "core.memory.rebuild_child",
             "cascade",
             "rebuild",
             "--yes",
@@ -350,14 +356,29 @@ async def test_recorded_sidecar_reaper_accepts_empty_owned_root(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_sidecar_reaper_verifies_identity_before_signalling(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("entrypoint", "legacy_record"),
+    [
+        ("avibe_memory.sidecar", False),
+        ("core.memory.sidecar", False),
+        ("core.memory.sidecar", True),
+    ],
+)
+async def test_sidecar_reaper_verifies_identity_before_signalling(
+    tmp_path: Path,
+    entrypoint: str,
+    legacy_record: bool,
+) -> None:
     home = tmp_path / "home"
     provider_root = home / "memory" / "everos-root"
     provider_root.mkdir(mode=0o700, parents=True)
     home.chmod(0o700)
     (home / "memory").chmod(0o700)
     path, record = _sidecar_record(home)
-    identity = _sidecar_identity(home, record)
+    if legacy_record:
+        record.pop("role")
+        path.write_text(json.dumps(record), encoding="utf-8")
+    identity = _sidecar_identity(home, record, entrypoint=entrypoint)
     host = _SidecarHost({451: identity})
     reaper = ReleasedEverOSOrphanReconciler(
         provider_root=provider_root,
@@ -369,6 +390,18 @@ async def test_sidecar_reaper_verifies_identity_before_signalling(tmp_path: Path
 
     assert host.signals[0] == {451: 10.5}
     assert not path.exists()
+
+
+@pytest.mark.parametrize(
+    "entrypoint",
+    ["avibe_memory.sidecar", "core.memory.sidecar"],
+)
+def test_sidecar_discovery_accepts_current_and_released_entrypoints(
+    entrypoint: str,
+) -> None:
+    assert _cmdline_is_sidecar(
+        ("/runtime/bin/python", "-m", entrypoint, "--uds", "/memory.sock")
+    )
 
 
 @pytest.mark.asyncio
