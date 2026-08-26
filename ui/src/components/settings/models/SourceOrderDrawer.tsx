@@ -354,7 +354,10 @@ export const SourceOrderDrawer: React.FC<{
                     </Reorder.Group>}
                 </section>
                 <section className="model-hub-order-section">
-                  <div className="model-hub-order-section-head"><h3>{t('settings.models.order.section.heldOut')}</h3></div>
+                  <div className="model-hub-order-section-head">
+                    <h3>{t('settings.models.order.section.heldOut')}</h3>
+                    <span>{t('settings.models.order.section.heldOut.note')}</span>
+                  </div>
                   <div className="flex flex-col gap-2">
                     {heldOut.map((source) => (
                       <div key={source.id} className="model-hub-order-row model-hub-order-row--held">

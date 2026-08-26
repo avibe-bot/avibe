@@ -2758,6 +2758,7 @@ the drawer keeps the same draft and retries it; no partial priority state is vis
 | `section.ordered` | 排在这条顺序里 | In this order |
 | `section.ordered.note` | 拖动排序 | Drag to reorder |
 | `section.heldOut` | 未排入这条顺序 | Not in this order |
+| `section.heldOut.note` | 这些来源仍保留在已有路由里，排在这条顺序之后。要从路由中移除，请编辑对应型号的网关路由。 | These sources remain in existing routes after the ordered sources. To remove one from a route, edit that model's gateway route. |
 | `action.include` | 排进来 | Add to order |
 | `action.exclude` | 移出 | Remove from order |
 | `empty.noEligible` `[derived]` | 这个后端还没有可用来源。 | No source is available to this backend yet. |

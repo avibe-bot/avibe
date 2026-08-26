@@ -984,7 +984,8 @@
         "section": {
           "ordered": "排在这条顺序里",
           "ordered.note": "拖动排序",
-          "heldOut": "未排入这条顺序"
+          "heldOut": "未排入这条顺序",
+          "heldOut.note": "这些来源仍保留在已有路由里，排在这条顺序之后。要从路由中移除，请编辑对应型号的网关路由。"
         },
         "action": {
           "include": "排进来",
