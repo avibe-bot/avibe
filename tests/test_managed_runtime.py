@@ -854,6 +854,128 @@ def test_clean_dry_run_is_read_only_and_creates_no_lock(
     assert not (runtime_dir / ".install.lock").exists()
 
 
+def _retention_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_kind: str,
+    *,
+    current_is_newest: bool,
+) -> tuple[ManagedRuntimeManager, Path, list[Path]]:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    _archive, manifest_path = _write_subclass_runtime_fixture(tmp_path, runtime_kind)
+    manager = _subclass_runtime_manager(tmp_path, runtime_kind, manifest_path, monkeypatch)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+    current = Path(installed["install_dir"])
+    previous = [current.with_name(f"previous-{index}") for index in range(3)]
+    for path in previous:
+        shutil.copytree(current, path)
+
+    current_mtime = 400 if current_is_newest else 100
+    previous_mtimes = (300, 200, 100) if current_is_newest else (400, 300, 200)
+    os.utime(current, (current_mtime, current_mtime))
+    for path, mtime in zip(previous, previous_mtimes):
+        os.utime(path, (mtime, mtime))
+    return manager, current, previous
+
+
+@pytest.mark.parametrize("keep_previous", [0, 1, 2])
+@pytest.mark.parametrize("current_is_newest", [True, False])
+@pytest.mark.parametrize("dry_run", [True, False])
+@pytest.mark.parametrize("runtime_kind", ["git", "memory", "model-hub"])
+def test_clean_retains_current_plus_requested_previous_regardless_of_mtime_rank(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    keep_previous: int,
+    current_is_newest: bool,
+    dry_run: bool,
+    runtime_kind: str,
+) -> None:
+    manager, current, previous = _retention_fixture(
+        tmp_path,
+        monkeypatch,
+        runtime_kind,
+        current_is_newest=current_is_newest,
+    )
+    expected_removed = set(previous[keep_previous:])
+
+    result = manager.clean(keep_previous=keep_previous, dry_run=dry_run)
+
+    assert result["ok"] is True
+    assert {Path(path) for path in result["removed"]} == expected_removed
+    assert current.is_dir()
+    expected_remaining = set(previous) if dry_run else set(previous[:keep_previous])
+    assert {path for path in previous if path.is_dir()} == expected_remaining
+
+
+@pytest.mark.parametrize(
+    "pointer_state",
+    ["corrupt", "unreadable", "wrong-root", "absent"],
+)
+@pytest.mark.parametrize("keep_previous", [0, 1])
+@pytest.mark.parametrize("dry_run", [True, False])
+@pytest.mark.parametrize("runtime_kind", ["git", "memory", "model-hub"])
+def test_clean_pointer_failure_or_absence_plans_no_install_deletion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pointer_state: str,
+    keep_previous: int,
+    dry_run: bool,
+    runtime_kind: str,
+) -> None:
+    manager, current, previous = _retention_fixture(
+        tmp_path,
+        monkeypatch,
+        runtime_kind,
+        current_is_newest=False,
+    )
+    install_dirs = {current, *previous}
+    pointer_path = manager.runtime_dir / "current.json"
+    original_mode = stat.S_IMODE(pointer_path.stat().st_mode)
+    staging_dir: Path | None = None
+    if pointer_state == "corrupt":
+        pointer_path.write_text("{", encoding="utf-8")
+        staging_dir = manager.runtime_dir / "install-pending"
+        staging_dir.mkdir()
+    elif pointer_state == "unreadable":
+        pointer_path.chmod(0)
+        staging_dir = manager.runtime_dir / "install-pending"
+        staging_dir.mkdir()
+    elif pointer_state == "wrong-root":
+        pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+        damaged_child = current / "damaged-child"
+        damaged_child.mkdir()
+        pointer["install_dir"] = str(damaged_child)
+        pointer_path.write_text(json.dumps(pointer), encoding="utf-8")
+        staging_dir = manager.runtime_dir / "install-pending"
+        staging_dir.mkdir()
+    else:
+        pointer_path.unlink()
+        manifest = manager._load_manifest(allow_network=False)
+        assert manifest is not None
+        archive = manager._manifest_archive_for_platform(manifest)
+        assert archive is not None
+        assert all(
+            manager._verified_manifest_binary(path, manifest, archive) is not None
+            for path in install_dirs
+        )
+
+    try:
+        result = manager.clean(keep_previous=keep_previous, dry_run=dry_run)
+    finally:
+        if pointer_state == "unreadable":
+            pointer_path.chmod(original_mode)
+
+    assert result["removed"] == []
+    assert all(path.is_dir() for path in install_dirs)
+    if pointer_state == "absent":
+        assert result["ok"] is True
+    else:
+        assert staging_dir is not None and staging_dir.is_dir()
+        assert result["ok"] is False
+        assert result["reason"] == manager._reason("clean_inspection_failed")
+
+
 def test_clean_dry_run_reports_inspection_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

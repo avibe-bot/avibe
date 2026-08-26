@@ -197,7 +197,13 @@ class ManagedRuntimeManager:
                     )
 
             install_dir = self._manifest_install_dir(manifest, archive)
-            current_install_dir = self._current_install_dir(self.runtime_dir / "versions")
+            try:
+                current_install_dir = self._current_install_dir(self.runtime_dir / "versions")
+            except OSError:
+                # Ensure can repair a damaged pointer from the selected
+                # manifest's admitted disk record. Cleanup cannot make the
+                # same assumption because it has no replacement transaction.
+                current_install_dir = None
             existing_install_dir = current_install_dir or install_dir
             existing = self._verified_manifest_binary(existing_install_dir, manifest, archive)
             if existing is None and existing_install_dir != install_dir:
@@ -751,31 +757,43 @@ class ManagedRuntimeManager:
     ) -> dict[str, Any]:
         if removed is None:
             removed = []
+        versions_dir = self.runtime_dir / "versions"
+        current = self._current_install_dir(versions_dir)
+        try:
+            versions_is_dir = stat.S_ISDIR(versions_dir.stat().st_mode)
+        except FileNotFoundError:
+            versions_is_dir = False
+        except OSError as exc:
+            # An uninspectable versions tree must not silently preview as
+            # empty (misleading "0 entries") — surface an inspection failure.
+            raise OSError(f"versions directory cannot be inspected: {versions_dir}") from exc
+
+        install_dirs = (
+            {
+                metadata_path.parent
+                for metadata_path in self._rglob_install_metadata(versions_dir)
+                if metadata_path.parent.is_dir()
+            }
+            if versions_is_dir
+            else set()
+        )
+        resolved_install_dirs = {path.resolve() for path in install_dirs}
+        if current is not None and current not in resolved_install_dirs:
+            raise OSError("current.json is unreadable")
+        protected = (
+            {current}
+            if current is not None
+            else resolved_install_dirs
+        )
+
         for staging_dir in self.runtime_dir.glob("install-*"):
             if staging_dir.is_dir():
                 if not dry_run:
                     shutil.rmtree(staging_dir, ignore_errors=True)
                 removed.append(str(staging_dir))
 
-        versions_dir = self.runtime_dir / "versions"
-        try:
-            versions_is_dir = stat.S_ISDIR(versions_dir.stat().st_mode)
-        except FileNotFoundError:
-            return {"ok": True, "removed": removed}
-        except OSError as exc:
-            # An uninspectable versions tree must not silently preview as
-            # empty (misleading "0 entries") — surface an inspection failure.
-            raise OSError(f"versions directory cannot be inspected: {versions_dir}") from exc
         if not versions_is_dir:
             return {"ok": True, "removed": removed}
-
-        install_dirs = {
-            metadata_path.parent
-            for metadata_path in self._rglob_install_metadata(versions_dir)
-            if metadata_path.parent.is_dir()
-        }
-        current = self._current_install_dir(versions_dir)
-        protected = {current} if current is not None else set()
         candidates = sorted(
             (path for path in install_dirs if path.resolve() not in protected),
             key=lambda path: path.stat().st_mtime,
@@ -1132,14 +1150,32 @@ class ManagedRuntimeManager:
         )
 
     def _current_install_dir(self, versions_dir: Path) -> Path | None:
+        pointer_path = self.runtime_dir / "current.json"
         try:
-            pointer = json.loads((self.runtime_dir / "current.json").read_text(encoding="utf-8"))
-            candidate = Path(str(pointer.get("install_dir") or "")).resolve()
-            if versions_dir.resolve() in candidate.parents:
-                return candidate
-        except Exception:  # noqa: BLE001
-            return None
-        return None
+            payload = pointer_path.read_text(encoding="utf-8")
+        except FileNotFoundError as exc:
+            try:
+                pointer_path.lstat()
+            except FileNotFoundError:
+                return None
+            except OSError as inspect_exc:
+                raise OSError("current.json is unreadable") from inspect_exc
+            raise OSError("current.json is unreadable") from exc
+        except (OSError, RecursionError, UnicodeError) as exc:
+            raise OSError("current.json is unreadable") from exc
+
+        try:
+            pointer = json.loads(payload)
+            install_dir = pointer.get("install_dir") if isinstance(pointer, dict) else None
+            if not isinstance(install_dir, str) or not install_dir or not Path(install_dir).is_absolute():
+                raise ValueError("current.json has no absolute install_dir")
+            candidate = Path(install_dir).resolve()
+            versions_root = versions_dir.resolve()
+            if candidate == versions_root or versions_root not in candidate.parents:
+                raise ValueError("current.json install_dir is outside versions")
+            return candidate
+        except (OSError, RecursionError, RuntimeError, UnicodeError, ValueError) as exc:
+            raise OSError("current.json is unreadable") from exc
 
     def _prune_empty_version_dirs(self, versions_dir: Path) -> None:
         for depth in (3, 2, 1):
