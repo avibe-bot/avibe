@@ -2095,6 +2095,50 @@ def test_cmd_upgrade_refuses_an_in_flight_restart_before_mutation(
     assert "restart is already in progress" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize(
+    ("restart_live", "expected"),
+    [
+        (True, "已有重启正在进行，升级未执行。"),
+        (False, "已有软件包操作正在进行，修复未执行。"),
+    ],
+)
+def test_cmd_upgrade_localizes_package_lease_contention(
+    monkeypatch,
+    capsys,
+    restart_live,
+    expected,
+):
+    @contextmanager
+    def blocked_mutation_lock():
+        raise cli.MigrationLockTimeout("raw lock diagnostic")
+        yield
+
+    monkeypatch.setattr(
+        cli,
+        "get_latest_version",
+        lambda: {"error": None, "has_update": True, "latest": "3.0.15"},
+    )
+    monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/custom/bin/vibe")
+    monkeypatch.setattr(cli, "package_mutation_lock", blocked_mutation_lock)
+    monkeypatch.setattr(cli, "restart_in_flight", lambda: restart_live)
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
+    monkeypatch.setattr(
+        cli,
+        "build_upgrade_plan",
+        lambda **kwargs: pytest.fail("lease contention must prevent upgrade planning"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "schedule_restart",
+        lambda **kwargs: pytest.fail("lease contention must prevent restart scheduling"),
+    )
+
+    assert cli.cmd_upgrade() == 2
+    output = capsys.readouterr().out
+    assert expected in output
+    assert "raw lock diagnostic" not in output
+
+
 def test_cmd_upgrade_running_runtime_honors_show_runtime_skip_for_restart(monkeypatch):
     plan = UpgradePlan(
         command=["/usr/local/bin/uv", "tool", "install", "avibe-os", "--upgrade"],

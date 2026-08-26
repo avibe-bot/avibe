@@ -6730,24 +6730,32 @@ def control():
                 if action == "start":
                     runtime.ensure_config()
                     service_pid = runtime.start_service()
-                    runtime.write_status("running", "started", service_pid, status.get("ui_pid"))
+                    current_status = runtime.read_status()
+                    runtime.write_status(
+                        "running",
+                        "started",
+                        service_pid,
+                        current_status.get("ui_pid"),
+                    )
                 else:
+                    current_status = runtime.read_status()
                     runtime.write_status(
                         "stopping",
                         "stopping",
-                        status.get("service_pid"),
-                        status.get("ui_pid"),
+                        current_status.get("service_pid"),
+                        current_status.get("ui_pid"),
                     )
                     stopped, error = _stop_runtime_process_or_error(
                         paths.get_runtime_pid_path(),
                         "Vibe service",
                     )
                     if not stopped:
+                        current_status = runtime.read_status()
                         runtime.write_status(
                             "error",
                             error,
-                            status.get("service_pid"),
-                            status.get("ui_pid"),
+                            current_status.get("service_pid"),
+                            current_status.get("ui_pid"),
                         )
                         return (
                             jsonify(
@@ -6761,7 +6769,13 @@ def control():
                             500,
                         )
                     _stop_opencode_server()
-                    runtime.write_status("stopped", "stopped", None, status.get("ui_pid"))
+                    current_status = runtime.read_status()
+                    runtime.write_status(
+                        "stopped",
+                        "stopped",
+                        None,
+                        current_status.get("ui_pid"),
+                    )
         except MigrationLockTimeout:
             return _control_lock_timeout_response(action=action)
     elif action == "restart":
@@ -6790,11 +6804,12 @@ def control():
                             ),
                             409,
                         )
+                    current_status = runtime.read_status()
                     runtime.write_status(
                         "restarting",
                         "restarting",
-                        status.get("service_pid"),
-                        status.get("ui_pid"),
+                        current_status.get("service_pid"),
+                        current_status.get("ui_pid"),
                     )
                     result = schedule_restart(
                         delay_seconds=0.0,
@@ -7458,37 +7473,69 @@ def ui_reload():
                 if memory_ui_secret is not None
                 else {}
             )
-            pid = runtime.spawn_background(
-                [sys.executable, "-c", command],
-                config_paths.get_runtime_ui_pid_path(),
-                "ui_stdout.log",
-                "ui_stderr.log",
-                **spawn_kwargs,
-            )
-            runtime.write_status(
-                status.get("state", "running"),
-                status.get("detail"),
-                status.get("service_pid"),
-                pid,
-            )
+            pid_path = config_paths.get_runtime_ui_pid_path()
+            try:
+                previous_pid_contents = pid_path.read_bytes()
+            except FileNotFoundError:
+                previous_pid_contents = None
+            try:
+                pid = runtime.spawn_background(
+                    [sys.executable, "-c", command],
+                    pid_path,
+                    "ui_stdout.log",
+                    "ui_stderr.log",
+                    **spawn_kwargs,
+                )
+                runtime.write_status(
+                    status.get("state", "running"),
+                    status.get("detail"),
+                    status.get("service_pid"),
+                    pid,
+                )
+            except Exception:
+                try:
+                    current_pid_contents = pid_path.read_bytes()
+                except FileNotFoundError:
+                    current_pid_contents = None
+                if current_pid_contents != previous_pid_contents:
+                    if previous_pid_contents is None:
+                        pid_path.unlink(missing_ok=True)
+                    else:
+                        pid_path.write_bytes(previous_pid_contents)
+                raise
             return pid
 
-        def _replacement_identity_ready() -> bool:
+        def _replacement_identity_ready(deadline: float) -> bool:
             for attempt in range(51):
-                if runtime.ui_pid_file_points_to_running_ui():
-                    return True
-                if attempt < 50:
-                    time.sleep(0.2)
+                if time.monotonic() > deadline:
+                    break
+                if runtime.ui_pid_file_points_to_running_ui() and runtime.ui_server_healthy(
+                    host=bind_host,
+                    port=port,
+                ):
+                    return time.monotonic() <= deadline
+                remaining = deadline - time.monotonic()
+                if attempt == 50 or remaining <= 0:
+                    break
+                time.sleep(min(0.2, remaining))
             return False
 
         spawned = False
         for attempt in range(2):
             try:
                 with package_mutation_lock():
+                    deadline = time.monotonic() + 10.0
                     _stop_current_server()
-                    try:
-                        replacement_pid = _spawn_replacement()
-                    except Exception:
+                    replacement_pid = None
+                    spawn_error = None
+                    for _spawn_attempt in range(2):
+                        try:
+                            replacement_pid = _spawn_replacement()
+                            spawn_error = None
+                            break
+                        except Exception as exc:
+                            spawn_error = exc
+                    if replacement_pid is None:
                         runtime.write_status(
                             "error",
                             "ui_reload_failed",
@@ -7498,9 +7545,10 @@ def ui_reload():
                         logger.exception(
                             "UI reload replacement failed to spawn: %s",
                             "ui_reload_failed",
+                            exc_info=spawn_error,
                         )
                         return
-                    if not _replacement_identity_ready():
+                    if not _replacement_identity_ready(deadline):
                         runtime.write_status(
                             "error",
                             "ui_reload_timeout",

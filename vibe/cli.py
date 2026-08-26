@@ -14528,6 +14528,10 @@ def cmd_upgrade():
         else:
             print(f"\033[31mUpgrade failed:\033[0m\n{result.stderr}")
             return 1
+    except MigrationLockTimeout:
+        if restart_in_flight():
+            return _restart_in_progress_exit(operation="upgrade")
+        return _package_mutation_busy_exit()
     except Exception as e:
         print(f"\033[31mUpgrade failed: {e}\033[0m")
         return 1

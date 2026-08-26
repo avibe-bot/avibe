@@ -151,6 +151,7 @@ def test_ui_reload_routes_replacement_output_through_runtime_log_sinks(monkeypat
     monkeypatch.setattr(runtime, "read_status", lambda: {"state": "running", "service_pid": 111})
     monkeypatch.setattr(runtime, "write_status", lambda *args: captured.setdefault("status", args))
     monkeypatch.setattr(runtime, "ui_pid_file_points_to_running_ui", lambda: True)
+    monkeypatch.setattr(runtime, "ui_server_healthy", lambda **kwargs: True)
 
     def fake_spawn(
         args,
@@ -239,6 +240,11 @@ def test_ui_reload_stops_old_server_and_waits_for_replacement_inside_package_lea
         lambda: events.append(("identity", mutation_lease_held)) or next(identities),
     )
     monkeypatch.setattr(
+        runtime,
+        "ui_server_healthy",
+        lambda **kwargs: events.append(("health", mutation_lease_held, kwargs)) or True,
+    )
+    monkeypatch.setattr(
         "vibe.ui_server.time.sleep",
         lambda delay: events.append(("sleep", delay, mutation_lease_held)),
     )
@@ -261,13 +267,14 @@ def test_ui_reload_stops_old_server_and_waits_for_replacement_inside_package_lea
         ("identity", True),
         ("sleep", 0.2, True),
         ("identity", True),
+        ("health", True, {"host": "127.0.0.1", "port": 5123}),
         ("lock-exit", None),
     ]
     assert server.should_exit is True
 
 
-def test_ui_reload_same_port_readiness_uses_replacement_identity_not_health(monkeypatch):
-    identity_checks: list[bool] = []
+def test_ui_reload_health_is_secondary_to_replacement_identity(monkeypatch):
+    readiness_events: list[str] = []
 
     class _Server:
         should_exit = False
@@ -278,16 +285,18 @@ def test_ui_reload_same_port_readiness_uses_replacement_identity_not_health(monk
     monkeypatch.setattr(runtime, "read_status", lambda: {"state": "running", "service_pid": 111})
     monkeypatch.setattr(runtime, "spawn_background", lambda *args, **kwargs: 222)
     monkeypatch.setattr(runtime, "write_status", lambda *args: None)
-    monkeypatch.setattr(
-        runtime,
-        "ui_server_healthy",
-        lambda *args, **kwargs: pytest.fail("same-port health can belong to the old UI"),
-    )
+    identities = iter([False, True])
     monkeypatch.setattr(
         runtime,
         "ui_pid_file_points_to_running_ui",
-        lambda: identity_checks.append(True) or True,
+        lambda: readiness_events.append("identity") or next(identities),
     )
+    monkeypatch.setattr(
+        runtime,
+        "ui_server_healthy",
+        lambda **kwargs: readiness_events.append("health") or True,
+    )
+    monkeypatch.setattr("vibe.ui_server.time.sleep", lambda delay: readiness_events.append("sleep"))
 
     client = app.test_client()
     response = client.post(
@@ -299,7 +308,7 @@ def test_ui_reload_same_port_readiness_uses_replacement_identity_not_health(monk
 
     assert response.status_code == 200
     assert response.get_json() == {"ok": True, "host": "127.0.0.1", "port": 5123}
-    assert identity_checks == [True]
+    assert readiness_events == ["identity", "sleep", "identity", "health"]
 
 
 def test_ui_reload_identity_timeout_writes_error_after_one_spawn(monkeypatch, caplog):
@@ -352,7 +361,85 @@ def test_ui_reload_identity_timeout_writes_error_after_one_spawn(monkeypatch, ca
     assert "ui_reload_timeout" in caplog.text
 
 
-def test_ui_reload_spawn_failure_writes_error_without_retry(monkeypatch, caplog):
+def test_ui_reload_retries_one_spawn_failure_inside_the_same_lease(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime.paths.ensure_data_dirs()
+    events: list[object] = []
+    mutation_lease_held = False
+
+    @contextmanager
+    def mutation_lock(*, timeout_seconds=None):
+        nonlocal mutation_lease_held
+        mutation_lease_held = True
+        events.append("lock-enter")
+        try:
+            yield
+        finally:
+            events.append("lock-exit")
+            mutation_lease_held = False
+
+    class _Server:
+        should_exit = False
+
+    server = _Server()
+    monkeypatch.setattr(ui_server, "package_mutation_lock", mutation_lock)
+    monkeypatch.setattr(ui_server, "_server", server)
+    monkeypatch.setattr(threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(
+        runtime,
+        "read_status",
+        lambda: {"state": "running", "service_pid": 111, "ui_pid": 110},
+    )
+    pid_path = runtime.paths.get_runtime_ui_pid_path()
+    pid_path.write_text("110", encoding="utf-8")
+    spawn_attempts = 0
+
+    def flaky_spawn(args, received_pid_path, *spawn_args, **spawn_kwargs):
+        nonlocal spawn_attempts
+        spawn_attempts += 1
+        assert mutation_lease_held is True
+        assert received_pid_path == pid_path
+        events.append(("spawn", spawn_attempts))
+        if spawn_attempts == 1:
+            received_pid_path.write_text("999", encoding="utf-8")
+            raise RuntimeError("first popen failed")
+        assert received_pid_path.read_text(encoding="utf-8") == "110"
+        received_pid_path.write_text("222", encoding="utf-8")
+        return 222
+
+    monkeypatch.setattr(runtime, "spawn_background", flaky_spawn)
+    monkeypatch.setattr(runtime, "write_status", lambda *args: events.append(("status", args)))
+    monkeypatch.setattr(runtime, "ui_pid_file_points_to_running_ui", lambda: True)
+    monkeypatch.setattr(runtime, "ui_server_healthy", lambda **kwargs: True)
+
+    client = app.test_client()
+    response = client.post(
+        "/api/ui/reload",
+        json={"host": "127.0.0.1", "port": 5123},
+        headers=csrf_headers(client, "http://127.0.0.1:5123"),
+        base_url="http://127.0.0.1:5123",
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True, "host": "127.0.0.1", "port": 5123}
+    assert server.should_exit is True
+    assert events == [
+        "lock-enter",
+        ("spawn", 1),
+        ("spawn", 2),
+        ("status", ("running", None, 111, 222)),
+        "lock-exit",
+    ]
+    assert pid_path.read_text(encoding="utf-8") == "222"
+
+
+def test_ui_reload_two_spawn_failures_write_error_without_further_retry(
+    monkeypatch,
+    tmp_path,
+    caplog,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime.paths.ensure_data_dirs()
     events: list[object] = []
 
     @contextmanager
@@ -375,17 +462,27 @@ def test_ui_reload_spawn_failure_writes_error_without_retry(monkeypatch, caplog)
         "read_status",
         lambda: {"state": "running", "service_pid": 111, "ui_pid": 110},
     )
+    pid_path = runtime.paths.get_runtime_ui_pid_path()
+    pid_path.write_text("110", encoding="utf-8")
 
-    def fail_spawn(*args, **kwargs):
+    def fail_spawn(args, received_pid_path, *spawn_args, **spawn_kwargs):
+        attempt = len([event for event in events if event == "spawn"]) + 1
         events.append("spawn")
-        raise RuntimeError("popen failed")
+        assert received_pid_path.read_text(encoding="utf-8") == "110"
+        received_pid_path.write_text(str(900 + attempt), encoding="utf-8")
+        raise RuntimeError(f"popen failed {attempt}")
 
     monkeypatch.setattr(runtime, "spawn_background", fail_spawn)
     monkeypatch.setattr(runtime, "write_status", lambda *args: events.append(("status", args)))
     monkeypatch.setattr(
         runtime,
         "ui_pid_file_points_to_running_ui",
-        lambda: pytest.fail("identity must not be checked when Popen fails"),
+        lambda: pytest.fail("identity must not be checked when both Popen attempts fail"),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "ui_server_healthy",
+        lambda **kwargs: pytest.fail("health must not be checked when both Popen attempts fail"),
     )
 
     client = app.test_client()
@@ -403,10 +500,68 @@ def test_ui_reload_spawn_failure_writes_error_without_retry(monkeypatch, caplog)
     assert events == [
         "lock-enter",
         "spawn",
+        "spawn",
         ("status", ("error", "ui_reload_failed", 111, 110)),
         "lock-exit",
     ]
+    assert pid_path.read_text(encoding="utf-8") == "110"
     assert "ui_reload_failed" in caplog.text
+
+
+def test_ui_reload_spawn_retry_and_readiness_share_one_deadline(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime.paths.ensure_data_dirs()
+    now = [100.0]
+    spawn_attempts = 0
+    sleeps: list[float] = []
+    statuses: list[tuple] = []
+
+    class _Server:
+        should_exit = False
+
+    def spawn(*args, **kwargs):
+        nonlocal spawn_attempts
+        spawn_attempts += 1
+        if spawn_attempts == 1:
+            now[0] = 109.9
+            raise RuntimeError("slow first failure")
+        return 222
+
+    def sleep(delay: float):
+        sleeps.append(delay)
+        now[0] += delay
+
+    monkeypatch.setattr(ui_server, "package_mutation_lock", nullcontext)
+    monkeypatch.setattr(ui_server, "_server", _Server())
+    monkeypatch.setattr(threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(
+        runtime,
+        "read_status",
+        lambda: {"state": "running", "service_pid": 111, "ui_pid": 110},
+    )
+    monkeypatch.setattr(runtime, "spawn_background", spawn)
+    monkeypatch.setattr(runtime, "write_status", lambda *args: statuses.append(args))
+    monkeypatch.setattr(runtime, "ui_pid_file_points_to_running_ui", lambda: False)
+    monkeypatch.setattr(
+        runtime,
+        "ui_server_healthy",
+        lambda **kwargs: pytest.fail("health requires replacement identity"),
+    )
+    monkeypatch.setattr("vibe.ui_server.time.monotonic", lambda: now[0])
+    monkeypatch.setattr("vibe.ui_server.time.sleep", sleep)
+
+    client = app.test_client()
+    response = client.post(
+        "/api/ui/reload",
+        json={"host": "127.0.0.1", "port": 5123},
+        headers=csrf_headers(client, "http://127.0.0.1:5123"),
+        base_url="http://127.0.0.1:5123",
+    )
+
+    assert response.status_code == 200
+    assert spawn_attempts == 2
+    assert sleeps == pytest.approx([0.1])
+    assert statuses[-1] == ("error", "ui_reload_timeout", 111, 222)
 
 
 def test_ui_reload_retries_busy_worker_then_leaves_current_server_running(

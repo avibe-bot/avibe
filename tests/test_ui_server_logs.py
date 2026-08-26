@@ -352,6 +352,89 @@ def test_control_stop_uses_locked_service_stop(monkeypatch, tmp_path):
     assert mutation_lease_held is False
 
 
+def test_control_start_uses_ui_pid_sampled_after_package_lease(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    current_status = {"state": "running", "service_pid": 111, "ui_pid": 100}
+    writes: list[tuple] = []
+
+    @contextmanager
+    def mutation_lock():
+        current_status["service_pid"] = 222
+        current_status["ui_pid"] = 200
+        yield
+
+    monkeypatch.setattr(runtime, "read_status", lambda: dict(current_status))
+    monkeypatch.setattr(runtime, "write_status", lambda *args: writes.append(args))
+    monkeypatch.setattr(runtime, "ensure_config", lambda: None)
+    monkeypatch.setattr(runtime, "start_service", lambda: 333)
+    monkeypatch.setattr(ui_server, "package_mutation_lock", mutation_lock)
+    monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: False)
+
+    client = app.test_client()
+    response = client.post("/api/control", json={"action": "start"}, headers=csrf_headers(client))
+
+    assert response.status_code == 200
+    assert writes == [("running", "started", 333, 200)]
+
+
+def test_control_stop_uses_status_sampled_after_package_lease(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    current_status = {"state": "running", "service_pid": 111, "ui_pid": 100}
+    writes: list[tuple] = []
+
+    @contextmanager
+    def mutation_lock():
+        current_status["service_pid"] = 222
+        current_status["ui_pid"] = 200
+        yield
+
+    monkeypatch.setattr(runtime, "read_status", lambda: dict(current_status))
+    monkeypatch.setattr(runtime, "write_status", lambda *args: writes.append(args))
+    monkeypatch.setattr(ui_server, "package_mutation_lock", mutation_lock)
+    monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: False)
+    monkeypatch.setattr(ui_server, "_stop_runtime_process_or_error", lambda *args: (True, None))
+    monkeypatch.setattr("vibe.cli._stop_opencode_server", lambda: None)
+
+    client = app.test_client()
+    response = client.post("/api/control", json={"action": "stop"}, headers=csrf_headers(client))
+
+    assert response.status_code == 200
+    assert writes == [
+        ("stopping", "stopping", 222, 200),
+        ("stopped", "stopped", None, 200),
+    ]
+
+
+def test_control_restart_uses_status_sampled_after_package_lease(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    current_status = {"state": "running", "service_pid": 111, "ui_pid": 100}
+    writes: list[tuple] = []
+
+    @contextmanager
+    def mutation_lock():
+        current_status["service_pid"] = 222
+        current_status["ui_pid"] = 200
+        yield
+
+    monkeypatch.setattr(runtime, "read_status", lambda: dict(current_status))
+    monkeypatch.setattr(runtime, "write_status", lambda *args: writes.append(args))
+    monkeypatch.setattr(ui_server, "package_mutation_lock", mutation_lock)
+    monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: False)
+    monkeypatch.setattr(
+        "vibe.restart_supervisor.schedule_restart",
+        lambda **kwargs: {"job_id": "job123", "state": "scheduled"},
+    )
+
+    client = app.test_client()
+    response = client.post("/api/control", json={"action": "restart"}, headers=csrf_headers(client))
+
+    assert response.status_code == 200
+    assert writes == [("restarting", "restarting", 222, 200)]
+
+
 @pytest.mark.parametrize("action", ["start", "stop"])
 def test_control_start_stop_refuse_an_in_flight_restart(monkeypatch, tmp_path, action):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
