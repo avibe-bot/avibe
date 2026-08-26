@@ -64,6 +64,7 @@ PROCESSING_PROBE_MAX_DEADLINE_SECONDS = (
     + PROCESSING_PROBE_DEADLINE_MARGIN_SECONDS
 )
 _PROCESSING_TIMEOUT_SECONDS = PROCESSING_PROBE_REQUEST_TIMEOUT_SECONDS
+_MAX_PROCESSING_PROBE_RESPONSE_BYTES = 2 * 1024 * 1024
 _PREFLIGHT_TIMEOUT_SECONDS = 30.0
 _CHAT_PROBE_MAX_TOKENS = 8
 _CHAT_PROBE_TERMINAL_FINISH_REASONS = frozenset(
@@ -948,7 +949,7 @@ class EverOSPort:
                             response.status_code,
                         )
                         return False
-                    raw = await _read_response(response)
+                    raw = await _read_bounded_processing_response(response)
             value = json.loads(raw)
         except (httpx.HTTPError, OSError, TypeError, ValueError, MemoryProviderFailure):
             logger.info("Memory processing probe unavailable endpoint=%s", path)
@@ -996,7 +997,7 @@ class EverOSPort:
                     json=payload,
                     headers={"Authorization": f"Bearer {api_key}"},
                 ) as response:
-                    raw = await _read_response(response)
+                    raw = await _read_bounded_processing_response(response)
                     status_code = response.status_code
             try:
                 value = json.loads(raw) if raw else None
@@ -1024,6 +1025,12 @@ class EverOSPort:
         except httpx.TimeoutException:
             failure = MemoryPreflightFailure(error_name, MemoryPreflightDiagnostic(side, message="provider_request_timed_out"))
             return failure
+        except MemoryProviderFailure:
+            failure = MemoryPreflightFailure(
+                error_name,
+                MemoryPreflightDiagnostic(side, message="provider_response_too_large"),
+            )
+            return failure
         except (httpx.HTTPError, OSError, TypeError, ValueError):
             failure = MemoryPreflightFailure(error_name, MemoryPreflightDiagnostic(side, message="provider_unavailable"))
             return failure
@@ -1049,6 +1056,17 @@ def _bounded_preflight_message(
 
 async def _read_response(response: httpx.Response) -> bytes:
     return await response.aread()
+
+
+async def _read_bounded_processing_response(response: httpx.Response) -> bytes:
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in response.aiter_bytes():
+        size += len(chunk)
+        if size > _MAX_PROCESSING_PROBE_RESPONSE_BYTES:
+            raise MemoryProviderFailure("memory_provider_response_invalid")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _map_search_items(

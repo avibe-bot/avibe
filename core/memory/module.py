@@ -1503,10 +1503,10 @@ class MemoryModule:
             if item.profile is not None:
                 if item.kind != "profile":
                     return OperationFailed(error="memory_provider_response_invalid")
-                profile_bytes = _profile_bytes(item.profile)
-                if profile_bytes is None:
+                # The structured profile projects the same canonical payload as
+                # item.text, so validate it without charging those bytes twice.
+                if _profile_bytes(item.profile) is None:
                     return OperationFailed(error="memory_provider_response_invalid")
-                total_bytes += profile_bytes
             if item.origin not in {None, "user", "agent", "both"}:
                 return OperationFailed(error="memory_provider_response_invalid")
             if total_bytes > MAX_PROVIDER_RESULT_BYTES:

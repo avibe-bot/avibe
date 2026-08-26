@@ -154,7 +154,7 @@ async def test_agent_remember_round_trips_through_dual_owner_search(
 async def test_profile_accepts_large_items_from_both_everos_owners(
     tmp_path: Path,
 ) -> None:
-    summary = "profile " * 10_000
+    summary = "profile " * 18_000
     item = MemoryItem(
         kind="profile",
         text=summary,
@@ -170,7 +170,7 @@ async def test_profile_accepts_large_items_from_both_everos_owners(
 
     result = await module.profile(principal_id=PRINCIPAL, project_id="default")
 
-    assert len(summary.encode()) > 64 * 1024
+    assert 128 * 1024 < len(summary.encode()) < 256 * 1024
     assert result == MemoryItems(
         items=(
             MemoryItem(
