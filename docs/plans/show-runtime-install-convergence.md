@@ -364,9 +364,21 @@ alternates between the packaged and a custom manifest lose the other lineage's
 installs. It is instead the existing suite: every case in
 `tests/test_show_runtime_archive_cleanup.py` that drives
 `_clean_after_managed_install()` passes against the shared successor, retargeted
-but not weakened, before the method is deleted. A symbol count is not sufficient
-evidence for this step: a deleted behavior with no shared successor fails this
-gate even when every deleted name reaches zero hits.
+but not weakened, before the method is deleted.
+
+That binding covers the behavior and not its invocation, and today nothing covers
+the invocation: all three of those cases call the method directly, the tests that
+drive `_install_managed_runtime_locked()` assert nothing about cleanup, and no
+test anywhere proves that completing an install runs cleanup at all. Retargeting
+the three onto a shared helper would therefore pass while the post-success call
+site disappeared, and installs and archives would accumulate with nothing failing.
+So this step also owes one test that a completed install invokes the shared
+successor — either by driving a production install entrypoint and observing the
+cleanup, or by asserting the call edge in the manner
+`test_provider_install_entrypoints_converge_on_single_admission_owner` already
+uses for `_install_managed_runtime_locked`. Deleting the last caller of a
+behavior is the same defect as deleting the behavior, and neither a symbol count
+nor a retargeted unit test can see it.
 
 ### Step 7: Migrate Tmux And Enforce Sole Ownership
 
