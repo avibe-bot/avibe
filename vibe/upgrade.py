@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import filecmp
 import json
 import logging
 import os
@@ -375,10 +376,14 @@ def _generation_for_hardlink(launcher: Path, root: Path) -> Path | None:
         identity = (launcher_stat.st_dev, launcher_stat.st_ino)
     except OSError:
         return None
-    root = root.expanduser().resolve()
-    if not root.is_dir():
+    try:
+        root = root.expanduser().resolve()
+        if not root.is_dir():
+            return None
+        generations = list(root.iterdir())
+    except OSError:
         return None
-    for generation in root.iterdir():
+    for generation in generations:
         candidate = generation / "bin" / launcher.name
         try:
             candidate_stat = candidate.stat()
@@ -404,7 +409,15 @@ def _launcher_generation(launcher: Path, root: Path) -> Path | None:
     except (OSError, UnicodeError):
         return None
     generation = _generation_for_path(marked, root)
-    return generation if generation is not None and generation.is_dir() else None
+    if generation is None or not generation.is_dir():
+        return None
+    # A marker is necessary only for the cross-volume copy fallback. Treat it
+    # as a hint and prove that it still describes the live launcher before use.
+    candidate = generation / "bin" / launcher.name
+    try:
+        return generation if filecmp.cmp(launcher, candidate, shallow=False) else None
+    except OSError:
+        return None
 
 
 def _update_launcher_generation_marker(launcher: Path, target: Path, root: Path) -> None:

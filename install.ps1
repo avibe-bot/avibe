@@ -78,7 +78,7 @@ function Get-StableBinDirectory {
 function Get-LauncherState {
     param(
         [string]$Launcher,
-        [string]$StableBin
+        [string]$RuntimeHome
     )
 
     $state = @{
@@ -86,20 +86,39 @@ function Get-LauncherState {
         SourcePath = $null
         ActivationOwner = $null
     }
-    $marker = Join-Path $StableBin ".vibe.exe.avibe-generation"
-    if (Test-Path -LiteralPath $marker) {
-        $marked = Get-Content -LiteralPath $marker -Raw -ErrorAction SilentlyContinue
-        if ($marked) {
-            $marked = $marked.Trim()
-        }
-        if ($marked) {
-            $state.SourcePath = $marked
-            $owner = Join-Path $marked "bin\vibe.exe"
-            if (Test-Path -LiteralPath $owner) {
-                $state.ActivationOwner = $owner
+    if (-not $state.Exists) {
+        return $state
+    }
+
+    $previousPythonPath = $env:PYTHONPATH
+    $previousPythonHome = $env:PYTHONHOME
+    $previousAvibeHome = $env:AVIBE_HOME
+    Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+    Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
+    $env:AVIBE_HOME = $RuntimeHome
+    Push-Location $RuntimeHome
+    try {
+        $protocol = Invoke-NativeCommand -FilePath $Launcher -Arguments @("__activate-install", "--protocol-version")
+        if ($protocol.Success -and [int]$protocol.Output.Trim() -ge 2) {
+            $snapshot = Invoke-NativeCommand `
+                -FilePath $Launcher `
+                -Arguments @("__activate-install", "--snapshot", "--launcher", $Launcher)
+            if ($snapshot.Success -and $snapshot.Output.Trim()) {
+                $state.SourcePath = $snapshot.Output.Trim()
+                $owner = Join-Path $state.SourcePath "bin\vibe.exe"
+                if (Test-Path -LiteralPath $owner) {
+                    $state.ActivationOwner = $owner
+                }
+                return $state
             }
-            return $state
         }
+    } catch {
+        # Released pre-protocol launchers fall through to legacy link discovery.
+    } finally {
+        Pop-Location
+        if ($null -eq $previousPythonPath) { Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue } else { $env:PYTHONPATH = $previousPythonPath }
+        if ($null -eq $previousPythonHome) { Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue } else { $env:PYTHONHOME = $previousPythonHome }
+        if ($null -eq $previousAvibeHome) { Remove-Item Env:AVIBE_HOME -ErrorAction SilentlyContinue } else { $env:AVIBE_HOME = $previousAvibeHome }
     }
     try {
         $item = Get-Item -LiteralPath $Launcher -ErrorAction Stop
@@ -382,7 +401,7 @@ function Invoke-UvToolInstallAttempt {
     $stableLauncher = Join-Path $stableBin "vibe.exe"
     # The candidate's shared Python activation owner resolves this snapshot to
     # a generation. PowerShell must not duplicate junction/symlink identity.
-    $launcherState = Get-LauncherState -Launcher $stableLauncher -StableBin $stableBin
+    $launcherState = Get-LauncherState -Launcher $stableLauncher -RuntimeHome $runtimeHome
     $previousSourcePath = $launcherState.SourcePath
     New-Item -ItemType Directory -Force -Path $generationTools, $generationBin, $stableBin | Out-Null
 
@@ -416,13 +435,13 @@ function Invoke-UvToolInstallAttempt {
         Push-Location $runtimeHome
         try {
             $protocol = Invoke-NativeCommand -FilePath $candidate -Arguments @("__activate-install", "--protocol-version")
-            $activationOwner = if ($protocol.Success -and $protocol.Output.Trim() -eq "1") {
+            $activationOwner = if ($protocol.Success -and [int]$protocol.Output.Trim() -ge 1) {
                 $candidate
             } elseif ($launcherState.ActivationOwner) {
                 $ownerProtocol = Invoke-NativeCommand `
                     -FilePath $launcherState.ActivationOwner `
                     -Arguments @("__activate-install", "--protocol-version")
-                if ($ownerProtocol.Success -and $ownerProtocol.Output.Trim() -eq "1") {
+                if ($ownerProtocol.Success -and [int]$ownerProtocol.Output.Trim() -ge 1) {
                     $launcherState.ActivationOwner
                 } else {
                     $null
@@ -623,8 +642,9 @@ function Write-NextSteps {
     Write-Host "  pip uninstall avibe-os vibe-remote"
     Write-Host ("  Remove-Item -Force `"$(Join-Path $stableBin 'vibe.exe')`"")
     Write-Host ("  Remove-Item -Force `"$(Join-Path $stableBin '.vibe.exe.avibe-generation')`"")
-    Write-Host '  Remove-Item -Recurse -Force (Join-Path $(if ($env:AVIBE_HOME) { $env:AVIBE_HOME } else { "$env:USERPROFILE\.avibe" }) "runtime\install-generations")'
-    Write-Host "  Remove-Item -Recurse ~\.avibe, ~\.vibe_remote  # remove config and data"
+    Write-Host '  $avibeHome = if ($env:AVIBE_HOME) { $env:AVIBE_HOME -replace ''^~(?=[\\/]|$)'', $env:USERPROFILE } else { "$env:USERPROFILE\.avibe" }'
+    Write-Host '  Remove-Item -Recurse -Force (Join-Path $avibeHome "runtime\install-generations")'
+    Write-Host '  Remove-Item -Recurse $avibeHome, ~\.vibe_remote  # remove config and data'
     Write-Host ""
     Write-Host "Documentation:" -ForegroundColor Blue
     Write-Host "  https://github.com/$REPO#readme"

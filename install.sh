@@ -425,9 +425,25 @@ uv_tool_install() {
     local generation_bin="$generation_root/bin"
     local stable_bin_dir="${VIBE_TOOL_BIN_DIR:-$HOME/.local/bin}"
     local previous_target=""
+    local source_snapshot=""
     mkdir -p "$generation_tools" "$generation_bin" "$stable_bin_dir"
     if [ -e "$stable_bin_dir/vibe" ] || [ -L "$stable_bin_dir/vibe" ]; then
         previous_target="$(resolve_binary_path "$stable_bin_dir/vibe" || true)"
+        local current_protocol=""
+        current_protocol="$(
+            cd "$AVIBE_RUNTIME_HOME" || exit 1
+            env -u PYTHONPATH -u PYTHONHOME AVIBE_HOME="$AVIBE_RUNTIME_HOME" "$stable_bin_dir/vibe" \
+                __activate-install --protocol-version 2>/dev/null || true
+        )"
+        if [ "${current_protocol:-0}" -ge 2 ] 2>/dev/null; then
+            source_snapshot="$(
+                cd "$AVIBE_RUNTIME_HOME" || exit 1
+                env -u PYTHONPATH -u PYTHONHOME AVIBE_HOME="$AVIBE_RUNTIME_HOME" "$stable_bin_dir/vibe" \
+                    __activate-install --snapshot --launcher "$stable_bin_dir/vibe" 2>/dev/null || true
+            )"
+        else
+            source_snapshot="$previous_target"
+        fi
     fi
 
     if UV_TOOL_DIR="$generation_tools" UV_TOOL_BIN_DIR="$generation_bin" uv tool install "$@"; then
@@ -440,7 +456,6 @@ uv_tool_install() {
         # The candidate's shared Python activation owner canonicalizes this
         # snapshot against the generation root. Keep path identity out of the
         # bootstrap script so aliases cannot produce a second interpretation.
-        local source_snapshot="$previous_target"
         local activation_args=(
             __activate-install
             --launcher "$stable_bin_dir/vibe"
@@ -452,7 +467,7 @@ uv_tool_install() {
         local activation_owner=""
         local owner=""
         local owner_protocol=""
-        for owner in "$VIBE_CANDIDATE_BIN_PATH" "$source_snapshot"; do
+        for owner in "$VIBE_CANDIDATE_BIN_PATH" "$previous_target"; do
             if [ -z "$owner" ] || [ ! -x "$owner" ]; then
                 continue
             fi
@@ -461,7 +476,7 @@ uv_tool_install() {
                 env -u PYTHONPATH -u PYTHONHOME AVIBE_HOME="$AVIBE_RUNTIME_HOME" "$owner" \
                     __activate-install --protocol-version 2>/dev/null || true
             )"
-            if [ "$owner_protocol" = "1" ]; then
+            if [ "${owner_protocol:-0}" -ge 1 ] 2>/dev/null; then
                 activation_owner="$owner"
                 break
             fi
@@ -713,6 +728,17 @@ pair_remote_access() {
     success "Avibe service started"
 }
 
+print_uninstall_commands() {
+    echo "  avibe_home=\"\${AVIBE_HOME:-\$HOME/.avibe}\""
+    echo '  avibe_home="${avibe_home/#\~/$HOME}"'
+    echo "  uv tool uninstall avibe-os       # current uv install"
+    echo "  uv tool uninstall vibe-remote    # legacy uv install"
+    echo "  pip uninstall avibe-os vibe-remote"
+    echo "  rm -f \"$VIBE_TOOL_BIN_DIR/vibe\" \"$VIBE_TOOL_BIN_DIR/.vibe.avibe-generation\""
+    echo '  rm -rf "$avibe_home/runtime/install-generations"'
+    echo '  rm -rf "$avibe_home" ~/.vibe_remote   # remove config and data'
+}
+
 # Print next steps
 print_next_steps() {
     local vibe_dir
@@ -742,12 +768,7 @@ print_next_steps() {
         echo "  vibe doctor   - Run diagnostics"
         echo ""
         echo -e "${BLUE}Uninstall:${NC}"
-        echo "  uv tool uninstall avibe-os       # current uv install"
-        echo "  uv tool uninstall vibe-remote    # legacy uv install"
-        echo "  pip uninstall avibe-os vibe-remote"
-        echo "  rm -f \"$VIBE_TOOL_BIN_DIR/vibe\" \"$VIBE_TOOL_BIN_DIR/.vibe.avibe-generation\""
-        echo "  rm -rf \"\${AVIBE_HOME:-\$HOME/.avibe}/runtime/install-generations\""
-        echo "  rm -rf ~/.avibe ~/.vibe_remote   # remove config and data"
+        print_uninstall_commands
         if ! is_vibe_immediately_available; then
             echo ""
             echo -e "${BLUE}If 'vibe' is not found in a new shell:${NC}"
@@ -781,12 +802,7 @@ print_next_steps() {
     echo "  vibe doctor   - Run diagnostics"
     echo ""
     echo -e "${BLUE}Uninstall:${NC}"
-    echo "  uv tool uninstall avibe-os       # current uv install"
-    echo "  uv tool uninstall vibe-remote    # legacy uv install"
-    echo "  pip uninstall avibe-os vibe-remote"
-    echo "  rm -f \"$VIBE_TOOL_BIN_DIR/vibe\" \"$VIBE_TOOL_BIN_DIR/.vibe.avibe-generation\""
-    echo "  rm -rf \"\${AVIBE_HOME:-\$HOME/.avibe}/runtime/install-generations\""
-    echo "  rm -rf ~/.avibe ~/.vibe_remote   # remove config and data"
+    print_uninstall_commands
     echo ""
     echo -e "${BLUE}If 'vibe' is still not found:${NC}"
     echo "  ${VIBE_BIN_PATH:-$HOME/.local/bin/vibe}"

@@ -16820,13 +16820,21 @@ def _dispatch_installer_activation(argv: list[str]) -> int:
     """Activate a staged one-command install through the shared Python owner."""
 
     if argv == ["--protocol-version"]:
-        print("1")
+        print("2")
         return 0
     parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--snapshot", action="store_true")
     parser.add_argument("--launcher", required=True)
-    parser.add_argument("--candidate", required=True)
+    parser.add_argument("--candidate")
     parser.add_argument("--source-generation")
     args = parser.parse_args(argv)
+    if args.snapshot:
+        generation = _launcher_generation(Path(args.launcher), atomic_uv_install_root())
+        if generation is not None:
+            print(generation)
+        return 0
+    if not args.candidate:
+        parser.error("--candidate is required unless --snapshot is used")
     activation = AtomicActivation(
         launcher=Path(args.launcher),
         candidate_launcher=Path(args.candidate),

@@ -61,7 +61,26 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
                 if [ -f "$(dirname "$0")/.legacy-activation" ]; then
                     exit 2
                 fi
-                echo "1"
+                echo "2"
+                exit 0
+            fi
+            if [ "${{2:-}}" = "--snapshot" ]; then
+                launcher=""
+                shift 2
+                while [ "$#" -gt 0 ]; do
+                    case "$1" in
+                        --launcher) launcher="$2"; shift 2 ;;
+                        *) shift ;;
+                    esac
+                done
+                target="$(readlink "$launcher" 2>/dev/null || true)"
+                if [ -n "$target" ]; then
+                    case "$target" in
+                        /*) ;;
+                        *) target="$(dirname "$launcher")/$target" ;;
+                    esac
+                    dirname "$(dirname "$target")"
+                fi
                 exit 0
             fi
             if [ "${{VIBE_TEST_CANDIDATE_PROBE_FAIL:-}}" = "1" ]; then
@@ -655,11 +674,13 @@ def test_windows_installer_honors_configured_tool_bin_and_cross_volume_copy_fall
     assert "function Get-StableBinDirectory" in powershell
     assert "function Resolve-InstallPath" in powershell
     assert "function Get-LauncherState" in powershell
+    assert "Get-Content -LiteralPath $marker" not in powershell
     assert "function Get-GenerationPath" not in powershell
     assert '$expanded.StartsWith("~\\")' in powershell
     assert "$configured = $env:UV_TOOL_BIN_DIR" in powershell
     assert '"__activate-install"' in powershell
     assert '"--protocol-version"' in powershell
+    assert '"--snapshot", "--launcher", $Launcher' in powershell
     assert '$activationArguments += @("--source-generation", $previousSourcePath)' in powershell
     assert "function Remove-StaleInstallGenerations" not in powershell
     assert "function Activate-LegacyInstallCandidate" in powershell
@@ -672,6 +693,7 @@ def test_install_script_candidate_probes_ignore_python_path_overrides():
     script = INSTALL_SCRIPT.read_text(encoding="utf-8")
     assert 'env -u PYTHONPATH -u PYTHONHOME AVIBE_HOME="$AVIBE_RUNTIME_HOME"' in script
     assert "__activate-install --protocol-version" in script
+    assert '__activate-install --snapshot --launcher "$stable_bin_dir/vibe"' in script
     assert 'activation_args+=(--source-generation "$source_snapshot")' in script
     assert "generation_path_for" not in script
     assert 'AVIBE_HOME="$AVIBE_RUNTIME_HOME" "$activation_owner"' in script
@@ -687,6 +709,30 @@ def test_uninstall_instructions_use_the_selected_stable_bin():
     script = INSTALL_SCRIPT.read_text(encoding="utf-8")
     assert r'rm -f \"$VIBE_TOOL_BIN_DIR/vibe\"' in script
     assert "rm -f ~/.local/bin/vibe" not in script
+
+
+def test_uninstall_instructions_expand_user_relative_avibe_home():
+    script = INSTALL_SCRIPT.read_text(encoding="utf-8")
+    assert 'avibe_home=\\"\\${AVIBE_HOME:-\\$HOME/.avibe}\\"' in script
+    assert 'avibe_home="${avibe_home/#\\~/$HOME}"' in script
+    assert 'rm -rf "$avibe_home/runtime/install-generations"' in script
+    assert 'rm -rf "$avibe_home" ~/.vibe_remote' in script
+
+    documents = (
+        (REPO_ROOT / "README.md").read_text(encoding="utf-8"),
+        (REPO_ROOT / "docs" / "INSTALL_FOR_AI.md").read_text(encoding="utf-8"),
+        (REPO_ROOT / "docs" / "INSTALL_FOR_AI_ZH.md").read_text(encoding="utf-8"),
+    )
+
+    for document in documents:
+        assert 'avibe_home="${AVIBE_HOME:-$HOME/.avibe}"' in document
+        assert 'avibe_home="${avibe_home/#\\~/$HOME}"' in document
+        assert 'rm -rf "$avibe_home/runtime/install-generations"' in document
+        assert 'rm -rf "$avibe_home" ~/.vibe_remote' in document
+
+    powershell = INSTALL_POWERSHELL.read_text(encoding="utf-8")
+    assert "-replace ''^~(?=[\\\\/]|$)'', $env:USERPROFILE" in powershell
+    assert "Remove-Item -Recurse $avibeHome, ~\\.vibe_remote" in powershell
 
 
 def test_install_script_continues_when_show_runtime_prepare_fails(tmp_path):

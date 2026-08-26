@@ -321,7 +321,25 @@ def test_installer_activation_reports_its_protocol_version(capsys):
     from vibe import cli
 
     assert cli._dispatch_installer_activation(["--protocol-version"]) == 0
-    assert capsys.readouterr().out == "1\n"
+    assert capsys.readouterr().out == "2\n"
+
+
+def test_installer_activation_snapshot_comes_from_shared_launcher_identity(monkeypatch, tmp_path, capsys):
+    from vibe import cli, upgrade
+
+    root = tmp_path / "generations"
+    generation = root / "active"
+    target = generation / "bin" / "vibe"
+    launcher = tmp_path / "bin" / "vibe"
+    target.parent.mkdir(parents=True)
+    launcher.parent.mkdir(parents=True)
+    target.write_text("active\n", encoding="utf-8")
+    launcher.symlink_to(target)
+    monkeypatch.setattr(upgrade, "atomic_uv_install_root", lambda: root)
+    monkeypatch.setattr(cli, "atomic_uv_install_root", lambda: root)
+
+    assert cli._dispatch_installer_activation(["--snapshot", "--launcher", str(launcher)]) == 0
+    assert capsys.readouterr().out == f"{generation.resolve()}\n"
 
 
 def test_installer_rejects_a_snapshot_superseded_by_runtime_activation(monkeypatch, tmp_path):
@@ -480,6 +498,50 @@ def test_launcher_generation_does_not_match_hardlink_inode_on_another_device(mon
     monkeypatch.setattr(upgrade, "atomic_uv_install_root", lambda: root)
 
     assert upgrade._generation_for_hardlink(launcher, root) is None
+
+
+def test_hardlink_generation_lookup_degrades_when_root_cannot_be_enumerated(monkeypatch, tmp_path):
+    from vibe import upgrade
+
+    root = tmp_path / "home" / "runtime" / "install-generations"
+    launcher = tmp_path / ".local" / "bin" / "vibe.exe"
+    root.mkdir(parents=True)
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("launcher\n", encoding="utf-8")
+    original_iterdir = Path.iterdir
+
+    def denied(path):
+        if path == root.resolve():
+            raise PermissionError("denied")
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", denied)
+    monkeypatch.setattr(upgrade, "atomic_uv_install_root", lambda: root)
+
+    assert upgrade._generation_for_hardlink(launcher, root) is None
+
+
+def test_copy_marker_must_match_the_live_launcher(monkeypatch, tmp_path):
+    from vibe import upgrade
+
+    root = tmp_path / "home" / "runtime" / "install-generations"
+    old = root / "old"
+    current = root / "current"
+    launcher = tmp_path / ".local" / "bin" / "vibe.exe"
+    marker = launcher.parent / ".vibe.exe.avibe-generation"
+    for generation, content in ((old, "old\n"), (current, "current\n")):
+        candidate = generation / "bin" / "vibe.exe"
+        candidate.parent.mkdir(parents=True)
+        candidate.write_text(content, encoding="utf-8")
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("current\n", encoding="utf-8")
+    monkeypatch.setattr(upgrade, "atomic_uv_install_root", lambda: root)
+
+    marker.write_text(str(old), encoding="utf-8")
+    assert upgrade._launcher_generation(launcher, root) is None
+
+    marker.write_text(str(current), encoding="utf-8")
+    assert upgrade._launcher_generation(launcher, root) == current.resolve()
 
 
 def test_launcher_is_current_process_only_matches_windows_launcher(monkeypatch, tmp_path):
