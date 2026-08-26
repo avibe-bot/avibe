@@ -13,6 +13,7 @@ from packaging.specifiers import SpecifierSet
 from packaging.utils import canonicalize_name
 from packaging.version import Version
 import pytest
+import yaml
 
 try:
     import tomllib
@@ -23,6 +24,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
 ROOT = Path(__file__).resolve().parents[1]
 MEMORY_PROJECT = ROOT / "packaging" / "avibe-memory"
 COMPATIBILITY = SpecifierSet(">=3.0.14.dev0,<3.1")
+RELEASE_GATE = "Block Memory Wave 3a release until Waves 3b and 3c"
 
 
 def _project(path: Path) -> dict[str, Any]:
@@ -96,6 +98,35 @@ def test_publish_order_guard_requires_memory_before_the_first_host_extra() -> No
     assert "release automation and manifest ownership changes (Wave 3c)" in contract
     assert "Wave 3a intentionally leaves both the upgrade planner" in contract
     assert "Upgrade and rollback package-shape planning is" in contract
+
+
+def test_release_workflows_fail_closed_before_the_split_package_builds() -> None:
+    expectations = (
+        ("publish.yml", "Build package", "Verify package runtime manifests"),
+        ("release_ai.yml", "Build Python package", "Verify bundled runtime manifests"),
+    )
+
+    for workflow_name, build_step, wheel_assertion_step in expectations:
+        workflow = yaml.safe_load(
+            (ROOT / ".github" / "workflows" / workflow_name).read_text(
+                encoding="utf-8"
+            )
+        )
+        matching_jobs = []
+        for job in workflow["jobs"].values():
+            steps = job.get("steps", [])
+            names = [step.get("name") for step in steps]
+            if RELEASE_GATE in names:
+                matching_jobs.append((steps, names))
+
+        assert len(matching_jobs) == 1
+        steps, names = matching_jobs[0]
+        gate_index = names.index(RELEASE_GATE)
+        gate_command = steps[gate_index]["run"]
+        assert gate_index < names.index(build_step) < names.index(wheel_assertion_step)
+        assert "Wave 3b" in gate_command
+        assert "Wave 3c" in gate_command
+        assert "exit 1" in gate_command
 
 
 def test_built_wheels_have_independent_contents_and_compatible_metadata() -> None:
