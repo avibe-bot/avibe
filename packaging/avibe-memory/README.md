@@ -24,6 +24,13 @@ matching `avibe-memory` release first and verify that the package index serves
 it before publishing `avibe-os`. This order is required because the host extra
 must resolve at the moment it becomes public.
 
+This package split is not release-ready by itself. Do not tag or publish that
+first host release until the upgrade and rollback package-shape planner (Wave
+3b) and the release automation and manifest ownership changes (Wave 3c) have
+landed. Wave 3c owns building and publishing `avibe-memory` first and verifying
+its package-index availability. Wave 3a intentionally leaves both the upgrade
+planner and release workflows unchanged.
+
 The package split changes distribution ownership only. The installed import
 path remains `avibe_memory`, the host keeps its fixed loader and protocol
 constant, and the EverOS artifact manifest remains available as

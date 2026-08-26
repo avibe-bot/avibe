@@ -91,6 +91,10 @@ def test_publish_order_guard_requires_memory_before_the_first_host_extra() -> No
 
     assert "publish the matching `avibe-memory` release first" in contract
     assert "before publishing `avibe-os`" in contract
+    assert "This package split is not release-ready by itself" in contract
+    assert "upgrade and rollback package-shape planner (Wave 3b)" in contract
+    assert "release automation and manifest ownership changes (Wave 3c)" in contract
+    assert "Wave 3a intentionally leaves both the upgrade planner" in contract
     assert "Upgrade and rollback package-shape planning is" in contract
 
 
@@ -134,6 +138,7 @@ def test_built_wheels_have_independent_contents_and_compatible_metadata() -> Non
     assert memory_version in memory_requirement.specifier
     assert host_requirement.specifier == COMPATIBILITY
     assert core_version in host_requirement.specifier
+    assert memory_version == core_version
 
 
 @pytest.mark.parametrize("installation", ["core-only", "core+memory"])
