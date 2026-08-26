@@ -136,7 +136,7 @@ const AgentModelCard: React.FC<{
         data-agent-group-head={agent.backend}
         className="flex min-h-[66px] flex-col justify-center gap-[7px] border-b border-border px-3.5 py-3 sm:min-h-[66px] sm:py-1"
       >
-        <div className="flex min-w-0 flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
+        <div className="flex min-w-0 flex-col items-stretch gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-3">
           <div className="flex min-w-0 items-center gap-[9px]">
             <span className={cn('flex size-[30px] shrink-0 items-center justify-center rounded-[9px]', ACCENT_TILE[accent])}><Icon className={cn('size-[15px]', ACCENT_ICON[accent])} /></span>
             <span className="flex min-w-0 items-center gap-[7px]">
