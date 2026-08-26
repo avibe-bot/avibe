@@ -339,6 +339,14 @@ function Invoke-UvToolInstallAttempt {
             }
         }
         Move-Item -Force -Path $replacement -Destination (Join-Path $stableBin "vibe.exe")
+        try {
+            $marker = Join-Path $stableBin ".vibe.exe.avibe-generation"
+            $markerReplacement = Join-Path $stableBin (".vibe.exe.avibe-generation-" + [Guid]::NewGuid().ToString("N") + ".new")
+            Set-Content -LiteralPath $markerReplacement -Value $generationRoot -Encoding UTF8
+            Move-Item -Force -Path $markerReplacement -Destination $marker
+        } catch {
+            Write-Warning "Activated the launcher, but could not record its generation for offline rollback."
+        }
         return $result
     } finally {
         if ($null -eq $previousToolDir) { Remove-Item Env:UV_TOOL_DIR -ErrorAction SilentlyContinue } else { $env:UV_TOOL_DIR = $previousToolDir }
@@ -554,6 +562,7 @@ function Write-NextSteps {
     Write-Host "  uv tool uninstall vibe-remote"
     Write-Host "  pip uninstall avibe-os vibe-remote"
     Write-Host ("  Remove-Item -Force `"$(Join-Path $stableBin 'vibe.exe')`"")
+    Write-Host ("  Remove-Item -Force `"$(Join-Path $stableBin '.vibe.exe.avibe-generation')`"")
     Write-Host '  Remove-Item -Recurse -Force (Join-Path $(if ($env:AVIBE_HOME) { $env:AVIBE_HOME } else { "$env:USERPROFILE\.avibe" }) "runtime\install-generations")'
     Write-Host "  Remove-Item -Recurse ~\.avibe, ~\.vibe_remote  # remove config and data"
     Write-Host ""
