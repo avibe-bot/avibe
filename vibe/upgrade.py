@@ -169,23 +169,16 @@ def restart_record_is_pending(
 
 
 def _is_stable_launcher_path(launcher: Path) -> bool:
-    if launcher.is_symlink():
-        return True
-    # Windows falls back to a hard link when creating a symlink requires
-    # developer mode. The user-facing launcher is still a stable activation
-    # point; a direct virtualenv path is not. Honor uv's configured bin too.
     if launcher.name.lower() not in {"vibe", "vibe.exe"}:
         return False
-    if launcher.parent.name.lower() == "bin" and launcher.parent.parent.name.lower() == ".local":
-        return True
-    if (launcher.parent / f".{launcher.name}.avibe-generation").is_file():
-        return True
-    stable_dirs = {Path.home() / ".local" / "bin"}
-    configured = os.environ.get("UV_TOOL_BIN_DIR")
-    if configured:
-        stable_dirs.add(Path(configured).expanduser())
-    launcher_dir = os.path.normcase(os.path.abspath(str(launcher.parent.expanduser())))
-    return any(os.path.normcase(os.path.abspath(str(directory))) == launcher_dir for directory in stable_dirs)
+    # ``vibe_path`` has already been resolved to the command that launched this
+    # installation. Its role, not the directory uv happened to use when it was
+    # installed, makes it the stable activation point. The only unsafe shape is
+    # the entry point inside the mutable uv tool environment itself.
+    logical = os.path.normcase(os.path.abspath(os.path.expanduser(str(launcher))))
+    atomic_root = os.path.normcase(os.path.abspath(os.path.expanduser(str(atomic_uv_install_root()))))
+    uv_layout = logical.replace("\\", "/").lower()
+    return "/uv/tools/" not in uv_layout and not Path(logical).is_relative_to(Path(atomic_root))
 
 
 def launcher_is_current_process(launcher: Path | str) -> bool:

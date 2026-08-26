@@ -12,12 +12,22 @@ from __future__ import annotations
 import base64
 import csv
 import hashlib
+import importlib.metadata as importlib_metadata
 import os
 import subprocess
 import tempfile
+from collections import deque
 from dataclasses import dataclass
+from importlib import import_module
 from pathlib import Path, PurePosixPath
 from typing import Iterable, Sequence
+
+from packaging.markers import default_environment
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import canonicalize_name
+
+
+RUNTIME_DISTRIBUTIONS = ("avibe-os", "vibe-remote")
 
 
 @dataclass(frozen=True)
@@ -209,13 +219,114 @@ def verify_site_packages(
     return IntegrityResult(not failures, checked_files=checked, failures=tuple(failures))
 
 
+def runtime_import_modules() -> tuple[str, ...]:
+    """Return import boundaries for every registered user-facing platform."""
+
+    from config.platform_registry import platform_descriptors
+
+    return tuple(
+        dict.fromkeys(
+            (
+                "vibe",
+                *(descriptor.client_module for descriptor in platform_descriptors()),
+            )
+        )
+    )
+
+
+def dependency_graph_failures(
+    distribution_names: Iterable[str] = RUNTIME_DISTRIBUTIONS,
+) -> tuple[str, ...]:
+    """Validate the installed dependency closure rooted at Avibe's wheel metadata."""
+
+    candidates = tuple(distribution_names)
+    root = None
+    root_candidate = ""
+    for name in candidates:
+        try:
+            root = importlib_metadata.distribution(name)
+            root_candidate = name
+            break
+        except importlib_metadata.PackageNotFoundError:
+            continue
+    if root is None:
+        return (f"missing runtime distribution: {' or '.join(candidates)}",)
+
+    root_name = canonicalize_name(root.metadata.get("Name") or root_candidate)
+    distributions = {root_name: root}
+    requested_extras: dict[str, set[str]] = {root_name: set()}
+    processed_extras: dict[str, frozenset[str]] = {}
+    pending = deque([root_name])
+    failures: set[str] = set()
+    marker_environment = default_environment()
+
+    while pending:
+        distribution_name = pending.popleft()
+        extras = requested_extras[distribution_name]
+        extras_snapshot = frozenset(extras)
+        if processed_extras.get(distribution_name) == extras_snapshot:
+            continue
+        processed_extras[distribution_name] = extras_snapshot
+        distribution = distributions[distribution_name]
+
+        for raw_requirement in distribution.requires or ():
+            try:
+                requirement = Requirement(raw_requirement)
+            except InvalidRequirement:
+                failures.add(f"invalid dependency metadata: {raw_requirement}")
+                continue
+            marker_extras = extras or {""}
+            if requirement.marker is not None and not any(
+                requirement.marker.evaluate({**marker_environment, "extra": extra})
+                for extra in marker_extras
+            ):
+                continue
+
+            dependency_name = canonicalize_name(requirement.name)
+            try:
+                dependency = importlib_metadata.distribution(requirement.name)
+            except importlib_metadata.PackageNotFoundError:
+                failures.add(f"missing dependency: {requirement.name}")
+                continue
+            if requirement.specifier and not requirement.specifier.contains(
+                dependency.version,
+                prereleases=True,
+            ):
+                failures.add(
+                    f"incompatible dependency: {requirement.name} {dependency.version} "
+                    f"does not satisfy {requirement.specifier}"
+                )
+                continue
+
+            distributions[dependency_name] = dependency
+            dependency_extras = requested_extras.setdefault(dependency_name, set())
+            previous_extras = frozenset(dependency_extras)
+            dependency_extras.update(requirement.extras)
+            if dependency_name not in processed_extras or previous_extras != frozenset(dependency_extras):
+                pending.append(dependency_name)
+
+    return tuple(sorted(failures))
+
+
+def probe_runtime_environment(required_imports: Iterable[str] | None = None) -> None:
+    """Raise when declared dependencies or registered platform imports are broken."""
+
+    failures = dependency_graph_failures()
+    if failures:
+        raise RuntimeError("; ".join(failures))
+    modules = runtime_import_modules() if required_imports is None else tuple(required_imports)
+    for module in modules:
+        if module:
+            import_module(module)
+
+
 def verify_python_environment(
     python_executable: str | os.PathLike[str],
     *,
-    required_imports: Iterable[str] = ("vibe", "lark_oapi", "modules.im.multi"),
+    required_imports: Iterable[str] | None = None,
     timeout: float = 30.0,
 ) -> IntegrityResult:
-    """Verify package records and import the modules required at startup."""
+    """Verify package records, dependency closure, and platform imports."""
 
     executable = str(Path(python_executable).expanduser())
     site_packages = site_packages_for_python(executable)
@@ -231,15 +342,18 @@ def verify_python_environment(
     if failures:
         return IntegrityResult(False, checked_files=checked, failures=tuple(failures))
 
-    modules = tuple(module for module in required_imports if module)
-    if modules:
-        code = "; ".join(f"import {module}" for module in modules)
-        try:
-            process = run_isolated_probe([executable, "-c", code], timeout=timeout)
-        except (OSError, subprocess.SubprocessError) as exc:
-            return IntegrityResult(False, checked_files=checked, failures=(f"import probe failed: {exc}",))
-        if process.returncode != 0:
-            detail = (process.stderr or process.stdout or "import probe failed").strip().splitlines()[-1]
-            return IntegrityResult(False, checked_files=checked, failures=(f"required import failed: {detail}",))
+    probe_call = (
+        "probe_runtime_environment()"
+        if required_imports is None
+        else f"probe_runtime_environment({tuple(module for module in required_imports if module)!r})"
+    )
+    code = f"from core.install_integrity import probe_runtime_environment; {probe_call}"
+    try:
+        process = run_isolated_probe([executable, "-c", code], timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return IntegrityResult(False, checked_files=checked, failures=(f"runtime probe failed: {exc}",))
+    if process.returncode != 0:
+        detail = (process.stderr or process.stdout or "runtime probe failed").strip().splitlines()[-1]
+        return IntegrityResult(False, checked_files=checked, failures=(f"runtime probe failed: {detail}",))
 
     return IntegrityResult(True, checked_files=checked)

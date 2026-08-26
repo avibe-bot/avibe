@@ -61,7 +61,7 @@ def _tree_is_not_an_installed_distribution(monkeypatch):
     monkeypatch.setattr("vibe.upgrade._distributions_providing_this_package", lambda: [])
 
 
-def test_build_upgrade_plan_uses_uv_and_preserves_tool_bin_dir(monkeypatch):
+def test_build_upgrade_plan_stages_custom_legacy_uv_launcher(monkeypatch):
     monkeypatch.setattr("vibe.upgrade.os.path.exists", lambda path: True)
     monkeypatch.setattr("vibe.upgrade.os.access", lambda path, mode: True)
 
@@ -75,10 +75,12 @@ def test_build_upgrade_plan_uses_uv_and_preserves_tool_bin_dir(monkeypatch):
     assert plan.method == "uv"
     assert plan.command == ["/usr/local/bin/uv", "tool", "install", "avibe-os", "--upgrade"]
     assert plan.env is not None
-    assert "UV_TOOL_DIR" not in plan.env
+    assert "UV_TOOL_DIR" in plan.env
+    assert "UV_TOOL_BIN_DIR" in plan.env
     assert plan.env["PATH"] == "/usr/bin"
-    assert plan.preflight_error is not None
-    assert plan.activation is None
+    assert plan.preflight_error is None
+    assert plan.activation is not None
+    assert plan.activation.launcher == Path("/custom/bin/vibe")
 
 
 def test_build_upgrade_plan_forces_legacy_uv_tool_install(monkeypatch):
@@ -799,16 +801,26 @@ def test_is_uv_tool_install_uses_logical_atomic_generation_path(monkeypatch, tmp
     assert upgrade.is_uv_tool_install(str(executable))
 
 
-def test_custom_configured_bin_is_a_stable_launcher(monkeypatch, tmp_path):
+def test_custom_legacy_bin_is_a_stable_launcher_without_uv_environment(monkeypatch, tmp_path):
     from vibe import upgrade
 
     launcher = tmp_path / "custom-tools" / "vibe.exe"
     launcher.parent.mkdir(parents=True)
     launcher.write_text("launcher\n", encoding="utf-8")
     launcher.chmod(0o755)
-    monkeypatch.setenv("UV_TOOL_BIN_DIR", str(launcher.parent))
+    monkeypatch.delenv("UV_TOOL_BIN_DIR", raising=False)
 
     assert upgrade._is_stable_launcher_path(launcher)
+
+
+def test_uv_environment_entry_point_is_not_a_stable_launcher(monkeypatch, tmp_path):
+    from vibe import upgrade
+
+    root = tmp_path / "home" / "runtime" / "install-generations"
+    launcher = root / "generation" / "tools" / "avibe-os" / "bin" / "vibe.exe"
+    monkeypatch.setattr(upgrade, "atomic_uv_install_root", lambda: root)
+
+    assert not upgrade._is_stable_launcher_path(launcher)
 
 
 def test_restart_is_pending_until_the_seed_marker_is_terminal(monkeypatch, tmp_path):

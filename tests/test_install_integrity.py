@@ -3,7 +3,9 @@ import hashlib
 import stat
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
+from config.platform_registry import platform_descriptors
 from core import install_integrity
 from core.install_integrity import verify_site_packages
 
@@ -175,3 +177,34 @@ def test_verify_site_packages_accepts_dist_packages_entry_point(tmp_path):
 
     assert result.ok is True
     assert result.checked_files == 1
+
+
+def test_runtime_imports_cover_every_registered_platform_client():
+    expected = {descriptor.client_module for descriptor in platform_descriptors()}
+
+    assert expected <= set(install_integrity.runtime_import_modules())
+
+
+def test_dependency_graph_rejects_a_wholly_missing_declared_distribution(monkeypatch):
+    distributions = {
+        "avibe-os": SimpleNamespace(
+            metadata={"Name": "avibe-os"},
+            version="1.0",
+            requires=("slack-sdk>=3.26", "discord.py>=2.4"),
+        ),
+        "slack-sdk": SimpleNamespace(
+            metadata={"Name": "slack-sdk"},
+            version="3.30",
+            requires=(),
+        ),
+    }
+
+    def distribution(name):
+        try:
+            return distributions[name]
+        except KeyError as exc:
+            raise install_integrity.importlib_metadata.PackageNotFoundError(name) from exc
+
+    monkeypatch.setattr(install_integrity.importlib_metadata, "distribution", distribution)
+
+    assert install_integrity.dependency_graph_failures() == ("missing dependency: discord.py",)
