@@ -1995,12 +1995,13 @@ class OpenCodeServerManager:
                 logger.warning(f"Failed to get available agents: {e}")
                 return []
 
-    async def get_available_models(self, directory: str) -> Dict[str, Any]:
-        """Fetch available models from OpenCode server.
-
-        Returns:
-            Dict with 'providers' list and 'default' dict mapping provider to default model.
-        """
+    async def _get_available_models(
+        self,
+        directory: str,
+        *,
+        project_runtime_models: bool,
+    ) -> Dict[str, Any]:
+        """Fetch the OpenCode catalog with the requested public projection."""
 
         async with self._request_scope():
             session = await self._get_http_session()
@@ -2013,12 +2014,32 @@ class OpenCodeServerManager:
                         return _public_opencode_catalog(
                             await resp.json(),
                             runtime_provider_id=self._active_model_hub_provider_id(),
-                            project_runtime_models=True,
+                            project_runtime_models=project_runtime_models,
                         )
                     return {"providers": [], "default": {}}
             except Exception as e:
                 logger.warning(f"Failed to get available models: {e}")
                 return {"providers": [], "default": {}}
+
+    async def get_available_models(self, directory: str) -> Dict[str, Any]:
+        """Fetch the user-facing catalog, including exact Hub projections.
+
+        Returns:
+            Dict with 'providers' list and 'default' dict mapping provider to default model.
+        """
+
+        return await self._get_available_models(
+            directory,
+            project_runtime_models=True,
+        )
+
+    async def get_native_available_models(self, directory: str) -> Dict[str, Any]:
+        """Fetch models that native provider configuration can probe directly."""
+
+        return await self._get_available_models(
+            directory,
+            project_runtime_models=False,
+        )
 
     async def get_default_config(self, directory: str) -> Dict[str, Any]:
         """Fetch current default config from OpenCode server.

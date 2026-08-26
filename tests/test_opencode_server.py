@@ -251,6 +251,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         manager.ensure_running = AsyncMock()  # type: ignore[method-assign]
 
         models = await manager.get_available_models("/tmp/work")
+        native_models = await manager.get_native_available_models("/tmp/work")
         providers = await manager.get_providers()
         config = await manager.get_default_config("/tmp/work")
 
@@ -269,6 +270,15 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(providers["connected"], [legacy_custom_id, "openai"])
         self.assertNotIn("model", config)
         self.assertEqual(set(config["provider"]), {legacy_custom_id, "openai"})
+        native_model_index = {
+            row["id"]: row["models"] for row in native_models["providers"]
+        }
+        self.assertEqual(set(native_model_index), {legacy_custom_id, "custom", "openai"})
+        self.assertEqual(
+            {entry["id"] for entry in native_model_index["openai"]},
+            {"gpt-4", "gpt-5"},
+        )
+        self.assertEqual(set(native_model_index["custom"]), {"native-model"})
         public_models = {
             row["id"]: row["models"] for row in models["providers"]
         }

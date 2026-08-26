@@ -796,6 +796,8 @@ class _FakeOpencodeServer:
     async def get_available_models(self, _directory):
         return self.catalog
 
+    get_native_available_models = get_available_models
+
     async def create_session(self, _directory, *, title):
         return self.created_session
 

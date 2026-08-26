@@ -2842,7 +2842,7 @@ class AgentAuthService:
             )
         if not chosen_model:
             try:
-                catalog = await server.get_available_models(os.path.expanduser("~"))
+                catalog = await server.get_native_available_models(os.path.expanduser("~"))
             except Exception:  # noqa: BLE001
                 catalog = None
             if isinstance(catalog, dict):
@@ -2916,7 +2916,7 @@ class AgentAuthService:
                 pass
 
             try:
-                catalog = await server.get_available_models(directory)
+                catalog = await server.get_native_available_models(directory)
             except Exception:  # noqa: BLE001
                 catalog = None
             model_dict = {"providerID": provider_id, "modelID": chosen_model}

@@ -11201,7 +11201,7 @@ async def _get_opencode_providers_async() -> dict:
         providers_raw, auth_raw, config_raw = await asyncio.gather(
             server.get_providers(),
             server.get_provider_auth(),
-            server.get_available_models(os.path.expanduser("~")),
+            server.get_native_available_models(os.path.expanduser("~")),
             return_exceptions=False,
         )
     finally:
@@ -11786,7 +11786,7 @@ async def save_opencode_provider_model_async(provider_id: str, payload: dict) ->
     try:
         if server is not None:
             try:
-                config_raw = await server.get_available_models(os.path.expanduser("~"))
+                config_raw = await server.get_native_available_models(os.path.expanduser("~"))
             except Exception as exc:
                 logger.warning(
                     "OpenCode provider model catalog fetch failed for %s/%s: %s",

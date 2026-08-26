@@ -940,7 +940,9 @@ def test_opencode_options_includes_keyless_custom_provider_models(monkeypatch, t
     assert local["models"] == {"local-model": {"name": "local-model", "vibe_remote": {"user_model": True}}}
 
 
-def test_opencode_provider_catalog_keeps_builtin_overrides_read_only(monkeypatch, tmp_path):
+def test_opencode_provider_catalog_uses_native_models_for_provider_probes(
+    monkeypatch, tmp_path
+):
     class _FakeServer:
         async def get_providers(self):
             return {
@@ -952,6 +954,9 @@ def test_opencode_provider_catalog_keeps_builtin_overrides_read_only(monkeypatch
             return {}
 
         async def get_available_models(self, directory):
+            raise AssertionError("provider probes must not use the projected catalog")
+
+        async def get_native_available_models(self, directory):
             return {
                 "providers": [{"id": "openai", "models": {"gpt-5": {}}}],
                 "default": {"openai": "gpt-5"},
@@ -988,6 +993,7 @@ def test_opencode_provider_catalog_keeps_builtin_overrides_read_only(monkeypatch
     result = asyncio.run(api.get_opencode_providers_async())
 
     entry = result["providers"][0]["model_entries"][0]
+    assert result["providers"][0]["models"] == ["gpt-5"]
     assert entry["id"] == "gpt-5"
     assert entry["reasoning_efforts"] == ["high"]
     assert entry["user_managed"] is False
@@ -1032,6 +1038,8 @@ def test_opencode_provider_catalog_prefers_runtime_agent_model(
                 ],
                 "default": {"openai": "gpt-5.3-chat-latest"},
             }
+
+        get_native_available_models = get_available_models
 
         async def close_http_session(self, *, loop=None):
             pass
@@ -1083,6 +1091,8 @@ def test_opencode_provider_catalog_marks_keyless_custom_provider_configured(
                 "providers": [{"id": "openai", "models": {"gpt-5": {}}}],
                 "default": {"openai": "gpt-5"},
             }
+
+        get_native_available_models = get_available_models
 
         async def close_http_session(self, *, loop=None):
             pass
@@ -1145,6 +1155,8 @@ def test_opencode_provider_catalog_keeps_custom_provider_without_vibe_meta(
                 "providers": [{"id": "openai", "models": {"gpt-5": {}}}],
                 "default": {"openai": "gpt-5"},
             }
+
+        get_native_available_models = get_available_models
 
         async def close_http_session(self, *, loop=None):
             pass
