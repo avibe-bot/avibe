@@ -40,6 +40,15 @@ class IntegrityResult:
         return suffix
 
 
+def isolated_probe_environment() -> dict[str, str]:
+    """Keep the candidate interpreter from importing the caller's checkout."""
+
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    environment.pop("PYTHONHOME", None)
+    return environment
+
+
 def site_packages_for_python(python_executable: str | os.PathLike[str]) -> list[Path]:
     """Return site-packages directories belonging to a Python executable."""
 
@@ -66,6 +75,7 @@ def site_packages_for_python(python_executable: str | os.PathLike[str]) -> list[
             timeout=10,
             check=False,
             cwd=tempfile.gettempdir(),
+            env=isolated_probe_environment(),
         )
     except (OSError, subprocess.SubprocessError):
         result = None
@@ -235,6 +245,7 @@ def verify_python_environment(
                 # Do not let a source checkout on the caller's cwd satisfy the
                 # probe in place of the candidate environment being checked.
                 cwd=tempfile.gettempdir(),
+                env=isolated_probe_environment(),
             )
         except (OSError, subprocess.SubprocessError) as exc:
             return IntegrityResult(False, checked_files=checked, failures=(f"import probe failed: {exc}",))

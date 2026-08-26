@@ -77,6 +77,8 @@ from vibe.upgrade import (
     cache_running_vibe_path,
     get_latest_version_info,
     get_safe_cwd,
+    _launcher_generation,
+    restart_is_pending,
     discard_atomic_uv_install_generation,
     should_skip_show_runtime_prepare,
     UPGRADE_INSTALL_TIMEOUT_SECONDS,
@@ -11840,14 +11842,11 @@ def _uv_tool_site_packages_for_vibe(vibe_path: Path) -> list[Path]:
     # generation directory and switch only the stable PATH launcher.  Resolve
     # that generation directly so doctor inspects the active candidate just as
     # it inspects a conventional ``~/.local/share/uv/tools/<package>`` root.
-    try:
-        generation_root = atomic_uv_install_root().expanduser().resolve()
-        generation = vibe_path.expanduser().resolve().relative_to(generation_root).parts[0]
-    except (OSError, ValueError, IndexError):
-        generation = None
+    generation_root = atomic_uv_install_root().expanduser().resolve()
+    generation = _launcher_generation(vibe_path, generation_root)
     if generation:
         for package_name in UV_TOOL_PACKAGE_NAMES:
-            add_tool_root(generation_root / generation / "tools" / package_name)
+            add_tool_root(generation / "tools" / package_name)
 
     parts = vibe_path.parts
     try:
@@ -14437,9 +14436,14 @@ def cmd_upgrade():
     # Use a stable directory as cwd to avoid issues when running from a
     # directory that uv may delete during upgrade (e.g. inside the uv tool venv).
     safe_cwd = get_safe_cwd()
+    restart = None
+    restart_error = None
 
     try:
         with atomic_upgrade_lock():
+            if restart_is_pending():
+                print("\033[31mUpgrade already has a restart in progress; wait for it to finish.\033[0m")
+                return 1
             if plan.activation is not None and not atomic_activation_source_is_current(plan.activation):
                 print("\033[31mUpgrade was superseded by another activation; retry the upgrade.\033[0m")
                 return 1
@@ -14460,14 +14464,12 @@ def cmd_upgrade():
                     return 1
             elif result.returncode != 0 and plan.activation is not None:
                 discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
-        if result.returncode == 0:
-            if plan.activation is None and plan.method == "pip":
+            if result.returncode == 0 and plan.activation is None and plan.method == "pip":
                 integrity = verify_python_environment(sys.executable)
                 if not integrity.ok:
                     print(f"\033[31mUpgrade installed an incomplete Python environment: {integrity.detail}\033[0m")
                     return 1
-            print("\033[32mUpgrade successful!\033[0m")
-            if runtime_was_running:
+            if result.returncode == 0 and runtime_was_running:
                 try:
                     restart = schedule_restart(
                         delay_seconds=0.0,
@@ -14477,14 +14479,18 @@ def cmd_upgrade():
                         rollback_to=plan.rollback_to,
                     )
                 except Exception as exc:
-                    print("\033[33mUpgrade installed, but restart scheduling failed.\033[0m")
-                    print(f"Restart error: {exc}")
-                    print("Run `vibe restart` to use the new version.")
-                    return 2
-                else:
-                    print("Restart scheduled to use the new version.")
-                    print(f"Job ID: {restart['job_id']}")
-                    print("Run `vibe status` to inspect the restart result.")
+                    restart_error = exc
+        if result.returncode == 0:
+            print("\033[32mUpgrade successful!\033[0m")
+            if restart_error is not None:
+                print("\033[33mUpgrade installed, but restart scheduling failed.\033[0m")
+                print(f"Restart error: {restart_error}")
+                print("Run `vibe restart` to use the new version.")
+                return 2
+            if restart is not None:
+                print("Restart scheduled to use the new version.")
+                print(f"Job ID: {restart['job_id']}")
+                print("Run `vibe status` to inspect the restart result.")
             else:
                 _prepare_show_runtime_after_install(current_vibe_path)
                 print("Avibe was not running; the new version will be used next time you start it.")

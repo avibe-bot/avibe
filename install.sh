@@ -439,8 +439,17 @@ uv_tool_install() {
             return 1
         fi
         local replacement="$stable_bin_dir/.vibe.avibe-${RANDOM}.new"
-        ln -s "$VIBE_CANDIDATE_BIN_PATH" "$replacement"
-        mv -f "$replacement" "$stable_bin_dir/vibe"
+        if ! ln -s "$VIBE_CANDIDATE_BIN_PATH" "$replacement"; then
+            warn "candidate Avibe launcher could not be staged for activation"
+            rm -rf -- "$generation_root"
+            return 1
+        fi
+        if ! mv -f "$replacement" "$stable_bin_dir/vibe"; then
+            warn "candidate Avibe launcher could not be activated"
+            rm -f -- "$replacement"
+            rm -rf -- "$generation_root"
+            return 1
+        fi
         VIBE_TOOL_BIN_DIR="$stable_bin_dir"
         VIBE_BIN_PATH="$stable_bin_dir/vibe"
         return 0

@@ -67,6 +67,31 @@ def test_verify_python_environment_import_probe_does_not_use_caller_cwd(monkeypa
     assert calls[0]["cwd"] != str(tmp_path)
 
 
+def test_candidate_probe_does_not_inherit_pythonpath(monkeypatch, tmp_path):
+    site_packages = tmp_path / "lib" / "python3.12" / "site-packages"
+    _write_record(site_packages, "demo_pkg/__init__.py", b"value = 1\n")
+    executable = tmp_path / "bin" / "python3"
+    executable.parent.mkdir()
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o755)
+    calls = []
+
+    def fake_run(*args, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            return subprocess.CompletedProcess(args[0], 0, stdout=f"{site_packages}\n", stderr="")
+        return subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
+
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    monkeypatch.setattr(install_integrity.subprocess, "run", fake_run)
+
+    result = install_integrity.verify_python_environment(executable, required_imports=("demo_pkg",))
+
+    assert result.ok is True
+    assert "PYTHONPATH" not in calls[0]["env"]
+    assert "PYTHONPATH" not in calls[1]["env"]
+
+
 def test_site_discovery_ignores_reported_prefix_without_record(monkeypatch, tmp_path):
     site_packages = tmp_path / "Lib" / "site-packages"
     _write_record(site_packages, "demo_pkg/__init__.py", b"value = 1\n")

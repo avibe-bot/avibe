@@ -70,6 +70,7 @@ from vibe.upgrade import (
     get_latest_version_info,
     get_running_vibe_path,
     get_safe_cwd,
+    restart_is_pending,
     should_skip_show_runtime_prepare,
     UPGRADE_INSTALL_TIMEOUT_SECONDS,
 )
@@ -6141,9 +6142,19 @@ def do_upgrade(auto_restart: bool = True) -> dict:
     # errors.  The vibe service process cwd may be inside the uv tool venv
     # directory, which uv deletes and recreates during upgrade.
     safe_cwd = get_safe_cwd()
+    restarting = False
+    restart_failed = False
+    runtime_output = None
 
     try:
         with atomic_upgrade_lock():
+            if restart_is_pending():
+                return {
+                    "ok": False,
+                    "message": "Upgrade already has a restart in progress",
+                    "output": "Wait for the pending restart to finish before starting another upgrade.",
+                    "restarting": False,
+                }
             if plan.activation is not None and not atomic_activation_source_is_current(plan.activation):
                 return {
                     "ok": False,
@@ -6177,8 +6188,7 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                     }
             elif result.returncode != 0 and plan.activation is not None:
                 discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
-        if result.returncode == 0:
-            if plan.activation is None and plan.method == "pip":
+            if result.returncode == 0 and plan.activation is None and plan.method == "pip":
                 integrity = verify_python_environment(sys.executable)
                 if not integrity.ok:
                     return {
@@ -6187,10 +6197,7 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                         "output": integrity.detail,
                         "restarting": False,
                     }
-            restarting = False
-            restart_failed = False
-            runtime_output = None
-            if auto_restart and runtime_was_running:
+            if result.returncode == 0 and auto_restart and runtime_was_running:
                 try:
                     schedule_restart(
                         delay_seconds=2.0,
@@ -6203,7 +6210,8 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                 except Exception as exc:
                     restart_failed = True
                     runtime_output = f"Restart scheduling failed; run `vibe restart` to use the new version.\n{exc}"
-            else:
+        if result.returncode == 0:
+            if not restarting and not restart_failed:
                 runtime_output = _prepare_show_runtime_after_upgrade(current_vibe_path, safe_cwd)
             if restarting:
                 message = "Upgrade successful. Restarting..."

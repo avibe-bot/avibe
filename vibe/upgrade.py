@@ -19,7 +19,7 @@ from typing import Iterable, NamedTuple, cast
 from uuid import uuid4
 
 from config import paths as config_paths
-from core.install_integrity import IntegrityResult, verify_python_environment
+from core.install_integrity import IntegrityResult, isolated_probe_environment, verify_python_environment
 from storage.lock import MigrationFileLock
 from vibe import runtime as runtime_mod
 
@@ -34,6 +34,7 @@ SHOW_RUNTIME_SKIP_ENV = "VIBE_INSTALL_SKIP_SHOW_RUNTIME"
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 UV_FALLBACK_BIN_DIRS = (".local/bin", ".cargo/bin")
 UPGRADE_INSTALL_TIMEOUT_SECONDS = 30 * 60
+RESTART_PENDING_GRACE_SECONDS = 5 * 60
 # Once a new generation is validated, only active and rollback generations are
 # retained. Failed candidates are discarded by the callers before activation.
 ATOMIC_GENERATION_RETENTION_SECONDS = 0
@@ -123,17 +124,46 @@ def atomic_upgrade_lock():
         yield
 
 
+def restart_is_pending() -> bool:
+    """Whether a scheduled restart still owns the next activation boundary."""
+
+    path = runtime_mod.get_restart_status_path()
+    payload = runtime_mod.read_json(path) or {}
+    if payload.get("state") not in {"scheduled", "running"}:
+        return False
+    supervisor_pid = payload.get("supervisor_pid")
+    if isinstance(supervisor_pid, int) and supervisor_pid > 0 and runtime_mod.pid_alive(supervisor_pid):
+        started_at = payload.get("supervisor_started_at")
+        if started_at is not None:
+            current_started_at = runtime_mod.process_create_time(supervisor_pid)
+            if current_started_at is not None and current_started_at != started_at:
+                return False
+        return True
+    try:
+        age = time.time() - path.stat().st_mtime
+    except OSError:
+        return False
+    return age <= RESTART_PENDING_GRACE_SECONDS
+
+
 def _is_stable_launcher_path(launcher: Path) -> bool:
     if launcher.is_symlink():
         return True
     # Windows falls back to a hard link when creating a symlink requires
-    # developer mode. The user-facing .local/bin launcher is still a stable
-    # activation point; a direct virtualenv path is not.
-    return (
-        launcher.name.lower() in {"vibe", "vibe.exe"}
-        and launcher.parent.name.lower() == "bin"
-        and launcher.parent.parent.name.lower() == ".local"
-    )
+    # developer mode. The user-facing launcher is still a stable activation
+    # point; a direct virtualenv path is not. Honor uv's configured bin too.
+    if launcher.name.lower() not in {"vibe", "vibe.exe"}:
+        return False
+    if launcher.parent.name.lower() == "bin" and launcher.parent.parent.name.lower() == ".local":
+        return True
+    if (launcher.parent / f".{launcher.name}.avibe-generation").is_file():
+        return True
+    stable_dirs = {Path.home() / ".local" / "bin"}
+    configured = os.environ.get("UV_TOOL_BIN_DIR")
+    if configured:
+        stable_dirs.add(Path(configured).expanduser())
+    launcher_dir = os.path.normcase(os.path.abspath(str(launcher.parent.expanduser())))
+    return any(os.path.normcase(os.path.abspath(str(directory))) == launcher_dir for directory in stable_dirs)
 
 
 def _staged_uv_environment(vibe_path: str | None) -> tuple[Path, Path, AtomicActivation | None]:
@@ -244,7 +274,37 @@ def _launcher_generation(launcher: Path, root: Path) -> Path | None:
     """Return the generation currently represented by a stable launcher."""
 
     root = root.expanduser().resolve()
-    return _generation_for_path(launcher, root) or _generation_for_hardlink(launcher, root)
+    generation = _generation_for_path(launcher, root) or _generation_for_hardlink(launcher, root)
+    if generation is not None:
+        return generation
+    if not _is_stable_launcher_path(launcher):
+        return None
+    marker = launcher.parent / f".{launcher.name}.avibe-generation"
+    try:
+        marked = Path(marker.read_text(encoding="utf-8").lstrip("\ufeff").strip())
+    except (OSError, UnicodeError):
+        return None
+    generation = _generation_for_path(marked, root)
+    return generation if generation is not None and generation.is_dir() else None
+
+
+def _update_launcher_generation_marker(launcher: Path, target: Path, root: Path) -> None:
+    """Record a copied launcher's generation without making cleanup mandatory."""
+
+    marker = launcher.parent / f".{launcher.name}.avibe-generation"
+    generation = _generation_for_path(target, root)
+    if generation is None:
+        with contextlib.suppress(OSError):
+            marker.unlink()
+        return
+    replacement = marker.parent / f".{marker.name}.{uuid4().hex}.new"
+    try:
+        replacement.write_text(str(generation), encoding="utf-8")
+        os.replace(replacement, marker)
+    except OSError:
+        with contextlib.suppress(OSError):
+            replacement.unlink()
+        logger.warning("failed to update launcher generation marker %s", marker, exc_info=True)
 
 
 def atomic_activation_source_is_current(activation: AtomicActivation) -> bool:
@@ -260,8 +320,12 @@ def prune_atomic_uv_install_generations(
 ) -> list[Path]:
     """Remove old abandoned generations while retaining active/rollback installs."""
 
-    root = atomic_uv_install_root().expanduser().resolve()
-    if not root.is_dir():
+    try:
+        root = atomic_uv_install_root().expanduser().resolve()
+        if not root.is_dir():
+            return []
+    except OSError:
+        logger.warning("failed to access atomic Avibe install generations", exc_info=True)
         return []
     kept = {
         generation
@@ -269,8 +333,13 @@ def prune_atomic_uv_install_generations(
         if (generation := _generation_for_path(Path(path), root)) is not None
     }
     now = time.time()
+    try:
+        generations = list(root.iterdir())
+    except OSError:
+        logger.warning("failed to enumerate atomic Avibe install generations %s", root, exc_info=True)
+        return []
     removed: list[Path] = []
-    for generation in root.iterdir():
+    for generation in generations:
         if not generation.is_dir() or generation in kept:
             continue
         try:
@@ -319,6 +388,7 @@ def verify_upgrade_candidate(activation: AtomicActivation) -> IntegrityResult:
             timeout=60,
             check=False,
             cwd=tempfile.gettempdir(),
+            env=isolated_probe_environment(),
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return IntegrityResult(False, failures=(f"candidate launcher probe failed: {exc}",))
@@ -357,7 +427,7 @@ def activate_upgrade_candidate(activation: AtomicActivation) -> None:
     replacement = launcher.parent / f".{launcher.name}.avibe-{uuid4().hex}.new"
     previous_target: Path | None = None
     root = atomic_uv_install_root().expanduser().resolve()
-    previous_generation = _generation_for_hardlink(launcher, root)
+    previous_generation = _launcher_generation(launcher, root)
     with contextlib.suppress(OSError, RuntimeError):
         if launcher.exists() or launcher.is_symlink():
             previous_target = launcher.resolve()
@@ -368,6 +438,7 @@ def activate_upgrade_candidate(activation: AtomicActivation) -> None:
         with contextlib.suppress(OSError):
             replacement.unlink()
         raise
+    _update_launcher_generation_marker(launcher, activation.candidate_launcher, root)
     if _generation_for_path(activation.candidate_launcher, root) is not None:
         keep_paths = [activation.candidate_launcher]
         if previous_target:
@@ -394,6 +465,7 @@ def activate_launcher_target(launcher: str | os.PathLike[str], target: str | os.
         with contextlib.suppress(OSError):
             replacement.unlink()
         raise
+    _update_launcher_generation_marker(launcher_path, target_path, atomic_uv_install_root().expanduser().resolve())
 
 
 def resolve_command_path(command: str | None, search_path: str | None = None) -> str | None:
@@ -775,6 +847,8 @@ def is_uv_tool_install(python_executable: str | None = None) -> bool:
         logical = Path(os.path.abspath(os.path.expanduser(executable)))
         logical_root = Path(os.path.abspath(os.path.expanduser(str(atomic_uv_install_root()))))
         if logical.is_relative_to(logical_root):
+            return True
+        if _launcher_generation(logical, logical_root) is not None:
             return True
         # A logical path may contain a symlinked parent. Resolving is only the
         # fallback: uv's tool Python is itself commonly a symlink to a shared
