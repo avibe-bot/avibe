@@ -75,48 +75,29 @@ function Get-StableBinDirectory {
     return Resolve-InstallPath $directory
 }
 
-function Get-GenerationPath {
-    param(
-        [string]$Path,
-        [string]$GenerationRoot
-    )
-
-    try {
-        $root = ([System.IO.Path]::GetFullPath($GenerationRoot)).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
-        $candidate = [System.IO.Path]::GetFullPath($Path)
-    } catch {
-        return $null
-    }
-    $prefix = $root + [System.IO.Path]::DirectorySeparatorChar
-    if (-not $candidate.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-        return $null
-    }
-    $relative = $candidate.Substring($prefix.Length)
-    $name = $relative.Split([System.IO.Path]::DirectorySeparatorChar)[0]
-    if (-not $name) {
-        return $null
-    }
-    return Join-Path $root $name
-}
-
-function Get-LauncherGeneration {
+function Get-LauncherSourcePath {
     param(
         [string]$Launcher,
-        [string]$StableBin,
-        [string]$GenerationRoot
+        [string]$StableBin
     )
 
     $marker = Join-Path $StableBin ".vibe.exe.avibe-generation"
     if (Test-Path -LiteralPath $marker) {
         $marked = (Get-Content -LiteralPath $marker -Raw -ErrorAction SilentlyContinue).Trim()
-        $generation = Get-GenerationPath -Path $marked -GenerationRoot $GenerationRoot
-        if ($generation) {
-            return $generation
+        if ($marked) {
+            return $marked
         }
     }
     try {
-        $resolved = (Resolve-Path -LiteralPath $Launcher -ErrorAction Stop).Path
-        return Get-GenerationPath -Path $resolved -GenerationRoot $GenerationRoot
+        $item = Get-Item -LiteralPath $Launcher -ErrorAction Stop
+        $target = @($item.Target)[0]
+        if (-not $target) {
+            return $null
+        }
+        if (-not [System.IO.Path]::IsPathRooted($target)) {
+            $target = Join-Path $item.DirectoryName $target
+        }
+        return Resolve-InstallPath $target
     } catch {
         return $null
     }
@@ -382,7 +363,9 @@ function Invoke-UvToolInstallAttempt {
     $generationBin = Join-Path $generationRoot "bin"
     $stableBin = Get-StableBinDirectory
     $stableLauncher = Join-Path $stableBin "vibe.exe"
-    $previousGeneration = Get-LauncherGeneration -Launcher $stableLauncher -StableBin $stableBin -GenerationRoot (Join-Path $runtimeHome "runtime\install-generations")
+    # The candidate's shared Python activation owner resolves this snapshot to
+    # a generation. PowerShell must not duplicate junction/symlink identity.
+    $previousSourcePath = Get-LauncherSourcePath -Launcher $stableLauncher -StableBin $stableBin
     New-Item -ItemType Directory -Force -Path $generationTools, $generationBin, $stableBin | Out-Null
 
     $previousToolDir = $env:UV_TOOL_DIR
@@ -419,8 +402,8 @@ function Invoke-UvToolInstallAttempt {
                     "--launcher", $stableLauncher,
                     "--candidate", $candidate
                 )
-                if ($previousGeneration) {
-                    $activationArguments += @("--source-generation", $previousGeneration)
+                if ($previousSourcePath) {
+                    $activationArguments += @("--source-generation", $previousSourcePath)
                 }
                 $activation = Invoke-NativeCommand -FilePath $candidate -Arguments $activationArguments
             } else {

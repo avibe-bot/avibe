@@ -66,13 +66,19 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
             shift
             launcher=""
             candidate=""
+            source_generation=""
             while [ "$#" -gt 0 ]; do
                 case "$1" in
                     --launcher) launcher="$2"; shift 2 ;;
                     --candidate) candidate="$2"; shift 2 ;;
+                    --source-generation) source_generation="$2"; shift 2 ;;
                     *) shift ;;
                 esac
             done
+            if [ "${{VIBE_TEST_REQUIRE_SOURCE_GENERATION:-}}" = "1" ] && [ -z "$source_generation" ]; then
+                echo "source generation missing" >&2
+                exit 20
+            fi
             replacement="${{launcher}}.new"
             ln -s "$candidate" "$replacement"
             mv -f "$replacement" "$launcher"
@@ -274,6 +280,35 @@ def test_install_script_canonicalizes_relative_avibe_home(tmp_path):
     assert target.is_absolute()
     assert target.is_file()
     assert target.is_relative_to(tmp_path / "relative-avibe" / "runtime" / "install-generations")
+
+
+def test_repeated_install_preserves_source_through_a_home_symlink(tmp_path):
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    physical_runtime_home = tmp_path / "physical-avibe"
+    physical_runtime_home.mkdir()
+    logical_runtime_home = tmp_path / "logical-avibe"
+    logical_runtime_home.symlink_to(physical_runtime_home, target_is_directory=True)
+    path_dir = tmp_path / "path-bin"
+    path_dir.mkdir()
+    uv_log = tmp_path / "uv-tool-bin-dir.txt"
+    _write_fake_uv(path_dir / "uv", uv_log)
+
+    env = os.environ.copy()
+    env["HOME"] = str(home_dir)
+    env["AVIBE_HOME"] = str(logical_runtime_home)
+    env["PATH"] = os.pathsep.join([str(path_dir), "/usr/bin", "/bin"])
+
+    first = _install(env)
+    launcher = path_dir / "vibe"
+    physical_target = launcher.resolve()
+    launcher.unlink()
+    launcher.symlink_to(physical_target)
+    env["VIBE_TEST_REQUIRE_SOURCE_GENERATION"] = "1"
+    second = _install(env)
+
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert second.returncode == 0, second.stdout + second.stderr
 
 
 def test_repeated_installer_runs_prune_old_generations(tmp_path):
@@ -581,11 +616,13 @@ def test_windows_installer_honors_configured_tool_bin_and_cross_volume_copy_fall
 
     assert "function Get-StableBinDirectory" in powershell
     assert "function Resolve-InstallPath" in powershell
+    assert "function Get-LauncherSourcePath" in powershell
+    assert "function Get-GenerationPath" not in powershell
     assert '$expanded.StartsWith("~\\")' in powershell
     assert "$configured = $env:UV_TOOL_BIN_DIR" in powershell
     assert '"__activate-install"' in powershell
     assert '"--protocol-version"' in powershell
-    assert '$activationArguments += @("--source-generation", $previousGeneration)' in powershell
+    assert '$activationArguments += @("--source-generation", $previousSourcePath)' in powershell
     assert "function Remove-StaleInstallGenerations" not in powershell
     assert "function Activate-LegacyInstallCandidate" in powershell
     assert "Start-Process -FilePath" not in powershell
@@ -596,7 +633,8 @@ def test_install_script_candidate_probes_ignore_python_path_overrides():
     script = INSTALL_SCRIPT.read_text(encoding="utf-8")
     assert 'env -u PYTHONPATH -u PYTHONHOME "$VIBE_CANDIDATE_BIN_PATH" "${activation_args[@]}"' in script
     assert "__activate-install --protocol-version" in script
-    assert 'activation_args+=(--source-generation "$source_generation")' in script
+    assert 'activation_args+=(--source-generation "$source_snapshot")' in script
+    assert "generation_path_for" not in script
     assert "verify_uv_candidate" not in script
     powershell = INSTALL_POWERSHELL.read_text(encoding="utf-8")
     assert "$previousPythonPath = $env:PYTHONPATH" in powershell

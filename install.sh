@@ -437,8 +437,10 @@ uv_tool_install() {
             rm -rf -- "$generation_root"
             return 1
         fi
-        local source_generation=""
-        source_generation="$(generation_path_for "$previous_target" || true)"
+        # The candidate's shared Python activation owner canonicalizes this
+        # snapshot against the generation root. Keep path identity out of the
+        # bootstrap script so aliases cannot produce a second interpretation.
+        local source_snapshot="$previous_target"
         local activation_protocol=""
         activation_protocol="$(
             cd "$AVIBE_RUNTIME_HOME" || exit 1
@@ -451,8 +453,8 @@ uv_tool_install() {
                 --launcher "$stable_bin_dir/vibe"
                 --candidate "$VIBE_CANDIDATE_BIN_PATH"
             )
-            if [ -n "$source_generation" ]; then
-                activation_args+=(--source-generation "$source_generation")
+            if [ -n "$source_snapshot" ]; then
+                activation_args+=(--source-generation "$source_snapshot")
             fi
             if ! (
                 cd "$AVIBE_RUNTIME_HOME" || exit 1
@@ -490,20 +492,6 @@ uv_tool_install() {
     fi
     rm -rf -- "$generation_root"
     return 1
-}
-
-generation_path_for() {
-    local path="$1"
-    local root="$AVIBE_RUNTIME_HOME/runtime/install-generations"
-    local relative generation
-
-    case "$path" in
-        "$root"/*)
-            relative="${path#"$root"/}"
-            generation="${relative%%/*}"
-            [ -n "$generation" ] && printf '%s/%s\n' "$root" "$generation"
-            ;;
-    esac
 }
 
 install_package_candidate() {

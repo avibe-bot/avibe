@@ -267,7 +267,7 @@ def test_activation_compares_source_generation_by_filesystem_identity(monkeypatc
     activation = upgrade.AtomicActivation(
         launcher,
         root / "candidate" / "bin" / "vibe",
-        logical_home / "runtime" / "install-generations" / "source",
+        logical_home / "runtime" / "install-generations" / "source" / "bin" / "vibe",
     )
 
     assert upgrade.atomic_activation_source_is_current(activation)
