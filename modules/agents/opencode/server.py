@@ -63,10 +63,11 @@ def _percent_encode_path(path: str) -> str:
 def _project_model_hub_models(
     providers: list[Any],
     runtime_models: dict[str, Any],
-) -> list[Any]:
+) -> tuple[list[Any], dict[str, str]]:
     """Expose runtime models under their public provider/model identities."""
 
     projected = [dict(entry) if isinstance(entry, dict) else entry for entry in providers]
+    public_defaults: dict[str, str] = {}
     provider_index = {
         entry.get("id"): entry
         for entry in projected
@@ -78,6 +79,7 @@ def _project_model_hub_models(
         provider_id, model_id = public_identifier.split("/", 1)
         if not provider_id or not model_id:
             continue
+        public_defaults.setdefault(provider_id, model_id)
         provider = provider_index.get(provider_id)
         if provider is None:
             provider = {"id": provider_id, "name": provider_id, "models": {}}
@@ -89,7 +91,7 @@ def _project_model_hub_models(
         public_model["id"] = model_id
         models[model_id] = public_model
         provider["models"] = models
-    return projected
+    return projected, public_defaults
 
 
 def _public_opencode_catalog(
@@ -132,10 +134,6 @@ def _public_opencode_catalog(
                 if provider_id != runtime_provider_id
             }
 
-    providers = projected.get("providers")
-    if project_runtime_models and runtime_models and isinstance(providers, list):
-        projected["providers"] = _project_model_hub_models(providers, runtime_models)
-
     connected = projected.get("connected")
     if isinstance(connected, list):
         projected["connected"] = [
@@ -152,6 +150,21 @@ def _public_opencode_catalog(
                 for provider_id, entry in value.items()
                 if provider_id != runtime_provider_id
             }
+
+    providers = projected.get("providers")
+    if project_runtime_models and runtime_models and isinstance(providers, list):
+        public_providers, public_defaults = _project_model_hub_models(
+            providers,
+            runtime_models,
+        )
+        projected["providers"] = public_providers
+        default_models = projected.get("default")
+        projected_defaults = (
+            dict(default_models) if isinstance(default_models, dict) else {}
+        )
+        for provider_id, model_id in public_defaults.items():
+            projected_defaults.setdefault(provider_id, model_id)
+        projected["default"] = projected_defaults
 
     model = projected.get("model")
     if isinstance(model, str) and model.split("/", 1)[0] == runtime_provider_id:

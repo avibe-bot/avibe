@@ -311,13 +311,13 @@ def resolve_opencode_allowed_providers(
 ) -> List[str]:
     """Return provider IDs to include when listing models."""
     providers = _extract_provider_ids_from_config(opencode_default_config)
-    if providers:
-        return providers
     if isinstance(opencode_models, dict):
         defaults = opencode_models.get("default", {})
         if isinstance(defaults, dict) and defaults:
-            return [key for key in defaults.keys() if isinstance(key, str) and key]
-    return []
+            for key in defaults:
+                if isinstance(key, str):
+                    _append_unique(providers, key)
+    return providers
 
 
 def _model_sort_key(model_item: Tuple[str, Any]) -> Tuple[int, int, str]:

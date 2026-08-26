@@ -12,6 +12,10 @@ from unittest.mock import AsyncMock, Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from storage import message_deliveries as delivery_store
+from modules.agents.opencode.utils import (
+    build_opencode_model_option_items,
+    resolve_opencode_allowed_providers,
+)
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "modules" / "agents" / "opencode" / "server.py"
 
@@ -245,7 +249,11 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             models["default"],
-            {legacy_custom_id: "relay-model", "openai": "gpt-5"},
+            {
+                legacy_custom_id: "relay-model",
+                "openai": "gpt-5",
+                "custom": "first-model",
+            },
         )
         self.assertEqual(set(providers["all"]), {legacy_custom_id, "openai"})
         self.assertEqual(providers["connected"], [legacy_custom_id, "openai"])
@@ -261,6 +269,26 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             public_models["custom"]["first-model"],
             {"id": "first-model"},
+        )
+        allowed_providers = resolve_opencode_allowed_providers(
+            {"providers": {"openai": {}}},
+            models,
+        )
+        self.assertEqual(
+            allowed_providers,
+            ["openai", legacy_custom_id, "custom"],
+        )
+        picker_values = {
+            item["value"]
+            for item in build_opencode_model_option_items(
+                models,
+                max_total=99,
+                allowed_providers=allowed_providers,
+            )
+        }
+        self.assertIn("custom/first-model", picker_values)
+        self.assertFalse(
+            any(value.startswith(f"{private_id}/") for value in picker_values)
         )
 
     async def test_ensure_running_restarts_healthy_server_when_caller_context_plugin_changes(self):
