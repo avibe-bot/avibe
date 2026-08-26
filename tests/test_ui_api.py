@@ -1423,6 +1423,35 @@ def test_detect_cli_supports_explicit_path(monkeypatch, tmp_path):
     assert result["path"] == str(binary_path)
 
 
+def test_resolve_cli_path_stops_before_npm_after_common_path_match(monkeypatch, tmp_path):
+    codex_path = tmp_path / ".local" / "bin" / "codex"
+    codex_path.parent.mkdir(parents=True)
+    codex_path.write_text("#!/bin/sh\n")
+    codex_path.chmod(0o755)
+
+    monkeypatch.setattr(api.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(api.shutil, "which", lambda _binary: None)
+    monkeypatch.setattr(
+        api,
+        "_npm_global_binary_candidates",
+        lambda _binary: pytest.fail("npm discovery must not run after a direct match"),
+    )
+
+    assert api.resolve_cli_path("codex") == str(codex_path)
+
+
+def test_resolve_cli_path_fast_probe_never_queries_npm(monkeypatch, tmp_path):
+    monkeypatch.setattr(api.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(api.shutil, "which", lambda _binary: None)
+    monkeypatch.setattr(
+        api,
+        "_npm_global_binary_candidates",
+        lambda _binary: pytest.fail("fast presence probes must not query npm"),
+    )
+
+    assert api.resolve_cli_path("missing-cli", include_npm_global=False) is None
+
+
 @pytest.fixture
 def only_tmp_binaries(monkeypatch, tmp_path):
     """Make CLI discovery hermetic: only executables under ``tmp_path`` count as
@@ -1555,6 +1584,129 @@ def test_detect_cli_finds_codex_in_npm_global_prefix(monkeypatch, tmp_path, only
 
     assert result["found"] is True
     assert result["path"] == str(codex_path)
+
+
+def test_resolve_cli_paths_queries_npm_prefix_once_for_a_backend_batch(
+    monkeypatch,
+    tmp_path,
+    only_tmp_binaries,
+):
+    npm_path = tmp_path / "tools" / "npm"
+    npm_path.parent.mkdir(parents=True, exist_ok=True)
+    npm_path.write_text("#!/bin/sh\n")
+    npm_path.chmod(0o755)
+    inactive_npm = (
+        tmp_path
+        / ".nvm"
+        / "versions"
+        / "node"
+        / "v18.20.0"
+        / "bin"
+        / "npm"
+    )
+    inactive_npm.parent.mkdir(parents=True, exist_ok=True)
+    inactive_npm.write_text("#!/bin/sh\n")
+    inactive_npm.chmod(0o755)
+
+    prefix_path = tmp_path / ".npm-global"
+    expected = {}
+    for binary in ("claude", "codex", "opencode"):
+        path = prefix_path / "bin" / binary
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/bin/sh\n")
+        path.chmod(0o755)
+        expected[binary] = str(path)
+
+    calls = []
+
+    class CompletedProcess:
+        returncode = 0
+        stdout = f"{prefix_path}\n"
+        stderr = ""
+
+    def fake_run(cmd, **_kwargs):
+        calls.append(cmd)
+        return CompletedProcess()
+
+    monkeypatch.setattr(api.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(
+        api.shutil,
+        "which",
+        lambda binary: str(npm_path) if binary == "npm" else None,
+    )
+    monkeypatch.setattr(api.subprocess, "run", fake_run)
+
+    assert api.resolve_cli_paths(list(expected)) == expected
+    assert calls == [[str(npm_path), "config", "get", "prefix"]]
+
+
+def test_resolve_cli_paths_finds_backend_in_inactive_nvm_version_without_npm_query(
+    monkeypatch,
+    tmp_path,
+    only_tmp_binaries,
+):
+    active_npm = (
+        tmp_path
+        / ".nvm"
+        / "versions"
+        / "node"
+        / "v22.18.0"
+        / "bin"
+        / "npm"
+    )
+    active_npm.parent.mkdir(parents=True, exist_ok=True)
+    active_npm.write_text("#!/bin/sh\n")
+    active_npm.chmod(0o755)
+    inactive_codex = (
+        tmp_path
+        / ".nvm"
+        / "versions"
+        / "node"
+        / "v18.20.0"
+        / "bin"
+        / "codex"
+    )
+    inactive_codex.parent.mkdir(parents=True, exist_ok=True)
+    inactive_codex.write_text("#!/bin/sh\n")
+    inactive_codex.chmod(0o755)
+
+    monkeypatch.setattr(api.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(
+        api.shutil,
+        "which",
+        lambda binary: str(active_npm) if binary == "npm" else None,
+    )
+    monkeypatch.setattr(
+        api.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail(
+            "an NVM bin match must not require npm prefix discovery"
+        ),
+    )
+
+    assert api.resolve_cli_paths(["codex"]) == {"codex": str(inactive_codex)}
+
+
+def test_resolve_cli_paths_preserves_completed_paths_when_other_probes_fail(
+    monkeypatch,
+):
+    def resolve(binary, *, include_npm_global):
+        assert include_npm_global is False
+        if binary == "codex":
+            raise OSError("NVM inventory changed during discovery")
+        return f"/resolved/{binary}" if binary == "claude" else None
+
+    def fail_prefix_probe():
+        raise OSError("npm disappeared")
+
+    monkeypatch.setattr(api, "resolve_cli_path", resolve)
+    monkeypatch.setattr(api, "_npm_global_prefixes", fail_prefix_probe)
+
+    assert api.resolve_cli_paths(["claude", "codex", "opencode"]) == {
+        "claude": "/resolved/claude",
+        "codex": None,
+        "opencode": None,
+    }
 
 
 def test_install_agent_returns_resolved_path(monkeypatch):

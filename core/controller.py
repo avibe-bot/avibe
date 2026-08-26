@@ -417,7 +417,7 @@ class Controller:
     def _init_model_hub(self) -> None:
         """Create the Model Hub aggregate only for an explicit release opt-in."""
 
-        from config.v2_config import is_model_hub_enabled
+        from config.v2_config import V2Config, is_model_hub_enabled
 
         self.model_hub_service = None
         self.model_hub_turn_gateway = None
@@ -430,6 +430,7 @@ class Controller:
         from core.handlers.model_hub import create_default_service
         from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
         from modules.agents.model_hub import ModelHubRuntimeRouter
+        from vibe.api import resolve_cli_paths
 
         def default_vibe_agent_model(backend: str) -> Optional[str]:
             agent = self.vibe_agent_store.get_default_agent()
@@ -454,25 +455,42 @@ class Controller:
 
         def cli_present(backend: str) -> bool:
             # Payload assembly runs on the controller loop. Read only the last
-            # worker-produced snapshot here; a missing/erroring probe is false.
+            # complete worker-produced snapshot here.
             return cli_presence.get(backend, False)
 
-        def refresh_cli_presence() -> None:
-            from config.v2_config import V2Config
-            from vibe.api import resolve_cli_path
-
+        def refresh_cli_presence(include_npm_global: bool) -> None:
+            nonlocal cli_presence
             try:
                 v2_config = V2Config.load()
             except FileNotFoundError:
                 v2_config = None
+            except Exception:
+                logger.warning("Model Hub CLI config probe failed", exc_info=True)
+                v2_config = None
+            configured_paths: dict[str, str] = {}
             for backend in ("claude", "codex", "opencode"):
                 backend_config = getattr(getattr(v2_config, "agents", None), backend, None)
-                configured_path = getattr(backend_config, "cli_path", None) or backend
-                try:
-                    cli_presence[backend] = resolve_cli_path(str(configured_path)) is not None
-                except Exception:
-                    logger.warning("Model Hub CLI presence probe failed for %s", backend, exc_info=True)
-                    cli_presence[backend] = False
+                configured_paths[backend] = str(
+                    getattr(backend_config, "cli_path", None) or backend
+                )
+            try:
+                resolved_paths = resolve_cli_paths(
+                    list(configured_paths.values()),
+                    include_npm_global=include_npm_global,
+                )
+            except Exception:
+                logger.warning("Model Hub CLI presence probe failed", exc_info=True)
+                return
+            refreshed = {
+                backend: resolved_paths.get(configured_path) is not None
+                for backend, configured_path in configured_paths.items()
+            }
+            cli_presence = refreshed
+
+        # Seed only filesystem and PATH facts before the internal RPC surface
+        # exists. The page publishes npm-only installs through an explicit
+        # post-paint refresh, so controller readiness never waits on npm.
+        refresh_cli_presence(False)
 
         self.model_hub_service = create_default_service(
             requested_model_override=default_vibe_agent_model,

@@ -110,6 +110,8 @@ export type ModelsApi = {
    *  status/submit response as `OAuthResult.repaired`. */
   reauthSource(id: string): Promise<OAuthFlow>;
   listAgents(): Promise<AgentSupply[]>;
+  /** Deep CLI discovery used after the fast Agent snapshot has painted. */
+  refreshAgentPresence(): Promise<AgentSupply[]>;
   /** Per-backend enabled subset + order (the 来源顺序 drawer's read). */
   getAgentSources(backend: AgentBackend): Promise<AgentSupply>;
   /** Total write of the exact stored source order. */
@@ -448,6 +450,7 @@ export const modelsApi: ModelsApi = {
   // supply consent: guarded inventory mutations separately echo the server plan.
   reauthSource: (id) => call<{ flow?: OAuthFlow } & OAuthFlow>(`/api/models/sources/${encodeURIComponent(id)}/reauth`, jsonInit('POST', { acknowledge_irreversible: true })).then((r) => (r.flow ?? r) as OAuthFlow),
   listAgents: () => call<{ agents: AgentSupply[] }>('/api/models/agents').then((r) => r.agents),
+  refreshAgentPresence: () => call<{ agents: AgentSupply[] }>('/api/models/agents?refresh_cli_presence=1').then((r) => r.agents),
   getAgentSources: (backend) => call<{ agent: AgentSupply }>(`/api/models/agents/${backend}/sources`).then((r) => r.agent),
   // The body is TOTAL and closed: the route rejects unknown keys, so
   // `contract_version` is deliberately absent (unlike every other write here).

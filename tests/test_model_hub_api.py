@@ -1875,6 +1875,20 @@ def test_agents_endpoint_projects_cli_presence_from_runtime(tmp_path):
     }
 
 
+def test_agents_collection_reads_cli_presence_without_running_discovery(tmp_path):
+    service, _store, _adapter = _service(tmp_path)
+    calls = []
+    service.cli_presence_refresh = lambda include_npm_global: calls.append(
+        include_npm_global
+    )
+    service.cli_present_override = lambda backend: backend == "codex"
+
+    agents = {agent["backend"]: agent for agent in service.list_agents()}
+
+    assert agents["codex"]["cli_present"] is True
+    assert calls == []
+
+
 def test_agents_endpoint_projects_exact_chain_runnability(tmp_path):
     service, store, _adapter = _service(tmp_path)
     model_id = "claude-opus-4-6"
@@ -1972,24 +1986,149 @@ def test_agents_endpoint_cli_presence_probe_errors_fail_closed(tmp_path):
     assert all(agent["cli_present"] is False for agent in agents.values())
 
 
-def test_agent_supply_rpc_refreshes_cli_presence_before_first_response(tmp_path):
+def test_agent_supply_mutation_rpc_refreshes_cli_presence_before_writing(tmp_path):
     from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
 
-    service, _store, _adapter = _service(tmp_path)
+    service, store, _adapter = _service(tmp_path)
     calls = []
-    service.cli_presence_refresh = lambda: calls.append("refresh")
+    service.cli_presence_refresh = lambda include_npm_global: calls.append(
+        include_npm_global
+    )
     service.cli_present_override = lambda backend: backend == "claude"
 
     payload = asyncio.run(
         dispatch_model_hub_rpc(
             service,
-            "get_agent_sources",
-            {"backend": "claude"},
+            "set_agent_sources",
+            {
+                "backend": "claude",
+                "sources": {
+                    "order": list(store.config.agents["claude"].sources.order),
+                },
+            },
         )
     )
 
     assert payload["cli_present"] is True
-    assert calls == ["refresh"]
+    assert calls == [True]
+
+
+def test_agent_supply_rpc_publishes_explicit_deep_discovery_after_fast_reads(
+    tmp_path,
+):
+    from core.handlers.model_hub import rpc as model_hub_rpc
+
+    service, _store, _adapter = _service(tmp_path)
+    calls: list[bool] = []
+    present = {"codex": False}
+    deep_started = threading.Event()
+    deep_release = threading.Event()
+
+    def refresh(include_npm_global: bool) -> None:
+        calls.append(include_npm_global)
+        deep_started.set()
+        deep_release.wait(timeout=2)
+        present["codex"] = True
+
+    service.cli_presence_refresh = refresh
+    service.cli_present_override = lambda backend: present.get(backend, False)
+
+    async def exercise() -> tuple[
+        list[dict],
+        list[dict],
+        list[dict],
+        list[dict],
+    ]:
+        first = await asyncio.wait_for(
+            model_hub_rpc.dispatch_model_hub_rpc(service, "list_agents", {}),
+            timeout=0.5,
+        )
+        assert calls == []
+
+        refreshed = asyncio.create_task(
+            model_hub_rpc.dispatch_model_hub_rpc(
+                service,
+                "list_agents",
+                {"refresh_cli_presence": True},
+            )
+        )
+        assert await asyncio.to_thread(deep_started.wait, 0.5)
+
+        joined = asyncio.create_task(
+            model_hub_rpc.dispatch_model_hub_rpc(
+                service,
+                "list_agents",
+                {"refresh_cli_presence": True},
+            )
+        )
+        second = await asyncio.wait_for(
+            model_hub_rpc.dispatch_model_hub_rpc(service, "list_agents", {}),
+            timeout=0.5,
+        )
+        deep_release.set()
+        return first, second, await refreshed, await joined
+
+    try:
+        payloads = asyncio.run(exercise())
+    finally:
+        deep_release.set()
+
+    first, second, refreshed, joined = payloads
+    assert (
+        next(agent for agent in first if agent["backend"] == "codex")["cli_present"]
+        is False
+    )
+    assert (
+        next(agent for agent in second if agent["backend"] == "codex")["cli_present"]
+        is False
+    )
+    assert (
+        next(agent for agent in refreshed if agent["backend"] == "codex")[
+            "cli_present"
+        ]
+        is True
+    )
+    assert (
+        next(agent for agent in joined if agent["backend"] == "codex")["cli_present"]
+        is True
+    )
+    assert calls == [True]
+
+
+def test_agent_presence_refresh_crosses_the_controller_rpc_boundary(monkeypatch):
+    from vibe import model_hub_client
+
+    calls = []
+
+    def rpc(operation, payload=None):
+        calls.append((operation, payload))
+        return []
+
+    monkeypatch.setattr(model_hub_client, "_rpc_sync", rpc)
+
+    agents = ModelHubRemoteService().list_agents(refresh_cli_presence=True)
+
+    assert agents == []
+    assert calls == [("list_agents", {"refresh_cli_presence": True})]
+
+
+def test_agents_route_requests_deep_presence_only_when_explicit(monkeypatch):
+    calls = []
+
+    class AgentService:
+        def list_agents(self, *, refresh_cli_presence=False):
+            calls.append(refresh_cli_presence)
+            return []
+
+    monkeypatch.setattr(ui_server, "_model_hub_service", AgentService)
+    client = app.test_client()
+
+    assert client.get("/api/models/agents").status_code == 200
+    assert (
+        client.get("/api/models/agents?refresh_cli_presence=1").status_code
+        == 200
+    )
+    assert calls == [False, True]
 
 
 def test_usage_summary_rpc_reads_the_ledger_off_the_controller_loop(tmp_path):
