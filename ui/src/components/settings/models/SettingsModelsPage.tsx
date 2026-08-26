@@ -789,7 +789,11 @@ export const SettingsModelsPage: React.FC = () => {
             const sourceSnapshot = sourceEntityAuthority.beginSnapshot();
             try {
               const sourceResult = await sourceCollectionReads.read();
-              if (sourceResult.kind === 'current') {
+              if (sourceResult.kind === 'stale') {
+                // A newer inventory read owns the projection; until it lands,
+                // keep the old values visibly retryable instead of ready.
+                setSourcesRead((previous) => failRegionRead(previous));
+              } else {
                 sourceEntityAuthority.settleSnapshot(sourceSnapshot, sourceResult.value);
               }
             } catch {

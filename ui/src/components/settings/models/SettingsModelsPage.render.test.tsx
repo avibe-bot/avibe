@@ -1070,6 +1070,12 @@ describe('SettingsModelsPage surface branches', () => {
     expect(screen.getByText(/Could not read the source list · the gateway itself is fine|来源列表没读到 · 网关本身正常/i)).toBeTruthy();
   });
 
+  it('marks superseded source reconciliation as retryable', () => {
+    const page = readFileSync(join(process.cwd(), 'src/components/settings/models/SettingsModelsPage.tsx'), 'utf8');
+    const recovery = page.slice(page.indexOf('const switchToDirect'), page.indexOf('const loadOlderEvents'));
+    expect(recovery).toMatch(/if \(sourceResult\.kind === 'stale'\) \{[\s\S]*?setSourcesRead\(\(previous\) => failRegionRead\(previous\)\)/);
+  });
+
   it('keeps retained supply rows but clears derived chain claims when a later supply read fails', async () => {
     const head = { ...retainedSource, id: 'src_head', display_name: 'Paused source', state: { status: 'cooldown' as const, retry_at: '2099-01-01T00:00:00Z', detail_key: null } };
     const relay = { ...retainedSource, id: 'src_relay', display_name: 'Replacement source', state: { status: 'active' as const, retry_at: null, detail_key: null } };
