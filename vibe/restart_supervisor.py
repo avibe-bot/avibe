@@ -1104,9 +1104,7 @@ def _run_restart_job(
         runtime.write_status("running", f"pid={new_pid}", new_pid, _live_ui_pid(recorded_ui_pid))
 
         mark_duration("restart_total_seconds", restart_started_at)
-        payload.update(ok=True, state="succeeded", new_pid=new_pid, error=None)
-        _write_status(payload)
-        write(f"restart job succeeded new_pid={new_pid}")
+        payload.update(new_pid=new_pid, error=None)
 
         if prepare_show_runtime:
             env = get_restart_environment(vibe_path=vibe_path)
@@ -1155,9 +1153,15 @@ def _run_restart_job(
                 )
             except Exception as exc:
                 payload["pending_restart"] = {"scheduled": False, "error": str(exc)}
+                payload.update(ok=True, state="succeeded")
                 _write_status(payload)
                 write(f"failed to schedule pending follow-up restart: {exc}")
+                write(f"restart job succeeded new_pid={new_pid}")
+            return 0
 
+        payload.update(ok=True, state="succeeded")
+        _write_status(payload)
+        write(f"restart job succeeded new_pid={new_pid}")
         return 0
 
 

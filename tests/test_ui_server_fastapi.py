@@ -2433,7 +2433,7 @@ def test_config_restart_fallback_schedules_when_in_flight_finishes_after_marker(
     assert mutation_lease_held is False
 
 
-def test_config_restart_fallback_marks_pending_when_package_lease_is_held(
+def test_config_restart_fallback_does_not_mark_pending_for_package_contention_alone(
     monkeypatch,
     tmp_path,
 ):
@@ -2457,7 +2457,7 @@ def test_config_restart_fallback_marks_pending_when_package_lease_is_held(
     monkeypatch.setattr(
         ui_server,
         "_restart_in_flight",
-        lambda: pytest.fail("status must be checked after acquiring the lease"),
+        lambda: False,
     )
     monkeypatch.setattr(
         restart_supervisor,
@@ -2468,10 +2468,50 @@ def test_config_restart_fallback_marks_pending_when_package_lease_is_held(
     result = ui_server._schedule_service_restart_for_config_fallback()
 
     assert result["ok"] is True
+    assert result == {
+        "ok": True,
+        "code": "restart_not_scheduled_package_busy",
+        "restart": {},
+    }
+    assert runtime.read_json(restart_supervisor._pending_restart_path()) is None
+
+
+def test_config_restart_fallback_timeout_marks_pending_for_a_live_restart(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import restart_supervisor
+    from vibe import runtime
+
+    runtime.get_restart_status_path().parent.mkdir(parents=True, exist_ok=True)
+    restart_status = {
+        "state": "running",
+        "job_id": "job-live",
+        "supervisor_pid": 4242,
+    }
+    runtime.write_json(runtime.get_restart_status_path(), restart_status)
+
+    @contextmanager
+    def blocked_mutation_lock():
+        raise MigrationLockTimeout("package mutation is still running")
+        yield
+
+    monkeypatch.setattr(ui_server, "package_mutation_lock", blocked_mutation_lock)
+    monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: True)
+    monkeypatch.setattr(
+        restart_supervisor,
+        "schedule_restart",
+        lambda **kwargs: pytest.fail("restart must not be scheduled"),
+    )
+
+    result = ui_server._schedule_service_restart_for_config_fallback()
+
+    assert result["ok"] is True
     assert result["code"] == "restart_pending_after_in_progress"
+    assert result["restart"] == restart_status
     pending = runtime.read_json(restart_supervisor._pending_restart_path())
-    assert pending["reason"] == "restart_in_progress"
-    assert pending["trigger"] == "web-ui-config-pending"
+    assert pending["restart_job_id"] == "job-live"
 
 
 def test_static_ui_assets_use_cache_headers(monkeypatch, tmp_path):

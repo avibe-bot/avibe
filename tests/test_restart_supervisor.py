@@ -832,8 +832,14 @@ def test_restart_job_prepares_show_runtime_after_service_start(monkeypatch, tmp_
         "restart_in_flight",
         lambda: pytest.fail("the supervisor prepare path must bypass ordinary refusal"),
     )
+    monkeypatch.setattr(
+        restart_supervisor,
+        "package_mutation_lock",
+        lambda: pytest.fail("the supervisor lifecycle must bypass human-entry acquire"),
+    )
 
     def fake_run(command, **kwargs):
+        assert runtime.read_json(runtime.get_restart_status_path())["state"] == "running"
         calls.append(("run", command))
         return SimpleNamespace(returncode=0)
 
@@ -886,7 +892,12 @@ def test_restart_job_schedules_pending_followup_after_success(monkeypatch, tmp_p
     original_schedule_restart = restart_supervisor.schedule_restart
 
     def _schedule_restart(**kwargs):
+        assert runtime.read_json(runtime.get_restart_status_path())["state"] == "running"
         scheduled.append(kwargs)
+        runtime.write_json(
+            runtime.get_restart_status_path(),
+            {"state": "scheduled", "job_id": "followup"},
+        )
         return {"job_id": "followup"}
 
     restart_supervisor.mark_pending_restart(
@@ -918,6 +929,66 @@ def test_restart_job_schedules_pending_followup_after_success(monkeypatch, tmp_p
         }
     ]
     assert runtime.read_json(restart_supervisor._pending_restart_path()) is None
+    assert runtime.read_json(runtime.get_restart_status_path()) == {
+        "state": "scheduled",
+        "job_id": "followup",
+    }
+
+
+def test_restart_job_records_terminal_success_when_pending_followup_schedule_fails(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    paths.get_runtime_pid_path().write_text("111", encoding="utf-8")
+    calls = []
+
+    monkeypatch.setattr(restart_supervisor, "_stop_runtime_for_restart", lambda stop_ui=True: _fake_stop_runtime(calls))
+    monkeypatch.setattr(restart_supervisor, "_start_runtime_processes", lambda start_ui=True: _fake_start_runtime(calls))
+    monkeypatch.setattr(restart_supervisor, "_wait_for_service_lock_release", lambda: True)
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 222)
+    monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: pid == 222)
+    monkeypatch.setattr(runtime, "service_instance_started", lambda pid: pid == 222)
+    monkeypatch.setattr(
+        restart_supervisor,
+        "restart_in_flight",
+        lambda: pytest.fail("the supervisor follow-up path must bypass ordinary refusal"),
+    )
+    monkeypatch.setattr(
+        restart_supervisor,
+        "package_mutation_lock",
+        lambda: pytest.fail("the supervisor follow-up path must bypass human-entry acquire"),
+    )
+
+    restart_supervisor.mark_pending_restart(
+        trigger="web-ui-config-pending",
+        scope="service",
+        reason="restart_in_progress",
+        restart_job_id="jobpending",
+    )
+
+    def schedule_restart(**kwargs):
+        assert runtime.read_json(runtime.get_restart_status_path())["state"] == "running"
+        raise RuntimeError("spawn failed")
+
+    monkeypatch.setattr(restart_supervisor, "schedule_restart", schedule_restart)
+
+    rc = restart_supervisor._run_restart_job(
+        job_id="jobpending",
+        delay_seconds=0,
+        vibe_path="/bin/vibe",
+        trigger="web-ui",
+        scope="service",
+    )
+
+    assert rc == 0
+    status = runtime.read_json(runtime.get_restart_status_path())
+    assert status["state"] == "succeeded"
+    assert status["pending_restart"] == {
+        "scheduled": False,
+        "error": "spawn failed",
+    }
 
 
 def test_restart_job_aborts_when_stop_fails(monkeypatch, tmp_path):

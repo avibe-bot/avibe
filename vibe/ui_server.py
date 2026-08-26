@@ -6574,7 +6574,13 @@ def _schedule_service_restart_for_config_fallback() -> dict[str, Any]:
                     return pending_result
                 restart = _schedule_restart()
     except MigrationLockTimeout:
-        return _mark_pending()
+        if _restart_in_flight():
+            return _mark_pending()
+        return {
+            "ok": True,
+            "code": "restart_not_scheduled_package_busy",
+            "restart": runtime.read_json(runtime.get_restart_status_path()) or {},
+        }
     return {"ok": True, "restart": restart}
 
 
@@ -6633,18 +6639,70 @@ def control():
     action = payload.get("action")
     status = runtime.read_status()
     status["last_action"] = action
-    if action == "start":
-        runtime.ensure_config()
-        service_pid = runtime.start_service()
-        runtime.write_status("running", "started", service_pid, status.get("ui_pid"))
-    elif action == "stop":
-        runtime.write_status("stopping", "stopping", status.get("service_pid"), status.get("ui_pid"))
-        stopped, error = _stop_runtime_process_or_error(paths.get_runtime_pid_path(), "Vibe service")
-        if not stopped:
-            runtime.write_status("error", error, status.get("service_pid"), status.get("ui_pid"))
-            return jsonify({"ok": False, "action": action, "error": error, "status": runtime.read_status()}), 500
-        _stop_opencode_server()
-        runtime.write_status("stopped", "stopped", None, status.get("ui_pid"))
+    if action in {"start", "stop"}:
+        try:
+            with package_mutation_lock():
+                if _restart_in_flight():
+                    return (
+                        jsonify(
+                            {
+                                "ok": False,
+                                "action": action,
+                                "error": "a restart is already in progress",
+                                "code": "restart_in_progress",
+                                "status": runtime.read_status(),
+                            }
+                        ),
+                        409,
+                    )
+                if action == "start":
+                    runtime.ensure_config()
+                    service_pid = runtime.start_service()
+                    runtime.write_status("running", "started", service_pid, status.get("ui_pid"))
+                else:
+                    runtime.write_status(
+                        "stopping",
+                        "stopping",
+                        status.get("service_pid"),
+                        status.get("ui_pid"),
+                    )
+                    stopped, error = _stop_runtime_process_or_error(
+                        paths.get_runtime_pid_path(),
+                        "Vibe service",
+                    )
+                    if not stopped:
+                        runtime.write_status(
+                            "error",
+                            error,
+                            status.get("service_pid"),
+                            status.get("ui_pid"),
+                        )
+                        return (
+                            jsonify(
+                                {
+                                    "ok": False,
+                                    "action": action,
+                                    "error": error,
+                                    "status": runtime.read_status(),
+                                }
+                            ),
+                            500,
+                        )
+                    _stop_opencode_server()
+                    runtime.write_status("stopped", "stopped", None, status.get("ui_pid"))
+        except MigrationLockTimeout:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "action": action,
+                        "error": "a restart is already in progress",
+                        "code": "restart_in_progress",
+                        "status": runtime.read_status(),
+                    }
+                ),
+                409,
+            )
     elif action == "restart":
         # Scope defaults to "all" (full restart) so the manual Dashboard /
         # Settings → Service restart buttons keep restarting BOTH processes

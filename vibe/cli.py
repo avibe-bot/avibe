@@ -12628,6 +12628,16 @@ def _live_ui_server_pid() -> int | None:
 
 
 def cmd_start():
+    try:
+        with package_mutation_lock():
+            if restart_in_flight():
+                return _restart_in_progress_exit()
+            return _cmd_start_under_package_lease()
+    except MigrationLockTimeout:
+        return _restart_in_progress_exit()
+
+
+def _cmd_start_under_package_lease():
     _guard_cli_default_state_migration()
     paths.ensure_data_dirs()
     config = _ensure_config()
@@ -12798,6 +12808,16 @@ def _runtime_process_was_running() -> bool:
 
 
 def cmd_stop():
+    try:
+        with package_mutation_lock():
+            if restart_in_flight():
+                return _restart_in_progress_exit()
+            return _cmd_stop_under_package_lease()
+    except MigrationLockTimeout:
+        return _restart_in_progress_exit()
+
+
+def _cmd_stop_under_package_lease():
     service_was_running = _pid_file_points_to_live_process(paths.get_runtime_pid_path())
     ui_was_running = _pid_file_points_to_live_process(paths.get_runtime_ui_pid_path())
 

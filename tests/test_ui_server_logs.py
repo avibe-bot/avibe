@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from pathlib import Path
+
+import pytest
 
 from config import paths
 from storage.lock import MigrationLockTimeout
@@ -283,18 +285,35 @@ def test_control_start_reuses_running_service_without_stop(monkeypatch, tmp_path
     paths.ensure_data_dirs()
     runtime.write_status("running", detail="already running", service_pid=12345, ui_pid=67890)
     calls = []
+    mutation_lease_held = False
+
+    @contextmanager
+    def mutation_lock():
+        nonlocal mutation_lease_held
+        mutation_lease_held = True
+        try:
+            yield
+        finally:
+            mutation_lease_held = False
 
     monkeypatch.setattr(runtime, "ensure_config", lambda: calls.append("ensure_config"))
     monkeypatch.setattr(runtime, "stop_service", lambda: calls.append("stop_service"))
-    monkeypatch.setattr(runtime, "start_service", lambda: calls.append("start_service") or 12345)
+    monkeypatch.setattr(
+        runtime,
+        "start_service",
+        lambda: calls.append(("start_service", mutation_lease_held)) or 12345,
+    )
+    monkeypatch.setattr(ui_server, "package_mutation_lock", mutation_lock)
+    monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: False)
 
     client = app.test_client()
     response = client.post("/api/control", json={"action": "start"}, headers=csrf_headers(client))
 
     assert response.status_code == 200
-    assert calls == ["ensure_config", "start_service"]
+    assert calls == ["ensure_config", ("start_service", True)]
     payload = response.get_json()
     assert payload["status"]["service_pid"] == 12345
+    assert mutation_lease_held is False
 
 
 def test_control_stop_uses_locked_service_stop(monkeypatch, tmp_path):
@@ -303,17 +322,105 @@ def test_control_stop_uses_locked_service_stop(monkeypatch, tmp_path):
     runtime.write_status("running", detail="running", service_pid=12345, ui_pid=67890)
     paths.get_runtime_pid_path().write_text("12345", encoding="utf-8")
     calls = []
+    mutation_lease_held = False
+
+    @contextmanager
+    def mutation_lock():
+        nonlocal mutation_lease_held
+        mutation_lease_held = True
+        try:
+            yield
+        finally:
+            mutation_lease_held = False
 
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 12345)
-    monkeypatch.setattr(runtime, "stop_service", lambda: calls.append("stop_service") or True)
+    monkeypatch.setattr(
+        runtime,
+        "stop_service",
+        lambda: calls.append(("stop_service", mutation_lease_held)) or True,
+    )
     monkeypatch.setattr(runtime, "stop_process", lambda pid_path: calls.append(("stop_process", pid_path)) or True)
+    monkeypatch.setattr(ui_server, "package_mutation_lock", mutation_lock)
+    monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: False)
 
     client = app.test_client()
     response = client.post("/api/control", json={"action": "stop"}, headers=csrf_headers(client))
 
     assert response.status_code == 200
-    assert calls == ["stop_service"]
+    assert calls == [("stop_service", True)]
     assert response.get_json()["status"]["state"] == "stopped"
+    assert mutation_lease_held is False
+
+
+@pytest.mark.parametrize("action", ["start", "stop"])
+def test_control_start_stop_refuse_an_in_flight_restart(monkeypatch, tmp_path, action):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    monkeypatch.setattr(ui_server, "package_mutation_lock", nullcontext)
+    monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: True)
+    monkeypatch.setattr(
+        runtime,
+        "start_service",
+        lambda: pytest.fail("start must not run while restart is in flight"),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "stop_service",
+        lambda: pytest.fail("stop must not run while restart is in flight"),
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/api/control",
+        json={"action": action},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 409
+    assert response.get_json()["code"] == "restart_in_progress"
+    assert response.get_json()["error"] == "a restart is already in progress"
+
+
+@pytest.mark.parametrize("action", ["start", "stop"])
+def test_control_start_stop_fail_closed_when_package_lease_is_held(
+    monkeypatch,
+    tmp_path,
+    action,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+
+    @contextmanager
+    def blocked_mutation_lock():
+        raise MigrationLockTimeout("package mutation is still running")
+        yield
+
+    monkeypatch.setattr(ui_server, "package_mutation_lock", blocked_mutation_lock)
+    monkeypatch.setattr(
+        ui_server,
+        "_restart_in_flight",
+        lambda: pytest.fail("status must be checked after acquiring the lease"),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "start_service",
+        lambda: pytest.fail("start must not run while package mutation is active"),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "stop_service",
+        lambda: pytest.fail("stop must not run while package mutation is active"),
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/api/control",
+        json={"action": action},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 409
+    assert response.get_json()["code"] == "restart_in_progress"
 
 
 def test_control_restart_schedules_restart_job(monkeypatch, tmp_path):

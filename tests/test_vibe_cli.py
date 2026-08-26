@@ -21,6 +21,12 @@ from vibe import cli
 from vibe import remote_access
 
 
+@pytest.fixture(autouse=True)
+def _no_lifecycle_contention(monkeypatch):
+    monkeypatch.setattr(cli, "package_mutation_lock", nullcontext)
+    monkeypatch.setattr(cli, "restart_in_flight", lambda: False)
+
+
 def _make_fake_uv_tool(
     tmp_path: Path,
     *,
@@ -750,6 +756,85 @@ def test_cmd_stop_ignores_absent_services(monkeypatch):
 
     assert cli.cmd_stop() == 0
     assert status == [("stopped", None)]
+
+
+@pytest.mark.parametrize(
+    ("command_name", "implementation_name"),
+    [
+        ("cmd_start", "_cmd_start_under_package_lease"),
+        ("cmd_stop", "_cmd_stop_under_package_lease"),
+    ],
+)
+def test_cli_start_stop_hold_package_lease_through_the_action(
+    monkeypatch,
+    command_name,
+    implementation_name,
+):
+    mutation_lease_held = False
+    calls: list[bool] = []
+
+    @contextmanager
+    def mutation_lock():
+        nonlocal mutation_lease_held
+        mutation_lease_held = True
+        try:
+            yield
+        finally:
+            mutation_lease_held = False
+
+    monkeypatch.setattr(cli, "package_mutation_lock", mutation_lock)
+    monkeypatch.setattr(
+        cli,
+        implementation_name,
+        lambda: calls.append(mutation_lease_held) or 0,
+        raising=False,
+    )
+
+    assert getattr(cli, command_name)() == 0
+    assert calls == [True]
+    assert mutation_lease_held is False
+
+
+@pytest.mark.parametrize("command_name", ["cmd_start", "cmd_stop"])
+def test_cli_start_stop_refuse_an_in_flight_restart(monkeypatch, capsys, command_name):
+    monkeypatch.setattr(cli, "restart_in_flight", lambda: True)
+    monkeypatch.setattr(
+        cli,
+        f"_{command_name}_under_package_lease",
+        lambda: pytest.fail("lifecycle action must not run"),
+        raising=False,
+    )
+
+    assert getattr(cli, command_name)() == 2
+    assert "restart is already in progress" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("command_name", ["cmd_start", "cmd_stop"])
+def test_cli_start_stop_fail_closed_when_package_lease_is_held(
+    monkeypatch,
+    capsys,
+    command_name,
+):
+    @contextmanager
+    def blocked_mutation_lock():
+        raise MigrationLockTimeout("package mutation is still running")
+        yield
+
+    monkeypatch.setattr(cli, "package_mutation_lock", blocked_mutation_lock)
+    monkeypatch.setattr(
+        cli,
+        "restart_in_flight",
+        lambda: pytest.fail("status must be checked after acquiring the lease"),
+    )
+    monkeypatch.setattr(
+        cli,
+        f"_{command_name}_under_package_lease",
+        lambda: pytest.fail("lifecycle action must not run"),
+        raising=False,
+    )
+
+    assert getattr(cli, command_name)() == 2
+    assert "restart is already in progress" in capsys.readouterr().out
 
 
 def test_cmd_stop_fails_when_live_service_survives(monkeypatch, capsys):
