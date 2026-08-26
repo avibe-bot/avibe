@@ -6584,6 +6584,8 @@ def _schedule_guarded_restart(
             with package_mutation_lock(
                 timeout_seconds=_RESTART_REACQUIRE_TIMEOUT_SECONDS,
             ):
+                if _restart_in_flight():
+                    return _mark_service_restart_pending(trigger=pending_trigger)
                 restart = schedule()
         except MigrationLockTimeout:
             _remove_pending_restart_marker()

@@ -2497,7 +2497,7 @@ def test_config_restart_fallback_schedules_when_in_flight_finishes_after_marker(
         "supervisor_pid": 4242,
     }
     runtime.write_json(runtime.get_restart_status_path(), restart_status)
-    in_flight_results = iter([True, False])
+    in_flight_results = iter([True, False, False])
     scheduled: list[dict] = []
     mutation_lease_held = False
 
@@ -2640,7 +2640,7 @@ def test_config_restart_fallback_timeout_reacquires_when_restart_finishes(
         finally:
             mutation_lease_held = False
 
-    in_flight_results = iter([True, False])
+    in_flight_results = iter([True, False, False])
 
     def schedule_restart(**kwargs):
         assert mutation_lease_held is True
@@ -2667,6 +2667,62 @@ def test_config_restart_fallback_timeout_reacquires_when_restart_finishes(
     assert 0 <= lock_timeouts[1] <= 5
     assert runtime.read_json(restart_supervisor._pending_restart_path()) is None
     assert mutation_lease_held is False
+
+
+def test_config_restart_fallback_reacquire_binds_to_a_competing_restart(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import restart_supervisor
+    from vibe import runtime
+
+    runtime.get_restart_status_path().parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_json(
+        runtime.get_restart_status_path(),
+        {"state": "running", "job_id": "job-finishing", "supervisor_pid": 4242},
+    )
+    lock_timeouts: list[float | None] = []
+
+    @contextmanager
+    def mutation_lock(*, timeout_seconds=None):
+        lock_timeouts.append(timeout_seconds)
+        if len(lock_timeouts) == 1:
+            raise MigrationLockTimeout("package mutation is still running")
+        yield
+
+    in_flight_calls = 0
+
+    def restart_in_flight():
+        nonlocal in_flight_calls
+        in_flight_calls += 1
+        if in_flight_calls == 1:
+            return True
+        if in_flight_calls == 2:
+            return False
+        runtime.write_json(
+            runtime.get_restart_status_path(),
+            {"state": "scheduled", "job_id": "job-competitor", "supervisor_pid": 5252},
+        )
+        return True
+
+    monkeypatch.setattr(ui_server, "package_mutation_lock", mutation_lock)
+    monkeypatch.setattr(ui_server, "_restart_in_flight", restart_in_flight)
+    monkeypatch.setattr(
+        restart_supervisor,
+        "schedule_restart",
+        lambda **kwargs: pytest.fail("the competitor already owns the restart"),
+    )
+
+    result = ui_server._schedule_service_restart_for_config_fallback()
+
+    assert result["ok"] is True
+    assert result["code"] == "restart_pending_after_in_progress"
+    assert result["restart"]["job_id"] == "job-competitor"
+    assert lock_timeouts == [None, ui_server._RESTART_REACQUIRE_TIMEOUT_SECONDS]
+    pending = runtime.read_json(restart_supervisor._pending_restart_path())
+    assert pending["restart_job_id"] == "job-competitor"
+    assert pending["trigger"] == "web-ui-config-pending"
 
 
 def test_config_restart_fallback_timeout_cleans_marker_when_reacquire_is_busy(
@@ -3488,7 +3544,7 @@ def test_wechat_qr_restart_reacquires_when_the_live_restart_finishes(
         finally:
             mutation_lease_held = False
 
-    in_flight_results = iter([True, False])
+    in_flight_results = iter([True, False, False])
 
     def schedule_restart(**kwargs):
         assert mutation_lease_held is True
