@@ -47,6 +47,7 @@ describe('SourcesCard footer', () => {
     const title = screen.getByText('Retained source');
     expect(title.className).toContain('block');
     expect(title.nextElementSibling?.className).toContain('flex');
+    expect(title.closest('button')?.className).toContain('min-h-[96px]');
   });
 
   it('exposes the upstream info note to keyboard activation and Escape dismissal', async () => {

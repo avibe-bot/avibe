@@ -155,6 +155,7 @@ describe('AgentCard', () => {
     expect(direct.querySelector('svg')).toBeTruthy();
     expect(gateway.querySelector('svg')).toBeTruthy();
     expect(order.parentElement?.className).toContain('items-center');
+    expect(order.parentElement?.className).toContain('min-w-0');
     expect(gateway.className).toContain('bg-primary');
   });
 
