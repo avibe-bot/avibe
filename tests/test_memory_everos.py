@@ -207,6 +207,17 @@ def test_health_rejects_a_truncated_core_capability_set() -> None:
     assert raised.value.error == "memory_provider_response_invalid"
 
 
+def test_health_projection_rejects_large_capability_key_in_parser_worker() -> None:
+    payload = _health_envelope()
+    payload["capabilities"]["future_" + "x" * 10_000] = True
+
+    with pytest.raises(ValueError, match="map key exceeds response contract"):
+        memory_everos._parse_spooled_json(
+            io.BytesIO(json.dumps(payload).encode("utf-8")),
+            memory_everos._HEALTH_RESPONSE_SCHEMA,
+        )
+
+
 def test_add_and_flush_are_separate_and_parse_provider_envelopes() -> None:
     requests: list[tuple[str, dict]] = []
 
@@ -527,6 +538,37 @@ def test_write_projection_bounds_control_scalars_before_worker_transfer() -> Non
     assert projected["request_id"] == memory_everos._VALIDATED_RECEIPT_MARKER
     assert len(projected["data"]["status"].encode("utf-8")) == 128
     assert len(projected["error"]["code"].encode("utf-8")) == 128
+
+
+def test_chat_projection_reduces_large_probe_scalars_before_worker_transfer() -> None:
+    projected = memory_everos._parse_spooled_json(
+        io.BytesIO(
+            json.dumps(
+                {
+                    "choices": [
+                        {
+                            "finish_reason": "stop" * 10_000,
+                            "message": {
+                                "content": "response" * 100_000,
+                                "role": "assistant" * 10_000,
+                            },
+                        }
+                    ],
+                    "error": {
+                        "code": "code" * 10_000,
+                        "message": "message" * 10_000,
+                    },
+                }
+            ).encode("utf-8")
+        ),
+        memory_everos._CHAT_RESPONSE_SCHEMA,
+    )
+
+    choice = projected["choices"][0]
+    assert choice["message"] == {"content": "present", "role": ""}
+    assert choice["finish_reason"] == ""
+    assert len(projected["error"]["code"].encode("utf-8")) == 128
+    assert len(projected["error"]["message"].encode("utf-8")) == 128
 
 
 @pytest.mark.parametrize(
@@ -1928,8 +1970,37 @@ def test_profile_projection_rejects_more_than_requested_profile() -> None:
     with pytest.raises(ValueError, match="array exceeds response contract"):
         memory_everos._parse_spooled_json(
             io.BytesIO(payload),
-            memory_everos._PROFILE_RESPONSE_SCHEMA,
+            memory_everos._profile_response_schema("owner-1"),
         )
+
+
+def test_profile_worker_discards_large_mismatched_profile_before_transfer(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "mismatched-profile.json"
+    path.write_text(
+        json.dumps(
+            {
+                "data": {
+                    "profiles": [
+                        {
+                            "user_id": "owner-2",
+                            "profile_data": {"summary": "x" * (2 * 1024 * 1024)},
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    ok, projected = memory_everos._parse_spooled_json_path(
+        str(path),
+        memory_everos._profile_response_schema("owner-1"),
+    )
+
+    assert ok is True
+    assert projected == {"data": {"profiles": []}}
 
 
 def test_projection_rejects_container_in_scalar_before_reading_its_body() -> None:
@@ -2005,7 +2076,7 @@ def test_cancelled_json_parse_terminates_worker_pool(
         task = asyncio.create_task(
             memory_everos._parse_spooled_json_async(
                 "/unused/provider-response.json",
-                memory_everos._PROFILE_RESPONSE_SCHEMA,
+                memory_everos._profile_response_schema("owner-1"),
                 60.0,
             )
         )
@@ -2121,7 +2192,7 @@ def test_queued_json_parse_timeout_does_not_terminate_active_pool(
         active = asyncio.create_task(
             memory_everos._parse_spooled_json_async(
                 "/unused/active-provider-response.json",
-                memory_everos._PROFILE_RESPONSE_SCHEMA,
+                memory_everos._profile_response_schema("owner-1"),
                 60.0,
             )
         )
@@ -2130,7 +2201,7 @@ def test_queued_json_parse_timeout_does_not_terminate_active_pool(
             with pytest.raises(asyncio.TimeoutError):
                 await memory_everos._parse_spooled_json_async(
                     "/unused/queued-provider-response.json",
-                    memory_everos._PROFILE_RESPONSE_SCHEMA,
+                    memory_everos._profile_response_schema("owner-1"),
                     0.01,
                 )
             assert len(executor.futures) == 1

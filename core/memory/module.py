@@ -846,70 +846,95 @@ class MemoryModule:
         if reservation is None:
             return OperationFailed(error="memory_queue_full")
         try:
-            normalized_query = await run_blocking(self._normalize_text, query)
-            if not await run_blocking(_valid_search_query, normalized_query):
-                return OperationFailed(error="memory_invalid_input")
-            if not is_principal_id(principal_id):
-                return OperationFailed(error="memory_access_denied")
-            if not is_new_stored_memory_project_id(project_id):
-                return OperationFailed(error="memory_access_denied")
-            if self._retired:
-                return OperationFailed(error="memory_operation_in_progress")
+            return await self._recall_admitted(
+                query,
+                policy=policy,
+                principal_id=principal_id,
+                project_id=project_id,
+                current_session_id=current_session_id,
+                effective_mode=effective_mode,
+            )
+        finally:
+            reservation.release()
 
-            agentic_started = (
-                monotonic()
-                if policy.mode == "agentic" and policy.timeout_seconds is not None
-                else None
+    async def _recall_admitted(
+        self,
+        query: str,
+        *,
+        policy: RecallPolicy,
+        principal_id: str,
+        project_id: str,
+        current_session_id: str | None = None,
+        effective_mode: Literal["keyword", "vector", "hybrid", "agentic"] | None = None,
+    ) -> RecallResult:
+        """Execute recall while an ingress owner retains the query reservation."""
+
+        if not self._is_enabled():
+            return OperationFailed(error="memory_disabled")
+        if not isinstance(policy, RecallPolicy):
+            return OperationFailed(error="memory_invalid_input")
+        normalized_query = await run_blocking(self._normalize_text, query)
+        if not await run_blocking(_valid_search_query, normalized_query):
+            return OperationFailed(error="memory_invalid_input")
+        if not is_principal_id(principal_id):
+            return OperationFailed(error="memory_access_denied")
+        if not is_new_stored_memory_project_id(project_id):
+            return OperationFailed(error="memory_access_denied")
+        if self._retired:
+            return OperationFailed(error="memory_operation_in_progress")
+
+        agentic_started = (
+            monotonic()
+            if policy.mode == "agentic" and policy.timeout_seconds is not None
+            else None
+        )
+        agentic_deadline = (
+            agentic_started + float(policy.timeout_seconds)
+            if agentic_started is not None
+            else None
+        )
+        if agentic_deadline is None:
+            return await self._recall_validated(
+                normalized_query,
+                policy=policy,
+                principal_id=principal_id,
+                project_id=project_id,
+                current_session_id=current_session_id,
+                effective_mode=effective_mode,
+                agentic_deadline=None,
+                agentic_telemetry=None,
             )
-            agentic_deadline = (
-                agentic_started + float(policy.timeout_seconds)
-                if agentic_started is not None
-                else None
-            )
-            if agentic_deadline is None:
-                return await self._recall_validated(
+        agentic_telemetry = AgenticRecallTelemetry()
+        try:
+            remaining = _remaining_timeout(agentic_deadline)
+            result = await asyncio.wait_for(
+                self._recall_validated(
                     normalized_query,
                     policy=policy,
                     principal_id=principal_id,
                     project_id=project_id,
                     current_session_id=current_session_id,
                     effective_mode=effective_mode,
-                    agentic_deadline=None,
-                    agentic_telemetry=None,
-                )
-            agentic_telemetry = AgenticRecallTelemetry()
-            try:
-                remaining = _remaining_timeout(agentic_deadline)
-                result = await asyncio.wait_for(
-                    self._recall_validated(
-                        normalized_query,
-                        policy=policy,
-                        principal_id=principal_id,
-                        project_id=project_id,
-                        current_session_id=current_session_id,
-                        effective_mode=effective_mode,
-                        agentic_deadline=agentic_deadline,
-                        agentic_telemetry=agentic_telemetry,
-                    ),
-                    timeout=remaining,
-                )
-            except asyncio.TimeoutError:
-                result = OperationFailed(error="memory_provider_timeout")
-            except BaseException:
-                _log_agentic_recall_telemetry(
-                    started=agentic_started,
-                    telemetry=agentic_telemetry,
-                    result=None,
-                )
-                raise
+                    agentic_deadline=agentic_deadline,
+                    agentic_telemetry=agentic_telemetry,
+                ),
+                timeout=remaining,
+            )
+        except asyncio.TimeoutError:
+            result = OperationFailed(error="memory_provider_timeout")
+        except BaseException:
             _log_agentic_recall_telemetry(
                 started=agentic_started,
                 telemetry=agentic_telemetry,
-                result=result,
+                result=None,
             )
-            return result
-        finally:
-            reservation.release()
+            raise
+        _log_agentic_recall_telemetry(
+            started=agentic_started,
+            telemetry=agentic_telemetry,
+            result=result,
+        )
+        return result
 
     async def _recall_validated(
         self,

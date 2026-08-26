@@ -632,7 +632,7 @@ def test_memory_list_route_admits_body_before_json_materialization(
     budget = RetainedInputBudget(max_bytes=1, max_reservations=2)
     held = budget.reserve(1)
     assert held is not None
-    monkeypatch.setattr(ui_memory_routes, "_MEMORY_LIST_INPUT_BUDGET", budget)
+    monkeypatch.setattr(ui_memory_routes, "_MEMORY_REQUEST_INPUT_BUDGET", budget)
     calls: list[dict[str, object]] = []
 
     async def memory_list(**kwargs):
@@ -644,6 +644,43 @@ def test_memory_list_route_admits_body_before_json_materialization(
     response = client.post(
         "/api/memory/list",
         json={"project": "all", "cursor": "a" * 10_000, "limit": 20},
+        headers=csrf_headers(client, BASE_URL),
+        **_request_options(),
+    )
+
+    held.release()
+    assert response.status_code == 429
+    assert response.get_json() == {
+        "status": "failed",
+        "error": "memory_queue_full",
+    }
+    assert calls == []
+
+
+def test_memory_search_route_admits_body_before_json_materialization(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config()
+    budget = RetainedInputBudget(max_bytes=1, max_reservations=2)
+    held = budget.reserve(1)
+    assert held is not None
+    monkeypatch.setattr(ui_memory_routes, "_MEMORY_REQUEST_INPUT_BUDGET", budget)
+    calls: list[dict[str, object]] = []
+
+    async def memory_search(*args, **kwargs):
+        calls.append({"args": args, "kwargs": kwargs})
+        return {"status_code": 200, "body": {"status": "ok", "items": []}}
+
+    monkeypatch.setattr(internal_client, "memory_search", memory_search)
+    client = app.test_client()
+    response = client.post(
+        "/api/memory/search",
+        json={
+            "query": "q" * 10_000,
+            "policy": {"mode": "hybrid", "max_results": 8},
+        },
         headers=csrf_headers(client, BASE_URL),
         **_request_options(),
     )

@@ -616,11 +616,15 @@ def test_memory_recovery_reads_resolve_only_signed_ui_operators() -> None:
 
 def test_memory_search_accepts_bounded_agentic_policy_from_cli_session() -> None:
     from core.memory.http_headers import CALLER_SESSION_HEADER
+    from core.memory.retained_input import RetainedInputBudget
 
     captured: list[tuple] = []
+    budget = RetainedInputBudget()
 
     class Runtime:
-        async def search_payload(
+        module = SimpleNamespace(_search_input_budget=budget)
+
+        async def _search_payload_admitted(
             self,
             query,
             policy,
@@ -629,10 +633,14 @@ def test_memory_search_accepts_bounded_agentic_policy_from_cli_session() -> None
             *,
             current_session_id=None,
         ):
+            assert budget.retained_bytes > 0
             captured.append(
                 (query, policy, principal_id, project_id, current_session_id)
             )
             return {"status": "ok", "items": []}
+
+        async def search_payload(self, *_args, **_kwargs):
+            pytest.fail("internal search reacquired admission after body decoding")
 
     controller = _build_controller_double()
     controller.memory_scope_for_cli_session.return_value = (
@@ -674,6 +682,52 @@ def test_memory_search_accepts_bounded_agentic_policy_from_cli_session() -> None
     assert principal_id == "u-11111111111111111111111111111111"
     assert project_id == "default"
     assert current_session_id == "ses-memory"
+
+
+def test_memory_search_rejects_body_before_json_materialization() -> None:
+    from core.memory.http_headers import CALLER_SESSION_HEADER
+    from core.memory.retained_input import RetainedInputBudget
+
+    budget = RetainedInputBudget(max_bytes=1, max_reservations=2)
+    held = budget.reserve(1)
+    assert held is not None
+    admitted_search = AsyncMock()
+    runtime = SimpleNamespace(
+        module=SimpleNamespace(_search_input_budget=budget),
+        _search_payload_admitted=admitted_search,
+    )
+    controller = _build_controller_double()
+    controller.memory_scope_for_cli_session.return_value = (
+        "u-11111111111111111111111111111111",
+        "default",
+    )
+    controller.memory_runtime = runtime
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.post(
+                "/internal/memory/search",
+                headers={CALLER_SESSION_HEADER: "ses-memory"},
+                json={
+                    "query": "q" * 10_000,
+                    "policy": {"mode": "hybrid", "max_results": 8},
+                },
+            )
+
+    response = asyncio.run(_exercise())
+    held.release()
+
+    assert response.status_code == 429
+    assert response.json() == {
+        "status": "failed",
+        "error": "memory_queue_full",
+    }
+    admitted_search.assert_not_awaited()
 
 
 def test_memory_list_binds_cli_session_and_uses_exact_provider_page() -> None:
@@ -1595,16 +1649,23 @@ def test_native_processing_record_routes_authorize_the_selected_project() -> Non
 def test_memory_remember_route_forwards_large_text_to_controller() -> None:
     from core.memory import CaptureAccepted
     from core.memory.http_headers import CALLER_SESSION_HEADER
+    from core.memory.retained_input import RetainedInputBudget
 
     text = "x" * 70_000
+    budget = RetainedInputBudget()
     controller = _build_controller_double()
     controller.memory_runtime = SimpleNamespace()
     controller.memory_scope_for_cli_session.return_value = (
         "u-" + "1" * 32,
         "default",
     )
-    controller.capture_memory = AsyncMock(return_value=CaptureAccepted())
+    async def capture_memory(_request):
+        assert budget.retained_bytes > 0
+        return CaptureAccepted()
+
+    controller.capture_memory = AsyncMock(side_effect=capture_memory)
     app = internal_server.create_app(controller)
+    app.state.memory_remember_input_budget = budget
 
     async def _exercise() -> httpx.Response:
         transport = httpx.ASGITransport(app=app)
@@ -1627,6 +1688,46 @@ def test_memory_remember_route_forwards_large_text_to_controller() -> None:
     assert request.principal_id == "u-" + "1" * 32
     assert request.project_id == "default"
     assert request.session_id == "session-1"
+
+
+def test_memory_remember_rejects_body_before_json_materialization() -> None:
+    from core.memory.http_headers import CALLER_SESSION_HEADER
+    from core.memory.retained_input import RetainedInputBudget
+
+    budget = RetainedInputBudget(max_bytes=1, max_reservations=2)
+    held = budget.reserve(1)
+    assert held is not None
+    controller = _build_controller_double()
+    controller.memory_runtime = SimpleNamespace()
+    controller.memory_scope_for_cli_session.return_value = (
+        "u-" + "1" * 32,
+        "default",
+    )
+    controller.capture_memory = AsyncMock()
+    app = internal_server.create_app(controller)
+    app.state.memory_remember_input_budget = budget
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.post(
+                "/internal/memory/remember",
+                json={"text": "x" * 10_000},
+                headers={CALLER_SESSION_HEADER: "session-1"},
+            )
+
+    response = asyncio.run(_exercise())
+    held.release()
+
+    assert response.status_code == 429
+    assert response.json() == {
+        "status": "failed",
+        "error": "memory_queue_full",
+    }
+    controller.capture_memory.assert_not_awaited()
 
 
 def test_memory_remember_route_rejects_capture_queued_across_runtime_replacement() -> None:

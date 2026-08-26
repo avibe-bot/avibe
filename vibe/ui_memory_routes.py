@@ -32,7 +32,7 @@ from vibe.ui_compat import Response, jsonify
 
 _PROCESSING_RECORD_CURSOR_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
 _PROCESSING_RECORD_ENTRY_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,256}\Z")
-_MEMORY_LIST_INPUT_BUDGET = RetainedInputBudget(max_reservations=4)
+_MEMORY_REQUEST_INPUT_BUDGET = RetainedInputBudget(max_reservations=4)
 
 
 def _memory_ui_user_key() -> str | None:
@@ -733,45 +733,70 @@ def register_memory_routes(app) -> None:
             if user_key is None:
                 return _memory_forbidden_response()
             try:
-                payload = await starlette_request.json()
-            except Exception:
-                payload = None
-            if (
-                not isinstance(payload, dict)
-                or not {"query", "policy"}.issubset(payload)
-                or set(payload) - {"query", "policy", "project"}
-            ):
-                return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
-            query = payload.get("query")
-            if not isinstance(query, str):
-                return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
-            from core.memory.types import RecallPolicy
-
-            try:
-                policy = RecallPolicy.from_payload(payload.get("policy"))
-            except (TypeError, ValueError):
-                return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
-            if policy.mode == "agentic":
+                payload, reservation = await read_json_object_admitted(
+                    starlette_request,
+                    _MEMORY_REQUEST_INPUT_BUDGET,
+                )
+            except RetainedInputRejected:
                 return _memory_response(
-                    {
-                        "status": "failed",
-                        "error": "memory_capability_unavailable",
-                    },
-                    status_code=503,
+                    {"status": "failed", "error": "memory_queue_full"},
+                    status_code=429,
                 )
-            project = payload.get("project")
-            if project is not None and not isinstance(project, str):
-                return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
-            from vibe import internal_client
+            except (TypeError, ValueError):
+                payload = None
+                reservation = None
+            try:
+                if (
+                    not isinstance(payload, dict)
+                    or not {"query", "policy"}.issubset(payload)
+                    or set(payload) - {"query", "policy", "project"}
+                ):
+                    return _memory_response(
+                        {"status": "failed", "error": "memory_invalid_input"},
+                        status_code=400,
+                    )
+                query = payload.get("query")
+                if not isinstance(query, str):
+                    return _memory_response(
+                        {"status": "failed", "error": "memory_invalid_input"},
+                        status_code=400,
+                    )
+                from core.memory.types import RecallPolicy
 
-            return await _memory_internal_response(
-                lambda: internal_client.memory_search(
-                    query,
-                    policy.payload(),
-                    user_key=user_key,
-                    project=project,
+                try:
+                    policy = RecallPolicy.from_payload(payload.get("policy"))
+                except (TypeError, ValueError):
+                    return _memory_response(
+                        {"status": "failed", "error": "memory_invalid_input"},
+                        status_code=400,
+                    )
+                if policy.mode == "agentic":
+                    return _memory_response(
+                        {
+                            "status": "failed",
+                            "error": "memory_capability_unavailable",
+                        },
+                        status_code=503,
+                    )
+                project = payload.get("project")
+                if project is not None and not isinstance(project, str):
+                    return _memory_response(
+                        {"status": "failed", "error": "memory_invalid_input"},
+                        status_code=400,
+                    )
+                from vibe import internal_client
+
+                return await _memory_internal_response(
+                    lambda: internal_client.memory_search(
+                        query,
+                        policy.payload(),
+                        user_key=user_key,
+                        project=project,
+                    )
                 )
-            )
+            finally:
+                if reservation is not None:
+                    reservation.release()
 
         return await app.dispatch_native_request(starlette_request, handler)
 
@@ -784,7 +809,7 @@ def register_memory_routes(app) -> None:
             try:
                 payload, reservation = await read_json_object_admitted(
                     starlette_request,
-                    _MEMORY_LIST_INPUT_BUDGET,
+                    _MEMORY_REQUEST_INPUT_BUDGET,
                 )
             except RetainedInputRejected:
                 return _memory_response(

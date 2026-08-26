@@ -140,6 +140,16 @@ class _JSONBoundedScalarSchema(_JSONSchema):
 
 
 @dataclass(frozen=True)
+class _JSONStringPresenceSchema(_JSONSchema):
+    pass
+
+
+@dataclass(frozen=True)
+class _JSONStringEnumSchema(_JSONSchema):
+    allowed: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class _JSONAnySchema(_JSONSchema):
     pass
 
@@ -177,7 +187,9 @@ class _JSONMapSchema(_JSONSchema):
     fields: dict[str, _JSONSchema]
     additional_values: _JSONSchema | None = None
     max_items: int | None = None
+    max_key_bytes: int | None = None
     reject_unknown: bool = False
+    profile_owner: str | None = None
     list_projection: _ListProjection | None = None
 
 
@@ -211,6 +223,11 @@ _JSON_NUMBER = _JSONScalarSchema(number_only=True)
 _JSON_RECEIPT = _JSONReceiptSchema()
 _JSON_REQUIRED_RECEIPT = _JSONReceiptSchema(required=True)
 _JSON_CONTROL = _JSONBoundedScalarSchema(max_string_bytes=128)
+_JSON_STRING_PRESENCE = _JSONStringPresenceSchema()
+_JSON_ASSISTANT_ROLE = _JSONStringEnumSchema(("assistant",))
+_JSON_TERMINAL_FINISH_REASON = _JSONStringEnumSchema(
+    tuple(sorted(_CHAT_PROBE_TERMINAL_FINISH_REASONS))
+)
 _JSON_ANY = _JSONAnySchema()
 _JSON_SKIP = _JSONSkipSchema()
 _JSON_PRESENCE = _JSONArraySchema(_JSON_SKIP, max_items=0, retention="presence")
@@ -222,27 +239,31 @@ _WRITE_RESPONSE_SCHEMA = _JSONMapSchema(
         "error": _JSONMapSchema({"code": _JSON_CONTROL}),
     }
 )
-_PROFILE_RESPONSE_SCHEMA = _JSONMapSchema(
-    {
-        "data": _JSONMapSchema(
-            {
-                "profiles": _JSONArraySchema(
-                    _JSONMapSchema(
-                        {
-                            "user_id": _JSON_SCALAR,
-                            "profile_data": _JSON_ANY,
-                            "timestamp": _JSON_SCALAR,
-                            "created_at": _JSON_SCALAR,
-                            "createdAt": _JSON_SCALAR,
-                            "date": _JSON_SCALAR,
-                        }
-                    ),
-                    max_items=1,
-                )
-            }
-        )
-    }
-)
+def _profile_response_schema(principal_id: str) -> _JSONMapSchema:
+    return _JSONMapSchema(
+        {
+            "data": _JSONMapSchema(
+                {
+                    "profiles": _JSONArraySchema(
+                        _JSONMapSchema(
+                            {
+                                "user_id": _JSON_SCALAR,
+                                "profile_data": _JSON_ANY,
+                                "timestamp": _JSON_SCALAR,
+                                "created_at": _JSON_SCALAR,
+                                "createdAt": _JSON_SCALAR,
+                                "date": _JSON_SCALAR,
+                            }
+                        ),
+                        max_items=1,
+                    )
+                }
+            )
+        },
+        profile_owner=principal_id,
+    )
+
+
 _HEALTH_RESPONSE_SCHEMA = _JSONMapSchema(
     {
         "status": _JSON_CONTROL,
@@ -251,6 +272,7 @@ _HEALTH_RESPONSE_SCHEMA = _JSONMapSchema(
             {},
             additional_values=_JSON_CONTROL,
             max_items=33,
+            max_key_bytes=64,
         ),
         "disabled_features": _JSONArraySchema(_JSON_CONTROL, max_items=32),
         "cascade": _JSONNullableSchema(
@@ -276,11 +298,11 @@ _CHAT_RESPONSE_SCHEMA = _JSONMapSchema(
         "choices": _JSONArraySchema(
             _JSONMapSchema(
                 {
-                    "finish_reason": _JSON_SCALAR,
+                    "finish_reason": _JSON_TERMINAL_FINISH_REASON,
                     "message": _JSONMapSchema(
                         {
-                            "content": _JSON_SCALAR,
-                            "role": _JSON_SCALAR,
+                            "content": _JSON_STRING_PRESENCE,
+                            "role": _JSON_ASSISTANT_ROLE,
                         }
                     ),
                 }
@@ -288,7 +310,7 @@ _CHAT_RESPONSE_SCHEMA = _JSONMapSchema(
             max_items=1,
         ),
         "error": _JSONMapSchema(
-            {"code": _JSON_SCALAR, "message": _JSON_SCALAR}
+            {"code": _JSON_CONTROL, "message": _JSON_CONTROL}
         ),
     }
 )
@@ -307,7 +329,7 @@ _EMBEDDING_RESPONSE_SCHEMA = _JSONMapSchema(
             max_items=1,
         ),
         "error": _JSONMapSchema(
-            {"code": _JSON_SCALAR, "message": _JSON_SCALAR}
+            {"code": _JSON_CONTROL, "message": _JSON_CONTROL}
         ),
     }
 )
@@ -318,7 +340,7 @@ _DEEPINFRA_RERANK_RESPONSE_SCHEMA = _JSONMapSchema(
             max_items=2,
         ),
         "error": _JSONMapSchema(
-            {"code": _JSON_SCALAR, "message": _JSON_SCALAR}
+            {"code": _JSON_CONTROL, "message": _JSON_CONTROL}
         ),
     }
 )
@@ -329,7 +351,7 @@ _RANKED_RESULTS_RESPONSE_SCHEMA = _JSONMapSchema(
             max_items=2,
         ),
         "error": _JSONMapSchema(
-            {"code": _JSON_SCALAR, "message": _JSON_SCALAR}
+            {"code": _JSON_CONTROL, "message": _JSON_CONTROL}
         ),
     }
 )
@@ -337,7 +359,7 @@ _DASHSCOPE_RERANK_RESPONSE_SCHEMA = _JSONMapSchema(
     {
         "output": _RANKED_RESULTS_RESPONSE_SCHEMA,
         "error": _JSONMapSchema(
-            {"code": _JSON_SCALAR, "message": _JSON_SCALAR}
+            {"code": _JSON_CONTROL, "message": _JSON_CONTROL}
         ),
     }
 )
@@ -910,7 +932,7 @@ class EverOSPort:
                 "page_size": 1,
             },
             require_json=True,
-            response_schema=_PROFILE_RESPONSE_SCHEMA,
+            response_schema=_profile_response_schema(principal_id),
         )
         data = body.get("data") if isinstance(body, dict) else None
         if not isinstance(data, dict):
@@ -1758,8 +1780,9 @@ def _parse_spooled_json_path(path: str, schema: _JSONSchema) -> tuple[bool, Any]
     try:
         with open(path, "rb") as spool:
             value = _parse_spooled_json(spool, schema)
-        if _is_profile_response_schema(schema):
-            value = _prepare_profile_response(value)
+        profile_owner = _profile_response_owner(schema)
+        if profile_owner is not None:
+            value = _prepare_profile_response(value, profile_owner)
         search_parameters = _search_response_parameters(schema)
         if search_parameters is not None:
             value = _prepare_search_response(value, *search_parameters)
@@ -1770,7 +1793,7 @@ def _parse_spooled_json_path(path: str, schema: _JSONSchema) -> tuple[bool, Any]
         pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
         return True, value
     except RecursionError:
-        if _is_profile_response_schema(schema):
+        if _profile_response_owner(schema) is not None:
             return True, {"data": {"profiles": []}}
         return False, "JSON response is too deeply nested to transfer"
     except Exception as exc:
@@ -1779,13 +1802,10 @@ def _parse_spooled_json_path(path: str, schema: _JSONSchema) -> tuple[bool, Any]
         return False, f"invalid JSON response: {exc}"
 
 
-def _is_profile_response_schema(schema: _JSONSchema) -> bool:
-    return (
-        isinstance(schema, _JSONMapSchema)
-        and set(schema.fields) == {"data"}
-        and isinstance(schema.fields.get("data"), _JSONMapSchema)
-        and set(schema.fields["data"].fields) == {"profiles"}
-    )
+def _profile_response_owner(schema: _JSONSchema) -> str | None:
+    if not isinstance(schema, _JSONMapSchema):
+        return None
+    return schema.profile_owner if isinstance(schema.profile_owner, str) else None
 
 
 def _search_response_parameters(
@@ -1831,7 +1851,7 @@ def _prepare_search_response(
     return value
 
 
-def _prepare_profile_response(value: Any) -> Any:
+def _prepare_profile_response(value: Any, principal_id: str) -> Any:
     """Canonicalize unbounded profile data before it crosses into the controller."""
 
     if not isinstance(value, dict):
@@ -1842,21 +1862,35 @@ def _prepare_profile_response(value: Any) -> Any:
     profiles = data.get("profiles")
     if not isinstance(profiles, list):
         return value
-    for profile in profiles:
-        if not isinstance(profile, dict):
-            continue
-        profile_data = profile.get("profile_data")
-        structured_profile = _structured_profile(profile_data)
-        profile["profile_data"] = _PreparedProfileData(
-            text=_canonical_profile_text(profile_data),
-            structured=structured_profile,
-            date=(
-                structured_profile.updated_at.split("T", 1)[0]
-                if structured_profile is not None
-                and structured_profile.updated_at is not None
-                else _record_date(profile)
-            ),
-        )
+    profile = next(
+        (
+            item
+            for item in profiles
+            if isinstance(item, dict) and item.get("user_id") == principal_id
+        ),
+        None,
+    )
+    if profile is None:
+        data["profiles"] = []
+        return value
+    profile_data = profile.get("profile_data")
+    structured_profile = _structured_profile(profile_data)
+    prepared = _PreparedProfileData(
+        text=_canonical_profile_text(profile_data),
+        structured=structured_profile,
+        date=(
+            structured_profile.updated_at.split("T", 1)[0]
+            if structured_profile is not None
+            and structured_profile.updated_at is not None
+            else _record_date(profile)
+        ),
+    )
+    data["profiles"] = [
+        {
+            "user_id": principal_id,
+            "profile_data": prepared,
+        }
+    ]
     return value
 
 
@@ -1926,6 +1960,12 @@ class _ProjectedJSONParser:
                     and frame.count > schema.max_items
                 ):
                     raise ValueError("map exceeds response contract")
+                if (
+                    isinstance(schema, _JSONMapSchema)
+                    and schema.max_key_bytes is not None
+                    and not _string_fits_utf8_bytes(value, schema.max_key_bytes)
+                ):
+                    raise ValueError("map key exceeds response contract")
             self._frames[-1].pending_key = value
             return
         if event in {"start_map", "start_array"}:
@@ -1944,6 +1984,8 @@ class _ProjectedJSONParser:
                     _JSONScalarSchema,
                     _JSONReceiptSchema,
                     _JSONBoundedScalarSchema,
+                    _JSONStringPresenceSchema,
+                    _JSONStringEnumSchema,
                 ),
             ):
                 raise ValueError("unexpected scalar value shape")
@@ -1997,6 +2039,10 @@ class _ProjectedJSONParser:
                 raise ValueError("invalid provider receipt")
         elif isinstance(schema, _JSONBoundedScalarSchema) and isinstance(value, str):
             value = _bounded_control_string(value, schema.max_string_bytes)
+        elif isinstance(schema, _JSONStringPresenceSchema) and isinstance(value, str):
+            value = "present" if any(not character.isspace() for character in value) else ""
+        elif isinstance(schema, _JSONStringEnumSchema) and isinstance(value, str):
+            value = value if value in schema.allowed else ""
         self._attach(value)
 
     def _next_schema(self) -> _JSONSchema:
@@ -2876,6 +2922,15 @@ def _bounded_control_string(value: str, max_bytes: int) -> str:
         candidate = candidate[:-1]
         encoded = candidate.encode("utf-8")
     return candidate
+
+
+def _string_fits_utf8_bytes(value: object, max_bytes: int) -> bool:
+    if not isinstance(value, str) or len(value) > max_bytes:
+        return False
+    try:
+        return len(value.encode("utf-8")) <= max_bytes
+    except UnicodeError:
+        return False
 
 
 def _utf8_bytes(value: str) -> bytes | None:

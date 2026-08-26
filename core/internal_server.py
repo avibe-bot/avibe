@@ -214,6 +214,10 @@ def create_app(
     from core.memory.retained_input import RetainedInputBudget
 
     memory_list_input_budget = RetainedInputBudget(max_reservations=4)
+    memory_search_input_budget = RetainedInputBudget(max_reservations=4)
+    memory_remember_input_budget = RetainedInputBudget(max_reservations=4)
+    app.state.memory_search_input_budget = memory_search_input_budget
+    app.state.memory_remember_input_budget = memory_remember_input_budget
 
     def _publish_scheduled_queue_growth(session_id: str, state: str) -> None:
         if state != "queued":
@@ -1599,58 +1603,110 @@ def create_app(
         runtime = _memory_runtime()
         if runtime is None:
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
-        payload = await _safe_json(request)
-        if (
-            not isinstance(payload, dict)
-            or not {"query", "policy"}.issubset(payload)
-            or set(payload) - {"query", "policy", "project"}
-            or not isinstance(payload.get("query"), str)
-        ):
-            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
-        from core.memory.http_headers import CALLER_SESSION_HEADER, MEMORY_USER_KEY_HEADER
-        from core.memory.project_ids import (
-            DEFAULT_MEMORY_PROJECT_ID,
-            omitted_project_to_default,
-            parse_agent_search_project,
-            parse_ui_search_project,
-        )
-        from core.memory.types import RecallPolicy
-
         try:
-            policy = RecallPolicy.from_payload(payload.get("policy"))
-            raw_project = omitted_project_to_default(payload.get("project"))
-            if str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip():
-                project_id = parse_ui_search_project(raw_project)
-            else:
-                project_id = parse_agent_search_project(raw_project)
+            from core.memory.retained_input import (
+                read_json_object_admitted,
+                RetainedInputRejected,
+            )
+
+            module = getattr(runtime, "module", None)
+            payload, reservation = await read_json_object_admitted(
+                request,
+                getattr(
+                    module,
+                    "_search_input_budget",
+                    app.state.memory_search_input_budget,
+                ),
+            )
+        except RetainedInputRejected:
+            return JSONResponse(
+                status_code=429,
+                content={"status": "failed", "error": "memory_queue_full"},
+            )
         except (TypeError, ValueError):
-            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
-        current_session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip() or None
-        if project_id not in {DEFAULT_MEMORY_PROJECT_ID, "all"}:
-            try:
-                catalog = await run_blocking(runtime.list_memory_projects, principal_id)
-            except Exception:
-                logger.warning("internal memory project catalog failed")
-                return JSONResponse(
-                    status_code=503,
-                    content={"status": "failed", "error": "memory_store_unavailable"},
-                )
-            if project_id not in catalog:
+            return JSONResponse(
+                status_code=400,
+                content={"status": "failed", "error": "memory_invalid_input"},
+            )
+        try:
+            if (
+                not isinstance(payload, dict)
+                or not {"query", "policy"}.issubset(payload)
+                or set(payload) - {"query", "policy", "project"}
+                or not isinstance(payload.get("query"), str)
+            ):
                 return JSONResponse(
                     status_code=400,
                     content={"status": "failed", "error": "memory_invalid_input"},
                 )
-        try:
-            return await runtime.search_payload(
-                payload["query"],
-                policy,
-                principal_id,
-                project_id,
-                current_session_id=current_session_id,
+            from core.memory.http_headers import (
+                CALLER_SESSION_HEADER,
+                MEMORY_USER_KEY_HEADER,
             )
-        except Exception:
-            logger.warning("internal memory search failed")
-            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_processing_failed"})
+            from core.memory.project_ids import (
+                DEFAULT_MEMORY_PROJECT_ID,
+                omitted_project_to_default,
+                parse_agent_search_project,
+                parse_ui_search_project,
+            )
+            from core.memory.types import RecallPolicy
+
+            try:
+                policy = RecallPolicy.from_payload(payload.get("policy"))
+                raw_project = omitted_project_to_default(payload.get("project"))
+                if str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip():
+                    project_id = parse_ui_search_project(raw_project)
+                else:
+                    project_id = parse_agent_search_project(raw_project)
+            except (TypeError, ValueError):
+                return JSONResponse(
+                    status_code=400,
+                    content={"status": "failed", "error": "memory_invalid_input"},
+                )
+            current_session_id = (
+                str(request.headers.get(CALLER_SESSION_HEADER) or "").strip() or None
+            )
+            if project_id not in {DEFAULT_MEMORY_PROJECT_ID, "all"}:
+                try:
+                    catalog = await run_blocking(
+                        runtime.list_memory_projects,
+                        principal_id,
+                    )
+                except Exception:
+                    logger.warning("internal memory project catalog failed")
+                    return JSONResponse(
+                        status_code=503,
+                        content={
+                            "status": "failed",
+                            "error": "memory_store_unavailable",
+                        },
+                    )
+                if project_id not in catalog:
+                    return JSONResponse(
+                        status_code=400,
+                        content={"status": "failed", "error": "memory_invalid_input"},
+                    )
+            try:
+                admitted_search = getattr(runtime, "_search_payload_admitted", None)
+                search = admitted_search if callable(admitted_search) else runtime.search_payload
+                return await search(
+                    payload["query"],
+                    policy,
+                    principal_id,
+                    project_id,
+                    current_session_id=current_session_id,
+                )
+            except Exception:
+                logger.warning("internal memory search failed")
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "status": "failed",
+                        "error": "memory_processing_failed",
+                    },
+                )
+        finally:
+            reservation.release()
 
     @app.post("/internal/memory/list")
     async def _memory_list(request: Request) -> Any:
@@ -1858,62 +1914,103 @@ def create_app(
         runtime = _memory_runtime()
         if runtime is None:
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
-        payload = await _safe_json(request)
-        if (
-            not isinstance(payload, dict)
-            or not {"text"}.issubset(payload)
-            or set(payload) - {"text", "project"}
-            or not isinstance(payload.get("text"), str)
-            or not payload["text"].strip()
-        ):
-            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
-        from core.memory.project_ids import omitted_project_to_default, parse_writable_memory_project
-
         try:
-            project_id = parse_writable_memory_project(
-                omitted_project_to_default(payload.get("project"))
+            from core.memory.retained_input import (
+                read_json_object_admitted,
+                RetainedInputRejected,
             )
-        except ValueError:
-            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
 
-        from core.memory import CaptureRequest
-        from core.memory.http_headers import CALLER_SESSION_HEADER
-
-        session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip()
-        text = payload["text"]
-        source_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-
+            payload, reservation = await read_json_object_admitted(
+                request,
+                app.state.memory_remember_input_budget,
+            )
+        except RetainedInputRejected:
+            return JSONResponse(
+                status_code=429,
+                content={"status": "failed", "error": "memory_queue_full"},
+            )
+        except (TypeError, ValueError):
+            return JSONResponse(
+                status_code=400,
+                content={"status": "failed", "error": "memory_invalid_input"},
+            )
         try:
-            capture = getattr(controller, "capture_memory", None)
-            if not callable(capture):
+            if (
+                not isinstance(payload, dict)
+                or not {"text"}.issubset(payload)
+                or set(payload) - {"text", "project"}
+                or not isinstance(payload.get("text"), str)
+                or not payload["text"].strip()
+            ):
+                return JSONResponse(
+                    status_code=400,
+                    content={"status": "failed", "error": "memory_invalid_input"},
+                )
+            from core.memory.project_ids import (
+                omitted_project_to_default,
+                parse_writable_memory_project,
+            )
+
+            try:
+                project_id = parse_writable_memory_project(
+                    omitted_project_to_default(payload.get("project"))
+                )
+            except ValueError:
+                return JSONResponse(
+                    status_code=400,
+                    content={"status": "failed", "error": "memory_invalid_input"},
+                )
+
+            from core.memory import CaptureRequest
+            from core.memory.http_headers import CALLER_SESSION_HEADER
+
+            session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip()
+            text = payload["text"]
+            source_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+            try:
+                capture = getattr(controller, "capture_memory", None)
+                if not callable(capture):
+                    return JSONResponse(
+                        status_code=503,
+                        content={
+                            "status": "failed",
+                            "error": "memory_runtime_missing",
+                        },
+                    )
+                receipt = await capture(
+                    CaptureRequest(
+                        source_message_id=(
+                            f"agent:{principal_id}:{project_id}:{session_id}:"
+                            f"{source_digest}"
+                        ),
+                        session_id=session_id,
+                        principal_id=principal_id,
+                        project_id=project_id,
+                        provenance="agent",
+                        text=text,
+                        occurred_at_ms=int(time.time() * 1000),
+                    )
+                )
+            except Exception:
+                logger.warning("internal memory remember failed")
                 return JSONResponse(
                     status_code=503,
-                    content={"status": "failed", "error": "memory_runtime_missing"},
+                    content={
+                        "status": "failed",
+                        "error": "memory_store_unavailable",
+                    },
                 )
-            receipt = await capture(
-                CaptureRequest(
-                    source_message_id=(
-                        f"agent:{principal_id}:{project_id}:{session_id}:{source_digest}"
-                    ),
-                    session_id=session_id,
-                    principal_id=principal_id,
-                    project_id=project_id,
-                    provenance="agent",
-                    text=text,
-                    occurred_at_ms=int(time.time() * 1000),
-                )
-            )
-        except Exception:
-            logger.warning("internal memory remember failed")
-            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_store_unavailable"})
-        response: dict[str, Any] = {"status": receipt.status}
-        reason = getattr(receipt, "reason", None)
-        error = getattr(receipt, "error", None)
-        if reason is not None:
-            response["reason"] = reason
-        if error is not None:
-            response["error"] = error
-        return response
+            response: dict[str, Any] = {"status": receipt.status}
+            reason = getattr(receipt, "reason", None)
+            error = getattr(receipt, "error", None)
+            if reason is not None:
+                response["reason"] = reason
+            if error is not None:
+                response["error"] = error
+            return response
+        finally:
+            reservation.release()
 
 
     @app.post("/internal/model-hub")

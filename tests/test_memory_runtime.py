@@ -3,6 +3,7 @@
 import asyncio
 import concurrent.futures
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
@@ -14,9 +15,12 @@ from core.memory.processing_record import RuntimeHealthProjection, SourceObserva
 from core.memory.runtime import MemoryConfig, MemoryRuntime
 from core.memory.store import MemoryStore
 from core.memory.types import (
+    MemoryItem,
     MemoryItems,
     MemoryListItem,
     MemoryListPage,
+    RecallItems,
+    RecallPolicy,
     is_opaque_provider_id,
 )
 
@@ -462,6 +466,237 @@ def test_aggregate_list_cursor_round_trips_every_accepted_provider_id(
     }
     assert page_hints == {"default": 1}
     assert total_hints == {"default": 2}
+
+
+@pytest.mark.asyncio
+async def test_aggregate_list_cursor_isolated_encoder_round_trips_large_id() -> None:
+    provider_id = "episode-" + "x" * 10_000
+    projects = ("default",)
+    fingerprint = runtime_module._memory_list_catalog_fingerprint(
+        "u-11111111111111111111111111111111",
+        projects,
+        origin="user",
+    )
+
+    cursor = await runtime_module._encode_memory_list_cursor_isolated(
+        fingerprint,
+        {"default": ("2026-08-26T00:00:00Z", provider_id)},
+        {"default": 1},
+        {"default": 2},
+        timeout_seconds=5.0,
+    )
+
+    boundaries, page_hints, total_hints = runtime_module._decode_memory_list_cursor(
+        cursor,
+        projects=projects,
+        fingerprint=fingerprint,
+    )
+    assert boundaries["default"] == ("2026-08-26T00:00:00Z", provider_id)
+    assert page_hints == {"default": 1}
+    assert total_hints == {"default": 2}
+
+
+@pytest.mark.asyncio
+async def test_cancelled_cursor_spool_unlinks_late_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    spool = tmp_path / "late-cursor.token"
+    spool.write_text("cursor", encoding="ascii")
+
+    def delayed_spool(_cursor: object, _deadline: float) -> str:
+        entered.set()
+        release.wait(timeout=2)
+        return str(spool)
+
+    monkeypatch.setattr(
+        runtime_module,
+        "_spool_memory_list_cursor",
+        delayed_spool,
+    )
+
+    task = asyncio.create_task(
+        runtime_module._decode_memory_list_cursor_isolated(
+            "cursor",
+            projects=("default",),
+            fingerprint="fingerprint",
+            timeout_seconds=5.0,
+        )
+    )
+    assert await asyncio.to_thread(entered.wait, 1)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert spool.exists()
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not spool.exists()
+
+
+@pytest.mark.asyncio
+async def test_aggregate_list_incrementally_retains_only_final_page(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    principal_id = "u-11111111111111111111111111111111"
+    projects = tuple(f"project-{index:02d}" for index in range(17))
+    monkeypatch.setattr(runtime, "list_memory_projects", lambda _principal: projects)
+
+    async def decode_cursor(*_args, **_kwargs):
+        return (
+            {project: None for project in projects},
+            {project: 1 for project in projects},
+            {project: None for project in projects},
+        )
+
+    async def project_window(
+        _principal_id: str,
+        project_id: str,
+        **_kwargs,
+    ):
+        project_index = projects.index(project_id)
+        items = tuple(
+            MemoryListItem(
+                id=f"{project_id}-episode-{item_index:02d}",
+                subject="subject",
+                summary="summary",
+                body="body",
+                timestamp=(
+                    f"2026-08-{project_index + 1:02d}T00:00:{item_index:02d}Z"
+                ),
+                project=project_id,
+            )
+            for item_index in range(20)
+        )
+        return (
+            items,
+            len(items),
+            (),
+            False,
+            True,
+            {item.id: 1 for item in items},
+        )
+
+    encoded: list[dict[str, tuple[str, str] | None]] = []
+
+    async def encode_cursor(
+        _fingerprint,
+        boundaries,
+        _page_hints,
+        _total_hints,
+        *,
+        timeout_seconds,
+    ):
+        assert timeout_seconds > 0
+        encoded.append(boundaries)
+        return "isolated-cursor"
+
+    merge_sizes: list[int] = []
+    real_merge = runtime_module._merge_memory_list_candidates
+
+    def bounded_merge(items, *, limit: int):
+        buffered = list(items)
+        merge_sizes.append(len(buffered))
+        return real_merge(buffered, limit=limit)
+
+    monkeypatch.setattr(
+        runtime_module,
+        "_decode_memory_list_cursor_isolated",
+        decode_cursor,
+    )
+    monkeypatch.setattr(runtime, "_list_project_window", project_window)
+    monkeypatch.setattr(
+        runtime_module,
+        "_encode_memory_list_cursor_isolated",
+        encode_cursor,
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "_merge_memory_list_candidates",
+        bounded_merge,
+    )
+
+    payload = await runtime.list_all_episodes_payload(
+        principal_id,
+        cursor=None,
+        limit=20,
+    )
+
+    assert payload["status"] == "ok"
+    assert payload["count"] == 20
+    assert payload["next_cursor"] == "isolated-cursor"
+    assert len(merge_sizes) == len(projects)
+    assert max(merge_sizes) <= 40
+    assert len(encoded) == 1
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_all_project_search_incrementally_retains_only_final_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    principal_id = "u-11111111111111111111111111111111"
+    projects = tuple(f"project-{index:02d}" for index in range(17))
+    monkeypatch.setattr(runtime, "list_memory_projects", lambda _principal: projects)
+
+    async def resolve_mode(_policy: RecallPolicy) -> str:
+        return "hybrid"
+
+    async def recall(
+        _query: str,
+        *,
+        policy: RecallPolicy,
+        project_id: str,
+        **_kwargs,
+    ) -> RecallItems:
+        assert policy.max_results == 20
+        project_index = projects.index(project_id)
+        return RecallItems(
+            items=tuple(
+                MemoryItem(
+                    kind="episode",
+                    text=f"{project_id}-item-{item_index:02d}",
+                    date=f"2026-08-{project_index + 1:02d}",
+                )
+                for item_index in range(20)
+            ),
+            requested_mode=policy.mode,
+            effective_mode="hybrid",
+        )
+
+    merge_sizes: list[int] = []
+    real_merge = runtime_module._merge_search_items
+
+    def bounded_merge(items, *, limit: int):
+        buffered = list(items)
+        merge_sizes.append(len(buffered))
+        return real_merge(buffered, limit=limit)
+
+    monkeypatch.setattr(runtime.module, "resolve_recall_mode", resolve_mode)
+    monkeypatch.setattr(runtime.module, "recall", recall)
+    monkeypatch.setattr(runtime_module, "_merge_search_items", bounded_merge)
+
+    result = await runtime._recall_all_projects(
+        "query",
+        policy=RecallPolicy(
+            mode="hybrid",
+            max_results=20,
+            include_profile=False,
+        ),
+        principal_id=principal_id,
+    )
+
+    assert isinstance(result, RecallItems)
+    assert len(result.items) == 20
+    assert len(merge_sizes) == len(projects)
+    assert max(merge_sizes) <= 40
+    await runtime.close()
 
 
 @pytest.mark.asyncio
