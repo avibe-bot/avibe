@@ -37,6 +37,7 @@ from core.memory.project_ids import (
     is_persisted_memory_project_id,
     is_writable_memory_project_id,
 )
+from core.memory.retained_input import RetainedInputBudget, estimate_text_residency
 from core.memory.store import (
     MemoryStore,
     VolatileAdmission,
@@ -192,6 +193,7 @@ class MemoryModule:
             effective_home=self._effective_home,
         )
         self._lifecycle_lock = asyncio.Lock()
+        self._search_input_budget = RetainedInputBudget()
         self._capture_admission_locks: weakref.WeakValueDictionary[
             tuple[str, str, str], asyncio.Lock
         ] = weakref.WeakValueDictionary()
@@ -838,69 +840,76 @@ class MemoryModule:
             return OperationFailed(error="memory_disabled")
         if not isinstance(policy, RecallPolicy):
             return OperationFailed(error="memory_invalid_input")
-        normalized_query = self._normalize_text(query)
-        query_bytes = _utf8_bytes(normalized_query)
-        if query_bytes is None or not normalized_query.strip():
-            return OperationFailed(error="memory_invalid_input")
-        if not is_principal_id(principal_id):
-            return OperationFailed(error="memory_access_denied")
-        if not is_new_stored_memory_project_id(project_id):
-            return OperationFailed(error="memory_access_denied")
-        if self._retired:
-            return OperationFailed(error="memory_operation_in_progress")
-
-        agentic_started = (
-            monotonic()
-            if policy.mode == "agentic" and policy.timeout_seconds is not None
-            else None
+        reservation = self._search_input_budget.reserve(
+            estimate_text_residency(query, copies=3)
         )
-        agentic_deadline = (
-            agentic_started + float(policy.timeout_seconds)
-            if agentic_started is not None
-            else None
-        )
-        if agentic_deadline is None:
-            return await self._recall_validated(
-                normalized_query,
-                policy=policy,
-                principal_id=principal_id,
-                project_id=project_id,
-                current_session_id=current_session_id,
-                effective_mode=effective_mode,
-                agentic_deadline=None,
-                agentic_telemetry=None,
-            )
-        agentic_telemetry = AgenticRecallTelemetry()
+        if reservation is None:
+            return OperationFailed(error="memory_queue_full")
         try:
-            remaining = _remaining_timeout(agentic_deadline)
-            result = await asyncio.wait_for(
-                self._recall_validated(
+            normalized_query = await run_blocking(self._normalize_text, query)
+            if not await run_blocking(_valid_search_query, normalized_query):
+                return OperationFailed(error="memory_invalid_input")
+            if not is_principal_id(principal_id):
+                return OperationFailed(error="memory_access_denied")
+            if not is_new_stored_memory_project_id(project_id):
+                return OperationFailed(error="memory_access_denied")
+            if self._retired:
+                return OperationFailed(error="memory_operation_in_progress")
+
+            agentic_started = (
+                monotonic()
+                if policy.mode == "agentic" and policy.timeout_seconds is not None
+                else None
+            )
+            agentic_deadline = (
+                agentic_started + float(policy.timeout_seconds)
+                if agentic_started is not None
+                else None
+            )
+            if agentic_deadline is None:
+                return await self._recall_validated(
                     normalized_query,
                     policy=policy,
                     principal_id=principal_id,
                     project_id=project_id,
                     current_session_id=current_session_id,
                     effective_mode=effective_mode,
-                    agentic_deadline=agentic_deadline,
-                    agentic_telemetry=agentic_telemetry,
-                ),
-                timeout=remaining,
-            )
-        except asyncio.TimeoutError:
-            result = OperationFailed(error="memory_provider_timeout")
-        except BaseException:
+                    agentic_deadline=None,
+                    agentic_telemetry=None,
+                )
+            agentic_telemetry = AgenticRecallTelemetry()
+            try:
+                remaining = _remaining_timeout(agentic_deadline)
+                result = await asyncio.wait_for(
+                    self._recall_validated(
+                        normalized_query,
+                        policy=policy,
+                        principal_id=principal_id,
+                        project_id=project_id,
+                        current_session_id=current_session_id,
+                        effective_mode=effective_mode,
+                        agentic_deadline=agentic_deadline,
+                        agentic_telemetry=agentic_telemetry,
+                    ),
+                    timeout=remaining,
+                )
+            except asyncio.TimeoutError:
+                result = OperationFailed(error="memory_provider_timeout")
+            except BaseException:
+                _log_agentic_recall_telemetry(
+                    started=agentic_started,
+                    telemetry=agentic_telemetry,
+                    result=None,
+                )
+                raise
             _log_agentic_recall_telemetry(
                 started=agentic_started,
                 telemetry=agentic_telemetry,
-                result=None,
+                result=result,
             )
-            raise
-        _log_agentic_recall_telemetry(
-            started=agentic_started,
-            telemetry=agentic_telemetry,
-            result=result,
-        )
-        return result
+            return result
+        finally:
+            reservation.release()
 
     async def _recall_validated(
         self,
@@ -1373,6 +1382,14 @@ class MemoryModule:
         if isinstance(bounded, OperationFailed):
             return bounded
         for item in items:
+            provider_validated = (
+                item.provider_validated is True
+                and item.item.provider_validated is True
+                and isinstance(item.text_fingerprint, str)
+                and bool(item.text_fingerprint)
+                and isinstance(item.rank_fingerprint, str)
+                and bool(item.rank_fingerprint)
+            )
             if (
                 item.queried_owner != owner_id
                 or item.item.origin is not None
@@ -1387,15 +1404,19 @@ class MemoryModule:
                         or not math.isfinite(item.score)
                     )
                 )
-                or (
+                or (not provider_validated and (
                     item.episode_id is not None
                     and (
                         not isinstance(item.episode_id, str)
                         or not item.episode_id
                         or _utf8_bytes(item.episode_id) is None
                     )
+                ))
+                or (
+                    not provider_validated
+                    and item.timestamp is not None
+                    and _list_timestamp_instant(item.timestamp) is None
                 )
-                or (item.timestamp is not None and _list_timestamp_instant(item.timestamp) is None)
             ):
                 return OperationFailed(error="memory_provider_response_invalid")
         return items
@@ -1488,10 +1509,13 @@ class MemoryModule:
         for item in items:
             if not isinstance(item, MemoryItem) or item.kind not in {"profile", "episode", "fact"}:
                 return OperationFailed(error="memory_provider_response_invalid")
-            item_text = _utf8_bytes(item.text) if isinstance(item.text, str) else None
-            if item_text is None or not item.text or "\x00" in item.text:
+            if not isinstance(item.text, str) or not item.text:
                 return OperationFailed(error="memory_provider_response_invalid")
-            if item.date is not None:
+            if not item.provider_validated:
+                item_text = _utf8_bytes(item.text)
+                if item_text is None or "\x00" in item.text:
+                    return OperationFailed(error="memory_provider_response_invalid")
+            if item.date is not None and not item.provider_validated:
                 date_bytes = _utf8_bytes(item.date) if isinstance(item.date, str) else None
                 if date_bytes is None:
                     return OperationFailed(error="memory_provider_response_invalid")
@@ -1502,8 +1526,7 @@ class MemoryModule:
             if item.profile is not None:
                 if item.kind != "profile":
                     return OperationFailed(error="memory_provider_response_invalid")
-                profile_bytes = _profile_bytes(item.profile)
-                if profile_bytes is None:
+                if not item.provider_validated and _profile_bytes(item.profile) is None:
                     return OperationFailed(error="memory_provider_response_invalid")
             if item.origin not in {None, "user", "agent", "both"}:
                 return OperationFailed(error="memory_provider_response_invalid")
@@ -1658,8 +1681,8 @@ def _merge_owner_search_items(
     seen: dict[str, int] = {}
     for provider_item, origin in ranked:
         item = replace(provider_item.item, origin=origin)
-        normalized_text = MemoryModule._normalize_text(item.text)
-        existing_index = seen.get(normalized_text)
+        text_key = _provider_text_key(provider_item)
+        existing_index = seen.get(text_key)
         if existing_index is not None:
             existing = merged[existing_index]
             if existing.origin != origin:
@@ -1667,7 +1690,7 @@ def _merge_owner_search_items(
             continue
         if len(merged) >= limit:
             continue
-        seen[normalized_text] = len(merged)
+        seen[text_key] = len(merged)
         merged.append(item)
     return tuple(merged)
 
@@ -1675,35 +1698,61 @@ def _merge_owner_search_items(
 def _same_method_rank_key(item: ProviderSearchItem) -> tuple[object, ...]:
     timestamp = _list_timestamp_instant(item.timestamp)
     timestamp_value = timestamp.timestamp() if timestamp is not None else float("-inf")
-    normalized_text = MemoryModule._normalize_text(item.item.text)
+    text_key = _provider_text_key(item)
     if item.score is not None:
         return (
             0,
             -float(item.score),
             -timestamp_value,
-            item.episode_id or normalized_text,
+            _provider_rank_key(item, text_key),
             item.provider_rank,
-            normalized_text,
+            text_key,
         )
     return (
         1,
         item.provider_rank,
         -timestamp_value,
-        item.episode_id or normalized_text,
-        normalized_text,
+        _provider_rank_key(item, text_key),
+        text_key,
     )
 
 
 def _per_leg_rank_key(item: ProviderSearchItem) -> tuple[object, ...]:
     timestamp = _list_timestamp_instant(item.timestamp)
     timestamp_value = timestamp.timestamp() if timestamp is not None else float("-inf")
-    normalized_text = MemoryModule._normalize_text(item.item.text)
+    text_key = _provider_text_key(item)
     return (
         item.provider_rank,
         -timestamp_value,
-        item.episode_id or normalized_text,
-        normalized_text,
+        _provider_rank_key(item, text_key),
+        text_key,
     )
+
+
+def _provider_text_key(item: ProviderSearchItem) -> str:
+    if (
+        item.provider_validated is True
+        and item.item.provider_validated is True
+        and isinstance(item.text_fingerprint, str)
+        and item.text_fingerprint
+    ):
+        return item.text_fingerprint
+    return MemoryModule._normalize_text(item.item.text)
+
+
+def _provider_rank_key(item: ProviderSearchItem, text_key: str) -> str:
+    if (
+        item.provider_validated is True
+        and item.item.provider_validated is True
+        and isinstance(item.rank_fingerprint, str)
+        and item.rank_fingerprint
+    ):
+        return item.rank_fingerprint
+    return item.episode_id or text_key
+
+
+def _valid_search_query(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip()) and _utf8_bytes(value) is not None
 
 
 def _profile_text_bytes(value: object) -> bytes | None:

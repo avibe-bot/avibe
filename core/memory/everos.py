@@ -7,6 +7,7 @@ import concurrent.futures
 from concurrent.futures.process import BrokenProcessPool
 from contextlib import asynccontextmanager
 import errno
+import hashlib
 import json
 import logging
 import math
@@ -18,6 +19,7 @@ import shutil
 import tempfile
 import threading
 import time
+import unicodedata
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, field, replace
@@ -28,6 +30,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from core.memory.blocking import run_blocking
 from core.memory.types import (
     CaptureAttachment,
     MemoryErrorCode,
@@ -169,6 +172,12 @@ class _JSONMapSchema(_JSONSchema):
 class _PreparedProfileData:
     text: str | None
     structured: MemoryProfile | None
+    date: str | None
+
+
+@dataclass(frozen=True)
+class _PreparedSearchData:
+    items: tuple[ProviderSearchItem, ...]
 
 
 _JSON_SCALAR = _JSONScalarSchema()
@@ -835,7 +844,7 @@ class EverOSPort:
                 timeout_seconds=timeout_seconds,
                 telemetry=response_metadata,
             )
-            return _map_search_items(data, principal_id=principal_id, limit=limit)
+            return data.items
         finally:
             if method == "agentic" and agentic_telemetry is not None:
                 round_value = response_metadata.get("round")
@@ -1110,7 +1119,7 @@ class EverOSPort:
         session_ref: ProviderSessionRef | None,
         timeout_seconds: float | None,
         telemetry: dict[str, str],
-    ) -> dict[str, Any]:
+    ) -> _PreparedSearchData:
         if method not in {"keyword", "vector", "hybrid", "agentic"}:
             raise MemoryProviderFailure("memory_invalid_input", retryable=False)
         if session_ref is not None and (
@@ -1164,7 +1173,7 @@ class EverOSPort:
             if not isinstance(body, dict):
                 raise MemoryProviderFailure("memory_provider_response_invalid")
             data = body.get("data")
-            if not isinstance(data, dict) or not _is_json_value(data):
+            if not isinstance(data, _PreparedSearchData):
                 raise MemoryProviderFailure("memory_provider_response_invalid")
         except asyncio.TimeoutError as exc:
             raise MemoryProviderFailure("memory_provider_timeout") from exc
@@ -1602,7 +1611,7 @@ def _remaining_before_deadline(deadline: float) -> float:
 
 async def _spool_response(response: httpx.Response, spool: BinaryIO) -> None:
     async for chunk in response.aiter_bytes(chunk_size=_RESPONSE_STREAM_CHUNK_BYTES):
-        _write_response_spool_chunk(spool, chunk)
+        await run_blocking(_write_response_spool_chunk, spool, chunk)
 
 
 def _write_response_spool_chunk(spool: BinaryIO, chunk: bytes) -> None:
@@ -1704,6 +1713,9 @@ def _parse_spooled_json_path(path: str, schema: _JSONSchema) -> tuple[bool, Any]
             value = _parse_spooled_json(spool, schema)
         if _is_profile_response_schema(schema):
             value = _prepare_profile_response(value)
+        search_parameters = _search_response_parameters(schema)
+        if search_parameters is not None:
+            value = _prepare_search_response(value, *search_parameters)
         # The process boundary must be able to return the projection without
         # recursively walking an adversarially deep profile object.
         pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
@@ -1727,6 +1739,49 @@ def _is_profile_response_schema(schema: _JSONSchema) -> bool:
     )
 
 
+def _search_response_parameters(
+    schema: _JSONSchema,
+) -> tuple[str, int] | None:
+    if not isinstance(schema, _JSONMapSchema):
+        return None
+    data_schema = schema.fields.get("data")
+    if not isinstance(data_schema, _JSONMapSchema):
+        return None
+    episodes_schema = data_schema.fields.get("episodes")
+    if (
+        not isinstance(episodes_schema, _JSONArraySchema)
+        or episodes_schema.retention != "search_items"
+        or not isinstance(episodes_schema.retention_owner, str)
+        or isinstance(episodes_schema.retain_items, bool)
+        or not isinstance(episodes_schema.retain_items, int)
+    ):
+        return None
+    return episodes_schema.retention_owner, episodes_schema.retain_items
+
+
+def _prepare_search_response(
+    value: Any,
+    principal_id: str,
+    limit: int,
+) -> Any:
+    """Map and validate retained search items before leaving the parser worker."""
+
+    if not isinstance(value, dict):
+        return value
+    data = value.get("data")
+    if not isinstance(data, dict):
+        return value
+    value["data"] = _PreparedSearchData(
+        items=_map_search_items(
+            data,
+            principal_id=principal_id,
+            limit=limit,
+            provider_validated=True,
+        )
+    )
+    return value
+
+
 def _prepare_profile_response(value: Any) -> Any:
     """Canonicalize unbounded profile data before it crosses into the controller."""
 
@@ -1746,6 +1801,12 @@ def _prepare_profile_response(value: Any) -> Any:
         profile["profile_data"] = _PreparedProfileData(
             text=_canonical_profile_text(profile_data),
             structured=structured_profile,
+            date=(
+                structured_profile.updated_at.split("T", 1)[0]
+                if structured_profile is not None
+                and structured_profile.updated_at is not None
+                else _record_date(profile)
+            ),
         )
     return value
 
@@ -2013,6 +2074,7 @@ def _map_search_items(
     *,
     principal_id: str,
     limit: int,
+    provider_validated: bool = False,
 ) -> tuple[ProviderSearchItem, ...]:
     episodes = data.get("episodes", [])
     if not isinstance(episodes, list):
@@ -2030,14 +2092,30 @@ def _map_search_items(
         episode_timestamp = _first_record_timestamp(episode)
         text = _episode_text(episode)
         if text is not None:
+            text_fingerprint = (
+                _search_text_fingerprint(text) if provider_validated else None
+            )
+            rank_fingerprint = (
+                _search_text_fingerprint(episode_id)
+                if provider_validated and episode_id is not None
+                else text_fingerprint
+            )
             items.append(
                 ProviderSearchItem(
-                    item=MemoryItem(kind="episode", text=text, date=_record_date(episode)),
+                    item=MemoryItem(
+                        kind="episode",
+                        text=text,
+                        date=_record_date(episode),
+                        provider_validated=provider_validated,
+                    ),
                     score=episode_score,
                     episode_id=episode_id,
                     timestamp=episode_timestamp,
                     provider_rank=len(items),
                     queried_owner=principal_id,
+                    provider_validated=provider_validated,
+                    text_fingerprint=text_fingerprint,
+                    rank_fingerprint=rank_fingerprint,
                 )
             )
         if len(items) >= limit:
@@ -2055,17 +2133,41 @@ def _map_search_items(
             text = _safe_text(fact.get("content"))
             if text is not None:
                 fact_score = _provider_score(fact)
+                text_fingerprint = (
+                    _search_text_fingerprint(text) if provider_validated else None
+                )
+                rank_fingerprint = (
+                    _search_text_fingerprint(episode_id)
+                    if provider_validated and episode_id is not None
+                    else text_fingerprint
+                )
                 items.append(
                     ProviderSearchItem(
-                        item=MemoryItem(kind="fact", text=text, date=_record_date(fact, episode)),
+                        item=MemoryItem(
+                            kind="fact",
+                            text=text,
+                            date=_record_date(fact, episode),
+                            provider_validated=provider_validated,
+                        ),
                         score=fact_score if fact_score is not None else episode_score,
                         episode_id=episode_id,
                         timestamp=_first_record_timestamp(fact, episode),
                         provider_rank=len(items),
                         queried_owner=principal_id,
+                        provider_validated=provider_validated,
+                        text_fingerprint=text_fingerprint,
+                        rank_fingerprint=rank_fingerprint,
                     )
                 )
     return tuple(items)
+
+
+def _search_text_fingerprint(value: str) -> str:
+    normalized = unicodedata.normalize(
+        "NFC",
+        value.replace("\r\n", "\n").replace("\r", "\n"),
+    )
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def _provider_score(record: dict[str, Any]) -> float | None:
@@ -2235,12 +2337,12 @@ def _map_profile_item(data: dict[str, Any], *, principal_id: str) -> MemoryItem 
         structured_profile = profile_data.structured
         text = profile_data.text
         if text is not None:
-            updated_at = structured_profile.updated_at if structured_profile is not None else None
             return MemoryItem(
                 kind="profile",
                 text=text,
-                date=updated_at.split("T", 1)[0] if updated_at is not None else _record_date(profile),
+                date=profile_data.date,
                 profile=structured_profile,
+                provider_validated=True,
             )
     return None
 

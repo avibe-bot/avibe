@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import core.memory.module as memory_module
 from core.memory.attachments import (
     AttachmentCleanupUnprovenError,
     AttachmentPinError,
@@ -15,6 +16,7 @@ from core.memory.attachments import (
 )
 from core.memory.everos import FakeMemoryProvider
 from core.memory.module import MIN_FREE_DISK_BYTES, MemoryModule
+from core.memory.retained_input import RetainedInputBudget
 from core.memory.store import MemoryStore, VolatileAdmission
 from core.memory.types import (
     CaptureAccepted,
@@ -243,6 +245,133 @@ async def test_large_provider_payloads_cross_capture_search_and_profile_boundari
     assert isinstance(result, MemoryItems)
     assert [item.origin for item in result.items] == ["user", "agent"]
     assert all(item.profile == profile for item in result.items)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_large_searches_share_retained_input_admission(
+    tmp_path: Path,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingSearchProvider(FakeMemoryProvider):
+        async def search(self, *_args, **_kwargs):
+            entered.set()
+            await release.wait()
+            return ()
+
+    module, _store, _provider = _module(
+        tmp_path,
+        provider=BlockingSearchProvider(),
+    )
+    module._search_input_budget = RetainedInputBudget(max_bytes=1)
+
+    first = asyncio.create_task(
+        module.search(
+            "first arbitrarily large query",
+            principal_id=PRINCIPAL,
+            project_id="default",
+        )
+    )
+    await asyncio.wait_for(entered.wait(), timeout=1)
+
+    second = await module.search(
+        "second arbitrarily large query",
+        principal_id=PRINCIPAL,
+        project_id="default",
+    )
+
+    assert second == OperationFailed(error="memory_queue_full")
+    release.set()
+    assert await first == MemoryItems()
+
+
+@pytest.mark.asyncio
+async def test_worker_validated_results_skip_controller_text_reencoding(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    large_text = "x" * (2 * 1024 * 1024 + 1)
+    fingerprint = "validated-text-fingerprint"
+    profile = MemoryProfile(summary="s" * 70_000)
+    profile_item = MemoryItem(
+        kind="profile",
+        text=large_text,
+        profile=profile,
+        provider_validated=True,
+    )
+    provider = FakeMemoryProvider(
+        search_items_by_owner={
+            PRINCIPAL: (
+                ProviderSearchItem(
+                    item=MemoryItem(
+                        kind="episode",
+                        text=large_text,
+                        provider_validated=True,
+                    ),
+                    score=1.0,
+                    episode_id="episode-1",
+                    timestamp="2026-08-26T00:00:00Z",
+                    provider_rank=0,
+                    queried_owner=PRINCIPAL,
+                    provider_validated=True,
+                    text_fingerprint=fingerprint,
+                    rank_fingerprint="validated-rank-fingerprint",
+                ),
+            )
+        },
+        profile_items_by_owner={
+            PRINCIPAL: (profile_item,),
+            f"{PRINCIPAL}-agent": (),
+        },
+    )
+    module, _store, _provider = _module(tmp_path, provider=provider)
+    original_utf8_bytes = memory_module._utf8_bytes
+    original_normalize = MemoryModule._normalize_text
+
+    def guarded_utf8_bytes(value: object):
+        if value is large_text:
+            pytest.fail("controller re-encoded worker-validated provider text")
+        return original_utf8_bytes(value)
+
+    def guarded_normalize(value: object) -> str:
+        if value is large_text:
+            pytest.fail("controller re-normalized worker-validated provider text")
+        return original_normalize(value)
+
+    monkeypatch.setattr(memory_module, "_utf8_bytes", guarded_utf8_bytes)
+    monkeypatch.setattr(MemoryModule, "_normalize_text", staticmethod(guarded_normalize))
+    monkeypatch.setattr(
+        memory_module,
+        "_profile_bytes",
+        lambda _profile: pytest.fail(
+            "controller revalidated worker-prepared profile fields"
+        ),
+    )
+
+    result = await module.search(
+        "query",
+        principal_id=PRINCIPAL,
+        project_id="default",
+    )
+    profile_result = await module.profile(
+        principal_id=PRINCIPAL,
+        project_id="default",
+    )
+
+    assert result == MemoryItems(
+        items=(MemoryItem(kind="episode", text=large_text, origin="user"),)
+    )
+    assert profile_result == MemoryItems(
+        items=(
+            MemoryItem(
+                kind="profile",
+                text=large_text,
+                profile=profile,
+                origin="user",
+            ),
+        )
+    )
 
 
 @pytest.mark.asyncio

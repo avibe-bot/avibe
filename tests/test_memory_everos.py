@@ -10,6 +10,7 @@ import subprocess
 import struct
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -1020,6 +1021,61 @@ def test_search_projection_counts_only_items_that_can_be_mapped() -> None:
     assert [item.item.text for item in items] == ["first usable result"]
 
 
+def test_search_mapping_completes_inside_bounded_parser_worker(tmp_path: Path) -> None:
+    large_text = "x" * (2 * 1024 * 1024 + 1)
+    response_path = tmp_path / "search-response.json"
+    response_path.write_text(
+        json.dumps(
+            {
+                "data": {
+                    "episodes": [
+                        {
+                            "id": "episode-1",
+                            "user_id": PRINCIPAL,
+                            "content": large_text,
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    ok, value = memory_everos._parse_spooled_json_path(
+        str(response_path),
+        memory_everos._search_response_schema(1, PRINCIPAL),
+    )
+
+    assert ok is True
+    prepared = value["data"]
+    assert isinstance(prepared, memory_everos._PreparedSearchData)
+    assert prepared.items[0].provider_validated is True
+    assert prepared.items[0].item.provider_validated is True
+    assert prepared.items[0].item.text == large_text
+    assert prepared.items[0].text_fingerprint
+
+
+def test_response_spool_writes_run_off_controller_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller_thread = threading.get_ident()
+    write_threads: list[int] = []
+
+    class Response:
+        async def aiter_bytes(self, *, chunk_size: int):
+            assert chunk_size == memory_everos._RESPONSE_STREAM_CHUNK_BYTES
+            yield b"response"
+
+    def write(_spool, _chunk: bytes) -> None:
+        write_threads.append(threading.get_ident())
+
+    monkeypatch.setattr(memory_everos, "_write_response_spool_chunk", write)
+    asyncio.run(memory_everos._spool_response(Response(), io.BytesIO()))
+
+    assert write_threads
+    assert all(thread_id != controller_thread for thread_id in write_threads)
+
+
 def test_assistant_owner_crosses_add_search_and_profile_provider_contract() -> None:
     """MEMORY-SEARCH-008, MEMORY-SEARCH-009, MEMORY-SEARCH-011 stay scoped."""
 
@@ -1765,6 +1821,7 @@ def test_profile_skips_large_irrelevant_root_field_during_projection() -> None:
 
     assert items[0].profile is not None
     assert items[0].profile.summary == "kept"
+    assert items[0].provider_validated is True
 
 
 def test_profile_projection_rejects_more_than_requested_profile() -> None:

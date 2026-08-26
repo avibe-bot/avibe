@@ -18,6 +18,7 @@ import shutil
 import stat
 import tempfile
 import threading
+import time
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any, Literal
@@ -128,10 +129,25 @@ class _AgenticDeadlineProjection:
             await _send_json_error(send, status=403, detail="memory_request_rejected")
             return
 
+        request_deadline = _request_header_deadline(
+            path,
+            scope.get("headers", []),
+        )
         spool = tempfile.TemporaryFile(mode="w+b")
         try:
             try:
-                body_size = await _spool_request(receive, spool)
+                body_size = await _spool_request(
+                    receive,
+                    spool,
+                    deadline=request_deadline,
+                )
+            except _RequestDeadlineExceeded:
+                await _send_json_error(
+                    send,
+                    status=504,
+                    detail="memory_request_timed_out",
+                )
+                return
             except OSError:
                 await _send_json_error(
                     send,
@@ -141,7 +157,20 @@ class _AgenticDeadlineProjection:
                 return
             if body_size is None:
                 return
-            payload = await run_blocking(_project_spooled_request, spool, path)
+            try:
+                payload = await run_blocking(
+                    _project_spooled_request,
+                    spool,
+                    path,
+                    request_deadline,
+                )
+            except _RequestDeadlineExceeded:
+                await _send_json_error(
+                    send,
+                    status=504,
+                    detail="memory_request_timed_out",
+                )
+                return
             if not isinstance(payload, dict) or _request_payload_rejection(
                 path,
                 payload,
@@ -174,6 +203,8 @@ class _AgenticDeadlineProjection:
             if agentic_timeout is None:
                 await self._app(scope, replay_receive, send)
                 return
+            if request_deadline is None:
+                request_deadline = time.monotonic() + agentic_timeout
 
             response_spool = tempfile.TemporaryFile(mode="w+b")
             try:
@@ -203,9 +234,9 @@ class _AgenticDeadlineProjection:
                 try:
                     await asyncio.wait_for(
                         self._app(scope, replay_receive, capture_send),
-                        timeout=agentic_timeout,
+                        timeout=_remaining_request_deadline(request_deadline),
                     )
-                except asyncio.TimeoutError:
+                except (asyncio.TimeoutError, _RequestDeadlineExceeded):
                     await _send_json_error(
                         send,
                         status=504,
@@ -246,10 +277,24 @@ class _AgenticDeadlineProjection:
             spool.close()
 
 
-async def _spool_request(receive: Any, spool: Any) -> int | None:
+async def _spool_request(
+    receive: Any,
+    spool: Any,
+    *,
+    deadline: float | None = None,
+) -> int | None:
     body_size = 0
     while True:
-        message = await receive()
+        if deadline is None:
+            message = await receive()
+        else:
+            try:
+                message = await asyncio.wait_for(
+                    receive(),
+                    timeout=_remaining_request_deadline(deadline),
+                )
+            except asyncio.TimeoutError:
+                raise _RequestDeadlineExceeded from None
         if message.get("type") == "http.disconnect":
             return None
         if message.get("type") != "http.request":
@@ -258,10 +303,11 @@ async def _spool_request(receive: Any, spool: Any) -> int | None:
         if not isinstance(chunk, bytes):
             return None
         if chunk:
-            await _spool_bytes(spool, chunk)
+            await _spool_bytes(spool, chunk, deadline=deadline)
             body_size += len(chunk)
         if not message.get("more_body", False):
             await run_blocking(spool.flush)
+            _check_request_deadline(deadline)
             return body_size
 
 
@@ -297,14 +343,21 @@ def _spooled_request_receive(
     return receive
 
 
-async def _spool_bytes(spool: Any, chunk: bytes) -> None:
+async def _spool_bytes(
+    spool: Any,
+    chunk: bytes,
+    *,
+    deadline: float | None = None,
+) -> None:
     view = memoryview(chunk)
     for offset in range(0, len(view), _SPOOL_REPLAY_CHUNK_BYTES):
+        _check_request_deadline(deadline)
         await run_blocking(
             _write_spool_chunk,
             spool,
             view[offset : offset + _SPOOL_REPLAY_CHUNK_BYTES],
         )
+        _check_request_deadline(deadline)
 
 
 def _write_spool_chunk(spool: Any, chunk: memoryview) -> None:
@@ -476,15 +529,27 @@ class _RequestShapeError(_RequestParseError):
     pass
 
 
+class _RequestDeadlineExceeded(RuntimeError):
+    pass
+
+
 class _MappedRequestParser:
     """Project only the bounded fields needed by the private request guard."""
 
-    def __init__(self, data: mmap.mmap, path: str) -> None:
+    def __init__(
+        self,
+        data: mmap.mmap,
+        path: str,
+        deadline: float | None = None,
+    ) -> None:
         self._data = data
         self._path = path
         self._index = 0
+        self._deadline = deadline
+        self._next_deadline_check = 0
 
     def parse(self) -> dict[str, Any]:
+        self._check_deadline(force=True)
         self._skip_whitespace()
         if self._peek(default=None) != ord("{"):
             raise _RequestShapeError("root shape")
@@ -503,6 +568,7 @@ class _MappedRequestParser:
         if self._consume(ord("}")):
             return projected
         while True:
+            self._check_deadline()
             key = self._parse_string(decode_limit=64)
             if not isinstance(key, str) or key not in allowed_keys or key in seen:
                 raise _RequestSchemaError("object key")
@@ -542,6 +608,7 @@ class _MappedRequestParser:
         if self._consume(ord("]")):
             return projected
         while True:
+            self._check_deadline()
             if len(projected) >= maximum:
                 raise _RequestSchemaError("array length")
             projected.append(self._parse_path_value(item_path))
@@ -620,6 +687,7 @@ class _MappedRequestParser:
                 raise _RequestParseError("control character")
             self._index += 1
             if self._index - segment_start >= _STRING_SCAN_CHUNK_BYTES:
+                self._check_deadline(force=True)
                 self._decode_segment(
                     decoder,
                     segment_start,
@@ -693,6 +761,15 @@ class _MappedRequestParser:
     def _skip_whitespace(self) -> None:
         while self._index < len(self._data) and self._data[self._index] in _JSON_WHITESPACE:
             self._index += 1
+            self._check_deadline()
+
+    def _check_deadline(self, *, force: bool = False) -> None:
+        if self._deadline is None:
+            return
+        if not force and self._index < self._next_deadline_check:
+            return
+        self._next_deadline_check = self._index + _STRING_SCAN_CHUNK_BYTES
+        _check_request_deadline(self._deadline)
 
     def _peek(self, *, default: int | None = None) -> int | None:
         return self._data[self._index] if self._index < len(self._data) else default
@@ -708,14 +785,19 @@ class _MappedRequestParser:
         return True
 
 
-def _project_spooled_request(spool: Any, path: str) -> Any:
+def _project_spooled_request(
+    spool: Any,
+    path: str,
+    deadline: float | None = None,
+) -> Any:
     try:
+        _check_request_deadline(deadline)
         spool.flush()
         size = os.fstat(spool.fileno()).st_size
         if size <= 0:
             return None
         with mmap.mmap(spool.fileno(), 0, access=mmap.ACCESS_READ) as mapped:
-            return _MappedRequestParser(mapped, path).parse()
+            return _MappedRequestParser(mapped, path, deadline).parse()
     except _RequestShapeError:
         return _SHAPE_REJECTED
     except _RequestSchemaError:
@@ -805,6 +887,37 @@ def _agentic_timeout_from_payload(
     ):
         return False
     return timeout
+
+
+def _request_header_deadline(path: str, headers: Any) -> float | None:
+    if path != "/api/v2/memory/search":
+        return None
+    raw_timeout = _header_value(headers, _AGENTIC_TIMEOUT_HEADER)
+    if raw_timeout is None:
+        return None
+    try:
+        timeout = float(raw_timeout)
+    except (TypeError, ValueError):
+        return None
+    if (
+        not math.isfinite(timeout)
+        or timeout <= 0
+        or timeout > MAX_AGENTIC_TIMEOUT_SECONDS
+    ):
+        return None
+    return time.monotonic() + timeout
+
+
+def _remaining_request_deadline(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise _RequestDeadlineExceeded
+    return remaining
+
+
+def _check_request_deadline(deadline: float | None) -> None:
+    if deadline is not None:
+        _remaining_request_deadline(deadline)
 
 
 def _header_value(headers: Any, name: str) -> str | None:

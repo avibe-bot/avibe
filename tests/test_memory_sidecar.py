@@ -124,7 +124,7 @@ def test_agentic_deadline_projection_cancels_downstream_and_preserves_round() ->
         "method": "POST",
         "path": "/api/v2/memory/search",
         "headers": [
-            (sidecar._AGENTIC_TIMEOUT_HEADER.lower().encode(), b"0.001"),
+            (sidecar._AGENTIC_TIMEOUT_HEADER.lower().encode(), b"0.5"),
         ],
     }
 
@@ -137,6 +137,54 @@ def test_agentic_deadline_projection_cancels_downstream_and_preserves_round() ->
     assert sent[0]["status"] == 504
     headers = dict(sent[0]["headers"])
     assert headers[sidecar._AGENTIC_ROUND_HEADER.lower().encode()] == b"round2"
+    assert json.loads(sent[1]["body"]) == {"detail": "memory_request_timed_out"}
+
+
+def test_agentic_deadline_includes_request_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent: list[dict] = []
+    projection_deadlines: list[float | None] = []
+    downstream_called = False
+    request_messages = [
+        {
+            "type": "http.request",
+            "body": _agentic_search_body(),
+            "more_body": False,
+        }
+    ]
+
+    async def receive():
+        return request_messages.pop(0)
+
+    async def capture(message):
+        sent.append(message)
+
+    async def downstream(_scope, _receive, _send):
+        nonlocal downstream_called
+        downstream_called = True
+
+    def expire_projection(_spool, _path: str, deadline: float | None = None):
+        projection_deadlines.append(deadline)
+        raise sidecar._RequestDeadlineExceeded
+
+    monkeypatch.setattr(sidecar, "_project_spooled_request", expire_projection)
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/api/v2/memory/search",
+        "headers": [
+            (sidecar._AGENTIC_TIMEOUT_HEADER.lower().encode(), b"1"),
+        ],
+    }
+
+    asyncio.run(
+        sidecar._AgenticDeadlineProjection(downstream)(scope, receive, capture)
+    )
+
+    assert projection_deadlines[0] is not None
+    assert downstream_called is False
+    assert sent[0]["status"] == 504
     assert json.loads(sent[1]["body"]) == {"detail": "memory_request_timed_out"}
 
 

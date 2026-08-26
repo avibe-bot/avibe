@@ -4,18 +4,24 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import concurrent.futures
 from copy import deepcopy
 import errno
 import hashlib
 import json
 import logging
+import multiprocessing
 import os
+import shutil
 import sqlite3
 import stat
+import tempfile
+import threading
 import time
 from concurrent.futures import CancelledError as FutureCancelledError
 from concurrent.futures import Future as ThreadFuture
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from concurrent.futures.process import BrokenProcessPool
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, replace
@@ -83,6 +89,7 @@ from core.memory.project_ids import (
     DEFAULT_MEMORY_PROJECT_ID,
     MEMORY_SEARCH_ALL_PROJECTS,
 )
+from core.memory.retained_input import RetainedInputBudget, estimate_text_residency
 from core.memory.store import MemoryStore, is_principal_id
 from core.memory.types import (
     MemoryFailureLogEntry,
@@ -116,6 +123,9 @@ _MEMORY_LIST_CURSOR_VERSION = 3
 _MEMORY_LIST_PROVIDER_PAGE_SIZE = 20
 _MEMORY_LIST_PROVIDER_MAX_PAGE = 1_000_000
 _MEMORY_LIST_AGGREGATE_TIMEOUT_SECONDS = 20.0
+_MEMORY_LIST_CURSOR_SPOOL_CHUNK_CHARS = 64 * 1024
+_MEMORY_LIST_CURSOR_SPOOL_FREE_BYTES = 512 * 1024 * 1024
+_MEMORY_LIST_CURSOR_SPOOL_LOCK = threading.Lock()
 _WAKE_LEASE_RETRY_DELAYS_SECONDS = (0.0, 0.25, 0.5, 1.0, 2.0)
 
 
@@ -358,6 +368,7 @@ class MemoryRuntime:
             else None
         )
         self._lifecycle_revision = 0
+        self._cursor_input_budget = RetainedInputBudget(max_reservations=4)
         self._reconcile_lock = _LifecycleGenerationLock(self._advance_lifecycle_revision)
         self._wake_task: asyncio.Task[dict[str, Any]] | None = None
         self._artifact_activation_task: asyncio.Task[None] | None = None
@@ -1295,8 +1306,49 @@ class MemoryRuntime:
             or origin not in ("user", "agent")
         ):
             return {"status": "failed", "error": "memory_invalid_input"}
+        reservation = self._cursor_input_budget.reserve(
+            estimate_text_residency(cursor, copies=1)
+        )
+        if reservation is None:
+            return {"status": "failed", "error": "memory_queue_full"}
         try:
-            projects = await run_blocking(self.list_memory_projects, principal_id)
+            return await self._list_all_episodes_payload_admitted(
+                principal_id,
+                cursor=cursor,
+                limit=limit,
+                origin=origin,
+            )
+        finally:
+            reservation.release()
+
+    async def _list_all_episodes_payload_admitted(
+        self,
+        principal_id: str,
+        *,
+        cursor: str | None,
+        limit: int = 20,
+        origin: MemoryOrigin = "user",
+    ) -> dict[str, Any]:
+        """Merge this principal's project pages behind an Avibe cursor."""
+
+        if not self.available:
+            return {"status": "failed", "error": "memory_store_unavailable"}
+        if (
+            not is_principal_id(principal_id)
+            or isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= _MEMORY_LIST_PROVIDER_PAGE_SIZE
+            or origin not in ("user", "agent")
+        ):
+            return {"status": "failed", "error": "memory_invalid_input"}
+        deadline = time.monotonic() + _MEMORY_LIST_AGGREGATE_TIMEOUT_SECONDS
+        try:
+            projects = await asyncio.wait_for(
+                run_blocking(self.list_memory_projects, principal_id),
+                timeout=max(0, deadline - time.monotonic()),
+            )
+        except asyncio.TimeoutError:
+            return {"status": "failed", "error": "memory_provider_timeout"}
         except Exception:
             return {"status": "failed", "error": "memory_store_unavailable"}
         if not projects:
@@ -1308,15 +1360,21 @@ class MemoryRuntime:
             origin=origin,
         )
         try:
-            boundaries, page_hints, total_hints = _decode_memory_list_cursor(
+            boundaries, page_hints, total_hints = await _decode_memory_list_cursor_isolated(
                 cursor,
                 projects=projects,
                 fingerprint=fingerprint,
+                timeout_seconds=max(0, deadline - time.monotonic()),
             )
+        except asyncio.TimeoutError:
+            return {"status": "failed", "error": "memory_provider_timeout"}
         except ValueError:
             return {"status": "failed", "error": "memory_invalid_input"}
+        except OSError:
+            return {"status": "failed", "error": "memory_disk_unavailable"}
+        except BrokenProcessPool:
+            return {"status": "failed", "error": "memory_processing_failed"}
 
-        deadline = time.monotonic() + _MEMORY_LIST_AGGREGATE_TIMEOUT_SECONDS
         candidates: list[MemoryListItem] = []
         warnings: list[MemoryListWarningCode] = []
         totals: dict[str, int] = {}
@@ -2998,6 +3056,144 @@ def _decode_memory_list_cursor(
         page_hints[project_id] = value["p"]
         total_hints[project_id] = value["n"]
     return boundaries, page_hints, total_hints
+
+
+async def _decode_memory_list_cursor_isolated(
+    cursor: str | None,
+    *,
+    projects: tuple[str, ...],
+    fingerprint: str,
+    timeout_seconds: float,
+) -> tuple[
+    dict[str, tuple[str, str] | None],
+    dict[str, int],
+    dict[str, int | None],
+]:
+    if cursor is None:
+        return _decode_memory_list_cursor(
+            None,
+            projects=projects,
+            fingerprint=fingerprint,
+        )
+    if timeout_seconds <= 0:
+        raise asyncio.TimeoutError
+
+    deadline = time.monotonic() + timeout_seconds
+    path = await run_blocking(_spool_memory_list_cursor, cursor, deadline)
+    pool: concurrent.futures.ProcessPoolExecutor | None = None
+    terminated = False
+    try:
+        context = multiprocessing.get_context("spawn")
+        pool = concurrent.futures.ProcessPoolExecutor(
+            max_workers=1,
+            mp_context=context,
+        )
+        future = asyncio.get_running_loop().run_in_executor(
+            pool,
+            _decode_memory_list_cursor_path,
+            path,
+            projects,
+            fingerprint,
+        )
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            return await asyncio.wait_for(future, timeout=remaining)
+        except (asyncio.TimeoutError, asyncio.CancelledError, BrokenProcessPool):
+            terminated = True
+            await asyncio.to_thread(_terminate_memory_list_cursor_pool, pool)
+            raise
+    finally:
+        if pool is not None and not terminated:
+            await asyncio.to_thread(
+                pool.shutdown,
+                wait=True,
+                cancel_futures=True,
+            )
+        await run_blocking(_unlink_memory_list_cursor_spool, path)
+
+
+def _spool_memory_list_cursor(cursor: object, deadline: float) -> str:
+    if not isinstance(cursor, str) or not cursor:
+        raise ValueError("invalid Memory list cursor")
+    spool = tempfile.NamedTemporaryFile(
+        mode="w+b",
+        prefix="avibe-memory-cursor-",
+        suffix=".token",
+        delete=False,
+    )
+    path = spool.name
+    try:
+        for offset in range(0, len(cursor), _MEMORY_LIST_CURSOR_SPOOL_CHUNK_CHARS):
+            if time.monotonic() >= deadline:
+                raise asyncio.TimeoutError
+            try:
+                chunk = cursor[
+                    offset : offset + _MEMORY_LIST_CURSOR_SPOOL_CHUNK_CHARS
+                ].encode("ascii")
+            except UnicodeEncodeError:
+                raise ValueError("invalid Memory list cursor") from None
+            with _MEMORY_LIST_CURSOR_SPOOL_LOCK:
+                free_bytes = shutil.disk_usage(tempfile.gettempdir()).free
+                if free_bytes - len(chunk) < _MEMORY_LIST_CURSOR_SPOOL_FREE_BYTES:
+                    raise OSError(
+                        errno.ENOSPC,
+                        "insufficient temporary storage for Memory list cursor",
+                    )
+                written = spool.write(chunk)
+                if written != len(chunk):
+                    raise OSError(errno.EIO, "short Memory list cursor spool write")
+                spool.flush()
+            if time.monotonic() >= deadline:
+                raise asyncio.TimeoutError
+        return path
+    except Exception:
+        spool.close()
+        _unlink_memory_list_cursor_spool(path)
+        raise
+    finally:
+        if not spool.closed:
+            spool.close()
+
+
+def _decode_memory_list_cursor_path(
+    path: str,
+    projects: tuple[str, ...],
+    fingerprint: str,
+) -> tuple[
+    dict[str, tuple[str, str] | None],
+    dict[str, int],
+    dict[str, int | None],
+]:
+    try:
+        with open(path, "r", encoding="ascii") as spool:
+            cursor = spool.read()
+    except (OSError, UnicodeError):
+        raise ValueError("invalid Memory list cursor") from None
+    return _decode_memory_list_cursor(
+        cursor,
+        projects=projects,
+        fingerprint=fingerprint,
+    )
+
+
+def _terminate_memory_list_cursor_pool(
+    pool: concurrent.futures.ProcessPoolExecutor,
+) -> None:
+    processes = tuple((getattr(pool, "_processes", None) or {}).values())
+    for process in processes:
+        process.terminate()
+    for process in processes:
+        process.join()
+    pool.shutdown(wait=True, cancel_futures=True)
+
+
+def _unlink_memory_list_cursor_spool(path: str) -> None:
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
 
 
 def _encode_memory_list_boundary_id(value: str) -> str:

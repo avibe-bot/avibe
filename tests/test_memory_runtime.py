@@ -1,6 +1,7 @@
 """Focused runtime lifecycle tests for best-effort Memory delivery."""
 
 import asyncio
+import concurrent.futures
 import sqlite3
 from pathlib import Path
 
@@ -514,3 +515,63 @@ async def test_aggregate_list_pages_round_trip_opaque_nul_provider_id(
     assert [item["id"] for item in second["items"]] == ["episode-older"]
     assert second["next_cursor"] is None
     await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_aggregate_cursor_timeout_terminates_isolated_decoder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Process:
+        def __init__(self) -> None:
+            self.terminated = False
+            self.joined = False
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def join(self) -> None:
+            self.joined = True
+
+    process = Process()
+
+    class HangingExecutor:
+        def __init__(self, *, max_workers: int, mp_context: object) -> None:
+            assert max_workers == 1
+            assert mp_context is context
+            self._processes = {1: process}
+            self.shutdown_called = False
+
+        def submit(self, _operation, *_args):
+            return concurrent.futures.Future()
+
+        def shutdown(self, *, wait: bool, cancel_futures: bool) -> None:
+            assert wait is True
+            assert cancel_futures is True
+            self.shutdown_called = True
+
+    context = object()
+    executors: list[HangingExecutor] = []
+
+    def executor_factory(**kwargs):
+        executor = HangingExecutor(**kwargs)
+        executors.append(executor)
+        return executor
+
+    monkeypatch.setattr(runtime_module.multiprocessing, "get_context", lambda method: context)
+    monkeypatch.setattr(
+        runtime_module.concurrent.futures,
+        "ProcessPoolExecutor",
+        executor_factory,
+    )
+
+    with pytest.raises(asyncio.TimeoutError):
+        await runtime_module._decode_memory_list_cursor_isolated(
+            "e30",
+            projects=("default",),
+            fingerprint="fingerprint",
+            timeout_seconds=0.01,
+        )
+
+    assert executors[0].shutdown_called
+    assert process.terminated
+    assert process.joined

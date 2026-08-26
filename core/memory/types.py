@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, TypeAlias
 
 MemoryKind = Literal["profile", "episode", "fact"]
@@ -343,6 +343,7 @@ class MemoryItem:
     profile: MemoryProfile | None = None
     project: str | None = None
     origin: Literal["user", "agent", "both"] | None = None
+    provider_validated: bool = field(default=False, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -355,6 +356,9 @@ class ProviderSearchItem:
     timestamp: str | None
     provider_rank: int
     queried_owner: str
+    provider_validated: bool = field(default=False, repr=False, compare=False)
+    text_fingerprint: str | None = field(default=None, repr=False, compare=False)
+    rank_fingerprint: str | None = field(default=None, repr=False, compare=False)
 
 
 def memory_profile_payload(profile: MemoryProfile) -> dict[str, Any]:
