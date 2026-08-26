@@ -115,16 +115,16 @@ DOCTOR_REPAIR_TARGETS = (
 )
 DOCTOR_DEFAULT_REPAIR_TARGETS = DOCTOR_REPAIR_TARGETS[:4]
 DOCTOR_DEPENDENCY_REPAIR_TARGETS = frozenset(DOCTOR_REPAIR_TARGETS[4:])
-DOCTOR_REPAIR_DRY_RUN_MESSAGES = {
-    "home-migration": "Would migrate ~/.vibe_remote to ~/.avibe when safe, or recreate the legacy compatibility symlink.",
-    "stale-install-runtime": "Would stop a running legacy vibe-remote service and start the current Avibe service.",
-    "duplicate-service-processes": "Would stop extra Avibe service processes outside the service lock.",
-    "stale-restart-state": "Would remove stale restart metadata and refresh runtime status.",
-    "askill": "Would install or refresh askill with the official installer.",
-    "avault": "Would install or refresh the manifest-pinned avault release.",
-    "git-runtime": "Would install or refresh the manifest-pinned Git Runtime.",
-    "show-runtime": "Would prepare the manifest-pinned Show Runtime archive when it is missing or invalid.",
-    "tmux": "Would install or refresh the manifest-pinned tmux runtime.",
+DOCTOR_REPAIR_DRY_RUN_I18N_KEYS = {
+    "home-migration": "doctor.repair.dryHomeMigration",
+    "stale-install-runtime": "doctor.repair.dryStaleInstall",
+    "duplicate-service-processes": "doctor.repair.dryDuplicateProcesses",
+    "stale-restart-state": "doctor.repair.dryStaleRestart",
+    "askill": "doctor.repair.dryAskill",
+    "avault": "doctor.repair.dryAvault",
+    "git-runtime": "doctor.repair.dryGitRuntime",
+    "show-runtime": "doctor.repair.dryShowRuntime",
+    "tmux": "doctor.repair.dryTmux",
 }
 
 DEFAULT_VAULT_APPROVAL_WAIT_SECONDS = 9 * 60
@@ -998,47 +998,46 @@ def _architecture_token(text: str | None) -> str | None:
 
 def _runtime_architecture_items() -> list[dict[str, str]]:
     items: list[dict[str, str]] = []
+    language = _configured_cli_language()
     is_apple_silicon = _is_apple_silicon_host()
     host_arch = "Apple Silicon" if is_apple_silicon else platform.machine() or "unknown"
     python_arch = platform.machine() or "unknown"
     python_status = "warn" if is_apple_silicon and _architecture_token(python_arch) == "x86_64" else "pass"
 
-    python_item = {
-        "status": python_status,
-        "message": f"Python runtime architecture: {python_arch} ({sys.executable})",
-    }
+    _add_doctor_item(
+        items,
+        python_status,
+        i18n_t("doctor.item.pythonArchitecture", language, architecture=python_arch, executable=sys.executable),
+    )
     if python_status == "warn":
-        python_item["action"] = "Reinstall Avibe with native arm64 uv/Python"
-    items.append(python_item)
+        items[-1]["action"] = i18n_t("doctor.action.nativeArmPython", language)
 
     uv_path = shutil.which("uv")
     if uv_path:
         uv_arch_output = _binary_architecture(uv_path)
         uv_arch = _architecture_token(uv_arch_output) or "unknown"
         uv_status = "warn" if is_apple_silicon and uv_arch in {"x86_64", "unknown"} else "pass"
-        uv_item = {
-            "status": uv_status,
-            "message": f"uv architecture: {uv_arch} ({uv_path})",
-        }
+        _add_doctor_item(
+            items,
+            uv_status,
+            i18n_t("doctor.item.uvArchitecture", language, architecture=uv_arch, path=uv_path),
+        )
         if is_apple_silicon and uv_arch == "x86_64":
-            uv_item["action"] = "Install native arm64 uv, then reinstall Avibe"
+            items[-1]["action"] = i18n_t("doctor.action.nativeArmUv", language)
         elif is_apple_silicon and uv_arch == "unknown":
-            uv_item["action"] = "Check whether this uv wrapper launches native arm64 uv"
-        items.append(uv_item)
+            items[-1]["action"] = i18n_t("doctor.action.nativeUvWrapper", language)
     else:
-        items.append(
-            {
-                "status": "warn",
-                "message": "uv command not found on PATH",
-                "action": "Install uv or add its bin directory to PATH",
-            }
+        _add_doctor_item(
+            items,
+            "warn",
+            i18n_t("doctor.item.uvMissing", language),
+            i18n_t("doctor.action.uvMissing", language),
         )
 
-    items.append(
-        {
-            "status": "pass",
-            "message": f"Host architecture: {host_arch}",
-        }
+    _add_doctor_item(
+        items,
+        "pass",
+        i18n_t("doctor.item.hostArchitecture", language, architecture=host_arch),
     )
     return items
 
@@ -1058,12 +1057,17 @@ def _path_points_to(path: Path, target: Path) -> bool:
 
 def _home_migration_items() -> list[dict]:
     items: list[dict] = []
+    language = _configured_cli_language()
     explicit_home = os.environ.get(paths.AVIBE_HOME_ENV)
     if explicit_home:
         _add_doctor_item(
             items,
             "pass",
-            f"AVIBE_HOME is set explicitly: {Path(explicit_home).expanduser()}",
+            i18n_t(
+                "doctor.item.explicitHome",
+                language,
+                path=Path(explicit_home).expanduser(),
+            ),
             code="runtime.explicit_home",
         )
         return items
@@ -1077,7 +1081,7 @@ def _home_migration_items() -> list[dict]:
         _add_doctor_item(
             items,
             "pass",
-            f"Default runtime home is ready to initialize at {avibe_home}",
+            i18n_t("doctor.item.homeReady", language, path=avibe_home),
             code="runtime.home_ready",
         )
         return items
@@ -1087,15 +1091,20 @@ def _home_migration_items() -> list[dict]:
             _add_doctor_item(
                 items,
                 "pass",
-                f"Legacy home compatibility symlink is healthy: {legacy_home} -> {avibe_home}",
+                i18n_t(
+                    "doctor.item.legacyHomeLinkHealthy",
+                    language,
+                    legacy_path=legacy_home,
+                    active_path=avibe_home,
+                ),
                 code="runtime.legacy_home_link_ok",
             )
         elif not legacy_present:
             _add_doctor_item(
                 items,
                 "warn",
-                f"Legacy home compatibility path is missing: {legacy_home}",
-                "Run `vibe doctor repair home-migration` to create the compatibility symlink.",
+                i18n_t("doctor.item.legacyHomeLinkMissing", language, path=legacy_home),
+                i18n_t("doctor.action.homeMigrationCreateLink", language),
                 code="runtime.legacy_home_link_missing",
                 repair_target="home-migration",
                 repair_risk="low",
@@ -1104,8 +1113,8 @@ def _home_migration_items() -> list[dict]:
             _add_doctor_item(
                 items,
                 "warn",
-                f"Legacy home symlink does not point to the active home: {legacy_home}",
-                "Run `vibe doctor repair home-migration` to recreate the compatibility symlink.",
+                i18n_t("doctor.item.legacyHomeLinkWrong", language, path=legacy_home),
+                i18n_t("doctor.action.homeMigrationRecreateLink", language),
                 code="runtime.legacy_home_link_wrong",
                 repair_target="home-migration",
                 repair_risk="low",
@@ -1114,8 +1123,13 @@ def _home_migration_items() -> list[dict]:
             _add_doctor_item(
                 items,
                 "fail",
-                f"Both {avibe_home} and {legacy_home} are real directories",
-                "Back up and merge the two homes manually before running repair.",
+                i18n_t(
+                    "doctor.item.homeConflict",
+                    language,
+                    active_path=avibe_home,
+                    legacy_path=legacy_home,
+                ),
+                i18n_t("doctor.action.homeConflict", language),
                 code="runtime.home_conflict",
             )
         return items
@@ -1124,8 +1138,8 @@ def _home_migration_items() -> list[dict]:
         _add_doctor_item(
             items,
             "warn",
-            f"Legacy home symlink exists but canonical {avibe_home} is missing",
-            "Inspect the symlink target before repair; Avibe will not guess which state to keep.",
+            i18n_t("doctor.item.legacyHomeWithoutCanonical", language, active_path=avibe_home),
+            i18n_t("doctor.action.legacyHomeWithoutCanonical", language),
             code="runtime.legacy_home_symlink_without_canonical",
         )
         return items
@@ -1133,8 +1147,8 @@ def _home_migration_items() -> list[dict]:
     _add_doctor_item(
         items,
         "warn",
-        f"Runtime home still uses the legacy path: {legacy_home}",
-        "Run `vibe doctor repair home-migration` to move it to ~/.avibe and keep a back-symlink.",
+        i18n_t("doctor.item.legacyHomeUnmigrated", language, path=legacy_home),
+        i18n_t("doctor.action.homeMigration", language),
         code="runtime.legacy_home_unmigrated",
         repair_target="home-migration",
         repair_risk="low",
@@ -1179,6 +1193,7 @@ def _current_cli_install_family() -> str | None:
 
 def _service_install_family_items(*, detect_extra_processes: bool = True) -> list[dict]:
     items: list[dict] = []
+    language = _configured_cli_language()
     current_family = _current_cli_install_family()
     owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
     service_pids = [pid for pid in [owner_pid] if pid]
@@ -1196,19 +1211,30 @@ def _service_install_family_items(*, detect_extra_processes: bool = True) -> lis
         _add_doctor_item(
             items,
             "warn",
-            "Running service process still comes from the legacy vibe-remote installation: "
-            f"pids={','.join(map(str, stale_pids))}",
-            "Run `vibe doctor repair stale-install-runtime` to stop the stale service and start the current Avibe install.",
+            i18n_t(
+                "doctor.item.staleInstallProcess",
+                language,
+                pids=",".join(map(str, stale_pids)),
+            ),
+            i18n_t("doctor.action.staleInstallRuntime", language),
             code="runtime.stale_install_process",
             repair_target="stale-install-runtime",
             repair_risk="medium",
         )
     elif owner_pid and current_family:
-        _add_doctor_item(items, "pass", f"No legacy install mismatch detected for running service: pid={owner_pid}")
+        _add_doctor_item(
+            items,
+            "pass",
+            i18n_t("doctor.item.installMismatchNone", language, pid=owner_pid),
+        )
     elif owner_pid:
-        _add_doctor_item(items, "pass", f"Current CLI install family is not a uv tool install; skipped install mismatch check: pid={owner_pid}")
+        _add_doctor_item(
+            items,
+            "pass",
+            i18n_t("doctor.item.installMismatchSkipped", language, pid=owner_pid),
+        )
     else:
-        _add_doctor_item(items, "pass", "No running service install mismatch detected")
+        _add_doctor_item(items, "pass", i18n_t("doctor.item.installMismatchAbsent", language))
     return items
 
 
@@ -1256,10 +1282,16 @@ def _restart_failure_summary(payload: dict) -> str:
 
 def _restart_state_items() -> list[dict]:
     items: list[dict] = []
+    language = _configured_cli_language()
     restart_path = runtime.get_restart_status_path()
     payload = runtime.read_json(restart_path) or {}
     if not payload:
-        _add_doctor_item(items, "pass", "No restart metadata is present", code="runtime.restart_state_absent")
+        _add_doctor_item(
+            items,
+            "pass",
+            i18n_t("doctor.item.restartStateAbsent", language),
+            code="runtime.restart_state_absent",
+        )
         return items
 
     # Both clauses are read now, from what is on disk and what is running now.
@@ -1324,12 +1356,12 @@ def _restart_state_items() -> list[dict]:
         _add_doctor_item(
             items,
             "fail",
-            f"Last restart failed and no service is running: {_restart_failure_summary(payload)}",
-            "Read the restart log named above for the cause, then run `vibe start`. If that reports a "
-            "service already running, the failed generation is still occupying this instance: run "
-            "`vibe doctor repair duplicate-service-processes`, which stops a process holding no lock and "
-            "brings the service up, or `vibe stop` if the failed process holds the lock itself, and then "
-            "repeat the start above.",
+            i18n_t(
+                "doctor.item.restartFailed",
+                language,
+                summary=_restart_failure_summary(payload),
+            ),
+            i18n_t("doctor.action.restartFailed", language),
             code="runtime.restart_failed",
         )
         return items
@@ -1339,20 +1371,21 @@ def _restart_state_items() -> list[dict]:
         _add_doctor_item(
             items,
             "warn",
-            f"Stale restart metadata is present: state={state}",
-            "Run `vibe doctor repair stale-restart-state` to clear the stale restart marker and refresh status.",
+            i18n_t("doctor.item.staleRestartState", language, state=state),
+            i18n_t("doctor.action.staleRestartState", language),
             code="runtime.stale_restart_state",
             repair_target="stale-restart-state",
             repair_risk="low",
         )
     else:
         state = payload.get("state") or "unknown"
-        _add_doctor_item(items, "pass", f"Restart metadata is current: state={state}")
+        _add_doctor_item(items, "pass", i18n_t("doctor.item.restartStateCurrent", language, state=state))
     return items
 
 
 def _service_lifecycle_items(*, detect_extra_processes: bool = True) -> list[dict]:
     items: list[dict] = []
+    language = _configured_cli_language()
     pid_path = paths.get_runtime_pid_path()
     recorded_pid: int | None = None
     try:
@@ -1366,43 +1399,63 @@ def _service_lifecycle_items(*, detect_extra_processes: bool = True) -> list[dic
     status_pid = status.get("service_pid")
 
     if owner_pid:
-        _add_doctor_item(items, "pass", f"Service lock owner: pid={owner_pid}", code="runtime.service_lock_owner")
+        _add_doctor_item(
+            items,
+            "pass",
+            i18n_t("doctor.item.serviceLockOwner", language, pid=owner_pid),
+            code="runtime.service_lock_owner",
+        )
     elif lock_holder_pid:
         _add_doctor_item(
             items,
             "warn",
-            f"Service lock is held by pid={lock_holder_pid}, but the owner could not be verified",
-            "Run `vibe status` and inspect service logs before starting another service.",
+            i18n_t("doctor.item.serviceLockUnverified", language, pid=lock_holder_pid),
+            i18n_t("doctor.action.serviceLockUnverified", language),
             code="runtime.unverified_service_lock",
         )
     else:
-        _add_doctor_item(items, "pass", "Service lock is free", code="runtime.service_lock_free")
+        _add_doctor_item(
+            items,
+            "pass",
+            i18n_t("doctor.item.serviceLockFree", language),
+            code="runtime.service_lock_free",
+        )
 
     if owner_pid and recorded_pid != owner_pid:
         _add_doctor_item(
             items,
             "warn",
-            f"Service pid file does not match the lock owner: pidfile={recorded_pid or 'missing'} lock_owner={owner_pid}",
-            "Run `vibe restart` once the current work is idle so Avibe can rewrite runtime ownership files.",
+            i18n_t(
+                "doctor.item.servicePidfileMismatch",
+                language,
+                pidfile=recorded_pid or "missing",
+                owner=owner_pid,
+            ),
+            i18n_t("doctor.action.servicePidfileMismatch", language),
             code="runtime.service_pidfile_mismatch",
         )
     elif recorded_pid:
-        _add_doctor_item(items, "pass", f"Service pid file points to pid={recorded_pid}")
+        _add_doctor_item(items, "pass", i18n_t("doctor.item.servicePidfile", language, pid=recorded_pid))
     else:
-        _add_doctor_item(items, "pass", "Service pid file is absent")
+        _add_doctor_item(items, "pass", i18n_t("doctor.item.servicePidfileAbsent", language))
 
     if owner_pid and status_pid != owner_pid:
         _add_doctor_item(
             items,
             "warn",
-            f"Runtime status service_pid does not match the lock owner: status={status_pid or 'missing'} lock_owner={owner_pid}",
-            "Refresh status; if it remains stale, restart Avibe when safe.",
+            i18n_t(
+                "doctor.item.statusPidMismatch",
+                language,
+                status=status_pid or "missing",
+                owner=owner_pid,
+            ),
+            i18n_t("doctor.action.statusPidMismatch", language),
             code="runtime.status_pid_mismatch",
         )
     elif status_pid:
-        _add_doctor_item(items, "pass", f"Runtime status service_pid: {status_pid}")
+        _add_doctor_item(items, "pass", i18n_t("doctor.item.statusPid", language, pid=status_pid))
     else:
-        _add_doctor_item(items, "pass", "Runtime status service_pid is absent")
+        _add_doctor_item(items, "pass", i18n_t("doctor.item.statusPidAbsent", language))
 
     if detect_extra_processes:
         extra_service_pids = runtime.extra_service_process_pids(owner_pid=owner_pid)
@@ -1415,8 +1468,12 @@ def _service_lifecycle_items(*, detect_extra_processes: bool = True) -> list[dic
             _add_doctor_item(
                 items,
                 "warn",
-                f"Extra Avibe service process detected outside the service lock: pids={','.join(map(str, extra_service_pids))}",
-                "Run `vibe doctor repair duplicate-service-processes` to stop extra service processes.",
+                i18n_t(
+                    "doctor.item.extraServiceProcess",
+                    language,
+                    pids=",".join(map(str, extra_service_pids)),
+                ),
+                i18n_t("doctor.action.duplicateServiceProcesses", language),
                 code="runtime.extra_service_process",
                 repair_target="duplicate-service-processes",
                 repair_risk="medium",
@@ -1425,18 +1482,22 @@ def _service_lifecycle_items(*, detect_extra_processes: bool = True) -> list[dic
             _add_doctor_item(
                 items,
                 "warn",
-                f"Possible extra Avibe service process could not be matched to AVIBE_HOME: pids={','.join(map(str, unverified_service_pids))}",
-                "Inspect the process environment before starting another service.",
+                i18n_t(
+                    "doctor.item.unverifiedServiceProcess",
+                    language,
+                    pids=",".join(map(str, unverified_service_pids)),
+                ),
+                i18n_t("doctor.action.unverifiedServiceProcess", language),
                 code="runtime.unverified_service_process",
             )
         else:
-            _add_doctor_item(items, "pass", "No extra Avibe service process detected")
+            _add_doctor_item(items, "pass", i18n_t("doctor.item.noExtraServiceProcess", language))
     else:
         _add_doctor_item(
             items,
             "pass",
-            "Deep service process scan skipped in fast diagnostics",
-            "Run deep diagnostics to check duplicate service processes.",
+            i18n_t("doctor.item.deepScanSkipped", language),
+            i18n_t("doctor.action.deepScanSkipped", language),
             code="runtime.deep_service_process_scan_skipped",
         )
 
@@ -1460,7 +1521,7 @@ def _show_git_checkpoint_items() -> list[dict]:
     return [
         {
             "status": "warn",
-            "message": "Show Page checkpointing is degraded because Git is unavailable",
+            "message": i18n_t("doctor.item.showGitUnavailable", _configured_cli_language()),
             "code": "runtime.show_git_unavailable",
         }
     ]
@@ -10778,19 +10839,22 @@ def _add_dependency_download_failure(
     retry_action: str | None = None,
     failure_status: str = "fail",
 ) -> None:
+    language = _configured_cli_language()
     error = error or {}
     kind = str(error.get("kind") or "unknown")
     url = str(error.get("url") or "the selected dependency URL")
     attempts = int(error.get("attempts") or 1)
-    attempt_text = f" after {attempts} attempts" if attempts > 1 else ""
-    retry_action = retry_action or f"Run `vibe doctor repair {repair_target}`."
+    retry_action = retry_action or (
+        i18n_t("doctor.action.repairCommand", _configured_cli_language(), target=repair_target)
+        if repair_target
+        else i18n_t("doctor.action.askillManual", _configured_cli_language())
+    )
     if kind == "http" and error.get("http_status") == 404:
         _add_doctor_item(
             items,
             failure_status,
-            f"{label} release asset is missing (HTTP 404): {url}",
-            "Verify the exact URL from another network. If the release asset is absent, upgrade or reinstall Avibe; "
-            "if it works elsewhere, fix the proxy or security gateway.",
+            i18n_t("doctor.item.dependencyHttp404", language, label=label, url=url),
+            i18n_t("doctor.action.dependencyHttp404", language),
             code=f"{code_prefix}_http_404",
         )
     elif kind == "http":
@@ -10798,48 +10862,83 @@ def _add_dependency_download_failure(
         _add_doctor_item(
             items,
             failure_status,
-            f"{label} request returned HTTP {status}{attempt_text}: {url}",
-            f"Check the exact release asset and any proxy response. {retry_action}",
+            i18n_t(
+                "doctor.item.dependencyHttpErrorRetried"
+                if attempts > 1
+                else "doctor.item.dependencyHttpError",
+                language,
+                label=label,
+                status=status,
+                attempts=attempts,
+                url=url,
+            ),
+            i18n_t("doctor.action.dependencyHttpError", language, retry=retry_action),
             code=f"{code_prefix}_http_error",
         )
     elif kind == "dns":
         _add_doctor_item(
             items,
             failure_status,
-            f"{label} host DNS lookup failed{attempt_text}: {error.get('host') or url}",
-            f"Fix DNS access to the dependency host. {retry_action}",
+            i18n_t(
+                "doctor.item.dependencyDnsFailedRetried"
+                if attempts > 1
+                else "doctor.item.dependencyDnsFailed",
+                language,
+                label=label,
+                attempts=attempts,
+                host=error.get("host") or url,
+            ),
+            i18n_t("doctor.action.dependencyDnsFailed", language, retry=retry_action),
             code=f"{code_prefix}_dns_failed",
         )
     elif kind == "tls":
         _add_doctor_item(
             items,
             failure_status,
-            f"{label} TLS verification failed: {url}",
-            "Fix the host CA or HTTPS inspection proxy for the Avibe service, then retry the repair.",
+            i18n_t("doctor.item.dependencyTlsFailed", language, label=label, url=url),
+            i18n_t("doctor.action.dependencyTlsFailed", language),
             code=f"{code_prefix}_tls_failed",
         )
     elif kind in {"timeout", "network"}:
         _add_doctor_item(
             items,
             failure_status,
-            f"{label} network request failed{attempt_text}: {url}",
-            f"Allow HTTPS access to the dependency host. {retry_action}",
+            i18n_t(
+                "doctor.item.dependencyNetworkFailedRetried"
+                if attempts > 1
+                else "doctor.item.dependencyNetworkFailed",
+                language,
+                label=label,
+                attempts=attempts,
+                url=url,
+            ),
+            i18n_t("doctor.action.dependencyNetworkFailed", language, retry=retry_action),
             code=f"{code_prefix}_{kind}_failed",
         )
     elif kind in {"permission", "disk", "io"}:
         _add_doctor_item(
             items,
             failure_status,
-            f"{label} could not be stored: {error.get('message') or kind}",
-            "Fix the runtime cache permissions or available disk space, then retry the repair.",
+            i18n_t(
+                "doctor.item.dependencyStoreFailed",
+                language,
+                label=label,
+                reason=error.get("message") or kind,
+            ),
+            i18n_t("doctor.action.dependencyStoreFailed", language),
             code=f"{code_prefix}_{kind}_failed",
         )
     else:
         _add_doctor_item(
             items,
             failure_status,
-            f"{label} is unreachable: {error.get('message') or url}",
-            "Inspect the Avibe log for the matching download exception, then retry the repair.",
+            i18n_t(
+                "doctor.item.dependencyUnreachable",
+                language,
+                label=label,
+                reason=error.get("message") or url,
+            ),
+            i18n_t("doctor.action.dependencyUnreachable", language),
             code=f"{code_prefix}_unreachable",
         )
 
@@ -10861,6 +10960,7 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
         "tmux": "tmux",
     }
     items: list[dict] = []
+    language = _configured_cli_language()
     try:
         dependencies = list(api.dependencies_status(offline=True).get("deps") or [])
         from core.git_runtime import git_runtime_status
@@ -10885,8 +10985,8 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
         _add_doctor_item(
             items,
             "fail",
-            f"Managed dependency status could not be inspected: {exc}",
-            "Inspect the Avibe log and rerun Doctor.",
+            i18n_t("doctor.item.dependencyStatusFailed", language, reason=exc),
+            i18n_t("doctor.action.dependencyStatusFailed", language),
             code="dependencies.status_failed",
         )
         return items
@@ -10900,19 +11000,23 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
         ready = bool(dependency.get("installed")) and status == "ready"
         version = dependency.get("version")
         if ready:
-            suffix = f" {version}" if version else ""
             if dependency_id == "git-runtime" and dependency.get("source") == "system":
                 _add_doctor_item(
                     items,
                     "pass",
-                    "Git is ready via the system runtime",
+                    i18n_t("doctor.item.gitSystemReady", language),
                     code="dependencies.git-runtime.system_ready",
                 )
             else:
                 _add_doctor_item(
                     items,
                     "pass",
-                    f"{label}{suffix} is ready",
+                    i18n_t(
+                        "doctor.item.dependencyReadyVersioned" if version else "doctor.item.dependencyReady",
+                        language,
+                        label=label,
+                        version=version,
+                    ),
                     code=f"dependencies.{dependency_id}.ready",
                 )
             continue
@@ -10923,8 +11027,8 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
             _add_doctor_item(
                 items,
                 severity,
-                f"{label} is missing or unsupported",
-                "Install a supported Node.js release (^20.19.0 or >=22.12.0).",
+                i18n_t("doctor.item.nodeNotReady", language, label=label),
+                i18n_t("doctor.action.nodeNotReady", language),
                 code="dependencies.node.not_ready",
             )
             continue
@@ -10934,8 +11038,8 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
             _add_doctor_item(
                 items,
                 severity,
-                f"{label} is not published for this platform",
-                "Use a system dependency where supported, or run Avibe on a platform with a published runtime.",
+                i18n_t("doctor.item.dependencyPlatformUnsupported", language, label=label),
+                i18n_t("doctor.action.dependencyPlatformUnsupported", language),
                 code=f"dependencies.{dependency_id}.platform_unsupported",
             )
             continue
@@ -10944,9 +11048,9 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
         if dependency_id == "askill" and not api.askill_auto_install_supported():
             repair_target = None
         retry_action = (
-            f"Run `vibe doctor repair {repair_target}`."
+            i18n_t("doctor.action.repairCommand", language, target=repair_target)
             if repair_target
-            else "Install askill manually from https://askill.sh."
+            else i18n_t("doctor.action.askillManual", language)
         )
         probe = None
         if deep and dependency_id == "tmux":
@@ -10963,8 +11067,13 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
             _add_doctor_item(
                 items,
                 severity,
-                f"{label} archive URL uses an unsupported scheme: {probe.get('url') or 'unknown'}",
-                "Configure the dependency manifest with an HTTPS or file URL.",
+                i18n_t(
+                    "doctor.item.dependencyArchiveUrlUnsupported",
+                    language,
+                    label=label,
+                    url=probe.get("url") or "unknown",
+                ),
+                i18n_t("doctor.action.dependencyArchiveUrlUnsupported", language),
                 code=f"dependencies.{dependency_id}.archive_url_unsupported",
             )
             continue
@@ -10972,8 +11081,8 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
         _add_doctor_item(
             items,
             severity,
-            f"{label} is not ready ({status})",
-            retry_action,
+            i18n_t("doctor.item.dependencyNotReady", language, label=label, status=status),
+            i18n_t("doctor.action.dependencyNotReady", language, retry=retry_action),
             code=f"dependencies.{dependency_id}.not_ready",
             repair_target=repair_target,
             repair_risk="low",
@@ -11001,15 +11110,15 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
             _add_doctor_item(
                 items,
                 "pass",
-                f"{label} download endpoint is reachable: {probe.get('url')}",
+                i18n_t("doctor.item.dependencyReachable", language, label=label, url=probe.get("url")),
                 code=f"dependencies.{dependency_id}.reachable",
             )
         elif not probe.get("checked") and probe.get("reason") == "dependency_probe_unsupported":
             _add_doctor_item(
                 items,
                 "warn",
-                f"{label} server does not support a body-free probe",
-                retry_action,
+                i18n_t("doctor.item.dependencyProbeUnsupported", language, label=label),
+                i18n_t("doctor.action.dependencyProbeUnsupported", language, retry=retry_action),
                 code=f"dependencies.{dependency_id}.probe_unsupported",
             )
         elif probe.get("download_error"):
@@ -11026,8 +11135,13 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
             _add_doctor_item(
                 items,
                 severity,
-                f"{label} archive could not be resolved ({probe.get('reason') or 'unknown'})",
-                "Inspect the dependency manifest and platform mapping before retrying.",
+                i18n_t(
+                    "doctor.item.dependencyProbeUnavailable",
+                    language,
+                    label=label,
+                    reason=probe.get("reason") or "unknown",
+                ),
+                i18n_t("doctor.action.dependencyProbeUnavailable", language),
                 code=f"dependencies.{dependency_id}.probe_unavailable",
             )
     return items
@@ -11042,6 +11156,7 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
     from core.show_runtime import ShowRuntimeManager
 
     items: list[dict] = []
+    doctor_language = _configured_cli_language()
     try:
         manager = ShowRuntimeManager(offline=True if not deep else None)
         status = manager.status()
@@ -11049,8 +11164,8 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
         _add_doctor_item(
             items,
             "fail",
-            f"Show Runtime status could not be inspected: {exc}",
-            "Inspect the Avibe log and reinstall the current Avibe release if package data is missing.",
+            i18n_t("doctor.item.showRuntimeStatusFailed", doctor_language, reason=exc),
+            i18n_t("doctor.action.showRuntimeStatusFailed", doctor_language),
             code="show_runtime.status_failed",
         )
         return items
@@ -11059,22 +11174,21 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
         archive_cache = manager.archive_cache_status()
     except Exception:  # noqa: BLE001
         archive_cache = None
-    doctor_language = _configured_cli_language()
     archive_skipped_reason = str((archive_cache or {}).get("skipped_reason") or "")
     if archive_cache and archive_skipped_reason == "archive_inspection_failed":
         _add_doctor_item(
             items,
             "warn",
-            i18n_t("runtime.doctor.archiveCacheSkipped", doctor_language, reason=archive_skipped_reason),
-            i18n_t("runtime.doctor.archiveCacheSkippedInspectionAction", doctor_language),
+            i18n_t("doctor.item.archiveCacheSkipped", doctor_language, reason=archive_skipped_reason),
+            i18n_t("doctor.action.archiveCacheSkippedInspection", doctor_language),
             code="show_runtime.archive_cache_skipped",
         )
     elif archive_cache and archive_skipped_reason:
         _add_doctor_item(
             items,
             "warn",
-            i18n_t("runtime.doctor.archiveCacheSkipped", doctor_language, reason=archive_skipped_reason),
-            i18n_t("runtime.doctor.archiveCacheSkippedAction", doctor_language),
+            i18n_t("doctor.item.archiveCacheSkipped", doctor_language, reason=archive_skipped_reason),
+            i18n_t("doctor.action.archiveCacheSkipped", doctor_language),
             code="show_runtime.archive_cache_skipped",
         )
     elif archive_cache and int(archive_cache.get("candidate_count") or 0) > 0:
@@ -11082,19 +11196,19 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
             items,
             "warn",
             i18n_t(
-                "runtime.doctor.archiveCacheReclaimable",
+                "doctor.item.archiveCacheReclaimable",
                 doctor_language,
                 count=int(archive_cache.get("candidate_count") or 0),
                 size=_format_byte_size(int(archive_cache.get("candidate_bytes") or 0)),
             ),
-            i18n_t("runtime.doctor.archiveCacheReclaimableAction", doctor_language),
+            i18n_t("doctor.action.archiveCacheReclaimable", doctor_language),
             code="show_runtime.archive_cache_reclaimable",
         )
     elif archive_cache is not None:
         _add_doctor_item(
             items,
             "pass",
-            i18n_t("runtime.doctor.archiveCacheClean", _configured_cli_language()),
+            i18n_t("doctor.item.archiveCacheClean", doctor_language),
             code="show_runtime.archive_cache_clean",
         )
 
@@ -11104,13 +11218,17 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
     explicit_command = status.get("explicit_command")
     if explicit_command:
         if installed:
-            _add_doctor_item(items, "pass", f"Show Runtime explicit command is available: {explicit_command}")
+            _add_doctor_item(
+                items,
+                "pass",
+                i18n_t("doctor.item.explicitCommandAvailable", doctor_language, command=explicit_command),
+            )
         else:
             _add_doctor_item(
                 items,
                 "fail",
-                f"Show Runtime explicit command is missing: {explicit_command}",
-                "Fix or remove VIBE_SHOW_RUNTIME_BIN, then rerun Doctor.",
+                i18n_t("doctor.item.explicitCommandMissing", doctor_language, command=explicit_command),
+                i18n_t("doctor.action.explicitCommandMissing", doctor_language),
                 code="show_runtime.explicit_command_missing",
             )
         return items
@@ -11132,8 +11250,8 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
             _add_doctor_item(
                 items,
                 "fail",
-                "The packaged Show Runtime manifest is missing or invalid",
-                "Upgrade or reinstall Avibe from an official wheel that includes the pinned runtime manifest.",
+                i18n_t("doctor.item.manifestMissing", doctor_language),
+                i18n_t("doctor.action.manifestMissing", doctor_language),
                 code="show_runtime.manifest_missing",
             )
         elif not archive:
@@ -11141,15 +11259,24 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
             _add_doctor_item(
                 items,
                 "fail",
-                f"The Show Runtime manifest has no archive for {status.get('platform') or 'this platform'}",
-                "Install Avibe on a supported platform or upgrade to a release that publishes this platform archive.",
+                i18n_t(
+                    "doctor.item.manifestPlatformUnsupported",
+                    doctor_language,
+                    platform=status.get("platform") or "this platform",
+                ),
+                i18n_t("doctor.action.manifestPlatformUnsupported", doctor_language),
                 code="show_runtime.platform_unsupported",
             )
         else:
             _add_doctor_item(
                 items,
                 "pass",
-                f"Show Runtime manifest pins {archive.get('name')} from {archive_url}",
+                i18n_t(
+                    "doctor.item.manifestReady",
+                    doctor_language,
+                    name=archive.get("name"),
+                    url=archive_url,
+                ),
                 code="show_runtime.manifest_ready",
             )
     elif provider == "archive":
@@ -11158,25 +11285,24 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
             _add_doctor_item(
                 items,
                 "fail",
-                f"Show Runtime selected the legacy unpinned archive URL: {archive_url}",
-                "Reinstall the official Avibe package or remove VIBE_SHOW_RUNTIME_SOURCE/ARCHIVE overrides. "
-                "The upstream source repository does not publish release assets.",
+                i18n_t("doctor.item.legacyArchiveProvider", doctor_language, url=archive_url),
+                i18n_t("doctor.action.legacyArchiveProvider", doctor_language),
                 code="show_runtime.legacy_archive_provider",
             )
         else:
             _add_doctor_item(
                 items,
                 "warn",
-                "Show Runtime uses an explicit unpinned archive provider",
-                "Prefer the manifest-cache provider for official installations.",
+                i18n_t("doctor.item.unpinnedArchiveProvider", doctor_language),
+                i18n_t("doctor.action.unpinnedArchiveProvider", doctor_language),
                 code="show_runtime.unpinned_archive_provider",
             )
     elif provider == "npm":
         _add_doctor_item(
             items,
             "warn",
-            f"Show Runtime uses the {provider} development provider",
-            "Use manifest-cache for official installations; keep this override only for development.",
+            i18n_t("doctor.item.developmentProvider", doctor_language, provider=provider),
+            i18n_t("doctor.action.developmentProvider", doctor_language),
             code="show_runtime.development_provider",
         )
     else:
@@ -11184,8 +11310,8 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
         _add_doctor_item(
             items,
             "fail",
-            f"Show Runtime provider is unsupported: {provider}",
-            i18n_t("runtime.doctor.providerUnsupportedAction", doctor_language),
+            i18n_t("doctor.item.providerUnsupported", doctor_language, provider=provider),
+            i18n_t("doctor.action.providerUnsupported", doctor_language),
             code="show_runtime.provider_unsupported",
         )
 
@@ -11193,25 +11319,33 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
         _add_doctor_item(
             items,
             "pass",
-            f"Show Runtime is installed for {status.get('platform') or 'this platform'}",
+            i18n_t(
+                "doctor.item.showRuntimeInstalled",
+                doctor_language,
+                platform=status.get("platform") or "this platform",
+            ),
             code="show_runtime.installed",
         )
         return items
 
     show_runtime_repairable = provider_repairable and node_available and node_supported and archive_scheme_supported
     show_runtime_retry_action = (
-        "Run `vibe doctor repair show-runtime`."
+        i18n_t("doctor.action.showRuntimeRepair", doctor_language)
         if show_runtime_repairable
-        else "Resolve the provider, platform, Node.js, or archive URL issue above, then rerun Doctor."
+        else i18n_t("doctor.action.showRuntimeRetry", doctor_language)
     )
     _add_doctor_item(
         items,
         "fail",
-        f"Show Runtime is not ready for {status.get('platform') or 'this platform'}",
+        i18n_t(
+            "doctor.item.showRuntimeNotReady",
+            doctor_language,
+            platform=status.get("platform") or "this platform",
+        ),
         (
-            "Run `vibe doctor repair show-runtime`; use `vibe doctor --deep` first when download access is uncertain."
+            i18n_t("doctor.action.showRuntimeRepair", doctor_language)
             if show_runtime_repairable
-            else show_runtime_retry_action
+            else i18n_t("doctor.action.showRuntimeRetry", doctor_language)
         ),
         code="show_runtime.not_ready",
         repair_target="show-runtime" if show_runtime_repairable else None,
@@ -11224,8 +11358,8 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
         _add_doctor_item(
             items,
             "pass",
-            "Show Runtime archive reachability was not checked in fast diagnostics",
-            "Run `vibe doctor --deep` to distinguish HTTP, DNS, TLS, and timeout failures without downloading the archive.",
+            i18n_t("doctor.item.archiveProbeSkipped", doctor_language),
+            i18n_t("doctor.action.archiveProbeSkipped", doctor_language),
             code="show_runtime.archive_probe_skipped",
         )
         return items
@@ -11237,15 +11371,15 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
         _add_doctor_item(
             items,
             "pass",
-            f"Show Runtime archive is reachable: {target}",
+            i18n_t("doctor.item.archiveReachable", doctor_language, target=target),
             code="show_runtime.archive_reachable",
         )
     elif probe_reason == "runtime_archive_probe_unsupported":
         _add_doctor_item(
             items,
             "warn",
-            "Show Runtime archive server does not support a body-free reachability probe",
-            show_runtime_retry_action,
+            i18n_t("doctor.item.archiveProbeUnsupported", doctor_language),
+            i18n_t("doctor.action.archiveProbeUnsupported", doctor_language, retry=show_runtime_retry_action),
             code="show_runtime.archive_probe_unsupported",
         )
     elif probe.get("download_error"):
@@ -11262,32 +11396,48 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
         _add_doctor_item(
             items,
             "fail",
-            f"Show Runtime archive URL scheme is unsupported: {probe.get('url') or (archive or {}).get('url')}",
-            "Use an HTTPS or file URL for the archive, then rerun deep Doctor.",
+            i18n_t(
+                "doctor.item.archiveUrlUnsupported",
+                doctor_language,
+                url=probe.get("url") or (archive or {}).get("url"),
+            ),
+            i18n_t("doctor.action.archiveUrlUnsupported", doctor_language),
             code="show_runtime.archive_url_unsupported",
         )
     elif probe_reason.startswith("runtime_manifest_"):
         _add_doctor_item(
             items,
             "fail",
-            f"Show Runtime manifest could not be loaded: {probe_reason}",
-            "Inspect the configured or packaged Runtime manifest, then reinstall the current Avibe release if needed.",
+            i18n_t("doctor.item.manifestUnavailable", doctor_language, reason=probe_reason),
+            i18n_t("doctor.action.manifestUnavailable", doctor_language),
             code="show_runtime.manifest_unavailable",
         )
     elif probe_reason == "runtime_platform_unsupported":
         _add_doctor_item(
             items,
             "fail",
-            f"Show Runtime manifest has no archive for {status.get('platform') or 'this platform'}",
-            "Install an Avibe release that publishes a Runtime archive for this platform.",
+            i18n_t(
+                "doctor.item.manifestPlatformUnsupported",
+                doctor_language,
+                platform=status.get("platform") or "this platform",
+            ),
+            i18n_t("doctor.action.showRuntimePlatformUnsupported", doctor_language),
             code="show_runtime.platform_unsupported",
         )
     else:
         _add_doctor_item(
             items,
             "fail",
-            f"Show Runtime archive check failed: {probe_reason or 'unknown error'}",
-            f"Inspect the selected archive path or URL. {show_runtime_retry_action}",
+            i18n_t(
+                "doctor.item.archiveCheckFailed",
+                doctor_language,
+                reason=probe_reason or "unknown error",
+            ),
+            i18n_t(
+                "doctor.action.archiveCheckFailed",
+                doctor_language,
+                retry=show_runtime_retry_action,
+            ),
             code="show_runtime.archive_check_failed",
         )
     return items
@@ -11306,33 +11456,32 @@ def _doctor(*, deep: bool = False):
     """
     groups = []
     summary = {"pass": 0, "warn": 0, "fail": 0}
+    language = _configured_cli_language()
 
     home_items = _home_migration_items()
     for item in home_items:
         status = item.get("status")
         if status in summary:
             summary[status] += 1
-    groups.append({"name": "Runtime Home", "items": home_items})
+    groups.append({"name": i18n_t("doctor.group.runtimeHome", language), "items": home_items})
 
     # Configuration Group
     config_items = []
     config_path = paths.get_config_path()
 
     if config_path.exists():
-        config_items.append(
-            {
-                "status": "pass",
-                "message": f"Configuration file found: {config_path}",
-            }
+        _add_doctor_item(
+            config_items,
+            "pass",
+            i18n_t("doctor.item.configFound", language, path=config_path),
         )
         summary["pass"] += 1
     else:
-        config_items.append(
-            {
-                "status": "fail",
-                "message": "Configuration file not found",
-                "action": "Run 'vibe' to create initial configuration",
-            }
+        _add_doctor_item(
+            config_items,
+            "fail",
+            i18n_t("doctor.item.configMissing", language),
+            i18n_t("doctor.action.configMissing", language),
         )
         summary["fail"] += 1
 
@@ -11342,40 +11491,42 @@ def _doctor(*, deep: bool = False):
         if config.load_warnings:
             recovery_notice = api.config_recovery_notice(config)
             if recovery_notice:
-                recovery_language = getattr(config, "language", "en") or "en"
+                recovery_language = getattr(config, "language", language) or language
                 _add_doctor_item(
                     config_items,
                     "warn",
-                    recovery_notice,
-                    i18n_t("error.configRecovery.action", recovery_language),
+                    i18n_t("doctor.item.configRecovery", recovery_language),
+                    i18n_t("doctor.action.configRecovery", recovery_language),
                     code="config.recovery",
                 )
                 summary["warn"] += 1
         else:
-            config_items.append(
-                {
-                    "status": "pass",
-                    "message": "Configuration loaded successfully",
-                }
+            _add_doctor_item(
+                config_items,
+                "pass",
+                i18n_t("doctor.item.configLoaded", language),
             )
             summary["pass"] += 1
     except Exception as exc:
-        config_items.append(
-            {
-                "status": "fail",
-                "message": f"Failed to load configuration: {exc}",
-                "action": "Check config.json syntax or delete and reconfigure",
-            }
+        _add_doctor_item(
+            config_items,
+            "fail",
+            i18n_t("doctor.item.configLoadFailed", language, reason=exc),
+            i18n_t("doctor.action.configLoadFailed", language),
         )
         summary["fail"] += 1
 
-    groups.append({"name": "Configuration", "items": config_items})
+    groups.append({"name": i18n_t("doctor.group.configuration", language), "items": config_items})
 
     remote_access_items = []
     if config is None:
-        _add_doctor_item(remote_access_items, "warn", "Cannot check Remote Access: configuration not loaded")
+        _add_doctor_item(
+            remote_access_items,
+            "warn",
+            i18n_t("doctor.item.remoteConfigMissing", language),
+        )
     elif not config.remote_access.vibe_cloud.enabled:
-        _add_doctor_item(remote_access_items, "pass", "Remote Access is disabled")
+        _add_doctor_item(remote_access_items, "pass", i18n_t("doctor.item.remoteDisabled", language))
     else:
         from vibe import remote_access
 
@@ -11384,19 +11535,19 @@ def _doctor(*, deep: bool = False):
             _add_doctor_item(
                 remote_access_items,
                 "fail",
-                "Remote Access connector is not running",
-                "Start Remote Access from Settings or run `vibe remote start`.",
+                i18n_t("doctor.item.remoteNotRunning", language),
+                i18n_t("doctor.action.remoteNotRunning", language),
             )
         else:
-            _add_doctor_item(remote_access_items, "pass", "Remote Access connector is running")
+            _add_doctor_item(remote_access_items, "pass", i18n_t("doctor.item.remoteRunning", language))
 
         quality = remote_status.get("tunnel_quality")
         if not isinstance(quality, dict):
             _add_doctor_item(
                 remote_access_items,
                 "warn",
-                "Tunnel quality is not available yet",
-                "Wait up to 45 seconds for the first metrics samples.",
+                i18n_t("doctor.item.tunnelQualityUnavailable", language),
+                i18n_t("doctor.action.tunnelQualityUnavailable", language),
             )
         else:
             state = str(quality.get("state") or "unknown")
@@ -11410,8 +11561,8 @@ def _doctor(*, deep: bool = False):
                 _add_doctor_item(
                     remote_access_items,
                     "warn",
-                    "Tunnel quality sample is stale",
-                    "Wait up to 45 seconds for fresh metrics or inspect the Remote Access logs.",
+                    i18n_t("doctor.item.tunnelQualityStale", language),
+                    i18n_t("doctor.action.tunnelQualityStale", language),
                 )
             else:
                 rtt = quality.get("rtt_ms") if isinstance(quality.get("rtt_ms"), dict) else None
@@ -11433,120 +11584,130 @@ def _doctor(*, deep: bool = False):
                         or int(request_path.get("success_count") or 0) == 0
                     )
                 )
-                if request_path_unavailable:
-                    quality_message = (
-                        f"Tunnel quality: {state}/{grade}; remote requests unavailable, "
-                        f"{int(request_path.get('success_count') or 0)}/"
-                        f"{int(request_path.get('sample_count') or 0)} succeeded; "
-                        f"connector {quality.get('protocol') or 'unknown'}"
-                    )
-                elif request_latency is not None:
-                    slow_rate = request_path.get("slow_request_rate") or {}
-                    quality_message = (
-                        f"Tunnel quality: {state}/{grade}; remote requests P95 "
-                        f"{request_latency.get('p95')} ms, P99 {request_latency.get('p99')} ms, "
-                        f"{round(float(slow_rate.get('over_1000_ms') or 0) * 100)}% above 1 second; "
-                        f"connector {quality.get('protocol') or 'unknown'}"
-                    )
-                elif rtt is None:
-                    quality_message = (
-                        f"Tunnel quality: {state}; edge RTT unavailable for "
-                        f"{quality.get('protocol') or 'unknown'} transport"
-                    )
-                else:
-                    quality_message = (
-                        f"Tunnel quality: {state}/{grade}; edge RTT median {rtt.get('median')} ms, "
-                        f"maximum {rtt.get('max')} ms"
-                    )
                 quality_status = "pass" if state == "healthy" and grade in {"good", "fair", "unknown"} else "warn"
                 if request_path_unavailable or (
                     state == "degraded" and int(quality.get("ha_connections") or 0) == 0
                 ):
                     quality_status = "fail"
-                _add_doctor_item(
-                    remote_access_items,
-                    quality_status,
-                    quality_message,
-                    "Avibe will evaluate a second Connector automatically when degradation persists."
-                    if quality_status == "warn"
-                    else None,
-                )
+                if request_path_unavailable:
+                    _add_doctor_item(
+                        remote_access_items,
+                        quality_status,
+                        i18n_t(
+                            "doctor.item.tunnelQualityRequestsUnavailable",
+                            language,
+                            state=state,
+                            grade=grade,
+                            succeeded=int(request_path.get("success_count") or 0),
+                            samples=int(request_path.get("sample_count") or 0),
+                            protocol=quality.get("protocol") or "unknown",
+                        ),
+                        i18n_t("doctor.action.tunnelQualityWarn", language)
+                        if quality_status == "warn"
+                        else None,
+                    )
+                elif request_latency is not None:
+                    slow_rate = request_path.get("slow_request_rate") or {}
+                    _add_doctor_item(
+                        remote_access_items,
+                        quality_status,
+                        i18n_t(
+                            "doctor.item.tunnelQualityLatency",
+                            language,
+                            state=state,
+                            grade=grade,
+                            p95=request_latency.get("p95"),
+                            p99=request_latency.get("p99"),
+                            slow_rate=round(float(slow_rate.get("over_1000_ms") or 0) * 100),
+                            protocol=quality.get("protocol") or "unknown",
+                        ),
+                        i18n_t("doctor.action.tunnelQualityWarn", language)
+                        if quality_status == "warn"
+                        else None,
+                    )
+                elif rtt is None:
+                    _add_doctor_item(
+                        remote_access_items,
+                        quality_status,
+                        i18n_t(
+                            "doctor.item.tunnelQualityRttUnavailable",
+                            language,
+                            state=state,
+                            protocol=quality.get("protocol") or "unknown",
+                        ),
+                        i18n_t("doctor.action.tunnelQualityWarn", language)
+                        if quality_status == "warn"
+                        else None,
+                    )
+                else:
+                    _add_doctor_item(
+                        remote_access_items,
+                        quality_status,
+                        i18n_t(
+                            "doctor.item.tunnelQualityRtt",
+                            language,
+                            state=state,
+                            grade=grade,
+                            median=rtt.get("median"),
+                            maximum=rtt.get("max"),
+                        ),
+                        i18n_t("doctor.action.tunnelQualityWarn", language)
+                        if quality_status == "warn"
+                        else None,
+                    )
 
     for item in remote_access_items:
         item_status = item.get("status")
         if item_status in summary:
             summary[item_status] += 1
-    groups.append({"name": "Remote Access", "items": remote_access_items})
+    groups.append({"name": i18n_t("doctor.group.remoteAccess", language), "items": remote_access_items})
 
     # Slack Group
     slack_items = []
     if config:
         try:
             config.slack.validate()
-            slack_items.append(
-                {
-                    "status": "pass",
-                    "message": "Slack token format is valid",
-                }
-            )
+            _add_doctor_item(slack_items, "pass", i18n_t("doctor.item.slackTokenValid", language))
             summary["pass"] += 1
 
             # Check if tokens are actually set
             if config.slack.bot_token:
-                slack_items.append(
-                    {
-                        "status": "pass",
-                        "message": "Bot token is configured",
-                    }
-                )
+                _add_doctor_item(slack_items, "pass", i18n_t("doctor.item.slackBotConfigured", language))
                 summary["pass"] += 1
             else:
-                slack_items.append(
-                    {
-                        "status": "warn",
-                        "message": "Bot token is not configured",
-                        "action": "Add your Slack bot token in the setup wizard",
-                    }
+                _add_doctor_item(
+                    slack_items,
+                    "warn",
+                    i18n_t("doctor.item.slackBotMissing", language),
+                    i18n_t("doctor.action.slackBotMissing", language),
                 )
                 summary["warn"] += 1
 
             if config.slack.app_token:
-                slack_items.append(
-                    {
-                        "status": "pass",
-                        "message": "App token is configured (Socket Mode)",
-                    }
-                )
+                _add_doctor_item(slack_items, "pass", i18n_t("doctor.item.slackAppConfigured", language))
                 summary["pass"] += 1
             else:
-                slack_items.append(
-                    {
-                        "status": "warn",
-                        "message": "App token is not configured",
-                        "action": "Add your Slack app token for Socket Mode",
-                    }
+                _add_doctor_item(
+                    slack_items,
+                    "warn",
+                    i18n_t("doctor.item.slackAppMissing", language),
+                    i18n_t("doctor.action.slackAppMissing", language),
                 )
                 summary["warn"] += 1
 
         except Exception as exc:
-            slack_items.append(
-                {
-                    "status": "fail",
-                    "message": f"Slack token validation failed: {exc}",
-                    "action": "Check your Slack tokens in the setup wizard",
-                }
+            _add_doctor_item(
+                slack_items,
+                "fail",
+                i18n_t("doctor.item.slackValidationFailed", language, reason=exc),
+                i18n_t("doctor.action.slackValidationFailed", language),
             )
             summary["fail"] += 1
     else:
-        slack_items.append(
-            {
-                "status": "fail",
-                "message": "Cannot check Slack: configuration not loaded",
-            }
-        )
+        _add_doctor_item(slack_items, "fail", i18n_t("doctor.item.slackConfigMissing", language))
         summary["fail"] += 1
 
-    groups.append({"name": "Slack", "items": slack_items})
+    groups.append({"name": i18n_t("doctor.group.slack", language), "items": slack_items})
 
     # Agent Backends Group
     agent_items = []
@@ -11556,29 +11717,22 @@ def _doctor(*, deep: bool = False):
             cli_path = config.agents.opencode.cli_path
             found_path = api.detect_cli(cli_path).get("path") if cli_path else None
             if found_path:
-                agent_items.append(
-                    {
-                        "status": "pass",
-                        "message": f"OpenCode CLI found: {found_path}",
-                    }
+                _add_doctor_item(
+                    agent_items,
+                    "pass",
+                    i18n_t("doctor.item.agentCliFound", language, agent="OpenCode", path=found_path),
                 )
                 summary["pass"] += 1
             else:
-                agent_items.append(
-                    {
-                        "status": "warn",
-                        "message": f"OpenCode CLI not found: {cli_path}",
-                        "action": "Install OpenCode or update CLI path",
-                    }
+                _add_doctor_item(
+                    agent_items,
+                    "warn",
+                    i18n_t("doctor.item.agentCliMissing", language, agent="OpenCode", path=cli_path),
+                    i18n_t("doctor.action.agentCliMissing", language, agent="OpenCode"),
                 )
                 summary["warn"] += 1
         else:
-            agent_items.append(
-                {
-                    "status": "pass",
-                    "message": "OpenCode: disabled",
-                }
-            )
+            _add_doctor_item(agent_items, "pass", i18n_t("doctor.item.agentDisabled", language, agent="OpenCode"))
             summary["pass"] += 1
 
         # Claude
@@ -11587,29 +11741,22 @@ def _doctor(*, deep: bool = False):
             found_path = api.detect_cli(cli_path).get("path") if cli_path else None
 
             if found_path:
-                agent_items.append(
-                    {
-                        "status": "pass",
-                        "message": f"Claude CLI found: {found_path}",
-                    }
+                _add_doctor_item(
+                    agent_items,
+                    "pass",
+                    i18n_t("doctor.item.agentCliFound", language, agent="Claude", path=found_path),
                 )
                 summary["pass"] += 1
             else:
-                agent_items.append(
-                    {
-                        "status": "warn",
-                        "message": f"Claude CLI not found: {cli_path}",
-                        "action": "Install Claude Code or update CLI path",
-                    }
+                _add_doctor_item(
+                    agent_items,
+                    "warn",
+                    i18n_t("doctor.item.agentCliMissing", language, agent="Claude", path=cli_path),
+                    i18n_t("doctor.action.agentCliMissing", language, agent="Claude"),
                 )
                 summary["warn"] += 1
         else:
-            agent_items.append(
-                {
-                    "status": "pass",
-                    "message": "Claude: disabled",
-                }
-            )
+            _add_doctor_item(agent_items, "pass", i18n_t("doctor.item.agentDisabled", language, agent="Claude"))
             summary["pass"] += 1
 
         # Codex
@@ -11617,29 +11764,22 @@ def _doctor(*, deep: bool = False):
             cli_path = config.agents.codex.cli_path
             found_path = api.detect_cli(cli_path).get("path") if cli_path else None
             if found_path:
-                agent_items.append(
-                    {
-                        "status": "pass",
-                        "message": f"Codex CLI found: {found_path}",
-                    }
+                _add_doctor_item(
+                    agent_items,
+                    "pass",
+                    i18n_t("doctor.item.agentCliFound", language, agent="Codex", path=found_path),
                 )
                 summary["pass"] += 1
             else:
-                agent_items.append(
-                    {
-                        "status": "warn",
-                        "message": f"Codex CLI not found: {cli_path}",
-                        "action": "Install Codex or update CLI path",
-                    }
+                _add_doctor_item(
+                    agent_items,
+                    "warn",
+                    i18n_t("doctor.item.agentCliMissing", language, agent="Codex", path=cli_path),
+                    i18n_t("doctor.action.agentCliMissing", language, agent="Codex"),
                 )
                 summary["warn"] += 1
         else:
-            agent_items.append(
-                {
-                    "status": "pass",
-                    "message": "Codex: disabled",
-                }
-            )
+            _add_doctor_item(agent_items, "pass", i18n_t("doctor.item.agentDisabled", language, agent="Codex"))
             summary["pass"] += 1
 
         # Default Agent check
@@ -11654,71 +11794,52 @@ def _doctor(*, deep: bool = False):
         finally:
             if store is not None:
                 store.close()
-        agent_items.append(
-            {
-                "status": "pass",
-                "message": f"Default Agent: {default_agent_name or 'not configured'}",
-            }
+        _add_doctor_item(
+            agent_items,
+            "pass",
+            i18n_t(
+                "doctor.item.defaultAgent",
+                language,
+                agent=default_agent_name or i18n_t("doctor.value.notConfigured", language),
+            ),
         )
         summary["pass"] += 1
     else:
-        agent_items.append(
-            {
-                "status": "fail",
-                "message": "Cannot check agents: configuration not loaded",
-            }
-        )
+        _add_doctor_item(agent_items, "fail", i18n_t("doctor.item.agentConfigMissing", language))
         summary["fail"] += 1
 
-    groups.append({"name": "Agent Backends", "items": agent_items})
+    groups.append({"name": i18n_t("doctor.group.agentBackends", language), "items": agent_items})
 
     # Runtime Group
     runtime_items = []
     if config:
         cwd = config.runtime.default_cwd
         if cwd and os.path.isdir(cwd):
-            runtime_items.append(
-                {
-                    "status": "pass",
-                    "message": f"Working directory: {cwd}",
-                }
-            )
+            _add_doctor_item(runtime_items, "pass", i18n_t("doctor.item.workingDirectory", language, path=cwd))
             summary["pass"] += 1
         else:
-            runtime_items.append(
-                {
-                    "status": "warn",
-                    "message": f"Working directory does not exist: {cwd}",
-                    "action": "Update default_cwd in settings",
-                }
+            _add_doctor_item(
+                runtime_items,
+                "warn",
+                i18n_t("doctor.item.workingDirectoryMissing", language, path=cwd),
+                i18n_t("doctor.action.workingDirectoryMissing", language),
             )
             summary["warn"] += 1
 
-        runtime_items.append(
-            {
-                "status": "pass",
-                "message": f"Log level: {config.runtime.log_level}",
-            }
+        _add_doctor_item(
+            runtime_items,
+            "pass",
+            i18n_t("doctor.item.logLevel", language, level=config.runtime.log_level),
         )
         summary["pass"] += 1
 
     # Check log file
     log_path = paths.get_logs_dir() / "vibe_remote.log"
     if log_path.exists():
-        runtime_items.append(
-            {
-                "status": "pass",
-                "message": f"Log file: {log_path}",
-            }
-        )
+        _add_doctor_item(runtime_items, "pass", i18n_t("doctor.item.logFile", language, path=log_path))
         summary["pass"] += 1
     else:
-        runtime_items.append(
-            {
-                "status": "pass",
-                "message": "Log file will be created on first run",
-            }
-        )
+        _add_doctor_item(runtime_items, "pass", i18n_t("doctor.item.logFilePending", language))
         summary["pass"] += 1
 
     for item in [
@@ -11733,7 +11854,7 @@ def _doctor(*, deep: bool = False):
         if status in summary:
             summary[status] += 1
 
-    groups.append({"name": "Runtime", "items": runtime_items})
+    groups.append({"name": i18n_t("doctor.group.runtime", language), "items": runtime_items})
 
     dependency_items = [
         *_managed_dependencies_doctor_items(deep=deep),
@@ -11743,14 +11864,14 @@ def _doctor(*, deep: bool = False):
         status = item.get("status")
         if status in summary:
             summary[status] += 1
-    groups.append({"name": "Dependencies", "items": dependency_items})
+    groups.append({"name": i18n_t("doctor.group.dependencies", language), "items": dependency_items})
 
     local_cli_items = _local_cli_installation_items()
     for item in local_cli_items:
         status = item.get("status")
         if status in summary:
             summary[status] += 1
-    groups.append({"name": "Local CLI Installation", "items": local_cli_items})
+    groups.append({"name": i18n_t("doctor.group.localCliInstallation", language), "items": local_cli_items})
 
     # Calculate overall status
     ok = summary["fail"] == 0
@@ -11944,6 +12065,7 @@ def _current_sqlite_revision() -> str | None:
 
 def _local_cli_installation_items() -> list[dict]:
     items: list[dict] = []
+    language = _configured_cli_language()
 
     vibe_paths = _path_entries_for_executable("vibe")
     preferred_vibe = (Path.home() / ".local" / "bin" / "vibe").expanduser()
@@ -11952,8 +12074,8 @@ def _local_cli_installation_items() -> list[dict]:
         _add_doctor_item(
             items,
             "warn",
-            "No vibe executable found on PATH",
-            "Install Avibe with uv tool or add the intended vibe executable to PATH.",
+            i18n_t("doctor.item.cliMissing", language),
+            i18n_t("doctor.action.cliMissing", language),
         )
     else:
         first_vibe = vibe_paths[0]
@@ -11966,19 +12088,24 @@ def _local_cli_installation_items() -> list[dict]:
             _add_doctor_item(
                 items,
                 "warn",
-                f"PATH resolves vibe to {first_vibe} before {preferred_resolved}",
-                "Put ~/.local/bin before system Python bin directories when using the uv tool installation.",
+                i18n_t(
+                    "doctor.item.cliPathPrecedence",
+                    language,
+                    active=first_vibe,
+                    preferred=preferred_resolved,
+                ),
+                i18n_t("doctor.action.cliPathPrecedence", language),
             )
         else:
-            _add_doctor_item(items, "pass", f"PATH resolves vibe to {first_vibe}")
+            _add_doctor_item(items, "pass", i18n_t("doctor.item.cliPath", language, path=first_vibe))
 
     site_packages_dirs = _uv_tool_site_packages_for_vibe(active_vibe_path) if active_vibe_path is not None else []
     if not site_packages_dirs:
         _add_doctor_item(
             items,
             "warn",
-            "Active vibe executable is not the uv tool installation",
-            "uv tool package-integrity checks are skipped for this executable.",
+            i18n_t("doctor.item.cliNotUvTool", language),
+            i18n_t("doctor.action.cliNotUvTool", language),
         )
         return items
 
@@ -11988,11 +12115,15 @@ def _local_cli_installation_items() -> list[dict]:
             _add_doctor_item(
                 items,
                 "fail",
-                f"uv tool installation is editable: {site_packages}",
-                "Reinstall Avibe from a normal wheel. Do not use 'uv tool install --editable .' for the live local CLI.",
+                i18n_t("doctor.item.cliEditable", language, path=site_packages),
+                i18n_t("doctor.action.cliEditable", language),
             )
         else:
-            _add_doctor_item(items, "pass", f"uv tool installation is not editable: {site_packages}")
+            _add_doctor_item(
+                items,
+                "pass",
+                i18n_t("doctor.item.cliNotEditable", language, path=site_packages),
+            )
 
         alembic_dir = site_packages / "storage" / "alembic"
         versions_dir = alembic_dir / "versions"
@@ -12000,34 +12131,42 @@ def _local_cli_installation_items() -> list[dict]:
             _add_doctor_item(
                 items,
                 "fail",
-                f"Packaged Alembic scripts are missing under {alembic_dir}",
-                "Reinstall from a wheel that includes storage/alembic. Editable uv tool installs can miss this package data.",
+                i18n_t("doctor.item.alembicMissing", language, path=alembic_dir),
+                i18n_t("doctor.action.alembicMissing", language),
             )
             continue
 
         revisions = _available_alembic_revisions(versions_dir)
         recognized_revisions.update(revisions)
         if revisions:
-            _add_doctor_item(items, "pass", f"Packaged Alembic scripts found: {versions_dir}")
+            _add_doctor_item(
+                items,
+                "pass",
+                i18n_t("doctor.item.alembicFound", language, path=versions_dir),
+            )
         else:
             _add_doctor_item(
                 items,
                 "fail",
-                f"No Alembic revision files found under {versions_dir}",
-                "Reinstall from a wheel that includes storage/alembic/versions.",
+                i18n_t("doctor.item.alembicRevisionsMissing", language, path=versions_dir),
+                i18n_t("doctor.action.alembicRevisionsMissing", language),
             )
 
     sqlite_revision = _current_sqlite_revision()
     if sqlite_revision is None:
-        _add_doctor_item(items, "pass", "SQLite schema revision is not initialized yet")
+        _add_doctor_item(items, "pass", i18n_t("doctor.item.sqliteRevisionAbsent", language))
     elif sqlite_revision in recognized_revisions:
-        _add_doctor_item(items, "pass", f"SQLite schema revision is recognized by this CLI: {sqlite_revision}")
+        _add_doctor_item(
+            items,
+            "pass",
+            i18n_t("doctor.item.sqliteRevisionKnown", language, revision=sqlite_revision),
+        )
     else:
         _add_doctor_item(
             items,
             "fail",
-            f"SQLite schema revision is newer than or unknown to this CLI: {sqlite_revision}",
-            "Install an Avibe wheel built from code that contains this migration revision.",
+            i18n_t("doctor.item.sqliteRevisionUnknown", language, revision=sqlite_revision),
+            i18n_t("doctor.action.sqliteRevisionUnknown", language),
         )
 
     return items
@@ -12082,7 +12221,13 @@ def _write_refreshed_runtime_status() -> None:
     runtime.write_status(resolved.state, resolved.detail, resolved.service_pid, status.get("ui_pid"))
 
 
-def _start_service_after_repair(target: str, success_message: str, failure_message: str, *, stopped_pids: list[int]) -> dict:
+def _start_service_after_repair(
+    target: str,
+    success_key: str,
+    failure_key: str,
+    *,
+    stopped_pids: list[int],
+) -> dict:
     from core.memory.ui_access import generate_ui_read_secret
 
     # This repair stopped the old service and starts a replacement, so it is the
@@ -12093,6 +12238,7 @@ def _start_service_after_repair(target: str, success_message: str, failure_messa
     # old one. Mint a secret for the process being started and realign the UI.
     memory_ui_secret = generate_ui_read_secret()
     live_ui_pid = _live_ui_server_pid()
+    language = _configured_cli_language()
     try:
         new_pid = runtime.start_service(memory_ui_secret=memory_ui_secret)
     except Exception as exc:
@@ -12100,7 +12246,7 @@ def _start_service_after_repair(target: str, success_message: str, failure_messa
         return _doctor_repair_result(
             target,
             "failed",
-            f"{failure_message}: {exc}",
+            i18n_t(failure_key, language, reason=exc),
             stopped_pids=stopped_pids,
         )
     ui_pid = runtime.read_status().get("ui_pid")
@@ -12126,7 +12272,7 @@ def _start_service_after_repair(target: str, success_message: str, failure_messa
     return _doctor_repair_result(
         target,
         "repaired",
-        success_message,
+        i18n_t(success_key, language),
         stopped_pids=stopped_pids,
         service_pid=new_pid,
     )
@@ -12139,8 +12285,13 @@ def _runtime_home_exists_for_repair() -> bool:
 
 def _repair_home_migration(*, dry_run: bool = False) -> dict:
     target = "home-migration"
+    language = _configured_cli_language()
     if os.environ.get(paths.AVIBE_HOME_ENV):
-        return _doctor_repair_result(target, "skipped", "AVIBE_HOME is explicit; default home migration does not apply.")
+        return _doctor_repair_result(
+            target,
+            "skipped",
+            i18n_t("doctor.repair.homeExplicit", language),
+        )
 
     avibe_home = Path.home() / paths.AVIBE_HOME_DIRNAME
     legacy_home = Path.home() / paths.LEGACY_HOME_DIRNAME
@@ -12148,31 +12299,31 @@ def _repair_home_migration(*, dry_run: bool = False) -> dict:
     legacy_present = legacy_home.exists() or legacy_home.is_symlink()
 
     if not avibe_present and not legacy_present:
-        return _doctor_repair_result(target, "skipped", "No runtime home exists yet; nothing needs migration.")
+        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.homeNoRuntime", language))
 
     if avibe_present and legacy_present and not legacy_home.is_symlink():
         return _doctor_repair_result(
             target,
             "failed",
-            "Both ~/.avibe and ~/.vibe_remote are real directories; manual merge is required.",
+            i18n_t("doctor.repair.homeConflict", language),
         )
 
     if not avibe_present and legacy_home.is_symlink():
         return _doctor_repair_result(
             target,
             "failed",
-            "Legacy home is a symlink but ~/.avibe is missing; inspect the symlink target manually.",
+            i18n_t("doctor.repair.homeSymlinkMissingCanonical", language),
         )
 
     if avibe_present and legacy_home.is_symlink() and _path_points_to(legacy_home, avibe_home):
-        return _doctor_repair_result(target, "skipped", "Runtime home migration is already healthy.")
+        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.homeHealthy", language))
 
     if dry_run:
         if not avibe_present and legacy_present and not legacy_home.is_symlink():
-            return _doctor_repair_result(target, "planned", "Would move ~/.vibe_remote to ~/.avibe and create a back-symlink.")
+            return _doctor_repair_result(target, "planned", i18n_t("doctor.repair.homeDryMove", language))
         if avibe_present:
-            return _doctor_repair_result(target, "planned", "Would recreate the ~/.vibe_remote compatibility symlink.")
-        return _doctor_repair_result(target, "skipped", "No runtime home migration is needed.")
+            return _doctor_repair_result(target, "planned", i18n_t("doctor.repair.homeDryLink", language))
+        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.homeNoNeed", language))
 
     if avibe_present:
         if legacy_home.is_symlink() or not legacy_present:
@@ -12180,54 +12331,68 @@ def _repair_home_migration(*, dry_run: bool = False) -> dict:
             try:
                 legacy_home.symlink_to(avibe_home, target_is_directory=True)
             except OSError as exc:
-                return _doctor_repair_result(target, "failed", f"Failed to create compatibility symlink: {exc}")
-            return _doctor_repair_result(target, "repaired", "Created ~/.vibe_remote compatibility symlink.")
-        return _doctor_repair_result(target, "skipped", "No runtime home migration is needed.")
+                return _doctor_repair_result(
+                    target,
+                    "failed",
+                    i18n_t("doctor.repair.homeLinkFailed", language, reason=exc),
+                )
+            return _doctor_repair_result(target, "repaired", i18n_t("doctor.repair.homeLinkCreated", language))
+        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.homeNoNeed", language))
 
     migrated_home = paths.migrate_default_home()
     if not _path_points_to(migrated_home, avibe_home):
-        return _doctor_repair_result(target, "failed", f"Default home remains at {migrated_home}; migration did not complete.")
+        return _doctor_repair_result(
+            target,
+            "failed",
+            i18n_t("doctor.repair.homeMigrationIncomplete", language, path=migrated_home),
+        )
     if not _path_points_to(legacy_home, avibe_home):
         return _doctor_repair_result(
             target,
             "failed",
-            "Migrated ~/.vibe_remote to ~/.avibe, but failed to create the compatibility symlink.",
+            i18n_t("doctor.repair.homeMigrationLinkFailed", language),
         )
     paths.ensure_data_dirs()
-    return _doctor_repair_result(target, "repaired", "Migrated ~/.vibe_remote to ~/.avibe.")
+    return _doctor_repair_result(target, "repaired", i18n_t("doctor.repair.homeMigrated", language))
 
 
 def _repair_stale_restart_state(*, dry_run: bool = False) -> dict:
     target = "stale-restart-state"
+    language = _configured_cli_language()
     restart_path = runtime.get_restart_status_path()
     payload = runtime.read_json(restart_path) or {}
     if not payload:
-        return _doctor_repair_result(target, "skipped", "No restart metadata is present.")
+        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.restartAbsent", language))
     if not _restart_status_is_stale(payload, restart_path):
-        return _doctor_repair_result(target, "skipped", "Restart metadata is still current.")
+        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.restartCurrent", language))
     if dry_run:
-        return _doctor_repair_result(target, "planned", "Would remove stale restart metadata and refresh runtime status.")
+        return _doctor_repair_result(target, "planned", i18n_t("doctor.repair.restartDryRun", language))
     restart_path.unlink(missing_ok=True)
     _write_refreshed_runtime_status()
-    return _doctor_repair_result(target, "repaired", "Removed stale restart metadata and refreshed runtime status.")
+    return _doctor_repair_result(target, "repaired", i18n_t("doctor.repair.restartRepaired", language))
 
 
 def _repair_duplicate_service_processes(*, dry_run: bool = False) -> dict:
     target = "duplicate-service-processes"
+    language = _configured_cli_language()
     if runtime.service_instance_lock_attached_to_process():
-        return _doctor_repair_result(target, "failed", "Run this repair from the CLI, not from inside the service process.")
+        return _doctor_repair_result(target, "failed", i18n_t("doctor.repair.cliOnly", language))
     if not _runtime_home_exists_for_repair():
-        return _doctor_repair_result(target, "skipped", "No runtime home exists yet; no service process state needs repair.")
+        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.noRuntimeProcessState", language))
 
     owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
     extra_pids = runtime.extra_service_process_pids(owner_pid=owner_pid)
     if not extra_pids:
-        return _doctor_repair_result(target, "skipped", "No extra Avibe service process was detected.")
+        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.noExtraProcess", language))
     if dry_run:
         return _doctor_repair_result(
             target,
             "planned",
-            f"Would stop extra Avibe service process(es): {','.join(map(str, extra_pids))}.",
+            i18n_t(
+                "doctor.repair.extraProcessDryRun",
+                language,
+                pids=",".join(map(str, extra_pids)),
+            ),
             pids=extra_pids,
         )
 
@@ -12242,8 +12407,8 @@ def _repair_duplicate_service_processes(*, dry_run: bool = False) -> dict:
     if not owner_pid and stopped and not failed:
         return _start_service_after_repair(
             target,
-            "Stopped lockless service process(es) and started a clean service.",
-            "Stopped lockless service process(es), but failed to start a clean service",
+            "doctor.repair.duplicateStoppedStarted",
+            "doctor.repair.duplicateStoppedStartFailed",
             stopped_pids=stopped,
         )
 
@@ -12252,19 +12417,25 @@ def _repair_duplicate_service_processes(*, dry_run: bool = False) -> dict:
         return _doctor_repair_result(
             target,
             "failed",
-            "Some extra service processes could not be stopped.",
+            i18n_t("doctor.repair.extraProcessPartial", language),
             stopped_pids=stopped,
             failed_pids=failed,
         )
-    return _doctor_repair_result(target, "repaired", "Stopped extra Avibe service process(es).", stopped_pids=stopped)
+    return _doctor_repair_result(
+        target,
+        "repaired",
+        i18n_t("doctor.repair.extraProcessStopped", language),
+        stopped_pids=stopped,
+    )
 
 
 def _repair_stale_install_runtime(*, dry_run: bool = False) -> dict:
     target = "stale-install-runtime"
+    language = _configured_cli_language()
     if runtime.service_instance_lock_attached_to_process():
-        return _doctor_repair_result(target, "failed", "Run this repair from the CLI, not from inside the service process.")
+        return _doctor_repair_result(target, "failed", i18n_t("doctor.repair.cliOnly", language))
     if not _runtime_home_exists_for_repair():
-        return _doctor_repair_result(target, "skipped", "No runtime home exists yet; no service process state needs repair.")
+        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.noRuntimeProcessState", language))
 
     current_family = _current_cli_install_family()
     owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
@@ -12279,12 +12450,12 @@ def _repair_stale_install_runtime(*, dry_run: bool = False) -> dict:
         elif family == PACKAGE_NAME:
             current_pids.append(pid)
     if not stale_pids:
-        return _doctor_repair_result(target, "skipped", "No legacy vibe-remote service process was detected.")
+        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.noLegacyProcess", language))
     if dry_run:
         return _doctor_repair_result(
             target,
             "planned",
-            f"Would stop legacy service process(es) and start current Avibe: {','.join(map(str, stale_pids))}.",
+            i18n_t("doctor.repair.staleInstallDryRun", language, pids=",".join(map(str, stale_pids))),
             pids=stale_pids,
         )
 
@@ -12301,7 +12472,7 @@ def _repair_stale_install_runtime(*, dry_run: bool = False) -> dict:
         return _doctor_repair_result(
             target,
             "failed",
-            "Some legacy vibe-remote service processes could not be stopped.",
+            i18n_t("doctor.repair.staleInstallPartial", language),
             stopped_pids=stopped,
             failed_pids=failed,
         )
@@ -12311,37 +12482,56 @@ def _repair_stale_install_runtime(*, dry_run: bool = False) -> dict:
         return _doctor_repair_result(
             target,
             "repaired",
-            "Stopped legacy vibe-remote service process(es).",
+            i18n_t("doctor.repair.staleInstallStopped", language),
             stopped_pids=stopped,
         )
 
     return _start_service_after_repair(
         target,
-        "Stopped legacy vibe-remote service process and started the current Avibe service.",
-        "Stopped legacy vibe-remote service process, but failed to start the current Avibe service",
+        "doctor.repair.staleInstallStoppedStarted",
+        "doctor.repair.staleInstallStoppedStartFailed",
         stopped_pids=stopped,
     )
 
 
 def _repair_managed_dependency(target: str, installer, *, dry_run: bool = False) -> dict:
+    language = _configured_cli_language()
     if dry_run:
-        return _doctor_repair_result(target, "planned", DOCTOR_REPAIR_DRY_RUN_MESSAGES[target])
+        return _doctor_repair_result(
+            target,
+            "planned",
+            i18n_t(DOCTOR_REPAIR_DRY_RUN_I18N_KEYS[target], language),
+        )
     try:
         result = installer(force=True)
     except Exception as exc:  # noqa: BLE001
-        return _doctor_repair_result(target, "failed", f"{target} repair failed: {exc}")
+        return _doctor_repair_result(
+            target,
+            "failed",
+            i18n_t("doctor.repair.dependencyFailed", language, target=target, reason=exc),
+        )
     if result.get("ok"):
         return _doctor_repair_result(
             target,
             "repaired" if result.get("changed", True) else "skipped",
-            str(result.get("message") or f"{target} is ready."),
+            i18n_t(
+                "doctor.repair.dependencyReady",
+                language,
+                target=target,
+                detail=result.get("message") or i18n_t("doctor.repair.dependencyReadyDefault", language),
+            ),
             path=result.get("path"),
             version=result.get("version"),
         )
     return _doctor_repair_result(
         target,
         "failed",
-        str(result.get("message") or result.get("reason") or f"{target} repair failed"),
+        i18n_t(
+            "doctor.repair.dependencyResultFailed",
+            language,
+            target=target,
+            detail=result.get("message") or result.get("reason") or i18n_t("doctor.repair.dependencyFailedDefault", language),
+        ),
         reason=result.get("reason"),
         download_error=result.get("download_error"),
         output=result.get("output"),
@@ -12372,8 +12562,13 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
     from core.show_runtime import ShowRuntimeManager
 
     target = "show-runtime"
+    language = _configured_cli_language()
     if dry_run:
-        return _doctor_repair_result(target, "planned", DOCTOR_REPAIR_DRY_RUN_MESSAGES[target])
+        return _doctor_repair_result(
+            target,
+            "planned",
+            i18n_t(DOCTOR_REPAIR_DRY_RUN_I18N_KEYS[target], language),
+        )
 
     manager = ShowRuntimeManager()
     before = manager.status()
@@ -12405,14 +12600,13 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
             return _ShowRuntimeStartability.startable()
         return _ShowRuntimeStartability.not_startable(result.reason or "runtime_start_failed")
 
-    language = _configured_cli_language()
     if before_installed:
         startability = verify_startability(before.get("command"))
         if startability.state is _ShowRuntimeStartabilityState.UNDETERMINED:
             return _doctor_repair_result(
                 target,
                 "failed",
-                i18n_t("runtime.doctor.repairVerificationFailed", language, detail=startability.detail),
+                i18n_t("doctor.repair.showRuntimeVerificationFailed", language, detail=startability.detail),
                 provider=before.get("provider"),
                 platform=before.get("platform"),
                 install_dir=before_install_dir,
@@ -12424,7 +12618,7 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
             return _doctor_repair_result(
                 target,
                 "skipped",
-                i18n_t("runtime.doctor.repairHealthy", language),
+                i18n_t("doctor.repair.showRuntimeHealthy", language),
                 provider=before.get("provider"),
                 platform=before.get("platform"),
                 install_dir=before_install_dir,
@@ -12436,7 +12630,7 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
             return _doctor_repair_result(
                 target,
                 "failed",
-                i18n_t("runtime.doctor.repairExplicitCommandFailed", language, reason=reason),
+                i18n_t("doctor.repair.showRuntimeExplicitFailed", language, reason=reason),
                 provider=before.get("provider"),
                 platform=before.get("platform"),
                 install_dir=before_install_dir,
@@ -12454,7 +12648,7 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
         return _doctor_repair_result(
             target,
             "failed",
-            i18n_t("runtime.doctor.repairLegacyArchiveUnavailable", language),
+            i18n_t("doctor.repair.showRuntimeLegacyUnavailable", language),
             provider=before.get("provider"),
             archive_url=archive_url,
         )
@@ -12472,9 +12666,9 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
                 "repaired",
                 i18n_t(
                     (
-                        "runtime.doctor.repairReinstalled"
+                        "doctor.repair.showRuntimeReinstalled"
                         if before_installed
-                        else "runtime.doctor.repairInstalled"
+                        else "doctor.repair.showRuntimeInstalled"
                     ),
                     language,
                 ),
@@ -12489,9 +12683,9 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
                 "failed",
                 i18n_t(
                     (
-                        "runtime.doctor.repairReinstallStartFailed"
+                        "doctor.repair.showRuntimeReinstallStartFailed"
                         if before_installed
-                        else "runtime.doctor.repairInstallStartFailed"
+                        else "doctor.repair.showRuntimeInstallStartFailed"
                     ),
                     language,
                     reason=reason,
@@ -12505,7 +12699,7 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
             return _doctor_repair_result(
                 target,
                 "failed",
-                i18n_t("runtime.doctor.repairPostVerificationFailed", language, detail=startability.detail),
+                i18n_t("doctor.repair.showRuntimePostVerificationFailed", language, detail=startability.detail),
                 provider=result.get("provider"),
                 platform=result.get("platform"),
                 install_dir=install_dir,
@@ -12522,11 +12716,10 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
             detail = f"{detail}: {download_error['url']}"
     else:
         detail = reason
-    message = i18n_t("runtime.doctor.repairPrepareFailed", language, detail=detail)
     return _doctor_repair_result(
         target,
         "failed",
-        message,
+        i18n_t("doctor.repair.showRuntimePrepareFailed", language, detail=detail),
         provider=result.get("provider"),
         platform=result.get("platform"),
         install_dir=install_dir,
@@ -12537,6 +12730,7 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
 
 
 def _repair_doctor_targets(targets: list[str], *, dry_run: bool = False, deep: bool = False) -> dict:
+    language = _configured_cli_language()
     requested_targets = targets or list(DOCTOR_DEFAULT_REPAIR_TARGETS)
     unknown = [target for target in requested_targets if target not in DOCTOR_REPAIR_TARGETS]
     if unknown:
@@ -12548,7 +12742,12 @@ def _repair_doctor_targets(targets: list[str], *, dry_run: bool = False, deep: b
                 _doctor_repair_result(
                     target,
                     "failed",
-                    f"Unknown repair target. Known targets: {', '.join(DOCTOR_REPAIR_TARGETS)}.",
+                    i18n_t(
+                        "doctor.repair.unknownTarget",
+                        language,
+                        target=target,
+                        known_targets=", ".join(DOCTOR_REPAIR_TARGETS),
+                    ),
                 )
                 for target in unknown
             ],
@@ -12563,7 +12762,7 @@ def _repair_doctor_targets(targets: list[str], *, dry_run: bool = False, deep: b
                 _doctor_repair_result(
                     target,
                     "planned",
-                    DOCTOR_REPAIR_DRY_RUN_MESSAGES[target],
+                    i18n_t(DOCTOR_REPAIR_DRY_RUN_I18N_KEYS[target], language),
                 )
                 for target in requested_targets
             ],
@@ -12597,7 +12796,13 @@ def _confirm_doctor_repair(targets: list[str]) -> bool:
     if not sys.stdin.isatty():
         return False
     target_text = ", ".join(targets or DOCTOR_DEFAULT_REPAIR_TARGETS)
-    answer = input(f"Repair Avibe doctor target(s): {target_text}? Type 'yes' to continue: ")
+    answer = input(
+        i18n_t(
+            "doctor.repairConfirm",
+            _configured_cli_language(),
+            targets=target_text,
+        )
+    )
     return answer.strip().lower() == "yes"
 
 
@@ -14233,9 +14438,10 @@ def _doctor_repair_requested(args) -> bool:
 
 
 def _print_doctor_repair_result(result: dict) -> None:
-    title = "Avibe Doctor Repair"
+    language = _configured_cli_language()
+    title = i18n_t("doctor.repairTitle", language)
     if result.get("dry_run"):
-        title = f"{title} (dry run)"
+        title += i18n_t("doctor.dryRunSuffix", language)
     print(f"\n  {title}")
     print("  " + "=" * 40)
     for item in result.get("results", []):
@@ -14255,7 +14461,7 @@ def cmd_doctor(args=None):
         targets = list(getattr(args, "doctor_repair_targets", []) or [])
         dry_run = bool(getattr(args, "dry_run", False))
         if not dry_run and not getattr(args, "yes", False) and not _confirm_doctor_repair(targets):
-            print("Doctor repair was not run. Pass --yes to confirm non-interactively.", file=sys.stderr)
+            print(i18n_t("doctor.repairNotRun", _configured_cli_language()), file=sys.stderr)
             return 2
         result = _repair_doctor_targets(
             targets,
@@ -14269,7 +14475,8 @@ def cmd_doctor(args=None):
     result = _doctor(deep=deep)
 
     # Terminal-friendly output
-    print("\n  Avibe Diagnostics")
+    language = _configured_cli_language()
+    print(f"\n  {i18n_t('doctor.title', language)}")
     print("  " + "=" * 40)
 
     for group in result.get("groups", []):
@@ -14291,9 +14498,9 @@ def cmd_doctor(args=None):
     summary = result.get("summary", {})
     print("\n  " + "-" * 30)
     print(
-        f"  \033[32m{summary.get('pass', 0)} passed\033[0m  "
-        f"\033[33m{summary.get('warn', 0)} warnings\033[0m  "
-        f"\033[31m{summary.get('fail', 0)} failed\033[0m"
+        f"  \033[32m{i18n_t('doctor.summary.passed', language, count=summary.get('pass', 0))}\033[0m  "
+        f"\033[33m{i18n_t('doctor.summary.warnings', language, count=summary.get('warn', 0))}\033[0m  "
+        f"\033[31m{i18n_t('doctor.summary.failed', language, count=summary.get('fail', 0))}\033[0m"
     )
     print()
 
