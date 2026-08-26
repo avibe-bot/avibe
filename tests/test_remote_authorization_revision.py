@@ -271,7 +271,7 @@ def test_organization_to_personal_reclassification_revalidates_before_the_bypass
     monkeypatch,
     tmp_path,
 ):
-    """A reclassified pairing must re-earn every instance-scoped authorization."""
+    """A reclassified pairing must re-earn every cached authorization."""
 
     config = _paired_config(tmp_path)
     remote_access._transition_instance_binding(
@@ -292,6 +292,19 @@ def test_organization_to_personal_reclassification_revalidates_before_the_bypass
     assert admitted is not None
     assert admitted["authorization_state"] == "current"
 
+    historical_reference = remote_access_authorization_service.upsert_scoped(
+        reference=None,
+        instance_id="inst_123",
+        subject="historical-user",
+        email="historical@example.com",
+        scope_kind="retired_scope",
+        scope_ref="retired-reference",
+        authorization_state="current",
+        claims={"vibe_instance_id": "inst_123"},
+        last_checked_at=now,
+        updated_at=now,
+    )
+
     assert remote_access._persist_instance_kind("inst_123", "personal", reconcile=True)
 
     reclassified = V2Config.load()
@@ -304,6 +317,14 @@ def test_organization_to_personal_reclassification_revalidates_before_the_bypass
     )
     assert invalidated is not None
     assert invalidated["authorization_state"] == "stale"
+    historical = remote_access_authorization_service.load_reference_record(
+        reference=historical_reference,
+        instance_id="inst_123",
+        subject="historical-user",
+        now=now,
+    )
+    assert historical is not None
+    assert historical["authorization_state"] == "stale"
 
     # The cached Organization claims must not be re-projected as Personal.
     blocked = remote_access.resolve_current_authorization(
