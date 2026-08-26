@@ -12,6 +12,7 @@ import json
 import logging
 import multiprocessing
 import os
+import pickle
 import shutil
 import sqlite3
 import stat
@@ -1375,13 +1376,12 @@ class MemoryRuntime:
         except BrokenProcessPool:
             return {"status": "failed", "error": "memory_processing_failed"}
 
-        candidates: list[MemoryListItem] = []
         warnings: list[MemoryListWarningCode] = []
         totals: dict[str, int] = {}
         failures: list[OperationFailed] = []
         available_counts: dict[str, int] = {}
         project_has_more: dict[str, bool] = {}
-        candidate_page_hints: dict[tuple[str, str], int] = {}
+        candidate_records: list[tuple[MemoryListItem, int]] = []
         complete = True
         merge_worker = _TerminableMemoryWorker()
         try:
@@ -1400,6 +1400,7 @@ class MemoryRuntime:
                         limit=limit,
                         deadline=deadline,
                         origin=origin,
+                        worker=merge_worker,
                     )
                     if isinstance(window, OperationFailed):
                         complete = False
@@ -1419,25 +1420,15 @@ class MemoryRuntime:
                         window_complete,
                         item_page_hints,
                     ) = window
-                    combined_hints = {
-                        **candidate_page_hints,
-                        **{
-                            (project_id, item.id): item_page_hints[item.id]
-                            for item in items
-                        },
-                    }
-                    candidates = list(
-                        await _merge_memory_list_candidates_isolated(
-                            (*candidates, *items),
+                    window_records = tuple(zip(items, item_page_hints))
+                    candidate_records = list(
+                        await _merge_memory_list_candidate_records_isolated(
+                            (*candidate_records, *window_records),
                             limit=limit,
                             deadline=deadline,
                             worker=merge_worker,
                         )
                     )
-                    candidate_page_hints = {
-                        (item.project, item.id): combined_hints[(item.project, item.id)]
-                        for item in candidates
-                    }
                     totals[project_id] = total_count
                     available_counts[project_id] = len(items)
                     project_has_more[project_id] = has_more
@@ -1462,15 +1453,16 @@ class MemoryRuntime:
             )
             return {"status": failure.status, "error": failure.error}
 
-        selected = tuple(candidates)
+        selected_records = tuple(candidate_records)
+        selected = tuple(item for item, _page_hint in selected_records)
         next_boundaries = dict(boundaries)
         next_page_hints = dict(page_hints)
         next_total_hints = dict(total_hints)
         selected_counts = {project_id: 0 for project_id in projects}
-        for item in selected:
+        for item, item_page_hint in selected_records:
             selected_counts[item.project] += 1
             next_boundaries[item.project] = (item.timestamp, item.id)
-            next_page_hints[item.project] = candidate_page_hints[(item.project, item.id)]
+            next_page_hints[item.project] = item_page_hint
             next_total_hints[item.project] = totals[item.project]
 
         has_more = any(
@@ -1527,6 +1519,7 @@ class MemoryRuntime:
         limit: int,
         deadline: float,
         origin: MemoryOrigin,
+        worker: "_TerminableMemoryWorker",
     ) -> (
         tuple[
             tuple[MemoryListItem, ...],
@@ -1534,13 +1527,13 @@ class MemoryRuntime:
             tuple[MemoryListWarningCode, ...],
             bool,
             bool,
-            dict[str, int],
+            tuple[int, ...],
         ]
         | OperationFailed
     ):
         page = 1
-        items_by_id: dict[str, MemoryListItem] = {}
-        item_page_hints: dict[str, int] = {}
+        window_records: tuple[tuple[MemoryListItem, int], ...] = ()
+        eligible_count = 0
         timestamp_page_hints: dict[datetime, int] = {}
         warnings: list[MemoryListWarningCode] = []
         total_count: int | None = None
@@ -1565,7 +1558,7 @@ class MemoryRuntime:
                 tuple(dict.fromkeys((*warnings, warning))),
                 True,
                 False,
-                {},
+                (),
             )
 
         async def read_page(page_number: int) -> MemoryListResult:
@@ -1587,14 +1580,13 @@ class MemoryRuntime:
                 return OperationFailed(error="memory_provider_timeout")
 
         def failure_result(error):
-            if not items_by_id:
+            if not window_records:
                 return OperationFailed(error=error)
-            ordered = _order_project_memory_list_items(items_by_id.values())
             safe = tuple(
-                item
-                for item in ordered
+                record
+                for record in window_records
                 if open_timestamp is not None
-                and _memory_list_instant(item.timestamp) > open_timestamp
+                and _memory_list_instant(record[0].timestamp) > open_timestamp
             )
             warning: MemoryListWarningCode = (
                 "memory_list_truncated"
@@ -1602,15 +1594,12 @@ class MemoryRuntime:
                 else "memory_list_partial"
             )
             return (
-                safe[:limit],
+                tuple(item for item, _page_hint in safe[:limit]),
                 total_count or 0,
                 tuple(dict.fromkeys((*warnings, warning))),
                 True,
                 False,
-                {
-                    item.id: item_page_hints[item.id]
-                    for item in safe[:limit]
-                },
+                tuple(page_hint for _item, page_hint in safe[:limit]),
             )
 
         async def locate_boundary_page() -> tuple[int | None, int] | OperationFailed:
@@ -1675,7 +1664,12 @@ class MemoryRuntime:
                 if isinstance(refreshed, OperationFailed):
                     return refreshed
                 warnings.extend(refreshed.warnings)
-                if refreshed != snapshot:
+                if not await _memory_values_equal_isolated(
+                    refreshed,
+                    snapshot,
+                    deadline=deadline,
+                    worker=worker,
+                ):
                     return (None, refreshed.total_count)
             return (low, observed_total)
 
@@ -1756,32 +1750,43 @@ class MemoryRuntime:
                         refreshed_previous.error,
                         result.total_count,
                     )
-                if refreshed_previous != previous_page_result:
+                if not await _memory_values_equal_isolated(
+                    refreshed_previous,
+                    previous_page_result,
+                    deadline=deadline,
+                    worker=worker,
+                ):
                     warnings.extend(refreshed_previous.warnings)
                     return retry_result("memory_list_partial", result.total_count)
             total_count = result.total_count
             warnings.extend(result.warnings)
             if boundary_instant is not None:
                 timestamp_page_hints[boundary_instant] = boundary_group_page_hint
-            for item in result.items:
-                if item.id not in items_by_id and _memory_list_after_boundary(
+            new_records = tuple(
+                (
                     item,
-                    boundary,
-                ):
-                    items_by_id[item.id] = item
-                    instant = _memory_list_instant(item.timestamp)
-                    group_page = timestamp_page_hints.setdefault(instant, page)
-                    item_page_hints[item.id] = group_page
-
-            ordered = _order_project_memory_list_items(items_by_id.values())
+                    timestamp_page_hints.setdefault(
+                        _memory_list_instant(item.timestamp),
+                        page,
+                    ),
+                )
+                for item in result.items
+            )
+            window_records, eligible_count = await _merge_project_window_records_isolated(
+                (*window_records, *new_records),
+                boundary=boundary,
+                limit=limit,
+                deadline=deadline,
+                worker=worker,
+            )
             exhausted = (
                 result.count < _MEMORY_LIST_PROVIDER_PAGE_SIZE
                 or page * _MEMORY_LIST_PROVIDER_PAGE_SIZE >= total_count
             )
             if exhausted:
                 break
-            if len(ordered) > limit and result.items:
-                cutoff = _memory_list_instant(ordered[limit - 1].timestamp)
+            if eligible_count > limit and result.items:
+                cutoff = _memory_list_instant(window_records[limit - 1][0].timestamp)
                 oldest_in_page = min(
                     _memory_list_instant(item.timestamp)
                     for item in result.items
@@ -1795,17 +1800,13 @@ class MemoryRuntime:
                 )
             previous_page = (page, result)
             page += 1
-        ordered = _order_project_memory_list_items(items_by_id.values())
         return (
-            tuple(ordered[:limit]),
+            tuple(item for item, _page_hint in window_records),
             total_count or 0,
             tuple(dict.fromkeys(warnings)),
-            len(ordered) > limit,
+            eligible_count > limit,
             True,
-            {
-                item.id: item_page_hints[item.id]
-                for item in ordered[:limit]
-            },
+            tuple(page_hint for _item, page_hint in window_records),
         )
 
     def list_memory_projects(self, principal_id: str) -> tuple[str, ...]:
@@ -2996,11 +2997,32 @@ def _merge_search_items(
     return tuple(merged)
 
 
-def _merge_search_items_worker(
-    items: tuple[MemoryItem, ...],
-    limit: int,
-) -> tuple[MemoryItem, ...]:
-    return _merge_search_items(items, limit=limit)
+def _merge_search_item_indices_worker(path: str, limit: int) -> tuple[int, ...]:
+    items = _load_memory_merge_items(path)
+    ordered = sorted(
+        enumerate(items),
+        key=lambda value: (
+            value[1].date is None,
+            value[1].date or "",
+            value[1].kind,
+            value[1].text,
+            value[1].project or "",
+        ),
+    )
+    dated = [value for value in ordered if value[1].date is not None]
+    undated = [value for value in ordered if value[1].date is None]
+    dated.sort(key=lambda value: value[1].date or "", reverse=True)
+    selected: list[int] = []
+    seen: set[tuple[str, str, str | None, str | None]] = set()
+    for index, item in (*dated, *undated):
+        key = (item.kind, item.text, item.date, item.project)
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(index)
+        if len(selected) >= limit:
+            break
+    return tuple(selected)
 
 
 async def _merge_search_items_isolated(
@@ -3010,12 +3032,23 @@ async def _merge_search_items_isolated(
     deadline: float,
     worker: "_TerminableMemoryWorker",
 ) -> tuple[MemoryItem, ...]:
-    return await worker.run(
-        _merge_search_items_worker,
-        tuple(items),
-        limit,
-        deadline=deadline,
+    source = tuple(items)
+    path = await run_blocking(
+        _spool_memory_merge_items,
+        source,
+        deadline,
+        on_cancel_result=_unlink_memory_merge_spool,
     )
+    try:
+        indices = await worker.run(
+            _merge_search_item_indices_worker,
+            path,
+            limit,
+            deadline=deadline,
+        )
+        return tuple(source[index] for index in indices)
+    finally:
+        await run_blocking(_unlink_memory_merge_spool, path)
 
 
 def _merge_memory_list_candidates(
@@ -3033,11 +3066,17 @@ def _merge_memory_list_candidates(
     return tuple(ordered[:limit])
 
 
-def _merge_memory_list_candidates_worker(
-    items: tuple[MemoryListItem, ...],
+def _merge_memory_list_candidate_indices_worker(
+    path: str,
     limit: int,
-) -> tuple[MemoryListItem, ...]:
-    return _merge_memory_list_candidates(items, limit=limit)
+) -> tuple[int, ...]:
+    indexed = list(enumerate(_load_memory_merge_items(path)))
+    indexed.sort(key=lambda value: (value[1].project, value[1].id))
+    indexed.sort(
+        key=lambda value: _memory_list_instant(value[1].timestamp),
+        reverse=True,
+    )
+    return tuple(index for index, _item in indexed[:limit])
 
 
 async def _merge_memory_list_candidates_isolated(
@@ -3047,12 +3086,139 @@ async def _merge_memory_list_candidates_isolated(
     deadline: float,
     worker: "_TerminableMemoryWorker",
 ) -> tuple[MemoryListItem, ...]:
-    return await worker.run(
-        _merge_memory_list_candidates_worker,
-        tuple(items),
-        limit,
-        deadline=deadline,
+    source = tuple(items)
+    path = await run_blocking(
+        _spool_memory_merge_items,
+        source,
+        deadline,
+        on_cancel_result=_unlink_memory_merge_spool,
     )
+    try:
+        indices = await worker.run(
+            _merge_memory_list_candidate_indices_worker,
+            path,
+            limit,
+            deadline=deadline,
+        )
+        return tuple(source[index] for index in indices)
+    finally:
+        await run_blocking(_unlink_memory_merge_spool, path)
+
+
+def _merge_memory_list_candidate_record_indices_worker(
+    path: str,
+    limit: int,
+) -> tuple[int, ...]:
+    records = _load_memory_merge_items(path)
+    indexed = list(enumerate(records))
+    indexed.sort(key=lambda value: (value[1][0].project, value[1][0].id))
+    indexed.sort(
+        key=lambda value: _memory_list_instant(value[1][0].timestamp),
+        reverse=True,
+    )
+    return tuple(index for index, _record in indexed[:limit])
+
+
+async def _merge_memory_list_candidate_records_isolated(
+    records: Iterable[tuple[MemoryListItem, int]],
+    *,
+    limit: int,
+    deadline: float,
+    worker: "_TerminableMemoryWorker",
+) -> tuple[tuple[MemoryListItem, int], ...]:
+    source = tuple(records)
+    path = await run_blocking(
+        _spool_memory_merge_items,
+        source,
+        deadline,
+        on_cancel_result=_unlink_memory_merge_spool,
+    )
+    try:
+        indices = await worker.run(
+            _merge_memory_list_candidate_record_indices_worker,
+            path,
+            limit,
+            deadline=deadline,
+        )
+        return tuple(source[index] for index in indices)
+    finally:
+        await run_blocking(_unlink_memory_merge_spool, path)
+
+
+def _merge_project_window_record_indices_worker(
+    path: str,
+    limit: int,
+) -> tuple[tuple[int, ...], int]:
+    values = _load_memory_merge_items(path)
+    boundary = values[0]
+    records = values[1:]
+    selected: dict[str, int] = {}
+    for index, (item, _page_hint) in enumerate(records):
+        if item.id not in selected and _memory_list_after_boundary(item, boundary):
+            selected[item.id] = index
+    ordered = sorted(selected.values(), key=lambda index: records[index][0].id)
+    ordered.sort(
+        key=lambda index: _memory_list_instant(records[index][0].timestamp),
+        reverse=True,
+    )
+    return tuple(ordered[:limit]), len(ordered)
+
+
+async def _merge_project_window_records_isolated(
+    records: Iterable[tuple[MemoryListItem, int]],
+    *,
+    boundary: tuple[str, str] | None,
+    limit: int,
+    deadline: float,
+    worker: "_TerminableMemoryWorker",
+) -> tuple[tuple[tuple[MemoryListItem, int], ...], int]:
+    source = tuple(records)
+    path = await run_blocking(
+        _spool_memory_merge_items,
+        (boundary, *source),
+        deadline,
+        on_cancel_result=_unlink_memory_merge_spool,
+    )
+    try:
+        indices, eligible_count = await worker.run(
+            _merge_project_window_record_indices_worker,
+            path,
+            limit,
+            deadline=deadline,
+        )
+        return tuple(source[index] for index in indices), eligible_count
+    finally:
+        await run_blocking(_unlink_memory_merge_spool, path)
+
+
+def _memory_spooled_values_equal_worker(path: str) -> bool:
+    left, right = _load_memory_merge_items(path)
+    return left == right
+
+
+async def _memory_values_equal_isolated(
+    left: object,
+    right: object,
+    *,
+    deadline: float,
+    worker: "_TerminableMemoryWorker",
+) -> bool:
+    path = await run_blocking(
+        _spool_memory_merge_items,
+        (left, right),
+        deadline,
+        on_cancel_result=_unlink_memory_merge_spool,
+    )
+    try:
+        return bool(
+            await worker.run(
+                _memory_spooled_values_equal_worker,
+                path,
+                deadline=deadline,
+            )
+        )
+    finally:
+        await run_blocking(_unlink_memory_merge_spool, path)
 
 
 def _memory_list_catalog_fingerprint(
@@ -3331,6 +3497,63 @@ class _TerminableMemoryWorker:
                 cancel_futures=True,
             )
             self._terminated = True
+
+
+class _MemoryMergeSpoolWriter:
+    def __init__(self, spool: Any, deadline: float) -> None:
+        self._spool = spool
+        self._deadline = deadline
+
+    def write(self, value: bytes) -> int:
+        view = memoryview(value)
+        for offset in range(0, len(view), _MEMORY_LIST_CURSOR_SPOOL_CHUNK_CHARS):
+            _write_memory_list_cursor_spool_chunk(
+                self._spool,
+                bytes(view[offset : offset + _MEMORY_LIST_CURSOR_SPOOL_CHUNK_CHARS]),
+                self._deadline,
+            )
+        return len(value)
+
+
+def _spool_memory_merge_items(items: tuple[Any, ...], deadline: float) -> str:
+    spool = tempfile.NamedTemporaryFile(
+        mode="w+b",
+        prefix="avibe-memory-merge-",
+        suffix=".pickle",
+        delete=False,
+    )
+    path = spool.name
+    try:
+        writer = _MemoryMergeSpoolWriter(spool, deadline)
+        for item in items:
+            if time.monotonic() >= deadline:
+                raise asyncio.TimeoutError
+            pickle.dump(item, writer, protocol=pickle.HIGHEST_PROTOCOL)
+        return path
+    except Exception:
+        spool.close()
+        _unlink_memory_merge_spool(path)
+        raise
+    finally:
+        if not spool.closed:
+            spool.close()
+
+
+def _load_memory_merge_items(path: str) -> tuple[Any, ...]:
+    items: list[Any] = []
+    with open(path, "rb") as spool:
+        while True:
+            try:
+                items.append(pickle.load(spool))
+            except EOFError:
+                return tuple(items)
+
+
+def _unlink_memory_merge_spool(path: str) -> None:
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
 
 
 def _spool_memory_list_cursor(cursor: object, deadline: float) -> str:

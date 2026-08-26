@@ -675,6 +675,23 @@ async def memory_profile(
     )
 
 
+async def memory_profile_stream(
+    *,
+    user_key: str,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
+) -> AsyncIterator[tuple[int | None, bytes]]:
+    async for event in _memory_stream_request(
+        "/internal/memory/profile",
+        None,
+        method="GET",
+        user_key=user_key,
+        socket_path=socket_path,
+        timeout=timeout,
+    ):
+        yield event
+
+
 async def memory_projects(
     *,
     user_key: str,
@@ -728,6 +745,36 @@ async def memory_list(
     )
 
 
+async def memory_list_stream(
+    *,
+    user_key: str,
+    project: str | None = None,
+    page: int | None = None,
+    cursor: str | None = None,
+    limit: int = 20,
+    origin: Literal["user", "agent"] | None = None,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
+) -> AsyncIterator[tuple[int | None, bytes]]:
+    payload: dict[str, object] = {"limit": limit}
+    if project is not None:
+        payload["project"] = project
+    if page is not None:
+        payload["page"] = page
+    if cursor is not None:
+        payload["cursor"] = cursor
+    if origin is not None:
+        payload["origin"] = origin
+    async for event in _memory_stream_request(
+        "/internal/memory/list",
+        payload,
+        user_key=user_key,
+        socket_path=socket_path,
+        timeout=timeout,
+    ):
+        yield event
+
+
 async def memory_search(
     query: str,
     policy: dict[str, object],
@@ -768,14 +815,35 @@ async def memory_search_stream(
     payload: dict[str, object] = {"query": query, "policy": policy}
     if project is not None:
         payload["project"] = project
+    async for event in _memory_stream_request(
+        "/internal/memory/search",
+        payload,
+        user_key=user_key,
+        socket_path=socket_path,
+        timeout=timeout,
+    ):
+        yield event
+
+
+async def _memory_stream_request(
+    path: str,
+    payload: dict[str, object] | None,
+    *,
+    method: str = "POST",
+    user_key: str,
+    socket_path: Optional[Path],
+    timeout: float,
+) -> AsyncIterator[tuple[int | None, bytes]]:
+    from core.memory.retained_input import stream_json_bytes
+
     target = await _verified_socket_path_async(socket_path)
     transport = httpx.AsyncHTTPTransport(uds=str(target))
     client_timeout = httpx.Timeout(timeout, connect=min(timeout, 5.0))
-    headers = _memory_user_key_headers(
-        "POST",
-        "/internal/memory/search",
-        user_key,
-    )
+    headers = _memory_user_key_headers(method, path, user_key)
+    content = None
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+        content = stream_json_bytes(payload)
     try:
         async with httpx.AsyncClient(
             transport=transport,
@@ -783,9 +851,9 @@ async def memory_search_stream(
             timeout=client_timeout,
         ) as client:
             async with client.stream(
-                "POST",
-                "/internal/memory/search",
-                json=payload,
+                method,
+                path,
+                content=content,
                 headers=headers,
             ) as response:
                 yield response.status_code, b""
@@ -921,6 +989,8 @@ async def _memory_request(
     socket_path: Optional[Path] = None,
     timeout: float | None,
 ) -> dict[str, Any]:
+    from core.memory.retained_input import stream_json_bytes
+
     target = await _verified_socket_path_async(socket_path)
     transport = httpx.AsyncHTTPTransport(uds=str(target))
     client_timeout = (
@@ -928,6 +998,11 @@ async def _memory_request(
         if timeout is None
         else httpx.Timeout(timeout, connect=min(timeout, 5.0))
     )
+    request_headers = dict(headers or {})
+    content = None
+    if payload is not None:
+        request_headers["Content-Type"] = "application/json"
+        content = stream_json_bytes(payload)
     try:
         async with httpx.AsyncClient(
             transport=transport,
@@ -937,9 +1012,9 @@ async def _memory_request(
             response = await client.request(
                 method,
                 route,
-                json=payload,
+                content=content,
                 params=params,
-                headers=headers,
+                headers=request_headers,
             )
     except _SOCKET_ERRORS as exc:
         raise InternalServerUnavailable(str(exc)) from exc
@@ -959,15 +1034,27 @@ def _memory_request_sync(
     socket_path: Optional[Path] = None,
     timeout: float,
 ) -> dict[str, Any]:
+    from core.memory.retained_input import iter_json_bytes
+
     target = _verified_socket_path(socket_path)
     transport = httpx.HTTPTransport(uds=str(target))
+    request_headers = dict(headers or {})
+    content = None
+    if payload is not None:
+        request_headers["Content-Type"] = "application/json"
+        content = iter_json_bytes(payload)
     try:
         with httpx.Client(
             transport=transport,
             base_url="http://localhost",
             timeout=httpx.Timeout(timeout, connect=5.0),
         ) as client:
-            response = client.request(method, route, json=payload, headers=headers)
+            response = client.request(
+                method,
+                route,
+                content=content,
+                headers=request_headers,
+            )
     except _SOCKET_ERRORS as exc:
         raise InternalServerUnavailable(str(exc)) from exc
     try:

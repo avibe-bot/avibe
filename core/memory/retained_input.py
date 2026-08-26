@@ -2,14 +2,28 @@
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
+import errno
 import json
+import multiprocessing
+import os
+import shutil
 import sys
+import tempfile
 import threading
+from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from typing import Any
 
 
 MAX_RETAINED_INPUT_BYTES = 64 * 1024 * 1024
 MAX_RETAINED_INPUT_RESERVATIONS = 32
+_JSON_BODY_SPOOL_CHUNK_BYTES = 64 * 1024
+_JSON_STRING_CHUNK_CHARS = 8 * 1024
+_JSON_BODY_PROCESS_THRESHOLD_BYTES = 64 * 1024
+_JSON_BODY_SPOOL_FREE_BYTES = 512 * 1024 * 1024
+_JSON_BODY_PARSE_TIMEOUT_SECONDS = 30.0
+_JSON_BODY_SPOOL_LOCK = threading.Lock()
 
 
 class RetainedInputReservation:
@@ -141,7 +155,17 @@ async def read_json_object_admitted(
     if reservation is None:
         raise RetainedInputRejected
 
-    chunks: list[bytes] = []
+    try:
+        spool = tempfile.NamedTemporaryFile(
+            mode="w+b",
+            prefix="avibe-memory-request-",
+            suffix=".json",
+            delete=False,
+        )
+    except BaseException:
+        reservation.release()
+        raise
+    path = spool.name
     received = 0
     try:
         async for chunk in request.stream():
@@ -152,10 +176,168 @@ async def read_json_object_admitted(
             if not reservation.resize(retained_bytes):
                 raise RetainedInputRejected
             reserved_bytes = retained_bytes
-            chunks.append(bytes(chunk))
-        body = b"".join(chunks)
-        value = json.loads(body)
+            view = memoryview(chunk)
+            for offset in range(0, len(view), _JSON_BODY_SPOOL_CHUNK_BYTES):
+                await asyncio.to_thread(
+                    _write_json_body_spool_chunk,
+                    spool,
+                    view[offset : offset + _JSON_BODY_SPOOL_CHUNK_BYTES],
+                )
+        await asyncio.to_thread(spool.flush)
+        await asyncio.to_thread(spool.close)
+        value = await _parse_json_body_spool(path, byte_count=received)
         return (value if isinstance(value, dict) else None), reservation
     except BaseException:
         reservation.release()
         raise
+    finally:
+        if not spool.closed:
+            spool.close()
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+
+def _write_json_body_spool_chunk(spool: Any, chunk: memoryview) -> None:
+    with _JSON_BODY_SPOOL_LOCK:
+        free_bytes = shutil.disk_usage(tempfile.gettempdir()).free
+        if free_bytes - len(chunk) < _JSON_BODY_SPOOL_FREE_BYTES:
+            raise OSError(
+                errno.ENOSPC,
+                "insufficient temporary storage for Memory request body",
+            )
+        written = spool.write(chunk)
+        if written != len(chunk):
+            raise OSError(errno.EIO, "short Memory request spool write")
+        spool.flush()
+
+
+def _load_json_body_spool(path: str) -> Any:
+    with open(path, "rb") as spool:
+        return json.load(spool)
+
+
+def _terminate_json_body_pool(
+    pool: concurrent.futures.ProcessPoolExecutor,
+) -> None:
+    processes = tuple((getattr(pool, "_processes", None) or {}).values())
+    for process in processes:
+        process.terminate()
+    for process in processes:
+        process.join()
+    pool.shutdown(wait=True, cancel_futures=True)
+
+
+async def _parse_json_body_spool(path: str, *, byte_count: int) -> Any:
+    if byte_count <= _JSON_BODY_PROCESS_THRESHOLD_BYTES:
+        return await asyncio.to_thread(_load_json_body_spool, path)
+    pool = concurrent.futures.ProcessPoolExecutor(
+        max_workers=1,
+        mp_context=multiprocessing.get_context("spawn"),
+    )
+    terminated = False
+    try:
+        future = asyncio.get_running_loop().run_in_executor(
+            pool,
+            _load_json_body_spool,
+            path,
+        )
+        return await asyncio.wait_for(
+            future,
+            timeout=_JSON_BODY_PARSE_TIMEOUT_SECONDS,
+        )
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        terminated = True
+        await asyncio.to_thread(_terminate_json_body_pool, pool)
+        raise
+    finally:
+        if not terminated:
+            await asyncio.to_thread(
+                pool.shutdown,
+                wait=True,
+                cancel_futures=True,
+            )
+
+
+def _json_scalar_bytes(value: object) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def iter_json_bytes(value: object) -> Iterator[bytes]:
+    """Serialize JSON values incrementally without a payload-sized byte buffer."""
+
+    stack: list[tuple[str, object]] = [("value", value)]
+    while stack:
+        action, current = stack.pop()
+        if action == "emit":
+            if not isinstance(current, bytes):
+                raise TypeError("invalid JSON stream token")
+            yield current
+            continue
+        if action == "string":
+            text = current
+            if not isinstance(text, str):
+                raise TypeError("JSON object keys must be strings")
+            yield b'"'
+            for offset in range(0, len(text), _JSON_STRING_CHUNK_CHARS):
+                encoded = json.dumps(
+                    text[offset : offset + _JSON_STRING_CHUNK_CHARS],
+                    ensure_ascii=False,
+                )[1:-1].encode("utf-8")
+                if encoded:
+                    yield encoded
+            yield b'"'
+            continue
+        if action == "mapping":
+            iterator, first = current  # type: ignore[misc]
+            try:
+                key, item = next(iterator)
+            except StopIteration:
+                yield b"}"
+                continue
+            if not first:
+                yield b","
+            stack.append(("mapping", (iterator, False)))
+            stack.append(("value", item))
+            stack.append(("emit", b":"))
+            stack.append(("string", key))
+            continue
+        if action == "sequence":
+            iterator, first = current  # type: ignore[misc]
+            try:
+                item = next(iterator)
+            except StopIteration:
+                yield b"]"
+                continue
+            if not first:
+                yield b","
+            stack.append(("sequence", (iterator, False)))
+            stack.append(("value", item))
+            continue
+        if isinstance(current, str):
+            stack.append(("string", current))
+        elif current is None or isinstance(current, (bool, int, float)):
+            yield _json_scalar_bytes(current)
+        elif isinstance(current, Mapping):
+            yield b"{"
+            stack.append(("mapping", (iter(current.items()), True)))
+        elif isinstance(current, Sequence) and not isinstance(
+            current,
+            (str, bytes, bytearray),
+        ):
+            yield b"["
+            stack.append(("sequence", (iter(current), True)))
+        else:
+            raise TypeError(f"unsupported JSON value: {type(current).__name__}")
+
+
+async def stream_json_bytes(value: object) -> AsyncIterator[bytes]:
+    for chunk in iter_json_bytes(value):
+        yield chunk
+        await asyncio.sleep(0)

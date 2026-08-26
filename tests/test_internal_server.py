@@ -619,6 +619,7 @@ def test_memory_search_accepts_bounded_agentic_policy_from_cli_session() -> None
     from core.memory.retained_input import RetainedInputBudget
 
     captured: list[tuple] = []
+    large_result = "r" * 70_000
     budget = RetainedInputBudget()
 
     class Runtime:
@@ -637,7 +638,7 @@ def test_memory_search_accepts_bounded_agentic_policy_from_cli_session() -> None
             captured.append(
                 (query, policy, principal_id, project_id, current_session_id)
             )
-            return {"status": "ok", "items": []}
+            return {"status": "ok", "items": [{"text": large_result}]}
 
         async def search_payload(self, *_args, **_kwargs):
             pytest.fail("internal search reacquired admission after body decoding")
@@ -673,7 +674,11 @@ def test_memory_search_accepts_bounded_agentic_policy_from_cli_session() -> None
     response = asyncio.run(_exercise())
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "items": []}
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {
+        "status": "ok",
+        "items": [{"text": large_result}],
+    }
     assert len(captured) == 1
     query, policy, principal_id, project_id, current_session_id = captured[0]
     assert query == "connect the clues"
@@ -1772,8 +1777,8 @@ def test_memory_remember_route_rejects_capture_queued_across_runtime_replacement
                     headers={CALLER_SESSION_HEADER: "session-1"},
                 )
             )
-            for _ in range(20):
-                await asyncio.sleep(0)
+            for _ in range(1_000):
+                await asyncio.sleep(0.001)
                 if getattr(gate, "_waiters", None):
                     break
             assert getattr(gate, "_waiters", None)

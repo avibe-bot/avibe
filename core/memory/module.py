@@ -1064,12 +1064,24 @@ class MemoryModule:
         succeeded_count = sum(leg_succeeded)
         if succeeded_count == 0:
             return first_failure or OperationFailed(error="memory_processing_failed")
-        merged = _merge_owner_search_items(
-            user_items=successful[0],
-            assistant_items=successful[1],
-            same_method=leg_methods[0] == leg_methods[1],
-            limit=policy.max_results,
-        )
+        try:
+            merged = await _merge_owner_search_items_isolated(
+                user_items=successful[0],
+                assistant_items=successful[1],
+                same_method=leg_methods[0] == leg_methods[1],
+                limit=policy.max_results,
+                deadline=(
+                    agentic_deadline
+                    if agentic_deadline is not None
+                    else monotonic() + PROVIDER_READ_TIMEOUT_SECONDS
+                ),
+            )
+        except asyncio.TimeoutError:
+            return OperationFailed(error="memory_provider_timeout")
+        except OSError:
+            return OperationFailed(error="memory_disk_unavailable")
+        except Exception:
+            return OperationFailed(error="memory_processing_failed")
         return RecallItems(
             items=merged,
             requested_mode=requested_mode,
@@ -1724,6 +1736,91 @@ def _merge_owner_search_items(
         seen[text_key] = len(merged)
         merged.append(item)
     return tuple(merged)
+
+
+def _merge_owner_search_item_indices_worker(
+    path: str,
+    user_count: int,
+    same_method: bool,
+    limit: int,
+) -> tuple[tuple[int, Literal["user", "agent", "both"]], ...]:
+    from core.memory.runtime import _load_memory_merge_items
+
+    source = _load_memory_merge_items(path)
+    user_ranked = list(range(user_count))
+    assistant_ranked = list(range(user_count, len(source)))
+    if same_method:
+        ranked = [*user_ranked, *assistant_ranked]
+        ranked.sort(key=lambda index: _same_method_rank_key(source[index]))
+    else:
+        user_ranked.sort(key=lambda index: _per_leg_rank_key(source[index]))
+        assistant_ranked.sort(key=lambda index: _per_leg_rank_key(source[index]))
+        ranked = []
+        for index in range(max(len(user_ranked), len(assistant_ranked))):
+            if index < len(user_ranked):
+                ranked.append(user_ranked[index])
+            if index < len(assistant_ranked):
+                ranked.append(assistant_ranked[index])
+
+    selected: list[tuple[int, Literal["user", "agent", "both"]]] = []
+    seen: dict[str, int] = {}
+    for source_index in ranked:
+        item = source[source_index]
+        origin: Literal["user", "agent"] = (
+            "user" if source_index < user_count else "agent"
+        )
+        text_key = _provider_text_key(item)
+        existing_index = seen.get(text_key)
+        if existing_index is not None:
+            previous_source, previous_origin = selected[existing_index]
+            if previous_origin != origin:
+                selected[existing_index] = (previous_source, "both")
+            continue
+        if len(selected) >= limit:
+            continue
+        seen[text_key] = len(selected)
+        selected.append((source_index, origin))
+    return tuple(selected)
+
+
+async def _merge_owner_search_items_isolated(
+    *,
+    user_items: tuple[ProviderSearchItem, ...],
+    assistant_items: tuple[ProviderSearchItem, ...],
+    same_method: bool,
+    limit: int,
+    deadline: float,
+) -> tuple[MemoryItem, ...]:
+    from core.memory.runtime import (
+        _spool_memory_merge_items,
+        _TerminableMemoryWorker,
+        _unlink_memory_merge_spool,
+    )
+
+    source = (*user_items, *assistant_items)
+    path = await run_blocking(
+        _spool_memory_merge_items,
+        source,
+        deadline,
+        on_cancel_result=_unlink_memory_merge_spool,
+    )
+    worker = _TerminableMemoryWorker()
+    try:
+        selected = await worker.run(
+            _merge_owner_search_item_indices_worker,
+            path,
+            len(user_items),
+            same_method,
+            limit,
+            deadline=deadline,
+        )
+        return tuple(
+            replace(source[index].item, origin=origin)
+            for index, origin in selected
+        )
+    finally:
+        await worker.close()
+        await run_blocking(_unlink_memory_merge_spool, path)
 
 
 def _same_method_rank_key(item: ProviderSearchItem) -> tuple[object, ...]:

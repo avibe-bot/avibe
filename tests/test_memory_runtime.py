@@ -579,7 +579,7 @@ async def test_aggregate_list_incrementally_retains_only_final_page(
             (),
             False,
             True,
-            {item.id: 1 for item in items},
+            tuple(1 for _item in items),
         )
 
     encoded: list[dict[str, tuple[str, str] | None]] = []
@@ -599,12 +599,14 @@ async def test_aggregate_list_incrementally_retains_only_final_page(
     merge_sizes: list[int] = []
     real_merge = runtime_module._merge_memory_list_candidates
 
-    async def bounded_merge(items, *, limit: int, deadline: float, worker):
+    async def bounded_merge(records, *, limit: int, deadline: float, worker):
         assert deadline > time.monotonic()
         assert worker is not None
-        buffered = list(items)
+        buffered = list(records)
         merge_sizes.append(len(buffered))
-        return real_merge(buffered, limit=limit)
+        merged = real_merge((item for item, _hint in buffered), limit=limit)
+        hints = {item.id: hint for item, hint in buffered}
+        return tuple((item, hints[item.id]) for item in merged)
 
     monkeypatch.setattr(
         runtime_module,
@@ -619,7 +621,7 @@ async def test_aggregate_list_incrementally_retains_only_final_page(
     )
     monkeypatch.setattr(
         runtime_module,
-        "_merge_memory_list_candidates_isolated",
+        "_merge_memory_list_candidate_records_isolated",
         bounded_merge,
     )
 
@@ -762,6 +764,66 @@ async def test_all_project_search_merge_round_trips_through_process_worker() -> 
         await worker.close()
 
     assert [item.text for item in items] == ["newer"]
+
+
+@pytest.mark.asyncio
+async def test_aggregate_merges_dispatch_only_spool_paths_to_worker() -> None:
+    dispatched: list[tuple[object, ...]] = []
+
+    class Worker:
+        async def run(self, operation, *args, deadline: float):
+            assert deadline > time.monotonic()
+            assert isinstance(args[0], str)
+            assert all(not isinstance(arg, (MemoryItem, MemoryListItem)) for arg in args)
+            dispatched.append(args)
+            return operation(*args)
+
+    worker = Worker()
+    large_text = "x" * 100_000
+    search_items = await runtime_module._merge_search_items_isolated(
+        (
+            MemoryItem(kind="episode", text=large_text, date="2026-08-26"),
+            MemoryItem(kind="episode", text="older", date="2026-08-25"),
+        ),
+        limit=1,
+        deadline=time.monotonic() + 5,
+        worker=worker,
+    )
+    list_records, eligible = await runtime_module._merge_project_window_records_isolated(
+        (
+            (
+                MemoryListItem(
+                    id="episode-" + "a" * 100_000,
+                    subject="subject",
+                    summary="summary",
+                    body="body",
+                    timestamp="2026-08-26T00:00:00Z",
+                    project="default",
+                ),
+                1,
+            ),
+            (
+                MemoryListItem(
+                    id="episode-" + "b" * 100_000,
+                    subject="subject",
+                    summary="summary",
+                    body="body",
+                    timestamp="2026-08-26T00:00:00Z",
+                    project="default",
+                ),
+                1,
+            ),
+        ),
+        boundary=None,
+        limit=1,
+        deadline=time.monotonic() + 5,
+        worker=worker,
+    )
+
+    assert search_items[0].text == large_text
+    assert list_records[0][0].id.endswith("a" * 100_000)
+    assert eligible == 2
+    assert len(dispatched) == 2
 
 
 @pytest.mark.asyncio

@@ -343,6 +343,13 @@ async def test_worker_validated_results_skip_controller_text_reencoding(
     monkeypatch.setattr(MemoryModule, "_normalize_text", staticmethod(guarded_normalize))
     monkeypatch.setattr(
         memory_module,
+        "_same_method_rank_key",
+        lambda _item: pytest.fail(
+            "controller sorted provider IDs outside the isolated worker"
+        ),
+    )
+    monkeypatch.setattr(
+        memory_module,
         "_profile_bytes",
         lambda _profile: pytest.fail(
             "controller revalidated worker-prepared profile fields"

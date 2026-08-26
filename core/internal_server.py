@@ -74,6 +74,17 @@ _PROCESSING_RECORD_CURSOR_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
 _PROCESSING_RECORD_ENTRY_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,256}\Z")
 
 
+def _memory_streaming_json_response(payload: object, *, status_code: int = 200) -> StreamingResponse:
+    from core.memory.retained_input import stream_json_bytes
+
+    return StreamingResponse(
+        stream_json_bytes(payload),
+        status_code=status_code,
+        media_type="application/json",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 def _processing_record_list_query(
     request: Request,
 ) -> tuple[str | None, int, str | None]:
@@ -1428,7 +1439,8 @@ def create_app(
         if runtime is None:
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
         try:
-            return await runtime.profile_payload(principal_id, project_id)
+            result = await runtime.profile_payload(principal_id, project_id)
+            return _memory_streaming_json_response(result)
         except Exception:
             logger.warning("internal memory profile failed")
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_processing_failed"})
@@ -1689,13 +1701,14 @@ def create_app(
             try:
                 admitted_search = getattr(runtime, "_search_payload_admitted", None)
                 search = admitted_search if callable(admitted_search) else runtime.search_payload
-                return await search(
+                result = await search(
                     payload["query"],
                     policy,
                     principal_id,
                     project_id,
                     current_session_id=current_session_id,
                 )
+                return _memory_streaming_json_response(result)
             except Exception:
                 logger.warning("internal memory search failed")
                 return JSONResponse(
@@ -1847,7 +1860,7 @@ def create_app(
                         "error": "memory_invalid_input",
                     }:
                         return JSONResponse(status_code=400, content=result)
-                    return result
+                    return _memory_streaming_json_response(result)
                 except Exception:
                     logger.warning("internal aggregate memory list failed")
                     return JSONResponse(
@@ -1889,13 +1902,14 @@ def create_app(
                         content={"status": "failed", "error": "memory_invalid_input"},
                     )
             try:
-                return await runtime.list_episodes_payload(
+                result = await runtime.list_episodes_payload(
                     principal_id,
                     project_id,
                     page=page,
                     page_size=limit,
                     **origin_options,
                 )
+                return _memory_streaming_json_response(result)
             except Exception:
                 logger.warning("internal memory list failed")
                 return JSONResponse(

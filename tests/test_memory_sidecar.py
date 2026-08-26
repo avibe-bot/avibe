@@ -513,6 +513,34 @@ def test_spool_write_rechecks_deadline_after_lock(
         assert spool.tell() == 0
 
 
+def test_spool_write_bounds_lock_acquisition_by_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    timeouts: list[float] = []
+
+    class BusyLock:
+        def acquire(self, *, timeout: float) -> bool:
+            timeouts.append(timeout)
+            return False
+
+        def release(self) -> None:
+            raise AssertionError("an unacquired lock must not be released")
+
+    monkeypatch.setattr(sidecar, "_SPOOL_WRITE_LOCK", BusyLock())
+    deadline = sidecar.time.monotonic() + 1.0
+    with (tmp_path / "response-spool").open("w+b") as spool:
+        with pytest.raises(sidecar._RequestDeadlineExceeded):
+            sidecar._write_spool_chunk(
+                spool,
+                memoryview(b"blocked response"),
+                deadline=deadline,
+            )
+
+    assert len(timeouts) == 1
+    assert 0 < timeouts[0] <= 1.0
+
+
 def test_sidecar_rejects_artifact_before_everos_can_persist_diagnostics(
     monkeypatch, tmp_path: Path
 ) -> None:

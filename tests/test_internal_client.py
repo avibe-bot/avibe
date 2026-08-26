@@ -690,6 +690,85 @@ def test_memory_search_async_streams_raw_controller_response(monkeypatch, socket
     )
 
 
+def test_memory_list_async_streams_raw_controller_response(monkeypatch, socket_path):
+    from core.memory import ui_access
+
+    monkeypatch.setattr(ui_access, "_process_secret", "test-ui-controller-secret")
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(
+            path=request.url.path,
+            payload=json.loads(request.content.decode("utf-8")),
+        )
+        return httpx.Response(
+            206,
+            content=b'{"status":"ok","items":[{"id":"large"}]}',
+        )
+
+    async def exercise():
+        with patch(
+            "vibe.internal_client.httpx.AsyncHTTPTransport",
+            return_value=httpx.MockTransport(handler),
+        ):
+            return [
+                item
+                async for item in internal_client.memory_list_stream(
+                    user_key="avibe:remote:user-list",
+                    project="all",
+                    cursor="cursor-token",
+                    limit=9,
+                    origin="agent",
+                    socket_path=socket_path,
+                )
+            ]
+
+    events = asyncio.run(exercise())
+
+    assert events[0] == (206, b"")
+    assert b"".join(chunk for _status, chunk in events[1:]) == (
+        b'{"status":"ok","items":[{"id":"large"}]}'
+    )
+    assert captured == {
+        "path": "/internal/memory/list",
+        "payload": {
+            "limit": 9,
+            "project": "all",
+            "cursor": "cursor-token",
+            "origin": "agent",
+        },
+    }
+
+
+def test_memory_profile_async_streams_raw_controller_response(monkeypatch, socket_path):
+    from core.memory import ui_access
+
+    monkeypatch.setattr(ui_access, "_process_secret", "test-ui-controller-secret")
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(path=request.url.path, method=request.method)
+        return httpx.Response(200, content=b'{"status":"ok","items":[]}')
+
+    async def exercise():
+        with patch(
+            "vibe.internal_client.httpx.AsyncHTTPTransport",
+            return_value=httpx.MockTransport(handler),
+        ):
+            return [
+                item
+                async for item in internal_client.memory_profile_stream(
+                    user_key="avibe:local",
+                    socket_path=socket_path,
+                )
+            ]
+
+    events = asyncio.run(exercise())
+
+    assert events == [(200, b""), (None, b'{"status":"ok","items":[]}')]
+    assert captured == {"path": "/internal/memory/profile", "method": "GET"}
+
+
 def test_memory_ui_read_helper_signs_the_fixed_local_owner(monkeypatch, socket_path):
     from core.memory import ui_access
 

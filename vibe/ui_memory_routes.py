@@ -135,45 +135,63 @@ async def _memory_internal_response(call: Callable[[], Any]) -> Response:
     return _memory_response(body, status_code=status_code)
 
 
-async def _memory_internal_stream_response(call: Callable[[], Any]) -> Response:
+async def _memory_internal_stream_response(
+    call: Callable[[], Any],
+    *,
+    on_close: Callable[[], None] | None = None,
+) -> Response:
     from vibe import internal_client
 
     stream = call()
+    transferred = False
     try:
-        status_code, first_chunk = await anext(stream)
-    except internal_client.InternalServerUnavailable:
-        return _memory_response(
-            {"status": "failed", "error": "memory_sidecar_unavailable"},
-            status_code=503,
-        )
-    except StopAsyncIteration:
-        return _memory_response(
-            {"status": "failed", "error": "memory_provider_response_invalid"},
-            status_code=503,
-        )
-    if status_code is None:
-        await stream.aclose()
-        return _memory_response(
-            {"status": "failed", "error": "memory_provider_response_invalid"},
-            status_code=503,
-        )
-
-    async def body():
         try:
-            if first_chunk:
-                yield first_chunk
-            async for _status_code, chunk in stream:
-                if chunk:
-                    yield chunk
-        finally:
-            await stream.aclose()
+            status_code, first_chunk = await anext(stream)
+        except internal_client.InternalServerUnavailable:
+            return _memory_response(
+                {"status": "failed", "error": "memory_sidecar_unavailable"},
+                status_code=503,
+            )
+        except StopAsyncIteration:
+            return _memory_response(
+                {"status": "failed", "error": "memory_provider_response_invalid"},
+                status_code=503,
+            )
+        if status_code is None:
+            return _memory_response(
+                {"status": "failed", "error": "memory_provider_response_invalid"},
+                status_code=503,
+            )
 
-    return StreamingResponse(
-        body(),
-        status_code=status_code,
-        media_type="application/json",
-        headers={"Cache-Control": "no-store"},
-    )
+        async def body():
+            try:
+                if first_chunk:
+                    yield first_chunk
+                async for _status_code, chunk in stream:
+                    if chunk:
+                        yield chunk
+            finally:
+                try:
+                    await stream.aclose()
+                finally:
+                    if on_close is not None:
+                        on_close()
+
+        response = StreamingResponse(
+            body(),
+            status_code=status_code,
+            media_type="application/json",
+            headers={"Cache-Control": "no-store"},
+        )
+        transferred = True
+        return response
+    finally:
+        if not transferred:
+            try:
+                await stream.aclose()
+            finally:
+                if on_close is not None:
+                    on_close()
 
 
 def _memory_settings_projection(memory: object) -> dict:
@@ -693,8 +711,8 @@ def register_memory_routes(app) -> None:
                 return _memory_forbidden_response()
             from vibe import internal_client
 
-            return await _memory_internal_response(
-                lambda: internal_client.memory_profile(user_key=user_key)
+            return await _memory_internal_stream_response(
+                lambda: internal_client.memory_profile_stream(user_key=user_key)
             )
 
         return await app.dispatch_native_request(starlette_request, handler)
@@ -828,13 +846,16 @@ def register_memory_routes(app) -> None:
                     )
                 from vibe import internal_client
 
+                stream_reservation = reservation
+                reservation = None
                 return await _memory_internal_stream_response(
                     lambda: internal_client.memory_search_stream(
                         query,
                         policy.payload(),
                         user_key=user_key,
                         project=project,
-                    )
+                    ),
+                    on_close=stream_reservation.release,
                 )
             finally:
                 if reservation is not None:
@@ -920,15 +941,18 @@ def register_memory_routes(app) -> None:
             from vibe import internal_client
 
             try:
-                return await _memory_internal_response(
-                    lambda: internal_client.memory_list(
+                stream_reservation = reservation
+                reservation = None
+                return await _memory_internal_stream_response(
+                    lambda: internal_client.memory_list_stream(
                         user_key=user_key,
                         project=project,
                         page=page,
                         cursor=cursor,
                         limit=limit,
                         origin=origin,
-                    )
+                    ),
+                    on_close=stream_reservation.release,
                 )
             finally:
                 if reservation is not None:

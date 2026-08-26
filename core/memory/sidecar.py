@@ -388,7 +388,14 @@ def _write_spool_chunk(
     deadline: float | None = None,
 ) -> None:
     _check_request_deadline(deadline)
-    with _SPOOL_WRITE_LOCK:
+    if deadline is None:
+        acquired = _SPOOL_WRITE_LOCK.acquire()
+    else:
+        remaining = deadline - time.monotonic()
+        acquired = remaining > 0 and _SPOOL_WRITE_LOCK.acquire(timeout=remaining)
+    if not acquired:
+        raise _RequestDeadlineExceeded
+    try:
         _check_request_deadline(deadline)
         free_bytes = shutil.disk_usage(tempfile.gettempdir()).free
         _check_request_deadline(deadline)
@@ -402,6 +409,8 @@ def _write_spool_chunk(
             raise OSError(errno.EIO, "short write while spooling sidecar payload")
         spool.flush()
         _check_request_deadline(deadline)
+    finally:
+        _SPOOL_WRITE_LOCK.release()
 
 
 async def _replay_spooled_response(

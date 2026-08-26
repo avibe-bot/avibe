@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import pytest
@@ -17,6 +18,7 @@ from config.v2_config import (
     V2Config,
 )
 from core.memory.retained_input import (
+    iter_json_bytes,
     read_json_object_admitted,
     RetainedInputBudget,
 )
@@ -542,14 +544,12 @@ def test_memory_list_route_forwards_agent_origin(
     _save_config()
     calls: list[dict[str, object]] = []
 
-    async def memory_list(**kwargs):
+    async def memory_list_stream(**kwargs):
         calls.append(kwargs)
-        return {
-            "status_code": 200,
-            "body": {"status": "ok", "items": [], "warnings": []},
-        }
+        yield 200, b""
+        yield None, b'{"status":"ok","items":[],"warnings":[]}'
 
-    monkeypatch.setattr(internal_client, "memory_list", memory_list)
+    monkeypatch.setattr(internal_client, "memory_list_stream", memory_list_stream)
     client = app.test_client()
     response = client.post(
         "/api/memory/list",
@@ -598,14 +598,19 @@ def test_memory_list_route_forwards_large_aggregate_cursor(
     cursor = "a" * 10_000
     calls: list[dict[str, object]] = []
 
-    async def memory_list(**kwargs):
+    async def memory_list_stream(**kwargs):
         calls.append(kwargs)
-        return {
-            "status_code": 200,
-            "body": {"status": "ok", "items": [], "next_cursor": None},
-        }
+        yield 200, b""
+        yield None, b'{"status":"ok","items":[],"next_cursor":null}'
 
-    monkeypatch.setattr(internal_client, "memory_list", memory_list)
+    monkeypatch.setattr(internal_client, "memory_list_stream", memory_list_stream)
+    monkeypatch.setattr(
+        ui_memory_routes,
+        "_memory_response",
+        lambda *_args, **_kwargs: pytest.fail(
+            "streaming list must not re-encode the response"
+        ),
+    )
     client = app.test_client()
     response = client.post(
         "/api/memory/list",
@@ -724,6 +729,69 @@ async def test_declared_body_size_does_not_reserve_unsent_bytes() -> None:
     reservation.release()
 
     assert payload == {}
+    assert budget.retained_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_large_json_body_spools_before_isolated_decoding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core.memory import retained_input
+
+    body = b'{"query":"' + b"x" * 70_000 + b'"}'
+    observed: dict[str, object] = {}
+
+    class Request:
+        headers = {"content-length": str(len(body))}
+
+        async def stream(self):
+            for offset in range(0, len(body), 4096):
+                yield body[offset : offset + 4096]
+
+    async def parse_spool(path: str, *, byte_count: int):
+        observed["byte_count"] = byte_count
+        with open(path, "rb") as spool:
+            observed["body"] = spool.read()
+        return {"query": "x" * 70_000}
+
+    monkeypatch.setattr(retained_input, "_parse_json_body_spool", parse_spool)
+    budget = RetainedInputBudget(max_bytes=1)
+    payload, reservation = await read_json_object_admitted(Request(), budget)
+    reservation.release()
+
+    assert payload == {"query": "x" * 70_000}
+    assert observed == {"byte_count": len(body), "body": body}
+    assert budget.retained_bytes == 0
+
+
+def test_streaming_json_encoder_bounds_large_scalar_chunks() -> None:
+    payload = {"status": "ok", "items": [{"text": "\x00" * 70_000}]}
+    chunks = tuple(iter_json_bytes(payload))
+
+    assert max(map(len, chunks)) <= 64 * 1024
+    assert json.loads(b"".join(chunks)) == payload
+
+
+@pytest.mark.asyncio
+async def test_memory_stream_holds_admission_until_body_closes() -> None:
+    budget = RetainedInputBudget(max_bytes=1024)
+    reservation = budget.reserve(512)
+    assert reservation is not None
+
+    async def stream():
+        yield 200, b""
+        yield None, b'{"status":"ok"}'
+
+    response = await ui_memory_routes._memory_internal_stream_response(
+        stream,
+        on_close=reservation.release,
+    )
+    assert budget.retained_bytes == 512
+
+    body = response.body_iterator
+    assert await anext(body) == b'{"status":"ok"}'
+    assert budget.retained_bytes == 512
+    await body.aclose()
     assert budget.retained_bytes == 0
 
 
