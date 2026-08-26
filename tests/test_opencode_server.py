@@ -180,6 +180,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_user_catalog_boundary_excludes_model_hub_runtime_provider(self):
         private_id = "avibe-model-hub-0123456789abcdef01234567"
+        legacy_custom_id = "avibe-model-hub-relay"
 
         class _CatalogSession(_FakeSession):
             def get(self, url, headers=None, timeout=None):
@@ -188,10 +189,12 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
                     payload = {
                         "providers": [
                             {"id": private_id, "models": {"openai/gpt-5": {}}},
+                            {"id": legacy_custom_id, "models": {"relay-model": {}}},
                             {"id": "openai", "models": {"gpt-5": {}}},
                         ],
                         "default": {
                             private_id: "openai/gpt-5",
+                            legacy_custom_id: "relay-model",
                             "openai": "gpt-5",
                         },
                     }
@@ -199,15 +202,17 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
                     payload = {
                         "all": {
                             private_id: {"id": private_id},
+                            legacy_custom_id: {"id": legacy_custom_id},
                             "openai": {"id": "openai"},
                         },
-                        "connected": [private_id, "openai"],
+                        "connected": [private_id, legacy_custom_id, "openai"],
                     }
                 else:
                     payload = {
                         "model": f"{private_id}/openai/gpt-5",
                         "provider": {
                             private_id: {"options": {"apiKey": "private"}},
+                            legacy_custom_id: {},
                             "openai": {},
                         },
                     }
@@ -222,12 +227,18 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         providers = await manager.get_providers()
         config = await manager.get_default_config("/tmp/work")
 
-        self.assertEqual([row["id"] for row in models["providers"]], ["openai"])
-        self.assertEqual(models["default"], {"openai": "gpt-5"})
-        self.assertEqual(set(providers["all"]), {"openai"})
-        self.assertEqual(providers["connected"], ["openai"])
+        self.assertEqual(
+            [row["id"] for row in models["providers"]],
+            [legacy_custom_id, "openai"],
+        )
+        self.assertEqual(
+            models["default"],
+            {legacy_custom_id: "relay-model", "openai": "gpt-5"},
+        )
+        self.assertEqual(set(providers["all"]), {legacy_custom_id, "openai"})
+        self.assertEqual(providers["connected"], [legacy_custom_id, "openai"])
         self.assertNotIn("model", config)
-        self.assertEqual(set(config["provider"]), {"openai"})
+        self.assertEqual(set(config["provider"]), {legacy_custom_id, "openai"})
 
     async def test_ensure_running_restarts_healthy_server_when_caller_context_plugin_changes(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)

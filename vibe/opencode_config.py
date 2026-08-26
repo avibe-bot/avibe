@@ -23,6 +23,9 @@ _CUSTOM_PROVIDER_LABELS = {
     "anthropic-compatible": "Anthropic compatible",
 }
 MODEL_HUB_RUNTIME_PROVIDER_PREFIX = "avibe-model-hub-"
+_MODEL_HUB_RUNTIME_PROVIDER_ID_RE = re.compile(
+    rf"^{re.escape(MODEL_HUB_RUNTIME_PROVIDER_PREFIX)}[0-9a-f]{{24}}$"
+)
 _RESERVED_PROVIDER_IDS = {
     "alibaba-cn",
     "anthropic",
@@ -529,7 +532,8 @@ def is_model_hub_runtime_provider_id(provider_id: object) -> bool:
 
     return (
         isinstance(provider_id, str)
-        and provider_id.lower().startswith(MODEL_HUB_RUNTIME_PROVIDER_PREFIX)
+        and _MODEL_HUB_RUNTIME_PROVIDER_ID_RE.fullmatch(provider_id.lower())
+        is not None
     )
 
 
