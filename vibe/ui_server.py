@@ -7815,6 +7815,8 @@ async def wechat_qr_login_poll():
                     restart.get("error") or restart.get("code"),
                 )
         except Exception as exc:
+            result["restart_scheduled"] = False
+            result["restart_reason"] = "restart_not_scheduled"
             logger.warning("Failed to schedule service restart after WeChat QR login: %s", exc)
 
     return jsonify(result)

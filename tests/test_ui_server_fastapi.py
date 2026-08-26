@@ -3640,6 +3640,61 @@ def test_wechat_qr_poll_reports_saved_login_when_restart_is_package_busy(monkeyp
     }
 
 
+def test_wechat_qr_poll_reports_saved_login_when_restart_scheduling_raises(monkeypatch):
+    from vibe import runtime
+
+    class _Auth:
+        async def poll_status(self, session_key, verify_code=None):
+            return {
+                "status": "confirmed",
+                "bot_token": "wechat-token",
+                "user_id": "wx-user",
+            }
+
+    persisted: list[dict] = []
+    bound: list[str] = []
+    runtime.ensure_config()
+    monkeypatch.setattr(ui_server, "_get_wechat_auth", lambda: _Auth())
+    monkeypatch.setattr(
+        ui_server,
+        "_persist_wechat_qr_credentials",
+        lambda result: persisted.append(dict(result)),
+    )
+    monkeypatch.setattr(
+        "vibe.api.auto_bind_wechat_user",
+        lambda user_id: bound.append(user_id) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        ui_server,
+        "_schedule_wechat_qr_login_restart",
+        lambda: (_ for _ in ()).throw(RuntimeError("supervisor unavailable")),
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/api/wechat/qr_login/poll",
+        json={"session_key": "qr-session"},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "status": "confirmed",
+        "bot_token": "wechat-token",
+        "user_id": "wx-user",
+        "restart_scheduled": False,
+        "restart_reason": "restart_not_scheduled",
+    }
+    assert persisted == [
+        {
+            "status": "confirmed",
+            "bot_token": "wechat-token",
+            "user_id": "wx-user",
+        }
+    ]
+    assert bound == ["wx-user"]
+
+
 def test_wechat_qr_poll_passes_verify_code(monkeypatch):
     class _Auth:
         async def poll_status(self, session_key, verify_code=None):
