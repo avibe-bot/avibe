@@ -31,7 +31,10 @@ const renderCompact = (enabled: boolean) =>
 describe('ShowPageAnnotateControl compact presentation', () => {
   it.each([false, true])('keeps one title-bar button when enabled=%s', (enabled) => {
     const html = renderCompact(enabled);
-    const shortcut = formatActionShortcut(defaultActionShortcuts().showPageAnnotation);
+    const shortcut = formatActionShortcut(
+      defaultActionShortcuts().showPageAnnotation,
+      i18n.getFixedT('en'),
+    );
 
     expect(html.match(/<button/g)).toHaveLength(1);
     expect(html).toContain('aria-label="Annotate"');

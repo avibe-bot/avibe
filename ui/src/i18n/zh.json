@@ -309,6 +309,33 @@
       "modifierRequired": "请包含 Option、Command 或 Control。",
       "reserved": "这个快捷键已被 Avibe 使用。",
       "conflict": "已被{{action}}使用。",
+      "modifierLabels": {
+        "ctrl": "Ctrl",
+        "alt": "Alt",
+        "shift": "Shift",
+        "meta": "Meta"
+      },
+      "keyLabels": {
+        "backspace": "退格",
+        "capsLock": "大写锁定",
+        "contextMenu": "菜单",
+        "delete": "删除",
+        "end": "行尾",
+        "enter": "回车",
+        "escape": "Esc",
+        "home": "行首",
+        "insert": "插入",
+        "numLock": "数字锁定",
+        "numpad": "数字键盘 {{key}}",
+        "numpadEnter": "数字键盘回车",
+        "pageDown": "下一页",
+        "pageUp": "上一页",
+        "pause": "暂停",
+        "printScreen": "截屏",
+        "scrollLock": "滚动锁定",
+        "space": "空格",
+        "tab": "Tab"
+      },
       "reset": "恢复默认"
     },
     "diagnosticsTab": "诊断",

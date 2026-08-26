@@ -45,6 +45,10 @@ vi.mock('../../lib/voiceRealtime', async (importOriginal) => ({
 
 import { ToastProvider } from '../../context/ToastProvider';
 import en from '../../i18n/en.json';
+import {
+  defaultActionShortcuts,
+  writeActionShortcuts,
+} from '../../lib/actionShortcuts';
 import { Composer } from './Composer';
 
 const i18n = createInstance();
@@ -85,6 +89,7 @@ beforeEach(() => {
     configurable: true,
     value: 'Linux x86_64',
   });
+  Object.defineProperty(navigator, 'keyboard', { configurable: true, value: undefined });
   Object.defineProperty(window, 'matchMedia', {
     configurable: true,
     value: vi.fn().mockReturnValue({ matches: false }),
@@ -127,6 +132,7 @@ describe('Composer voice shortcut', () => {
     fireEvent.keyDown(window, { code: 'KeyZ', altKey: true });
 
     expect(voiceMocks.getUserMedia).not.toHaveBeenCalled();
+    menuTrigger.remove();
   });
 
   it('does not advertise or handle the shortcut when voice input is disabled', async () => {
@@ -137,5 +143,32 @@ describe('Composer voice shortcut', () => {
     expect(mic.getAttribute('title')).toBe(en.chat.compose.voice);
     fireEvent.keyDown(window, { code: 'KeyZ', altKey: true });
     expect(voiceMocks.getUserMedia).not.toHaveBeenCalled();
+  });
+
+  it('finishes a modified Escape shortcut while plain Escape still cancels', async () => {
+    const shortcuts = defaultActionShortcuts();
+    shortcuts.voiceInput = {
+      code: 'Escape',
+      displayKey: 'Escape',
+      altKey: true,
+      ctrlKey: false,
+      metaKey: false,
+      shiftKey: false,
+    };
+    writeActionShortcuts(shortcuts);
+    renderComposer('escape-shortcut-session');
+    await screen.findByRole('button', { name: en.chat.compose.voice });
+    await act(async () => undefined);
+
+    fireEvent.keyDown(window, { code: 'Escape', key: 'Escape', altKey: true });
+    await waitFor(() => expect(voiceMocks.getUserMedia).toHaveBeenCalledOnce());
+    await screen.findByRole('button', { name: en.chat.compose.stopRecording });
+    fireEvent.keyDown(window, { code: 'Escape', key: 'Escape', altKey: true });
+    expect(voiceMocks.finish).toHaveBeenCalledOnce();
+    expect(voiceMocks.abort).not.toHaveBeenCalled();
+
+    voiceMocks.finish.mockReset();
+    fireEvent.keyDown(window, { code: 'Escape', key: 'Escape' });
+    expect(voiceMocks.abort).toHaveBeenCalledOnce();
   });
 });

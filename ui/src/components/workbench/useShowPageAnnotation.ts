@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { actionShortcutMatches, useActionShortcuts } from '../../lib/actionShortcuts';
+import { actionShortcutMatches, isPlainEscape, useActionShortcuts } from '../../lib/actionShortcuts';
 import { useLatestRef } from '../../lib/useLatestRef';
 import { bindFrameChord } from '../apps/windowChords';
 import { inShortcutBlockingOverlay } from './chatShortcuts';
@@ -108,7 +108,7 @@ export function useShowPageAnnotation(src: string | null, shortcutActive = true)
   }, [startListening, stopListening]);
 
   const onParentKeyDown = useCallback((event: KeyboardEvent) => {
-    if (event.key !== 'Escape' || event.defaultPrevented) return;
+    if (!isPlainEscape(event) || event.defaultPrevented) return;
     const target = event.target;
     if (target instanceof Element && target.closest(PARENT_ESCAPE_CLAIM_SELECTOR)) return;
     if (inShortcutBlockingOverlay(target as Element | null, document)) return;
@@ -118,7 +118,12 @@ export function useShowPageAnnotation(src: string | null, shortcutActive = true)
       if (!frameDocument) return;
       const FrameKeyboardEvent = frameDocument.defaultView?.KeyboardEvent ?? KeyboardEvent;
       frameDocument.dispatchEvent(
-        new FrameKeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+        new FrameKeyboardEvent('keydown', {
+          code: 'Escape',
+          key: 'Escape',
+          bubbles: true,
+          cancelable: true,
+        }),
       );
     } catch {
       // The frame may be sandboxed, navigating, or already torn down.

@@ -309,6 +309,33 @@
       "modifierRequired": "Include Option, Command, or Control.",
       "reserved": "This shortcut is already used by Avibe.",
       "conflict": "Already used by {{action}}.",
+      "modifierLabels": {
+        "ctrl": "Ctrl",
+        "alt": "Alt",
+        "shift": "Shift",
+        "meta": "Meta"
+      },
+      "keyLabels": {
+        "backspace": "Backspace",
+        "capsLock": "Caps Lock",
+        "contextMenu": "Context Menu",
+        "delete": "Delete",
+        "end": "End",
+        "enter": "Enter",
+        "escape": "Esc",
+        "home": "Home",
+        "insert": "Insert",
+        "numLock": "Num Lock",
+        "numpad": "Numpad {{key}}",
+        "numpadEnter": "Numpad Enter",
+        "pageDown": "Page Down",
+        "pageUp": "Page Up",
+        "pause": "Pause",
+        "printScreen": "Print Screen",
+        "scrollLock": "Scroll Lock",
+        "space": "Space",
+        "tab": "Tab"
+      },
       "reset": "Restore defaults"
     },
     "diagnosticsTab": "Diagnostics",

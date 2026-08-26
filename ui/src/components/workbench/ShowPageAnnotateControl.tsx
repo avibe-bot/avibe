@@ -5,7 +5,7 @@ import { Camera, Check, type LucideIcon, MessageSquarePlus, MousePointerClick, X
 
 import { Button } from '../ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
-import { formatActionShortcut, useActionShortcuts } from '../../lib/actionShortcuts';
+import { useActionShortcutLabel, useActionShortcuts } from '../../lib/actionShortcuts';
 import type { AnnotationMode, AnnotationState } from './useShowPageAnnotation';
 
 // Show Page annotation control rendered in the chat header (only in Show Page
@@ -77,8 +77,9 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
 }) => {
   const { t } = useTranslation();
   const { showPageAnnotation: annotationShortcut } = useActionShortcuts();
+  const annotationShortcutLabel = useActionShortcutLabel(annotationShortcut);
   const shortcutHint = t('chat.showPage.annotate.shortcutHint', {
-    shortcut: formatActionShortcut(annotationShortcut),
+    shortcut: annotationShortcutLabel,
   });
   const ready = state !== null;
   const available = state?.available === true;

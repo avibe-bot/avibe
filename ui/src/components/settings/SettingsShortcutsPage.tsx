@@ -6,10 +6,11 @@ import clsx from 'clsx';
 import {
   actionShortcutsEqual,
   defaultActionShortcuts,
-  formatActionShortcut,
   isReservedActionShortcut,
+  isPlainEscape,
   shortcutFromKeyboardEvent,
   shortcutFromKeyboardEventWithLayout,
+  useActionShortcutLabel,
   useActionShortcuts,
   writeActionShortcuts,
   type ActionShortcutId,
@@ -26,6 +27,10 @@ export const SettingsShortcutsPage: React.FC = () => {
   const [capturing, setCapturing] = useState<ActionShortcutId | null>(null);
   const [error, setError] = useState<{ id: ActionShortcutId; message: string } | null>(null);
   const captureRequestRef = useRef(0);
+  const shortcutLabels: Record<ActionShortcutId, string> = {
+    voiceInput: useActionShortcutLabel(shortcuts.voiceInput),
+    showPageAnnotation: useActionShortcutLabel(shortcuts.showPageAnnotation),
+  };
 
   const actionLabel = (id: ActionShortcutId): string => t(`settings.shortcuts.${id}.title`);
 
@@ -33,13 +38,7 @@ export const SettingsShortcutsPage: React.FC = () => {
     if (capturing !== id) return;
     event.preventDefault();
     event.stopPropagation();
-    if (
-      event.code === 'Escape'
-      && !event.altKey
-      && !event.ctrlKey
-      && !event.metaKey
-      && !event.shiftKey
-    ) {
+    if (isPlainEscape(event)) {
       captureRequestRef.current += 1;
       setCapturing(null);
       setError(null);
@@ -109,7 +108,7 @@ export const SettingsShortcutsPage: React.FC = () => {
         >
           <Keyboard className="size-3.5 shrink-0 text-muted" />
           <kbd className="min-w-0 flex-1 truncate text-right font-mono text-[12px] font-semibold">
-            {active ? t('settings.shortcuts.pressKeys') : formatActionShortcut(shortcuts[id])}
+            {active ? t('settings.shortcuts.pressKeys') : shortcutLabels[id]}
           </kbd>
         </button>
         <span

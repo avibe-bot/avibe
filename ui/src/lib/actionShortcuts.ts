@@ -1,4 +1,6 @@
-import { useMemo, useSyncExternalStore } from 'react';
+import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 
 import { isApplePlatform } from './platform';
 
@@ -23,6 +25,8 @@ type ShortcutEvent = Pick<
 
 type KeyboardLayoutProvider = {
   getLayoutMap: () => Promise<Pick<Map<string, string>, 'get'>>;
+  addEventListener?: (type: 'layoutchange', listener: EventListener) => void;
+  removeEventListener?: (type: 'layoutchange', listener: EventListener) => void;
 };
 
 type ReadableStorage = Pick<Storage, 'getItem'>;
@@ -147,10 +151,22 @@ export function writeActionShortcuts(
 
 function normalizedDisplayKey(value: string | undefined): string | undefined {
   if (!value || value === 'Dead' || value === 'Unidentified') return undefined;
-  if (value === ' ') return 'Space';
+  if (value === ' ') return undefined;
   const glyphs = Array.from(value);
   if (glyphs.length !== 1) return undefined;
   return value.toLocaleUpperCase();
+}
+
+export function isPlainEscape(
+  event: Pick<ShortcutEvent, 'altKey' | 'code' | 'ctrlKey' | 'key' | 'metaKey' | 'shiftKey'>,
+): boolean {
+  return (
+    (event.code === 'Escape' || event.key === 'Escape')
+    && !event.altKey
+    && !event.ctrlKey
+    && !event.metaKey
+    && !event.shiftKey
+  );
 }
 
 export function shortcutFromKeyboardEvent(event: ShortcutEvent): ActionShortcut | null {
@@ -264,47 +280,79 @@ export function isReservedActionShortcut(
   );
 }
 
-const KEY_LABELS: Readonly<Record<string, string>> = {
+const SYMBOL_KEY_LABELS: Readonly<Record<string, string>> = {
   ArrowDown: '↓',
   ArrowLeft: '←',
   ArrowRight: '→',
   ArrowUp: '↑',
   Backquote: '`',
   Backslash: '\\',
-  Backspace: 'Backspace',
   BracketLeft: '[',
   BracketRight: ']',
   Comma: ',',
-  Delete: 'Delete',
-  End: 'End',
-  Enter: 'Enter',
   Equal: '=',
-  Escape: 'Esc',
-  Home: 'Home',
-  Insert: 'Insert',
   Minus: '-',
-  PageDown: 'Page Down',
-  PageUp: 'Page Up',
   Period: '.',
   Quote: "'",
   Semicolon: ';',
   Slash: '/',
-  Space: 'Space',
-  Tab: 'Tab',
 };
 
-export function actionShortcutKeyLabel(code: string): string {
+const TRANSLATED_KEY_LABELS: Readonly<Record<string, string>> = {
+  Backspace: 'backspace',
+  CapsLock: 'capsLock',
+  ContextMenu: 'contextMenu',
+  Delete: 'delete',
+  End: 'end',
+  Enter: 'enter',
+  Escape: 'escape',
+  Home: 'home',
+  Insert: 'insert',
+  NumLock: 'numLock',
+  NumpadEnter: 'numpadEnter',
+  PageDown: 'pageDown',
+  PageUp: 'pageUp',
+  Pause: 'pause',
+  PrintScreen: 'printScreen',
+  ScrollLock: 'scrollLock',
+  Space: 'space',
+  Tab: 'tab',
+};
+
+export function actionShortcutKeyLabel(code: string, t: TFunction): string {
   if (/^Key[A-Z]$/.test(code)) return code.slice(3);
   if (/^Digit[0-9]$/.test(code)) return code.slice(5);
-  if (/^Numpad[0-9]$/.test(code)) return `Numpad ${code.slice(6)}`;
-  return KEY_LABELS[code] ?? code.replace(/([a-z])([A-Z])/g, '$1 $2');
+  if (/^Numpad[0-9]$/.test(code)) {
+    return t('settings.shortcuts.keyLabels.numpad', { key: code.slice(6) });
+  }
+  const numpadSymbol = ({
+    NumpadAdd: '+',
+    NumpadComma: ',',
+    NumpadDecimal: '.',
+    NumpadDivide: '/',
+    NumpadEqual: '=',
+    NumpadMultiply: '×',
+    NumpadSubtract: '-',
+  } as Readonly<Record<string, string>>)[code];
+  if (numpadSymbol) return t('settings.shortcuts.keyLabels.numpad', { key: numpadSymbol });
+  const translated = TRANSLATED_KEY_LABELS[code];
+  if (translated) return t(`settings.shortcuts.keyLabels.${translated}`);
+  return SYMBOL_KEY_LABELS[code] ?? code;
 }
 
 export function formatActionShortcut(
   shortcut: ActionShortcut,
+  t: TFunction,
   apple = isApplePlatform(),
+  layoutKey?: string,
 ): string {
-  const key = shortcut.displayKey ?? actionShortcutKeyLabel(shortcut.code);
+  const key = shortcut.code.startsWith('Numpad')
+    ? actionShortcutKeyLabel(shortcut.code, t)
+    : (
+      normalizedDisplayKey(layoutKey)
+      ?? normalizedDisplayKey(shortcut.displayKey)
+      ?? actionShortcutKeyLabel(shortcut.code, t)
+    );
   if (apple) {
     return [
       shortcut.ctrlKey ? '⌃' : '',
@@ -315,12 +363,58 @@ export function formatActionShortcut(
     ].join('');
   }
   return [
-    shortcut.ctrlKey ? 'Ctrl' : '',
-    shortcut.altKey ? 'Alt' : '',
-    shortcut.shiftKey ? 'Shift' : '',
-    shortcut.metaKey ? 'Meta' : '',
+    shortcut.ctrlKey ? t('settings.shortcuts.modifierLabels.ctrl') : '',
+    shortcut.altKey ? t('settings.shortcuts.modifierLabels.alt') : '',
+    shortcut.shiftKey ? t('settings.shortcuts.modifierLabels.shift') : '',
+    shortcut.metaKey ? t('settings.shortcuts.modifierLabels.meta') : '',
     key,
   ].filter(Boolean).join('+');
+}
+
+function activeKeyboardLayoutProvider(): KeyboardLayoutProvider | undefined {
+  if (typeof navigator === 'undefined') return undefined;
+  return (navigator as Navigator & { keyboard?: KeyboardLayoutProvider }).keyboard;
+}
+
+function useActiveLayoutKey(code: string): string | undefined {
+  const [resolved, setResolved] = useState<{ code: string; key?: string }>({ code: '' });
+
+  useEffect(() => {
+    const keyboard = activeKeyboardLayoutProvider();
+    let active = true;
+    let request = 0;
+
+    const refresh = () => {
+      const currentRequest = ++request;
+      if (!keyboard) {
+        setResolved({ code });
+        return;
+      }
+      void keyboard.getLayoutMap().then((layout) => {
+        if (!active || currentRequest !== request) return;
+        setResolved({ code, key: normalizedDisplayKey(layout.get(code)) });
+      }).catch(() => {
+        if (!active || currentRequest !== request) return;
+        setResolved({ code });
+      });
+    };
+    const onLayoutChange: EventListener = () => refresh();
+
+    refresh();
+    keyboard?.addEventListener?.('layoutchange', onLayoutChange);
+    return () => {
+      active = false;
+      keyboard?.removeEventListener?.('layoutchange', onLayoutChange);
+    };
+  }, [code]);
+
+  return resolved.code === code ? resolved.key : undefined;
+}
+
+export function useActionShortcutLabel(shortcut: ActionShortcut): string {
+  const { t } = useTranslation();
+  const layoutKey = useActiveLayoutKey(shortcut.code);
+  return formatActionShortcut(shortcut, t, isApplePlatform(), layoutKey);
 }
 
 const defaultSnapshot = JSON.stringify(defaultActionShortcuts());

@@ -1,16 +1,31 @@
+import { createInstance } from 'i18next';
 import { describe, expect, it, vi } from 'vitest';
+
+import en from '../i18n/en.json';
+import zh from '../i18n/zh.json';
 
 import {
   ACTION_SHORTCUTS_STORAGE_KEY,
   actionShortcutMatches,
   defaultActionShortcuts,
   formatActionShortcut,
+  isPlainEscape,
   isReservedActionShortcut,
   readActionShortcuts,
   shortcutFromKeyboardEvent,
   shortcutFromKeyboardEventWithLayout,
   writeActionShortcuts,
 } from './actionShortcuts';
+
+const i18n = createInstance();
+void i18n.init({
+  lng: 'en',
+  fallbackLng: 'en',
+  resources: { en: { translation: en }, zh: { translation: zh } },
+  interpolation: { escapeValue: false },
+});
+const enT = i18n.getFixedT('en');
+const zhT = i18n.getFixedT('zh');
 
 const chord = (overrides: Partial<KeyboardEvent> = {}) => ({
   code: 'KeyZ',
@@ -28,8 +43,8 @@ describe('action shortcuts', () => {
 
     expect(defaults.voiceInput).toMatchObject({ code: 'KeyZ', altKey: true });
     expect(defaults.showPageAnnotation).toMatchObject({ code: 'KeyX', altKey: true });
-    expect(formatActionShortcut(defaults.voiceInput, true)).toBe('⌥Z');
-    expect(formatActionShortcut(defaults.showPageAnnotation, false)).toBe('Alt+X');
+    expect(formatActionShortcut(defaults.voiceInput, enT, true)).toBe('⌥Z');
+    expect(formatActionShortcut(defaults.showPageAnnotation, enT, false)).toBe('Alt+X');
   });
 
   it('captures only modified non-modifier keys and matches the exact chord', () => {
@@ -57,8 +72,31 @@ describe('action shortcuts', () => {
     );
 
     expect(shortcut).toMatchObject({ code: 'KeyV', displayKey: 'K', ctrlKey: true });
-    expect(formatActionShortcut(shortcut!, false)).toBe('Ctrl+K');
+    expect(formatActionShortcut(shortcut!, enT, false)).toBe('Ctrl+K');
     expect(actionShortcutMatches(chord({ code: 'KeyV', key: 'k', ctrlKey: true }), shortcut!)).toBe(true);
+  });
+
+  it('localizes every generated word in a shortcut label', () => {
+    const numpad = shortcutFromKeyboardEvent(chord({
+      code: 'Numpad1',
+      key: '1',
+      altKey: true,
+    }))!;
+    const pageDown = shortcutFromKeyboardEvent(chord({
+      code: 'PageDown',
+      key: 'PageDown',
+      ctrlKey: true,
+    }))!;
+
+    expect(formatActionShortcut(numpad, enT, false)).toBe('Alt+Numpad 1');
+    expect(formatActionShortcut(numpad, zhT, false)).toBe('Alt+数字键盘 1');
+    expect(formatActionShortcut(pageDown, enT, false)).toBe('Ctrl+Page Down');
+    expect(formatActionShortcut(pageDown, zhT, false)).toBe('Ctrl+下一页');
+  });
+
+  it('keeps plain Escape separate from modified user shortcuts', () => {
+    expect(isPlainEscape(chord({ code: 'Escape', key: 'Escape' }))).toBe(true);
+    expect(isPlainEscape(chord({ code: 'Escape', key: 'Escape', altKey: true }))).toBe(false);
   });
 
   it('keeps shell-wide commands out of the configurable shortcut namespace', () => {

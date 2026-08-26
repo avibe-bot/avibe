@@ -18,7 +18,8 @@ import { isSoftKeyboardOpen, isTouchCapableDevice } from '../../lib/softKeyboard
 import { cn, copyTextToClipboard } from '../../lib/utils';
 import {
   actionShortcutMatches,
-  formatActionShortcut,
+  isPlainEscape,
+  useActionShortcutLabel,
   useActionShortcuts,
 } from '../../lib/actionShortcuts';
 import {
@@ -393,7 +394,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 }, ref) {
   const { t } = useTranslation();
   const { voiceInput: voiceInputShortcut } = useActionShortcuts();
-  const voiceShortcutLabel = formatActionShortcut(voiceInputShortcut);
+  const voiceShortcutLabel = useActionShortcutLabel(voiceInputShortcut);
   const voiceShortcutHint = t('chat.compose.voiceShortcutHint', { shortcut: voiceShortcutLabel });
   const { showToast } = useToast();
   const [value, setValue] = useState('');
@@ -1159,7 +1160,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   useEffect(() => {
     if (!recording) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+      if (isPlainEscape(e)) {
         e.preventDefault();
         abortRecording();
       }

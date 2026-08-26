@@ -53,6 +53,25 @@ describe('SettingsShortcutsPage', () => {
     });
   });
 
+  it('resolves shipped defaults from the current layout and refreshes after a layout change', async () => {
+    let layout = new Map([['KeyZ', 'y'], ['KeyX', 'q']]);
+    const keyboard = Object.assign(new EventTarget(), {
+      getLayoutMap: async () => layout,
+    });
+    Object.defineProperty(navigator, 'keyboard', { configurable: true, value: keyboard });
+    renderPage();
+
+    const voice = screen.getByRole('button', { name: 'Change Chat voice input shortcut' });
+    const annotation = screen.getByRole('button', { name: 'Change Show Page annotation mode shortcut' });
+    await waitFor(() => expect(voice.textContent).toContain('Alt+Y'));
+    expect(annotation.textContent).toContain('Alt+Q');
+
+    layout = new Map([['KeyZ', 'w'], ['KeyX', 'r']]);
+    keyboard.dispatchEvent(new Event('layoutchange'));
+    await waitFor(() => expect(voice.textContent).toContain('Alt+W'));
+    expect(annotation.textContent).toContain('Alt+R');
+  });
+
   it('rejects modifierless, reserved, and duplicate chords without changing storage', () => {
     renderPage();
     const voice = screen.getByRole('button', { name: 'Change Chat voice input shortcut' });
@@ -89,6 +108,19 @@ describe('SettingsShortcutsPage', () => {
       expect(screen.getByRole('alert').textContent).toBe('This shortcut is already used by Avibe.');
     });
     expect(readActionShortcuts().voiceInput.code).toBe('KeyZ');
+  });
+
+  it('allows a modified Escape voice shortcut while plain Escape cancels capture', async () => {
+    renderPage();
+    const voice = screen.getByRole('button', { name: 'Change Chat voice input shortcut' });
+
+    fireEvent.click(voice);
+    fireEvent.keyDown(voice, { code: 'Escape', key: 'Escape', altKey: true });
+    await waitFor(() => expect(readActionShortcuts().voiceInput).toMatchObject({
+      code: 'Escape',
+      altKey: true,
+    }));
+    expect(voice.textContent).toContain('Alt+Esc');
   });
 
   it('marks only the control that is actively capturing a shortcut', () => {
