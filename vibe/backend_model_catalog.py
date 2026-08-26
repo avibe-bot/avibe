@@ -16,7 +16,6 @@ from config.atomic_io import write_atomic
 from core.command_runner import run_supervised_command
 from vibe.claude_model_catalog import DEFAULT_CLAUDE_MODEL_ALIASES, load_catalog_models
 from vibe.codex_config import get_codex_home
-from vibe.upgrade import get_safe_cwd
 
 
 REMOTE_CATALOG_URL_ENV = "AVIBE_BACKEND_MODEL_CATALOG_URL"
@@ -131,6 +130,8 @@ def _export_codex_bundled_catalog(
     binary: str,
     base_env: dict[str, str] | None = None,
 ) -> bytes:
+    from vibe.upgrade import get_safe_cwd
+
     env = dict(base_env or {})
     removed_env = (
         "OPENAI_API_KEY",
