@@ -115,6 +115,27 @@ def test_memory_search_json_is_a_presentation_of_the_uds_response(monkeypatch, c
     }
 
 
+def test_memory_search_parser_forwards_query_without_avibe_size_cap(
+    monkeypatch,
+    capsys,
+) -> None:
+    query = "q" * 70_000
+    args = cli.build_parser().parse_args(
+        ["memory", "search", query, "--json"]
+    )
+    calls: list[str] = []
+
+    def search(value: str, _limit: int, **_kwargs):
+        calls.append(value)
+        return {"status_code": 200, "body": {"status": "ok", "items": []}}
+
+    monkeypatch.setattr(internal_client, "memory_search_sync", search)
+
+    assert cli.cmd_memory(args) == 0
+    assert calls == [query]
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+
+
 def test_memory_list_json_preserves_opaque_entry_id_and_page_contract(
     monkeypatch,
     capsys,

@@ -437,8 +437,11 @@ class EverOSPort:
                 async with client.stream(method, route, json=payload) as response:
                     status_code = response.status_code
                     try:
-                        raw = await _read_response(response)
-                    except (httpx.TransportError, OSError):
+                        raw = await _read_response(
+                            response,
+                            timeout_seconds=timeout_seconds or self._sidecar_timeout_seconds,
+                        )
+                    except (asyncio.TimeoutError, httpx.TransportError, OSError):
                         if 200 <= status_code < 300:
                             raise
                         logger.warning(
@@ -450,7 +453,7 @@ class EverOSPort:
         except (httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
             logger.warning("EverOS sidecar connection timeout route=%s latency_ms=%s", route, _elapsed_ms(started))
             raise MemoryProviderSystemFailure() from exc
-        except httpx.TimeoutException as exc:
+        except (asyncio.TimeoutError, httpx.TimeoutException) as exc:
             logger.warning("EverOS sidecar timeout route=%s latency_ms=%s", route, _elapsed_ms(started))
             raise MemoryProviderFailure(
                 "memory_provider_timeout",
@@ -889,7 +892,10 @@ class EverOSPort:
                             )
                         )
                     if not require_json:
-                        await _read_response(response)
+                        await _read_response(
+                            response,
+                            timeout_seconds=request_timeout,
+                        )
                         logger.debug(
                             "EverOS sidecar request complete route=%s status=%s latency_ms=%s",
                             route,
@@ -897,10 +903,13 @@ class EverOSPort:
                             _elapsed_ms(started),
                         )
                         return None
-                    raw = await _read_response(response)
+                    raw = await _read_response(
+                        response,
+                        timeout_seconds=request_timeout,
+                    )
         except MemoryProviderFailure:
             raise
-        except httpx.TimeoutException as exc:
+        except (asyncio.TimeoutError, httpx.TimeoutException) as exc:
             logger.warning("EverOS sidecar timeout route=%s latency_ms=%s", route, _elapsed_ms(started))
             raise MemoryProviderFailure("memory_provider_timeout") from exc
         except (httpx.HTTPError, OSError) as exc:
@@ -945,9 +954,12 @@ class EverOSPort:
                             response.status_code,
                         )
                         return False
-                    raw = await _read_response(response)
+                    raw = await _read_response(
+                        response,
+                        timeout_seconds=self._processing_timeout_seconds,
+                    )
             value = json.loads(raw)
-        except (httpx.HTTPError, OSError, TypeError, ValueError, MemoryProviderFailure):
+        except (asyncio.TimeoutError, httpx.HTTPError, OSError, TypeError, ValueError, MemoryProviderFailure):
             logger.info("Memory processing probe unavailable endpoint=%s", path)
             return False
         return bool(validator(value))
@@ -993,7 +1005,10 @@ class EverOSPort:
                     json=payload,
                     headers={"Authorization": f"Bearer {api_key}"},
                 ) as response:
-                    raw = await _read_response(response)
+                    raw = await _read_response(
+                        response,
+                        timeout_seconds=_PREFLIGHT_TIMEOUT_SECONDS,
+                    )
                     status_code = response.status_code
             try:
                 value = json.loads(raw) if raw else None
@@ -1018,7 +1033,7 @@ class EverOSPort:
                 message = "provider_error"
             failure = MemoryPreflightFailure(error_name, MemoryPreflightDiagnostic(side, status_code, code, message))
             return failure
-        except httpx.TimeoutException:
+        except (asyncio.TimeoutError, httpx.TimeoutException):
             failure = MemoryPreflightFailure(error_name, MemoryPreflightDiagnostic(side, message="provider_request_timed_out"))
             return failure
         except (httpx.HTTPError, OSError, TypeError, ValueError):
@@ -1044,8 +1059,15 @@ def _bounded_preflight_message(
     return message[:512]
 
 
-async def _read_response(response: httpx.Response) -> bytes:
-    return await response.aread()
+async def _read_response(
+    response: httpx.Response,
+    *,
+    timeout_seconds: float,
+) -> bytes:
+    return await asyncio.wait_for(
+        response.aread(),
+        timeout=_positive_timeout(timeout_seconds, _SIDECAR_TIMEOUT_SECONDS),
+    )
 
 
 def _map_search_items(

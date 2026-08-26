@@ -629,7 +629,6 @@ def cmd_memory(args) -> int:
         query = args.query.strip() if isinstance(args.query, str) else ""
         if (
             not query
-            or len(query.encode("utf-8")) > 8 * 1024
             or not isinstance(args.limit, int)
             or isinstance(args.limit, bool)
             or not 1 <= args.limit <= 20

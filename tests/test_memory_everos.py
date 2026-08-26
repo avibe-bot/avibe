@@ -87,6 +87,13 @@ class _FailingResponseStream(httpx.AsyncByteStream):
         yield b""  # pragma: no cover - keeps this an async generator
 
 
+class _DripResponseStream(httpx.AsyncByteStream):
+    async def __aiter__(self):
+        while True:
+            await asyncio.sleep(0.01)
+            yield b" "
+
+
 def _thinking_chat_completion(*, role: str = "assistant", finish_reason: str | None = "length") -> dict:
     message = {"role": role}
     choice: dict = {"finish_reason": finish_reason, "index": 0, "message": message}
@@ -302,6 +309,31 @@ def test_add_keeps_connect_timeout_on_retryable_system_outage_path() -> None:
 
     assert raised.value.error == "memory_sidecar_unavailable"
     assert raised.value.ambiguous is False
+
+
+@pytest.mark.parametrize("operation", ["add", "flush"])
+def test_write_response_stream_has_total_wall_clock_deadline(operation: str) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=_DripResponseStream())
+
+    async def run():
+        provider = EverOSPort(
+            Path("/tmp/everos.sock"),
+            add_timeout_seconds=0.025,
+            flush_timeout_seconds=0.025,
+        )
+        if operation == "add":
+            return await provider.add(ProviderCapture(SESSION_REF, "capture", 1))
+        return await provider.flush(SESSION_REF)
+
+    with _sidecar_transport(handler):
+        if operation == "add":
+            with pytest.raises(MemoryProviderFailure) as raised:
+                asyncio.run(run())
+            assert raised.value.error == "memory_provider_timeout"
+            assert raised.value.ambiguous is True
+        else:
+            assert asyncio.run(run()) == FlushUnknown(reason="timeout")
 
 
 @pytest.mark.parametrize("failure_type", [httpx.WriteError, httpx.CloseError])

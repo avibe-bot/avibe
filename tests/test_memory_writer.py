@@ -28,6 +28,7 @@ from core.memory.writer import (
     MAX_UNFLUSHED_AGE_SECONDS,
     MAX_UNFLUSHED_MESSAGES,
     MAX_WRITER_PERMITS,
+    MAX_WRITER_RETAINED_TEXT_BYTES,
     BestEffortMemoryWriter,
     _BarrierItem,
     _PendingSession,
@@ -162,6 +163,47 @@ async def test_full_queue_discards_increment_process_local_count(
 
     assert writer.dropped_count() == 3
     assert writer._pending[key].retry_after == current + IDLE_FLUSH_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_writer_byte_backpressure_allows_one_oversized_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "core.memory.writer.MAX_WRITER_RETAINED_TEXT_BYTES",
+        10,
+    )
+    writer = _writer(tmp_path, FakeMemoryProvider())
+    writer._ensure_worker = lambda: None
+
+    oversized = writer.reserve("oversized")
+    assert not isinstance(oversized, str)
+    assert writer.offer_capture(
+        oversized,
+        _admission(0),
+        text="x" * 11,
+        attachments=(),
+        bundle=None,
+    ) == "queued"
+    blocked = writer.reserve("blocked")
+    assert not isinstance(blocked, str)
+    assert writer.offer_capture(
+        blocked,
+        _admission(1),
+        text="y",
+        attachments=(),
+        bundle=None,
+    ) == "full"
+    blocked.abandon()
+
+    assert writer._retained_text_bytes == 11
+    assert writer.dropped_count() == 1
+
+    await writer.close()
+
+    assert writer._retained_text_bytes == 0
+    assert writer._permits == MAX_WRITER_PERMITS
 
 
 @pytest.mark.asyncio
@@ -1112,5 +1154,6 @@ async def test_failed_automatic_barrier_offer_defers_for_five_minutes(
 
 def test_writer_bounds_are_fixed_and_not_user_tunable() -> None:
     assert MAX_WRITER_PERMITS == MAX_DUPLICATE_ENTRIES == MAX_PENDING_SESSIONS == 256
+    assert MAX_WRITER_RETAINED_TEXT_BYTES == 64 * 1024 * 1024
     assert MAX_PENDING_MESSAGE_IDS == MAX_UNFLUSHED_MESSAGES == 100
     assert MAX_UNFLUSHED_AGE_SECONDS == 30 * 60

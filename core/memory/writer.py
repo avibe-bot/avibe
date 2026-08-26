@@ -34,6 +34,7 @@ from core.memory.types import CaptureAttachment, ProviderSessionRef
 logger = logging.getLogger(__name__)
 
 MAX_WRITER_PERMITS = 256
+MAX_WRITER_RETAINED_TEXT_BYTES = 64 * 1024 * 1024
 MAX_DUPLICATE_ENTRIES = 256
 MAX_ATTEMPTS = 3
 MAX_PENDING_SESSIONS = 256
@@ -54,6 +55,7 @@ class _CaptureItem:
     bundle: PinnedBundle | None
     reservation: "WriterReservation"
     raw_session_id: str
+    retained_text_bytes: int
 
 
 @dataclass(slots=True)
@@ -140,6 +142,7 @@ class BestEffortMemoryWriter:
         self._close_task: asyncio.Task[None] | None = None
         self._active_provider_calls = 0
         self._queued_items = 0
+        self._retained_text_bytes = 0
         self._permits = MAX_WRITER_PERMITS
         self._duplicate_lru: OrderedDict[str, bool] = OrderedDict()
         self._pending: OrderedDict[str, _PendingSession] = OrderedDict()
@@ -158,7 +161,7 @@ class BestEffortMemoryWriter:
         return not self._attachments_disabled
 
     def dropped_count(self) -> int:
-        """Return the process-local count of queue insertions discarded as full."""
+        """Return the process-local count of capacity admissions discarded as full."""
 
         return self.dropped
 
@@ -271,6 +274,19 @@ class BestEffortMemoryWriter:
         assert admission.provider_session_ref is not None
         assert admission.provider_timestamp_ms is not None
         assert admission.raw_session_id is not None
+        try:
+            retained_text_bytes = len(text.encode("utf-8"))
+        except UnicodeError:
+            return "disabled"
+        # A single capture has no Avibe size cap. Once text is retained, apply
+        # aggregate backpressure so the item-count budget cannot multiply it.
+        if (
+            self._retained_text_bytes > 0
+            and self._retained_text_bytes + retained_text_bytes
+            > MAX_WRITER_RETAINED_TEXT_BYTES
+        ):
+            self.dropped += 1
+            return "full"
         item = _CaptureItem(
             digest=reservation.digest,
             capture=ProviderCapture(
@@ -282,6 +298,7 @@ class BestEffortMemoryWriter:
             bundle=bundle,
             reservation=reservation,
             raw_session_id=admission.raw_session_id,
+            retained_text_bytes=retained_text_bytes,
         )
         try:
             self._queue.put_nowait(item)
@@ -290,6 +307,7 @@ class BestEffortMemoryWriter:
             return "full"
         reservation.handed_off = True
         self._queued_items += 1
+        self._retained_text_bytes += retained_text_bytes
         self._ensure_worker()
         return "queued"
 
@@ -596,6 +614,10 @@ class BestEffortMemoryWriter:
                 except Exception:
                     self.disable_attachment_intake()
         finally:
+            self._retained_text_bytes = max(
+                0,
+                self._retained_text_bytes - item.retained_text_bytes,
+            )
             item.reservation.release()
 
     async def _flush_barrier(self, item: _BarrierItem) -> None:
