@@ -280,7 +280,7 @@ def test_slack_memory_reservation_normalizes_invalid_multimodal_generation(
 def test_attachment_capacity_is_reserved_before_session_or_lease_work() -> None:
     controller = _controller()
     reserve_admission = Mock()
-    controller.memory_module.reserve_capture_capacity = lambda: "full"
+    controller.memory_module.reserve_capture_capacity = lambda _text=None: "full"
     controller.memory_module.reserve_capture_admission = reserve_admission
     context = _context("slack", ordinary=False)
     context.files = [
@@ -306,7 +306,13 @@ def test_attachment_capacity_is_reserved_before_session_or_lease_work() -> None:
 @pytest.mark.parametrize("outcome", ["unavailable", "disabled"])
 def test_capture_capacity_terminal_outcomes_are_propagated(outcome: str) -> None:
     controller = _controller()
-    controller.memory_module.reserve_capture_capacity = lambda: outcome
+    reserved_text: list[object] = []
+
+    def reserve_capacity(text: object = None) -> str:
+        reserved_text.append(text)
+        return outcome
+
+    controller.memory_module.reserve_capture_capacity = reserve_capacity
 
     reservation = controller.reserve_memory_capture_capacity(
         _context("slack"),
@@ -317,6 +323,7 @@ def test_capture_capacity_terminal_outcomes_are_propagated(outcome: str) -> None
     assert reservation is not None
     assert reservation.capacity_outcome == outcome
     assert reservation.capacity_blocked is True
+    assert reserved_text == ["remember this"]
     reservation.release()
 
 

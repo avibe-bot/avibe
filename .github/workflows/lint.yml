@@ -158,6 +158,7 @@ jobs:
           output="$RUNNER_TEMP/memory-insight-contract.log"
           uv run --frozen --project scripts/memory_runtime \
             --with 'pytest==9.0.3' --with 'pytest-asyncio==1.4.0' \
+            --with 'ijson==3.5.1' \
             python -m pytest \
             tests/test_memory_wake.py::test_pinned_everos_runtime_wakes_through_production_sidecar \
             -ra | tee "$output"

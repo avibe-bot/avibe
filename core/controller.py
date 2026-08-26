@@ -2240,7 +2240,7 @@ class Controller:
         if not callable(reserve_capacity):
             return None
         try:
-            capacity_token = reserve_capacity()
+            capacity_token = reserve_capacity(text)
         except Exception:
             return None
         if isinstance(capacity_token, str):

@@ -312,10 +312,11 @@ class MemoryModule:
 
     def reserve_capture_capacity(
         self,
+        text: object | None = None,
     ) -> WriterReservation | Literal["full", "disabled", "unavailable"]:
         """Claim one volatile capture slot before deferred work starts."""
 
-        return self._writer.reserve_pending()
+        return self._writer.reserve_pending(text=text)
 
     def release_capture_capacity(self, reservation: object) -> None:
         """Release a pending slot that was not handed to the writer queue."""
@@ -362,7 +363,9 @@ class MemoryModule:
 
         reservation = capacity_reservation
         if reservation is None:
-            reservation = self.reserve_capture_capacity()
+            reservation = self.reserve_capture_capacity(
+                request.text if isinstance(request, CaptureRequest) else None
+            )
         if isinstance(reservation, str):
             if reservation == "full":
                 return await self._skipped_with_missed("memory_queue_full")
@@ -373,6 +376,13 @@ class MemoryModule:
             return await self._skipped_with_missed("memory_invalid_input")
 
         try:
+            text_outcome = reservation.reserve_text(
+                request.text if isinstance(request, CaptureRequest) else None
+            )
+            if text_outcome == "full":
+                return await self._skipped_with_missed("memory_queue_full")
+            if text_outcome != "reserved":
+                return await self._skipped_with_missed("memory_invalid_input")
             admission_lock = self._capture_lock_for_request(request)
             if admission is None:
                 key = self._capture_admission_key(
@@ -538,6 +548,11 @@ class MemoryModule:
             validation_error = self._capture_validation_error(request, normalized_text)
             if validation_error is not None:
                 return await self._skipped_with_missed(validation_error)
+            text_outcome = capacity_reservation.reserve_text(normalized_text)
+            if text_outcome == "full":
+                return await self._skipped_with_missed("memory_queue_full")
+            if text_outcome != "reserved":
+                return await self._skipped_with_missed("memory_invalid_input")
             if (
                 request.attachments
                 and not self._writer.attachments_enabled

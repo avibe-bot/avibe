@@ -206,6 +206,28 @@ async def test_writer_byte_backpressure_allows_one_oversized_capture(
     assert writer._permits == MAX_WRITER_PERMITS
 
 
+def test_pending_reservation_claims_text_budget_before_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "core.memory.writer.MAX_WRITER_RETAINED_TEXT_BYTES",
+        10,
+    )
+    writer = _writer(tmp_path, FakeMemoryProvider())
+
+    oversized = writer.reserve_pending(text="x" * 11)
+    assert not isinstance(oversized, str)
+    assert writer._retained_text_bytes == 11
+    assert writer.reserve_pending(text="y") == "full"
+    assert writer._retained_text_bytes == 11
+
+    oversized.abandon()
+
+    assert writer._retained_text_bytes == 0
+    assert writer._permits == MAX_WRITER_PERMITS
+
+
 @pytest.mark.asyncio
 async def test_worker_delivers_captures_in_offer_order(tmp_path: Path) -> None:
     provider = FakeMemoryProvider()

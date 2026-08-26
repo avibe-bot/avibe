@@ -2,17 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import concurrent.futures
 import hashlib
+import io
 import json
 import struct
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
 
 from core.memory import artifact as memory_artifact
+from core.memory import everos as memory_everos
 from core.memory.everos import (
     PROCESSING_PROBE_REQUEST_TIMEOUT_SECONDS,
     _AGENTIC_ROUND_HEADER,
@@ -869,7 +873,6 @@ def test_assistant_owner_crosses_add_search_and_profile_provider_contract() -> N
                 "data": {
                     "profiles": [
                         {"user_id": assistant_owner, "profile_data": {"summary": "Agent profile"}},
-                        {"user_id": PRINCIPAL, "profile_data": {"summary": "must not leak"}},
                     ]
                 }
             },
@@ -1437,6 +1440,48 @@ def test_profile_spools_large_streamed_response_without_aread() -> None:
     assert items[0].profile.summary == summary
 
 
+def test_response_spool_preserves_temporary_filesystem_free_space(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b'{"data":{"profiles":[]}}'
+    created_paths: list[Path] = []
+    real_named_temporary_file = tempfile.NamedTemporaryFile
+
+    def tracked_temporary_file(*args, **kwargs):
+        temporary_file = real_named_temporary_file(*args, **kwargs)
+        created_paths.append(Path(temporary_file.name))
+        return temporary_file
+
+    monkeypatch.setattr(
+        memory_everos.tempfile,
+        "NamedTemporaryFile",
+        tracked_temporary_file,
+    )
+    monkeypatch.setattr(
+        memory_everos.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(
+            free=memory_everos._MIN_RESPONSE_SPOOL_FREE_BYTES
+        ),
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            stream=_ChunkedResponseStream(payload),
+        )
+
+    with _sidecar_transport(handler):
+        with pytest.raises(MemoryProviderSystemFailure):
+            asyncio.run(
+                EverOSPort(Path("/tmp/everos.sock")).profile("owner-1", PROJECT)
+            )
+
+    assert len(created_paths) == 1
+    assert not created_paths[0].exists()
+
+
 def test_profile_skips_large_irrelevant_root_field_during_projection() -> None:
     payload = json.dumps(
         {
@@ -1465,6 +1510,31 @@ def test_profile_skips_large_irrelevant_root_field_during_projection() -> None:
     assert items[0].profile.summary == "kept"
 
 
+def test_profile_projection_rejects_more_than_requested_profile() -> None:
+    payload = json.dumps(
+        {
+            "data": {
+                "profiles": [
+                    {
+                        "user_id": "owner-1",
+                        "profile_data": {"summary": "kept"},
+                    },
+                    {
+                        "user_id": "owner-1",
+                        "profile_data": {"summary": "discarded"},
+                    },
+                ]
+            }
+        }
+    ).encode()
+
+    with pytest.raises(ValueError, match="array exceeds response contract"):
+        memory_everos._parse_spooled_json(
+            io.BytesIO(payload),
+            memory_everos._PROFILE_RESPONSE_SCHEMA,
+        )
+
+
 def test_profile_parse_is_inside_total_response_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"data": {"profiles": []}})
@@ -1485,6 +1555,48 @@ def test_profile_parse_is_inside_total_response_deadline(monkeypatch: pytest.Mon
 
     with _sidecar_transport(handler):
         asyncio.run(run())
+
+
+def test_cancelled_json_parse_terminates_worker_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class HangingExecutor:
+        def __init__(self) -> None:
+            self._processes = {}
+            self.future: concurrent.futures.Future[object] = (
+                concurrent.futures.Future()
+            )
+            self.shutdown_called = False
+
+        def submit(self, _operation, *_args):
+            return self.future
+
+        def shutdown(self, *, wait: bool, cancel_futures: bool) -> None:
+            assert wait is False
+            assert cancel_futures is True
+            self.shutdown_called = True
+
+    memory_everos._terminate_json_parse_pool()
+    executor = HangingExecutor()
+    monkeypatch.setattr(memory_everos, "_JSON_PARSE_POOL", executor)
+
+    async def run() -> None:
+        task = asyncio.create_task(
+            memory_everos._parse_spooled_json_async(
+                "/unused/provider-response.json",
+                memory_everos._PROFILE_RESPONSE_SCHEMA,
+                60.0,
+            )
+        )
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+
+    assert executor.shutdown_called
+    assert memory_everos._JSON_PARSE_POOL is None
 
 
 def test_search_projects_content_only_episode() -> None:
@@ -2584,6 +2696,41 @@ def test_processing_health_rejects_llm_probe_without_completion_content() -> Non
     real_async_client = httpx.AsyncClient
     with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
         client_type.side_effect = lambda **kwargs: real_async_client(transport=httpx.MockTransport(handler), **kwargs)
+        assert asyncio.run(run()) is False
+
+
+@pytest.mark.parametrize("invalid_element", ["invalid", {"unexpected": True}, None])
+def test_processing_health_validates_discarded_embedding_elements(
+    invalid_element: object,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/chat/completions"):
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": "OK"}}]},
+            )
+        return httpx.Response(
+            200,
+            json={"data": [{"embedding": [0.1, invalid_element]}]},
+        )
+
+    async def run() -> bool:
+        return await EverOSPort(
+            Path("/tmp/everos.sock"),
+            llm_base_url="https://llm.example.test/v1",
+            llm_model="chat-model",
+            llm_api_key="llm-secret",
+            embedding_base_url="https://embed.example.test/v1",
+            embedding_model="embedding-model",
+            embedding_api_key="embedding-secret",
+        ).processing_healthy()
+
+    real_async_client = httpx.AsyncClient
+    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+        client_type.side_effect = lambda **kwargs: real_async_client(
+            transport=httpx.MockTransport(handler),
+            **kwargs,
+        )
         assert asyncio.run(run()) is False
 
 

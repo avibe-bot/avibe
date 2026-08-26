@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 from concurrent.futures.process import BrokenProcessPool
+import errno
 import json
 import logging
 import math
@@ -12,6 +13,7 @@ import multiprocessing
 import os
 import pickle
 import re
+import shutil
 import tempfile
 import threading
 import time
@@ -73,6 +75,7 @@ PROCESSING_PROBE_MAX_DEADLINE_SECONDS = (
 _PROCESSING_TIMEOUT_SECONDS = PROCESSING_PROBE_REQUEST_TIMEOUT_SECONDS
 _PREFLIGHT_TIMEOUT_SECONDS = 30.0
 _RESPONSE_STREAM_CHUNK_BYTES = 64 * 1024
+_MIN_RESPONSE_SPOOL_FREE_BYTES = 512 * 1024 * 1024
 _CHAT_PROBE_MAX_TOKENS = 8
 _CHAT_PROBE_TERMINAL_FINISH_REASONS = frozenset(
     {"stop", "length", "content_filter", "tool_calls", "function_call"}
@@ -103,6 +106,7 @@ ProviderAttachment = CaptureAttachment
 
 _JSON_PARSE_POOL: concurrent.futures.ProcessPoolExecutor | None = None
 _JSON_PARSE_POOL_LOCK = threading.Lock()
+_RESPONSE_SPOOL_LOCK = threading.Lock()
 
 
 class _JSONSchema:
@@ -135,6 +139,7 @@ class _JSONArraySchema(_JSONSchema):
     max_items: int | None = None
     retention: Literal["all", "first", "none", "presence"] = "all"
     retain_items: int | None = None
+    validate_discarded_items: bool = False
 
 
 @dataclass(frozen=True)
@@ -172,7 +177,8 @@ _PROFILE_RESPONSE_SCHEMA = _JSONMapSchema(
                             "createdAt": _JSON_SCALAR,
                             "date": _JSON_SCALAR,
                         }
-                    )
+                    ),
+                    max_items=1,
                 )
             }
         )
@@ -235,6 +241,7 @@ _EMBEDDING_RESPONSE_SCHEMA = _JSONMapSchema(
                     "embedding": _JSONArraySchema(
                         _JSON_NUMBER,
                         retain_items=1,
+                        validate_discarded_items=True,
                     )
                 }
             ),
@@ -1416,8 +1423,20 @@ async def _discard_response(
 
 async def _spool_response(response: httpx.Response, spool: BinaryIO) -> None:
     async for chunk in response.aiter_bytes(chunk_size=_RESPONSE_STREAM_CHUNK_BYTES):
-        spool.write(chunk)
-    spool.flush()
+        _write_response_spool_chunk(spool, chunk)
+
+
+def _write_response_spool_chunk(spool: BinaryIO, chunk: bytes) -> None:
+    with _RESPONSE_SPOOL_LOCK:
+        free_bytes = shutil.disk_usage(spool.name).free
+        if free_bytes - len(chunk) < _MIN_RESPONSE_SPOOL_FREE_BYTES:
+            raise OSError(errno.ENOSPC, "insufficient temporary storage for provider response")
+        written = spool.write(chunk)
+        if written != len(chunk):
+            raise OSError(errno.EIO, "short write while spooling provider response")
+        # Make the next free-space check account for this chunk even when the
+        # file object uses buffered writes.
+        spool.flush()
 
 
 async def _consume_response(response: httpx.Response) -> None:
@@ -1453,7 +1472,7 @@ async def _parse_spooled_json_async(
         if not ok:
             raise ValueError(value)
         return value
-    except asyncio.TimeoutError:
+    except (asyncio.TimeoutError, asyncio.CancelledError):
         _terminate_json_parse_pool()
         raise
     except BrokenProcessPool:
@@ -1558,6 +1577,8 @@ class _ProjectedJSONParser:
                 # Keep an incorrectly shaped value for endpoint validators to
                 # report the specific contract error instead of collapsing it
                 # into a generic non-object response.
+                if schema.number_only:
+                    raise ValueError("unexpected numeric value shape")
                 schema = _JSON_ANY
             if event == "start_map":
                 if not isinstance(schema, (_JSONMapSchema, _JSONAnySchema)):
@@ -1627,6 +1648,8 @@ class _ProjectedJSONParser:
             if schema.retention in {"none", "presence"} or (
                 schema.retain_items is not None and frame.count > schema.retain_items
             ):
+                if schema.validate_discarded_items:
+                    return schema.item
                 return _JSON_SKIP
             return schema.item
         raise ValueError("unexpected value")

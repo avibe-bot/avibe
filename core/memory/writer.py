@@ -55,7 +55,6 @@ class _CaptureItem:
     bundle: PinnedBundle | None
     reservation: "WriterReservation"
     raw_session_id: str
-    retained_text_bytes: int
 
 
 @dataclass(slots=True)
@@ -82,20 +81,21 @@ class WriterReservation:
     def __init__(self, writer: "BestEffortMemoryWriter", digest: str | None) -> None:
         self._writer = writer
         self.digest = digest
+        self.retained_text_bytes = 0
         self.active = True
         self.handed_off = False
 
     def release(self) -> None:
         if self.active:
             self.active = False
-            self._writer._release_reservation(self.digest)
+            self._writer._release_reservation(self)
 
     def abandon(self) -> None:
         """Release work that never entered the writer queue."""
 
         if self.active:
             self.active = False
-            self._writer._abandon_reservation(self.digest)
+            self._writer._abandon_reservation(self)
 
     def bind_digest(
         self,
@@ -104,6 +104,14 @@ class WriterReservation:
         """Bind the final source digest after the pending work is admitted."""
 
         return self._writer.bind_reservation(self, digest)
+
+    def reserve_text(
+        self,
+        text: object,
+    ) -> Literal["reserved", "full", "disabled"]:
+        """Count retained capture text before admission performs deferred work."""
+
+        return self._writer.reserve_reservation_text(self, text)
 
 
 class BestEffortMemoryWriter:
@@ -196,10 +204,12 @@ class BestEffortMemoryWriter:
     def reserve(
         self,
         digest: str,
+        *,
+        text: object | None = None,
     ) -> WriterReservation | Literal["duplicate", "full", "disabled", "unavailable"]:
         """Try to claim one permit before attachment pinning."""
 
-        reservation = self.reserve_pending()
+        reservation = self.reserve_pending(text=text)
         if isinstance(reservation, str):
             return reservation
         outcome = reservation.bind_digest(digest)
@@ -209,6 +219,8 @@ class BestEffortMemoryWriter:
 
     def reserve_pending(
         self,
+        *,
+        text: object | None = None,
     ) -> WriterReservation | Literal["full", "disabled", "unavailable"]:
         """Claim capacity before deferred capture work performs I/O."""
 
@@ -219,7 +231,47 @@ class BestEffortMemoryWriter:
         if self._permits <= 0:
             return "full"
         self._permits -= 1
-        return WriterReservation(self, None)
+        reservation = WriterReservation(self, None)
+        if text is not None:
+            outcome = reservation.reserve_text(text)
+            if outcome != "reserved":
+                reservation.abandon()
+                return outcome
+        return reservation
+
+    def reserve_reservation_text(
+        self,
+        reservation: WriterReservation,
+        text: object,
+    ) -> Literal["reserved", "full", "disabled"]:
+        """Reserve the aggregate text budget for one permit-owning admission."""
+
+        if reservation._writer is not self or not reservation.active:
+            return "disabled"
+        if not isinstance(text, str):
+            return "disabled"
+        try:
+            retained_text_bytes = len(text.encode("utf-8"))
+        except UnicodeError:
+            return "disabled"
+        other_retained_bytes = max(
+            0,
+            self._retained_text_bytes - reservation.retained_text_bytes,
+        )
+        # A single capture has no Avibe size cap. Aggregate backpressure still
+        # prevents permit-owning admissions from multiplying retained strings.
+        if (
+            other_retained_bytes > 0
+            and other_retained_bytes + retained_text_bytes
+            > MAX_WRITER_RETAINED_TEXT_BYTES
+        ):
+            self.dropped += 1
+            return "full"
+        self._retained_text_bytes = (
+            other_retained_bytes + retained_text_bytes
+        )
+        reservation.retained_text_bytes = retained_text_bytes
+        return "reserved"
 
     def bind_reservation(
         self,
@@ -274,19 +326,9 @@ class BestEffortMemoryWriter:
         assert admission.provider_session_ref is not None
         assert admission.provider_timestamp_ms is not None
         assert admission.raw_session_id is not None
-        try:
-            retained_text_bytes = len(text.encode("utf-8"))
-        except UnicodeError:
-            return "disabled"
-        # A single capture has no Avibe size cap. Once text is retained, apply
-        # aggregate backpressure so the item-count budget cannot multiply it.
-        if (
-            self._retained_text_bytes > 0
-            and self._retained_text_bytes + retained_text_bytes
-            > MAX_WRITER_RETAINED_TEXT_BYTES
-        ):
-            self.dropped += 1
-            return "full"
+        text_outcome = reservation.reserve_text(text)
+        if text_outcome != "reserved":
+            return text_outcome
         item = _CaptureItem(
             digest=reservation.digest,
             capture=ProviderCapture(
@@ -298,7 +340,6 @@ class BestEffortMemoryWriter:
             bundle=bundle,
             reservation=reservation,
             raw_session_id=admission.raw_session_id,
-            retained_text_bytes=retained_text_bytes,
         )
         try:
             self._queue.put_nowait(item)
@@ -307,7 +348,6 @@ class BestEffortMemoryWriter:
             return "full"
         reservation.handed_off = True
         self._queued_items += 1
-        self._retained_text_bytes += retained_text_bytes
         self._ensure_worker()
         return "queued"
 
@@ -440,17 +480,28 @@ class BestEffortMemoryWriter:
                 # permit bound prevents this protected set from growing.
                 break
 
-    def _release_reservation(self, digest: str | None) -> None:
+    def _release_reservation(self, reservation: WriterReservation) -> None:
         self._release_permit()
+        self._release_reservation_text(reservation)
+        digest = reservation.digest
         if digest is not None and digest in self._duplicate_lru:
             self._duplicate_lru[digest] = False
             self._duplicate_lru.move_to_end(digest)
             self._evict_duplicate_entries()
 
-    def _abandon_reservation(self, digest: str | None) -> None:
+    def _abandon_reservation(self, reservation: WriterReservation) -> None:
         self._release_permit()
+        self._release_reservation_text(reservation)
+        digest = reservation.digest
         if digest is not None:
             self._duplicate_lru.pop(digest, None)
+
+    def _release_reservation_text(self, reservation: WriterReservation) -> None:
+        self._retained_text_bytes = max(
+            0,
+            self._retained_text_bytes - reservation.retained_text_bytes,
+        )
+        reservation.retained_text_bytes = 0
 
     async def _run(self) -> None:
         while not self._closed:
@@ -614,10 +665,6 @@ class BestEffortMemoryWriter:
                 except Exception:
                     self.disable_attachment_intake()
         finally:
-            self._retained_text_bytes = max(
-                0,
-                self._retained_text_bytes - item.retained_text_bytes,
-            )
             item.reservation.release()
 
     async def _flush_barrier(self, item: _BarrierItem) -> None:
