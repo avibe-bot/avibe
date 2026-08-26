@@ -102,6 +102,8 @@ export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) 
   }
 
   const items = data?.items ?? null;
+  const partial = data?.warnings.includes('memory_search_partial') ?? false;
+  const partialEmpty = partial && items !== null && items.length === 0;
 
   return (
     <div className="flex flex-col gap-3">
@@ -112,7 +114,7 @@ export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) 
           {t('memory.profile.refresh')}
         </Button>
       </div>
-      {data?.warnings.includes('memory_search_partial') ? (
+      {partial ? (
         <div className="rounded-lg border border-border bg-surface px-4 py-3 text-sm text-muted">
           {t('memory.profile.partial')}
         </div>
@@ -124,7 +126,7 @@ export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) 
           <Loader2 className="size-4 animate-spin" />
           {t('memory.profile.loading')}
         </div>
-      ) : data?.profile_warning === 'empty' ? (
+      ) : partialEmpty ? null : data?.profile_warning === 'empty' ? (
         <div className="rounded-2xl border border-gold/30 bg-gold/[0.06] p-6 text-center text-[13px] text-foreground">
           {t('memory.profile.warningEmpty')}
         </div>
