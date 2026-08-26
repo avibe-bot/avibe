@@ -26,6 +26,19 @@ describe('SourceRow', () => {
     await userEvent.click(screen.getByRole('button', { name: /Production/ }));
     expect(onOpen).toHaveBeenCalledWith(source);
     expect(screen.queryByText(/latency/i)).toBeNull();
+    expect(screen.getByText('Anthropic · Anthropic Messages')).toBeTruthy();
+  });
+
+  it('labels a custom upstream by host and protocol', () => {
+    render(
+      <I18nextProvider i18n={i18n}>
+        <SourceRow
+          source={{ ...source, vendor: 'custom', base_url: 'https://relay.example/v1' }}
+          onOpen={vi.fn()}
+        />
+      </I18nextProvider>,
+    );
+    expect(screen.getByText('relay.example · Anthropic Messages')).toBeTruthy();
   });
 
   it('uses the authoritative Source adoption to name an active supplying source', () => {

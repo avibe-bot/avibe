@@ -231,7 +231,7 @@ describe('SourceDetailPanel', () => {
     expect(screen.queryByText(/latency|延迟|enrollment|protocol|协议/i)).toBeNull();
     expect(screen.queryByText(/^Standby$|^待命$/i)).toBeNull();
     expect(screen.getByText('model-a')).toBeTruthy();
-    expect(screen.getByText(/relay\.example/)).toBeTruthy();
+    expect(screen.getByTitle('relay.example · Anthropic Messages')).toBeTruthy();
   });
 
   it('shows in-use only when the response carries adoption for this source', () => {
@@ -325,7 +325,7 @@ describe('SourceDetailPanel', () => {
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
     await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
 
-    expect(screen.getByText(/OpenAI Chat Completions/i)).toBeTruthy();
+    expect(screen.getByTitle('relay.example · OpenAI Chat Completions')).toBeTruthy();
     expect(screen.queryByText('openai_chat')).toBeNull();
   });
 
@@ -620,7 +620,7 @@ describe('SourceDetailPanel', () => {
       await waitFor(() => expect(inventory).toHaveBeenCalledOnce());
       expect(patch).toHaveBeenCalledWith(source.id, { base_url: requestedBaseUrl });
       if (committed) {
-        expect(await screen.findByText(/requested\.example/)).toBeTruthy();
+        expect(await screen.findByTitle('requested.example · Anthropic Messages')).toBeTruthy();
         expect(document.querySelector('[data-manage-failure="edit"]')).toBeNull();
       } else {
         const failure = await waitFor(() => {

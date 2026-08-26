@@ -267,7 +267,7 @@ half named in its Missing cell has an owner.
 | G-15 | 06 source detail, a source's own name and Base URL — **registered by frame 11** | ~~any affordance that edits them~~ nothing | §1.10 registers the overflow action, edit dialog and guarded `PATCH /api/models/sources/<id>` producer drawn in frame 11. Kept as a registered row so the former absence and its closing frame remain auditable |
 | G-16 | 01 upstream card and 06 source detail — **registered by frame 11** | ~~any affordance that removes a source~~ nothing | §1.10 registers the overflow action and the source-removal guard dialog drawn in frame 11 for `DELETE /api/models/sources/<id>`. The existing 06 model-row 移除 remains a different operation. Kept as a registered row so the former ambiguity and its closing frame remain auditable |
 | G-17 | 04 add-subscription, a flow that expects something pasted back — **registered by the 04 paste-back exhibit** | ~~the field that takes it, and the control that sends it~~ nothing | §1.4 registers `nOgMQ`'s paste-back dialog and its `POST /api/models/oauth/submit` producer. The drawn `paste_code` variant supplies the frame geometry; `presentation.expects` selects the registered code or callback-URL copy without changing that geometry. Kept as a registered row so the former absence and its closing exhibit remain auditable |
-| G-18 | 05 add-by-key, 拉取型号 and the observation 添加 runs before it saves — **registered against Source observation** | ~~the route that carries a non-persisting observation of a source that does not exist yet~~ nothing | `POST /api/models/sources/observe` accepts `{vendor, base_url?, key, protocol_order?}` and returns `SourceObservation` without persisting a Source or returning a credential reference. §1.5 consumes its closed outcome/reachability/authentication/protocol/discovery/models facts. |
+| G-18 | 05 add-by-key, 拉取型号 and the observation 添加 runs before it saves — **registered against Source observation** | ~~the route that carries a non-persisting observation of a source that does not exist yet~~ nothing | `POST /api/models/sources/observe` accepts `{vendor, base_url?, key, protocol?}` and returns `SourceObservation` without persisting a Source or returning a credential reference. Omission auto-detects; a value restricts observation to one interface and still requires matching response proof. §1.5 consumes its closed outcome/reachability/authentication/protocol/discovery/models facts. |
 | G-19 | 05 add-by-key, 取消 pressed while a persisting add is in flight — **registered against the Source-create commit boundary** | ~~what the server is left holding when the cancel lands after the transient phase~~ nothing | Before durable Source commit, AC-26 cleanup completes before cancellation settles. After commit, cancellation ends only the caller's wait: the Source and placements remain committed and the next Source/Agent read owns the outcome. §1.5 registers that boundary instead of promising a post-commit abort. |
 | G-20 | 01 source card and 06 status bar on every Source read — **registered against `Source.adopted_by`** | ~~a *read* that carries `adopted_by`~~ nothing | Every Source returned by `GET /api/models/sources` now carries server-derived, complete, unique `adopted_by`, sorted by backend then menu model. Creation responses echo the same projection at top level. §1.0 owns the grouping/de-duplication rendering and never derives it from chains. |
 | G-21 | 01 upstream card, 添加订阅 → 04 — **registered by frame 13** | ~~the step that picks which vendor the subscription is for~~ nothing | §1.12 registers the vendor menu drawn in frame 13. Claude 订阅 passes `anthropic` and ChatGPT 订阅 passes `openai` into §1.4 before that dialog renders its vendor-specific title, options and `POST /api/models/oauth/start` request. Kept as a registered row so the producer/consumer break and its closing frame remain auditable |
@@ -276,7 +276,7 @@ half named in its Missing cell has an owner.
 | G-24 | 01 run pill, *Unsupported host* — **registered against RuntimeDependency** | ~~a host-platform or installability discriminator in the runtime payload~~ nothing | Every runtime response now carries server-authoritative `host_platform`; an exact match in `manifest.assets[].platform` is the support predicate. §1.0 never substitutes the browser platform. |
 | G-25 | 01 gateway group, the unavailable marker — **registered against AgentSupply model supply; collapse ownership retired 2026-08-23** | ~~a per-model fact that separates a chain with a live hop from one whose hops are all stale~~ nothing | `model_supply[].has_runnable_hop` now carries that server-derived fact under the same runnability axiom as AgentChain. §1.1 uses it only to choose the row marker: a nonempty chain with no runnable hop renders `legend.unavailable`; the forced-false `chain_length: 0` subset branches first to the existing `models.launch.route_unconfigured` treatment instead of borrowing paused-supply copy. The six-row prefix owns collapse independently of this field. |
 | G-26 | 03 order drawer, a reorder — **registered against the same explicit reorder contract as G-13** | ~~a policy value that reads the stored Source order~~ nothing | `POST /api/models/agents/<backend>/chains/reorder` consumes the current Source-order sequence with a stable total sort over every stored Route. The order PUT remains chain-byte-identical; invocation is explicit and separate. |
-| G-27 | 05 add-by-key, the persisting `POST /api/models/sources` — **registered against `source-create.schema.json`** | ~~the request shape that route accepts~~ nothing | The schema is the complete request: required `vendor` and write-only `key`; optional `display_name`, `base_url`, `protocol_order`, `client_nonce` and `accept_unavailable_inventory` `[contract]`. The client submits no protocol conclusion or discovered inventory; the server observes both. §1.5 sends the consent boolean true only from ⑤, where a repeated observation still has to prove the protocol before a failed inventory may commit. |
+| G-27 | 05 add-by-key, the persisting `POST /api/models/sources` — **registered against `source-create.schema.json`** | ~~the request shape that route accepts~~ nothing | The schema is the complete request: required `vendor` and write-only `key`; optional `display_name`, `base_url`, `protocol`, `client_nonce` and `accept_unavailable_inventory` `[contract]`. The client-selected protocol is a one-interface probe constraint, never response proof or discovered inventory. §1.5 sends the consent boolean true only from ⑤, where a repeated observation still has to prove the protocol before a failed inventory may commit. |
 | G-28 | `Qp6FI` guarded-change hop rows — **registered against `RouteHopRef.position`** | ~~the hop's position, on the reference the refusal returns~~ nothing | `guard-refusal.schema.json` carries one-based pre-mutation `position` on every `RouteHopRef`. §1.6 and §1.10 render it directly and issue no per-chain lookup. |
 | G-29 | 05 add-by-key, ⑦'s lost-response reconciliation — **registered against Source-create nonce totality** | ~~anything the client holds *before* the send that the committed Source can afterwards be recognized by~~ nothing | The client generates `SourceCreate.client_nonce` before send. A list read finds exact `Source.client_nonce` after commit; in-flight and committed retries return distinct `409` conflicts, released/list-miss retries are fresh. A committed retry never replays an old response; it returns `source_nonce_conflict` and the client rereads the list to claim the Source. |
 | G-30 | 04 add-subscription, *Start failed* entered by a lost response — **registered against OAuth start nonce totality** | ~~a way to reach a flow whose `flow_id` never arrived~~ nothing | The client generates `client_nonce` before start; the server claims the exact `(client_nonce, vendor, channel)` tuple before provider work. Concurrent retry coalesces to one pending start/result, every resulting flow echoes the nonce, and nonce-bearing cancellation remains bounded by its non-null `expires_at`. §1.4 retries the held tuple without opening a second provider start. |
@@ -392,16 +392,12 @@ single-select and one 去登录 produces exactly one effect, so there is no part
 define. Both are struck rather than renumbered: a `G-n` that moves is a citation that
 silently retargets.
 
-**G-2 and G-4 stopped being gaps when the basis moved to `176b41b7`, and both became
-conflicts.** A gap is silence; a conflict is a sentence pointing the other way, and
-the two need opposite handling — a gap is closed by adding, a conflict by somebody
-retracting. G-2 was 06's protocol-edit entry having no route: at `176b41b7` the UI
-landing checklist says the protocol selector exists *only* after a failed observation,
-as a probe-order hint, so the contract now **forbids** the control rather than merely
-omitting its route. G-4 was the quiet badge having no field to read: AC-27 now states
-「the stored shape has **no** manual/automatic provenance marker」, which is not an
-absence to be filled but a decision that the badge cannot be rendered. Both fold into
-E-2 in §0.6, and their numbers are struck rather than reused.
+**G-2 and G-4 remain retired, with E-2 superseded in part on 2026-08-26.** G-2 asked
+for a saved-protocol edit route and remains closed by subtraction: changing protocol
+still requires a new Source. G-4 asked for a badge conditioned on manual provenance;
+that marker still does not exist. The new ruling adds an unconditional source identity
+label (`provider or host · proved protocol`) and a form-level Auto/manual selector.
+Neither resurrects the retired edit route or invents provenance.
 
 ### 0.6 Conflicts raised by this pass — all five now ruled
 
@@ -443,24 +439,13 @@ recorded here rather than deleted because a resolved conflict is evidence about 
 next one should go: the escalation was worth its cost precisely because the answer was
 *not* the side this lane had drawn.
 
-**E-2 is closed, and it was the design that moved.** It read: *can a stored protocol be
-changed, and can the surface tell that a human chose it?* One half had already
-narrowed — 05's `undetermined.hint` used to say the value was editable later, and the
-rebuilt frame says 「保存后不可更改」. What remained was the standing instruction to put a
-protocol-edit entry point at frame 06's quiet badge, plus the badge tooltip written to
-match it, and at `ca45aeb6` the contract still rules against the control twice over: the UI
-landing checklist allows a protocol selector 「**only after failed observation**」 as a
-probe-order hint, which excludes one on a saved source's detail page; and AC-27 states
-「the stored shape has **no** manual/automatic provenance marker」, so a badge drawn only
-for human-supplied interfaces has nothing to render *from*.
-
-The owner ruled for the behaviour spec. **The badge is gone from frame 06 and the edit
-entry point with it**, and 05 state ④'s hint carries the whole rule instead —
-「提示只改探测顺序 · 仍要真的连上才会保存;保存后不可更改」. §1.6 no longer specifies a
-badge, an `interfaceBadge` copy row or a tooltip, and no `UI-n` quantifies over one.
-The second contract bullet is why the ruling was inevitable in hindsight: it killed the
-badge whichever way the *edit* question went, because a conditional control whose
-condition is an absent field cannot be drawn at all.
+**E-2 was amended by the 2026-08-26 owner ruling.** A stored protocol still cannot be
+edited and Source still carries no manual/automatic provenance. What changed is the
+preflight and read presentation: frame 05 exposes Auto/manual protocol selection before
+the first request, while every Source card and detail header show the endpoint identity
+and proved protocol unconditionally. The label never claims who selected it and has no
+edit action. This separates three facts that the older ruling conflated: choosing a
+candidate, proving a protocol, and displaying the proved protocol.
 
 **E-3 is closed, and the design moved again.** It read: *can a source be saved without
 a verifying upstream response?* The frames drew 05 state ③ with a 仍要添加 escape, on
@@ -872,14 +857,14 @@ state exit; held intent never bypasses the evidence column.
 | §1.4 | Engine unavailable | The gateway is not running and gateway-upstream was chosen | F1 | `addSub.error.engineDown`, `addSub.retry` | 重试 re-sends, and that press **is** the recovery observation — nothing here watches for one — so its answer decides: whichever of *Awaiting sign-in* / *Already bound* / *Start failed* the start call then names, or still down → back here; 取消 → dismiss, nothing bound `[derived]` |
 | §1.4 | Already bound | 去登录 was refused by the start call because that backend already holds its one `native_cli` Source — 「the API rejects duplicate creation with the existing Source id」 `[spec §4.1]`. **This is the race the dialog cannot see**: it disables the native row from the sources it read on open, and the singleton can appear after that | F1, in place — nothing was sent to the provider, so there is no flow to cancel | `addSub.error.alreadyBound`, `addSub.retry` | 重试 → Second pass: the dialog re-reads the sources, the native row is now the inert one, and the hub row is what 去登录 sends; 取消 → dismiss, nothing bound `[derived]` |
 | §1.4 | Start failed | `POST /api/models/oauth/start` did not put a flow in this dialog's hands, for any reason that is not the singleton refusal above — a refusal, or no answer at all. The exact generated `(client_nonce, vendor, channel)` tuple remains held `[contract]` | F1, in place — there is no `flow_id` to poll or cancel, so D-36 reconciliation repeats only the held tuple. The server coalesces an in-flight claim, returns its one committed flow, or releases the tuple for one fresh provider start | `addSub.error.startFailed`, `addSub.retry` | 重试 sends the same tuple and classifies the answer as Default does: accepted/coalesced flow → RR-1/RR-2, singleton refusal → Already bound, still no flow → back here. It never opens a second provider start beside the first. 取消 dismisses; a claim released before flow creation has no Source binding `[derived]` |
-| §1.5 | ① Default | Dialog opened | F5 | `addKey.title` … `addKey.submit` | 添加 → ②; 拉取型号 → ②′; 取消 → dismiss |
+| §1.5 | ① Default | Dialog opened | F5 | `addKey.title` … `addKey.submit`; `addKey.field.protocol`, `addKey.field.protocol.hint`, and all four `addKey.protocol.*` options | Auto detect is selected initially. Choosing a concrete interface constrains both 拉取型号 and 添加 to exactly that protocol. 添加 → ②; 拉取型号 → ②′; 取消 → dismiss |
 | §1.5 | ①′ Pull result, **Pull origin** `[derived]` | ②′ came back with an inventory — including after a hint in ④′, and after 重试 reran the entire observation from ⑤′ | F5 — the request already succeeded | `addKey.pull.result`, `addKey.pull.empty`, and ①'s own keys, which all still render | Editing Base URL or API Key → ①, the report dropped; 拉取型号 again → ②′; 添加 → ②, which runs its own observation and reuses nothing from here; 取消 → dismiss |
 | §1.5 | ② Adding | 添加 pressed — `POST /api/models/sources/observe` runs first, and `POST /api/models/sources` with one generated `client_nonce` goes out only on the outcome that has consent `[contract]` | → ③ / ④ / ⑤ / ⑦ through O1 | `addKey.adding`, `addKey.adding.detail` | O1 classifies both producers. An accepted explicit observation sends the complete `SourceCreate` with `accept_unavailable_inventory` false / omitted `[contract]`; its committed success envelope closes into 06. A classified create refusal returns to ③ / ④ / ⑤ exactly as the same observation would; only transport/no answer or a create response with no terminal observation classifier → ⑦ |
 | §1.5 | ②′ Pulling, **Pull origin** `[derived]` | 拉取型号 pressed, or 重试 pressed from ③′ / ④′ / ⑤′ | → ③′ / ④′ / ⑤′ | `addKey.adding`, `addKey.adding.detail` | Success → ①′, persisting nothing |
 | §1.5 | ③ Failure, **Add origin** | O1 received one of four closed unsuccessful outcomes from the explicit 添加 observation or Source create's repeated observation: `authentication_failed`, `unreachable`, `timeout` or `adapter_error` `[contract]` | F1 | `addKey.fail.subtitle`; exactly one outcome line: `authentication_failed` → `addKey.fail.auth` + `addKey.fail.auth.detail`, `unreachable` → `addKey.fail.address`, `timeout` → `addKey.fail.network`, `adapter_error` → `addKey.fail.unclassified`; `addKey.retry` | 重试 → ②, whichever producer returned the line — the retry re-runs the explicit observation before any create and does not depend on what the last one concluded |
 | §1.5 | ③′ Failure, **Pull origin** `[derived]` | A probe run by 拉取型号 classified the failure | F1 | as ③ | 重试 → **another 拉取型号, not ②** |
-| §1.5 | ④ Interface undetermined, **Add origin** | O1 received `SourceObservation.outcome: ambiguous` from the explicit 添加 observation or Source create's repeated observation: reachable, protocol null, and authentication authenticated or unknown `[contract]` | F1 | `addKey.undetermined.title`, `addKey.undetermined.detail`, `addKey.undetermined.label`, `addKey.undetermined.hint`, `addKey.protocol.anthropicMessages`, `addKey.protocol.openaiResponses`, `addKey.protocol.openaiChatCompletions`, `addKey.retry` | Pick a hint + 重试 → run the entire explicit observation with that `protocol_order`; identified with discovery succeeded → send the complete `SourceCreate` with `accept_unavailable_inventory` false / omitted `[contract]`, whose result re-enters O1; identified with discovery failed → ⑤; still ambiguous → back to ④ |
-| §1.5 | ④′ Interface undetermined, **Pull origin** `[derived]` | The same outcome, from 拉取型号 | F1 | as ④ | Pick a hint + 重试, still as a pull → identified: → ①′, persisting nothing; still undetermined: back to ④′ |
+| §1.5 | ④ Interface undetermined, **Add origin** | O1 received `SourceObservation.outcome: ambiguous` from the explicit 添加 observation or Source create's repeated observation: reachable, protocol null, and authentication authenticated or unknown `[contract]` | F1 | ①'s still-visible form and selector plus `addKey.undetermined.title`, `addKey.undetermined.detail`, and `addKey.retry` | Choose one concrete interface + 重试 → run the entire explicit observation against exactly that protocol; identified with discovery succeeded → send the complete `SourceCreate` with the same `protocol` constraint and `accept_unavailable_inventory` false / omitted `[contract]`, whose result re-enters O1; identified with discovery failed → ⑤; still ambiguous → back to ④ |
+| §1.5 | ④′ Interface undetermined, **Pull origin** `[derived]` | The same outcome, from 拉取型号 | F1 | as ④ | Choose one concrete interface + 重试, still as a pull → identified: → ①′, persisting nothing; still undetermined: back to ④′ |
 | §1.5 | ⑤ Identified, inventory unavailable, **Add origin** `[frame]` `d6bFlX` | O1 received `SourceObservation.outcome: observed`, protocol non-null, and `discovery: failed` from the explicit 添加 observation or Source create's repeated observation; the contract carries no request/status/reason evidence `[contract]` | F1 | `addKey.inventory.title`, `addKey.inventory.detail`, `addKey.retry`, `addKey.addAnyway` | 重试 → run **the entire explicit observation** again. 仍要添加 → send `SourceCreate` with **`accept_unavailable_inventory: true`** `[contract]`; false / omitted remains the clean path and may not commit this repeated discovery-failed observation. The server still repeats response-backed observation: only the same protocol-proved / discovery-failed cell may commit with `models: []`; every other classified result remains O1's own and the flag supplies no evidence. Only that committed success envelope closes into 06 |
 | §1.5 | ⑤′ Identified, inventory unavailable, **Pull origin** `[derived]` | The same outcome, from 拉取型号 | F1 | as ⑤ without `addKey.addAnyway` | 重试 → run the entire observation again as a pull |
 | §1.5 | ⑥ Engine unavailable, **Add origin** `[derived]` | The gateway is not running when 添加 is pressed | F1 | `addKey.fail.engineDown`, `addKey.retry` | F1 in full: the form keeps every value it holds and the primary becomes 重试. Pressing it **is** the recovery observation — nothing here watches for one — and re-attempts 添加 → ②, whose own outcomes then apply; the engine still down → back here; 取消 → dismiss |
@@ -3305,7 +3290,8 @@ refusing: ③ and ④ cannot save at all, ⑤ can.
 | --- | --- | --- | --- | --- |
 | head sub-line | that Add performs one real connection | static | no | — |
 | `f7Ao1U` 名称(可选) | free text | user | yes | — |
-| `cXsiv` Base URL + hint | free text; the hint says any relay/aggregator/self-hosted address works | user | yes | — |
+| Interface type | Auto detect plus Anthropic Messages, OpenAI Responses and OpenAI Chat Completions; Auto detect is selected by default | user | yes | Select the exact probe constraint used by both actions |
+| `cXsiv` Base URL + hint | free text; the hint names an API root, and says a bare host uses the standard `/v1` path | user | yes | — |
 | `mZBBw` API Key | masked value, reveal icon | user | yes | Toggle reveal |
 | `zVU7c` / `V6CtoF` 拉取型号 + hint | an optional early pull, which Add performs anyway | — | yes | Enter ②′; render its result in place |
 | `S0pOY2` 添加 | — | form validity | yes | Run the add action (connect + identify + fetch) |
@@ -3313,8 +3299,8 @@ refusing: ③ and ④ cannot save at all, ⑤ can.
 | `C72yS` state ③ strip | classified outcome copy | observation result | no | — |
 | `EJrDH` ③ foot | 取消 / 重试 | — | yes | Dismiss / re-run whatever failed |
 | `vKiIo` state ④ strip | connected, interface undetermined | observation result | no | — |
-| `WZyA8` selector | the three interface types, as a **hint to the prober** | static | yes, **nothing pre-selected** | Select one; enables 重试 |
-| `Nak7y` ④ foot | 取消 / 重试 (dimmed until a hint is picked) | selection | yes | — |
+| `WZyA8` selector | the same four interface choices from the form | selection | yes, Auto detect remains selected until changed | Select one concrete interface; enables 重试 |
+| `Nak7y` ④ foot | 取消 / 重试 (dimmed until a concrete interface is picked) | selection | yes | — |
 | `d6bFlX` state ⑤ strip | the interface *was* identified, and the model list did not come back | observation result | no | — |
 | `x0Gzg` ⑤ foot | 取消 / 仍要添加 / 重试 — **three** buttons, the only foot in the product with three | — | yes | Dismiss / save the source without an inventory / rerun the entire observation |
 | `sqZa9` success note | that the dialog closes straight into 06 | static | no | — |
@@ -3325,27 +3311,23 @@ sets no fixed height, so a build that pins one is deviating, not matching. Head
 `radius 8` fill `#FFFFFF08`; field hint 10.5 JetBrains Mono `#9BA3B8B3`. 拉取型号
 `padding [8,14]` `gap 6`, neutral. Result strip 520 wide `padding [11,13]` `gap 10`
 `radius 9`: red `#FF6B6B14`/`#FF6B6B40` for ③, gold `#FFC85714`/`#FFC85759` for ④
-**and for ⑤** (`AFl3g`), mint `#5BFFA014`/`#5BFFA040` for the success note. State ④
-selector `padding 3` `gap 3` on `#FFFFFF0A`/`$--border`, **all three segments fill
-`#00000000`**. Foot `padding [14,20]` `gap 8` on `#FFFFFF05`, top border; buttons
+**and for ⑤** (`AFl3g`), mint `#5BFFA014`/`#5BFFA040` for the success note. The
+form-level selector uses `padding 3` `gap 3` on `#FFFFFF0A`/`$--border`; unselected
+segments fill `#00000000`, while the selected Auto or concrete segment uses the mint
+success fill and ink. Foot `padding [14,20]` `gap 8` on `#FFFFFF05`, top border; buttons
 `padding [8,14]` `gap 6`. State ⑤ (`d6bFlX`, 560×148) is the same dialog shell with
 one strip (`uKZuq` 560×87 → `AFl3g` 520×59 → `EbcxN` `triangle-alert` + `LePtp`
 title/detail) and a three-button foot (`x0Gzg` 560×61 → `SvK44` 取消, `wouXZ`
 仍要添加, `o8K7m` 重试); it carries no field, because ⑤ asks the user for nothing.
 
-**Three of those fills are the design carrying a product rule, not styling.** Every
-segment in ④'s selector is transparent — nothing is pre-selected — and ④'s primary
-`LrUsk` 重试 is `#5BFFA059`, the same dimmed mint that ② uses for its in-flight
-primary and that ⑤'s `o8K7m` 重试 uses. ③'s primary, by contrast, is full `$--mint`.
-The rule underneath all four is one sentence: **full mint means the user has already
-supplied the new information; dimmed mint means pressing it repeats a request the
-user has not changed.** ③ qualifies because fixing the credential field *is* the new
-information. ② is mid-flight, ④ without a hint would re-run the identical probe
-order, and ⑤'s whole observation would re-hit the same endpoint with the same key — in
-⑤ the new information is elapsed time, which the user supplies by waiting rather than
-by editing. A build that pre-selects a segment, or that enables ④'s 重试 before a pick,
-or that promotes ⑤'s whole-observation retry to full mint, is not deviating cosmetically; it has
-implemented the opposite decision.
+**Three of those fills carry state policy, not styling.** Auto detect is selected on the
+initial form. In ④, 重试 stays dimmed and disabled only while the selector remains Auto;
+a concrete interface selected before or after the ambiguous attempt is shown as selected
+and enables the full-mint retry. State ②'s in-flight primary and ⑤'s whole-observation
+retry retain their drawn dimmed mint, while ③'s retry is full `$--mint`. A build that
+defaults the initial form to a concrete interface, enables ④ while it still reads Auto,
+or hides a concrete selection that produced the latest attempt has implemented a
+different decision rather than a cosmetic variation.
 
 **States** — §0.8, rows marked §1.5. Two of them are absences worth stating: this
 dialog has no Loading state, because nothing is fetched before it opens, and no Empty
@@ -3360,11 +3342,11 @@ details.
 
 **添加 observes before it persists, and that ordering is what makes ③, ④ and ⑤ offers
 rather than notifications** `[contract]`. Each of them asks the user for a
-decision — retry, pick a protocol, add anyway — and a decision offered after the row is
+decision — retry, pick a concrete protocol, add anyway — and a decision offered after the row is
 already stored is not a decision; ⑤ is the clearest case, because 仍要添加 is only an
 offer if nothing was added when the inventory came back unusable. So 添加 runs the same
 non-persisting observation 拉取型号 runs, and `POST /api/models/sources` goes out on one
-of three paths, all of them past a consent: a clean observation, ④'s retry once a hint
+of three paths, all of them past a consent: a clean observation, ④'s retry once a concrete selection
 identified the protocol, and ⑤'s 仍要添加. An earlier version had the creation call go
 first and the diagnosis come back from it, which needed the persisting route to answer
 non-terminally — a response no contract gives it — and left every 重试 in this dialog
@@ -3409,7 +3391,7 @@ happened to ②, whose row said 取消 returned to ① while the axis said an ad
 earlier version primed ③ alone, which left ④ and ⑤ silently shared between the two
 origins —
 and both of their success paths persist a source and close the dialog. A user who
-pressed the optional button, picked a hint, and pressed 重试 would then have created a
+pressed the optional button, picked a concrete interface, and pressed 重试 would then have created a
 source they never asked for, or lost the form to 取消; the same hole existed twice
 because the fix had been written as a row rather than as a rule. 拉取型号 is labelled
 可选 (D-4), and the promise that word makes is *nothing you do here commits anything* —
@@ -3458,7 +3440,7 @@ describes as 「Dialog opened」. ①′ is that state written down: the form ex
 renders it, plus `addKey.pull.result` reporting what came back, or `addKey.pull.empty`
 when the source answered and listed nothing — the reachable zero this key has, and the
 reason it takes a string rather than 「拉到 0 个型号」. It is also where ④′ lands when
-  the hint identifies the interface, and where ⑤′'s 重试 lands when the repeated observation
+  the manual selection identifies the interface, and where ⑤′'s 重试 lands when the repeated observation
 comes back usable: the same result by a longer road, which is the point of naming it once. Three
 properties hold here because it is a Pull-origin state and for no other reason. Nothing
 was persisted, so 添加 from here still runs its own observation and reuses none of
@@ -3468,33 +3450,19 @@ abort belongs to ②′, which is where the request still is. A build without th
 decide all three from what is on screen, which is the reconstruction the paragraph above
 names as the only way to get the origin wrong.
 
-**④'s selector is a hint to the prober, not a declaration of the answer** `[frame]`
-`[contract]`. The drawn hint is explicit — 「提示只改探测顺序 · 仍要真的连上才会保存;
-保存后不可更改」 — and it settles three things at once that earlier revisions of this
-file got wrong in three different ways:
+**The form-level protocol selector is a probe constraint, not response proof**
+`[frame]` `[contract]`. The 2026-08-26 owner ruling supersedes the former
+ambiguity-only probe-order hint: the selector is visible before the first request, with
+Auto detect selected by default. Auto detect probes the supported interfaces in the
+adapter's authoritative order. A concrete choice probes exactly that interface for both
+拉取型号 and 添加. In either branch, persistence still requires a matching
+protocol-shaped upstream response; the user choice cannot manufacture proof.
 
-- **The pick does not persist by itself.** It reorders the probe sequence for the next
-  attempt. Identification still has to come from a real upstream response, which is
-  AC-27's requirement, reached here by agreement rather than by exception.
-- **The primary is 重试, not a save.** A build that persists the picked protocol
-  directly has removed the verification the same screen promises.
-- **Repeated failures must not accumulate silently**: the strip shows the latest
-  attempt's evidence, for the order that was tried `[derived]`.
-
-`[derived]` for ④'s entry gate: until a segment is chosen, 重试 stays in the dimmed
-treatment. Retrying with no hint would re-run the identical probe order that just
-failed, and a button that is guaranteed to reproduce the current screen is worse than
-no button. (D-3.)
-
-**This is the one screen in the product where the user supplies a fact the product
-normally derives, and the frame goes out of its way to bound it** — one hint, affecting
-one attempt, not stored as an answer. 「全产品唯一一处让你提示接口类型的地方」 is the
-frame's own caption. At `ca45aeb6` the ledger
-uses the frame's own word for it: AC-27 calls the control 「a one-time three-value
-**probe-order hint**」 and FC-07 contracts it as 「a manual three-value probe-order hint」
-that 「cannot save a protocol without response proof」. The frame and the contract now
-say the same sentence, which is the ideal end state for a `[frame]` `[contract]` pair —
-neither is quoting the other, and they agree anyway.
+State ④ keeps the same selector visible and requires a concrete choice before 重试. The
+primary is still a retry, not a save, and the strip always describes the latest attempt.
+The stored Source records the proved protocol but no manual/automatic provenance marker:
+the distinction matters during preflight, not during later invocation. Saved protocol
+changes still require a new Source.
 
 **State ⑤ is the one place in the product that saves something it could not fully
 verify, and the rule that makes it safe is a property, not a permission** `[frame]`
@@ -3517,7 +3485,7 @@ is not, because every later request depends on it.
 
 That is why 仍要添加 exists here and nowhere else, and the frame says so in its own
 caption: 「全产品唯一一处「仍要添加」」. It is also why the state carries **no field**.
-④ asks the user for a hint because the product is missing something the user might
+④ asks the user for a concrete interface because the product is missing something the user might
 know; ⑤ asks for nothing, because the user cannot supply a model list. The only
 question ⑤ puts to a person is whether to keep the connection they just proved.
 
@@ -3542,11 +3510,11 @@ opposite sides — which is why it is worth stating as one.
 **The persisting body is the complete `SourceCreate` schema, including
 `accept_unavailable_inventory`** `[contract]`. The frozen schema
 carries required `vendor` and write-only `key`,
-optional `display_name`, normalized `base_url`, the one-time `protocol_order` hint when
+optional `display_name`, normalized `base_url`, the selected `protocol` constraint when
 present, and the generated `client_nonce`. It
 carries no protocol conclusion or discovered inventory: the server repeats the same
 response-backed observation inside the create attempt and owns the stored protocol,
-models and health. Thus ④'s pick remains ordering rather than authority, and ⑤'s
+models and health. Thus ④'s pick remains a probe constraint rather than authority, and ⑤'s
 仍要添加 is the only producer that sets `accept_unavailable_inventory: true`;
 the clean path sends false or omits it and may not commit when that server-side
 observation again proves a protocol while discovery remains unavailable. The flag never
@@ -3573,8 +3541,10 @@ is revealed; the button carries the verb.
 | `title` | 添加 API Key | Add API key |
 | `subtitle` | 「添加」时自动连一次:认出接口 + 拉取型号列表 | Add connects once: it identifies the interface and fetches the model list |
 | `field.name` | 名称(可选) | Name (optional) |
+| `field.protocol` | 接口类型 | Interface type |
+| `field.protocol.hint` | 不确定时用自动探测；已知类型时只验证所选接口 | Use Auto detect when unsure; choose a type to validate only that interface |
 | `field.baseUrl` | Base URL | Base URL |
-| `field.baseUrl.hint` | 粘贴任何中转 / 聚合 / 自建服务的地址即可,Avibe 会自己认出接口 | Paste any relay, aggregator or self-hosted address — Avibe identifies the interface itself |
+| `field.baseUrl.hint` | 填写 API 根地址，例如 https://api.example.com/v1；只填域名时使用标准 /v1 路径 | API root, such as https://api.example.com/v1; a bare host uses the standard /v1 path |
 | `field.apiKey` | API Key | API key |
 | `field.apiKey.reveal` | 显示 API Key | Show API key |
 | `field.apiKey.conceal` | 隐藏 API Key | Hide API key |
@@ -3585,10 +3555,10 @@ is revealed; the button carries the verb.
 | `pull.empty` | 连上了,但这个来源没有可用型号 | Connected, but this source lists no models |
 | `submit` | 添加 | Add |
 | `adding` | 连接中… | Connecting… |
-| `adding.detail` | 连上 + 认出接口 + 首次拉取型号列表 · 通常 1–3 秒 | Connect, identify the interface, fetch the model list · usually 1–3s |
+| `adding.detail` | 连上 + 验证接口 + 首次拉取型号列表 · 通常 1–3 秒 | Connect, validate the interface, fetch the model list · usually 1–3s |
 | `fail.subtitle` | 认出接口是「添加」的前置条件 · 先按下面这条修,再重试 | Identifying the interface is a precondition of Add · fix what the line below names, then retry |
-| `fail.auth` | 鉴权失败 | Authentication failed |
-| `fail.auth.detail` | 检查 API Key 是否有效 | Check whether the API key is valid |
+| `fail.auth` | 上游拒绝了这个凭据 | The upstream rejected this credential |
+| `fail.auth.detail` | 检查 API Key、接口类型和 Base URL 的 API 根路径 | Check the API key, interface type, and the Base URL's API root path |
 | `fail.address` `[derived]` | 无法连接这个地址 | Could not reach this address |
 | `fail.network` `[derived]` | 连接超时 | The connection timed out |
 | `fail.unclassified` `[derived]` | 响应无法归类 | The response could not be classified |
@@ -3597,9 +3567,8 @@ is revealed; the button carries the verb.
 | `fail.inProgress` `[derived]` | 创建仍在进行,可稍后重试 | Creation is still in progress. Try again later. |
 | `retry` | 重试 | Retry |
 | `undetermined.title` | 连上了 —— 但认不出它说哪种接口 | Connected — but we cannot tell which interface it speaks |
-| `undetermined.detail` | 返回结构对不上任何一种已知接口 | The response shape matches no interface we know |
-| `undetermined.label` | 接口类型 · 这一次由你提示 | Interface type · you hint it this once |
-| `undetermined.hint` | 提示只改探测顺序 · 仍要真的连上才会保存;保存后不可更改 | The hint only reorders the probe · it still has to really connect before anything is saved, and it cannot be changed afterwards |
+| `undetermined.detail` | 返回结构对不上任何一种已知接口，请选择一个明确类型后重试 | The response shape matches no interface we know; choose a concrete interface and retry |
+| `protocol.auto` | 自动探测 | Auto detect |
 | `protocol.anthropicMessages` | Anthropic Messages | Anthropic Messages |
 | `protocol.openaiResponses` | OpenAI Responses | OpenAI Responses |
 | `protocol.openaiChatCompletions` | OpenAI Chat Completions | OpenAI Chat Completions |
@@ -3706,7 +3675,7 @@ them do I actually want, and what reasoning tiers does each accept?* Nothing els
 | Element | Displays | Data source | Interactive | On activate |
 | --- | --- | --- | --- | --- |
 | `iGcAi` back icon | icon only; `sourceDetail.back` is its accessible name in both locales `[derived]` | route | yes | Return to 01 |
-| `sugad` source bar | 36×36 identity tile, source name, **state dot + state label** (使用中 in the drawn state) + 型号列表更新于 {{time}}, mono `host · N 个型号` | source state `[spec §4.5]` | capability-gated 重新拉取 / 添加模型 / source overflow `[frame 11]` | Refetch / append an editable row / open 编辑来源 · 移除来源 |
+| `sugad` source bar | 36×36 identity tile, source name, `provider or endpoint host · proved protocol` identity pill, **state dot + state label** (使用中 in the drawn state) + 型号列表更新于 {{time}}, mono `host · N 个型号` | source state `[spec §4.5]` | capability-gated 重新拉取 / 添加模型 / source overflow `[frame 11]` | Refetch / append an editable row / open 编辑来源 · 移除来源 |
 | 重新拉取 action capability `[derived]` | `sourceDetail.action.refetch` | `Source.supply_channel` | render for `hub`; do not render for `native_cli` | A Hub Source → Refetching. A native Source has no stored credential for this route to validate, so it exposes no activation |
 | `myA8k` header | 型号 ID (250) · 录入 (84) · 推理强度 (470, with info) · fill spacer | static | no | — |
 | `OM5PH` row | model id, entry-kind pill, tier chips, overflow icon | one model | tiers, overflow | Edit tiers / row menu |
@@ -3715,7 +3684,7 @@ them do I actually want, and what reasoning tiers does each accept?* Nothing els
 | `eVavA` tiers (editing) | removable chips + text input + 回车添加 · 任意文本 | local edit → `PATCH /api/models/sources/<source_id>/models/<model_id>` `[contract]` | yes | Add / remove a tier |
 | `nN4TZ` manual row | editable id input, 手动添加 pill, tier affordance, 取消 / 添加 | local draft → `POST /api/models/sources/<source_id>/models` `[contract]` | yes | Commit or discard |
 | `Q83BF` add row | 添加模型 + when to use it | — | yes | Append a manual draft row |
-| `tF3Bh` footnote | scope of this page; that tiers are yours to type; that the interface type is identified at add time, fixed, and neither shown nor editable here | static | no | — |
+| `tF3Bh` footnote | scope of this page; that tiers are yours to type; that the interface type is confirmed at add time, shown, and not editable here | static | no | — |
 
 **The back icon is named rather than inferred** `[derived]`. `iGcAi` is this page's only
 route back to 01 and draws no text, so `sourceDetail.back` carries its accessible name in
@@ -4240,7 +4209,7 @@ Five rules:
 | `addRow.hint` | 拉取不到、或只想接入其中一个时用 | Use this when a model is not discoverable, or when you only want one of them |
 | `empty` `[derived]` | 这个来源没有返回型号。可以手动添加,或重新拉取。 | This source returned no models. Add one by hand, or refetch. |
 | `emptyNeverFetched` `[derived]` | 还没有成功拉取过这个来源的型号列表。可以按上面状态里写的那条先处理,再拉一次,或者手动添加一个型号。 | This source's model list has never come back. Deal with whatever the status above reports, fetch again, or add a model by hand. |
-| `footnote` | 这里只管「这个来源有哪些型号」。型号走哪条路由链,在网关模块里改。档位自己填,两种录入方式都一样。接口类型在添加时认出并固定,页面上不显示、也不能改。 | This page answers only "which models does this source have". Which routing chain a model takes is set in the gateway module. Tiers are yours to type, the same for both entry kinds. The interface type is identified when the source is added and fixed there — it is neither shown on this page nor editable. |
+| `footnote` | 这里只管「这个来源有哪些型号」。型号走哪条路由链,在网关模块里改。档位自己填,两种录入方式都一样。接口类型在添加时确认并固定，页面会显示、但不能修改。 | This page answers only "which models does this source have". Which routing chain a model takes is set in the gateway module. Tiers are yours to type, the same for both entry kinds. The interface type is confirmed when the source is added, shown here, and not editable. |
 
 **The four discovery results are rendered at two different grains, and one of them has
 no row to land on** `[derived]` `[spec §4.2]`. `model-hub.md` requires discovery to render
@@ -4328,29 +4297,14 @@ probe. A freshness stamp next to a refetch button is a closed loop the user can
 act on. A latency figure next to a refetch button would invite exactly the conflation
 the previous rule forbids.
 
-**This page shows no protocol at all, and that is the resolution of E-2** `[frame]`.
-Earlier revisions of this section specified a quiet badge next to the source name —
-「接口由你指定」 — with a tooltip naming the stored protocol and a 「改为…」 action
-behind it. Both are gone, and the frame no longer draws either. The ruling took the
-subtractive branch of the conflict: the stored shape at `ca45aeb6` carries no
-manual/automatic provenance marker (AC-27), so a badge conditioned on 「由你指定」 has
-nothing to render *from*; and 「changing protocol requires a new Source」, so an edit
-affordance would advertise an operation the API cannot perform: `PATCH
-/api/models/sources/<source_id>` `[contract]` has no protocol field to send it in.
-
-What replaced both is one clause in the footnote: 「接口类型在添加时认出并固定,页面上
-不显示、也不能改。」 That is a better outcome than either half of the original design,
-and the reason generalizes past this frame. A badge that renders on *some* sources
-teaches every user that protocols are a thing they may have to think about, in exchange
-for a fact that changes nothing they can do — which is the mechanism D-8 spends its
-whole argument hiding. Stating the rule once, in the place where a user might go
-looking for the control, costs one sentence and leaves nothing conditional to
-implement. The 「type is fixed」 half of the rule is also stated at the only moment it
-can still be acted on, in 05 state ④'s hint (§1.5).
-
-Consequently no `interfaceBadge*` copy key exists, no `UI-n` quantifies over a badge,
-and D-8's 「the user does not perceive the supply mechanism」 now holds on frame 06
-without an exception clause.
+**The source identity label is unconditional and non-editable** `[frame]` `[contract]`.
+The card and detail header show `provider or endpoint host · proved protocol`, for
+example `ai-relay.chainbot.io · Anthropic Messages`. It is not the retired
+「接口由你指定」 badge: Source carries no manual/automatic provenance, so the label never
+claims how the protocol was selected. `PATCH /api/models/sources/<source_id>` still has
+no protocol field; changing it requires a new Source.
+Consequently no `interfaceBadge.manual` or protocol-edit copy exists. The ordinary
+identity pill is always present and reads only persisted endpoint/protocol facts.
 
 **Extreme data** `[derived]`: the table does not collapse — the whole point of the
 page is the full inventory, so it scrolls (the frame's 13 rows are an instance, not
@@ -4871,8 +4825,8 @@ stroke `#FF6B6B40`, a `circle-x` in `#FF8A8A`, title Inter 12 / 600 in `#FF8A8A`
 machine detail under it in JetBrains Mono 10.5 `#9BA3B8B3`. Nothing else in the dialog
 changes — the bullets stay, 取消 stays, and 切换到网关 stays in its full mint treatment.
 That last point is the one place this differs from §1.5's dimmed-重试 rule, and the
-difference is real rather than an exception: there, a retry with no new hint re-runs an
-identical probe and is guaranteed to reproduce the screen; here the input was never the
+difference is real rather than an exception: there, an ambiguous Auto result cannot
+progress until the user supplies a concrete interface; here the input was never the
 thing that failed, so a second press is not a guaranteed repeat. Stating it this way
 keeps one rule — *a control is dimmed when pressing it cannot change the outcome* —
 rather than two rules that happen to disagree.
@@ -5356,20 +5310,18 @@ self-hosted endpoint are all *an API key with a custom base URL*.
 *Why:* the official/unofficial split is unanswerable for compatible endpoints, and
 a category the product cannot adjudicate becomes a label that lies. `[spec §3]`
 
-**D-2 — The user never picks the interface protocol.** The add action performs one
-real upstream request and identifies it.
-*Why:* it is derivable from evidence the product can obtain in one round trip. A
-field the product can answer itself is a field the user can only get wrong.
+**D-2 — Protocol selection is explicit but never self-proving.** The add form offers
+Auto detect plus each supported interface before the first request. Auto is the default;
+a concrete choice restricts observation to that one protocol.
+*Why:* compatible relays often expose multiple or misleading routes. The operator may
+know the contract while the product still owns the proof required to save it.
 
-**D-3 — When identification fails, ask for a hint instead of guessing.** State ④ is
-the single protocol selector in the product; nothing is pre-selected, the pick reorders
-the probe rather than answering for it, and 重试 stays dimmed until a hint exists.
-*Why:* **guessing stores an unverifiable value that fails later, at request time,
-far from the moment the user could have fixed it in one click.** One question now
-is cheaper than a wrong value forever. This is also why the *picture* enforces it:
-an unselected control and a dimmed button cannot silently default. Asking for a hint
-rather than an answer is what keeps this compatible with D-4 — the user narrows the
-search, the upstream still supplies the fact.
+**D-3 — Manual selection narrows verification; it never bypasses it.** A concrete
+selection produces exactly one candidate probe. State ④ keeps the form and selector
+visible, and Retry stays dimmed while Auto remains selected after auto-detection was
+ambiguous.
+*Why:* one visible owner for the candidate removes probe-order uncertainty without
+turning a user claim into a stored fact. A matching upstream response remains the gate.
 
 **D-4 — Identification is a gate; the model pull is not.** Nothing persists until an
 upstream response identifies the interface — state ③ offers only 取消 / 重试 — while

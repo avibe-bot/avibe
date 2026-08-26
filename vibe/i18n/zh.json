@@ -882,6 +882,7 @@
       "flow_expired": "授权流程已过期。",
       "discovery_failed": "无法验证或发现此来源。",
       "ambiguous_source": "已连接，但无法确认这是哪种模型接口。",
+      "inventory_unavailable": "接口已确认，但暂时无法获取型号清单。",
       "source_unreachable": "无法连接到这个地址，请检查地址后重试。",
       "authentication_failed": "鉴权失败，请检查 API Key 是否有效。",
       "observation_failed": "已连接，但无法确认服务返回的是有效模型接口。",

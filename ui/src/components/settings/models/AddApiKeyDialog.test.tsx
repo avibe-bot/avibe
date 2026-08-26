@@ -17,7 +17,6 @@ import type {
 import {
   CONTRACT_VERSION,
   SOURCE_DISPLAY_NAME_MAX_LENGTH,
-  SOURCE_PROTOCOLS,
   type RouteHopRef,
   type Source,
   type SourceObservation,
@@ -162,7 +161,27 @@ describe('AddApiKeyDialog', () => {
     expect(screen.queryByText(/Fetched 2 models|拉到 2 个型号/i)).toBeNull();
   });
 
-  it('uses the interface choice only as the next complete probe order', async () => {
+  it('sends one manually selected interface on the first observation and create', async () => {
+    const observe = vi.spyOn(modelsApi, 'observeApiKeySource')
+      .mockResolvedValueOnce(observed({ protocol: 'openai_responses' }));
+    const create = vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValueOnce({
+      source,
+      added_to: [],
+      adopted_by: [],
+    });
+    renderDialog();
+    const user = await fillCredentials();
+
+    expect(screen.getByRole('button', { name: /Auto detect|自动探测/i }).getAttribute('aria-pressed')).toBe('true');
+    await user.click(screen.getByRole('button', { name: 'OpenAI Responses' }));
+    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+
+    await waitFor(() => expect(create).toHaveBeenCalledOnce());
+    expect(observe.mock.calls[0][0].protocol).toBe('openai_responses');
+    expect(create.mock.calls[0][0].protocol).toBe('openai_responses');
+  });
+
+  it('turns an ambiguous auto-detection into one exact manual retry', async () => {
     const observe = vi.spyOn(modelsApi, 'observeApiKeySource')
       .mockResolvedValueOnce(observed({
         outcome: 'ambiguous',
@@ -188,10 +207,8 @@ describe('AddApiKeyDialog', () => {
 
     await waitFor(() => expect(create).toHaveBeenCalledOnce());
     const secondObservation = observe.mock.calls[1][0];
-    expect(secondObservation.protocol_order?.[0]).toBe('openai_responses');
-    expect(new Set(secondObservation.protocol_order)).toEqual(new Set(SOURCE_PROTOCOLS));
-    expect(create.mock.calls[0][0]).not.toHaveProperty('protocol');
-    expect(create.mock.calls[0][0].protocol_order?.[0]).toBe('openai_responses');
+    expect(secondObservation.protocol).toBe('openai_responses');
+    expect(create.mock.calls[0][0].protocol).toBe('openai_responses');
     expect(onAdded).toHaveBeenCalledWith({ source, added_to: [], adopted_by: [] });
   });
 
@@ -215,8 +232,8 @@ describe('AddApiKeyDialog', () => {
 
     await user.click(await screen.findByRole('button', { name: /Add anyway|仍要添加/i }));
     await waitFor(() => expect(create).toHaveBeenCalledOnce());
-    expect(create.mock.calls[0][0]).not.toHaveProperty('protocol');
-    expect(create.mock.calls[0][0].protocol_order?.[0]).toBe('openai_chat');
+    expect(create.mock.calls[0][0].protocol).toBe('openai_chat');
+    expect(create.mock.calls[0][0].accept_unavailable_inventory).toBe(true);
   });
 
   it('adopts the new observation result when inventory retry moves to interface undetermined', async () => {
@@ -241,6 +258,29 @@ describe('AddApiKeyDialog', () => {
     await waitFor(() => expect(observe).toHaveBeenCalledTimes(2));
     expect(await screen.findByText(/cannot tell which interface|无法判断是哪种接口/i)).toBeTruthy();
     expect(screen.queryByRole('button', { name: /Add anyway|仍要添加/i })).toBeNull();
+  });
+
+  it('preserves unavailable-inventory consent across lost-response reconciliation', async () => {
+    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValueOnce(
+      observed({ discovery: 'failed', models: [] }),
+    );
+    const create = vi.spyOn(modelsApi, 'createApiKeySource')
+      .mockRejectedValueOnce(new TypeError('response lost'))
+      .mockResolvedValueOnce({ source, added_to: [], adopted_by: [] });
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValueOnce([]);
+    renderDialog();
+    const user = await fillCredentials();
+
+    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+    await user.click(await screen.findByRole('button', { name: /Add anyway|仍要添加/i }));
+    await user.click(await screen.findByRole('button', { name: /^Retry$|^重试$/i }));
+
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(2));
+    expect(create.mock.calls.map(([draft]) => draft.accept_unavailable_inventory)).toEqual([
+      true,
+      true,
+    ]);
+    expect(create.mock.calls[1][0].client_nonce).toBe(create.mock.calls[0][0].client_nonce);
   });
 
   it('aborts an in-flight pull and returns to the form without dismissing', async () => {

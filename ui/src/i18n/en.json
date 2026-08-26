@@ -913,6 +913,10 @@
           "subscription": "Subscription",
           "apiKey": "API key"
         },
+        "vendor": {
+          "anthropic": "Anthropic",
+          "openai": "OpenAI"
+        },
         "empty": "No sources yet. Add a subscription or an API key first.",
         "unread": "Could not read the source list · the gateway itself is fine",
         "retry": "Retry",
@@ -1171,8 +1175,10 @@
         "subtitle": "Add connects once: it identifies the interface and fetches the model list",
         "field": {
           "name": "Name (optional)",
+          "protocol": "Interface type",
+          "protocol.hint": "Use Auto detect when unsure; choose a type to validate only that interface",
           "baseUrl": "Base URL",
-          "baseUrl.hint": "Paste any relay, aggregator or self-hosted address — Avibe identifies the interface itself",
+          "baseUrl.hint": "API root, such as https://api.example.com/v1; a bare host uses the standard /v1 path",
           "apiKey": "API key",
           "apiKey.reveal": "Show API key",
           "apiKey.conceal": "Hide API key"
@@ -1186,11 +1192,11 @@
         },
         "submit": "Add",
         "adding": "Connecting…",
-        "adding.detail": "Connect, identify the interface, fetch the model list · usually 1–3s",
+        "adding.detail": "Connect, validate the interface, fetch the model list · usually 1–3s",
         "fail": {
           "subtitle": "Identifying the interface is a precondition of Add · fix what the line below names, then retry",
-          "auth": "Authentication failed: 401 Unauthorized",
-          "auth.detail": "Check whether the API key is valid",
+          "auth": "The upstream rejected this credential",
+          "auth.detail": "Check the API key, interface type, and the Base URL's API root path",
           "address": "Wrong address: 404 Not Found",
           "network": "Could not connect to this address (unreachable or timed out)",
           "undetermined": "Connected, but we could not identify the model interface",
@@ -1202,11 +1208,10 @@
         "retry": "Retry",
         "undetermined": {
           "title": "Connected and authenticated — but we cannot tell which interface it speaks",
-          "detail": "The response shape matches no interface we know",
-          "label": "Interface type · you hint it this once",
-          "hint": "The hint only reorders the probe · it still has to really connect before anything is saved, and it cannot be changed afterwards"
+          "detail": "The response shape matches no interface we know; choose a concrete interface and retry"
         },
         "protocol": {
+          "auto": "Auto detect",
           "anthropicMessages": "Anthropic Messages",
           "openaiResponses": "OpenAI Responses",
           "openaiChatCompletions": "OpenAI Chat Completions"
@@ -1479,7 +1484,7 @@
         },
         "empty": "This source returned no models. Add one by hand, or refetch.",
         "emptyNeverFetched": "This source's model list has never come back. Deal with the status above, fetch again, or add a model by hand.",
-        "footnote": "This page answers only \"which models does this source have\". Which routing chain a model takes is set in the gateway module. Tiers are yours to type, the same for both entry kinds. The interface type is identified when the source is added and fixed there — it is neither shown on this page nor editable."
+        "footnote": "This page answers only \"which models does this source have\". Which routing chain a model takes is set in the gateway module. Tiers are yours to type, the same for both entry kinds. The interface type is confirmed when the source is added, shown here, and not editable."
       },
       "guard": {
         "label": "Hops that will be removed",

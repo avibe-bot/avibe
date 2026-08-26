@@ -22,7 +22,6 @@ import {
   classifyObservation,
   isAbortError,
   PROTOCOL_COPY_KEYS,
-  protocolOrderWithHint,
   type AddApiKeyFailure,
   type AddApiKeyOrigin,
 } from './addApiKeyState';
@@ -56,12 +55,22 @@ type Phase =
   | { kind: 'form'; report: SourceObservation | null }
   | { kind: 'working'; origin: AddApiKeyOrigin; stage: 'observe' | 'persist' }
   | { kind: 'failure'; origin: AddApiKeyOrigin; cause: AddApiKeyFailure }
-  | { kind: 'undetermined'; origin: AddApiKeyOrigin; observation: SourceObservation; hint: SourceProtocol | null }
+  | { kind: 'undetermined'; origin: AddApiKeyOrigin; observation: SourceObservation }
   | { kind: 'inventory'; origin: AddApiKeyOrigin; observation: SourceObservation }
-  | { kind: 'persist_failure'; messageKey: string | null; protocolOrder: SourceProtocol[] | undefined }
-  | { kind: 'save_unconfirmed'; protocolOrder: SourceProtocol[] | undefined };
+  | {
+      kind: 'persist_failure';
+      messageKey: string | null;
+      protocol: SourceProtocol | undefined;
+      acceptUnavailableInventory: boolean;
+    }
+  | {
+      kind: 'save_unconfirmed';
+      protocol: SourceProtocol | undefined;
+      acceptUnavailableInventory: boolean;
+    };
 
 const INITIAL_PHASE: Phase = { kind: 'form', report: null };
+type ProtocolSelection = 'auto' | SourceProtocol;
 
 type ReplaceOutcome =
   | { kind: 'repaired' }
@@ -196,6 +205,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
   const [displayName, setDisplayName] = React.useState('');
   const [baseUrl, setBaseUrl] = React.useState('');
   const [apiKey, setApiKey] = React.useState('');
+  const [protocolSelection, setProtocolSelection] = React.useState<ProtocolSelection>('auto');
   const [revealed, setRevealed] = React.useState(false);
   const [phase, setPhase] = React.useState<Phase>(INITIAL_PHASE);
   const [replacePhase, setReplacePhase] = React.useState<ReplacePhase>({ kind: 'edit' });
@@ -221,6 +231,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
       setDisplayName('');
       setBaseUrl('');
       setApiKey('');
+      setProtocolSelection('auto');
       setRevealed(false);
       setPhase(INITIAL_PHASE);
       setReplacePhase({ kind: 'edit' });
@@ -259,20 +270,28 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
     if (settle) void settle().catch(() => undefined);
   }, [continuation]);
 
-  const draft = React.useCallback((protocolOrder?: SourceProtocol[]): ApiKeySourceCreate => ({
+  const draft = React.useCallback((
+    protocol?: SourceProtocol,
+    acceptUnavailableInventory = false,
+  ): ApiKeySourceCreate => ({
     kind: 'api_key',
     vendor: 'custom',
     ...(displayName.trim() ? { display_name: displayName.trim() } : {}),
     base_url: baseUrl.trim(),
     key: apiKey.trim(),
     client_nonce: clientNonce.current,
-    ...(protocolOrder ? { protocol_order: protocolOrder } : {}),
+    ...(protocol ? { protocol } : {}),
+    ...(acceptUnavailableInventory ? { accept_unavailable_inventory: true } : {}),
   }), [apiKey, baseUrl, displayName]);
 
-  const persist = React.useCallback(async (seq: ContinuationTicket, protocolOrder?: SourceProtocol[]) => {
+  const persist = React.useCallback(async (
+    seq: ContinuationTicket,
+    protocol?: SourceProtocol,
+    acceptUnavailableInventory = false,
+  ) => {
     if (continuation.settle(seq, () => setPhase({ kind: 'working', origin: 'add', stage: 'persist' })) === 'stale') return;
     try {
-      const created = await modelsApi.createApiKeySource(draft(protocolOrder));
+      const created = await modelsApi.createApiKeySource(draft(protocol, acceptUnavailableInventory));
       createdDelivery.settle(continuation, seq, created);
     } catch (error) {
       const failure = apiFailure(error);
@@ -285,7 +304,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
       continuation.settle(seq, () => {
         if (definitiveClientFailure && verdict && verdict.kind !== 'ready') {
           if (verdict.kind === 'undetermined') {
-            setPhase({ kind: 'undetermined', origin: 'add', observation: verdict.observation, hint: null });
+            setPhase({ kind: 'undetermined', origin: 'add', observation: verdict.observation });
           } else if (verdict.kind === 'inventory') {
             setPhase({ kind: 'inventory', origin: 'add', observation: verdict.observation });
           } else {
@@ -294,15 +313,20 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
           return;
         }
         setPhase(definitiveClientFailure
-          ? { kind: 'persist_failure', messageKey: failureMessageKey(failure), protocolOrder }
-          : { kind: 'save_unconfirmed', protocolOrder });
+          ? {
+              kind: 'persist_failure',
+              messageKey: failureMessageKey(failure),
+              protocol,
+              acceptUnavailableInventory,
+            }
+          : { kind: 'save_unconfirmed', protocol, acceptUnavailableInventory });
       });
     }
   }, [continuation, createdDelivery, draft]);
 
   const observe = React.useCallback(async (
     origin: AddApiKeyOrigin,
-    protocolOrder?: SourceProtocol[],
+    protocol?: SourceProtocol,
   ) => {
     const seq = continuation.begin();
     observationAbort.current?.abort();
@@ -314,7 +338,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
         vendor: 'custom',
         base_url: baseUrl.trim(),
         key: apiKey.trim(),
-        ...(protocolOrder ? { protocol_order: protocolOrder } : {}),
+        ...(protocol ? { protocol } : {}),
       }, controller.signal);
       const verdict = classifyObservation(observation);
       let persistNext = false;
@@ -324,14 +348,14 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
           if (origin === 'pull') setPhase({ kind: 'form', report: observation });
           else persistNext = true;
         } else if (verdict.kind === 'undetermined') {
-          setPhase({ kind: 'undetermined', origin, observation, hint: null });
+          setPhase({ kind: 'undetermined', origin, observation });
         } else if (verdict.kind === 'inventory') {
           setPhase({ kind: 'inventory', origin, observation });
         } else {
           setPhase({ kind: 'failure', origin, cause: verdict.cause });
         }
       });
-      if (landed === 'landed' && persistNext) await persist(seq, protocolOrder);
+      if (landed === 'landed' && persistNext) await persist(seq, protocol);
     } catch (error) {
       if (isAbortError(error)) return;
       continuation.settle(seq, () => {
@@ -446,17 +470,14 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
 
   const retry = async () => {
     if (phase.kind === 'undetermined') {
-      if (!phase.hint) return;
-      await observe(phase.origin, protocolOrderWithHint(phase.hint));
+      if (protocolSelection === 'auto') return;
+      await observe(phase.origin, protocolSelection);
       return;
     }
     if (phase.kind === 'inventory') {
-      const order = phase.observation.protocol
-        ? protocolOrderWithHint(phase.observation.protocol)
-        : undefined;
       // 2026-08-11 ruling: retry repeats the complete observation. There is no
       // inventory-only credential lifetime or server capability.
-      await observe(phase.origin, order);
+      await observe(phase.origin, phase.observation.protocol ?? undefined);
       return;
     }
     if (phase.kind === 'save_unconfirmed') {
@@ -475,21 +496,30 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
         return;
       }
       if (reconciliation.kind === 'absent') {
-        await persist(seq, phase.protocolOrder);
+        await persist(seq, phase.protocol, phase.acceptUnavailableInventory);
       }
       return;
     }
     if (phase.kind === 'persist_failure') {
-      await persist(continuation.begin(), phase.protocolOrder);
+      await persist(
+        continuation.begin(),
+        phase.protocol,
+        phase.acceptUnavailableInventory,
+      );
       return;
     }
-    if (phase.kind === 'failure') await observe(phase.origin);
+    if (phase.kind === 'failure') {
+      await observe(
+        phase.origin,
+        protocolSelection === 'auto' ? undefined : protocolSelection,
+      );
+    }
   };
 
   const addAnyway = async () => {
     if (phase.kind !== 'inventory' || phase.origin !== 'add' || !phase.observation.protocol) return;
     const seq = continuation.begin();
-    await persist(seq, protocolOrderWithHint(phase.observation.protocol));
+    await persist(seq, phase.observation.protocol, true);
   };
 
   const editEndpoint = (value: string) => {
@@ -505,6 +535,10 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
     setDisplayName(value);
     if (phase.kind === 'persist_failure') setPhase(INITIAL_PHASE);
   };
+  const editProtocol = (value: ProtocolSelection) => {
+    setProtocolSelection(value);
+    if (phase.kind === 'form' && phase.report) setPhase(INITIAL_PHASE);
+  };
 
   const isWorking = phase.kind === 'working';
   const formLocked = isWorking || phase.kind === 'save_unconfirmed';
@@ -514,7 +548,8 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
   const displayNameValid = optionalTrimmedTextWithin(displayName, SOURCE_DISPLAY_NAME_MAX_LENGTH);
   const canObserve = Boolean(baseUrl.trim() && apiKey.trim()) && !formLocked;
   const canSubmit = canObserve && displayNameValid;
-  const showForm = phase.kind !== 'undetermined' && phase.kind !== 'inventory';
+  const selectedProtocol = protocolSelection === 'auto' ? undefined : protocolSelection;
+  const showForm = phase.kind !== 'inventory';
   const replaceTerminalFailure = replacePhase.kind === 'failure'
     && replacePhase.failureClass === 'authoritative-terminal';
   const replaceFieldLocked = replacePhase.kind === 'submitting'
@@ -620,6 +655,40 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
             <Field className="model-hub-add-key-field" labelClassName="model-hub-add-key-label" label={t('settings.models.addKey.field.name')}>
               {(id) => <Input id={id} value={displayName} disabled={formLocked} aria-invalid={!displayNameValid} onChange={(event) => editDisplayName(event.target.value)} className="model-hub-add-key-input" />}
             </Field>
+            <Field
+              className="model-hub-add-key-field"
+              labelClassName="model-hub-add-key-label"
+              hintClassName="model-hub-add-key-hint"
+              label={t('settings.models.addKey.field.protocol')}
+              hint={t('settings.models.addKey.field.protocol.hint')}
+            >
+              {(id) => (
+                <div
+                  id={id}
+                  role="group"
+                  aria-label={t('settings.models.addKey.field.protocol')}
+                  className="model-hub-add-key-segments flex max-w-full flex-wrap"
+                >
+                  {(['auto', ...SOURCE_PROTOCOLS] as const).map((selection) => (
+                    <button
+                      key={selection}
+                      type="button"
+                      disabled={formLocked}
+                      aria-pressed={protocolSelection === selection}
+                      className={cn(
+                        'model-hub-add-key-segment',
+                        protocolSelection === selection && 'is-selected',
+                      )}
+                      onClick={() => editProtocol(selection)}
+                    >
+                      {t(selection === 'auto'
+                        ? 'settings.models.addKey.protocol.auto'
+                        : PROTOCOL_COPY_KEYS[selection])}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </Field>
             <Field className="model-hub-add-key-field" labelClassName="model-hub-add-key-label" hintClassName="model-hub-add-key-hint" label={t('settings.models.addKey.field.baseUrl')} hint={t('settings.models.addKey.field.baseUrl.hint')}>
               {(id) => <Input id={id} value={baseUrl} disabled={formLocked} autoComplete="url" spellCheck={false} onChange={(event) => editEndpoint(event.target.value)} className="model-hub-add-key-input font-mono" />}
             </Field>
@@ -632,6 +701,16 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
               onToggleReveal={() => setRevealed((value) => !value)}
             />
 
+            {phase.kind === 'undetermined' && (
+              <div className="model-hub-add-key-strip model-hub-add-key-strip--advisory">
+                <Info className="model-hub-ink-gold size-3.5 shrink-0" />
+                <div className="flex min-w-0 flex-col gap-[3px]">
+                  <span className="model-hub-add-key-strip-title model-hub-ink-gold">{t('settings.models.addKey.undetermined.title')}</span>
+                  <span className="model-hub-add-key-strip-detail">{t('settings.models.addKey.undetermined.detail')}</span>
+                </div>
+              </div>
+            )}
+
             {!isWorking && (
               <div className="model-hub-add-key-test-row flex items-center justify-between gap-4">
                 <Button
@@ -639,7 +718,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
                   variant="outline"
                   className="model-hub-add-key-secondary"
                   disabled={!canObserve}
-                  onClick={() => void observe('pull')}
+                  onClick={() => void observe('pull', selectedProtocol)}
                 >
                   <PlugZap className="size-3" />
                   {t('settings.models.addKey.test')}
@@ -690,40 +769,6 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
                 </span>
               </div>
             )}
-          </div>
-        )}
-
-        {!replaceMode && phase.kind === 'undetermined' && (
-          <div className="model-hub-add-key-outcome flex flex-col">
-            <div className="model-hub-add-key-outcome-wrap">
-              <div className="model-hub-add-key-strip model-hub-add-key-strip--advisory">
-                <Info className="model-hub-ink-gold size-3.5 shrink-0" />
-                <div className="flex min-w-0 flex-col gap-[3px]">
-                  <span className="model-hub-add-key-strip-title model-hub-ink-gold">{t('settings.models.addKey.undetermined.title')}</span>
-                  <span className="model-hub-add-key-strip-detail">{t('settings.models.addKey.undetermined.detail')}</span>
-                </div>
-              </div>
-            </div>
-            <div className="model-hub-add-key-protocol-field flex flex-col">
-              <div className="flex items-center gap-1.5">
-                <span className="model-hub-add-key-label">{t('settings.models.addKey.undetermined.label')}</span>
-                <Info className="model-hub-ink-59 size-[13px]" aria-hidden />
-              </div>
-              <div className="model-hub-add-key-segments flex max-w-full flex-wrap">
-                {SOURCE_PROTOCOLS.map((protocol) => (
-                  <button
-                    key={protocol}
-                    type="button"
-                    aria-pressed={phase.hint === protocol}
-                    className={cn('model-hub-add-key-segment', phase.hint === protocol && 'is-selected')}
-                    onClick={() => setPhase({ ...phase, hint: protocol })}
-                  >
-                    {t(PROTOCOL_COPY_KEYS[protocol])}
-                  </button>
-                ))}
-              </div>
-              <span className="model-hub-add-key-hint">{t('settings.models.addKey.undetermined.hint')}</span>
-            </div>
           </div>
         )}
 
@@ -793,7 +838,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
                   variant="brand"
                   className="model-hub-add-key-action"
                   disabled={!canSubmit}
-                  onClick={() => void observe('add')}
+                  onClick={() => void observe('add', selectedProtocol)}
                 >
                   {t('settings.models.addKey.submit')}
                 </Button>
@@ -810,10 +855,10 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
                   variant="brand"
                   className={cn(
                     'model-hub-add-key-action',
-                    (phase.kind === 'inventory' || phase.kind === 'save_unconfirmed' || (phase.kind === 'undetermined' && !phase.hint))
+                    (phase.kind === 'inventory' || phase.kind === 'save_unconfirmed' || (phase.kind === 'undetermined' && protocolSelection === 'auto'))
                       && 'model-hub-add-key-action--dim',
                   )}
-                  disabled={phase.kind === 'undetermined' && !phase.hint}
+                  disabled={phase.kind === 'undetermined' && protocolSelection === 'auto'}
                   onClick={() => void retry()}
                 >
                   {t('settings.models.addKey.retry')}

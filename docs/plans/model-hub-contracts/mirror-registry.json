@@ -423,7 +423,7 @@
         {
           "kind": "schema_vocabulary",
           "schema": "source-create.schema.json",
-          "paths": ["/properties/protocol_order/items"]
+          "paths": ["/properties/protocol"]
         }
       ]
     },

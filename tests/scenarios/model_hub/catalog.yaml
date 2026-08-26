@@ -101,6 +101,12 @@ scenarios:
     kind: contract
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_protocol_002_contract_exposes_only_the_three_authoritative_transports
+  - id: MH-PROTOCOL-003
+    name: Manual protocol selection constrains observation and persists only matching response proof
+    status: covered
+    kind: observation
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_protocol_003_manual_selection_requires_matching_response_proof
   - id: MH-AC29-001
     name: A persisted import-shaped Source survives canonical serialization and reload
     status: covered

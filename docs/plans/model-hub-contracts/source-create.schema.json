@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/source-create.schema.json",
   "title": "SourceCreate",
-  "description": "API-key Source creation input. It extends the unsaved observation request with display, reconciliation, and explicit unavailable-inventory consent data; the server still owns Source identity, protocol evidence, discovered inventory, health, usage, custody metadata, and timestamps. When client_nonce is present, the server reserves it atomically in process before observation or credential work; only a successful commit persists Source.client_nonce unchanged. A lost-response client reconciles through the ordinary Source list without a receipt or separate endpoint. Nonce uniqueness covers live-process reservations and live Sources; process restart or Source deletion releases it, and a later same-nonce request after the required list read is a fresh create.",
+  "description": "API-key Source creation input. It extends the unsaved observation request with display, reconciliation, and explicit unavailable-inventory consent data; the server still owns Source identity, response proof, discovered inventory, health, usage, custody metadata, and timestamps. Optional protocol restricts observation to one user-selected interface; omission auto-detects across the supported interfaces. Neither branch persists a protocol without matching upstream response proof. When client_nonce is present, the server reserves it atomically in process before observation or credential work; only a successful commit persists Source.client_nonce unchanged. A lost-response client reconciles through the ordinary Source list without a receipt or separate endpoint. Nonce uniqueness covers live-process reservations and live Sources; process restart or Source deletion releases it, and a later same-nonce request after the required list read is a fresh create.",
   "type": "object",
   "required": ["vendor", "key"],
   "additionalProperties": false,
@@ -27,15 +27,9 @@
       "writeOnly": true,
       "description": "Transient plaintext credential. It is never returned or persisted in Source state."
     },
-    "protocol_order": {
-      "type": "array",
-      "items": {
-        "enum": ["anthropic", "openai_responses", "openai_chat"]
-      },
-      "minItems": 3,
-      "maxItems": 3,
-      "uniqueItems": true,
-      "description": "Optional one-time probe order containing every protocol exactly once. It orders observation and never supplies a protocol conclusion."
+    "protocol": {
+      "enum": ["anthropic", "openai_responses", "openai_chat"],
+      "description": "Optional user-selected interface. When present, observation probes exactly this protocol and persists it only after matching response proof. Omission auto-detects across the authoritative protocol vocabulary."
     },
     "client_nonce": {
       "type": "string",
@@ -54,14 +48,14 @@
       "display_name": "relay.example",
       "base_url": "https://relay.example/v1",
       "key": "<transient plaintext key>",
-      "protocol_order": ["openai_chat", "openai_responses", "anthropic"],
+      "protocol": "openai_chat",
       "client_nonce": "scn_01j5w8z7p4n6q2rt"
     },
     {
       "vendor": "custom",
       "base_url": "https://relay.example/v1",
       "key": "<transient plaintext key>",
-      "protocol_order": ["openai_chat", "openai_responses", "anthropic"],
+      "protocol": "openai_chat",
       "accept_unavailable_inventory": true
     }
   ]

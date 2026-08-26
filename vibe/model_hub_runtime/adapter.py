@@ -38,6 +38,7 @@ from vibe.model_hub_runtime.client import (
     EngineInvokeHandle,
     completed_handle,
     probe_models,
+    upstream_api_url,
 )
 from vibe.model_hub_runtime.installer import InstallClaimTransition
 from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore
@@ -231,9 +232,11 @@ _PROTOCOL_OBSERVATION_TAXONOMY = {
     "anthropic": _ProtocolObservationTaxonomy(
         request_path="/v1/messages",
         request_body={
-            "model": "__avibe_model_hub_probe__",
-            "max_tokens": 1,
-            "messages": [{"role": "user", "content": "ping"}],
+            # Fail schema validation before a relay selects a model. A synthetic
+            # model can otherwise surface as an availability failure even when
+            # the credential and interface are valid.
+            "max_tokens": 0,
+            "messages": [],
         },
         oauth_path="/v1/messages?beta=true",
         evidence_rules=(
@@ -331,6 +334,20 @@ def _parse_protocol_authenticated_evidence(
             authentication=_AuthenticationEvidence.UNKNOWN,
         )
 
+    top_level_identifiers = {
+        value.strip().lower()
+        for value in (payload.get("type"), payload.get("code"))
+        if isinstance(value, str)
+    }
+    if (
+        status in _AUTHENTICATION_ERROR_STATUSES
+        and not _AUTHENTICATION_ERROR_IDENTIFIERS.isdisjoint(top_level_identifiers)
+    ):
+        return _ProtocolEvidence(
+            protocol=_ProtocolProof.UNPROVEN,
+            authentication=_AuthenticationEvidence.REJECTED,
+        )
+
     taxonomy = _PROTOCOL_OBSERVATION_TAXONOMY.get(protocol)
     for rule in taxonomy.evidence_rules if taxonomy is not None else ():
         if rule.matches(status, payload):
@@ -362,9 +379,8 @@ async def _probe_protocol_response(
     taxonomy = _PROTOCOL_OBSERVATION_TAXONOMY.get(protocol)
     if taxonomy is None:
         raise EngineClientError("unsupported source protocol")
-    endpoint = taxonomy.request_path.removeprefix("/v1")
     try:
-        url = normalize_model_hub_base_url(root, append_path=endpoint)
+        url = upstream_api_url(root, taxonomy.request_path)
     except (TypeError, ValueError):
         raise EngineClientError("source base URL is invalid")
     assert url is not None

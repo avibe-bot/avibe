@@ -47,6 +47,18 @@ _PROTOCOL_HEADERS = frozenset({"anthropic-beta", "anthropic-version", "openai-be
 logger = logging.getLogger(__name__)
 
 
+def upstream_api_url(root: str, path: str) -> str:
+    """Resolve a standard v1 endpoint from either an origin or an API root."""
+
+    normalized = normalize_model_hub_base_url(root)
+    assert normalized is not None
+    root_path = urllib.parse.urlsplit(normalized).path.rstrip("/")
+    append_path = path if not root_path else path.removeprefix("/v1")
+    resolved = normalize_model_hub_base_url(normalized, append_path=append_path)
+    assert resolved is not None
+    return resolved
+
+
 class EngineClientError(RuntimeError):
     def __init__(
         self,
@@ -567,7 +579,7 @@ async def probe_models(
     if not root:
         raise EngineClientError("source requires a base URL for model discovery")
     try:
-        url = normalize_model_hub_base_url(root, append_path="/models")
+        url = upstream_api_url(root, "/v1/models")
     except (TypeError, ValueError):
         raise EngineClientError("source base URL is invalid")
     assert url is not None
