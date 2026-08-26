@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+from concurrent.futures.process import BrokenProcessPool
 import json
 import logging
 import math
+import multiprocessing
+import os
+import pickle
 import re
 import tempfile
+import threading
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -95,6 +101,9 @@ _ATTACHMENT_ADD_REJECTION_CODES_WITHOUT_WRITE = frozenset(
 
 ProviderAttachment = CaptureAttachment
 
+_JSON_PARSE_POOL: concurrent.futures.ProcessPoolExecutor | None = None
+_JSON_PARSE_POOL_LOCK = threading.Lock()
+
 
 class _JSONSchema:
     pass
@@ -178,12 +187,12 @@ _HEALTH_RESPONSE_SCHEMA = _JSONMapSchema(
             additional_values=_JSON_SCALAR,
             max_items=33,
         ),
-        "disabled_features": _JSONArraySchema(_JSON_SCALAR, max_items=33),
+        "disabled_features": _JSONArraySchema(_JSON_SCALAR, max_items=32),
         "cascade": _JSONNullableSchema(
             _JSONMapSchema(
                 {
                     "healthy": _JSON_SCALAR,
-                    "reasons": _JSONArraySchema(_JSON_SCALAR, max_items=9),
+                    "reasons": _JSONArraySchema(_JSON_SCALAR, max_items=8),
                     "pending": _JSON_SCALAR,
                     "failed_permanent": _JSON_SCALAR,
                     "failed_retryable": _JSON_SCALAR,
@@ -292,6 +301,7 @@ def _search_response_schema(limit: int) -> _JSONMapSchema:
             "summary": _JSON_SCALAR,
             "subject": _JSON_SCALAR,
             "episode": _JSON_SCALAR,
+            "content": _JSON_SCALAR,
             "atomic_facts": _JSONArraySchema(fact, retain_items=limit),
             **timestamps,
         }
@@ -736,7 +746,7 @@ class EverOSPort:
         except httpx.ConnectError as exc:
             logger.warning("EverOS sidecar unavailable route=%s latency_ms=%s", route, _elapsed_ms(started))
             raise MemoryProviderSystemFailure() from exc
-        except (httpx.HTTPError, OSError) as exc:
+        except (BrokenProcessPool, httpx.HTTPError, OSError) as exc:
             logger.warning("EverOS sidecar transport failed route=%s latency_ms=%s", route, _elapsed_ms(started))
             raise MemoryProviderSystemFailure(ambiguous=True) from exc
         logger.debug(
@@ -1201,7 +1211,7 @@ class EverOSPort:
             ValueError,
         ) as exc:
             raise MemoryProviderFailure("memory_provider_response_invalid") from exc
-        except (httpx.HTTPError, OSError) as exc:
+        except (BrokenProcessPool, httpx.HTTPError, OSError) as exc:
             logger.warning("EverOS sidecar unavailable route=%s latency_ms=%s", route, _elapsed_ms(started))
             raise MemoryProviderSystemFailure() from exc
 
@@ -1340,7 +1350,7 @@ class EverOSPort:
         except (asyncio.TimeoutError, httpx.TimeoutException):
             failure = MemoryPreflightFailure(error_name, MemoryPreflightDiagnostic(side, message="provider_request_timed_out"))
             return failure
-        except (httpx.HTTPError, OSError, TypeError, ValueError):
+        except (BrokenProcessPool, httpx.HTTPError, OSError, TypeError, ValueError):
             failure = MemoryPreflightFailure(error_name, MemoryPreflightDiagnostic(side, message="provider_unavailable"))
             return failure
 
@@ -1369,11 +1379,30 @@ async def _read_json_response(
     timeout_seconds: float,
     schema: _JSONSchema,
 ) -> Any:
-    with tempfile.TemporaryFile(mode="w+b") as spool:
+    timeout = _positive_timeout(timeout_seconds, _SIDECAR_TIMEOUT_SECONDS)
+    deadline = time.monotonic() + timeout
+    with tempfile.NamedTemporaryFile(mode="w+b", delete=False) as spool:
+        path = spool.name
+        try:
+            await asyncio.wait_for(
+                _spool_response(response, spool),
+                timeout=timeout,
+            )
+        finally:
+            spool.close()
+    try:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise asyncio.TimeoutError
         return await asyncio.wait_for(
-            _spool_and_parse_response(response, spool, schema),
-            timeout=_positive_timeout(timeout_seconds, _SIDECAR_TIMEOUT_SECONDS),
+            _parse_spooled_json_async(path, schema, remaining),
+            timeout=remaining,
         )
+    finally:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
 
 
 async def _discard_response(
@@ -1387,20 +1416,90 @@ async def _discard_response(
     )
 
 
-async def _spool_and_parse_response(
-    response: httpx.Response,
-    spool: BinaryIO,
-    schema: _JSONSchema,
-) -> Any:
+async def _spool_response(response: httpx.Response, spool: BinaryIO) -> None:
     async for chunk in response.aiter_bytes(chunk_size=_RESPONSE_STREAM_CHUNK_BYTES):
         spool.write(chunk)
     spool.flush()
-    return await asyncio.to_thread(_parse_spooled_json, spool, schema)
 
 
 async def _consume_response(response: httpx.Response) -> None:
     async for _chunk in response.aiter_bytes(chunk_size=_RESPONSE_STREAM_CHUNK_BYTES):
         pass
+
+
+async def _parse_spooled_json_async(
+    path: str,
+    schema: _JSONSchema,
+    timeout_seconds: float,
+) -> Any:
+    global _JSON_PARSE_POOL
+    with _JSON_PARSE_POOL_LOCK:
+        if _JSON_PARSE_POOL is None:
+            try:
+                context = multiprocessing.get_context("fork")
+            except ValueError:
+                context = multiprocessing.get_context("spawn")
+            _JSON_PARSE_POOL = concurrent.futures.ProcessPoolExecutor(
+                max_workers=1,
+                mp_context=context,
+            )
+        pool = _JSON_PARSE_POOL
+    future = asyncio.get_running_loop().run_in_executor(
+        pool,
+        _parse_spooled_json_path,
+        path,
+        schema,
+    )
+    try:
+        ok, value = await asyncio.wait_for(future, timeout=timeout_seconds)
+        if not ok:
+            raise ValueError(value)
+        return value
+    except asyncio.TimeoutError:
+        _terminate_json_parse_pool()
+        raise
+    except BrokenProcessPool:
+        _terminate_json_parse_pool()
+        raise
+
+
+def _terminate_json_parse_pool() -> None:
+    global _JSON_PARSE_POOL
+    with _JSON_PARSE_POOL_LOCK:
+        pool = _JSON_PARSE_POOL
+        _JSON_PARSE_POOL = None
+    if pool is None:
+        return
+    for process in (getattr(pool, "_processes", None) or {}).values():
+        process.terminate()
+    pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _parse_spooled_json_path(path: str, schema: _JSONSchema) -> tuple[bool, Any]:
+    try:
+        with open(path, "rb") as spool:
+            value = _parse_spooled_json(spool, schema)
+        # The process boundary must be able to return the projection without
+        # recursively walking an adversarially deep profile object.
+        pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        return True, value
+    except RecursionError:
+        if _is_profile_response_schema(schema):
+            return True, {"data": {"profiles": []}}
+        return False, "JSON response is too deeply nested to transfer"
+    except Exception as exc:
+        # Exceptions from ijson's C/Python backends are not all picklable. Keep
+        # the worker boundary serializable and let the caller classify it.
+        return False, f"invalid JSON response: {exc}"
+
+
+def _is_profile_response_schema(schema: _JSONSchema) -> bool:
+    return (
+        isinstance(schema, _JSONMapSchema)
+        and set(schema.fields) == {"data"}
+        and isinstance(schema.fields.get("data"), _JSONMapSchema)
+        and set(schema.fields["data"].fields) == {"profiles"}
+    )
 
 
 def _parse_spooled_json(spool: BinaryIO, schema: _JSONSchema) -> Any:
@@ -1435,6 +1534,16 @@ class _ProjectedJSONParser:
                 and not isinstance(self._frames[-1].value, dict)
             ):
                 raise ValueError("unexpected map key")
+            frame = self._frames[-1]
+            if frame.value is not None:
+                frame.count += 1
+                schema = frame.schema.value if isinstance(frame.schema, _JSONNullableSchema) else frame.schema
+                if (
+                    isinstance(schema, _JSONMapSchema)
+                    and schema.max_items is not None
+                    and frame.count > schema.max_items
+                ):
+                    raise ValueError("map exceeds response contract")
             self._frames[-1].pending_key = value
             return
         if event in {"start_map", "start_array"}:
@@ -1925,7 +2034,7 @@ def _canonical_profile_text(value: Any) -> str | None:
         return None
     try:
         rendered = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    except (TypeError, ValueError):
+    except (RecursionError, TypeError, ValueError):
         return None
     return _safe_text(rendered)
 

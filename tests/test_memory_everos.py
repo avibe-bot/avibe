@@ -6,7 +6,6 @@ import hashlib
 import json
 import struct
 import tempfile
-import time
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -1424,8 +1423,8 @@ def test_profile_spools_large_streamed_response_without_aread() -> None:
     with (
         _sidecar_transport(handler),
         patch(
-            "core.memory.everos.tempfile.TemporaryFile",
-            wraps=tempfile.TemporaryFile,
+            "core.memory.everos.tempfile.NamedTemporaryFile",
+            wraps=tempfile.NamedTemporaryFile,
         ) as temporary_file,
     ):
         items = asyncio.run(
@@ -1433,7 +1432,7 @@ def test_profile_spools_large_streamed_response_without_aread() -> None:
         )
 
     response.aread.assert_not_awaited()
-    temporary_file.assert_called_once_with(mode="w+b")
+    temporary_file.assert_called_once_with(mode="w+b", delete=False)
     assert items[0].profile is not None
     assert items[0].profile.summary == summary
 
@@ -1470,11 +1469,11 @@ def test_profile_parse_is_inside_total_response_deadline(monkeypatch: pytest.Mon
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"data": {"profiles": []}})
 
-    def slow_parse(*_args, **_kwargs):
-        time.sleep(0.1)
+    async def slow_parse(*_args, **_kwargs):
+        await asyncio.sleep(0.1)
         return {"data": {"profiles": []}}
 
-    monkeypatch.setattr("core.memory.everos._parse_spooled_json", slow_parse)
+    monkeypatch.setattr("core.memory.everos._parse_spooled_json_async", slow_parse)
 
     async def run() -> None:
         with pytest.raises(MemoryProviderFailure) as raised:
@@ -1486,6 +1485,67 @@ def test_profile_parse_is_inside_total_response_deadline(monkeypatch: pytest.Mon
 
     with _sidecar_transport(handler):
         asyncio.run(run())
+
+
+def test_search_projects_content_only_episode() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "episodes": [
+                        {"user_id": "owner-1", "content": "content-only memory"}
+                    ]
+                }
+            },
+        )
+
+    with _sidecar_transport(handler):
+        items = asyncio.run(
+            EverOSPort(Path("/tmp/everos.sock")).search(
+                "owner-1", PROJECT, "memory", 1
+            )
+        )
+
+    assert [item.item.text for item in items] == ["content-only memory"]
+
+
+def test_health_rejects_capability_map_over_contract_limit() -> None:
+    payload = _health_envelope()
+    payload["capabilities"].update({f"extra_{index}": True for index in range(28)})
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    with _sidecar_transport(handler):
+        with pytest.raises(MemoryProviderFailure) as raised:
+            asyncio.run(EverOSPort(Path("/tmp/everos.sock")).health_snapshot())
+
+    assert raised.value.error == "memory_provider_response_invalid"
+
+
+def test_deep_profile_serialization_degrades_without_recursion_failure() -> None:
+    depth = 10_000
+    nested = b'{"nested":' * depth + b'"leaf"' + b"}" * depth
+    payload = (
+        b'{"data":{"profiles":[{"user_id":"owner-1","profile_data":'
+        + nested
+        + b"}]}}"
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            stream=_ChunkedResponseStream(payload),
+        )
+
+    with _sidecar_transport(handler):
+        items = asyncio.run(
+            EverOSPort(Path("/tmp/everos.sock")).profile("owner-1", PROJECT)
+        )
+
+    assert items == ()
 
 
 def test_profile_maps_known_fields_without_collapsing_basis_and_evidence() -> None:
