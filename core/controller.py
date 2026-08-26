@@ -1082,6 +1082,9 @@ class Controller:
 
         if not self.config.memory.enabled:
             return DisabledCaptureReceipt()
+        plugin_error = getattr(self, "_memory_plugin_error", None)
+        if plugin_error is not None:
+            raise plugin_error
         _CaptureAccepted, _CaptureRequest, CaptureSkipped = (
             _load_memory_capture_types()
         )

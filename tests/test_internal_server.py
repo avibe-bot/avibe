@@ -600,6 +600,34 @@ def test_memory_projects_plugin_failure_preserves_admitted_cli_session_boundary(
     assert response.json() == {"status": "failed", "error": "memory_plugin_unavailable"}
 
 
+def test_memory_remember_plugin_failure_uses_stable_plugin_envelope() -> None:
+    from vibe.memory_http_headers import CALLER_SESSION_HEADER
+    from vibe.memory_contract import MemoryPluginUnavailableError
+
+    controller = Controller.__new__(Controller)
+    controller.config = SimpleNamespace(memory=SimpleNamespace(enabled=True))
+    controller._memory_plugin_error = MemoryPluginUnavailableError("injected")
+    controller.memory_scope_for_cli_session = lambda _session_id: (
+        "u-11111111111111111111111111111111",
+        "default",
+    )
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                "/internal/memory/remember",
+                headers={CALLER_SESSION_HEADER: "session-1"},
+                json={"text": "remember this"},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 503
+    assert response.json() == {"status": "failed", "error": "memory_plugin_unavailable"}
+
+
 def test_memory_install_route_delegates_to_controller_lifecycle() -> None:
     controller = _build_controller_double()
     controller.memory_runtime = None
