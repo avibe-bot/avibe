@@ -7435,8 +7435,6 @@ def ui_reload():
     except (TypeError, ValueError):
         return jsonify({"error": "invalid_port"}), 400
 
-    status = runtime.read_status()
-
     try:
         from core.services import settings as settings_service
 
@@ -7486,10 +7484,11 @@ def ui_reload():
                     "ui_stderr.log",
                     **spawn_kwargs,
                 )
+                fresh = runtime.read_status()
                 runtime.write_status(
-                    status.get("state", "running"),
-                    status.get("detail"),
-                    status.get("service_pid"),
+                    fresh.get("state", "running"),
+                    fresh.get("detail"),
+                    fresh.get("service_pid"),
                     pid,
                 )
             except Exception:
@@ -7505,13 +7504,22 @@ def ui_reload():
                 raise
             return pid
 
-        def _replacement_identity_ready(deadline: float) -> bool:
+        def _replacement_identity_ready(replacement_pid: int, deadline: float) -> bool:
+            pid_path = config_paths.get_runtime_ui_pid_path()
+            ready_path = config_paths.get_runtime_dir() / "ui_server_ready.json"
             for attempt in range(51):
                 if time.monotonic() > deadline:
                     break
-                if runtime.ui_pid_file_points_to_running_ui() and runtime.ui_server_healthy(
-                    host=bind_host,
-                    port=port,
+                try:
+                    recorded_pid = int(pid_path.read_text(encoding="utf-8").strip())
+                except (OSError, ValueError):
+                    recorded_pid = None
+                ready = runtime.read_json(ready_path) or {}
+                marker_pid = ready.get("pid") if isinstance(ready, dict) else None
+                if (
+                    runtime.ui_pid_file_points_to_running_ui()
+                    and recorded_pid == replacement_pid
+                    and marker_pid == replacement_pid
                 ):
                     return time.monotonic() <= deadline
                 remaining = deadline - time.monotonic()
@@ -7524,6 +7532,12 @@ def ui_reload():
         for attempt in range(2):
             try:
                 with package_mutation_lock():
+                    if _restart_in_flight():
+                        logger.warning(
+                            "UI reload not scheduled while restart is active: %s",
+                            "restart_in_progress",
+                        )
+                        return
                     deadline = time.monotonic() + 10.0
                     _stop_current_server()
                     replacement_pid = None
@@ -7536,11 +7550,12 @@ def ui_reload():
                         except Exception as exc:
                             spawn_error = exc
                     if replacement_pid is None:
+                        fresh = runtime.read_status()
                         runtime.write_status(
                             "error",
                             "ui_reload_failed",
-                            status.get("service_pid"),
-                            status.get("ui_pid"),
+                            fresh.get("service_pid"),
+                            fresh.get("ui_pid"),
                         )
                         logger.exception(
                             "UI reload replacement failed to spawn: %s",
@@ -7548,11 +7563,12 @@ def ui_reload():
                             exc_info=spawn_error,
                         )
                         return
-                    if not _replacement_identity_ready(deadline):
+                    if not _replacement_identity_ready(replacement_pid, deadline):
+                        fresh = runtime.read_status()
                         runtime.write_status(
                             "error",
                             "ui_reload_timeout",
-                            status.get("service_pid"),
+                            fresh.get("service_pid"),
                             replacement_pid,
                         )
                         logger.warning(
@@ -16480,6 +16496,12 @@ def run_ui_server(host: str, port: int) -> None:
                 workers=1,
             )
             bound_socket = _bind_ui_socket(host, port)
+            from vibe import runtime
+
+            runtime.write_json(
+                paths.get_runtime_dir() / "ui_server_ready.json",
+                {"pid": os.getpid(), "bound_at": time.time()},
+            )
             _server = uvicorn.Server(uvicorn_config)
             # Reconcile remote_access in the background so cloudflared download/
             # connector start does not block /health and the rest of the UI

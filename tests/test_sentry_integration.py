@@ -156,6 +156,7 @@ def test_run_ui_server_skips_sentry_when_config_load_fails(monkeypatch):
     monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
 
     monkeypatch.setattr(ui_server.paths, "ensure_data_dirs", lambda: None)
+    monkeypatch.setattr("vibe.runtime.write_json", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         ui_server.V2Config,
         "load",
@@ -193,6 +194,7 @@ def test_run_ui_server_reconciles_remote_access_after_binding(monkeypatch):
     config = _config()
 
     monkeypatch.setattr(ui_server.paths, "ensure_data_dirs", lambda: None)
+    monkeypatch.setattr("vibe.runtime.write_json", lambda *args, **kwargs: None)
     # run_ui_server loads config via settings_service.load_config (PR #340), not
     # V2Config.load — patch the real seam, otherwise config is None and the
     # reconcile thread early-returns.
@@ -242,6 +244,7 @@ def test_run_ui_server_retries_when_prebind_reports_port_in_use(monkeypatch):
         return DummySocket()
 
     monkeypatch.setattr(ui_server.paths, "ensure_data_dirs", lambda: None)
+    monkeypatch.setattr("vibe.runtime.write_json", lambda *args, **kwargs: None)
     monkeypatch.setattr(ui_server.V2Config, "load", lambda *args, **kwargs: _config())
     monkeypatch.setattr(ui_server, "init_sentry", lambda *args, **kwargs: None)
     monkeypatch.setattr(ui_server, "_bind_ui_socket", bind_socket)
