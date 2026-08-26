@@ -255,8 +255,11 @@ def test_agentic_deadline_projection_returns_allowlisted_round_header() -> None:
     assert all(b"private query" not in value for value in headers.values())
 
 
-def test_agentic_deadline_projection_spools_large_response_before_replay() -> None:
+def test_agentic_deadline_projection_spools_large_response_before_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     response_body = b"x" * (2 * 1024 * 1024 + 1)
+    spool_deadlines: dict[int, list[float | None]] = {}
     sent: list[dict] = []
     request_messages = [
         {
@@ -288,6 +291,17 @@ def test_agentic_deadline_projection_spools_large_response_before_replay() -> No
         )
         await send({"type": "http.response.body", "body": response_body})
 
+    original_write_spool_chunk = sidecar._write_spool_chunk
+
+    def record_write_spool_chunk(
+        spool,
+        chunk: memoryview,
+        deadline: float | None = None,
+    ) -> None:
+        spool_deadlines.setdefault(id(spool), []).append(deadline)
+        original_write_spool_chunk(spool, chunk, deadline)
+
+    monkeypatch.setattr(sidecar, "_write_spool_chunk", record_write_spool_chunk)
     scope = {
         "type": "http",
         "method": "POST",
@@ -313,6 +327,30 @@ def test_agentic_deadline_projection_spools_large_response_before_replay() -> No
         response_body
     )
     assert body_messages[-1].get("more_body", False) is False
+    assert len(spool_deadlines) == 2
+    assert all(
+        deadline is not None
+        for deadlines in spool_deadlines.values()
+        for deadline in deadlines
+    )
+
+
+def test_spool_write_rechecks_deadline_after_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monotonic_values = iter((0.0, 2.0))
+    monkeypatch.setattr(sidecar.time, "monotonic", lambda: next(monotonic_values))
+
+    with (tmp_path / "response-spool").open("w+b") as spool:
+        with pytest.raises(sidecar._RequestDeadlineExceeded):
+            sidecar._write_spool_chunk(
+                spool,
+                memoryview(b"late response"),
+                deadline=1.0,
+            )
+
+        assert spool.tell() == 0
 
 
 def test_sidecar_rejects_artifact_before_everos_can_persist_diagnostics(

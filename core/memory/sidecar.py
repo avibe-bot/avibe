@@ -226,7 +226,11 @@ class _AgenticDeadlineProjection:
                     if not isinstance(chunk, bytes):
                         raise TypeError("sidecar response body must be bytes")
                     if chunk:
-                        await _spool_bytes(response_spool, chunk)
+                        await _spool_bytes(
+                            response_spool,
+                            chunk,
+                            deadline=request_deadline,
+                        )
                         response_body_size += len(chunk)
 
                 round_state: dict[str, str] = {}
@@ -356,13 +360,21 @@ async def _spool_bytes(
             _write_spool_chunk,
             spool,
             view[offset : offset + _SPOOL_REPLAY_CHUNK_BYTES],
+            deadline,
         )
         _check_request_deadline(deadline)
 
 
-def _write_spool_chunk(spool: Any, chunk: memoryview) -> None:
+def _write_spool_chunk(
+    spool: Any,
+    chunk: memoryview,
+    deadline: float | None = None,
+) -> None:
+    _check_request_deadline(deadline)
     with _SPOOL_WRITE_LOCK:
+        _check_request_deadline(deadline)
         free_bytes = shutil.disk_usage(tempfile.gettempdir()).free
+        _check_request_deadline(deadline)
         if free_bytes - len(chunk) < _MIN_SPOOL_FREE_BYTES:
             raise OSError(
                 errno.ENOSPC,
@@ -372,6 +384,7 @@ def _write_spool_chunk(spool: Any, chunk: memoryview) -> None:
         if written != len(chunk):
             raise OSError(errno.EIO, "short write while spooling sidecar payload")
         spool.flush()
+        _check_request_deadline(deadline)
 
 
 async def _replay_spooled_response(
