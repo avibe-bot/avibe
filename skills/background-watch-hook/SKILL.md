@@ -204,19 +204,24 @@ opts into retrying that code. Exit code `64` with the
 turn.
 
 **A waiter detects change; the follow-up Agent Run makes the decision.** Keep that
-split when writing your own. A hand-written waiter that fires only once a composite
-gate is satisfied — CI green *and* a verdict bound to the exact head *and* zero
-unresolved threads — has to match the shape of every signal in that gate, and it can
-only match the shapes its author has already seen. A wrong predicate then produces
-silence, which is indistinguishable from "nothing has happened yet": it can sit on a
-retry exit code for hours while the state it was armed for has already arrived. The
-bundled waiters report the change and leave the judgment to the turn that has the
-whole picture, which is why they cannot fail that way.
+split when writing your own. A waiter that fires only once a composite gate is
+satisfied — CI green *and* a verdict bound to the exact head *and* zero unresolved
+threads — must match the shape of every signal in that gate, and it can only match
+the shapes its author has already seen. A wrong predicate then produces silence,
+which is indistinguishable from "nothing has happened yet", so it can sit on a retry
+exit code for hours after the state it was armed for arrived. The bundled waiters
+avoid that by reporting the change and leaving the judgment to the turn that has the
+whole picture. They keep one silent-pending mode of their own: a `--workflow` value
+that never matches — renamed, misspelled, or never triggered on this branch — holds a
+combined watch quiet indefinitely under `--timeout 0`, so check the name against a
+head that actually ran it before arming.
 
-Before arming any custom waiter, run it once against a PR or resource that **already**
-carries the event and confirm it exits `0`. A predicate written from observed failures
-alone can be blind to success, and a waiter that has never been seen to fire has not
-been tested.
+A predicate never seen to fire has not been tested. Verify it the way the delivery
+loop below is armed — seed the baseline, produce one event, confirm exit `0` — not by
+starting it on an event that already exists: an edge-triggered waiter is supposed to
+adopt that as its baseline, and one that fires there is level-triggered and will
+re-report forever. `--catch-up` is the bundled waiters' explicit replay mode for
+deliberately processing history.
 
 Run bundled waiters relative to the directory containing this loaded `SKILL.md`.
 The examples below use `BACKGROUND_WATCH_HOOK_DIR` for that directory:
@@ -458,9 +463,13 @@ GitHub-specific notes:
   against the rate limit — an idle watch can poll for hours for free
 - a Codex verdict arrives in more than one shape, and the waiter watches all of them:
   findings as a review with inline comments, and a pass as either a `+1` reaction on
-  the PR body from `chatgpt-codex-connector` / `chatgpt-codex-connector[bot]` or a PR
-  conversation comment naming the reviewed commit. Pass reactions remain visible even
-  when `--event-limit` is reached. A predicate keyed to reviews alone never sees a pass
+  the PR body or a PR conversation comment carrying the pass phrase. Either shape is a
+  pass only when all three hold: the author is the Codex bot
+  (`chatgpt-codex-connector` / `chatgpt-codex-connector[bot]`), the pass phrase is
+  present, and the reviewed commit it names is the current head. A contributor quoting
+  a pass, and the bot's own pass on an earlier head, are both not one. Pass reactions
+  remain visible even when `--event-limit` is reached. A predicate keyed to reviews
+  alone never sees a pass
 - PR activity also includes lifecycle changes on the PR itself, for example draft/ready, closed, reopened, or merged transitions
 - a changed PR head is reported as activity so a new push cannot leave the review
   loop asleep
