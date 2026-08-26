@@ -750,7 +750,8 @@
     "cli": {
       "restartInProgressUpgrade": "已有重启正在进行，升级未执行。",
       "restartInProgressRestart": "已有重启正在进行，未安排新的重启。",
-      "restartInProgressAction": "已有重启正在进行，操作未执行。"
+      "restartInProgressAction": "已有重启正在进行，操作未执行。",
+      "packageMutationInProgressAction": "已有软件包操作正在进行，修复未执行。"
     }
   },
   "memory": {

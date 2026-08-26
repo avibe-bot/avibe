@@ -750,7 +750,8 @@
     "cli": {
       "restartInProgressUpgrade": "A restart is already in progress; upgrade was not started.",
       "restartInProgressRestart": "A restart is already in progress; restart was not scheduled.",
-      "restartInProgressAction": "A restart is already in progress; the operation was not performed."
+      "restartInProgressAction": "A restart is already in progress; the operation was not performed.",
+      "packageMutationInProgressAction": "A package operation is already in progress; the repair was not performed."
     }
   },
   "memory": {

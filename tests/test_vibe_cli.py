@@ -1400,18 +1400,78 @@ def test_current_cli_install_family_resolves_cached_launcher_symlink(monkeypatch
 
 def test_repair_duplicate_service_processes_stops_only_extra_process(monkeypatch):
     stopped = []
+    mutation_lease_held = False
     paths.ensure_data_dirs()
+
+    @contextmanager
+    def mutation_lock():
+        nonlocal mutation_lease_held
+        mutation_lease_held = True
+        try:
+            yield
+        finally:
+            mutation_lease_held = False
+
+    def stop_pid(pid, timeout=5):
+        assert mutation_lease_held is True
+        stopped.append(pid)
+        return True
+
+    def refresh_status():
+        assert mutation_lease_held is True
+
+    monkeypatch.setattr(cli, "package_mutation_lock", mutation_lock)
     monkeypatch.setattr(cli.runtime, "service_instance_lock_attached_to_process", lambda: False)
     monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1234)
     monkeypatch.setattr(cli.runtime, "extra_service_process_pids", lambda owner_pid=None: [2222])
-    monkeypatch.setattr(cli.runtime, "stop_pid", lambda pid, timeout=5: stopped.append(pid) or True)
-    monkeypatch.setattr(cli, "_write_refreshed_runtime_status", lambda: None)
+    monkeypatch.setattr(cli.runtime, "stop_pid", stop_pid)
+    monkeypatch.setattr(cli, "_write_refreshed_runtime_status", refresh_status)
 
     result = cli._repair_duplicate_service_processes()
 
     assert result["status"] == "repaired"
     assert stopped == [2222]
     assert result["stopped_pids"] == [2222]
+    assert mutation_lease_held is False
+
+
+def test_repair_duplicate_service_processes_starts_under_the_same_package_lease(
+    monkeypatch,
+):
+    mutation_lease_held = False
+    stopped: list[int] = []
+    paths.ensure_data_dirs()
+
+    @contextmanager
+    def mutation_lock():
+        nonlocal mutation_lease_held
+        mutation_lease_held = True
+        try:
+            yield
+        finally:
+            mutation_lease_held = False
+
+    def stop_pid(pid, timeout=5):
+        assert mutation_lease_held is True
+        stopped.append(pid)
+        return True
+
+    def start_after_repair(*args, **kwargs):
+        assert mutation_lease_held is True
+        return {"target": args[0], "status": "repaired", "message": args[1]}
+
+    monkeypatch.setattr(cli, "package_mutation_lock", mutation_lock)
+    monkeypatch.setattr(cli.runtime, "service_instance_lock_attached_to_process", lambda: False)
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: None)
+    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", lambda owner_pid=None: [2222])
+    monkeypatch.setattr(cli.runtime, "stop_pid", stop_pid)
+    monkeypatch.setattr(cli, "_start_service_after_repair", start_after_repair)
+
+    result = cli._repair_duplicate_service_processes()
+
+    assert result["status"] == "repaired"
+    assert stopped == [2222]
+    assert mutation_lease_held is False
 
 
 def _stub_repair_service_restart(monkeypatch, *, live_ui_pid):
@@ -1515,7 +1575,32 @@ def test_repair_stale_install_runtime_stops_only_legacy_extra_process(monkeypatc
 def test_repair_stale_install_runtime_restarts_when_legacy_owner_is_stopped(monkeypatch):
     stopped = []
     statuses = []
+    mutation_lease_held = False
     paths.ensure_data_dirs()
+
+    @contextmanager
+    def mutation_lock():
+        nonlocal mutation_lease_held
+        mutation_lease_held = True
+        try:
+            yield
+        finally:
+            mutation_lease_held = False
+
+    def stop_pid(pid, timeout=5):
+        assert mutation_lease_held is True
+        stopped.append(pid)
+        return True
+
+    def start_service(**kwargs):
+        assert mutation_lease_held is True
+        return 3333
+
+    def write_status(*args):
+        assert mutation_lease_held is True
+        statuses.append(args)
+
+    monkeypatch.setattr(cli, "package_mutation_lock", mutation_lock)
     monkeypatch.setattr(cli.runtime, "service_instance_lock_attached_to_process", lambda: False)
     monkeypatch.setattr(cli, "_current_cli_install_family", lambda: cli.PACKAGE_NAME)
     monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1111)
@@ -1525,11 +1610,11 @@ def test_repair_stale_install_runtime_restarts_when_legacy_owner_is_stopped(monk
         "get_process_command",
         lambda pid: "/home/test/.local/share/uv/tools/vibe-remote/bin/python service_main.py",
     )
-    monkeypatch.setattr(cli.runtime, "stop_pid", lambda pid, timeout=5: stopped.append(pid) or True)
+    monkeypatch.setattr(cli.runtime, "stop_pid", stop_pid)
     monkeypatch.setattr(cli, "_live_ui_server_pid", lambda: None)
-    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: 3333)
+    monkeypatch.setattr(cli.runtime, "start_service", start_service)
     monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 4444})
-    monkeypatch.setattr(cli.runtime, "write_status", lambda *args: statuses.append(args))
+    monkeypatch.setattr(cli.runtime, "write_status", write_status)
 
     result = cli._repair_stale_install_runtime()
 
@@ -1537,6 +1622,7 @@ def test_repair_stale_install_runtime_restarts_when_legacy_owner_is_stopped(monk
     assert stopped == [1111]
     assert result["service_pid"] == 3333
     assert statuses == [("running", "pid=3333", 3333, 4444)]
+    assert mutation_lease_held is False
 
 
 def test_repair_stale_install_runtime_restarts_after_lockless_legacy_stopped(monkeypatch):
@@ -1590,6 +1676,130 @@ def test_repair_stale_install_runtime_reports_failed_when_restart_fails(monkeypa
     assert stopped == [1111]
     assert result["stopped_pids"] == [1111]
     assert refreshed == [True]
+
+
+def _prepare_doctor_lifecycle_repair(monkeypatch, target, *, detected=True):
+    paths.ensure_data_dirs()
+    monkeypatch.setattr(cli.runtime, "service_instance_lock_attached_to_process", lambda: False)
+    if target == "duplicate-service-processes":
+        monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1111)
+        monkeypatch.setattr(
+            cli.runtime,
+            "extra_service_process_pids",
+            lambda owner_pid=None: [2222] if detected else [],
+        )
+        return cli._repair_duplicate_service_processes
+
+    monkeypatch.setattr(cli, "_current_cli_install_family", lambda: cli.PACKAGE_NAME)
+    monkeypatch.setattr(
+        cli.runtime,
+        "resolve_service_owner_pid",
+        lambda include_starting=False: 1111 if detected else None,
+    )
+    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", lambda owner_pid=None: [])
+    monkeypatch.setattr(
+        cli.runtime,
+        "get_process_command",
+        lambda pid: "/home/test/.local/share/uv/tools/vibe-remote/bin/python service_main.py",
+    )
+    return cli._repair_stale_install_runtime
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["duplicate-service-processes", "stale-install-runtime"],
+)
+def test_doctor_lifecycle_repairs_refuse_an_in_flight_restart(
+    monkeypatch,
+    target,
+):
+    repair = _prepare_doctor_lifecycle_repair(monkeypatch, target)
+    monkeypatch.setattr(cli, "restart_in_flight", lambda: True)
+    monkeypatch.setattr(
+        cli.runtime,
+        "stop_pid",
+        lambda *args, **kwargs: pytest.fail("an in-flight restart must prevent service stops"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_start_service_after_repair",
+        lambda *args, **kwargs: pytest.fail("an in-flight restart must prevent service starts"),
+    )
+
+    result = repair()
+
+    assert result == {
+        "target": target,
+        "status": "failed",
+        "message": "A restart is already in progress; the operation was not performed.",
+        "reason": "restart_in_progress",
+    }
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["duplicate-service-processes", "stale-install-runtime"],
+)
+def test_doctor_lifecycle_repairs_report_package_lease_timeout(
+    monkeypatch,
+    target,
+):
+    repair = _prepare_doctor_lifecycle_repair(monkeypatch, target)
+
+    @contextmanager
+    def blocked_mutation_lock():
+        raise MigrationLockTimeout("package mutation is still running")
+        yield
+
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
+    monkeypatch.setattr(cli, "package_mutation_lock", blocked_mutation_lock)
+    monkeypatch.setattr(
+        cli,
+        "restart_in_flight",
+        lambda: pytest.fail("restart state must be checked only after lease acquisition"),
+    )
+    monkeypatch.setattr(
+        cli.runtime,
+        "stop_pid",
+        lambda *args, **kwargs: pytest.fail("lease timeout must prevent service stops"),
+    )
+
+    result = repair()
+
+    assert result == {
+        "target": target,
+        "status": "failed",
+        "message": "已有软件包操作正在进行，修复未执行。",
+        "reason": "restart_not_scheduled_package_busy",
+    }
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["duplicate-service-processes", "stale-install-runtime"],
+)
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_doctor_lifecycle_repair_skip_and_dry_run_paths_do_not_take_package_lease(
+    monkeypatch,
+    target,
+    dry_run,
+):
+    repair = _prepare_doctor_lifecycle_repair(
+        monkeypatch,
+        target,
+        detected=dry_run,
+    )
+
+    @contextmanager
+    def forbidden_mutation_lock():
+        raise AssertionError("skip and dry-run paths must remain lock-free")
+        yield
+
+    monkeypatch.setattr(cli, "package_mutation_lock", forbidden_mutation_lock)
+
+    result = repair(dry_run=dry_run)
+
+    assert result["status"] == ("planned" if dry_run else "skipped")
 
 
 def test_repair_home_migration_skips_empty_home_without_initializing(monkeypatch, tmp_path):

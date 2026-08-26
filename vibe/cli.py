@@ -12054,6 +12054,20 @@ def _doctor_repair_result(target: str, status: str, message: str, **details) -> 
     return payload
 
 
+def _doctor_lifecycle_repair_blocked(target: str, reason: str) -> dict:
+    key = (
+        "lifecycle.cli.restartInProgressAction"
+        if reason == "restart_in_progress"
+        else "lifecycle.cli.packageMutationInProgressAction"
+    )
+    return _doctor_repair_result(
+        target,
+        "failed",
+        i18n_t(key, _configured_cli_language()),
+        reason=reason,
+    )
+
+
 class _ShowRuntimeStartabilityState(str, Enum):
     STARTABLE = "startable"
     NOT_STARTABLE = "not_startable"
@@ -12248,30 +12262,44 @@ def _repair_duplicate_service_processes(*, dry_run: bool = False) -> dict:
 
     stopped: list[int] = []
     failed: list[int] = []
-    for pid in extra_pids:
-        if runtime.stop_pid(pid, timeout=5):
-            stopped.append(pid)
-        else:
-            failed.append(pid)
+    try:
+        with package_mutation_lock():
+            if restart_in_flight():
+                return _doctor_lifecycle_repair_blocked(target, "restart_in_progress")
+            for pid in extra_pids:
+                if runtime.stop_pid(pid, timeout=5):
+                    stopped.append(pid)
+                else:
+                    failed.append(pid)
 
-    if not owner_pid and stopped and not failed:
-        return _start_service_after_repair(
-            target,
-            "Stopped lockless service process(es) and started a clean service.",
-            "Stopped lockless service process(es), but failed to start a clean service",
-            stopped_pids=stopped,
-        )
+            if not owner_pid and stopped and not failed:
+                return _start_service_after_repair(
+                    target,
+                    "Stopped lockless service process(es) and started a clean service.",
+                    "Stopped lockless service process(es), but failed to start a clean service",
+                    stopped_pids=stopped,
+                )
 
-    _write_refreshed_runtime_status()
-    if failed:
-        return _doctor_repair_result(
+            _write_refreshed_runtime_status()
+            if failed:
+                return _doctor_repair_result(
+                    target,
+                    "failed",
+                    "Some extra service processes could not be stopped.",
+                    stopped_pids=stopped,
+                    failed_pids=failed,
+                )
+            return _doctor_repair_result(
+                target,
+                "repaired",
+                "Stopped extra Avibe service process(es).",
+                stopped_pids=stopped,
+            )
+    except MigrationLockTimeout:
+        return _doctor_lifecycle_repair_blocked(
             target,
-            "failed",
-            "Some extra service processes could not be stopped.",
-            stopped_pids=stopped,
-            failed_pids=failed,
+            "restart_not_scheduled_package_busy",
         )
-    return _doctor_repair_result(target, "repaired", "Stopped extra Avibe service process(es).", stopped_pids=stopped)
 
 
 def _repair_stale_install_runtime(*, dry_run: bool = False) -> dict:
@@ -12305,37 +12333,46 @@ def _repair_stale_install_runtime(*, dry_run: bool = False) -> dict:
 
     stopped: list[int] = []
     failed: list[int] = []
-    for pid in stale_pids:
-        if runtime.stop_pid(pid, timeout=5):
-            stopped.append(pid)
-        else:
-            failed.append(pid)
+    try:
+        with package_mutation_lock():
+            if restart_in_flight():
+                return _doctor_lifecycle_repair_blocked(target, "restart_in_progress")
+            for pid in stale_pids:
+                if runtime.stop_pid(pid, timeout=5):
+                    stopped.append(pid)
+                else:
+                    failed.append(pid)
 
-    if failed:
-        _write_refreshed_runtime_status()
-        return _doctor_repair_result(
+            if failed:
+                _write_refreshed_runtime_status()
+                return _doctor_repair_result(
+                    target,
+                    "failed",
+                    "Some legacy vibe-remote service processes could not be stopped.",
+                    stopped_pids=stopped,
+                    failed_pids=failed,
+                )
+
+            if current_pids or (owner_pid is not None and owner_pid not in stale_pids):
+                _write_refreshed_runtime_status()
+                return _doctor_repair_result(
+                    target,
+                    "repaired",
+                    "Stopped legacy vibe-remote service process(es).",
+                    stopped_pids=stopped,
+                )
+
+            return _start_service_after_repair(
+                target,
+                "Stopped legacy vibe-remote service process and started the current Avibe service.",
+                "Stopped legacy vibe-remote service process, but failed to start the current Avibe service",
+                stopped_pids=stopped,
+            )
+    except MigrationLockTimeout:
+        return _doctor_lifecycle_repair_blocked(
             target,
-            "failed",
-            "Some legacy vibe-remote service processes could not be stopped.",
-            stopped_pids=stopped,
-            failed_pids=failed,
+            "restart_not_scheduled_package_busy",
         )
-
-    if current_pids or (owner_pid is not None and owner_pid not in stale_pids):
-        _write_refreshed_runtime_status()
-        return _doctor_repair_result(
-            target,
-            "repaired",
-            "Stopped legacy vibe-remote service process(es).",
-            stopped_pids=stopped,
-        )
-
-    return _start_service_after_repair(
-        target,
-        "Stopped legacy vibe-remote service process and started the current Avibe service.",
-        "Stopped legacy vibe-remote service process, but failed to start the current Avibe service",
-        stopped_pids=stopped,
-    )
 
 
 def _repair_managed_dependency(target: str, installer, *, dry_run: bool = False) -> dict:
