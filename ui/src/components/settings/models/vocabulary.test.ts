@@ -19,8 +19,8 @@ describe('Models page vocabulary', () => {
     expect(zh.settings.models.billing.metered).toBe('按量付费');
     expect(en.settings.models.billing.monthly).toBe('Subscription');
     expect(en.settings.models.billing.metered).toBe('Pay as you go');
-    expect(zh.settings.models.order.subtitle).toBe('排在前面的上游将优先被使用。当额度不足或出错时自动切换下一优先级。');
-    expect(en.settings.models.order.subtitle).toBe('Upstream sources at the top are used first. When quota is insufficient or an error occurs, the next priority is used automatically.');
+    expect(zh.settings.models.order.subtitle).toBe('排在前面的上游将优先被使用。当额度不足、触发限流、服务端、认证或网络出错导致请求无法完成时，自动切换下一优先级。');
+    expect(en.settings.models.order.subtitle).toBe('Upstream sources at the top are used first. When quota, rate-limit, server, authentication, or network failures prevent a request, the next priority is used automatically.');
     expect('policy' in zh.settings.models.agents).toBe(false);
   });
 });

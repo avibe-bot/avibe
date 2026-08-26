@@ -264,7 +264,7 @@ half named in its Missing cell has an owner.
 | G-10 | 01 shell pill, install in flight — **and 08's 安装并切换**, the other press that promises one — **registered against the runtime install contract** | ~~a server-side install state, and the route that enters it~~ nothing | `POST /api/models/runtime/install` is the idempotent producer. `RuntimeDependency.status.health: installing` survives reload, successful verification settles at `not_started`, and failure settles at `not_installed` with the closed `status.error_key`. §1.0 and §1.9 consume that one machine; any mounted surface observing durable `installing` owns the derived 2s status loop, while a held initiating sequence only decides whether settlement lands at Not started or continues through Starting. Unmount stops the loop; reload owns G-10's first read and restores no intent. |
 | G-11 | 09 direct-only home, zero backends — **registered against AgentSupply** | ~~an installation flag per agent backend, and the payload that carries it~~ nothing | Every `GET /api/models/agents` row now carries server-authoritative `cli_present`; the zero-installed state is exactly all rows false. §1.8 derives `installedAgents` once from that field and uses the same set for mode dispatch, rows and the count pill. Source presence is evaluated first so an empty installed set cannot hide retained Sources; only `sources == []` + the empty set enters No backend found. |
 | G-12 | 01 upstream card and 06 header, `needs_action` — **registered by frame 12** | ~~the control that replaces a dead credential~~ nothing | §1.11 registers the two repair producers drawn on the source cards: 更换 Key sends the credential-replacement flow to `PUT /api/models/sources/<id>/credential`, and 重新授权 starts `POST /api/models/sources/<id>/reauth`. §1.1 and §1.6 cite that owner instead of pointing at each other. Kept as a registered row so the former absence and its closing frame remain auditable |
-| G-13 | 03 order drawer, chains that already exist — **registered by the global priority save** | ~~an action that re-applies the current order to chains built before it~~ ~~the route behind it~~ | `POST /api/models/agents/<backend>/chains/reorder` is the sole explicit operation that reorders every stored Route by the current Source order. It is idempotent, adds/removes/remaps nothing and has no guard. Frame 03 saves the Source order first, then invokes this operation; a failure keeps the drawer open with the draft held for retry. |
+| G-13 | 03 order drawer, chains that already exist — **registered by the global priority save** | ~~an action that re-applies the current order to chains built before it~~ ~~the route behind it~~ | `POST /api/models/agents/<backend>/chains/reorder` is the sole explicit operation that stores a supplied Source order and reorders every stored Route by it. The combined mutation is idempotent, adds/removes/remaps nothing and has no guard; a failure leaves the drawer draft untouched for retry. |
 | G-14 | 08 adopt-gateway confirm, `effects.1` — **registered against the mode transaction** | ~~the adoption itself: turning the backend's existing CLI login into that backend's first `native_cli` Source~~ nothing | A qualifying `direct` → `hub` mode `PATCH` now atomically adopts the recognized CLI login as the first singleton `native_cli` Source and returns the updated `AgentSupply`; an absent or unrecognized login or an existing native Source creates and reorders nothing, and repeats create no duplicate. §1.9's consequence pair states both branches and never treats `cli_present` as recognition evidence; its M5 handoff rereads Sources before the committed result lands because the response cannot carry the possibly created Source. |
 | G-15 | 06 source detail, a source's own name and Base URL — **registered by frame 11** | ~~any affordance that edits them~~ nothing | §1.10 registers the overflow action, edit dialog and guarded `PATCH /api/models/sources/<id>` producer drawn in frame 11. Kept as a registered row so the former absence and its closing frame remain auditable |
 | G-16 | 01 upstream card and 06 source detail — **registered by frame 11** | ~~any affordance that removes a source~~ nothing | §1.10 registers the overflow action and the source-removal guard dialog drawn in frame 11 for `DELETE /api/models/sources/<id>`. The existing 06 model-row 移除 remains a different operation. Kept as a registered row so the former ambiguity and its closing frame remain auditable |
@@ -734,8 +734,8 @@ promise is how a user ends up with the same source listed twice. So the promise 
 what the evidence covers, and 重试 out of a no-answer failure re-reads the collection it
 was writing into before it re-sends — a row already sitting there closes as the success it
 is, rather than colliding with itself. An unguarded idempotent replacement may owe nothing
-extra: §1.3's 保存顺序 sends the same complete order to its PUT and then repeats the
-idempotent chains/reorder operation, so retrying the two-step save lands the same result.
+extra: §1.3's 保存顺序 sends the same complete order to the atomic chains/reorder
+operation, so retrying the save lands the same result without a persisted half-state.
 §1.2 is deliberately different even though it also replaces an array: the write
 has a guarded plan and response-only impact evidence, so D-36 reads the exact Route before
 any resend and an inferred commit marks that evidence unavailable. Which side a state
@@ -847,7 +847,7 @@ state exit; held intent never bypasses the evidence column.
 | §1.3 | Zero eligible sources | No source is eligible for this backend | F5 | `order.empty.noEligible` | 关闭. A source becomes eligible → Ready. 保存顺序 is disabled |
 | §1.3 | Empty order, held-out sources remaining | The ordered section is empty and the held-out section is not | F5 | `order.empty.ordered` | 排进来 → Dirty. 保存顺序 stays enabled — an empty order is a real configuration |
 | §1.3 | Dirty (uncommitted moves) | 排进来, 移出, a drag, or a keyboard move | F5 — nothing has been sent, so nothing can fail | `order.action.include`, `order.action.exclude` | 保存顺序 → Saving; 取消 → discard, close |
-| §1.3 | Saving | 保存顺序 pressed — first persist the whole order with `PUT /api/models/agents/<backend>/sources` `{order: string[]}`, then apply it to existing Routes with `POST /api/models/agents/<backend>/chains/reorder` `[contract]` | F1 | `order.save`, `order.fail.save`, `order.retry` | Both requests succeed → close; either request fails → keep every move held and 重试 the two-step save |
+| §1.3 | Saving | 保存顺序 pressed — send `{order: string[]}` to `POST /api/models/agents/<backend>/chains/reorder`, which stores the order and applies it to existing Routes in one mutation `[contract]` | F1 | `order.save`, `order.fail.save`, `order.retry` | Success → close; failure → keep every move held and 重试 the same save |
 | §1.4 | Default | A frame 13 vendor row has supplied the vendor | F5 | `addSub.title` … `addSub.hint.chatgpt` | The recommended option is pre-selected; selecting the other replaces it. 去登录 synchronously preallocates PD-1's blank browser context, then sends `POST /api/models/oauth/start`; RR-1/RR-2 classify any accepted flow **before** presentation: non-terminal transfers the context to PD-2, then `presentation.expects: none` → Awaiting sign-in, a paste presentation in E3a `starting` / `awaiting_action` → Awaiting paste-back, and a paste presentation already in E3b `verifying` → Awaiting paste-back completion; each navigates when `presentation.auth_url` is non-null now or on a later flow read. Terminal → immediate status read with no form reopened. Refused because that backend already holds its one `native_cli` Source `[contract]` → Already bound, and any other answer that is not a flow → Start failed; either path closes an unused blank context. Polling, re-render and reconciliation never auto-open a second context `[derived]` |
 | §1.4 | Second pass `[derived]` | Re-opened while this backend already holds its one `native_cli` source `[contract]` | F5 | `addSub.opt.added` | The native row is inert whichever account that source holds; the hub row stays choosable and is selected on open, whatever the recommendation says |
 | §1.4 | Awaiting sign-in | An acquired flow carries `presentation.expects: none` and no `device_code`; Form B remains G-33. `GET /api/models/oauth/status/<flow_id>` is polled every 2s until the §1.4 evidence-class matrix selects an exit `[contract]` | → OAuth failed / OAuth materialization failed. E2 transport/outage evidence, including `engine_down`, is inconclusive and the next 2s tick retries under the same bound (D-16); E4 or E8/E9 with the held Source present/unread stops at OAuth failed; only E6's two materialization codes stop at OAuth materialization failed | `addSub.signIn`; PD-4 resolves `presentation.instructions_key` and uses the device-code helper on null or lookup failure | PD-2 keeps the authorization link actionable. E5 `success` → `intent: create` closes **into 06 for the source that terminal names** with `added_to` and `adopted_by` in hand; `intent: reauth` → §1.11's R3 repair terminal `[contract]`; E4 → OAuth failed; E8/E9 first run RR-5's registered read, then absent → M0 / Source gone, present or unread → OAuth failed (the unread branch retains read-only Retry); E7 → M0 / Source gone; the polling bound passes with no terminal reading → OAuth failed — the bound is `OAuthFlow.expires_at` when the flow carries one `[contract]` and 15 minutes from acquisition when it does not `[derived]`; dismissed any of the three ways → Dismissing |
@@ -1455,7 +1455,7 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | `upstream.repair.fail` `[derived]` | 没能完成这次凭据修复 | The credential repair did not finish |
 | `gateway.heading` | 网关路由 | Gateway routes |
 | `gateway.infoLabel` `[derived]` | 什么是网关路由 | What gateway routes are |
-| `gateway.info` `[derived]` | 网关路由决定每个 Agent 的型号先使用哪个上游来源;额度不足或出错时自动切换下一优先级。 | Gateway routes decide which upstream source each Agent's model uses first. When quota is insufficient or an error occurs, the next priority is used automatically. |
+| `gateway.info` `[derived]` | 网关路由决定每个 Agent 的型号先使用哪个上游来源;当额度不足、触发限流、服务端、认证或网络出错导致请求无法完成时，自动切换下一优先级。 | Gateway routes decide which upstream source each Agent's model uses first. When quota, rate-limit, server, authentication, or network failures prevent a request, the next priority is used automatically. |
 | `gateway.sourceOrder` | 调整优先级 | Adjust priority |
 | `gateway.switchToGateway` | 切换到网关 | Switch to gateway |
 | `gateway.switchToDirect` | 切到直连 | Switch to direct |
@@ -2565,12 +2565,11 @@ try first, and what should it try next when the first one cannot serve the reque
 ordered list, scoped to one backend, controls both the persisted priority and the order
 of that backend's existing Route hops.
 
-**It governs global route priority** `[spec]`. `PUT /api/models/agents/<backend>/sources`
-first stores the complete order. The drawer then invokes the explicit
-`POST /api/models/agents/<backend>/chains/reorder` operation, which applies the current
-Source-order sequence to every stored Route with a stable total sort, without adding,
-removing or remapping a hop `[contract]`. If either request fails, the drawer keeps the
-draft and retries the two-step save; no partial success is presented as complete.
+**It governs global route priority** `[spec]`. `POST /api/models/agents/<backend>/chains/reorder`
+stores the supplied complete order and applies the current Source-order sequence to every
+stored Route with a stable total sort, without adding, removing or remapping a hop
+`[contract]`. The combined mutation is atomic; if it fails, the drawer keeps the draft and
+retries the same save, so no partial success is presented as complete.
 
 The scope in that sentence is the whole point of the frame, and it is what the frame
 used to get wrong. An earlier version drew one product-global order with native
@@ -2651,14 +2650,13 @@ button, the other a gesture — and the gesture is the direction with no keyboar
 equivalent that produces the same result.
 
 **Changing the order is not a guarded change, and this drawer starts no confirmation
-at all** `[contract]`. The drawer first saves the whole order with
-`PUT /api/models/agents/<backend>/sources` and then invokes the explicit
-`POST /api/models/agents/<backend>/chains/reorder` route. The second response is the
-authoritative `AgentSupply` echo after existing Routes have been stably reordered. A
-source removed from the priority list remains a valid Route hop when it is still present
-in a chain; the reorder operation only places listed Sources first and preserves every
-hop pair. There is nothing for a guard to refuse, but either request can fail, so 保存顺序
-closes only after both succeed.
+at all** `[contract]`. The drawer sends the complete order to the explicit
+`POST /api/models/agents/<backend>/chains/reorder` route. That response is the
+authoritative `AgentSupply` echo after the order has been stored and existing Routes
+have been stably reordered in one mutation. A source removed from the priority list
+remains a valid Route hop when it is still present in a chain; the reorder operation only
+places listed Sources first and preserves every hop pair. There is nothing for a guard to
+refuse, and a failed request leaves the draft available for retry.
 
 *An earlier version of this section had it removing hops.* It read the order save as
 「a save that drops sources is not a different kind of change from any other that would
@@ -2744,18 +2742,18 @@ same value through the same commit path, not two paths that agree today. Every b
 the table above commits through that one path, and so does every button on a row.
 
 **The subtitle says what this drawer stores and what its Save applies** `[contract]`.
-The first request persists the complete Source order, and the following explicit
-`chains/reorder` request applies that order to every existing Route using the stable
-sort defined in `model-hub.md` §4.6. Therefore the first source is tried first and the
-next priority is used automatically when quota is insufficient or an error occurs.
-If either request fails, the drawer keeps the same draft and retries the two-step save.
+The `chains/reorder` request persists the complete Source order and applies it to every
+existing Route using the stable sort defined in `model-hub.md` §4.6. Therefore the first
+source is tried first and the next priority is used automatically for fallback-eligible
+quota, rate-limit, server, authentication, and network failures. If the request fails,
+the drawer keeps the same draft and retries it; no partial priority state is visible.
 
 **Copy** — namespace `models.hub.order.*`
 
 | Key | 中文 | English |
 | --- | --- | --- |
 | `title` | {{backend}} · 全局路由优先级 | {{backend}} · Global route priority |
-| `subtitle` | 排在前面的上游将优先被使用。当额度不足或出错时自动切换下一优先级。 | Upstream sources at the top are used first. When quota is insufficient or an error occurs, the next priority is used automatically. |
+| `subtitle` | 排在前面的上游将优先被使用。当额度不足、触发限流、服务端、认证或网络出错导致请求无法完成时，自动切换下一优先级。 | Upstream sources at the top are used first. When quota, rate-limit, server, authentication, or network failures prevent a request, the next priority is used automatically. |
 | `infoLabel` `[derived]` | 什么是全局路由优先级 | What global route priority is |
 | `section.ordered` | 排在这条顺序里 | In this order |
 | `section.ordered.note` | 拖动排序 | Drag to reorder |
@@ -2786,14 +2784,15 @@ result would have used, the primary becomes 重试」 (§0.8) — so each owes o
 drawer that carried neither would be specifying a treatment it cannot render. The label is
 shared because it is the same word in the same place on a surface that never shows both
 lines at once: a drawer with no list to reorder has nothing to save. Both lines say what
-did not happen and nothing about why. The save sends the complete order to the PUT and then
-the idempotent reorder operation, while the drawer keeps every move the user made, and the frozen rule against enumerating request-level failure
+did not happen and nothing about why. The save sends the complete order to the atomic
+reorder operation, while the drawer keeps every move the user made, and the frozen rule against enumerating request-level failure
 kinds means a 401, a 409 and a timeout are the same sentence here — the same shape
 §1.6 gives `fail.tier`.
 
 **The copy says priority and fallback** `[derived]`. 保存顺序 stores the source order and
-then applies it to existing Route hops (§4.6), so the first listed upstream is tried first
-and the next priority is used automatically when quota is insufficient or an error occurs.
+applies it to existing Route hops (§4.6), so the first listed upstream is tried first and
+the next priority is used automatically for fallback-eligible quota, rate-limit, server,
+authentication, and network failures.
 The two section labels remain about membership in the priority list: 排在这条顺序里 and
 未排入这条顺序.
 
@@ -2814,7 +2813,7 @@ The two section labels remain about membership in the priority list: 排在这�
   configuration — it means *place no source automatically when a new route is built* —
   and refusing to save it would trap a user who genuinely wants that in a drawer they
   cannot leave without undoing their work. What it does **not** mean is that the backend
-  stops being supplied. This save stores the order and then stably reorders existing
+  stops being supplied. This save stores the order and stably reorders existing
   Route hops without changing their membership or mappings; frame 01 goes on rendering
   whichever hop is runnable first. 没有可用来源 appears when a backend has no runnable
   hop, which an empty priority order neither causes nor prevents — it decides only what
@@ -3767,7 +3766,7 @@ the two would disagree the first time it grew.
 
 The 移出 in §1.3's drawer is not a caller, because it is not yet a request. It moves a row
 between two sections of an open drawer and sends nothing; 取消 discards it, and only
-保存顺序 persists the order and applies the separate reorder operation. Neither request
+保存顺序 persists the order and applies the reorder operation in one request. That request
 has a guard, so no confirmation is needed. A guard hung on the click would fire
 on an edit the user can still take back, and would not fire on the edit that actually
 lands. The two unguarded model operations do not come here either: adding an entry and
@@ -5597,9 +5596,9 @@ that pair too: a card that read a chain would have to pick one hop — first, se
 and each answer is a different sentence that changes under the user with no edit and no
 notification. **Naming the Source order here does not make it live supply state.**
 `model-hub.md` §4.2 is explicit that it is a visible Gateway priority and that runtime
-executes the exact hop order stored for each model. The drawer's two-step save is the
-explicit bridge: the PUT stores the priority and chains/reorder applies it to existing
-Routes without changing hop membership or mappings. This decision assigns each surface
+executes the exact hop order stored for each model. The drawer's atomic chains/reorder
+save is the explicit bridge: it stores the priority and applies it to existing Routes
+without changing hop membership or mappings. This decision assigns each surface
 the projection it displays; it does not promote any of the three into an input for another.
 
 Neither projection reports live supply, and the card must not be written as though one

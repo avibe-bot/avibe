@@ -2348,6 +2348,65 @@ def test_reorder_agent_chains_applies_source_order_without_changing_pairs(tmp_pa
     ]
 
 
+def test_reorder_agent_chains_commits_source_order_with_route_reorder(tmp_path):
+    service, store, _ = _service(tmp_path)
+    model_id = "claude-opus-4-6"
+    _set_claude_route_fixture(
+        store,
+        ("src_first0001", "src_second001"),
+        model_id,
+    )
+
+    agent = asyncio.run(
+        service.reorder_agent_chains(
+            "claude",
+            ["src_second001", "src_first0001"],
+        )
+    )
+
+    assert store.config.agents["claude"].sources.order == [
+        "src_second001",
+        "src_first0001",
+    ]
+    assert agent["sources"]["order"] == ["src_second001", "src_first0001"]
+    assert [hop["source_id"] for hop in agent["routes"][model_id]["hops"]] == [
+        "src_second001",
+        "src_first0001",
+    ]
+
+
+def test_reorder_route_accepts_source_order_atomically(monkeypatch, tmp_path):
+    service, store, _ = _service(tmp_path)
+    model_id = "claude-opus-4-6"
+    _set_claude_route_fixture(
+        store,
+        ("src_first0001", "src_second001"),
+        model_id,
+    )
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+
+    response = client.post(
+        "/api/models/agents/claude/chains/reorder",
+        json={"order": ["src_second001", "src_first0001"]},
+        headers=csrf_headers(client, base_url),
+        base_url=base_url,
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    _assert_envelope(payload)
+    assert payload["agent"]["sources"]["order"] == [
+        "src_second001",
+        "src_first0001",
+    ]
+    assert [hop["source_id"] for hop in payload["agent"]["routes"][model_id]["hops"]] == [
+        "src_second001",
+        "src_first0001",
+    ]
+
+
 def test_ui_model_hub_default_is_controller_rpc_client(monkeypatch):
     monkeypatch.setattr(ui_server, "_MODEL_HUB_SERVICE", None)
 

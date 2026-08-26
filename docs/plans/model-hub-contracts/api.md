@@ -38,7 +38,7 @@ compatibility path.
 | GET `/api/models/agents` | → `{agents: AgentSupply[]}` | Backend records include server-authoritative `cli_present` and `named_agents`, the enabled named-Agent live projection. |
 | GET `/api/models/agents/<backend>/sources` | → `{agent: AgentSupply}` | Returns the authoritative effective order and eligibility. |
 | PUT `/api/models/agents/<backend>/sources` | `{order: string[]}` → `{agent: AgentSupply}` | Stores and re-echoes the complete canonical order; no policy state exists. This route never touches a Route chain and has no guarded `409` branch. |
-| POST `/api/models/agents/<backend>/chains/reorder` | → `{agent: AgentSupply}` | Idempotently reorders every stored Route by the current Source order without adding, removing, remapping, matching, or guarding. The total order is defined below. |
+| POST `/api/models/agents/<backend>/chains/reorder` | `{order?: string[]}` → `{agent: AgentSupply}` | With `order`, atomically stores the complete Source order and idempotently reorders every stored Route by it; with no body, applies the already stored order. In either form it adds, removes, remaps, matches, and guards nothing. The total order is defined below. |
 | PATCH `/api/models/agents/<backend>/mode` | `{mode}` → `{agent: AgentSupply}` | Explicit `hub` / `direct` switch. A qualifying Direct → Gateway switch atomically adopts the recognized CLI login as the first native Source; other switches create nothing. |
 | PUT `/api/models/agents/opencode/menu` | `{menu}` → `{agent: AgentSupply}` | Open-menu configuration. |
 | GET `/api/models/agents/<backend>/chains` | → `{chains: AgentChain[]}` | Hub only. Returns the complete Overview model set in menu order, followed by a selected model or configured Route not already present. All members share one config snapshot and observation time. Direct returns the documented `direct_mode` error. |
@@ -372,6 +372,9 @@ order save is allowed to mutate supply, which violates S-1.
 
 `POST /api/models/agents/<backend>/chains/reorder` is the only server-side post-creation
 operation that implicitly reads and applies the stored Source order to existing Routes.
+When the optional `order` body is present, storing that complete order and applying it
+to existing Routes happen under the same mutation lock and persistence boundary; an
+omitted body preserves the stored-order-only form for internal callers.
 For each Route, give every hop its original zero-based index `i` and sort by this total key:
 
 ```text

@@ -4591,7 +4591,18 @@ async def model_hub_agent_chains_reorder_post(backend):
     from core.handlers.model_hub import ModelHubError
 
     try:
-        agent = await _model_hub_service().reorder_agent_chains(backend)
+        payload = request.json
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict) or set(payload) - {"order"}:
+            raise ModelHubError("invalid_source_order")
+        if "order" in payload:
+            agent = await _model_hub_service().reorder_agent_chains(
+                backend,
+                payload["order"],
+            )
+        else:
+            agent = await _model_hub_service().reorder_agent_chains(backend)
         return _model_hub_success(agent=agent)
     except ModelHubError as exc:
         return _model_hub_error(exc)

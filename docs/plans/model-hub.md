@@ -412,9 +412,9 @@ stored route for that model.
 
 One record per Agent backend owns `mode`, its menu, one stored Source order, and one
 stored Route chain for each menu model. The Source order is the visible Gateway priority
-and the Add-time placement input. Saving that priority stores the complete order, then
-the explicit `chains/reorder` operation applies it to existing Routes without changing
-their hop membership or mappings. There is no backend Source-order policy discriminator
+and the Add-time placement input. Saving that priority atomically stores the complete
+order and applies it to existing Routes without changing their hop membership or
+mappings. There is no backend Source-order policy discriminator
 and no per-model route policy. Runtime executes the exact hop order stored for each model.
 
 Matching is an **Add Source write-time operation**. After connectivity, protocol, and
@@ -454,7 +454,9 @@ metadata for audit/display; routing and placement never read or mutate it.
 
 The explicit `POST /api/models/agents/<backend>/chains/reorder` operation is the sole
 server-side post-creation operation that implicitly applies the stored Source-order
-sequence to existing Routes. It reorders existing hops only, preserves every exact
+sequence to existing Routes. When the UI supplies an `order` body, persisting that
+order and applying it to existing Routes are one mutation; an omitted body applies the
+already stored order. It reorders existing hops only, preserves every exact
 `(source_id, model_id)` member and mapping, and never reruns matching. Its complete stable
 order is defined in §4.6. A user-authored per-model `hops` PUT carries only the submitted
 explicit hop order, and its server handler never reads `sources.order`; an editor may use
@@ -1234,10 +1236,10 @@ The request carrier shown in each row is the only one. The final `api.md`, serve
 envelopes, confirmation UI, and route tests mirror this matrix row-for-row.
 `PUT /api/models/agents/<backend>/sources` is intentionally outside the matrix: it
 changes only the persisted Source-order sequence, never a Route chain or its members, and
-must not gain a guarded `409` branch. The UI may follow it with the explicit
-`POST /api/models/agents/<backend>/chains/reorder` operation; keeping that second request
-separate preserves the PUT's storage-only contract and avoids making the order write itself
-a guarded Route mutation.
+must not gain a guarded `409` branch. The UI uses the explicit
+`POST /api/models/agents/<backend>/chains/reorder` operation with the complete order;
+that operation stores the order and applies it to existing Routes in one mutation while
+preserving the PUT's storage-only contract.
 Automatic background discovery never performs this cascade: when neither literal
 inventory nor sanctioned-alias evidence remains, it records the model as
 `model_unsupported`, keeps the configured hop visible and non-runnable, and waits for
@@ -1349,7 +1351,8 @@ Source deletion removes its id from every backend order in the same transaction 
 preserves the relative order of survivors. Serialization/reload rejects a dangling id.
 
 `POST /api/models/agents/<backend>/chains/reorder` applies that sequence to every
-existing Route without changing Route membership or mappings. For an original hop at
+existing Route without changing Route membership or mappings. When its optional `order`
+body is present, it stores that sequence in the same mutation. For an original hop at
 index `i`, use stable key `(0, source_order_index, i)` when its Source appears in the
 current order and `(1, i, i)` otherwise, then sort lexicographically. Thus all listed
 Sources come first in configured order, hops sharing a listed Source retain their

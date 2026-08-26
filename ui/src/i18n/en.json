@@ -834,7 +834,7 @@
       "gateway": {
         "heading": "Gateway routes",
         "infoLabel": "What gateway routes are",
-        "info": "Gateway routes decide which upstream source each Agent's model uses first. When quota is insufficient or an error occurs, the next priority is used automatically.",
+        "info": "Gateway routes decide which upstream source each Agent's model uses first. When quota, rate-limit, server, authentication, or network failures prevent a request, the next priority is used automatically.",
         "sourceOrder": "Adjust priority",
         "switchToGateway": "Switch to gateway",
         "switchToDirect": "Switch to direct",
@@ -978,7 +978,7 @@
       },
       "order": {
         "title": "{{backend}} · Global route priority",
-        "subtitle": "Upstream sources at the top are used first. When quota is insufficient or an error occurs, the next priority is used automatically.",
+        "subtitle": "Upstream sources at the top are used first. When quota, rate-limit, server, authentication, or network failures prevent a request, the next priority is used automatically.",
         "infoLabel": "What global route priority is",
         "reorder": "Reorder source",
         "section": {

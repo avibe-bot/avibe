@@ -152,8 +152,11 @@ class ModelHubRemoteService:
             {"backend": backend, "sources": sources},
         )
 
-    async def reorder_agent_chains(self, backend: str) -> dict:
-        return await _rpc("reorder_agent_chains", {"backend": backend})
+    async def reorder_agent_chains(self, backend: str, order: object = None) -> dict:
+        payload = {"backend": backend}
+        if order is not None:
+            payload["order"] = order
+        return await _rpc("reorder_agent_chains", payload)
 
     async def set_agent_mode(self, backend: str, mode: object) -> dict:
         return await _rpc("set_agent_mode", {"backend": backend, "mode": mode})
