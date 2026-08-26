@@ -43,13 +43,55 @@ class IntegrityResult:
 def site_packages_for_python(python_executable: str | os.PathLike[str]) -> list[Path]:
     """Return site-packages directories belonging to a Python executable."""
 
+    # Keep the logical path intact. uv tool interpreters are often symlinks to
+    # a shared Python binary, while their import path and sysconfig point at
+    # the tool environment selected through that symlink.
     executable = Path(python_executable).expanduser()
     root = executable.parent.parent
-    candidates = sorted((root / "lib").glob("python*/site-packages"))
-    windows = root / "Lib" / "site-packages"
-    if windows.is_dir():
-        candidates.append(windows)
-    return [path for path in candidates if path.is_dir()]
+    discovered: list[Path] = []
+    probe = (
+        "import site, sysconfig; "
+        "config = sysconfig.get_paths(); "
+        "paths = [config.get('purelib'), config.get('platlib')]; "
+        "paths += list(getattr(site, 'getsitepackages', lambda: [])()); "
+        "user = getattr(site, 'getusersitepackages', lambda: '')(); "
+        "paths += [user] if user else []; "
+        "print('\\n'.join(dict.fromkeys(path for path in paths if path)))"
+    )
+    try:
+        result = subprocess.run(
+            [str(executable), "-c", probe],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            cwd=tempfile.gettempdir(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        result = None
+    if result is not None and result.returncode == 0:
+        discovered.extend(Path(line).expanduser() for line in result.stdout.splitlines() if line.strip())
+
+    heuristic = [
+        *sorted((root / "lib").glob("python*/site-packages")),
+        *sorted((root / "lib").glob("python*/dist-packages")),
+        root / "Lib" / "site-packages",
+    ]
+    # Prefer the environment-local layout. If it is absent (for example a
+    # system Python with a pip user install), retain the interpreter-reported
+    # locations, including a user site directory.
+    discovered = [*heuristic, *discovered] if any(path.is_dir() for path in heuristic) else discovered
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+    for path in discovered:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            continue
+        if resolved.is_dir() and resolved not in seen:
+            seen.add(resolved)
+            candidates.append(resolved)
+    return candidates
 
 
 def record_paths(site_packages: Path, distribution_names: Iterable[str] | None = None) -> list[Path]:

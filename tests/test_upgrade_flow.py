@@ -24,6 +24,7 @@ from vibe.upgrade import (
     get_restart_environment,
     get_restart_invocation_command,
     get_restart_shell_command,
+    prune_atomic_uv_install_generations,
     get_running_vibe_path,
     get_safe_cwd,
     installed_package_name,
@@ -149,6 +150,51 @@ def test_activate_upgrade_candidate_replaces_launcher_only_after_verification(mo
     assert launcher.is_symlink()
     assert launcher.resolve() == candidate.resolve()
     assert old.read_text(encoding="utf-8") == "old\n"
+
+
+def test_activate_upgrade_candidate_replaces_windows_hardlink_launcher(monkeypatch, tmp_path):
+    from vibe import upgrade
+
+    launcher = tmp_path / ".local" / "bin" / "vibe.exe"
+    old_generation = tmp_path / "home" / "runtime" / "install-generations" / "old"
+    candidate = tmp_path / "home" / "runtime" / "install-generations" / "new" / "bin" / "vibe.exe"
+    launcher.parent.mkdir(parents=True)
+    old_launcher = old_generation / "bin" / "vibe.exe"
+    old_launcher.parent.mkdir(parents=True)
+    candidate.parent.mkdir(parents=True)
+    old_launcher.write_text("old\n", encoding="utf-8")
+    os.link(old_launcher, launcher)
+    os.utime(old_generation, (0, 0))
+    candidate.write_text("new\n", encoding="utf-8")
+    candidate.chmod(0o755)
+    activation = upgrade.AtomicActivation(launcher=launcher, candidate_launcher=candidate)
+    monkeypatch.setattr(upgrade, "atomic_uv_install_root", lambda: tmp_path / "home" / "runtime" / "install-generations")
+    monkeypatch.setattr(upgrade, "verify_upgrade_candidate", lambda _activation: upgrade.IntegrityResult(True, 1))
+
+    upgrade.activate_upgrade_candidate(activation)
+
+    assert launcher.is_symlink()
+    assert launcher.resolve() == candidate.resolve()
+
+
+def test_prune_atomic_uv_install_generations_keeps_active_and_rollback(monkeypatch, tmp_path):
+    from vibe import upgrade
+
+    root = tmp_path / "generations"
+    active = root / "active" / "bin" / "vibe"
+    rollback = root / "rollback" / "bin" / "vibe"
+    stale = root / "stale" / "bin" / "vibe"
+    for path in (active, rollback, stale):
+        path.parent.mkdir(parents=True)
+        path.write_text(path.parent.parent.name, encoding="utf-8")
+    monkeypatch.setattr(upgrade, "atomic_uv_install_root", lambda: root)
+
+    removed = prune_atomic_uv_install_generations(keep=(active, rollback), min_age_seconds=0)
+
+    assert removed == [stale.parent.parent]
+    assert active.exists()
+    assert rollback.exists()
+    assert not stale.parent.parent.exists()
 
 
 def test_verify_upgrade_candidate_follows_uv_launcher_to_tool_environment(monkeypatch, tmp_path):

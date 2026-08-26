@@ -88,6 +88,19 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
         fi
         EOF
         chmod +x "$bin_dir/vibe"
+        cat > "$bin_dir/python3" <<'EOF'
+        #!/usr/bin/env bash
+        if [ "${1:-}" = "-c" ]; then
+            if [ "${{VIBE_TEST_CANDIDATE_PROBE_FAIL:-}}" = "1" ]; then
+                echo "candidate import failed" >&2
+                exit 19
+            fi
+            echo "verified 1 package files"
+            exit 0
+        fi
+        exit 1
+        EOF
+        chmod +x "$bin_dir/python3"
         if [ "${{VIBE_TEST_UV_FAIL:-}}" = "1" ]; then
             exit 17
         fi
@@ -228,6 +241,27 @@ def test_install_script_keeps_active_launcher_when_uv_install_fails(tmp_path):
     env["HOME"] = str(home_dir)
     env["PATH"] = os.pathsep.join([str(path_dir), "/usr/bin", "/bin"])
     env["VIBE_TEST_UV_FAIL"] = "1"
+
+    install_result = _install(env)
+
+    assert install_result.returncode != 0
+    assert active.read_text(encoding="utf-8") == "#!/usr/bin/env bash\necho stable\n"
+
+
+def test_install_script_keeps_active_launcher_when_candidate_probe_fails(tmp_path):
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    path_dir = tmp_path / "path-bin"
+    path_dir.mkdir()
+    uv_log = tmp_path / "uv-tool-bin-dir.txt"
+    active = path_dir / "vibe"
+    _write_executable(active, "#!/usr/bin/env bash\necho stable\n")
+    _write_fake_uv(path_dir / "uv", uv_log)
+
+    env = os.environ.copy()
+    env["HOME"] = str(home_dir)
+    env["PATH"] = os.pathsep.join([str(path_dir), "/usr/bin", "/bin"])
+    env["VIBE_TEST_CANDIDATE_PROBE_FAIL"] = "1"
 
     install_result = _install(env)
 

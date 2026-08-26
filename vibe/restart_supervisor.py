@@ -32,6 +32,7 @@ from vibe.upgrade import (
     RollbackTarget,
     activate_launcher_target,
     atomic_uv_install_root,
+    get_cli_launcher_path,
     _names_a_published_release,
     build_upgrade_plan,
     get_restart_command,
@@ -668,7 +669,8 @@ def _roll_back_failed_upgrade(
     # A staged upgrade leaves the previous tool generation untouched. Reuse it
     # directly during rollback; reinstalling the old wheel would reintroduce a
     # long, mutable operation into the one path that exists to recover quickly.
-    if restore_stable_launcher and vibe_path and Path(rollback_to.launcher.main).is_file():
+    rollback_cli_launcher = get_cli_launcher_path(rollback_to.launcher) if restore_stable_launcher else None
+    if restore_stable_launcher and vibe_path and rollback_cli_launcher is not None:
         rollback["install"] = {"method": "atomic", "ok": True, "reused": True}
         record(rollback)
         write(f"reusing the previous {version} generation")
@@ -710,14 +712,14 @@ def _roll_back_failed_upgrade(
         record(rollback)
         write(f"installed {version} using {plan.method}")
 
-    if restore_stable_launcher and vibe_path:
+    if restore_stable_launcher and vibe_path and rollback_cli_launcher is not None:
         try:
-            activate_launcher_target(vibe_path, rollback_to.launcher.main)
+            activate_launcher_target(vibe_path, rollback_cli_launcher)
         except Exception as exc:  # noqa: BLE001
             rollback.update(state="failed", error=f"restoring the active launcher failed: {exc}")
             record(rollback)
             return rollback
-        rollback["launcher"] = {"restored": True, "path": rollback_to.launcher.main}
+        rollback["launcher"] = {"restored": True, "path": str(rollback_cli_launcher)}
         record(rollback)
 
     try:

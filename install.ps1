@@ -287,6 +287,11 @@ function Invoke-UvToolInstallAttempt {
             }
         }
 
+        $integrity = Test-UvCandidate -Candidate $candidate -GenerationTools $generationTools -WorkingDirectory $runtimeHome
+        if (-not $integrity.Success) {
+            return $integrity
+        }
+
         $replacement = Join-Path $stableBin ("vibe.exe.avibe-" + [Guid]::NewGuid().ToString("N") + ".new")
         try {
             New-Item -ItemType SymbolicLink -Path $replacement -Target $candidate -ErrorAction Stop | Out-Null
@@ -301,6 +306,60 @@ function Invoke-UvToolInstallAttempt {
     } finally {
         if ($null -eq $previousToolDir) { Remove-Item Env:UV_TOOL_DIR -ErrorAction SilentlyContinue } else { $env:UV_TOOL_DIR = $previousToolDir }
         if ($null -eq $previousToolBinDir) { Remove-Item Env:UV_TOOL_BIN_DIR -ErrorAction SilentlyContinue } else { $env:UV_TOOL_BIN_DIR = $previousToolBinDir }
+    }
+}
+
+function Test-UvCandidate {
+    param(
+        [string]$Candidate,
+        [string]$GenerationTools,
+        [string]$WorkingDirectory
+    )
+
+    try {
+        $candidateTarget = (Resolve-Path -LiteralPath $Candidate -ErrorAction Stop).Path
+        $candidateBin = Split-Path -Parent $candidateTarget
+        $pythonCandidates = @(
+            (Join-Path $candidateBin "python.exe"),
+            (Join-Path $candidateBin "python3.exe"),
+            (Join-Path $GenerationTools "python.exe"),
+            (Join-Path $GenerationTools "python3.exe")
+        )
+        $candidatePython = $pythonCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+        if (-not $candidatePython) {
+            $candidatePython = Get-ChildItem -LiteralPath $GenerationTools -Recurse -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -in @("python.exe", "python3.exe") } |
+                Select-Object -First 1 -ExpandProperty FullName
+        }
+        if (-not $candidatePython) {
+            return @{
+                Success = $false
+                ExitCode = 1
+                Output = "could not find the candidate Python interpreter"
+            }
+        }
+
+        $probeCode = 'from core.install_integrity import verify_python_environment; result = verify_python_environment(__import__("sys").executable); print(result.detail); raise SystemExit(0 if result.ok else 1)'
+        Push-Location $WorkingDirectory
+        try {
+            $probe = Invoke-NativeCommand -FilePath $candidatePython -Arguments @("-c", $probeCode)
+        } finally {
+            Pop-Location
+        }
+        if (-not $probe.Success) {
+            return @{
+                Success = $false
+                ExitCode = $probe.ExitCode
+                Output = if ($probe.Output) { $probe.Output } else { "candidate Avibe environment failed integrity checks" }
+            }
+        }
+        return $probe
+    } catch {
+        return @{
+            Success = $false
+            ExitCode = 1
+            Output = (($_ | Out-String).Trim())
+        }
     }
 }
 

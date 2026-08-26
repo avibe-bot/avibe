@@ -428,6 +428,10 @@ uv_tool_install() {
             warn "uv completed but the candidate vibe launcher was not created"
             return 1
         fi
+        if ! verify_uv_candidate "$VIBE_CANDIDATE_BIN_PATH"; then
+            warn "uv completed but the candidate Avibe environment failed integrity checks"
+            return 1
+        fi
         local replacement="$stable_bin_dir/.vibe.avibe-${RANDOM}.new"
         ln -s "$VIBE_CANDIDATE_BIN_PATH" "$replacement"
         mv -f "$replacement" "$stable_bin_dir/vibe"
@@ -436,6 +440,36 @@ uv_tool_install() {
         return 0
     fi
     return 1
+}
+
+verify_uv_candidate() {
+    local candidate="$1"
+    local candidate_target candidate_bin candidate_python
+    candidate_target="$(resolve_binary_path "$candidate" || true)"
+    if [ -z "$candidate_target" ] || [ ! -e "$candidate_target" ]; then
+        return 1
+    fi
+    candidate_bin="$(dirname "$candidate_target")"
+    for candidate_python in "$candidate_bin/python3" "$candidate_bin/python"; do
+        if [ -x "$candidate_python" ]; then
+            break
+        fi
+        candidate_python=""
+    done
+    if [ -z "$candidate_python" ]; then
+        warn "could not find the candidate Python interpreter"
+        return 1
+    fi
+
+    local detail
+    detail="$(
+        cd "$AVIBE_RUNTIME_HOME" || exit 1
+        "$candidate_python" -c 'from core.install_integrity import verify_python_environment; result = verify_python_environment(__import__("sys").executable); print(result.detail); raise SystemExit(0 if result.ok else 1)'
+    )" || {
+        [ -n "$detail" ] && warn "$detail"
+        return 1
+    }
+    return 0
 }
 
 install_package_candidate() {
