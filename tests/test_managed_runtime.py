@@ -271,6 +271,21 @@ def _archive_provenance(manager: ManagedRuntimeManager) -> set[tuple[str, str]]:
     return {(entry["name"], entry["sha256"]) for entry in payload["archives"]}
 
 
+def _archive_unlink_failure(archive_path: Path, real_unlink):
+    def _refuse(path, *args, **kwargs):
+        requested = Path(path)
+        matches = (
+            requested == Path(archive_path.name)
+            if kwargs.get("dir_fd") is not None
+            else requested == archive_path
+        )
+        if matches:
+            raise OSError("archive is in use")
+        return real_unlink(path, *args, **kwargs)
+
+    return _refuse
+
+
 @pytest.mark.parametrize("runtime_kind", ["git", "memory", "model-hub"])
 def test_subclass_relative_runtime_directory_persists_an_admissible_absolute_path(
     tmp_path: Path,
@@ -1243,6 +1258,49 @@ def test_clean_retries_recent_archive_from_durable_provenance(
     assert _archive_provenance(manager) == set()
 
 
+def test_clean_retries_parser_valid_long_archive_basename_from_provenance(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    manifest_path = tmp_path / "manifest.json"
+    manager = _fixture_runtime_manager(runtime_dir, manifest_path=manifest_path)
+    archive_name = f"{'a' * 129} runtime-版本@%.tar.gz"
+    assert len(archive_name.encode("utf-8")) > 128
+    stale, stale_archive = _install_fixture_runtime_release(
+        manager,
+        tmp_path,
+        manifest_path,
+        label="stale",
+        version="stale",
+        archive_name=archive_name,
+    )
+    current, _current_archive = _install_fixture_runtime_release(
+        manager,
+        tmp_path,
+        manifest_path,
+        label="current",
+        version="current",
+    )
+    os.utime(stale, (100, 100))
+    os.utime(current, (200, 200))
+    stale_digest = hashlib.sha256(stale_archive.read_bytes()).hexdigest()
+
+    first = manager.clean(keep_previous=0)
+
+    assert first["ok"] is True
+    assert not stale.exists() and stale_archive.is_file()
+    assert _archive_provenance(manager) == {(archive_name, stale_digest)}
+
+    _age_path(stale_archive)
+    second = manager.clean(keep_previous=0)
+
+    assert second["ok"] is True
+    assert second["archives"]["candidate_count"] == 1
+    assert second["archives"]["removed_count"] == 1
+    assert not stale_archive.exists()
+    assert _archive_provenance(manager) == set()
+
+
 def test_clean_retries_archive_after_transient_unlink_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1270,12 +1328,7 @@ def test_clean_retries_archive_after_transient_unlink_failure(
     stale_digest = hashlib.sha256(stale_archive.read_bytes()).hexdigest()
     real_unlink = os.unlink
 
-    def _refuse_archive(path, *args, **kwargs):
-        if path == stale_archive.name and kwargs.get("dir_fd") is not None:
-            raise OSError("archive is in use")
-        return real_unlink(path, *args, **kwargs)
-
-    monkeypatch.setattr(os, "unlink", _refuse_archive)
+    monkeypatch.setattr(os, "unlink", _archive_unlink_failure(stale_archive, real_unlink))
     first = manager.clean(keep_previous=0)
 
     assert first["ok"] is False
@@ -1593,12 +1646,7 @@ def test_clean_archive_removal_failure_uses_shared_failure_and_archive_vocabular
     _age_path(stale_archive)
     real_unlink = os.unlink
 
-    def _refuse_archive(path, *args, **kwargs):
-        if path == stale_archive.name and kwargs.get("dir_fd") is not None:
-            raise OSError("archive is in use")
-        return real_unlink(path, *args, **kwargs)
-
-    monkeypatch.setattr(os, "unlink", _refuse_archive)
+    monkeypatch.setattr(os, "unlink", _archive_unlink_failure(stale_archive, real_unlink))
     result = manager.clean(keep_previous=0)
 
     assert result["ok"] is False

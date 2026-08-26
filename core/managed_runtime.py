@@ -864,7 +864,7 @@ class ManagedRuntimeManager:
             (record.archive_name, record.archive_sha256)
             for record in installs
             if record.path.resolve() in candidate_paths
-            and self._archive_name_is_candidate(record.archive_name)
+            and self._archive_name_is_owned(record.archive_name)
         }
         pending_provenance = persisted_provenance | candidate_provenance
         if not dry_run and pending_provenance != persisted_provenance:
@@ -899,7 +899,7 @@ class ManagedRuntimeManager:
         install_provenance = {
             (record.archive_name, record.archive_sha256)
             for record in installs
-            if self._archive_name_is_candidate(record.archive_name)
+            if self._archive_name_is_owned(record.archive_name)
         }
         archive_provenance = pending_provenance | install_provenance
         archives, terminal_archive_names = self._clean_downloaded_archives(
@@ -974,8 +974,7 @@ class ManagedRuntimeManager:
                     or not isinstance(manifest_sha256, str)
                     or not _SHA256_RE.fullmatch(manifest_sha256)
                     or not isinstance(archive_name, str)
-                    or not archive_name
-                    or Path(archive_name).name != archive_name
+                    or not self._archive_name_is_owned(archive_name)
                     or not isinstance(archive_sha256, str)
                     or not _SHA256_RE.fullmatch(archive_sha256)
                     or not isinstance(manifest_source, str)
@@ -1024,7 +1023,7 @@ class ManagedRuntimeManager:
                 digest = entry.get("sha256") if isinstance(entry, dict) else None
                 if (
                     not isinstance(name, str)
-                    or not self._archive_name_is_candidate(name)
+                    or not self._archive_name_is_owned(name)
                     or not isinstance(digest, str)
                     or not _SHA256_RE.fullmatch(digest)
                 ):
@@ -1096,10 +1095,14 @@ class ManagedRuntimeManager:
             raise OSError("current.json is unreadable") from exc
 
     @staticmethod
-    def _archive_name_is_candidate(name: str) -> bool:
+    def _archive_name_is_owned(name: str) -> bool:
+        return bool(name) and Path(name).name == name
+
+    @classmethod
+    def _archive_name_is_candidate(cls, name: str) -> bool:
         return (
-            _safe_metadata_value(name)
-            and Path(name).name == name
+            cls._archive_name_is_owned(name)
+            and name.isprintable()
             and not name.endswith(".tmp")
             and not _MANIFEST_CACHE_RE.fullmatch(name)
         )
@@ -1191,7 +1194,7 @@ class ManagedRuntimeManager:
                 raise OSError("downloads directory cannot be inspected") from exc
             terminal_names.update(known_archive_names - set(names))
             for name in names:
-                if name not in known_archive_names:
+                if name not in known_archive_names or not self._archive_name_is_candidate(name):
                     continue
                 path = downloads_dir / name
                 try:
@@ -1270,7 +1273,7 @@ class ManagedRuntimeManager:
                 names = sorted(entry.name for entry in entries)
             terminal_names.update(known_archive_names - set(names))
             for name in names:
-                if name not in known_archive_names:
+                if name not in known_archive_names or not self._archive_name_is_candidate(name):
                     continue
                 try:
                     entry_info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
@@ -1456,7 +1459,7 @@ class ManagedRuntimeManager:
                 bin_path = str(item.get("bin_path") or self.spec.default_bin_path)
                 raw_size = item.get(self.spec.archive_size_field)
                 size = int(raw_size) if raw_size is not None else None
-                if Path(name).name != name or not name:
+                if not self._archive_name_is_owned(name):
                     raise ValueError("unsafe archive name")
                 if not _SHA256_RE.fullmatch(sha256):
                     raise ValueError("invalid archive sha256")
