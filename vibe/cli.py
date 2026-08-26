@@ -14589,25 +14589,38 @@ def cmd_runtime(args) -> int:
         return 1 if getattr(args, "strict", False) and not strict_ok else 0
     if command == "clean":
         dry_run = bool(getattr(args, "dry_run", False))
+        keep_previous = getattr(args, "keep_previous", 1)
         payload = manager.clean(
-            keep_previous=getattr(args, "keep_previous", 1),
+            keep_previous=keep_previous,
             dry_run=dry_run,
         )
-        git = _clean_git_runtime(keep_previous=getattr(args, "keep_previous", 1), dry_run=dry_run)
-        payload["git"] = git
+        managed_runtimes = _clean_managed_runtime_consumers(
+            keep_previous=keep_previous,
+            dry_run=dry_run,
+        )
+        payload.update(managed_runtimes)
         if getattr(args, "json", False):
             print(json.dumps(payload, indent=2))
         else:
             language = _configured_cli_language()
-            archives = payload.get("archives") or {}
+            archives_value = payload.get("archives")
+            archives = archives_value if isinstance(archives_value, Mapping) else {}
             skipped_reason = str(archives.get("skipped_reason") or "")
             outcome = str(archives.get("outcome") or "")
-            # Show/Git results are reported independently of the archive
+            # Consumer results are reported independently of the Show archive
             # outcome: a skipped archive pass must not hide what the rest of
             # the cleanup actually reclaimed (or would reclaim).
             prefix_key = "runtime.clean.wouldRemove" if dry_run else "runtime.clean.removed"
             removed = payload.get("removed") or []
             print(i18n_t(f"{prefix_key}Items", language, count=len(removed)))
+            show_failed = _runtime_clean_failed(payload)
+            if show_failed:
+                _print_runtime_clean_failure(
+                    consumer="Show Runtime",
+                    result=payload,
+                    dry_run=dry_run,
+                    language=language,
+                )
             is_partial_run = outcome == "partial" and not dry_run
             if is_partial_run:
                 print(
@@ -14642,7 +14655,7 @@ def cmd_runtime(args) -> int:
                         else "runtime.clean.skipped"
                     )
                     print(i18n_t(skip_key, language, reason=skipped_reason), file=sys.stderr)
-            else:
+            elif archives or not show_failed:
                 archive_count = int(archives.get("candidate_count") or 0) if dry_run else int(archives.get("removed_count") or 0)
                 archive_bytes = int(archives.get("candidate_bytes") or 0) if dry_run else int(archives.get("removed_bytes") or 0)
                 print(
@@ -14653,12 +14666,17 @@ def cmd_runtime(args) -> int:
                         size=_format_byte_size(archive_bytes),
                     )
                 )
-            if git.get("ok") is False and git.get("reason"):
-                git_skip_key = "runtime.clean.gitSkippedPreview" if dry_run else "runtime.clean.gitSkipped"
-                print(i18n_t(git_skip_key, language, reason=git["reason"]), file=sys.stderr)
-            else:
-                print(i18n_t(f"{prefix_key}Git", language, count=len(git.get("removed") or [])))
-        return 0
+            for runtime_id, result in managed_runtimes.items():
+                _print_managed_runtime_clean_result(
+                    runtime_id=runtime_id,
+                    result=result,
+                    dry_run=dry_run,
+                    language=language,
+                )
+        failed = _runtime_clean_failed(payload) or any(
+            _runtime_clean_failed(result) for result in managed_runtimes.values()
+        )
+        return 1 if failed else 0
     raise TaskCliError("runtime command is required", code="invalid_arguments", help_command="vibe runtime --help")
 
 
@@ -14798,13 +14816,166 @@ def _format_byte_size(size: int) -> str:
     return f"{size:.1f} PiB"
 
 
+def _managed_runtime_cleaners() -> tuple[tuple[str, Callable[..., dict[str, Any]]], ...]:
+    """Return the shared-runtime cleanup passes in stable output order."""
+
+    from core.memory.artifact import get_memory_artifact_manager
+    from vibe.model_hub_runtime.installer import EngineRuntimeManager
+
+    def clean_memory(*, keep_previous: int, dry_run: bool) -> dict[str, Any]:
+        return get_memory_artifact_manager().clean(
+            keep_previous=keep_previous,
+            dry_run=dry_run,
+        )
+
+    def clean_model_hub(*, keep_previous: int, dry_run: bool) -> dict[str, Any]:
+        return EngineRuntimeManager().clean(
+            keep_previous=keep_previous,
+            dry_run=dry_run,
+        )
+
+    return (
+        ("git", _clean_git_runtime),
+        ("memory-runtime", clean_memory),
+        ("model_hub_engine", clean_model_hub),
+    )
+
+
+def _clean_managed_runtime_consumers(*, keep_previous: int, dry_run: bool = False) -> dict[str, dict[str, Any]]:
+    results: dict[str, dict[str, Any]] = {}
+    for runtime_id, cleaner in _managed_runtime_cleaners():
+        try:
+            result = cleaner(keep_previous=keep_previous, dry_run=dry_run)
+            if not isinstance(result, Mapping):
+                raise TypeError("runtime cleanup returned a non-mapping result")
+            results[runtime_id] = dict(result)
+        except Exception as exc:  # noqa: BLE001
+            results[runtime_id] = {
+                "ok": False,
+                "removed": [],
+                "reason": f"{runtime_id}_clean_failed",
+                "message": str(exc),
+            }
+    return results
+
+
+def _runtime_clean_failed(result: Mapping[str, Any]) -> bool:
+    ok = result.get("ok")
+    return ok is False or (ok is not True and bool(result.get("reason")))
+
+
+def _managed_runtime_label(runtime_id: str) -> str:
+    labels = {
+        "git": "Git Runtime",
+        "memory-runtime": "Memory Runtime",
+        "model_hub_engine": "Model Hub Runtime",
+    }
+    return labels.get(runtime_id, runtime_id.replace("-", " ").replace("_", " ").title())
+
+
+def _print_runtime_clean_failure(
+    *,
+    consumer: str,
+    result: Mapping[str, Any],
+    dry_run: bool,
+    language: str,
+) -> None:
+    key = "runtime.clean.consumerPreviewFailed" if dry_run else "runtime.clean.consumerFailed"
+    print(
+        i18n_t(
+            key,
+            language,
+            consumer=consumer,
+            reason=result.get("reason") or "unknown",
+        ),
+        file=sys.stderr,
+    )
+
+
+def _print_managed_runtime_clean_result(
+    *,
+    runtime_id: str,
+    result: Mapping[str, Any],
+    dry_run: bool,
+    language: str,
+) -> None:
+    consumer = _managed_runtime_label(runtime_id)
+    prefix_key = "runtime.clean.consumerWouldRemove" if dry_run else "runtime.clean.consumerRemoved"
+    removed = result.get("removed")
+    removed_count = len(removed) if isinstance(removed, list) else 0
+    print(i18n_t(f"{prefix_key}Items", language, consumer=consumer, count=removed_count))
+
+    if _runtime_clean_failed(result):
+        _print_runtime_clean_failure(
+            consumer=consumer,
+            result=result,
+            dry_run=dry_run,
+            language=language,
+        )
+
+    archives_value = result.get("archives")
+    if not isinstance(archives_value, Mapping) or not archives_value:
+        return
+    archives = archives_value
+    skipped_reason = str(archives.get("skipped_reason") or "")
+    outcome = str(archives.get("outcome") or "")
+    if outcome == "partial" and not dry_run:
+        print(
+            i18n_t(
+                "runtime.clean.consumerRemovedArchives",
+                language,
+                consumer=consumer,
+                count=int(archives.get("removed_count") or 0),
+                size=_format_byte_size(int(archives.get("removed_bytes") or 0)),
+            )
+        )
+        print(
+            i18n_t(
+                "runtime.clean.consumerArchivesPartial",
+                language,
+                consumer=consumer,
+                reason=skipped_reason or "archive_removal_failed",
+                failed=int(archives.get("failed_count") or 0),
+            ),
+            file=sys.stderr,
+        )
+        return
+    if skipped_reason:
+        print(
+            i18n_t(
+                "runtime.clean.consumerArchivesSkipped",
+                language,
+                consumer=consumer,
+                reason=skipped_reason,
+            ),
+            file=sys.stderr,
+        )
+        return
+    count_key = "candidate_count" if dry_run else "removed_count"
+    bytes_key = "candidate_bytes" if dry_run else "removed_bytes"
+    print(
+        i18n_t(
+            f"{prefix_key}Archives",
+            language,
+            consumer=consumer,
+            count=int(archives.get(count_key) or 0),
+            size=_format_byte_size(int(archives.get(bytes_key) or 0)),
+        )
+    )
+
+
 def _clean_git_runtime(*, keep_previous: int, dry_run: bool = False) -> dict:
     try:
         from core.git_runtime import get_git_runtime_manager
 
         return get_git_runtime_manager().clean(keep_previous=keep_previous, dry_run=dry_run)
     except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "removed": [], "message": str(exc)}
+        return {
+            "ok": False,
+            "removed": [],
+            "reason": "git_clean_failed",
+            "message": str(exc),
+        }
 
 
 def _ensure_avault_during_prepare(offline: bool = False, force: bool = False) -> dict:
