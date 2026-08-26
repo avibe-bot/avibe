@@ -930,7 +930,7 @@
         "state": {
           "supplyingNative": "正在供给 {{backend}}（原生）",
           "supplying": "正在供给 {{backends}}",
-          "standby": "备用",
+          "standby": "可用 · 当前未供给",
           "unavailableRetry": "暂不可用 · {{delay}} 后自动重试",
           "unavailableDue": "暂不可用 · 已到重试时间"
         }

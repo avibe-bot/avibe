@@ -805,7 +805,7 @@ Three classes, because the action owed by the user differs in each.
 | Status | zh (UI) | Heals itself | Meaning |
 | --- | --- | --- | --- |
 | `active` | 使用中 | — | currently serving |
-| `standby` | 备用 | — | healthy, but not currently serving any configured route |
+| `standby` | 可用 · 当前未供给 | — | healthy, but not currently serving any configured route |
 | `cooldown` | 暂不可用 (gold) | **yes** | shaped quota/rate/server result; persisted `retry_at` known; recovers unattended |
 | `needs_action` | 需处理 (rose) | **no** | OAuth expired, balance exhausted, key revoked/banned — dead until the user acts |
 | `error` | 异常 | **no** | unclassified failure — no `retry_at`, so nothing clears it unattended |

@@ -972,7 +972,7 @@ a different key.
 | `{{health}}` | One of exactly five words — `gateway.group.status.ok`, `gateway.group.status.degraded`, `gateway.group.status.waiting`, `gateway.group.status.interrupted`, `gateway.group.status.unused`. The first four are the closed aggregate over `named_agents[].supply_status`; the fifth means no enabled Agent uses this backend. Supply health, not an HTTP status: nothing here is a code, and the group renders it whether or not any request was made. | Always present | `gateway.group.subtitle.gateway` |
 | `{{reason}}` | The §1.9 classified cause, from that state's closed and total copy set. No consumer interpolates an upstream string here. Source observation exposes no reason member. | Always present | `adopt.fail.detail` |
 | `{{mode}}` | One of exactly two words — `gateway.group.mode.direct` or `gateway.group.mode.gateway`. The subtitle interpolates the word rather than carrying two whole strings, because the health half varies independently of it. | Always present | `gateway.group.subtitle.direct`, `gateway.group.subtitle.gateway` |
-| `{{backends}}` | The backends that have this source configured into a route, by product name, joined by `、` / `,` — `adopted_by`'s projection, grouped and de-duplicated, never a computation over live chains (§1.0). | Always present — `upstream.state.supplying` is entered only when the list is non-empty; a source no backend has configured is 备用 instead | `upstream.state.supplying` |
+| `{{backends}}` | The backends that have this source configured into a route, by product name, joined by `、` / `,` — `adopted_by`'s projection, grouped and de-duplicated, never a computation over live chains (§1.0). | Always present — `upstream.state.supplying` is entered only when the list is non-empty; a source no backend has configured is 可用 · 当前未供给 instead | `upstream.state.supplying` |
 | `{{component}}` | The gateway component's name, as the manifest names it `[contract]`. | Always present | `adopt.effects.install`, `install.effects.1` |
 | `{{duration}}` | A rough install time — 约 1 分钟 / about a minute. It is an estimate stated as one, never a countdown. | Always present | `adopt.effects.install`, `install.effects.1` |
 
@@ -1419,7 +1419,7 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | `upstream.kind.apiKey` | API Key | API key |
 | `upstream.state.supplyingNative` `[spec]` | 正在供给 {{backend}}(原生) | Supplying {{backend}} (native) |
 | `upstream.state.supplying` `[spec]` | 正在供给 {{backends}} | Supplying {{backends}} |
-| `upstream.state.standby` | 备用 | Standby |
+| `upstream.state.standby` | 可用 · 当前未供给 | Available · not currently supplying |
 | `upstream.state.unavailableRetry` | 暂不可用 · {{delay}} 后自动重试 | Unavailable · retrying automatically after {{delay}} |
 | `upstream.state.unavailableDue` `[derived]` | 暂不可用 · 已到重试时间 | Unavailable · the retry is due |
 | `upstream.state.supplyStopped` `[frame]` | · 已停止供给 | · stopped supplying |
@@ -5504,7 +5504,7 @@ is cyan there.
 means different things in each.** Wires: cyan = 原生, mint = 网关供给, violet =
 接管, `#FFFFFF26` = 已启用 · 当前未被使用, gold = 供给已暂停. State text:
 mint = 使用中 / 正常, gold = 降级 / 暂不可用 / 冷却 / 供给暂不可用, rose = 需处理 /
-异常 / 无可用来源, muted = 备用 / 暂无 Agent 使用, cyan = 原生 provenance only, violet-tint
+异常 / 无可用来源, muted = 可用 · 当前未供给 / 暂无 Agent 使用, cyan = 原生 provenance only, violet-tint
 `#7C5BFFCC` = a takeover hop label. The group-status vocabulary (§1.1) is assigned here
 in full — 正常 mint, 降级 gold, 供给暂不可用 gold, 无可用来源 rose,
 暂无 Agent 使用 muted — and

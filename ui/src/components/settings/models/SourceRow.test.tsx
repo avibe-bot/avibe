@@ -29,6 +29,11 @@ describe('SourceRow', () => {
     expect(screen.getByText('Anthropic · Anthropic Messages')).toBeTruthy();
   });
 
+  it('explains that a healthy source is not currently supplying a route', () => {
+    render(<I18nextProvider i18n={i18n}><SourceRow source={source} onOpen={vi.fn()} /></I18nextProvider>);
+    expect(screen.getByText(/Available · not currently supplying|可用 · 当前未供给/i)).toBeTruthy();
+  });
+
   it('labels a custom upstream by host and protocol', () => {
     render(
       <I18nextProvider i18n={i18n}>

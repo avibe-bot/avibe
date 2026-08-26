@@ -930,7 +930,7 @@
         "state": {
           "supplyingNative": "Supplying {{backend}} (native)",
           "supplying": "Supplying {{backends}}",
-          "standby": "Standby",
+          "standby": "Available · not currently supplying",
           "unavailableRetry": "Unavailable · retrying automatically after {{delay}}",
           "unavailableDue": "Unavailable · the retry is due"
         }
