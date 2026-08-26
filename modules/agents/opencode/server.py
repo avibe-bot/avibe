@@ -63,11 +63,10 @@ def _percent_encode_path(path: str) -> str:
 def _project_model_hub_models(
     providers: list[Any],
     runtime_models: dict[str, Any],
-) -> tuple[list[Any], dict[str, str]]:
+) -> list[Any]:
     """Expose runtime models under their public provider/model identities."""
 
     projected = [dict(entry) if isinstance(entry, dict) else entry for entry in providers]
-    public_defaults: dict[str, str] = {}
     provider_index = {
         entry.get("id"): entry
         for entry in projected
@@ -79,19 +78,39 @@ def _project_model_hub_models(
         provider_id, model_id = public_identifier.split("/", 1)
         if not provider_id or not model_id:
             continue
-        public_defaults.setdefault(provider_id, model_id)
         provider = provider_index.get(provider_id)
         if provider is None:
             provider = {"id": provider_id, "name": provider_id, "models": {}}
             projected.append(provider)
             provider_index[provider_id] = provider
         raw_models = provider.get("models")
-        models = dict(raw_models) if isinstance(raw_models, dict) else {}
-        public_model = dict(model_config) if isinstance(model_config, dict) else {}
+        if isinstance(raw_models, dict):
+            models = dict(raw_models)
+        elif isinstance(raw_models, list):
+            models = {}
+            for entry in raw_models:
+                if isinstance(entry, str) and entry:
+                    models[entry] = {"id": entry}
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                entry_id = entry.get("id") or entry.get("modelID") or entry.get("model_id")
+                if isinstance(entry_id, str) and entry_id:
+                    models[entry_id] = dict(entry)
+        else:
+            models = {}
+        existing_model = models.get(model_id)
+        public_model = dict(existing_model) if isinstance(existing_model, dict) else {}
+        if isinstance(model_config, dict):
+            public_model.update(model_config)
         public_model["id"] = model_id
+        metadata = public_model.get("vibe_remote")
+        public_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        public_metadata["model_hub_projected"] = True
+        public_model["vibe_remote"] = public_metadata
         models[model_id] = public_model
         provider["models"] = models
-    return projected, public_defaults
+    return projected
 
 
 def _public_opencode_catalog(
@@ -153,18 +172,10 @@ def _public_opencode_catalog(
 
     providers = projected.get("providers")
     if project_runtime_models and runtime_models and isinstance(providers, list):
-        public_providers, public_defaults = _project_model_hub_models(
+        projected["providers"] = _project_model_hub_models(
             providers,
             runtime_models,
         )
-        projected["providers"] = public_providers
-        default_models = projected.get("default")
-        projected_defaults = (
-            dict(default_models) if isinstance(default_models, dict) else {}
-        )
-        for provider_id, model_id in public_defaults.items():
-            projected_defaults.setdefault(provider_id, model_id)
-        projected["default"] = projected_defaults
 
     model = projected.get("model")
     if isinstance(model, str) and model.split("/", 1)[0] == runtime_provider_id:

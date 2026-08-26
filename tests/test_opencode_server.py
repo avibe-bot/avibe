@@ -205,7 +205,18 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
                                 },
                             },
                             {"id": legacy_custom_id, "models": {"relay-model": {}}},
-                            {"id": "openai", "models": {"gpt-5": {"id": "gpt-5"}}},
+                            {"id": "custom", "models": {"native-model": {}}},
+                            {
+                                "id": "openai",
+                                "models": [
+                                    {"id": "gpt-4", "name": "GPT-4"},
+                                    {
+                                        "id": "gpt-5",
+                                        "name": "GPT-5",
+                                        "capabilities": {"tools": True},
+                                    },
+                                ],
+                            },
                         ],
                         "default": {
                             private_id: "openai/gpt-5",
@@ -245,14 +256,13 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             [row["id"] for row in models["providers"]],
-            [legacy_custom_id, "openai", "custom"],
+            [legacy_custom_id, "custom", "openai"],
         )
         self.assertEqual(
             models["default"],
             {
                 legacy_custom_id: "relay-model",
                 "openai": "gpt-5",
-                "custom": "first-model",
             },
         )
         self.assertEqual(set(providers["all"]), {legacy_custom_id, "openai"})
@@ -262,13 +272,28 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         public_models = {
             row["id"]: row["models"] for row in models["providers"]
         }
+        self.assertEqual(set(public_models["openai"]), {"gpt-4", "gpt-5"})
+        self.assertEqual(public_models["openai"]["gpt-5"]["name"], "GPT-5")
         self.assertEqual(
-            public_models["openai"]["gpt-5"],
-            {"id": "gpt-5", "variants": {"high": {}}},
+            public_models["openai"]["gpt-5"]["capabilities"],
+            {"tools": True},
         )
         self.assertEqual(
+            public_models["openai"]["gpt-5"]["variants"],
+            {"high": {}},
+        )
+        self.assertTrue(
+            public_models["openai"]["gpt-5"]["vibe_remote"][
+                "model_hub_projected"
+            ]
+        )
+        self.assertEqual(set(public_models["custom"]), {"native-model", "first-model"})
+        self.assertEqual(
             public_models["custom"]["first-model"],
-            {"id": "first-model"},
+            {
+                "id": "first-model",
+                "vibe_remote": {"model_hub_projected": True},
+            },
         )
         allowed_providers = resolve_opencode_allowed_providers(
             {"providers": {"openai": {}}},
@@ -276,7 +301,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             allowed_providers,
-            ["openai", legacy_custom_id, "custom"],
+            ["openai"],
         )
         picker_values = {
             item["value"]
@@ -287,6 +312,8 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
             )
         }
         self.assertIn("custom/first-model", picker_values)
+        self.assertNotIn("custom/native-model", picker_values)
+        self.assertNotIn(f"{legacy_custom_id}/relay-model", picker_values)
         self.assertFalse(
             any(value.startswith(f"{private_id}/") for value in picker_values)
         )

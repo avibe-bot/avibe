@@ -10936,36 +10936,32 @@ def _filter_opencode_models_to_configured_providers(
 
     if not isinstance(models, dict):
         return models
+    from modules.agents.opencode.utils import (
+        filter_opencode_models_to_allowed_providers,
+    )
+
     allowed = _configured_opencode_provider_ids(
         providers_raw=providers_raw,
         auth_entries=auth_entries,
         config_api_key_provider_ids=config_api_key_provider_ids,
         custom_config_provider_ids=custom_config_provider_ids,
     )
-    if not allowed:
-        return {**models, "providers": [], "default": {}}
-
-    providers = []
+    filtered = filter_opencode_models_to_allowed_providers(models, allowed)
+    providers = list(filtered.get("providers", []) or [])
     seen: set[str] = set()
-    for provider in models.get("providers", []) or []:
+    for provider in providers:
         if not isinstance(provider, dict):
             continue
         pid = _opencode_provider_id(provider)
-        if isinstance(pid, str) and pid in allowed:
+        if isinstance(pid, str):
             seen.add(pid)
-            providers.append(provider)
 
     for pid in allowed:
         if pid in seen:
             continue
         providers.append({"id": pid, "models": {}})
 
-    defaults = models.get("default")
-    if isinstance(defaults, dict):
-        defaults = {pid: model_id for pid, model_id in defaults.items() if pid in allowed}
-    else:
-        defaults = {}
-    return {**models, "providers": providers, "default": defaults}
+    return {**filtered, "providers": providers}
 
 
 def _merge_opencode_user_models(
@@ -10982,26 +10978,14 @@ def _merge_opencode_user_models(
     if not isinstance(providers_raw, list):
         return models
     if allowed_provider_ids is not None:
-        filtered_providers = []
-        for provider in providers_raw:
-            if not isinstance(provider, dict):
-                continue
-            pid = _opencode_provider_id(provider)
-            if isinstance(pid, str) and pid in allowed_provider_ids:
-                filtered_providers.append(provider)
-        raw_defaults = models.get("default")
-        filtered_defaults = {}
-        if isinstance(raw_defaults, dict):
-            filtered_defaults = {
-                pid: model_id
-                for pid, model_id in raw_defaults.items()
-                if pid in allowed_provider_ids
-            }
-        models = {
-            **models,
-            "providers": filtered_providers,
-            "default": filtered_defaults,
-        }
+        from modules.agents.opencode.utils import (
+            filter_opencode_models_to_allowed_providers,
+        )
+
+        models = filter_opencode_models_to_allowed_providers(
+            models,
+            allowed_provider_ids,
+        )
         providers_raw = models.get("providers", [])
     if not user_model_index:
         return models

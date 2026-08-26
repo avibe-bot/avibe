@@ -246,6 +246,15 @@ def test_opencode_options_filters_unconfigured_provider_models(monkeypatch, tmp_
                     {"id": "openai", "models": {"gpt-5": {}}},
                     {"id": "poe", "models": {"claude-opus-4": {}}},
                     {"id": "alibaba-cn", "models": {"qwen-max": {}}},
+                    {
+                        "id": "custom",
+                        "models": {
+                            "first-model": {
+                                "vibe_remote": {"model_hub_projected": True}
+                            },
+                            "native-model": {},
+                        },
+                    },
                 ],
                 "default": {
                     "openai": "gpt-5",
@@ -303,7 +312,9 @@ def test_opencode_options_filters_unconfigured_provider_models(monkeypatch, tmp_
     result = asyncio.run(api.opencode_options_async("/tmp/workspace"))
 
     providers = result["data"]["models"]["providers"]
-    assert [p["id"] for p in providers] == ["openai"]
+    assert [p["id"] for p in providers] == ["openai", "custom"]
+    custom = next(provider for provider in providers if provider["id"] == "custom")
+    assert set(custom["models"]) == {"first-model"}
     assert result["data"]["models"]["default"] == {"openai": "gpt-5"}
 
 
