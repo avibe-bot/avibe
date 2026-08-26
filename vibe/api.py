@@ -62,17 +62,22 @@ from vibe.opencode_config import (
 )
 from vibe.build_identity import get_build_identity
 from vibe.upgrade import (
+    AtomicActivation,
+    _candidate_python,
     activate_upgrade_candidate,
     atomic_activation_source_is_current,
     atomic_upgrade_lock,
     build_upgrade_plan,
+    defer_upgrade_activation,
     discard_atomic_uv_install_generation,
     get_latest_version_info,
     get_running_vibe_path,
     get_safe_cwd,
+    launcher_is_current_process,
     restart_is_pending,
     should_skip_show_runtime_prepare,
     UPGRADE_INSTALL_TIMEOUT_SECONDS,
+    verify_upgrade_candidate,
 )
 from vibe.restart_supervisor import schedule_restart
 from vibe import backend_model_catalog
@@ -6145,6 +6150,8 @@ def do_upgrade(auto_restart: bool = True) -> dict:
     restarting = False
     restart_failed = False
     runtime_output = None
+    deferred_activation = False
+    restart_python = None
 
     try:
         with atomic_upgrade_lock():
@@ -6177,7 +6184,25 @@ def do_upgrade(auto_restart: bool = True) -> dict:
             )
             if result.returncode == 0 and plan.activation is not None:
                 try:
-                    activate_upgrade_candidate(plan.activation)
+                    if os.name == "nt" and launcher_is_current_process(plan.activation.launcher):
+                        candidate_result = verify_upgrade_candidate(plan.activation)
+                        if not candidate_result.ok:
+                            raise RuntimeError(candidate_result.detail)
+                        defer_upgrade_activation(
+                            plan.activation,
+                            parent_pid=os.getpid(),
+                            rollback_to=plan.rollback_to,
+                            restart_required=auto_restart and runtime_was_running,
+                            prepare_show_runtime=(
+                                auto_restart
+                                and runtime_was_running
+                                and not should_skip_show_runtime_prepare()
+                            ),
+                        )
+                        deferred_activation = True
+                    else:
+                        restart_python = _candidate_python(plan.activation.candidate_launcher)
+                        activate_upgrade_candidate(plan.activation)
                 except Exception as exc:  # noqa: BLE001
                     discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
                     return {
@@ -6197,7 +6222,7 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                         "output": integrity.detail,
                         "restarting": False,
                     }
-            if result.returncode == 0 and auto_restart and runtime_was_running:
+            if result.returncode == 0 and auto_restart and runtime_was_running and not deferred_activation:
                 try:
                     schedule_restart(
                         delay_seconds=2.0,
@@ -6205,12 +6230,20 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                         trigger="upgrade",
                         prepare_show_runtime=not should_skip_show_runtime_prepare(),
                         rollback_to=plan.rollback_to,
+                        **({"python_executable": str(restart_python)} if restart_python else {}),
                     )
                     restarting = True
                 except Exception as exc:
                     restart_failed = True
                     runtime_output = f"Restart scheduling failed; run `vibe restart` to use the new version.\n{exc}"
         if result.returncode == 0:
+            if deferred_activation:
+                return {
+                    "ok": True,
+                    "message": "Upgrade successful. Activation will complete after this process exits.",
+                    "output": _append_upgrade_output(result.stdout, None),
+                    "restarting": auto_restart and runtime_was_running,
+                }
             if not restarting and not restart_failed:
                 runtime_output = _prepare_show_runtime_after_upgrade(current_vibe_path, safe_cwd)
             if restarting:

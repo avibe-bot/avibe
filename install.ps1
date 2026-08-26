@@ -63,6 +63,84 @@ function Get-StableBinDirectory {
     return [System.IO.Path]::GetFullPath($directory)
 }
 
+function Get-GenerationPath {
+    param(
+        [string]$Path,
+        [string]$GenerationRoot
+    )
+
+    try {
+        $root = ([System.IO.Path]::GetFullPath($GenerationRoot)).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
+        $candidate = [System.IO.Path]::GetFullPath($Path)
+    } catch {
+        return $null
+    }
+    $prefix = $root + [System.IO.Path]::DirectorySeparatorChar
+    if (-not $candidate.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $null
+    }
+    $relative = $candidate.Substring($prefix.Length)
+    $name = $relative.Split([System.IO.Path]::DirectorySeparatorChar)[0]
+    if (-not $name) {
+        return $null
+    }
+    return Join-Path $root $name
+}
+
+function Get-LauncherGeneration {
+    param(
+        [string]$Launcher,
+        [string]$StableBin,
+        [string]$GenerationRoot
+    )
+
+    $marker = Join-Path $StableBin ".vibe.exe.avibe-generation"
+    if (Test-Path -LiteralPath $marker) {
+        $marked = (Get-Content -LiteralPath $marker -Raw -ErrorAction SilentlyContinue).Trim()
+        $generation = Get-GenerationPath -Path $marked -GenerationRoot $GenerationRoot
+        if ($generation) {
+            return $generation
+        }
+    }
+    try {
+        $resolved = (Resolve-Path -LiteralPath $Launcher -ErrorAction Stop).Path
+        return Get-GenerationPath -Path $resolved -GenerationRoot $GenerationRoot
+    } catch {
+        return $null
+    }
+}
+
+function Remove-StaleInstallGenerations {
+    param(
+        [string]$RuntimeHome,
+        [string]$ActivePath,
+        [string]$PreviousPath
+    )
+
+    $root = Join-Path (Join-Path $RuntimeHome "runtime\install-generations") ""
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+        return
+    }
+    $keep = @{}
+    foreach ($path in @($ActivePath, $PreviousPath)) {
+        if ($path) {
+            $generation = Get-GenerationPath -Path $path -GenerationRoot $root
+            if ($generation) {
+                $keep[$generation.ToUpperInvariant()] = $true
+            }
+        }
+    }
+    try {
+        Get-ChildItem -LiteralPath $root -Directory -ErrorAction Stop | ForEach-Object {
+            if (-not $keep.ContainsKey($_.FullName.ToUpperInvariant())) {
+                Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    } catch {
+        Write-Warning "Could not enumerate old Avibe install generations for cleanup."
+    }
+}
+
 function Invoke-WebScriptWithRetry {
     param([string]$Url)
 
@@ -279,6 +357,8 @@ function Invoke-UvToolInstallAttempt {
     $generationTools = Join-Path $generationRoot "tools"
     $generationBin = Join-Path $generationRoot "bin"
     $stableBin = Get-StableBinDirectory
+    $stableLauncher = Join-Path $stableBin "vibe.exe"
+    $previousGeneration = Get-LauncherGeneration -Launcher $stableLauncher -StableBin $stableBin -GenerationRoot (Join-Path $runtimeHome "runtime\install-generations")
     New-Item -ItemType Directory -Force -Path $generationTools, $generationBin, $stableBin | Out-Null
 
     $previousToolDir = $env:UV_TOOL_DIR
@@ -350,6 +430,7 @@ function Invoke-UvToolInstallAttempt {
             }
             Write-Warning "Activated the launcher, but could not record its generation for offline rollback."
         }
+        Remove-StaleInstallGenerations -RuntimeHome $runtimeHome -ActivePath $candidate -PreviousPath $previousGeneration
         return $result
     } finally {
         if ($null -eq $previousToolDir) { Remove-Item Env:UV_TOOL_DIR -ErrorAction SilentlyContinue } else { $env:UV_TOOL_DIR = $previousToolDir }

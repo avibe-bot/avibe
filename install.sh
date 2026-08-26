@@ -424,7 +424,11 @@ uv_tool_install() {
     local generation_tools="$generation_root/tools"
     local generation_bin="$generation_root/bin"
     local stable_bin_dir="${VIBE_TOOL_BIN_DIR:-$HOME/.local/bin}"
+    local previous_target=""
     mkdir -p "$generation_tools" "$generation_bin" "$stable_bin_dir"
+    if [ -e "$stable_bin_dir/vibe" ] || [ -L "$stable_bin_dir/vibe" ]; then
+        previous_target="$(resolve_binary_path "$stable_bin_dir/vibe" || true)"
+    fi
 
     if UV_TOOL_DIR="$generation_tools" UV_TOOL_BIN_DIR="$generation_bin" uv tool install "$@"; then
         VIBE_CANDIDATE_BIN_PATH="$generation_bin/vibe"
@@ -452,10 +456,46 @@ uv_tool_install() {
         fi
         VIBE_TOOL_BIN_DIR="$stable_bin_dir"
         VIBE_BIN_PATH="$stable_bin_dir/vibe"
+        prune_install_generations "$VIBE_CANDIDATE_BIN_PATH" "$previous_target"
         return 0
     fi
     rm -rf -- "$generation_root"
     return 1
+}
+
+generation_path_for() {
+    local path="$1"
+    local root="$AVIBE_RUNTIME_HOME/runtime/install-generations"
+    local relative generation
+
+    case "$path" in
+        "$root"/*)
+            relative="${path#"$root"/}"
+            generation="${relative%%/*}"
+            [ -n "$generation" ] && printf '%s/%s\n' "$root" "$generation"
+            ;;
+    esac
+}
+
+prune_install_generations() {
+    local active_path="$1"
+    local previous_path="$2"
+    local root="$AVIBE_RUNTIME_HOME/runtime/install-generations"
+    local active_generation previous_generation generation
+
+    [ -d "$root" ] || return 0
+    active_generation="$(generation_path_for "$active_path" || true)"
+    previous_generation="$(generation_path_for "$previous_path" || true)"
+    for generation in "$root"/*; do
+        [ -d "$generation" ] || continue
+        if [ -n "$active_generation" ] && [ "$generation" = "$active_generation" ]; then
+            continue
+        fi
+        if [ -n "$previous_generation" ] && [ "$generation" = "$previous_generation" ]; then
+            continue
+        fi
+        rm -rf -- "$generation" || warn "could not prune old Avibe install generation $generation"
+    done
 }
 
 verify_uv_candidate() {

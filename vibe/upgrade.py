@@ -35,6 +35,7 @@ TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 UV_FALLBACK_BIN_DIRS = (".local/bin", ".cargo/bin")
 UPGRADE_INSTALL_TIMEOUT_SECONDS = 30 * 60
 RESTART_PENDING_GRACE_SECONDS = 5 * 60
+DEFERRED_ACTIVATION_TIMEOUT_SECONDS = 5 * 60
 # Once a new generation is validated, only active and rollback generations are
 # retained. Failed candidates are discarded by the callers before activation.
 ATOMIC_GENERATION_RETENTION_SECONDS = 0
@@ -166,6 +167,21 @@ def _is_stable_launcher_path(launcher: Path) -> bool:
     return any(os.path.normcase(os.path.abspath(str(directory))) == launcher_dir for directory in stable_dirs)
 
 
+def launcher_is_current_process(launcher: Path | str) -> bool:
+    """Whether this Windows process is holding the stable launcher open."""
+
+    if os.name != "nt":
+        return False
+    target = os.path.normcase(os.path.abspath(os.path.expanduser(str(launcher))))
+    for candidate in (sys.argv[0], os.environ.get(CURRENT_VIBE_EXECUTABLE_ENV)):
+        if not candidate:
+            continue
+        current = os.path.normcase(os.path.abspath(os.path.expanduser(candidate)))
+        if current == target:
+            return True
+    return False
+
+
 def _staged_uv_environment(vibe_path: str | None) -> tuple[Path, Path, AtomicActivation | None]:
     generation = atomic_uv_install_root() / uuid4().hex
     tools_dir = generation / "tools"
@@ -211,6 +227,68 @@ def _candidate_python(candidate_launcher: Path) -> Path | None:
     return None
 
 
+def defer_upgrade_activation(
+    activation: AtomicActivation,
+    *,
+    parent_pid: int,
+    rollback_to: "RollbackTarget | None" = None,
+    restart_required: bool = False,
+    prepare_show_runtime: bool = False,
+) -> subprocess.Popen:
+    """Run activation after a Windows CLI process releases its launcher."""
+
+    candidate_python = _candidate_python(activation.candidate_launcher)
+    if candidate_python is None:
+        raise RuntimeError(f"candidate Python missing beside {activation.candidate_launcher}")
+    command = [
+        str(candidate_python),
+        "-c",
+        "from vibe.cli import main; main()",
+        "__activate-upgrade",
+        "--parent-pid",
+        str(parent_pid),
+        "--launcher",
+        str(activation.launcher),
+        "--candidate",
+        str(activation.candidate_launcher),
+    ]
+    if activation.source_generation is not None:
+        command.extend(["--source-generation", str(activation.source_generation)])
+    if restart_required:
+        command.append("--restart")
+    if prepare_show_runtime:
+        command.append("--prepare-show-runtime")
+    if rollback_to is not None:
+        command.extend(
+            [
+                "--rollback-to",
+                rollback_to.version,
+                "--rollback-python",
+                rollback_to.launcher.python,
+                "--rollback-main",
+                rollback_to.launcher.main,
+            ]
+        )
+        if rollback_to.package:
+            command.extend(["--rollback-package", rollback_to.package])
+    parent_started_at = runtime_mod.process_create_time(parent_pid)
+    if parent_started_at is not None:
+        command.extend(["--parent-started-at", str(parent_started_at)])
+    log_path = config_paths.get_logs_dir() / f"upgrade-activation-{uuid4().hex}.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as log:
+        return subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+            cwd=get_safe_cwd(),
+            env=isolated_probe_environment(),
+        )
+
+
 def get_cli_launcher_path(launcher: runtime_mod.ServiceLauncher) -> Path | None:
     """Find the CLI launcher next to a saved service interpreter."""
 
@@ -254,7 +332,8 @@ def _generation_for_hardlink(launcher: Path, root: Path) -> Path | None:
     if launcher.is_symlink() or not _is_stable_launcher_path(launcher):
         return None
     try:
-        inode = launcher.stat().st_ino
+        launcher_stat = launcher.stat()
+        identity = (launcher_stat.st_dev, launcher_stat.st_ino)
     except OSError:
         return None
     root = root.expanduser().resolve()
@@ -263,7 +342,8 @@ def _generation_for_hardlink(launcher: Path, root: Path) -> Path | None:
     for generation in root.iterdir():
         candidate = generation / "bin" / launcher.name
         try:
-            if generation.is_dir() and candidate.stat().st_ino == inode:
+            candidate_stat = candidate.stat()
+            if generation.is_dir() and (candidate_stat.st_dev, candidate_stat.st_ino) == identity:
                 return generation
         except OSError:
             continue

@@ -251,6 +251,30 @@ def test_install_script_canonicalizes_relative_avibe_home(tmp_path):
     assert target.is_relative_to(tmp_path / "relative-avibe" / "runtime" / "install-generations")
 
 
+def test_repeated_installer_runs_prune_old_generations(tmp_path):
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    path_dir = tmp_path / "path-bin"
+    path_dir.mkdir()
+    uv_log = tmp_path / "uv-tool-bin-dir.txt"
+    _write_fake_uv(path_dir / "uv", uv_log)
+
+    env = os.environ.copy()
+    env["HOME"] = str(home_dir)
+    env["PATH"] = os.pathsep.join([str(path_dir), "/usr/bin", "/bin"])
+
+    first = _install(env)
+    first_generations = sorted((home_dir / ".avibe" / "runtime" / "install-generations").iterdir())
+    second = _install(env)
+    generations = sorted((home_dir / ".avibe" / "runtime" / "install-generations").iterdir())
+
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert len(first_generations) == 1
+    assert len(generations) == 2
+    assert all(path.is_dir() for path in generations)
+
+
 def test_install_script_keeps_active_launcher_when_uv_install_fails(tmp_path):
     home_dir = tmp_path / "home"
     home_dir.mkdir()
@@ -512,6 +536,8 @@ def test_windows_installer_honors_configured_tool_bin_and_cross_volume_copy_fall
     assert "function Get-StableBinDirectory" in powershell
     assert "$configured = $env:UV_TOOL_BIN_DIR" in powershell
     assert "Copy-Item -LiteralPath $candidate -Destination $replacement" in powershell
+    assert "function Remove-StaleInstallGenerations" in powershell
+    assert "Remove-StaleInstallGenerations -RuntimeHome $runtimeHome" in powershell
 
 
 def test_install_script_continues_when_show_runtime_prepare_fails(tmp_path):

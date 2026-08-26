@@ -69,19 +69,26 @@ from vibe.upgrade import (
     CURRENT_VIBE_EXECUTABLE_ENV,
     LEGACY_PACKAGE_NAME,
     PACKAGE_NAME,
+    AtomicActivation,
+    DEFERRED_ACTIVATION_TIMEOUT_SECONDS,
+    RollbackTarget,
     activate_upgrade_candidate,
     atomic_activation_source_is_current,
     atomic_uv_install_root,
     atomic_upgrade_lock,
     build_upgrade_plan,
     cache_running_vibe_path,
+    defer_upgrade_activation,
     get_latest_version_info,
     get_safe_cwd,
     _launcher_generation,
+    _candidate_python,
+    launcher_is_current_process,
     restart_is_pending,
     discard_atomic_uv_install_generation,
     should_skip_show_runtime_prepare,
     UPGRADE_INSTALL_TIMEOUT_SECONDS,
+    verify_upgrade_candidate,
 )
 from storage.db import create_sqlite_engine
 from storage.background import (
@@ -14438,6 +14445,8 @@ def cmd_upgrade():
     safe_cwd = get_safe_cwd()
     restart = None
     restart_error = None
+    deferred_activation = False
+    restart_python = None
 
     try:
         with atomic_upgrade_lock():
@@ -14457,7 +14466,21 @@ def cmd_upgrade():
             )
             if result.returncode == 0 and plan.activation is not None:
                 try:
-                    activate_upgrade_candidate(plan.activation)
+                    if os.name == "nt" and launcher_is_current_process(plan.activation.launcher):
+                        candidate_result = verify_upgrade_candidate(plan.activation)
+                        if not candidate_result.ok:
+                            raise RuntimeError(candidate_result.detail)
+                        defer_upgrade_activation(
+                            plan.activation,
+                            parent_pid=os.getpid(),
+                            rollback_to=plan.rollback_to,
+                            restart_required=runtime_was_running,
+                            prepare_show_runtime=runtime_was_running and not should_skip_show_runtime_prepare(),
+                        )
+                        deferred_activation = True
+                    else:
+                        restart_python = _candidate_python(plan.activation.candidate_launcher)
+                        activate_upgrade_candidate(plan.activation)
                 except Exception as exc:  # noqa: BLE001
                     discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
                     print(f"\033[31mUpgrade candidate failed integrity verification: {exc}\033[0m")
@@ -14469,7 +14492,7 @@ def cmd_upgrade():
                 if not integrity.ok:
                     print(f"\033[31mUpgrade installed an incomplete Python environment: {integrity.detail}\033[0m")
                     return 1
-            if result.returncode == 0 and runtime_was_running:
+            if result.returncode == 0 and runtime_was_running and not deferred_activation:
                 try:
                     restart = schedule_restart(
                         delay_seconds=0.0,
@@ -14477,11 +14500,17 @@ def cmd_upgrade():
                         trigger="upgrade",
                         prepare_show_runtime=not should_skip_show_runtime_prepare(),
                         rollback_to=plan.rollback_to,
+                        **({"python_executable": str(restart_python)} if restart_python else {}),
                     )
                 except Exception as exc:
                     restart_error = exc
         if result.returncode == 0:
             print("\033[32mUpgrade successful!\033[0m")
+            if deferred_activation:
+                print("Upgrade validated; launcher activation will complete after this command exits.")
+                if runtime_was_running:
+                    print("Restart will be scheduled by the activation helper.")
+                return 0
             if restart_error is not None:
                 print("\033[33mUpgrade installed, but restart scheduling failed.\033[0m")
                 print(f"Restart error: {restart_error}")
@@ -16713,11 +16742,88 @@ def _dispatch_restart_supervisor(argv: list[str]) -> int:
     return restart_supervisor_main(argv)
 
 
+def _dispatch_deferred_upgrade_activation(argv: list[str]) -> int:
+    """Activate a Windows CLI upgrade after the parent launcher exits."""
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--parent-pid", type=int, required=True)
+    parser.add_argument("--parent-started-at", type=float)
+    parser.add_argument("--launcher", required=True)
+    parser.add_argument("--candidate", required=True)
+    parser.add_argument("--source-generation")
+    parser.add_argument("--restart", action="store_true")
+    parser.add_argument("--prepare-show-runtime", action="store_true")
+    parser.add_argument("--rollback-to")
+    parser.add_argument("--rollback-package")
+    parser.add_argument("--rollback-python")
+    parser.add_argument("--rollback-main")
+    args = parser.parse_args(argv)
+
+    deadline = time.monotonic() + DEFERRED_ACTIVATION_TIMEOUT_SECONDS
+    while runtime.pid_alive(args.parent_pid):
+        if args.parent_started_at is not None:
+            observed = runtime.process_create_time(args.parent_pid)
+            if observed is not None and observed != args.parent_started_at:
+                break
+        if time.monotonic() >= deadline:
+            print("deferred upgrade activation timed out waiting for the parent launcher", file=sys.stderr)
+            return 1
+        time.sleep(0.1)
+
+    source_generation = Path(args.source_generation) if args.source_generation else None
+    activation = AtomicActivation(
+        launcher=Path(args.launcher),
+        candidate_launcher=Path(args.candidate),
+        source_generation=source_generation,
+    )
+    try:
+        with atomic_upgrade_lock():
+            if source_generation is not None and not atomic_activation_source_is_current(activation):
+                discard_atomic_uv_install_generation(activation.candidate_launcher)
+                print("deferred upgrade activation was superseded by another activation", file=sys.stderr)
+                return 1
+            activate_upgrade_candidate(activation)
+    except Exception as exc:
+        discard_atomic_uv_install_generation(activation.candidate_launcher)
+        print(f"deferred upgrade activation failed: {exc}", file=sys.stderr)
+        return 1
+
+    if not args.restart:
+        return 0
+    if args.rollback_to and (not args.rollback_python or not args.rollback_main):
+        print("deferred upgrade restart is missing its rollback launcher", file=sys.stderr)
+        return 1
+    rollback_to = (
+        RollbackTarget(
+            version=args.rollback_to,
+            package=args.rollback_package,
+            launcher=runtime.ServiceLauncher(python=args.rollback_python, main=args.rollback_main),
+        )
+        if args.rollback_to
+        else None
+    )
+    try:
+        schedule_restart(
+            delay_seconds=0.0,
+            vibe_path=args.launcher,
+            trigger="upgrade",
+            prepare_show_runtime=args.prepare_show_runtime,
+            rollback_to=rollback_to,
+            python_executable=sys.executable,
+        )
+    except Exception as exc:
+        print(f"deferred upgrade restart scheduling failed: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main():
     cache_running_vibe_path()
     argv = sys.argv[1:]
     if argv and argv[0] == "__restart-supervisor":
         sys.exit(_dispatch_restart_supervisor(argv[1:]))
+    if argv and argv[0] == "__activate-upgrade":
+        sys.exit(_dispatch_deferred_upgrade_activation(argv[1:]))
     parser = build_parser()
     args = parser.parse_args()
 

@@ -1079,6 +1079,7 @@ def schedule_restart(
     prepare_show_runtime: bool = False,
     memory_ui_secret: str | None = None,
     rollback_to: RollbackTarget | None = None,
+    python_executable: str | None = None,
 ) -> dict:
     """Spawn the detached restart job.
 
@@ -1104,7 +1105,10 @@ def schedule_restart(
     memory_ui_secret = memory_ui_secret or process_ui_read_secret()
     guard_source_checkout_default_state_bootstrap()
     job_id = uuid.uuid4().hex[:12]
-    invocation = get_restart_invocation_command(vibe_path=vibe_path)
+    if python_executable:
+        invocation = [python_executable, "-c", "from vibe.cli import main; main()", "restart"]
+    else:
+        invocation = get_restart_invocation_command(vibe_path=vibe_path)
     command = [*invocation[:-1], "__restart-supervisor"] if invocation and invocation[-1] == "restart" else [
         *(invocation or ["vibe"]),
         "__restart-supervisor",
