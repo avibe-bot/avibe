@@ -435,6 +435,24 @@ def load_first_opencode_user_config(
     return result
 
 
+def opencode_user_provider_exists(
+    provider_id: str,
+    *,
+    home: Path | None = None,
+    logger_instance: Optional[logging.Logger] = None,
+) -> bool:
+    """Return whether the user's config already owns a provider id."""
+
+    if not isinstance(provider_id, str) or not provider_id.strip():
+        return False
+    probe = load_first_opencode_user_config(
+        home=home,
+        logger_instance=logger_instance,
+    )
+    provider_map = probe.config.get("provider") if probe.config is not None else None
+    return isinstance(provider_map, dict) and provider_id.strip() in provider_map
+
+
 def _load_or_create_user_config(
     *,
     home: Path | None = None,

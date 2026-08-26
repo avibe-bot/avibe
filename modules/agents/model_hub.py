@@ -44,6 +44,7 @@ from core.handlers.model_hub.service import (
 from core.services.settings import load_config_or_default
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 from vibe.codex_config import format_toml_basic_string
+from vibe.opencode_config import opencode_user_provider_exists
 
 
 LaunchChannel = Literal["direct", "native_cli", "hub"]
@@ -968,6 +969,8 @@ class ModelHubRuntimeRouter:
         checked = tuple(agent.menu.checked if agent.menu else ())
         if not checked:
             return None
+        if opencode_user_provider_exists(_OPENCODE_MODEL_HUB_PROVIDER_ID):
+            raise ModelHubError("mapping_target_unavailable", status=409)
 
         gateway_base_url, gateway_token = await self._gateway_credentials(
             "opencode",
@@ -1029,7 +1032,7 @@ class ModelHubRuntimeRouter:
             if self.turn_gateway is None:
                 prefix = await self._source_prefix(source.id)
                 runtime_model = f"{prefix}/{exact_model_id}"
-            provider["models"][identifier] = {
+            projected_model: dict[str, Any] = {
                 "id": runtime_model,
                 "name": (
                     model.display_name
@@ -1037,6 +1040,13 @@ class ModelHubRuntimeRouter:
                     else identifier
                 ),
             }
+            variants = {
+                effort: {"reasoningEffort": effort}
+                for effort in (model.reasoning_efforts if model is not None else ())
+            }
+            if variants:
+                projected_model["variants"] = variants
+            provider["models"][identifier] = projected_model
             projected_identifiers.append(identifier)
             if resolution.candidate_hops:
                 available_identifiers.append(identifier)

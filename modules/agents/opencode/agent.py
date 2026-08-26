@@ -80,6 +80,7 @@ from .utils import resolve_opencode_model_id, resolve_opencode_reasoning_effort
 
 logger = logging.getLogger(__name__)
 _STEERING_SNAPSHOT_KEY = "opencode_native_steering"
+_MODEL_HUB_DISPLAY_MODEL_KEY = "model_hub_display_model"
 _STATUS_RECONCILIATION_FAILURE_LIMIT = 3
 # OpenCode returns 204 after forking prompt work, before that worker necessarily
 # registers the session as busy.
@@ -1204,6 +1205,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             # routing for legacy installs.
             default_provider = getattr(opencode_cfg, "default_provider", None)
             model_dict = resolve_opencode_model_dict(model_str, default_provider)
+            display_model_dict = resolve_opencode_model_dict(
+                requested_model_str,
+                default_provider,
+            )
 
             reasoning_effort = override_reasoning
             if not reasoning_effort:
@@ -1326,6 +1331,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             launch_identity = persisted_launch_identity(model_hub_launch)
             if launch_identity is not None:
                 processing_indicator["model_hub_launch"] = launch_identity
+            if display_model_dict is not None:
+                processing_indicator[_MODEL_HUB_DISPLAY_MODEL_KEY] = display_model_dict
 
             if model_hub_overlay_reservation is None:
                 await server.mark_run_active(session_id)
@@ -1420,7 +1427,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     + _ASYNC_PROMPT_START_CONFIRMATION_TIMEOUT_SECONDS
                 ),
                 idle_reconciliation_message=self._idle_reconciliation_message(
-                    model_dict,
+                    display_model_dict,
                     reasoning_effort,
                 ),
             )
@@ -2356,6 +2363,13 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 else ""
             )
             has_steering_identity = bool(target_session_id and logical_turn_id)
+            display_model_dict = (
+                poll_info.processing_indicator.get(_MODEL_HUB_DISPLAY_MODEL_KEY)
+                if isinstance(poll_info.processing_indicator, dict)
+                else None
+            )
+            if not isinstance(display_model_dict, dict):
+                display_model_dict = poll_info.model_dict
             if current_task is not None and (
                 has_steering_identity
                 or reconcile_initial_status
@@ -2389,7 +2403,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                         else None
                     ),
                     idle_reconciliation_message=self._idle_reconciliation_message(
-                        poll_info.model_dict,
+                        display_model_dict,
                         poll_info.reasoning_effort,
                     ),
                     restored=True,

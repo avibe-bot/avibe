@@ -4218,6 +4218,7 @@ def test_settlement_retires_correlation_when_mode_persistence_fails(
 
 def test_opencode_overlay_projects_menu_identity_to_exact_hop_model(tmp_path: Path) -> None:
     source = _source("src_overlay01", "Overlay", model_id="upstream-model")
+    source.models[0].reasoning_efforts = ["low", "high"]
     config = _config([source])
     agent = config.agents["opencode"]
     agent.routes.pop("openai/shared-model")
@@ -4240,7 +4241,37 @@ def test_opencode_overlay_projects_menu_identity_to_exact_hop_model(tmp_path: Pa
     payload = json.loads(overlay.content)
     provider = payload["provider"]["avibe-model-hub"]
     assert provider["models"]["openai/menu-model"]["id"] == "openai/menu-model"
+    assert provider["models"]["openai/menu-model"]["variants"] == {
+        "high": {"reasoningEffort": "high"},
+        "low": {"reasoningEffort": "low"},
+    }
     assert overlay.launches[0].target_model == "upstream-model"
+
+
+def test_opencode_overlay_rejects_a_user_owned_private_provider_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = _source("src_overlay10", "Overlay")
+    service = _service(tmp_path, sources=[source])
+    monkeypatch.setattr(
+        "modules.agents.model_hub.opencode_user_provider_exists",
+        lambda _provider_id: True,
+    )
+    router = ModelHubRuntimeRouter(
+        service=service,
+        turn_gateway=SimpleNamespace(
+            endpoint=AsyncMock(
+                return_value=("http://127.0.0.1:19000/opencode", "gateway-token")
+            ),
+        ),
+        overlay_path=tmp_path / "overlay.json",
+    )
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(router.prepare_opencode_overlay())
+
+    assert exc_info.value.code == "mapping_target_unavailable"
 
 
 def test_opencode_overlay_supports_mixed_protocols_under_one_provider(tmp_path: Path) -> None:
