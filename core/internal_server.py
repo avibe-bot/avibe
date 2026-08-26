@@ -1246,12 +1246,13 @@ def create_app(
             and len(scope) == 2
         ):
             return scope
-        from core.memory.store import is_principal_id, is_project_id
+        from vibe.memory_contract import is_memory_principal_id
+        from vibe.memory_project_ids import is_project_id
 
         if (
             isinstance(scope, tuple)
             and len(scope) == 2
-            and is_principal_id(scope[0])
+            and is_memory_principal_id(scope[0])
             and is_project_id(scope[1])
         ):
             return scope
@@ -1610,7 +1611,7 @@ def create_app(
             parse_ui_search_project,
         )
         try:
-            from core.memory.types import RecallPolicy
+            from vibe.memory_contract import RecallPolicy
 
             policy = RecallPolicy.from_payload(payload.get("policy"))
             raw_project = omitted_project_to_default(payload.get("project"))

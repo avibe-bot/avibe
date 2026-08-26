@@ -1091,6 +1091,9 @@ class Controller:
         del _CaptureAccepted, _CaptureRequest
         observed_generation = getattr(self, "_memory_runtime_generation", 0)
         async with self._memory_replacement_lock():
+            plugin_error = getattr(self, "_memory_plugin_error", None)
+            if plugin_error is not None:
+                raise plugin_error
             if (
                 getattr(self, "_memory_runtime_generation", 0)
                 != observed_generation

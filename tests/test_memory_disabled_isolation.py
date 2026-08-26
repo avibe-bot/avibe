@@ -998,6 +998,35 @@ async def test_disabled_wake_and_remember_are_host_derived_without_runtime() -> 
 
 
 @pytest.mark.asyncio
+async def test_plugin_failure_rechecked_after_blocked_capture_lock() -> None:
+    controller = Controller.__new__(Controller)
+    controller.config = types.SimpleNamespace(memory=types.SimpleNamespace(enabled=True))
+    controller._memory_plugin_error = None
+    controller.memory_runtime = None
+    controller._memory_runtime_generation = 1
+    request = CaptureRequest(
+        source_message_id="message-1",
+        session_id="session-1",
+        principal_id="u-11111111111111111111111111111111",
+        project_id="default",
+        provenance="agent",
+        text="remember this",
+        occurred_at_ms=1,
+    )
+
+    gate = controller._memory_replacement_lock()
+    await gate.acquire()
+    capture = asyncio.create_task(controller.capture_memory(request))
+    await asyncio.sleep(0)
+    assert not capture.done()
+    controller._memory_plugin_error = MemoryPluginUnavailableError("injected")
+    gate.release()
+
+    with pytest.raises(MemoryPluginUnavailableError):
+        await capture
+
+
+@pytest.mark.asyncio
 async def test_disabled_store_backed_read_is_gated_before_runtime_construction() -> None:
     controller = Controller.__new__(Controller)
     controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)

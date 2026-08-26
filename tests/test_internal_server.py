@@ -444,6 +444,27 @@ def test_memory_internal_routes_cannot_bypass_controller_lifecycle() -> None:
     assert reflective_bypasses == []
 
 
+def test_memory_internal_server_keeps_implementation_imports_out_of_host_boundary() -> None:
+    tree = ast.parse(Path(internal_server.__file__).read_text(encoding="utf-8"))
+    implementation_imports: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            if node.module == "core.memory" and [alias.name for alias in node.names] != [
+                "CaptureRequest"
+            ]:
+                implementation_imports.append(node.module)
+            elif node.module.startswith("core.memory.") and node.module != "core.memory_loader":
+                implementation_imports.append(node.module)
+        elif isinstance(node, ast.Import):
+            implementation_imports.extend(
+                alias.name
+                for alias in node.names
+                if alias.name == "core.memory" or alias.name.startswith("core.memory.")
+            )
+
+    assert implementation_imports == []
+
+
 def test_disabled_memory_status_route_uses_host_projection_without_runtime() -> None:
     from core.memory_adapter import DisabledMemoryAdapter
 
@@ -967,6 +988,44 @@ def test_memory_search_accepts_bounded_agentic_policy_from_cli_session() -> None
     assert principal_id == "u-11111111111111111111111111111111"
     assert project_id == "default"
     assert current_session_id == "ses-memory"
+
+
+def test_memory_search_route_does_not_import_memory_types_on_request(monkeypatch) -> None:
+    import builtins
+
+    from vibe.memory_http_headers import CALLER_SESSION_HEADER
+
+    controller = _build_controller_double()
+    controller.memory_scope_for_cli_session.return_value = (
+        "u-11111111111111111111111111111111",
+        "default",
+    )
+    controller.memory_search_payload = AsyncMock(
+        return_value={"status": "ok", "items": []}
+    )
+    app = internal_server.create_app(controller)
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "core.memory.types":
+            raise RuntimeError("optional implementation initializer")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                "/internal/memory/search",
+                headers={CALLER_SESSION_HEADER: "ses-memory"},
+                json={"query": "connect the clues", "policy": {"mode": "keyword"}},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "items": []}
 
 
 def test_memory_list_binds_cli_session_and_uses_exact_provider_page() -> None:
