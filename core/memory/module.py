@@ -1376,8 +1376,7 @@ class MemoryModule:
                     and (
                         not isinstance(item.episode_id, str)
                         or not item.episode_id
-                        or (episode_id_bytes := _utf8_bytes(item.episode_id)) is None
-                        or len(episode_id_bytes) > 256
+                        or _utf8_bytes(item.episode_id) is None
                     )
                 )
                 or (item.timestamp is not None and _list_timestamp_instant(item.timestamp) is None)
@@ -1478,7 +1477,7 @@ class MemoryModule:
                 return OperationFailed(error="memory_provider_response_invalid")
             if item.date is not None:
                 date_bytes = _utf8_bytes(item.date) if isinstance(item.date, str) else None
-                if date_bytes is None or len(date_bytes) > 64:
+                if date_bytes is None:
                     return OperationFailed(error="memory_provider_response_invalid")
                 try:
                     date.fromisoformat(item.date)
@@ -1720,13 +1719,12 @@ def _list_text_bytes(value: object, *, allow_empty: bool) -> bytes | None:
 
 def _valid_list_identifier(value: object) -> bool:
     encoded = _utf8_bytes(value) if isinstance(value, str) else None
-    return bool(value) and encoded is not None and len(encoded) <= 128 and "\x00" not in value
+    return bool(value) and encoded is not None and "\x00" not in value
 
 
 def _list_timestamp_instant(value: object) -> datetime | None:
     if (
         not isinstance(value, str)
-        or len(value) > 64
         or _RFC3339_TIMESTAMP_RE.fullmatch(value) is None
     ):
         return None
@@ -1790,7 +1788,7 @@ def _profile_bytes(profile: object) -> int | None:
 
     if profile.updated_at is not None:
         timestamp_bytes = _profile_text_bytes(profile.updated_at)
-        if timestamp_bytes is None or len(timestamp_bytes) > 64:
+        if timestamp_bytes is None:
             return None
         try:
             instant = datetime.fromisoformat(profile.updated_at.replace("Z", "+00:00"))

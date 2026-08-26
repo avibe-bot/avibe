@@ -1449,7 +1449,7 @@ def _record_date(*records: dict[str, Any]) -> str | None:
                     return datetime.fromtimestamp(value / 1000, tz=timezone.utc).date().isoformat()
                 except (OverflowError, OSError, ValueError):
                     continue
-            if not isinstance(value, str) or len(value) > 128:
+            if not isinstance(value, str):
                 continue
             candidate = value.strip()
             try:
@@ -1468,7 +1468,7 @@ def _record_timestamp(value: Any) -> str | None:
             instant = datetime.fromtimestamp(value / 1000, tz=timezone.utc)
         except (OverflowError, OSError, ValueError):
             return None
-    elif isinstance(value, str) and len(value) <= 128:
+    elif isinstance(value, str):
         try:
             instant = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
             if instant.tzinfo is None:

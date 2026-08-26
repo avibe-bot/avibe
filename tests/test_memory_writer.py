@@ -284,7 +284,7 @@ async def test_ambiguous_failure_never_replays_and_disables_intake(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("request_id", [None, "", "\ud800", "x" * 129])
+@pytest.mark.parametrize("request_id", [None, "", "\ud800"])
 async def test_invalid_add_receipt_is_ambiguous_and_never_replayed(
     tmp_path: Path,
     request_id: str | None,
@@ -318,7 +318,6 @@ async def test_invalid_add_receipt_is_ambiguous_and_never_replayed(
         FlushSucceeded(request_id=None, status="extracted"),
         FlushSucceeded(request_id="", status="extracted"),
         FlushSucceeded(request_id="\ud800", status="extracted"),
-        FlushSucceeded(request_id="x" * 129, status="extracted"),
         FlushSucceeded(request_id="flush-request", status=None),
     ],
 )
@@ -346,6 +345,27 @@ async def test_invalid_flush_receipt_is_ambiguous_and_never_replayed(
     assert stopped == 1
     assert writer.unavailable
     assert writer._pending == {}
+
+
+@pytest.mark.asyncio
+async def test_provider_receipts_have_no_avibe_size_cap(tmp_path: Path) -> None:
+    request_id = "request-" + "x" * 300
+    provider = FakeMemoryProvider(
+        add_results=deque([AddAck(request_id=request_id, status="accumulated")]),
+        flush_results=deque(
+            [FlushSucceeded(request_id=request_id, status="extracted")]
+        ),
+    )
+    writer = _writer(tmp_path, provider)
+    _reserve_and_offer(writer, 0)
+
+    await writer.wait_idle_for_tests()
+    await writer._flush_barrier(_BarrierItem(raw_session_id="raw-session-0"))
+
+    assert len(provider.captures) == 1
+    assert provider.flushes == [_ref()]
+    assert writer._pending == {}
+    assert not writer.unavailable
 
 
 @pytest.mark.asyncio

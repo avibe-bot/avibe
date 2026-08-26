@@ -24,6 +24,8 @@ from core.memory.types import (
     CaptureSkipped,
     MemoryItem,
     MemoryItems,
+    MemoryListItem,
+    MemoryListPage,
     MemoryProfile,
     MemoryProfileExplicitInfo,
     OperationFailed,
@@ -156,6 +158,7 @@ async def test_large_provider_payloads_cross_capture_search_and_profile_boundari
     tmp_path: Path,
 ) -> None:
     large_text = "x" * (2 * 1024 * 1024)
+    large_episode_id = "episode-" + "e" * 300
     profile = MemoryProfile(
         summary="s" * 70_000,
         explicit_info=tuple(
@@ -167,10 +170,38 @@ async def test_large_provider_payloads_cross_capture_search_and_profile_boundari
     )
     profile_item = MemoryItem(kind="profile", text=large_text, profile=profile)
     provider = FakeMemoryProvider(
+        search_items_by_owner={
+            PRINCIPAL: (
+                ProviderSearchItem(
+                    item=MemoryItem(kind="episode", text=large_text),
+                    score=1.0,
+                    episode_id=large_episode_id,
+                    timestamp="2026-08-26T00:00:00Z",
+                    provider_rank=0,
+                    queried_owner=PRINCIPAL,
+                ),
+            )
+        },
         profile_items_by_owner={
             PRINCIPAL: (profile_item,),
             f"{PRINCIPAL}-agent": (profile_item,),
-        }
+        },
+        list_page=MemoryListPage(
+            items=(
+                MemoryListItem(
+                    id="list-" + "i" * 300,
+                    subject="",
+                    summary="s" * 70_000,
+                    body=large_text,
+                    timestamp="2026-08-26T00:00:00Z",
+                    project="default",
+                ),
+            ),
+            page=1,
+            page_size=1,
+            count=1,
+            total_count=1,
+        ),
     )
     module, _store, _provider = _module(tmp_path, provider=provider)
 
@@ -182,10 +213,33 @@ async def test_large_provider_payloads_cross_capture_search_and_profile_boundari
         principal_id=PRINCIPAL,
         project_id="default",
     )
+    listing = await module.list_episodes(
+        principal_id=PRINCIPAL,
+        project_id="default",
+        page_size=1,
+    )
     result = await module.profile(principal_id=PRINCIPAL, project_id="default")
 
     assert provider.captures[0].text == capture_text
-    assert search == MemoryItems(items=())
+    assert isinstance(search, MemoryItems)
+    assert [item.origin for item in search.items] == ["user"]
+    assert listing == MemoryListPage(
+        items=(
+            MemoryListItem(
+                id="list-" + "i" * 300,
+                subject="",
+                summary="s" * 70_000,
+                body=large_text,
+                timestamp="2026-08-26T00:00:00Z",
+                project="default",
+                origin="user",
+            ),
+        ),
+        page=1,
+        page_size=1,
+        count=1,
+        total_count=1,
+    )
     assert isinstance(result, MemoryItems)
     assert [item.origin for item in result.items] == ["user", "agent"]
     assert all(item.profile == profile for item in result.items)

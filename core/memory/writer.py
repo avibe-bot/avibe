@@ -751,6 +751,7 @@ def _valid_receipt(value: object) -> bool:
     if not isinstance(value, str) or not value:
         return False
     try:
-        return len(value.encode("utf-8")) <= 128
+        value.encode("utf-8")
     except UnicodeError:
         return False
+    return True
