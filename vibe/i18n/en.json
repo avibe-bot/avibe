@@ -973,6 +973,7 @@
       "unsupportedSource": "Show Runtime preparation failed: {reason}. Remove VIBE_SHOW_RUNTIME_SOURCE and use the packaged runtime, or set VIBE_SHOW_RUNTIME_BIN to a runtime you built."
     },
     "clean": {
+      "commandHelp": "Remove stale Show, Git, Memory, and Model Hub runtime installs and archives; exit nonzero if any cleanup fails.",
       "dryRunHelp": "Report stale archives and cache entries without removing anything.",
       "wouldRemoveItems": "Would remove {count} Show Runtime cache item(s).",
       "wouldRemoveArchives": "Would remove {count} downloaded Show Runtime archive(s) ({size}).",

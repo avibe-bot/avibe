@@ -15266,18 +15266,18 @@ def build_parser():
     runtime_prepare_parser.add_argument("--strict", action="store_true", help="Return a non-zero exit code when preparation fails.")
     runtime_prepare_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
 
+    runtime_clean_language = _configured_cli_language()
+    runtime_clean_help = i18n_t("runtime.clean.commandHelp", runtime_clean_language)
     runtime_clean_parser = runtime_subparsers.add_parser(
         "clean",
-        help=(
-            "Delete stale Show, Git, Memory, and Model Hub runtime cache entries; "
-            "exit non-zero if any cleanup fails"
-        ),
+        help=runtime_clean_help,
+        description=runtime_clean_help,
     )
     runtime_clean_parser.add_argument("--keep-previous", type=int, default=1, help="Number of previous runtime versions to keep.")
     runtime_clean_parser.add_argument(
         "--dry-run",
         action="store_true",
-        help=i18n_t("runtime.clean.dryRunHelp", _configured_cli_language()),
+        help=i18n_t("runtime.clean.dryRunHelp", runtime_clean_language),
     )
     runtime_clean_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
     remote_parser = subparsers.add_parser(

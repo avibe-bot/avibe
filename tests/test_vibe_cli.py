@@ -3103,16 +3103,34 @@ def test_runtime_clean_does_not_render_shared_archive_failure_as_zero_success(mo
     assert "downloaded Memory Runtime archive" not in captured.out
 
 
-def test_runtime_clean_help_names_consumers_and_failure_exit(capsys):
+@pytest.mark.parametrize("help_args", [("runtime", "--help"), ("runtime", "clean", "--help")])
+@pytest.mark.parametrize(
+    ("language", "consumer_scope", "failure_contract"),
+    [
+        ("en", "Show, Git, Memory, and Model Hub", "exit nonzero if any cleanup fails"),
+        ("zh", "Show、Git、Memory 和 Model Hub", "任一清理失败时以非零状态退出"),
+    ],
+)
+def test_runtime_clean_help_names_consumers_and_failure_exit(
+    monkeypatch,
+    capsys,
+    help_args,
+    language,
+    consumer_scope,
+    failure_contract,
+):
+    monkeypatch.setenv("COLUMNS", "240")
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
     parser = cli.build_parser()
 
     with pytest.raises(SystemExit) as exc_info:
-        parser.parse_args(["runtime", "--help"])
+        parser.parse_args(help_args)
 
     assert exc_info.value.code == 0
     output = capsys.readouterr().out
-    assert "Show, Git, Memory, and Model Hub" in output
-    assert "exit non-zero if any cleanup fails" in output
+    assert cli.i18n_t("runtime.clean.commandHelp", language) in output
+    assert consumer_scope in output
+    assert failure_contract in output
 
 
 @pytest.mark.parametrize("legacy_source", ["github", "github-source", "GitHub-Source"])
