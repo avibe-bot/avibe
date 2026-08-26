@@ -416,21 +416,6 @@ def test_upsert_custom_provider_allows_documented_dotted_id(tmp_path: Path) -> N
     assert config["provider"]["llama.cpp"]["name"] == "llama.cpp"
 
 
-def test_user_provider_presence_reads_the_raw_config_namespace(tmp_path: Path) -> None:
-    from vibe.opencode_config import opencode_user_provider_exists
-
-    upsert_opencode_custom_provider(
-        "avibe-model-hub",
-        "Existing relay",
-        "openai-compatible",
-        "https://relay.example/v1",
-        home=tmp_path,
-    )
-
-    assert opencode_user_provider_exists("avibe-model-hub", home=tmp_path) is True
-    assert opencode_user_provider_exists("missing", home=tmp_path) is False
-
-
 def test_upsert_custom_provider_refuses_existing_builtin_block(tmp_path: Path) -> None:
     upsert_opencode_provider_base_url("openai", "https://relay.example/v1", home=tmp_path)
 

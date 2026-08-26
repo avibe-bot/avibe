@@ -182,6 +182,7 @@ def test_codex_hub_launch_uses_toml_safe_catalog_path(tmp_path):
 
 def test_opencode_overlay_requires_exact_checked_identifier():
     overlay = SimpleNamespace(
+        provider_id="avibe-model-hub-runtime",
         checked_identifiers=("openai/gpt-5", "custom/gpt-5"),
         available_identifiers=("openai/gpt-5", "custom/gpt-5"),
     )
@@ -189,7 +190,7 @@ def test_opencode_overlay_requires_exact_checked_identifier():
         "openai/gpt-5"
     )
     assert opencode_model_for_overlay("openai/gpt-5", overlay) == (
-        "avibe-model-hub/openai/gpt-5"
+        "avibe-model-hub-runtime/openai/gpt-5"
     )
     with pytest.raises(ModelHubError):
         opencode_model_for_overlay("gpt-5", overlay)
@@ -197,6 +198,7 @@ def test_opencode_overlay_requires_exact_checked_identifier():
 
 def test_opencode_overlay_never_repeats_add_time_bare_identifier_matching():
     overlay = SimpleNamespace(
+        provider_id="avibe-model-hub-runtime",
         checked_identifiers=("openai/gpt-5",),
         available_identifiers=("openai/gpt-5",),
     )

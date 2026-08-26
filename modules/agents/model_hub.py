@@ -44,7 +44,6 @@ from core.handlers.model_hub.service import (
 from core.services.settings import load_config_or_default
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 from vibe.codex_config import format_toml_basic_string
-from vibe.opencode_config import opencode_user_provider_exists
 
 
 LaunchChannel = Literal["direct", "native_cli", "hub"]
@@ -98,6 +97,7 @@ class OpenCodeOverlay:
     path: Path
     content_hash: str
     content: bytes
+    provider_id: str
     checked_identifiers: tuple[str, ...]
     available_identifiers: tuple[str, ...]
     launches: tuple[ModelHubLaunch, ...] = field(repr=False)
@@ -338,10 +338,14 @@ def _provider_package() -> str:
     return "@ai-sdk/openai-compatible"
 
 
-# OpenCode merges custom providers with its built-ins by id. A private id keeps
-# internal title/compaction traffic on OpenCode's own providers instead of
-# sending those unrelated requests through the Model Hub turn gateway.
-_OPENCODE_MODEL_HUB_PROVIDER_ID = "avibe-model-hub"
+_OPENCODE_MODEL_HUB_PROVIDER_PREFIX = "avibe-model-hub-"
+
+
+def _opencode_model_hub_provider_id(gateway_token: str) -> str:
+    """Derive an overlay-private provider namespace from its runtime credential."""
+
+    digest = hashlib.sha256(gateway_token.encode()).hexdigest()[:24]
+    return f"{_OPENCODE_MODEL_HUB_PROVIDER_PREFIX}{digest}"
 
 
 def _provider_base_url(gateway_base_url: str) -> str:
@@ -969,14 +973,12 @@ class ModelHubRuntimeRouter:
         checked = tuple(agent.menu.checked if agent.menu else ())
         if not checked:
             return None
-        if opencode_user_provider_exists(_OPENCODE_MODEL_HUB_PROVIDER_ID):
-            raise ModelHubError("mapping_target_unavailable", status=409)
-
         gateway_base_url, gateway_token = await self._gateway_credentials(
             "opencode",
             process_scope="opencode:shared-server",
             turn_id=None,
         )
+        overlay_provider_id = _opencode_model_hub_provider_id(gateway_token)
         providers: dict[str, dict[str, Any]] = {}
         projected_identifiers: list[str] = []
         available_identifiers: list[str] = []
@@ -988,9 +990,9 @@ class ModelHubRuntimeRouter:
                 identifier,
                 supply_channel="hub",
             )
-            provider_id = resolution.menu_provider_id
+            menu_provider_id = resolution.menu_provider_id
             menu_model_id = resolution.menu_model_id
-            if provider_id is None or menu_model_id is None:
+            if menu_provider_id is None or menu_model_id is None:
                 raise ModelHubError("mapping_target_unavailable", status=409)
             inspection = (
                 resolution.candidate_hops[0]
@@ -1016,7 +1018,7 @@ class ModelHubRuntimeRouter:
             package = _provider_package()
             base_url = _provider_base_url(gateway_base_url)
             provider = providers.setdefault(
-                _OPENCODE_MODEL_HUB_PROVIDER_ID,
+                overlay_provider_id,
                 {
                     "name": "Avibe Model Hub",
                     "npm": package,
@@ -1081,6 +1083,7 @@ class ModelHubRuntimeRouter:
             path=self.overlay_path,
             content_hash=content_hash,
             content=content,
+            provider_id=overlay_provider_id,
             checked_identifiers=tuple(projected_identifiers),
             available_identifiers=tuple(available_identifiers),
             launches=tuple(launches),
@@ -1121,4 +1124,4 @@ def opencode_model_for_overlay(
     requested_model = opencode_requested_model_for_overlay(model, overlay)
     if overlay is None or requested_model is None:
         return requested_model
-    return f"{_OPENCODE_MODEL_HUB_PROVIDER_ID}/{requested_model}"
+    return f"{overlay.provider_id}/{requested_model}"

@@ -239,7 +239,7 @@ def test_restore_im_registration_failure_retries_before_releasing_poll() -> None
 def test_restored_poll_exposes_the_persisted_guarded_steering_owner() -> None:
     poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
     poll.model_dict = {
-        "providerID": "avibe-model-hub",
+        "providerID": "avibe-model-hub-runtime",
         "modelID": "openai/gpt-5",
     }
     poll.reasoning_effort = "high"
@@ -287,7 +287,7 @@ def test_restored_poll_exposes_the_persisted_guarded_steering_owner() -> None:
         ].idle_reconciliation_message
         assert "openai" in reconciliation_message
         assert "gpt-5" in reconciliation_message
-        assert "avibe-model-hub" not in reconciliation_message
+        assert "avibe-model-hub-runtime" not in reconciliation_message
         recovery_complete.set()
         await poll_started.wait()
         receipt = await steer_active_turn(
@@ -315,7 +315,7 @@ def test_restored_poll_exposes_the_persisted_guarded_steering_owner() -> None:
             "text": "补充：`keep exact`",
             "agent": "build",
             "model": {
-                "providerID": "avibe-model-hub",
+                "providerID": "avibe-model-hub-runtime",
                 "modelID": "openai/gpt-5",
             },
             "reasoning_effort": "high",
