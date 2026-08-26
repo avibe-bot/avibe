@@ -17,6 +17,7 @@ from core.memory.everos import (
     MemoryProviderFailure,
 )
 from core.memory.attachments import AttachmentBundleInvalidError
+from core.memory.retained_input import estimate_text_residency
 from core.memory.store import MemoryStore, VolatileAdmission
 from core.memory.types import ProviderSessionRef
 from core.memory.writer import (
@@ -176,13 +177,14 @@ async def test_writer_byte_backpressure_allows_one_oversized_capture(
     )
     writer = _writer(tmp_path, FakeMemoryProvider())
     writer._ensure_worker = lambda: None
+    text = "x" * 11 + "\U0001f600"
 
     oversized = writer.reserve("oversized")
     assert not isinstance(oversized, str)
     assert writer.offer_capture(
         oversized,
         _admission(0),
-        text="x" * 11,
+        text=text,
         attachments=(),
         bundle=None,
     ) == "queued"
@@ -197,7 +199,7 @@ async def test_writer_byte_backpressure_allows_one_oversized_capture(
     ) == "full"
     blocked.abandon()
 
-    assert writer._retained_text_bytes == 11
+    assert writer._retained_text_bytes == estimate_text_residency(text, copies=2)
     assert writer.dropped_count() == 1
 
     await writer.close()
@@ -215,12 +217,14 @@ def test_pending_reservation_claims_text_budget_before_admission(
         10,
     )
     writer = _writer(tmp_path, FakeMemoryProvider())
+    text = "x" * 11
 
-    oversized = writer.reserve_pending(text="x" * 11)
+    oversized = writer.reserve_pending(text=text)
     assert not isinstance(oversized, str)
-    assert writer._retained_text_bytes == 11
+    retained = estimate_text_residency(text, copies=2)
+    assert writer._retained_text_bytes == retained
     assert writer.reserve_pending(text="y") == "full"
-    assert writer._retained_text_bytes == 11
+    assert writer._retained_text_bytes == retained
 
     oversized.abandon()
 

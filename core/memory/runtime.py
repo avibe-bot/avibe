@@ -1383,63 +1383,73 @@ class MemoryRuntime:
         project_has_more: dict[str, bool] = {}
         candidate_page_hints: dict[tuple[str, str], int] = {}
         complete = True
-        async with _concurrent_episode_lists(
-            self.module,
-            deadline=deadline,
-        ) as list_episodes:
-            for project_id in projects:
-                window = await self._list_project_window(
-                    principal_id,
-                    project_id,
-                    list_episodes=list_episodes,
-                    boundary=boundaries[project_id],
-                    page_hint=page_hints[project_id],
-                    total_hint=total_hints[project_id],
-                    limit=limit,
-                    deadline=deadline,
-                    origin=origin,
-                )
-                if isinstance(window, OperationFailed):
-                    complete = False
-                    failures.append(window)
-                    warning: MemoryListWarningCode = (
-                        "memory_list_truncated"
-                        if window.error == "memory_provider_timeout"
-                        else "memory_list_partial"
-                    )
-                    warnings.append(warning)
-                    continue
-                (
-                    items,
-                    total_count,
-                    project_warnings,
-                    has_more,
-                    window_complete,
-                    item_page_hints,
-                ) = window
-                combined_hints = {
-                    **candidate_page_hints,
-                    **{
-                        (project_id, item.id): item_page_hints[item.id]
-                        for item in items
-                    },
-                }
-                candidates = list(
-                    _merge_memory_list_candidates(
-                        [*candidates, *items],
+        merge_worker = _TerminableMemoryWorker()
+        try:
+            async with _concurrent_episode_lists(
+                self.module,
+                deadline=deadline,
+            ) as list_episodes:
+                for project_id in projects:
+                    window = await self._list_project_window(
+                        principal_id,
+                        project_id,
+                        list_episodes=list_episodes,
+                        boundary=boundaries[project_id],
+                        page_hint=page_hints[project_id],
+                        total_hint=total_hints[project_id],
                         limit=limit,
+                        deadline=deadline,
+                        origin=origin,
                     )
-                )
-                candidate_page_hints = {
-                    (item.project, item.id): combined_hints[(item.project, item.id)]
-                    for item in candidates
-                }
-                totals[project_id] = total_count
-                available_counts[project_id] = len(items)
-                project_has_more[project_id] = has_more
-                warnings.extend(project_warnings)
-                if not window_complete:
-                    complete = False
+                    if isinstance(window, OperationFailed):
+                        complete = False
+                        failures.append(window)
+                        warning: MemoryListWarningCode = (
+                            "memory_list_truncated"
+                            if window.error == "memory_provider_timeout"
+                            else "memory_list_partial"
+                        )
+                        warnings.append(warning)
+                        continue
+                    (
+                        items,
+                        total_count,
+                        project_warnings,
+                        has_more,
+                        window_complete,
+                        item_page_hints,
+                    ) = window
+                    combined_hints = {
+                        **candidate_page_hints,
+                        **{
+                            (project_id, item.id): item_page_hints[item.id]
+                            for item in items
+                        },
+                    }
+                    candidates = list(
+                        await _merge_memory_list_candidates_isolated(
+                            (*candidates, *items),
+                            limit=limit,
+                            deadline=deadline,
+                            worker=merge_worker,
+                        )
+                    )
+                    candidate_page_hints = {
+                        (item.project, item.id): combined_hints[(item.project, item.id)]
+                        for item in candidates
+                    }
+                    totals[project_id] = total_count
+                    available_counts[project_id] = len(items)
+                    project_has_more[project_id] = has_more
+                    warnings.extend(project_warnings)
+                    if not window_complete:
+                        complete = False
+        except asyncio.TimeoutError:
+            return {"status": "failed", "error": "memory_provider_timeout"}
+        except BrokenProcessPool:
+            return {"status": "failed", "error": "memory_processing_failed"}
+        finally:
+            await merge_worker.close()
 
         if not totals and failures:
             failure = next(
@@ -3023,6 +3033,28 @@ def _merge_memory_list_candidates(
     return tuple(ordered[:limit])
 
 
+def _merge_memory_list_candidates_worker(
+    items: tuple[MemoryListItem, ...],
+    limit: int,
+) -> tuple[MemoryListItem, ...]:
+    return _merge_memory_list_candidates(items, limit=limit)
+
+
+async def _merge_memory_list_candidates_isolated(
+    items: Iterable[MemoryListItem],
+    *,
+    limit: int,
+    deadline: float,
+    worker: "_TerminableMemoryWorker",
+) -> tuple[MemoryListItem, ...]:
+    return await worker.run(
+        _merge_memory_list_candidates_worker,
+        tuple(items),
+        limit,
+        deadline=deadline,
+    )
+
+
 def _memory_list_catalog_fingerprint(
     principal_id: str,
     projects: tuple[str, ...],
@@ -3321,7 +3353,7 @@ def _spool_memory_list_cursor(cursor: object, deadline: float) -> str:
                 ].encode("ascii")
             except UnicodeEncodeError:
                 raise ValueError("invalid Memory list cursor") from None
-            _write_memory_list_cursor_spool_chunk(spool, chunk)
+            _write_memory_list_cursor_spool_chunk(spool, chunk, deadline)
             if time.monotonic() >= deadline:
                 raise asyncio.TimeoutError
         return path
@@ -3353,37 +3385,37 @@ def _spool_memory_list_cursor_encoding(
     )
     path = spool.name
     try:
-        _write_memory_list_cursor_spool_chunk(spool, b'{"f":')
+        _write_memory_list_cursor_spool_chunk(spool, b'{"f":', deadline)
         _write_memory_list_cursor_json_string(spool, fingerprint, deadline)
-        _write_memory_list_cursor_spool_chunk(spool, b',"rows":[')
+        _write_memory_list_cursor_spool_chunk(spool, b',"rows":[', deadline)
         for index, (project_id, boundary) in enumerate(boundaries.items()):
             if time.monotonic() >= deadline:
                 raise asyncio.TimeoutError
             if index:
-                _write_memory_list_cursor_spool_chunk(spool, b",")
-            _write_memory_list_cursor_spool_chunk(spool, b"[")
+                _write_memory_list_cursor_spool_chunk(spool, b",", deadline)
+            _write_memory_list_cursor_spool_chunk(spool, b"[", deadline)
             _write_memory_list_cursor_json_string(spool, project_id, deadline)
-            _write_memory_list_cursor_spool_chunk(spool, b",")
+            _write_memory_list_cursor_spool_chunk(spool, b",", deadline)
             if boundary is None:
-                _write_memory_list_cursor_spool_chunk(spool, b"null")
+                _write_memory_list_cursor_spool_chunk(spool, b"null", deadline)
             else:
                 if not isinstance(boundary, tuple) or len(boundary) != 2:
                     raise ValueError("invalid Memory list boundary")
-                _write_memory_list_cursor_spool_chunk(spool, b"[")
+                _write_memory_list_cursor_spool_chunk(spool, b"[", deadline)
                 _write_memory_list_cursor_json_string(spool, boundary[0], deadline)
-                _write_memory_list_cursor_spool_chunk(spool, b",")
+                _write_memory_list_cursor_spool_chunk(spool, b",", deadline)
                 _write_memory_list_cursor_json_string(spool, boundary[1], deadline)
                 for value in (page_hints[project_id], total_hints[project_id]):
-                    _write_memory_list_cursor_spool_chunk(spool, b",")
+                    _write_memory_list_cursor_spool_chunk(spool, b",", deadline)
                     encoded = json.dumps(
                         value,
                         ensure_ascii=True,
                         separators=(",", ":"),
                     ).encode("ascii")
-                    _write_memory_list_cursor_spool_chunk(spool, encoded)
-                _write_memory_list_cursor_spool_chunk(spool, b"]")
-            _write_memory_list_cursor_spool_chunk(spool, b"]")
-        _write_memory_list_cursor_spool_chunk(spool, b"]}")
+                    _write_memory_list_cursor_spool_chunk(spool, encoded, deadline)
+                _write_memory_list_cursor_spool_chunk(spool, b"]", deadline)
+            _write_memory_list_cursor_spool_chunk(spool, b"]", deadline)
+        _write_memory_list_cursor_spool_chunk(spool, b"]}", deadline)
         if time.monotonic() >= deadline:
             raise asyncio.TimeoutError
         return path
@@ -3403,7 +3435,7 @@ def _write_memory_list_cursor_json_string(
 ) -> None:
     if not isinstance(value, str):
         raise ValueError("invalid Memory list cursor string")
-    _write_memory_list_cursor_spool_chunk(spool, b'"')
+    _write_memory_list_cursor_spool_chunk(spool, b'"', deadline)
     for offset in range(0, len(value), _MEMORY_LIST_CURSOR_SPOOL_CHUNK_CHARS):
         if time.monotonic() >= deadline:
             raise asyncio.TimeoutError
@@ -3411,22 +3443,39 @@ def _write_memory_list_cursor_json_string(
             value[offset : offset + _MEMORY_LIST_CURSOR_SPOOL_CHUNK_CHARS],
             ensure_ascii=True,
         )[1:-1].encode("ascii")
-        _write_memory_list_cursor_spool_chunk(spool, chunk)
-    _write_memory_list_cursor_spool_chunk(spool, b'"')
+        _write_memory_list_cursor_spool_chunk(spool, chunk, deadline)
+    _write_memory_list_cursor_spool_chunk(spool, b'"', deadline)
 
 
-def _write_memory_list_cursor_spool_chunk(spool: Any, chunk: bytes) -> None:
-    with _MEMORY_LIST_CURSOR_SPOOL_LOCK:
+def _write_memory_list_cursor_spool_chunk(
+    spool: Any,
+    chunk: bytes,
+    deadline: float,
+) -> None:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0 or not _MEMORY_LIST_CURSOR_SPOOL_LOCK.acquire(timeout=remaining):
+        raise asyncio.TimeoutError
+    try:
+        if time.monotonic() >= deadline:
+            raise asyncio.TimeoutError
         free_bytes = shutil.disk_usage(tempfile.gettempdir()).free
+        if time.monotonic() >= deadline:
+            raise asyncio.TimeoutError
         if free_bytes - len(chunk) < _MEMORY_LIST_CURSOR_SPOOL_FREE_BYTES:
             raise OSError(
                 errno.ENOSPC,
                 "insufficient temporary storage for Memory list cursor",
             )
         written = spool.write(chunk)
+        if time.monotonic() >= deadline:
+            raise asyncio.TimeoutError
         if written != len(chunk):
             raise OSError(errno.EIO, "short Memory list cursor spool write")
         spool.flush()
+        if time.monotonic() >= deadline:
+            raise asyncio.TimeoutError
+    finally:
+        _MEMORY_LIST_CURSOR_SPOOL_LOCK.release()
 
 
 def _decode_memory_list_cursor_path(

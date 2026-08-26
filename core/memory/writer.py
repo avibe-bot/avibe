@@ -27,6 +27,7 @@ from core.memory.everos import (
     attachment_add_rejection_proves_no_write,
 )
 from core.memory.observations import AddResult, FlushResult
+from core.memory.retained_input import estimate_text_residency
 from core.memory.store import MemoryStore, VolatileAdmission
 from core.memory.types import CaptureAttachment, ProviderSessionRef
 
@@ -250,10 +251,7 @@ class BestEffortMemoryWriter:
             return "disabled"
         if not isinstance(text, str):
             return "disabled"
-        try:
-            retained_text_bytes = len(text.encode("utf-8"))
-        except UnicodeError:
-            return "disabled"
+        retained_text_bytes = estimate_text_residency(text, copies=2)
         other_retained_bytes = max(
             0,
             self._retained_text_bytes - reservation.retained_text_bytes,

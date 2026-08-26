@@ -884,6 +884,30 @@ def test_sidecar_guard_accepts_provider_valid_large_request_bodies() -> None:
     assert _request_rejection("POST", "/api/v2/memory/add", add_body) is None
 
 
+def test_sidecar_numeric_scan_rechecks_projection_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parser = sidecar._MappedRequestParser(
+        b"1" * (sidecar._STRING_SCAN_CHUNK_BYTES * 2),
+        "/api/v2/memory/search",
+        deadline=1.0,
+    )
+    checks: list[int] = []
+
+    def expire_after_first_check(_deadline: float) -> None:
+        checks.append(parser._index)
+        if len(checks) > 1:
+            raise sidecar._RequestDeadlineExceeded
+
+    monkeypatch.setattr(sidecar, "_check_request_deadline", expire_after_first_check)
+
+    with pytest.raises(sidecar._RequestDeadlineExceeded):
+        parser._parse_number()
+
+    assert checks[0] == 1
+    assert checks[1] < len(parser._data)
+
+
 def test_sidecar_guard_keeps_profile_exact_and_allows_only_bounded_episode_lists() -> None:
     principal = "u-11111111111111111111111111111111"
     profile = {

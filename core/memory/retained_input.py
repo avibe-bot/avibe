@@ -133,7 +133,10 @@ async def read_json_object_admitted(
             raise ValueError("invalid Content-Length") from exc
         if expected_bytes < 0:
             raise ValueError("invalid Content-Length")
-    reserved_bytes = _json_body_residency(expected_bytes)
+    # Content-Length is only a declaration. Reserve the small initial body
+    # footprint, then grow admission as bytes are actually retained so a slow
+    # upload cannot monopolize the aggregate budget before sending its body.
+    reserved_bytes = _json_body_residency(0)
     reservation = budget.reserve(reserved_bytes)
     if reservation is None:
         raise RetainedInputRejected

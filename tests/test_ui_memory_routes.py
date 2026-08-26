@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -15,7 +16,10 @@ from config.v2_config import (
     SlackConfig,
     V2Config,
 )
-from core.memory.retained_input import RetainedInputBudget
+from core.memory.retained_input import (
+    read_json_object_admitted,
+    RetainedInputBudget,
+)
 from tests.ui_server_test_helpers import csrf_headers
 from vibe import internal_client, ui_memory_routes
 from vibe.ui_server import app
@@ -669,11 +673,12 @@ def test_memory_search_route_admits_body_before_json_materialization(
     monkeypatch.setattr(ui_memory_routes, "_MEMORY_REQUEST_INPUT_BUDGET", budget)
     calls: list[dict[str, object]] = []
 
-    async def memory_search(*args, **kwargs):
+    async def memory_search_stream(*args, **kwargs):
         calls.append({"args": args, "kwargs": kwargs})
-        return {"status_code": 200, "body": {"status": "ok", "items": []}}
+        yield 200, b""
+        yield None, b'{"status":"ok","items":[]}'
 
-    monkeypatch.setattr(internal_client, "memory_search", memory_search)
+    monkeypatch.setattr(internal_client, "memory_search_stream", memory_search_stream)
     client = app.test_client()
     response = client.post(
         "/api/memory/search",
@@ -692,3 +697,76 @@ def test_memory_search_route_admits_body_before_json_materialization(
         "error": "memory_queue_full",
     }
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_declared_body_size_does_not_reserve_unsent_bytes() -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class SlowRequest:
+        headers = {"content-length": "1000000"}
+
+        async def stream(self):
+            entered.set()
+            await release.wait()
+            yield b"{}"
+
+    budget = RetainedInputBudget(max_bytes=16, max_reservations=2)
+    task = asyncio.create_task(read_json_object_admitted(SlowRequest(), budget))
+    await entered.wait()
+
+    concurrent = budget.reserve(1)
+    assert concurrent is not None
+    concurrent.release()
+    release.set()
+    payload, reservation = await task
+    reservation.release()
+
+    assert payload == {}
+    assert budget.retained_bytes == 0
+
+
+def test_memory_search_route_streams_controller_json_without_reencoding(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config()
+    calls: list[dict[str, object]] = []
+
+    async def memory_search_stream(*args, **kwargs):
+        calls.append({"args": args, "kwargs": kwargs})
+        yield 200, b""
+        yield None, b'{"status":"ok","items":[{"text":"'
+        yield None, b"large result"
+        yield None, b'"}]}'
+
+    def unexpected_reencode(*_args, **_kwargs):
+        raise AssertionError("streaming search must not re-encode the response")
+
+    monkeypatch.setattr(internal_client, "memory_search_stream", memory_search_stream)
+    monkeypatch.setattr(ui_memory_routes, "_memory_response", unexpected_reencode)
+    client = app.test_client()
+    response = client.post(
+        "/api/memory/search",
+        json={
+            "query": "find this",
+            "policy": {"mode": "hybrid", "max_results": 8},
+        },
+        headers=csrf_headers(client, BASE_URL),
+        **_request_options(),
+    )
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.content == b'{"status":"ok","items":[{"text":"large result"}]}'
+    assert calls[0]["args"] == (
+        "find this",
+        {
+            "mode": "hybrid",
+            "max_results": 8,
+            "include_profile": True,
+            "include_current_session": False,
+        },
+    )

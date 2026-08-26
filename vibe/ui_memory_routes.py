@@ -20,6 +20,7 @@ import re
 from typing import Any, Callable
 
 from fastapi import Request as FastAPIRequest
+from fastapi.responses import StreamingResponse
 
 from config.v2_config import V2Config
 from core.memory.retained_input import (
@@ -132,6 +133,47 @@ async def _memory_internal_result(call: Callable[[], Any]) -> tuple[dict, int]:
 async def _memory_internal_response(call: Callable[[], Any]) -> Response:
     body, status_code = await _memory_internal_result(call)
     return _memory_response(body, status_code=status_code)
+
+
+async def _memory_internal_stream_response(call: Callable[[], Any]) -> Response:
+    from vibe import internal_client
+
+    stream = call()
+    try:
+        status_code, first_chunk = await anext(stream)
+    except internal_client.InternalServerUnavailable:
+        return _memory_response(
+            {"status": "failed", "error": "memory_sidecar_unavailable"},
+            status_code=503,
+        )
+    except StopAsyncIteration:
+        return _memory_response(
+            {"status": "failed", "error": "memory_provider_response_invalid"},
+            status_code=503,
+        )
+    if status_code is None:
+        await stream.aclose()
+        return _memory_response(
+            {"status": "failed", "error": "memory_provider_response_invalid"},
+            status_code=503,
+        )
+
+    async def body():
+        try:
+            if first_chunk:
+                yield first_chunk
+            async for _status_code, chunk in stream:
+                if chunk:
+                    yield chunk
+        finally:
+            await stream.aclose()
+
+    return StreamingResponse(
+        body(),
+        status_code=status_code,
+        media_type="application/json",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 def _memory_settings_projection(memory: object) -> dict:
@@ -786,8 +828,8 @@ def register_memory_routes(app) -> None:
                     )
                 from vibe import internal_client
 
-                return await _memory_internal_response(
-                    lambda: internal_client.memory_search(
+                return await _memory_internal_stream_response(
+                    lambda: internal_client.memory_search_stream(
                         query,
                         policy.payload(),
                         user_key=user_key,

@@ -754,6 +754,48 @@ async def memory_search(
     )
 
 
+async def memory_search_stream(
+    query: str,
+    policy: dict[str, object],
+    *,
+    user_key: str,
+    project: str | None = None,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_SEARCH_TIMEOUT_SECONDS,
+) -> AsyncIterator[tuple[int | None, bytes]]:
+    """Stream one Memory search response without materializing it in the UI process."""
+
+    payload: dict[str, object] = {"query": query, "policy": policy}
+    if project is not None:
+        payload["project"] = project
+    target = await _verified_socket_path_async(socket_path)
+    transport = httpx.AsyncHTTPTransport(uds=str(target))
+    client_timeout = httpx.Timeout(timeout, connect=min(timeout, 5.0))
+    headers = _memory_user_key_headers(
+        "POST",
+        "/internal/memory/search",
+        user_key,
+    )
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://localhost",
+            timeout=client_timeout,
+        ) as client:
+            async with client.stream(
+                "POST",
+                "/internal/memory/search",
+                json=payload,
+                headers=headers,
+            ) as response:
+                yield response.status_code, b""
+                async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
+                    if chunk:
+                        yield None, chunk
+    except _SOCKET_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+
+
 
 
 def memory_status_sync(

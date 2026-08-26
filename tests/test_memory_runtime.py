@@ -599,7 +599,9 @@ async def test_aggregate_list_incrementally_retains_only_final_page(
     merge_sizes: list[int] = []
     real_merge = runtime_module._merge_memory_list_candidates
 
-    def bounded_merge(items, *, limit: int):
+    async def bounded_merge(items, *, limit: int, deadline: float, worker):
+        assert deadline > time.monotonic()
+        assert worker is not None
         buffered = list(items)
         merge_sizes.append(len(buffered))
         return real_merge(buffered, limit=limit)
@@ -617,7 +619,7 @@ async def test_aggregate_list_incrementally_retains_only_final_page(
     )
     monkeypatch.setattr(
         runtime_module,
-        "_merge_memory_list_candidates",
+        "_merge_memory_list_candidates_isolated",
         bounded_merge,
     )
 
@@ -634,6 +636,33 @@ async def test_aggregate_list_incrementally_retains_only_final_page(
     assert max(merge_sizes) <= 40
     assert len(encoded) == 1
     await runtime.close()
+
+
+def test_cursor_spool_lock_wait_honors_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timeouts: list[float] = []
+
+    class BusyLock:
+        def acquire(self, *, timeout: float) -> bool:
+            timeouts.append(timeout)
+            return False
+
+        def release(self) -> None:
+            raise AssertionError("an unacquired lock must not be released")
+
+    monkeypatch.setattr(runtime_module, "_MEMORY_LIST_CURSOR_SPOOL_LOCK", BusyLock())
+    with (tmp_path / "cursor").open("wb") as spool:
+        with pytest.raises(asyncio.TimeoutError):
+            runtime_module._write_memory_list_cursor_spool_chunk(
+                spool,
+                b"cursor",
+                time.monotonic() + 1.0,
+            )
+
+    assert len(timeouts) == 1
+    assert 0 < timeouts[0] <= 1.0
 
 
 @pytest.mark.asyncio

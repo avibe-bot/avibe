@@ -774,12 +774,14 @@ class _MappedRequestParser:
         if current is None or not minimum <= current <= ord("9"):
             raise _RequestParseError("digit")
         self._index += 1
+        self._check_deadline()
 
     def _consume_digit(self) -> bool:
         current = self._peek(default=None)
         if current is None or not ord("0") <= current <= ord("9"):
             return False
         self._index += 1
+        self._check_deadline()
         return True
 
     def _expect_literal(self, value: bytes) -> None:

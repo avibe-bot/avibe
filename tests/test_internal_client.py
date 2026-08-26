@@ -635,6 +635,61 @@ def test_memory_list_async_signs_ui_aggregate_cursor(monkeypatch, socket_path):
     )
 
 
+def test_memory_search_async_streams_raw_controller_response(monkeypatch, socket_path):
+    from core.memory import ui_access
+
+    monkeypatch.setattr(ui_access, "_process_secret", "test-ui-controller-secret")
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(
+            path=request.url.path,
+            payload=json.loads(request.content.decode("utf-8")),
+            user_key=request.headers.get("x-avibe-memory-user-key"),
+            proof=request.headers.get("x-avibe-memory-ui-proof"),
+        )
+        return httpx.Response(
+            206,
+            content=b'{"status":"ok","items":[{"text":"large"}]}',
+        )
+
+    async def exercise():
+        with patch(
+            "vibe.internal_client.httpx.AsyncHTTPTransport",
+            return_value=httpx.MockTransport(handler),
+        ):
+            return [
+                item
+                async for item in internal_client.memory_search_stream(
+                    "find this",
+                    {"mode": "hybrid", "max_results": 8},
+                    user_key="avibe:remote:user-search",
+                    project="all",
+                    socket_path=socket_path,
+                )
+            ]
+
+    events = asyncio.run(exercise())
+
+    assert events[0] == (206, b"")
+    assert b"".join(chunk for _status, chunk in events[1:]) == (
+        b'{"status":"ok","items":[{"text":"large"}]}'
+    )
+    assert captured["path"] == "/internal/memory/search"
+    assert captured["payload"] == {
+        "query": "find this",
+        "policy": {"mode": "hybrid", "max_results": 8},
+        "project": "all",
+    }
+    assert captured["user_key"] == "avibe:remote:user-search"
+    assert captured["proof"] == ui_access.build_ui_read_proof(
+        "test-ui-controller-secret",
+        method="POST",
+        path="/internal/memory/search",
+        user_key="avibe:remote:user-search",
+    )
+
+
 def test_memory_ui_read_helper_signs_the_fixed_local_owner(monkeypatch, socket_path):
     from core.memory import ui_access
 
