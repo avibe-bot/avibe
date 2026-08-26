@@ -3172,8 +3172,10 @@ def test_runtime_start_consults_install_owner_before_starting(
     asyncio.run(run())
 
 
-def test_runtime_start_continues_after_server_owned_installation(
+@pytest.mark.parametrize("stop_wins", [False, True])
+def test_runtime_start_after_install_obeys_latest_explicit_lifecycle_action(
     tmp_path: Path,
+    stop_wins: bool,
 ) -> None:
     class BlockingInstaller(EngineRuntimeManager):
         def __init__(self, runtime_dir: Path) -> None:
@@ -3223,6 +3225,7 @@ def test_runtime_start_continues_after_server_owned_installation(
             self.installer = installer
             self.state_store = EngineStateStore(tmp_path / "state")
             self.start_calls = 0
+            self.disable_calls = 0
 
         def status(self):
             installed = self.installer.resolve_engine_path() is not None
@@ -3251,6 +3254,9 @@ def test_runtime_start_continues_after_server_owned_installation(
         def ensure_running(self) -> None:
             self.start_calls += 1
 
+        def disable(self) -> None:
+            self.disable_calls += 1
+
     async def run() -> None:
         installer = BlockingInstaller(tmp_path / "runtime")
         supervisor = Supervisor(installer)
@@ -3258,6 +3264,20 @@ def test_runtime_start_continues_after_server_owned_installation(
             supervisor=supervisor,  # type: ignore[arg-type]
             state_store=supervisor.state_store,
         )
+        continuation_ready = asyncio.Event()
+        allow_continuation = asyncio.Event()
+        if stop_wins:
+            start_after_install = adapter._start_after_install
+
+            async def gated_start_after_install(
+                install_task: asyncio.Task[None],
+            ) -> None:
+                await asyncio.shield(install_task)
+                continuation_ready.set()
+                await allow_continuation.wait()
+                await start_after_install(install_task)
+
+            adapter._start_after_install = gated_start_after_install  # type: ignore[method-assign]
 
         installing = await adapter.install()
         assert installing.health is EngineHealth.INSTALLING
@@ -3268,6 +3288,17 @@ def test_runtime_start_continues_after_server_owned_installation(
         assert supervisor.start_calls == 0
 
         installer.release.set()
+        if stop_wins:
+            await asyncio.wait_for(continuation_ready.wait(), timeout=2)
+            stopped = await adapter.stop_runtime()
+            allow_continuation.set()
+            await asyncio.sleep(0)
+
+            assert stopped.health is EngineHealth.NOT_STARTED
+            assert supervisor.start_calls == 0
+            assert supervisor.disable_calls == 1
+            return
+
         for _ in range(100):
             settled = await adapter.status()
             if settled.health is EngineHealth.OK:

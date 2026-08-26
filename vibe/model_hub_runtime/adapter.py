@@ -916,6 +916,12 @@ class CLIProxyEngineAdapter:
             status = await self.status()
             if status.health is EngineHealth.INSTALLING:
                 return status
+            start_after_install_task = self._start_after_install_task
+            if (
+                start_after_install_task is not None
+                and not start_after_install_task.done()
+            ):
+                start_after_install_task.cancel()
             await asyncio.to_thread(self.supervisor.disable)
             return await self.status()
 
