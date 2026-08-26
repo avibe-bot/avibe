@@ -16,6 +16,7 @@ from vibe import api, cli
 from vibe.runtime import ServiceLauncher
 from vibe.upgrade import (
     MEMORY_PACKAGE_COMPATIBILITY,
+    PIP_DOWNLOAD_DEST_PLACEHOLDER,
     UpgradePlan,
     build_memory_add_plan,
     build_upgrade_plan,
@@ -112,7 +113,19 @@ def test_memory_indep_018_upgrade_and_rollback_preserve_optional_package_shape(
     assert forward.method == method
     assert "avibe-os[memory]" in forward.command
     assert forward.preflight_command is not None
-    assert "--dry-run" in forward.preflight_command
+    if method == "pip":
+        assert forward.preflight_command[:4] == [
+            python_executable,
+            "-m",
+            "pip",
+            "download",
+        ]
+        assert forward.preflight_command[
+            forward.preflight_command.index("--dest") + 1
+        ] == PIP_DOWNLOAD_DEST_PLACEHOLDER
+        assert "--dry-run" not in forward.preflight_command
+    else:
+        assert "--dry-run" in forward.preflight_command
     assert forward.rollback_to == RollbackTarget(
         version="3.0.14",
         package="avibe-os",
@@ -133,6 +146,16 @@ def test_memory_indep_018_upgrade_and_rollback_preserve_optional_package_shape(
     assert "avibe-os[memory]==3.0.14" in rollback_with_memory.command
     assert "avibe-memory==3.0.14" in rollback_with_memory.command
     assert rollback_with_memory.preflight_command is not None
+    if method == "pip":
+        assert rollback_with_memory.preflight_command[:4] == [
+            python_executable,
+            "-m",
+            "pip",
+            "download",
+        ]
+        assert "--dry-run" not in rollback_with_memory.preflight_command
+    else:
+        assert "--dry-run" in rollback_with_memory.preflight_command
     assert rollback_with_memory.cleanup_command is None
 
     rollback_core_only = build_upgrade_plan(
@@ -170,6 +193,16 @@ def test_enabled_upgrade_selects_memory_extra_when_package_is_missing(monkeypatc
 
     assert plan.command[-1] == "avibe-os[memory]"
     assert plan.preflight_command is not None
+    assert plan.preflight_command[:4] == [
+        "/usr/bin/python3",
+        "-m",
+        "pip",
+        "download",
+    ]
+    assert plan.preflight_command[
+        plan.preflight_command.index("--dest") + 1
+    ] == PIP_DOWNLOAD_DEST_PLACEHOLDER
+    assert "--dry-run" not in plan.preflight_command
 
 
 def test_enabled_pip_upgrade_renders_url_extra_as_named_requirement(monkeypatch):
@@ -238,6 +271,7 @@ def test_memory_preflight_failure_never_runs_the_replacing_install():
         env=None,
         method="test",
         preflight_command=["installer", "preflight"],
+        cleanup_command=["installer", "cleanup"],
     )
     calls: list[list[str]] = []
 
@@ -249,6 +283,82 @@ def test_memory_preflight_failure_never_runs_the_replacing_install():
 
     assert result.returncode == 42
     assert calls == [["installer", "preflight"]]
+
+
+@pytest.mark.parametrize("preflight_returncode", [0, 42])
+def test_pip_download_preflight_removes_scratch_on_success_and_failure(
+    monkeypatch,
+    tmp_path,
+    preflight_returncode,
+):
+    scratch = tmp_path / "pip-download"
+    calls: list[list[str]] = []
+
+    def make_scratch(**kwargs):
+        scratch.mkdir()
+        return str(scratch)
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if "download" in command:
+            assert command[command.index("--dest") + 1] == str(scratch)
+            assert scratch.is_dir()
+            return subprocess.CompletedProcess(
+                command,
+                preflight_returncode,
+                stdout="",
+                stderr="resolver failed" if preflight_returncode else "",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr("vibe.upgrade.tempfile.mkdtemp", make_scratch)
+    plan = UpgradePlan(
+        command=["installer", "install"],
+        env=None,
+        method="pip",
+        preflight_command=[
+            "/usr/bin/python3",
+            "-m",
+            "pip",
+            "download",
+            "--dest",
+            PIP_DOWNLOAD_DEST_PLACEHOLDER,
+            "avibe-os[memory]",
+        ],
+        cleanup_command=["installer", "cleanup"],
+    )
+
+    result = execute_upgrade_plan(plan, run=fake_run, capture_output=True, text=True)
+
+    assert result.returncode == preflight_returncode
+    assert scratch.exists() is False
+    assert PIP_DOWNLOAD_DEST_PLACEHOLDER not in calls[0]
+    if preflight_returncode:
+        assert calls == [
+            [
+                "/usr/bin/python3",
+                "-m",
+                "pip",
+                "download",
+                "--dest",
+                str(scratch),
+                "avibe-os[memory]",
+            ]
+        ]
+    else:
+        assert calls == [
+            [
+                "/usr/bin/python3",
+                "-m",
+                "pip",
+                "download",
+                "--dest",
+                str(scratch),
+                "avibe-os[memory]",
+            ],
+            ["installer", "cleanup"],
+            ["installer", "install"],
+        ]
 
 
 def test_package_plan_holds_the_shared_mutation_lease_for_resolution_and_install(
@@ -317,7 +427,6 @@ def test_memory_add_plan_force_reinstalls_only_the_compatible_memory_distributio
     memory_requirement = f"avibe-memory{MEMORY_PACKAGE_COMPATIBILITY}"
     assert memory_requirement in plan.command
     assert plan.preflight_command is not None
-    assert "--dry-run" in plan.preflight_command
     assert "--force-reinstall" in plan.command
     assert "--no-deps" in plan.command
     assert memory_requirement in plan.preflight_command
@@ -327,8 +436,21 @@ def test_memory_add_plan_force_reinstalls_only_the_compatible_memory_distributio
         assert plan.command[:3] == ["/usr/local/bin/uv", "pip", "install"]
         assert "tool" not in plan.command
         assert plan.command[plan.command.index("--python") + 1] == python_executable
+        assert "--dry-run" in plan.preflight_command
     else:
         assert plan.command[:4] == [python_executable, "-m", "pip", "install"]
+        assert plan.preflight_command[:4] == [
+            python_executable,
+            "-m",
+            "pip",
+            "download",
+        ]
+        assert plan.preflight_command[
+            plan.preflight_command.index("--dest") + 1
+        ] == PIP_DOWNLOAD_DEST_PLACEHOLDER
+        assert "--dry-run" not in plan.preflight_command
+        assert "--force-reinstall" not in plan.preflight_command
+        assert "--no-deps" in plan.preflight_command
 
 
 def test_core_only_rollback_removes_memory_before_the_pinned_install():

@@ -29,6 +29,7 @@ MEMORY_PACKAGE_COMPATIBILITY = ">=3.0.14.dev0,<3.1"
 MEMORY_PACKAGE_REQUIREMENT = (
     f"{MEMORY_PACKAGE_NAME}{MEMORY_PACKAGE_COMPATIBILITY}"
 )
+PIP_DOWNLOAD_DEST_PLACEHOLDER = "{avibe-pip-download-destination}"
 PACKAGE_MUTATION_LOCK_TIMEOUT_SECONDS = 30.0
 DEFAULT_UPDATE_METADATA_URL = f"https://pypi.org/pypi/{PACKAGE_NAME}/json"
 CURRENT_VIBE_EXECUTABLE_ENV = "VIBE_CURRENT_EXECUTABLE"
@@ -118,7 +119,21 @@ def execute_upgrade_plan(
 
     with package_mutation_lock():
         if plan.preflight_command is not None:
-            preflight = run(plan.preflight_command, env=plan.env, **run_kwargs)
+            preflight_command = plan.preflight_command
+            scratch_dir: str | None = None
+            try:
+                if PIP_DOWNLOAD_DEST_PLACEHOLDER in preflight_command:
+                    scratch_dir = tempfile.mkdtemp(prefix="avibe-pip-download-")
+                    preflight_command = [
+                        scratch_dir
+                        if argument == PIP_DOWNLOAD_DEST_PLACEHOLDER
+                        else argument
+                        for argument in preflight_command
+                    ]
+                preflight = run(preflight_command, env=plan.env, **run_kwargs)
+            finally:
+                if scratch_dir is not None:
+                    shutil.rmtree(scratch_dir, ignore_errors=True)
             if preflight.returncode != 0:
                 return preflight
 
@@ -1025,15 +1040,16 @@ def build_upgrade_plan(
         command.append(pinned_memory_spec)
     preflight_command = None
     if include_memory:
+        # Unlike install, download never treats installed metadata as satisfied;
+        # legacy pip therefore needs neither (nor supports) an upgrade flag here.
         preflight_command = [
             executable,
             "-m",
             "pip",
-            "install",
-            "--dry-run",
+            "download",
+            "--dest",
+            PIP_DOWNLOAD_DEST_PLACEHOLDER,
         ]
-        if not version:
-            preflight_command.append("--upgrade")
         preflight_command.append(package_spec)
         if pinned_memory_spec:
             preflight_command.append(pinned_memory_spec)
@@ -1116,10 +1132,9 @@ def build_memory_add_plan(
         executable,
         "-m",
         "pip",
-        "install",
-        "--dry-run",
-        "--upgrade",
-        "--force-reinstall",
+        "download",
+        "--dest",
+        PIP_DOWNLOAD_DEST_PLACEHOLDER,
         "--no-deps",
         MEMORY_PACKAGE_REQUIREMENT,
     ]
