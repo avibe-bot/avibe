@@ -77,10 +77,17 @@ def site_packages_for_python(python_executable: str | os.PathLike[str]) -> list[
         *sorted((root / "lib").glob("python*/dist-packages")),
         root / "Lib" / "site-packages",
     ]
+    def has_record(path: Path) -> bool:
+        return path.is_dir() and any(path.glob("*.dist-info/RECORD"))
+
     # Prefer the environment-local layout. If it is absent (for example a
-    # system Python with a pip user install), retain the interpreter-reported
-    # locations, including a user site directory.
-    discovered = [*heuristic, *discovered] if any(path.is_dir() for path in heuristic) else discovered
+    # system Python with a pip user install), retain interpreter-reported
+    # locations that actually contain wheel metadata. Some Windows Python
+    # builds report their environment root as ``purelib``; accepting that path
+    # would make an unrelated top-level directory fail with "no RECORD".
+    local = [path for path in heuristic if path.is_dir()]
+    reported = [path for path in discovered if has_record(path)]
+    discovered = [*local, *reported] if local else reported
     candidates: list[Path] = []
     seen: set[Path] = set()
     for path in discovered:

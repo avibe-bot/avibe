@@ -65,3 +65,23 @@ def test_verify_python_environment_import_probe_does_not_use_caller_cwd(monkeypa
     assert result.ok is True
     assert calls[0]["cwd"] == install_integrity.tempfile.gettempdir()
     assert calls[0]["cwd"] != str(tmp_path)
+
+
+def test_site_discovery_ignores_reported_prefix_without_record(monkeypatch, tmp_path):
+    site_packages = tmp_path / "Lib" / "site-packages"
+    _write_record(site_packages, "demo_pkg/__init__.py", b"value = 1\n")
+    executable = tmp_path / "Scripts" / "python.exe"
+    executable.parent.mkdir()
+    executable.write_text("", encoding="utf-8")
+
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args[0],
+            0,
+            stdout=f"{tmp_path}\n{site_packages}\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(install_integrity.subprocess, "run", fake_run)
+
+    assert install_integrity.site_packages_for_python(executable) == [site_packages.resolve()]
