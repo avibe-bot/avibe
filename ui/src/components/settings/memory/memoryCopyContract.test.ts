@@ -6,9 +6,11 @@ import zh from '../../../i18n/zh.json';
 const bundles = { en, zh } as const;
 
 describe('Memory UI copy contracts', () => {
-  it.each(['en', 'zh'] as const)('describes an empty profile without blaming provider support in %s', (language) => {
+  it.each(['en', 'zh'] as const)('explains how an ungenerated profile will develop in %s', (language) => {
     const emptyProfile = bundles[language].memory.profile.warningEmpty;
-    expect(emptyProfile).toMatch(language === 'en' ? /profile is currently empty/i : /当前画像为空/);
+    expect(emptyProfile).toMatch(language === 'en' ? /hasn't been generated yet/i : /画像尚未生成/);
+    expect(emptyProfile).toMatch(language === 'en' ? /more content/i : /积累更多内容/);
+    expect(emptyProfile).toMatch(language === 'en' ? /Avibe will try to generate/i : /Avibe 会尝试/);
     expect(emptyProfile).not.toMatch(language === 'en' ? /provider|support/i : /提供方|支持/);
   });
 
