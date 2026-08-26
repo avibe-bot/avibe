@@ -7440,7 +7440,17 @@ def ui_reload():
         from config import paths as config_paths
         from vibe.memory_ui_access import process_ui_read_secret
 
-        def _spawn_replacement() -> None:
+        def _stop_current_server() -> None:
+            if not _server:
+                return
+            if hasattr(_server, "should_exit"):
+                _server.should_exit = True
+                return
+            shutdown = getattr(_server, "shutdown", None)
+            if callable(shutdown):
+                shutdown()
+
+        def _spawn_replacement() -> int:
             command = f"from vibe.ui_server import run_ui_server; run_ui_server('{bind_host}', {port})"
             memory_ui_secret = process_ui_read_secret()
             spawn_kwargs = (
@@ -7461,12 +7471,47 @@ def ui_reload():
                 status.get("service_pid"),
                 pid,
             )
+            return pid
+
+        def _replacement_identity_ready() -> bool:
+            for attempt in range(51):
+                if runtime.ui_pid_file_points_to_running_ui():
+                    return True
+                if attempt < 50:
+                    time.sleep(0.2)
+            return False
 
         spawned = False
         for attempt in range(2):
             try:
                 with package_mutation_lock():
-                    _spawn_replacement()
+                    _stop_current_server()
+                    try:
+                        replacement_pid = _spawn_replacement()
+                    except Exception:
+                        runtime.write_status(
+                            "error",
+                            "ui_reload_failed",
+                            status.get("service_pid"),
+                            status.get("ui_pid"),
+                        )
+                        logger.exception(
+                            "UI reload replacement failed to spawn: %s",
+                            "ui_reload_failed",
+                        )
+                        return
+                    if not _replacement_identity_ready():
+                        runtime.write_status(
+                            "error",
+                            "ui_reload_timeout",
+                            status.get("service_pid"),
+                            replacement_pid,
+                        )
+                        logger.warning(
+                            "UI reload replacement identity timed out: %s",
+                            "ui_reload_timeout",
+                        )
+                        return
                 spawned = True
                 break
             except MigrationLockTimeout:
@@ -7478,16 +7523,6 @@ def ui_reload():
                 "restart_not_scheduled_package_busy",
             )
             return
-
-        time.sleep(0.2)
-        # Shutdown the old server to release the port
-        if _server:
-            if hasattr(_server, "should_exit"):
-                _server.should_exit = True
-            else:
-                shutdown = getattr(_server, "shutdown", None)
-                if callable(shutdown):
-                    shutdown()
 
     # Schedule restart after response is sent
     threading.Thread(target=_restart).start()
