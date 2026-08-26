@@ -1505,18 +1505,18 @@ def test_memory_runtime_dependency_job_stops_when_package_resolution_fails(monke
         lambda: calls.append(True)
         or {
             "ok": False,
-            "message": "memory_plugin_incompatible",
+            "message": "memory_runtime_install_failed",
             "output": "resolver failed",
-            "reason": "memory_plugin_incompatible",
+            "reason": "memory_runtime_install_failed",
             "download_error": None,
         },
     )
 
     assert api._prepare_memory_runtime_job() == {
         "ok": False,
-        "message": "memory_plugin_incompatible",
+        "message": "memory_runtime_install_failed",
         "output": "resolver failed",
-        "reason": "memory_plugin_incompatible",
+        "reason": "memory_runtime_install_failed",
         "download_error": None,
     }
     assert calls == [True]
@@ -1559,6 +1559,52 @@ def test_memory_package_install_uses_the_non_replacing_add_plan(monkeypatch):
         }
     ]
     assert executed == [plan]
+
+
+def test_memory_package_install_reports_nonzero_installer_as_install_failure(
+    monkeypatch,
+):
+    monkeypatch.setattr(api, "installed_metadata_describes_running_code", lambda: True)
+    monkeypatch.setattr(api, "package_mutation_lock", nullcontext)
+    monkeypatch.setattr(api, "build_memory_add_plan", lambda **kwargs: object())
+    monkeypatch.setattr(
+        api,
+        "execute_upgrade_plan",
+        lambda plan, **kwargs: subprocess.CompletedProcess(
+            [],
+            1,
+            stdout="",
+            stderr="index unavailable",
+        ),
+    )
+
+    assert api._install_memory_package_for_current_release() == {
+        "ok": False,
+        "message": "memory_runtime_install_failed",
+        "output": "index unavailable",
+        "reason": "memory_runtime_install_failed",
+        "download_error": None,
+    }
+
+
+def test_memory_package_install_reports_resolver_exception_as_install_failure(
+    monkeypatch,
+):
+    monkeypatch.setattr(api, "installed_metadata_describes_running_code", lambda: True)
+    monkeypatch.setattr(api, "package_mutation_lock", nullcontext)
+
+    def fail_plan(**kwargs):
+        raise RuntimeError("resolver unavailable")
+
+    monkeypatch.setattr(api, "build_memory_add_plan", fail_plan)
+
+    assert api._install_memory_package_for_current_release() == {
+        "ok": False,
+        "message": "memory_runtime_install_failed",
+        "output": "resolver unavailable",
+        "reason": "memory_runtime_install_failed",
+        "download_error": None,
+    }
 
 
 def test_memory_package_install_refuses_a_stale_pre_restart_process(monkeypatch):

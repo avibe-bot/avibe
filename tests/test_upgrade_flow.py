@@ -172,6 +172,52 @@ def test_enabled_upgrade_selects_memory_extra_when_package_is_missing(monkeypatc
     assert plan.preflight_command is not None
 
 
+def test_enabled_pip_upgrade_renders_url_extra_as_named_requirement(monkeypatch):
+    package_url = "https://downloads.example.test/avibe_os-3.0.14-py3-none-any.whl"
+    monkeypatch.setenv("AVIBE_UPGRADE_PACKAGE_SPEC", package_url)
+    monkeypatch.setattr("vibe.upgrade.memory_package_installed", lambda: False)
+    monkeypatch.setattr(
+        "vibe.upgrade.installed_metadata_describes_running_code",
+        lambda: True,
+    )
+
+    plan = build_upgrade_plan(
+        python_executable="/usr/bin/python3",
+        uv_path=None,
+        base_env={"PATH": "/usr/bin"},
+        memory_enabled=True,
+    )
+
+    named_requirement = f"avibe-os[memory] @ {package_url}"
+    assert plan.command[-1] == named_requirement
+    assert plan.preflight_command is not None
+    assert plan.preflight_command[-1] == named_requirement
+    assert f"{package_url}[memory]" not in plan.command
+    assert f"{package_url}[memory]" not in plan.preflight_command
+
+
+def test_enabled_pip_upgrade_retains_local_path_extra_syntax(monkeypatch):
+    package_path = "/tmp/avibe_os-3.0.14-py3-none-any.whl"
+    monkeypatch.setenv("AVIBE_UPGRADE_PACKAGE_SPEC", package_path)
+    monkeypatch.setattr("vibe.upgrade.memory_package_installed", lambda: False)
+    monkeypatch.setattr(
+        "vibe.upgrade.installed_metadata_describes_running_code",
+        lambda: True,
+    )
+
+    plan = build_upgrade_plan(
+        python_executable="/usr/bin/python3",
+        uv_path=None,
+        base_env={"PATH": "/usr/bin"},
+        memory_enabled=True,
+    )
+
+    local_requirement = f"{package_path}[memory]"
+    assert plan.command[-1] == local_requirement
+    assert plan.preflight_command is not None
+    assert plan.preflight_command[-1] == local_requirement
+
+
 def test_disabled_core_only_upgrade_keeps_the_core_only_shape(monkeypatch):
     monkeypatch.setattr("vibe.upgrade.memory_package_installed", lambda: False)
 

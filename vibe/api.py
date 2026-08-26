@@ -8612,18 +8612,18 @@ def _install_memory_package_for_current_release() -> dict:
     except Exception as exc:  # noqa: BLE001
         return {
             "ok": False,
-            "message": "memory_plugin_unavailable",
+            "message": "memory_runtime_install_failed",
             "output": str(exc),
-            "reason": "memory_plugin_unavailable",
+            "reason": "memory_runtime_install_failed",
             "download_error": None,
         }
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()[-4000:] or None
         return {
             "ok": False,
-            "message": "memory_plugin_incompatible",
+            "message": "memory_runtime_install_failed",
             "output": detail,
-            "reason": "memory_plugin_incompatible",
+            "reason": "memory_runtime_install_failed",
             "download_error": None,
         }
     return {
