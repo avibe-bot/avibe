@@ -70,17 +70,12 @@ def test_memory_cli_session_keeps_authenticated_boundary_when_plugin_is_unavaila
     controller._memory_scopes_by_session = {}
     controller._memory_cli_facts_by_session = {}
     controller._memory_plugin_cli_sessions = set()
-    facts = object()
-
-    class _Admission:
-        def principal_for(self, _facts):
-            return None
-
-        def project_for(self, _facts):
-            return "default"
-
-    controller._memory_admission = lambda: _Admission()
-    controller._memory_turn_facts = lambda _context: facts
+    controller._memory_admission = lambda: pytest.fail(
+        "plugin failure must be projected before admission imports"
+    )
+    controller._memory_turn_facts = lambda _context: pytest.fail(
+        "plugin failure must be projected before facts imports"
+    )
     context = types.SimpleNamespace(
         platform_specific={
             "agent_session_target": {"id": "session-plugin"},

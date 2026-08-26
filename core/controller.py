@@ -3260,20 +3260,27 @@ class Controller:
         if not isinstance(facts_by_session, dict):
             facts_by_session = {}
             self._memory_cli_facts_by_session = facts_by_session
+        plugin_error = getattr(self, "_memory_plugin_error", None)
+        plugin_sessions = getattr(self, "_memory_plugin_cli_sessions", None)
+        if plugin_error is not None:
+            if admitted:
+                if not isinstance(plugin_sessions, set):
+                    plugin_sessions = set()
+                    self._memory_plugin_cli_sessions = plugin_sessions
+                plugin_sessions.add(caller.session_id)
+                self._memory_scopes_by_session.pop(caller.session_id, None)
+                facts_by_session.pop(caller.session_id, None)
+                return True
+            if isinstance(plugin_sessions, set):
+                plugin_sessions.discard(caller.session_id)
+            self._memory_scopes_by_session.pop(caller.session_id, None)
+            facts_by_session.pop(caller.session_id, None)
+            return False
         admission = self._memory_admission()
         facts = self._memory_turn_facts(context)
         principal_id = admission.principal_for(facts) if admitted else None
         project_id = admission.project_for(facts) if admitted else None
         if principal_id is None or project_id is None:
-            plugin_error = getattr(self, "_memory_plugin_error", None)
-            plugin_sessions = getattr(self, "_memory_plugin_cli_sessions", None)
-            if admitted and plugin_error is not None:
-                if not isinstance(plugin_sessions, set):
-                    plugin_sessions = set()
-                    self._memory_plugin_cli_sessions = plugin_sessions
-                plugin_sessions.add(caller.session_id)
-                facts_by_session[caller.session_id] = facts
-                return True
             if isinstance(plugin_sessions, set):
                 plugin_sessions.discard(caller.session_id)
             self._memory_scopes_by_session.pop(caller.session_id, None)
