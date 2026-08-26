@@ -1381,16 +1381,14 @@ async def _read_json_response(
 ) -> Any:
     timeout = _positive_timeout(timeout_seconds, _SIDECAR_TIMEOUT_SECONDS)
     deadline = time.monotonic() + timeout
-    with tempfile.NamedTemporaryFile(mode="w+b", delete=False) as spool:
-        path = spool.name
-        try:
+    path = ""
+    try:
+        with tempfile.NamedTemporaryFile(mode="w+b", delete=False) as spool:
+            path = spool.name
             await asyncio.wait_for(
                 _spool_response(response, spool),
                 timeout=timeout,
             )
-        finally:
-            spool.close()
-    try:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise asyncio.TimeoutError
