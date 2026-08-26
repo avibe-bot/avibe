@@ -3888,6 +3888,7 @@
       "retry": "Retry",
       "durationMin": "{{minutes}}m {{seconds}}s",
       "durationSec": "{{seconds}}s",
+      "dayShort": "d",
       "empty": "No activity recorded for this turn.",
       "tools": "Tools",
       "showTools": "Show tool calls",

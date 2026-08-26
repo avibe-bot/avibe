@@ -30,6 +30,7 @@ import { copyTextToClipboard } from '../../lib/utils';
 import {
   activityDurationParts,
   filterActivityRows,
+  formatActivityElapsedClock,
   genericChips,
   parseToolCall,
   parseToolName,
@@ -451,9 +452,7 @@ export const ActivityCard: React.FC<{
   }, [expanded]);
 
   const elapsedMs = Math.max(0, nowMs - (startedAtMs ?? mountedAt));
-  const mm = Math.floor(elapsedMs / 60000);
-  const ss = Math.floor((elapsedMs % 60000) / 1000);
-  const clock = `${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
+  const clock = formatActivityElapsedClock(elapsedMs, t('chat.agentActivity.dayShort'));
 
   return (
     <div className="flex w-full justify-start">
