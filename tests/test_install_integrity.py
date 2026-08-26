@@ -85,3 +85,19 @@ def test_site_discovery_ignores_reported_prefix_without_record(monkeypatch, tmp_
     monkeypatch.setattr(install_integrity.subprocess, "run", fake_run)
 
     assert install_integrity.site_packages_for_python(executable) == [site_packages.resolve()]
+
+
+def test_verify_site_packages_accepts_dist_packages_entry_point(tmp_path):
+    site_packages = tmp_path / "lib" / "python3.12" / "dist-packages"
+    entrypoint = tmp_path / "bin" / "vibe"
+    entrypoint.parent.mkdir(parents=True)
+    entrypoint.write_bytes(b"#!/bin/sh\n")
+    digest = base64.urlsafe_b64encode(hashlib.sha256(entrypoint.read_bytes()).digest()).decode().rstrip("=")
+    record = site_packages / "demo_pkg-1.0.dist-info" / "RECORD"
+    record.parent.mkdir(parents=True)
+    record.write_text(f"../../../bin/vibe,sha256={digest},{entrypoint.stat().st_size}\n", encoding="utf-8")
+
+    result = verify_site_packages(site_packages)
+
+    assert result.ok is True
+    assert result.checked_files == 1

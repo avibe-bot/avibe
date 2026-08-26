@@ -157,9 +157,9 @@ def verify_site_packages(
             # include ``../../../bin/<entrypoint>`` for generated scripts.  The
             # enclosing tool root is the trust boundary, not site-packages
             # itself; anything that escapes that root is still rejected.
-            if root.name == "site-packages" and root.parent.name.startswith("python"):
+            if root.name in {"site-packages", "dist-packages"} and root.parent.name.startswith("python"):
                 allowed_root = root.parent.parent.parent.resolve()
-            elif root.name == "site-packages" and root.parent.name == "Lib":
+            elif root.name in {"site-packages", "dist-packages"} and root.parent.name == "Lib":
                 allowed_root = root.parent.parent.resolve()
             else:
                 allowed_root = root

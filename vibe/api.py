@@ -63,6 +63,7 @@ from vibe.opencode_config import (
 from vibe.build_identity import get_build_identity
 from vibe.upgrade import (
     activate_upgrade_candidate,
+    atomic_upgrade_lock,
     build_upgrade_plan,
     discard_atomic_uv_install_generation,
     get_latest_version_info,
@@ -6126,6 +6127,13 @@ def do_upgrade(auto_restart: bool = True) -> dict:
     """
     current_vibe_path = get_running_vibe_path()
     plan = build_upgrade_plan(vibe_path=current_vibe_path)
+    if plan.preflight_error:
+        return {
+            "ok": False,
+            "message": "Upgrade cannot be activated safely",
+            "output": plan.preflight_error,
+            "restarting": False,
+        }
     runtime_was_running = _runtime_process_was_running()
 
     # Use a stable directory as cwd to avoid "Current directory does not exist"
@@ -6134,21 +6142,21 @@ def do_upgrade(auto_restart: bool = True) -> dict:
     safe_cwd = get_safe_cwd()
 
     try:
-        result = subprocess.run(
-            plan.command,
-            capture_output=True,
-            text=True,
-            # A wheel install copies the complete candidate environment before
-            # it can be activated.  The old 120s bound interrupted that copy
-            # in-place and left metadata claiming a package tree that no longer
-            # existed.  The candidate is isolated now; this is only a bound for
-            # a genuinely hung resolver/download.
-            timeout=UPGRADE_INSTALL_TIMEOUT_SECONDS,
-            env=plan.env,
-            cwd=safe_cwd,
-        )
-        if result.returncode == 0:
-            if plan.activation is not None:
+        with atomic_upgrade_lock():
+            result = subprocess.run(
+                plan.command,
+                capture_output=True,
+                text=True,
+                # A wheel install copies the complete candidate environment before
+                # it can be activated.  The old 120s bound interrupted that copy
+                # in-place and left metadata claiming a package tree that no longer
+                # existed.  The candidate is isolated now; this is only a bound for
+                # a genuinely hung resolver/download.
+                timeout=UPGRADE_INSTALL_TIMEOUT_SECONDS,
+                env=plan.env,
+                cwd=safe_cwd,
+            )
+            if result.returncode == 0 and plan.activation is not None:
                 try:
                     activate_upgrade_candidate(plan.activation)
                 except Exception as exc:  # noqa: BLE001
@@ -6159,7 +6167,10 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                         "output": str(exc),
                         "restarting": False,
                     }
-            elif plan.method == "pip":
+            elif result.returncode != 0 and plan.activation is not None:
+                discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
+        if result.returncode == 0:
+            if plan.activation is None and plan.method == "pip":
                 integrity = verify_python_environment(sys.executable)
                 if not integrity.ok:
                     return {
@@ -6200,8 +6211,6 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                 "restarting": restarting,
             }
         else:
-            if plan.activation is not None:
-                discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
             return {
                 "ok": False,
                 "message": "Upgrade failed",

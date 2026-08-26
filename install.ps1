@@ -536,6 +536,8 @@ function Write-NextSteps {
     Write-Host "  uv tool uninstall avibe-os"
     Write-Host "  uv tool uninstall vibe-remote"
     Write-Host "  pip uninstall avibe-os vibe-remote"
+    Write-Host '  Remove-Item -Force "$env:USERPROFILE\.local\bin\vibe.exe"'
+    Write-Host '  Remove-Item -Recurse -Force (Join-Path $(if ($env:AVIBE_HOME) { $env:AVIBE_HOME } else { "$env:USERPROFILE\.avibe" }) "runtime\install-generations")'
     Write-Host "  Remove-Item -Recurse ~\.avibe, ~\.vibe_remote  # remove config and data"
     Write-Host ""
     Write-Host "Documentation:" -ForegroundColor Blue

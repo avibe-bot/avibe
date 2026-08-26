@@ -326,6 +326,8 @@ npm install -g @openai/codex
 vibe stop
 uv tool uninstall avibe-os
 uv tool uninstall vibe-remote   # legacy installs
+rm -f ~/.local/bin/vibe
+rm -rf "${AVIBE_HOME:-$HOME/.avibe}/runtime/install-generations"
 rm -rf ~/.avibe ~/.vibe_remote
 ```
 

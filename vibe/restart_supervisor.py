@@ -32,6 +32,7 @@ from vibe.upgrade import (
     RollbackTarget,
     activate_launcher_target,
     atomic_uv_install_root,
+    atomic_upgrade_lock,
     get_cli_launcher_path,
     _names_a_published_release,
     build_upgrade_plan,
@@ -714,7 +715,8 @@ def _roll_back_failed_upgrade(
 
     if restore_stable_launcher and vibe_path and rollback_cli_launcher is not None:
         try:
-            activate_launcher_target(vibe_path, rollback_cli_launcher)
+            with atomic_upgrade_lock():
+                activate_launcher_target(vibe_path, rollback_cli_launcher)
         except Exception as exc:  # noqa: BLE001
             rollback.update(state="failed", error=f"restoring the active launcher failed: {exc}")
             record(rollback)

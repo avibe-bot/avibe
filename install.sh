@@ -723,6 +723,8 @@ print_next_steps() {
         echo "  uv tool uninstall avibe-os       # current uv install"
         echo "  uv tool uninstall vibe-remote    # legacy uv install"
         echo "  pip uninstall avibe-os vibe-remote"
+        echo "  rm -f ~/.local/bin/vibe"
+        echo "  rm -rf \"\${AVIBE_HOME:-\$HOME/.avibe}/runtime/install-generations\""
         echo "  rm -rf ~/.avibe ~/.vibe_remote   # remove config and data"
         if ! is_vibe_immediately_available; then
             echo ""
@@ -760,6 +762,8 @@ print_next_steps() {
     echo "  uv tool uninstall avibe-os       # current uv install"
     echo "  uv tool uninstall vibe-remote    # legacy uv install"
     echo "  pip uninstall avibe-os vibe-remote"
+    echo "  rm -f ~/.local/bin/vibe"
+    echo "  rm -rf \"\${AVIBE_HOME:-\$HOME/.avibe}/runtime/install-generations\""
     echo "  rm -rf ~/.avibe ~/.vibe_remote   # remove config and data"
     echo ""
     echo -e "${BLUE}If 'vibe' is still not found:${NC}"

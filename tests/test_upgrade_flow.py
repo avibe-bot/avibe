@@ -70,9 +70,9 @@ def test_build_upgrade_plan_uses_uv_and_preserves_tool_bin_dir(monkeypatch):
     assert plan.method == "uv"
     assert plan.command == ["/usr/local/bin/uv", "tool", "install", "avibe-os", "--upgrade"]
     assert plan.env is not None
-    assert "/runtime/install-generations/" in plan.env["UV_TOOL_DIR"]
-    assert plan.env["UV_TOOL_BIN_DIR"] != "/custom/bin"
+    assert "UV_TOOL_DIR" not in plan.env
     assert plan.env["PATH"] == "/usr/bin"
+    assert plan.preflight_error is not None
     assert plan.activation is None
 
 
@@ -127,6 +127,21 @@ def test_build_upgrade_plan_stages_uv_install_for_a_stable_launcher(monkeypatch,
     assert plan.env is not None
     assert plan.env["UV_TOOL_DIR"].startswith(str(tmp_path / "home" / "runtime" / "install-generations"))
     assert plan.env["UV_TOOL_BIN_DIR"].startswith(str(tmp_path / "home" / "runtime" / "install-generations"))
+
+
+def test_build_upgrade_plan_refuses_uv_install_without_activation_point(monkeypatch):
+    monkeypatch.setattr("vibe.upgrade.os.path.exists", lambda path: True)
+    monkeypatch.setattr("vibe.upgrade.os.access", lambda path, mode: True)
+
+    plan = build_upgrade_plan(
+        python_executable="/tmp/.local/share/uv/tools/avibe-os/bin/python",
+        uv_path="/usr/local/bin/uv",
+        vibe_path="/tmp/.local/share/uv/tools/avibe-os/bin/vibe",
+        base_env={"PATH": "/usr/bin"},
+    )
+
+    assert plan.activation is None
+    assert plan.preflight_error is not None
 
 
 def test_activate_upgrade_candidate_replaces_launcher_only_after_verification(monkeypatch, tmp_path):
@@ -216,6 +231,54 @@ def test_verify_upgrade_candidate_follows_uv_launcher_to_tool_environment(monkey
 
     assert result.ok is True
     assert result.checked_files == 2
+
+
+def test_verify_upgrade_candidate_searches_staged_tools_for_windows_python(monkeypatch, tmp_path):
+    from vibe import upgrade
+
+    root = tmp_path / "generations"
+    candidate = root / "generation" / "bin" / "vibe.exe"
+    python = root / "generation" / "tools" / "avibe-os" / "Scripts" / "python.exe"
+    candidate.parent.mkdir(parents=True)
+    python.parent.mkdir(parents=True)
+    candidate.write_text("candidate\n", encoding="utf-8")
+    python.write_text("python\n", encoding="utf-8")
+    candidate.chmod(0o755)
+    python.chmod(0o755)
+    monkeypatch.setattr(upgrade.os, "name", "nt")
+    monkeypatch.setattr(upgrade, "atomic_uv_install_root", lambda: root)
+    observed = {}
+
+    def verify(path):
+        observed["path"] = path
+        return upgrade.IntegrityResult(True, 3)
+
+    monkeypatch.setattr(upgrade, "verify_python_environment", verify)
+
+    result = upgrade.verify_upgrade_candidate(upgrade.AtomicActivation(candidate, candidate))
+
+    assert result.ok is True
+    assert observed["path"] == python
+
+
+def test_activate_upgrade_candidate_falls_back_to_hardlink(monkeypatch, tmp_path):
+    from vibe import upgrade
+
+    launcher = tmp_path / ".local" / "bin" / "vibe"
+    candidate = tmp_path / "generation" / "bin" / "vibe"
+    launcher.parent.mkdir(parents=True)
+    candidate.parent.mkdir(parents=True)
+    launcher.write_text("old\n", encoding="utf-8")
+    candidate.write_text("new\n", encoding="utf-8")
+    candidate.chmod(0o755)
+    activation = upgrade.AtomicActivation(launcher=launcher, candidate_launcher=candidate)
+    monkeypatch.setattr(upgrade, "verify_upgrade_candidate", lambda _activation: upgrade.IntegrityResult(True, 1))
+    monkeypatch.setattr(Path, "symlink_to", lambda self, _target: (_ for _ in ()).throw(OSError("symlink denied")))
+
+    upgrade.activate_upgrade_candidate(activation)
+
+    assert not launcher.is_symlink()
+    assert launcher.read_text(encoding="utf-8") == "new\n"
 
 
 def test_do_upgrade_keeps_active_launcher_when_staged_install_fails(monkeypatch, tmp_path):

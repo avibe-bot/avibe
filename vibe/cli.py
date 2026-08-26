@@ -71,6 +71,7 @@ from vibe.upgrade import (
     PACKAGE_NAME,
     activate_upgrade_candidate,
     atomic_uv_install_root,
+    atomic_upgrade_lock,
     build_upgrade_plan,
     cache_running_vibe_path,
     get_latest_version_info,
@@ -14426,6 +14427,9 @@ def cmd_upgrade():
 
     current_vibe_path = cache_running_vibe_path()
     plan = build_upgrade_plan(vibe_path=current_vibe_path)
+    if plan.preflight_error:
+        print(f"\033[31mUpgrade cannot be activated safely: {plan.preflight_error}\033[0m")
+        return 1
     print(f"Using {plan.method}: {' '.join(plan.command)}")
     runtime_was_running = _runtime_process_was_running()
 
@@ -14434,23 +14438,26 @@ def cmd_upgrade():
     safe_cwd = get_safe_cwd()
 
     try:
-        result = subprocess.run(
-            plan.command,
-            capture_output=True,
-            text=True,
-            env=plan.env,
-            cwd=safe_cwd,
-            timeout=UPGRADE_INSTALL_TIMEOUT_SECONDS,
-        )
-        if result.returncode == 0:
-            if plan.activation is not None:
+        with atomic_upgrade_lock():
+            result = subprocess.run(
+                plan.command,
+                capture_output=True,
+                text=True,
+                env=plan.env,
+                cwd=safe_cwd,
+                timeout=UPGRADE_INSTALL_TIMEOUT_SECONDS,
+            )
+            if result.returncode == 0 and plan.activation is not None:
                 try:
                     activate_upgrade_candidate(plan.activation)
                 except Exception as exc:  # noqa: BLE001
                     discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
                     print(f"\033[31mUpgrade candidate failed integrity verification: {exc}\033[0m")
                     return 1
-            elif plan.method == "pip":
+            elif result.returncode != 0 and plan.activation is not None:
+                discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
+        if result.returncode == 0:
+            if plan.activation is None and plan.method == "pip":
                 integrity = verify_python_environment(sys.executable)
                 if not integrity.ok:
                     print(f"\033[31mUpgrade installed an incomplete Python environment: {integrity.detail}\033[0m")
@@ -14479,8 +14486,6 @@ def cmd_upgrade():
                 print("Avibe was not running; the new version will be used next time you start it.")
             return 0
         else:
-            if plan.activation is not None:
-                discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
             print(f"\033[31mUpgrade failed:\033[0m\n{result.stderr}")
             return 1
     except Exception as e:

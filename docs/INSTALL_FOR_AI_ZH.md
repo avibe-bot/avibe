@@ -167,5 +167,7 @@ vibe doctor
 ```bash
 vibe stop
 uv tool uninstall vibe-remote
+rm -f ~/.local/bin/vibe
+rm -rf "${AVIBE_HOME:-$HOME/.avibe}/runtime/install-generations"
 rm -rf ~/.vibe_remote
 ```
