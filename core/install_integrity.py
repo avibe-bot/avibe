@@ -55,7 +55,7 @@ def site_packages_for_python(python_executable: str | os.PathLike[str]) -> list[
         "paths = [config.get('purelib'), config.get('platlib')]; "
         "paths += list(getattr(site, 'getsitepackages', lambda: [])()); "
         "user = getattr(site, 'getusersitepackages', lambda: '')(); "
-        "paths += [user] if user else []; "
+        "paths += [user] if user and getattr(site, 'ENABLE_USER_SITE', True) else []; "
         "print('\\n'.join(dict.fromkeys(path for path in paths if path)))"
     )
     try:

@@ -33,6 +33,7 @@ from vibe.upgrade import (
     activate_launcher_target,
     atomic_uv_install_root,
     atomic_upgrade_lock,
+    _launcher_generation,
     get_cli_launcher_path,
     _names_a_published_release,
     build_upgrade_plan,
@@ -631,14 +632,9 @@ def _roll_back_failed_upgrade(
     """
 
     version = rollback_to.version
-    restore_stable_launcher = False
-    if vibe_path:
-        try:
-            restore_stable_launcher = Path(vibe_path).expanduser().resolve().is_relative_to(
-                atomic_uv_install_root().expanduser().resolve()
-            )
-        except (OSError, RuntimeError, ValueError):
-            restore_stable_launcher = False
+    restore_stable_launcher = bool(
+        vibe_path and _launcher_generation(Path(vibe_path).expanduser(), atomic_uv_install_root()) is not None
+    )
     rollback: dict = {"target_version": version, "state": "running", "started_at": _now_iso()}
     record(rollback)
     write(f"rolling back to {version}: no service is running after the failed restart")

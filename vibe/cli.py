@@ -70,6 +70,7 @@ from vibe.upgrade import (
     LEGACY_PACKAGE_NAME,
     PACKAGE_NAME,
     activate_upgrade_candidate,
+    atomic_activation_source_is_current,
     atomic_uv_install_root,
     atomic_upgrade_lock,
     build_upgrade_plan,
@@ -14439,6 +14440,9 @@ def cmd_upgrade():
 
     try:
         with atomic_upgrade_lock():
+            if plan.activation is not None and not atomic_activation_source_is_current(plan.activation):
+                print("\033[31mUpgrade was superseded by another activation; retry the upgrade.\033[0m")
+                return 1
             result = subprocess.run(
                 plan.command,
                 capture_output=True,

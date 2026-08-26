@@ -506,6 +506,14 @@ def test_install_script_probes_the_same_libreoffice_path_as_memory(tmp_path):
     assert "Install LibreOffice from https://www.libreoffice.org/" not in powershell
 
 
+def test_windows_installer_honors_configured_tool_bin_and_cross_volume_copy_fallback():
+    powershell = INSTALL_POWERSHELL.read_text(encoding="utf-8")
+
+    assert "function Get-StableBinDirectory" in powershell
+    assert "$configured = $env:UV_TOOL_BIN_DIR" in powershell
+    assert "Copy-Item -LiteralPath $candidate -Destination $replacement" in powershell
+
+
 def test_install_script_continues_when_show_runtime_prepare_fails(tmp_path):
     home_dir = tmp_path / "home"
     home_dir.mkdir()

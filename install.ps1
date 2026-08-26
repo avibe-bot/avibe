@@ -54,6 +54,15 @@ function Test-Command {
     return $?
 }
 
+function Get-StableBinDirectory {
+    $configured = $env:UV_TOOL_BIN_DIR
+    $directory = if ($configured) { $configured } else { Join-Path $env:USERPROFILE ".local\bin" }
+    if (-not [System.IO.Path]::IsPathRooted($directory)) {
+        $directory = Join-Path (Get-Location) $directory
+    }
+    return [System.IO.Path]::GetFullPath($directory)
+}
+
 function Invoke-WebScriptWithRetry {
     param([string]$Url)
 
@@ -269,7 +278,7 @@ function Invoke-UvToolInstallAttempt {
     $generationRoot = Join-Path (Join-Path $runtimeHome "runtime\install-generations") ([Guid]::NewGuid().ToString("N"))
     $generationTools = Join-Path $generationRoot "tools"
     $generationBin = Join-Path $generationRoot "bin"
-    $stableBin = Join-Path $env:USERPROFILE ".local\bin"
+    $stableBin = Get-StableBinDirectory
     New-Item -ItemType Directory -Force -Path $generationTools, $generationBin, $stableBin | Out-Null
 
     $previousToolDir = $env:UV_TOOL_DIR
@@ -321,7 +330,13 @@ function Invoke-UvToolInstallAttempt {
             # Developer mode is not required for a normal Windows install. A
             # hard link preserves the candidate bytes while still allowing an
             # atomic Move-Item activation on the same volume.
-            New-Item -ItemType HardLink -Path $replacement -Target $candidate -ErrorAction Stop | Out-Null
+            try {
+                New-Item -ItemType HardLink -Path $replacement -Target $candidate -ErrorAction Stop | Out-Null
+            } catch {
+                # Hard links cannot cross volumes. Copying to a temporary file
+                # in the stable bin keeps the final Move-Item atomic there.
+                Copy-Item -LiteralPath $candidate -Destination $replacement -Force -ErrorAction Stop
+            }
         }
         Move-Item -Force -Path $replacement -Destination (Join-Path $stableBin "vibe.exe")
         return $result
@@ -464,7 +479,8 @@ function Test-Installation {
     
     # Refresh PATH
     $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
-    $env:Path += ";$env:USERPROFILE\.local\bin"
+    $stableBin = Get-StableBinDirectory
+    $env:Path += ";$stableBin"
     
     if (Test-Command "vibe") {
         Write-Success "vibe command is available"
@@ -475,7 +491,7 @@ function Test-Installation {
     
     # Check common install locations
     $vibeLocations = @(
-        "$env:USERPROFILE\.local\bin\vibe.exe"
+        (Join-Path $stableBin "vibe.exe")
     )
     
     foreach ($loc in $vibeLocations) {
@@ -518,6 +534,7 @@ function Prepare-ShowRuntime {
 }
 
 function Write-NextSteps {
+    $stableBin = Get-StableBinDirectory
     Write-Host ""
     Write-Host "Installation complete!" -ForegroundColor Green
     Write-Host ""
@@ -536,7 +553,7 @@ function Write-NextSteps {
     Write-Host "  uv tool uninstall avibe-os"
     Write-Host "  uv tool uninstall vibe-remote"
     Write-Host "  pip uninstall avibe-os vibe-remote"
-    Write-Host '  Remove-Item -Force "$env:USERPROFILE\.local\bin\vibe.exe"'
+    Write-Host ("  Remove-Item -Force `"$(Join-Path $stableBin 'vibe.exe')`"")
     Write-Host '  Remove-Item -Recurse -Force (Join-Path $(if ($env:AVIBE_HOME) { $env:AVIBE_HOME } else { "$env:USERPROFILE\.avibe" }) "runtime\install-generations")'
     Write-Host "  Remove-Item -Recurse ~\.avibe, ~\.vibe_remote  # remove config and data"
     Write-Host ""

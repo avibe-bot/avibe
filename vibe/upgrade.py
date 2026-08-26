@@ -7,6 +7,7 @@ import os
 import re
 import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -104,6 +105,7 @@ class AtomicActivation:
 
     launcher: Path
     candidate_launcher: Path
+    source_generation: Path | None = None
 
 
 def atomic_uv_install_root() -> Path:
@@ -148,7 +150,11 @@ def _staged_uv_environment(vibe_path: str | None) -> tuple[Path, Path, AtomicAct
     if not _is_stable_launcher_path(launcher):
         return tools_dir, bin_dir, None
     candidate = bin_dir / launcher.name
-    return tools_dir, bin_dir, AtomicActivation(launcher=launcher, candidate_launcher=candidate)
+    return tools_dir, bin_dir, AtomicActivation(
+        launcher=launcher,
+        candidate_launcher=candidate,
+        source_generation=_launcher_generation(launcher, atomic_uv_install_root()),
+    )
 
 
 def _candidate_python(candidate_launcher: Path) -> Path | None:
@@ -219,6 +225,19 @@ def _generation_for_hardlink(launcher: Path, root: Path) -> Path | None:
     return None
 
 
+def _launcher_generation(launcher: Path, root: Path) -> Path | None:
+    """Return the generation currently represented by a stable launcher."""
+
+    root = root.expanduser().resolve()
+    return _generation_for_path(launcher, root) or _generation_for_hardlink(launcher, root)
+
+
+def atomic_activation_source_is_current(activation: AtomicActivation) -> bool:
+    """Check that the stable launcher still points at the source we measured."""
+
+    return _launcher_generation(activation.launcher, atomic_uv_install_root()) == activation.source_generation
+
+
 def prune_atomic_uv_install_generations(
     *,
     keep: Iterable[Path] = (),
@@ -274,7 +293,42 @@ def verify_upgrade_candidate(activation: AtomicActivation) -> IntegrityResult:
     python = _candidate_python(candidate)
     if python is None:
         return IntegrityResult(False, failures=(f"candidate Python missing beside {candidate}",))
-    return verify_python_environment(python)
+    result = verify_python_environment(python)
+    if not result.ok:
+        return result
+    try:
+        probe = subprocess.run(
+            [str(candidate), "--help"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+            cwd=tempfile.gettempdir(),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return IntegrityResult(False, failures=(f"candidate launcher probe failed: {exc}",))
+    if probe.returncode != 0:
+        detail = (probe.stderr or probe.stdout or "").strip().splitlines()
+        suffix = detail[-1] if detail else f"exit code {probe.returncode}"
+        return IntegrityResult(False, failures=(f"candidate launcher probe failed: {suffix}",))
+    return result
+
+
+def _prepare_launcher_replacement(replacement: Path, target: Path) -> None:
+    """Create a replacement launcher, using copy when links cannot cross volumes."""
+
+    try:
+        replacement.symlink_to(target)
+        return
+    except OSError:
+        pass
+    try:
+        os.link(target, replacement)
+        return
+    except OSError:
+        # A regular copy is the only portable option when the stable bin and
+        # the runtime home are on different Windows volumes.
+        shutil.copy2(target, replacement)
 
 
 def activate_upgrade_candidate(activation: AtomicActivation) -> None:
@@ -293,12 +347,7 @@ def activate_upgrade_candidate(activation: AtomicActivation) -> None:
         if launcher.exists() or launcher.is_symlink():
             previous_target = launcher.resolve()
     try:
-        try:
-            replacement.symlink_to(activation.candidate_launcher)
-        except OSError:
-            # Windows without Developer Mode cannot create the stable symlink;
-            # a same-volume hard link still gives Move/Replace atomicity.
-            os.link(activation.candidate_launcher, replacement)
+        _prepare_launcher_replacement(replacement, activation.candidate_launcher)
         os.replace(replacement, launcher)
     except Exception:
         with contextlib.suppress(OSError):
@@ -324,10 +373,7 @@ def activate_launcher_target(launcher: str | os.PathLike[str], target: str | os.
     launcher_path.parent.mkdir(parents=True, exist_ok=True)
     replacement = launcher_path.parent / f".{launcher_path.name}.avibe-{uuid4().hex}.new"
     try:
-        try:
-            replacement.symlink_to(target_path)
-        except OSError:
-            os.link(target_path, replacement)
+        _prepare_launcher_replacement(replacement, target_path)
         os.replace(replacement, launcher_path)
     except Exception:
         with contextlib.suppress(OSError):
@@ -711,7 +757,14 @@ def is_uv_tool_install(python_executable: str | None = None) -> bool:
     if "/uv/tools/" in executable:
         return True
     try:
-        return Path(executable).expanduser().resolve().is_relative_to(atomic_uv_install_root().resolve())
+        logical = Path(os.path.abspath(os.path.expanduser(executable)))
+        logical_root = Path(os.path.abspath(os.path.expanduser(str(atomic_uv_install_root()))))
+        if logical.is_relative_to(logical_root):
+            return True
+        # A logical path may contain a symlinked parent. Resolving is only the
+        # fallback: uv's tool Python is itself commonly a symlink to a shared
+        # interpreter outside the generation.
+        return logical.resolve().is_relative_to(logical_root.resolve())
     except (OSError, ValueError, RuntimeError):
         return False
 

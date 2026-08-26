@@ -63,6 +63,7 @@ from vibe.opencode_config import (
 from vibe.build_identity import get_build_identity
 from vibe.upgrade import (
     activate_upgrade_candidate,
+    atomic_activation_source_is_current,
     atomic_upgrade_lock,
     build_upgrade_plan,
     discard_atomic_uv_install_generation,
@@ -6143,6 +6144,13 @@ def do_upgrade(auto_restart: bool = True) -> dict:
 
     try:
         with atomic_upgrade_lock():
+            if plan.activation is not None and not atomic_activation_source_is_current(plan.activation):
+                return {
+                    "ok": False,
+                    "message": "Upgrade was superseded by another activation",
+                    "output": "The active Avibe generation changed while waiting for the upgrade lock; retry the upgrade.",
+                    "restarting": False,
+                }
             result = subprocess.run(
                 plan.command,
                 capture_output=True,

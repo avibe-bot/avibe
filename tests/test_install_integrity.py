@@ -87,6 +87,23 @@ def test_site_discovery_ignores_reported_prefix_without_record(monkeypatch, tmp_
     assert install_integrity.site_packages_for_python(executable) == [site_packages.resolve()]
 
 
+def test_site_discovery_probe_respects_disabled_user_site(monkeypatch, tmp_path):
+    executable = tmp_path / "bin" / "python3"
+    executable.parent.mkdir()
+    executable.write_text("", encoding="utf-8")
+    calls = []
+
+    def fake_run(*args, **kwargs):
+        calls.append(args[0][2])
+        return subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
+
+    monkeypatch.setattr(install_integrity.subprocess, "run", fake_run)
+
+    install_integrity.site_packages_for_python(executable)
+
+    assert "ENABLE_USER_SITE" in calls[0]
+
+
 def test_verify_site_packages_accepts_dist_packages_entry_point(tmp_path):
     site_packages = tmp_path / "lib" / "python3.12" / "dist-packages"
     entrypoint = tmp_path / "bin" / "vibe"
