@@ -133,11 +133,11 @@ named revision, not a promise about a future implementation.
 | **Step 1:** Online unrelated-platform edit | `_manifest_install_dir()` hashes the whole manifest digest with the selected archive digest. An online manifest edit for another platform therefore selects a new directory even when this host's archive bytes are unchanged. | `2c6fcbe88` |
 | **Step 1:** Model-hub platform alias | Model-hub maps host `linux-x64` to released artifact label `linux-amd64`; its released pointer, metadata, and claim can therefore carry a label different from the host tag. | `2c6fcbe88` |
 | **Step 4:** Downloads namespace | Remote manifest caches use `downloads/manifest-<digest>.json` beside archives, so the namespace mixes durable manifest facts with disposable archive bytes. | `2c6fcbe88` |
-| **Step 4:** Retention with a readable pointer | Shared and Show both protect the pointer's install unconditionally and rank the remaining installs by mtime, so a requested count of zero, one, or two preserves the current install plus exactly that many previous installs whatever the current install's own mtime rank. Show protects one thing more: `_install_dir_overlaps_protected()` matches ancestors and descendants of a protected path, so a legacy install root that contains the current fingerprint directory survives a requested count of zero and is not one of the counted previous installs. Shared protection is exact-membership only, and its consumers' versioned layouts do not nest, so no overlapping install exists on this layer to protect. | `343a6b4a50`; hermetic probes 2026-08-24; `test_show_runtime_clean_skips_legacy_parent_of_current_fingerprint` |
+| **Step 4:** Retention with a readable pointer | Shared and Show both protect the pointer's install unconditionally and rank the remaining installs by mtime, so a requested count of zero, one, or two preserves the current install plus that many previous installs whatever the current install's own mtime rank. Both bound the count by what exists rather than demanding it: retention stops at `kept_previous < keep_previous`, so a request for two against a single eligible previous install keeps that one and reports success. Show protects one thing more: `_install_dir_overlaps_protected()` matches ancestors and descendants of a protected path, so a legacy install root that contains the current fingerprint directory survives a requested count of zero and is not one of the counted previous installs. Shared protection is exact-membership only, and its consumers' versioned layouts do not nest, so no overlapping install exists on this layer to protect. | `343a6b4a50`; hermetic probes 2026-08-24; `test_show_runtime_clean_skips_legacy_parent_of_current_fingerprint` |
 | **Step 4:** Retention after pointer inspection failure | Shared `_current_install_dir()` and Show `_current_manifest_install_dir()` both catch every pointer read/parse/path exception and return `None`, which contributes nothing to the protected set and leaves the live install ranked by mtime alone. With a corrupt, unreadable, or absent pointer both managers plan the live install for deletion at a requested count of zero, and at every requested count once the live install is no longer among the newest that count retains; each case still reports success. Show's archive pass in the same call refuses only for a *present* pointer it cannot read or parse, raising `current.json is unreadable`; an absent pointer is not a refusal there, because `_protected_archive_sha256s()` catches `FileNotFoundError` and keeps collecting protected digests from the retained installs' metadata. | `343a6b4a50`; hermetic probes 2026-08-24 |
 | **Step 4:** Downloads reclamation | Shared cleanup enumerates staging directories and versioned installs only. At a requested count of zero, a real clean reclaims no bytes from `downloads/` — a superseded archive, the current archive, an orphaned `.tmp` staging file, and a manifest cache all survive — and the result carries only `ok` and `removed`, reporting neither those artifacts nor any size. Show already reclaims content-addressed archives against a protected digest set and reports counts and bytes. | `343a6b4a50`; hermetic probe 2026-08-24 |
-| **Step 4:** Removal failure reporting | Shared `_clean_locked()` deletes each staging directory and versioned install with `shutil.rmtree(..., ignore_errors=True)` and appends the path to `removed` unconditionally, then returns `ok: True`, so a removal blocked by permissions or an in-use file is reported as reclaimed. Show's archive pass instead unlinks each file under its own `except OSError`, increments `failed_count`, and adds to `removed_bytes` only after a successful unlink. In a real pass its outcome is three-way rather than binary: `cleaned` requires a zero `failed_count`, a nonzero `failed_count` with at least one successful unlink is `partial`, and a nonzero `failed_count` with no successful unlink is `skipped`; the latter two both carry `skipped_reason: archive_removal_failed`. The label alone does not identify a failure, because the dry-run branch reuses `partial` to mean only that reclaimable candidates exist, with `failed_count: 0` and no `skipped_reason`. The failure discriminators are a present `skipped_reason` or a nonzero `failed_count`. | `343a6b4a50` |
-| **Step 4:** Archive protection for retained installs | Show's `_protected_archive_sha256s()` derives the protected digest set from the `current.json` pointer plus every remaining install's own metadata, and it runs after install-dir cleanup, so those remaining files are exactly the current install plus the retained rollback install(s). A retained install whose metadata is unreadable or malformed raises `_ArchiveMetadataError` rather than leaving that archive unprotected, and an uninspectable versions tree fails closed for the same reason. Shared cleanup reclaims no archives at all today, so it has no protected set to lose and none to inherit. | `343a6b4a50` |
+| **Step 4:** Removal failure reporting | Shared `_clean_locked()` deletes each staging directory and versioned install with `shutil.rmtree(..., ignore_errors=True)` and appends the path to `removed` unconditionally, then returns `ok: True`, so a removal blocked by permissions or an in-use file is reported as reclaimed. Show's archive pass instead unlinks each file under its own `except OSError`, increments `failed_count`, and adds to `removed_bytes` only after a successful unlink. In a real pass its outcome is three-way rather than binary: `cleaned` requires a zero `failed_count`, a nonzero `failed_count` with at least one successful unlink is `partial`, and a nonzero `failed_count` with no successful unlink is `skipped`; the latter two both carry `skipped_reason: archive_removal_failed`. The label alone does not identify a failure, because the dry-run branch reuses `partial` to mean only that reclaimable candidates exist, with `failed_count: 0` and no `skipped_reason`. Within this archive report a failure is a present `skipped_reason` or a nonzero `failed_count`; that vocabulary is Show's own and is not the cross-runtime failure test, since shared `clean()` reports its failures as `ok: False` with a `reason` and neither of those fields. | `343a6b4a50` |
+| **Step 4:** Archive protection for retained installs | Show's `_protected_archive_sha256s()` protects three kinds of input, and its own docstring names only the first two: the `current.json` pointer, every remaining install's metadata, and — omitted there but present in the body — the configured `archive_path` when that file is content-addressed, which is how a direct-archive source persisting no install metadata keeps its own input. A retained install whose metadata is unreadable or malformed raises `_ArchiveMetadataError` rather than leaving that archive unprotected, and an uninspectable versions tree fails closed for the same reason. Shared cleanup reclaims no archives at all today, so it has no protected set to lose and none to inherit. This row's own history is the reason the Step 4 gate binds to Show's cleanup suite instead of restating the set: the first draft transcribed that docstring and inherited its omission. | `343a6b4a50`; `test_configured_prebuilt_archive_is_protected` |
 | Inspection versus absence | Shared versions-directory preview preserves traversal errors instead of treating them as proof of no install; Show status can still collapse a raised inspection into absent at its consumer boundary. | `2c6fcbe88` |
 | **Step 3:** Released Show links | Each v3.0.13 Darwin/Linux archive has 16 symlinks and one esbuild hard link; the four Unix archives have nine forward symlinks total, prior-target hard links, and no finally dangling symlink. Windows archives have no links. | `v3.0.13` manifests and archives; measured 2026-08-23 |
 | **Step 3:** Extractor behavior | Shared stops at the first link member. Show and tmux accept the benign regular/symlink/hard-link probe and raise on an escaping `linkname`. | `2c6fcbe88`; hermetic probe 2026-08-23 |
@@ -242,8 +242,11 @@ Step 2 guard, exposed through `vibe runtime clean` for every on-layer consumer.
 
 **Gate:** Every marked Step 4 census row has an executable case. For requested
 retention counts of zero, one, and more than one, dry-run and real cleanup
-preserve the current install plus exactly that many eligible previous installs,
-where an install overlapping a protected path is protected rather than counted.
+preserve the current install plus as many eligible previous installs as the
+request allows and the disk supplies — the count is a ceiling, not a quota, so a
+request for more than exist keeps every one that exists and still reports
+success — where an install overlapping a protected path is protected rather than
+counted.
 The shared consumers' layouts do not nest, so that exclusion selects nothing on
 this layer today; it is stated so the count cannot later be read as license to
 delete an overlapping compatibility root once Show's nested legacy layout
@@ -258,12 +261,16 @@ manager's own resolver would still admit under the Step 1 disk-state model.
 Protection of the live install comes from that ruling and never from its mtime
 rank, so a requested count of zero protects it as strongly as any other count.
 Reclaimability is derived from what this same call retains, never asserted
-independently of it: the protected set covers the current pointer's archive plus
-the archive every retained install's own metadata names, an install whose
-metadata cannot be read protects its archive instead of exposing it, and only the
-remainder — superseded archives and orphaned staging files — is reclaimable and
-appears in the cleanup report. Manifest-cache facts remain usable offline, and
-cleanup failure does not overturn a committed install.
+independently of it, and this contract does not restate which inputs that is.
+The executable form of the requirement is `tests/test_show_runtime_archive_cleanup.py`:
+the shared protected set must admit every input that suite already proves Show
+protects, so an archive is reclaimable only as the remainder after those inputs
+are protected, and an input whose provenance cannot be read protects its archive
+rather than exposing it. Binding to the suite rather than to a written set is
+deliberate — the three earlier drafts of this clause each enumerated the sources
+by hand, and each was narrower than the function, twice because the function's
+own docstring is narrower than its body. Manifest-cache facts remain usable
+offline, and cleanup failure does not overturn a committed install.
 
 A removal that did not happen never appears in the report as removed: real
 cleanup detects each failed removal rather than delegating it to `ignore_errors`,
@@ -275,13 +282,20 @@ a new policy.
 
 `vibe runtime clean` gains Memory and model-hub cleanup beside the git pass and
 the Show pass it already runs. Its exit status is then derived rather than
-enumerated: any runtime in the command's own payload that reports a failure makes
-the command's own result a failure with a nonzero exit status, while each
-runtime's own report survives intact. A report signals failure when it carries a
-skip reason or counts a removal that did not happen, never merely because it
-carries a label — a dry run legitimately reports `partial` to mean only that
-reclaimable candidates exist. Show's result is already in that payload and is
-covered by that rule; today the branch prints its skip reasons to stderr and
+enumerated, and derived in the direction that cannot silently under-report:
+success is affirmative. Every runtime in the command's own payload must state its
+own success for the command to exit zero, and anything else — a report declaring
+itself not ok, a report carrying a skip reason, a report counting a removal that
+did not happen, or a shape this contract did not anticipate — is a failure with a
+nonzero exit status, while each runtime's own report survives intact and its
+`reason` is preserved rather than flattened into the exit code. Stated the other
+way round, as a list of failure shapes, this clause was wrong on its first draft:
+it named Show's `skipped_reason` and `failed_count` and so missed shared `clean()`,
+which reports lock contention, install contention, and inspection failure as
+`ok: False` with a `reason` and neither of those fields. A label is never the
+test in either direction — a dry run legitimately reports `partial` to mean only
+that reclaimable candidates exist. Show's result is already in that payload and
+is covered by that rule; today the branch prints its skip reasons to stderr and
 still returns 0 unconditionally, so automation cannot see them. Any on-layer
 consumer's loss stops rollout for that dependency.
 
@@ -289,12 +303,12 @@ consumer's loss stops rollout for that dependency.
 the command, so the shared `ensure()` gaining its own cleanup call is a separate
 decision and not a gate item here. That defers the work; it does not leave the
 behavior ownerless. Show runs `_clean_after_managed_install()` after every
-successful managed install today — manifest install-dir retention plus archive
-reclamation, wrapped in a bare `except` precisely so cleanup can never turn a
-usable install into a failed prepare. Step 6 deletes that method with the rest of
-Show's parallel installer, so the obligation to place automatic post-install
-cleanup on the shared layer, with that same never-fail-the-install property,
-transfers to the Step 6 gate rather than expiring here.
+successful managed install today, and this contract does not enumerate what that
+method guarantees — its properties are held by
+`tests/test_show_runtime_archive_cleanup.py`, which is where the Step 6 successor
+must prove it inherited them. Step 6 deletes the method with the rest of Show's
+parallel installer, so the obligation to place automatic post-install cleanup on
+the shared layer transfers to the Step 6 gate rather than expiring here.
 
 **Sequencing within the step:** the protected-set correction lands before any
 reclamation is added, because reclamation widens what an empty protected set can
@@ -342,10 +356,17 @@ cleanup, persistence, and utility ownership while retaining product adapters.
 source and tests, focused suites for the four migrated consumers pass, and no
 private compatibility shim recreates a second installer; tmux remains the one
 temporary outlier. Automatic post-install cleanup exists on the shared layer,
-inherited from Step 4, before `_clean_after_managed_install()` is deleted, and it
-keeps that method's never-fail-the-install property. A symbol count is not
-sufficient evidence for this step: a deleted behavior with no shared successor
-fails this gate even when every deleted name reaches zero hits.
+inherited from Step 4, before `_clean_after_managed_install()` is deleted. Its
+acceptance is not a written property list — the first draft of this sentence named
+one property, never-fail-the-install, and thereby licensed a successor that would
+drop the manifest-lineage scoping the method also carries, letting a user who
+alternates between the packaged and a custom manifest lose the other lineage's
+installs. It is instead the existing suite: every case in
+`tests/test_show_runtime_archive_cleanup.py` that drives
+`_clean_after_managed_install()` passes against the shared successor, retargeted
+but not weakened, before the method is deleted. A symbol count is not sufficient
+evidence for this step: a deleted behavior with no shared successor fails this
+gate even when every deleted name reaches zero hits.
 
 ### Step 7: Migrate Tmux And Enforce Sole Ownership
 
