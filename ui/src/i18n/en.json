@@ -4506,7 +4506,7 @@
       "empty": "No profile yet — keep chatting, then check back once messages have been processed.",
       "loadFailed": "Couldn't load your profile.",
       "partial": "One profile source could not be loaded. The profile shown here may be incomplete.",
-      "warningUnavailable": "A profile isn't available from this provider yet. This is expected, not an error — try Search instead, or check back later.",
+      "warningEmpty": "Your profile is currently empty. This is expected, not an error — try Search, or check back later.",
       "disabledHint": "Enable Memory to view your profile.",
       "refresh": "Refresh",
       "summary": "Summary",

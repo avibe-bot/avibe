@@ -81,7 +81,7 @@ export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) 
   const { t } = useTranslation();
   const api = useApi();
   // Only a SUCCESSFUL response is the benign Provider-A case: `profile_warning:'empty'`
-  // (or simply zero items) renders as the graceful "not available"/empty copy. A closed
+  // (or simply zero items) renders as the graceful empty-state copy. A closed
   // failure — sidecar down, provider outage, timeout, etc. — is a real ERROR, and the
   // resource surfaces it distinctly per its code.
   const { data, error, loading, reload } = useMemoryResource<MemoryItemsOk>({
@@ -126,7 +126,7 @@ export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) 
         </div>
       ) : data?.profile_warning === 'empty' ? (
         <div className="rounded-2xl border border-gold/30 bg-gold/[0.06] p-6 text-center text-[13px] text-foreground">
-          {t('memory.profile.warningUnavailable')}
+          {t('memory.profile.warningEmpty')}
         </div>
       ) : !items || items.length === 0 ? (
         <div className="rounded-2xl border border-dashed border-border bg-surface p-8 text-center text-sm text-muted">
