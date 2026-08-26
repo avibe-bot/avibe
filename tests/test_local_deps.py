@@ -1343,6 +1343,80 @@ def test_memory_runtime_dependency_job_preserves_controller_closed_error(monkeyp
     }
 
 
+def test_memory_runtime_dependency_job_installs_missing_package_then_retries_controller(
+    monkeypatch,
+):
+    from vibe import internal_client
+
+    responses = iter(
+        [
+            {
+                "status_code": 503,
+                "body": {"ok": False, "reason": "memory_plugin_unavailable"},
+            },
+            {
+                "status_code": 200,
+                "body": {"ok": True, "reason": None, "download_error": None},
+            },
+        ]
+    )
+    installs: list[bool] = []
+    monkeypatch.setattr(
+        internal_client,
+        "memory_install_runtime_sync",
+        lambda: next(responses),
+    )
+    monkeypatch.setattr(
+        api,
+        "_install_memory_package_for_current_release",
+        lambda: installs.append(True) or {"ok": True, "output": "installed"},
+    )
+
+    assert api._prepare_memory_runtime_job() == {
+        "ok": True,
+        "message": "memory_runtime_ready",
+        "output": None,
+        "reason": None,
+        "download_error": None,
+    }
+    assert installs == [True]
+
+
+def test_memory_runtime_dependency_job_stops_when_package_resolution_fails(monkeypatch):
+    from vibe import internal_client
+
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        internal_client,
+        "memory_install_runtime_sync",
+        lambda: {
+            "status_code": 503,
+            "body": {"ok": False, "reason": "memory_plugin_incompatible"},
+        },
+    )
+    monkeypatch.setattr(
+        api,
+        "_install_memory_package_for_current_release",
+        lambda: calls.append(True)
+        or {
+            "ok": False,
+            "message": "memory_plugin_incompatible",
+            "output": "resolver failed",
+            "reason": "memory_plugin_incompatible",
+            "download_error": None,
+        },
+    )
+
+    assert api._prepare_memory_runtime_job() == {
+        "ok": False,
+        "message": "memory_plugin_incompatible",
+        "output": "resolver failed",
+        "reason": "memory_plugin_incompatible",
+        "download_error": None,
+    }
+    assert calls == [True]
+
+
 def test_dependencies_status_node_unsupported_not_ready(monkeypatch):
     # Node present but below the runtime minimum (node_supported False) -> not ready.
     monkeypatch.setattr(

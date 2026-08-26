@@ -70,6 +70,8 @@ from vibe.upgrade import (
     PACKAGE_NAME,
     build_upgrade_plan,
     cache_running_vibe_path,
+    configured_memory_enabled,
+    execute_upgrade_plan,
     get_latest_version_info,
     get_safe_cwd,
     should_skip_show_runtime_prepare,
@@ -14396,7 +14398,10 @@ def cmd_upgrade():
     print("\nUpgrading...")
 
     current_vibe_path = cache_running_vibe_path()
-    plan = build_upgrade_plan(vibe_path=current_vibe_path)
+    plan = build_upgrade_plan(
+        vibe_path=current_vibe_path,
+        memory_enabled=configured_memory_enabled(),
+    )
     print(f"Using {plan.method}: {' '.join(plan.command)}")
     runtime_was_running = _runtime_process_was_running()
 
@@ -14405,7 +14410,13 @@ def cmd_upgrade():
     safe_cwd = get_safe_cwd()
 
     try:
-        result = subprocess.run(plan.command, capture_output=True, text=True, env=plan.env, cwd=safe_cwd)
+        result = execute_upgrade_plan(
+            plan,
+            run=subprocess.run,
+            capture_output=True,
+            text=True,
+            cwd=safe_cwd,
+        )
         if result.returncode == 0:
             print("\033[32mUpgrade successful!\033[0m")
             if runtime_was_running:

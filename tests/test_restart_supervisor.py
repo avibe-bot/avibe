@@ -32,10 +32,15 @@ _REPLACED_INSTALL = runtime.ServiceLauncher(
 )
 
 
-def _rollback_target(version: str = "3.0.10") -> RollbackTarget:
+def _rollback_target(version: str = "3.0.10", *, memory_package: bool = False) -> RollbackTarget:
     """The install to go back to, as the upgrade captured it before installing."""
 
-    return RollbackTarget(version=version, package="vibe-remote", launcher=_REPLACED_INSTALL)
+    return RollbackTarget(
+        version=version,
+        package="vibe-remote",
+        launcher=_REPLACED_INSTALL,
+        memory_package=memory_package,
+    )
 
 
 def _fake_start_runtime(calls, service_pid: int = 222, ui_pid: int = 333):
@@ -1514,7 +1519,7 @@ def test_a_recoverable_restart_carries_its_rollback_target_into_the_job(monkeypa
 
     monkeypatch.setattr(restart_supervisor.subprocess, "Popen", fake_popen)
 
-    target = _rollback_target()
+    target = _rollback_target(memory_package=True)
     restart_supervisor.schedule_restart(
         delay_seconds=0,
         vibe_path="/bin/vibe",

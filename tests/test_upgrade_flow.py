@@ -16,6 +16,8 @@ from vibe.runtime import ServiceLauncher
 from vibe.upgrade import (
     UpgradePlan,
     build_upgrade_plan,
+    configured_memory_enabled,
+    execute_upgrade_plan,
     has_newer_version,
     get_current_vibe_bin_dir,
     get_latest_version_info,
@@ -52,6 +54,172 @@ def _tree_is_not_an_installed_distribution(monkeypatch):
     """
 
     monkeypatch.setattr("vibe.upgrade._distributions_providing_this_package", lambda: [])
+    monkeypatch.setattr("vibe.upgrade.memory_package_installed", lambda: False)
+    monkeypatch.setattr(api, "configured_memory_enabled", lambda: False)
+    monkeypatch.setattr(cli, "configured_memory_enabled", lambda: False)
+
+
+def test_upgrade_preserves_memory_shape_when_config_cannot_be_read(monkeypatch):
+    def fail_to_load():
+        raise OSError("config is unreadable")
+
+    monkeypatch.setattr("config.v2_config.V2Config.load", fail_to_load)
+
+    assert configured_memory_enabled() is True
+
+
+@pytest.mark.parametrize(
+    ("python_executable", "uv_path", "method"),
+    [
+        ("/tmp/.local/share/uv/tools/avibe-os/bin/python", "/usr/local/bin/uv", "uv"),
+        ("/usr/bin/python3", None, "pip"),
+    ],
+)
+def test_memory_indep_018_upgrade_and_rollback_preserve_optional_package_shape(
+    monkeypatch,
+    python_executable,
+    uv_path,
+    method,
+):
+    monkeypatch.setattr("vibe.upgrade.os.path.exists", lambda path: True)
+    monkeypatch.setattr("vibe.upgrade.os.access", lambda path, mode: True)
+    monkeypatch.setattr("vibe.upgrade.memory_package_installed", lambda: True)
+    monkeypatch.setattr("vibe.__version__", "3.0.14")
+    launcher = ServiceLauncher(
+        python="/uv/tools/avibe-os/bin/python",
+        main="/uv/tools/avibe-os/lib/python3.13/site-packages/vibe/service_main.py",
+    )
+    monkeypatch.setattr("vibe.runtime.current_service_launcher", lambda: launcher)
+    monkeypatch.setattr("vibe.upgrade.installed_package_name", lambda *args, **kwargs: "avibe-os")
+
+    forward = build_upgrade_plan(
+        python_executable=python_executable,
+        uv_path=uv_path,
+        base_env={"PATH": "/usr/bin"},
+    )
+
+    assert forward.method == method
+    assert "avibe-os[memory]" in forward.command
+    assert forward.preflight_command is not None
+    assert "--dry-run" in forward.preflight_command
+    assert forward.rollback_to == RollbackTarget(
+        version="3.0.14",
+        package="avibe-os",
+        launcher=launcher,
+        memory_package=True,
+    )
+
+    rollback_with_memory = build_upgrade_plan(
+        python_executable=python_executable,
+        uv_path=uv_path,
+        base_env={"PATH": "/usr/bin"},
+        version="3.0.14",
+        package_name="avibe-os",
+        memory_package=True,
+    )
+    assert "avibe-os[memory]==3.0.14" in rollback_with_memory.command
+    assert rollback_with_memory.preflight_command is not None
+    assert rollback_with_memory.cleanup_command is None
+
+    rollback_core_only = build_upgrade_plan(
+        python_executable=python_executable,
+        uv_path=uv_path,
+        base_env={"PATH": "/usr/bin"},
+        version="3.0.14",
+        package_name="avibe-os",
+        memory_package=False,
+    )
+    assert "avibe-os==3.0.14" in rollback_core_only.command
+    assert not any("[memory]" in argument for argument in rollback_core_only.command)
+    if method == "pip":
+        assert rollback_core_only.cleanup_command == [
+            python_executable,
+            "-m",
+            "pip",
+            "uninstall",
+            "--yes",
+            "avibe-memory",
+        ]
+    else:
+        assert rollback_core_only.cleanup_command is None
+
+
+def test_enabled_upgrade_selects_memory_extra_when_package_is_missing(monkeypatch):
+    monkeypatch.setattr("vibe.upgrade.memory_package_installed", lambda: False)
+
+    plan = build_upgrade_plan(
+        python_executable="/usr/bin/python3",
+        uv_path=None,
+        base_env={"PATH": "/usr/bin"},
+        memory_enabled=True,
+    )
+
+    assert plan.command[-1] == "avibe-os[memory]"
+    assert plan.preflight_command is not None
+
+
+def test_disabled_core_only_upgrade_keeps_the_core_only_shape(monkeypatch):
+    monkeypatch.setattr("vibe.upgrade.memory_package_installed", lambda: False)
+
+    plan = build_upgrade_plan(
+        python_executable="/usr/bin/python3",
+        uv_path=None,
+        base_env={"PATH": "/usr/bin"},
+        memory_enabled=False,
+    )
+
+    assert plan.command[-1] == "avibe-os"
+    assert plan.preflight_command is None
+
+
+def test_memory_preflight_failure_never_runs_the_replacing_install():
+    plan = UpgradePlan(
+        command=["installer", "replace"],
+        env=None,
+        method="test",
+        preflight_command=["installer", "preflight"],
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 42, stdout="", stderr="incompatible")
+
+    result = execute_upgrade_plan(plan, run=fake_run, capture_output=True, text=True)
+
+    assert result.returncode == 42
+    assert calls == [["installer", "preflight"]]
+
+
+def test_core_only_rollback_removes_memory_only_after_the_pinned_install_succeeds():
+    plan = UpgradePlan(
+        command=["installer", "pinned-core"],
+        env=None,
+        method="test",
+        cleanup_command=["installer", "remove-memory"],
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+    result = execute_upgrade_plan(plan, run=fake_run, capture_output=True, text=True)
+
+    assert result.returncode == 0
+    assert calls == [["installer", "pinned-core"], ["installer", "remove-memory"]]
+
+
+def test_controller_startup_has_no_python_package_install_path():
+    source = (Path(__file__).resolve().parents[1] / "core" / "controller.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "build_upgrade_plan" not in source
+    assert "execute_upgrade_plan" not in source
+    assert "memory_package_installed" not in source
+    assert '"pip"' not in source
+    assert '"uv", "tool", "install"' not in source
 
 
 def test_build_upgrade_plan_uses_uv_and_preserves_tool_bin_dir(monkeypatch):

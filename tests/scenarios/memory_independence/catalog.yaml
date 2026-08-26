@@ -129,3 +129,9 @@ scenarios:
     kind: guardrail
     layer: scenario
     test: tests/test_memory_disabled_isolation.py::test_memory_indep_017_core_workflows_run_without_avibe_memory
+  - id: MEMORY-INDEP-018
+    name: Upgrades preserve the optional Memory package and pinned rollback restores the prior package shape
+    status: covered
+    kind: correctness
+    layer: scenario
+    test: tests/test_upgrade_flow.py::test_memory_indep_018_upgrade_and_rollback_preserve_optional_package_shape

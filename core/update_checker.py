@@ -1065,7 +1065,18 @@ class UpdateChecker:
             # Run upgrade in thread to avoid blocking event loop
             from vibe.api import do_upgrade
 
-            result = await asyncio.to_thread(do_upgrade, True)
+            memory_enabled = bool(
+                getattr(
+                    getattr(getattr(self.controller, "config", None), "memory", None),
+                    "enabled",
+                    False,
+                )
+            )
+            result = await asyncio.to_thread(
+                do_upgrade,
+                True,
+                memory_enabled=memory_enabled,
+            )
 
             if result["ok"]:
                 logger.info(f"Upgrade successful: {result['message']}")

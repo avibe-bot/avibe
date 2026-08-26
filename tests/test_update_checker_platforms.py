@@ -493,7 +493,7 @@ def test_suppressed_post_update_notification_writes_verification_marker(monkeypa
 
     monkeypatch.setattr(
         "vibe.api.do_upgrade",
-        lambda restart: {"ok": True, "restarting": True, "message": "ok", "output": None},
+        lambda restart, **kwargs: {"ok": True, "restarting": True, "message": "ok", "output": None},
     )
 
     result = asyncio.run(checker._perform_update("1.0.1", suppress_post_update_notification=True))
@@ -503,6 +503,26 @@ def test_suppressed_post_update_notification_writes_verification_marker(monkeypa
     data = json.loads(marker.read_text(encoding="utf-8"))
     assert data["version"] == "1.0.1"
     assert data["suppress_success_notification"] is True
+
+
+def test_automatic_update_passes_live_memory_enablement_to_upgrade(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    SettingsStore.reset_instance()
+    controller = _StubController(SettingsStore.get_instance())
+    controller.config.memory = type("Memory", (), {"enabled": True})()
+    checker = UpdateChecker(controller, UpdateConfig())
+    calls = []
+
+    def do_upgrade(restart, **kwargs):
+        calls.append((restart, kwargs))
+        return {"ok": True, "restarting": False, "message": "ok", "output": None}
+
+    monkeypatch.setattr("vibe.api.do_upgrade", do_upgrade)
+
+    result = asyncio.run(checker._perform_update("1.0.1"))
+
+    assert result["ok"] is True
+    assert calls == [(True, {"memory_enabled": True})]
 
 
 def test_update_marker_records_platform_for_non_slack_callbacks(monkeypatch, tmp_path):

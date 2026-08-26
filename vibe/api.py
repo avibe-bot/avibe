@@ -60,10 +60,14 @@ from vibe.opencode_config import (
 )
 from vibe.build_identity import get_build_identity
 from vibe.upgrade import (
+    PACKAGE_NAME,
     build_upgrade_plan,
+    configured_memory_enabled,
+    execute_upgrade_plan,
     get_latest_version_info,
     get_running_vibe_path,
     get_safe_cwd,
+    installed_package_name,
     should_skip_show_runtime_prepare,
 )
 from vibe.restart_supervisor import schedule_restart
@@ -6116,7 +6120,11 @@ def get_local_version_info() -> dict:
     return {"current": __version__, "build": get_build_identity().as_dict()}
 
 
-def do_upgrade(auto_restart: bool = True) -> dict:
+def do_upgrade(
+    auto_restart: bool = True,
+    *,
+    memory_enabled: bool | None = None,
+) -> dict:
     """Perform upgrade to latest version.
 
     Args:
@@ -6126,7 +6134,14 @@ def do_upgrade(auto_restart: bool = True) -> dict:
         {"ok": bool, "message": str, "output": str | None, "restarting": bool}
     """
     current_vibe_path = get_running_vibe_path()
-    plan = build_upgrade_plan(vibe_path=current_vibe_path)
+    plan = build_upgrade_plan(
+        vibe_path=current_vibe_path,
+        memory_enabled=(
+            configured_memory_enabled()
+            if memory_enabled is None
+            else memory_enabled
+        ),
+    )
     runtime_was_running = _runtime_process_was_running()
 
     # Use a stable directory as cwd to avoid "Current directory does not exist"
@@ -6135,12 +6150,12 @@ def do_upgrade(auto_restart: bool = True) -> dict:
     safe_cwd = get_safe_cwd()
 
     try:
-        result = subprocess.run(
-            plan.command,
+        result = execute_upgrade_plan(
+            plan,
+            run=subprocess.run,
             capture_output=True,
             text=True,
             timeout=120,
-            env=plan.env,
             cwd=safe_cwd,
         )
         if result.returncode == 0:
@@ -8562,6 +8577,52 @@ def _memory_runtime_dependency_status(memory_runtime: dict) -> str:
     return "error"
 
 
+def _install_memory_package_for_current_release() -> dict:
+    """Explicitly add the Memory extra to the current packaged install."""
+
+    from vibe import __version__
+
+    try:
+        plan = build_upgrade_plan(
+            vibe_path=get_running_vibe_path(),
+            version=__version__,
+            package_name=installed_package_name() or PACKAGE_NAME,
+            memory_package=True,
+        )
+        result = execute_upgrade_plan(
+            plan,
+            run=subprocess.run,
+            capture_output=True,
+            text=True,
+            timeout=600,
+            cwd=get_safe_cwd(),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "ok": False,
+            "message": "memory_plugin_unavailable",
+            "output": str(exc),
+            "reason": "memory_plugin_unavailable",
+            "download_error": None,
+        }
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()[-4000:] or None
+        return {
+            "ok": False,
+            "message": "memory_plugin_incompatible",
+            "output": detail,
+            "reason": "memory_plugin_incompatible",
+            "download_error": None,
+        }
+    return {
+        "ok": True,
+        "message": "memory_plugin_installed",
+        "output": (result.stdout or "").strip()[-4000:] or None,
+        "reason": None,
+        "download_error": None,
+    }
+
+
 def _prepare_show_runtime_job() -> dict:
     try:
         from core.show_runtime import get_show_runtime_manager
@@ -8593,20 +8654,32 @@ def _prepare_show_runtime_job() -> dict:
 
 
 def _prepare_memory_runtime_job() -> dict:
-    """Install EverOS through the controller-owned activation lifecycle."""
+    """Install the optional package when needed, then activate EverOS."""
 
-    try:
-        from vibe import internal_client
+    from vibe import internal_client
 
-        response = internal_client.memory_install_runtime_sync()
-    except Exception:  # noqa: BLE001
-        return {
-            "ok": False,
-            "message": "memory_runtime_install_failed",
-            "output": None,
-            "reason": "memory_runtime_install_failed",
-            "download_error": None,
-        }
+    def install_runtime() -> dict:
+        try:
+            return internal_client.memory_install_runtime_sync()
+        except Exception:  # noqa: BLE001
+            return {
+                "status_code": 503,
+                "body": {
+                    "ok": False,
+                    "reason": "memory_runtime_install_failed",
+                    "download_error": None,
+                },
+            }
+
+    response = install_runtime()
+    first_payload = response.get("body") if isinstance(response.get("body"), dict) else {}
+    first_reason = first_payload.get("reason")
+    if first_reason in {"memory_plugin_unavailable", "memory_plugin_incompatible"}:
+        package_result = _install_memory_package_for_current_release()
+        if not package_result.get("ok"):
+            return package_result
+        response = install_runtime()
+
     payload = response.get("body") if isinstance(response.get("body"), dict) else {}
     if response.get("status_code") != 200:
         payload = {

@@ -32,6 +32,7 @@ from vibe.upgrade import (
     RollbackTarget,
     _names_a_published_release,
     build_upgrade_plan,
+    execute_upgrade_plan,
     get_restart_command,
     get_restart_environment,
     get_restart_invocation_command,
@@ -656,7 +657,12 @@ def _roll_back_failed_upgrade(
         return rollback
 
     try:
-        plan = build_upgrade_plan(vibe_path=vibe_path, version=version, package_name=rollback_to.package)
+        plan = build_upgrade_plan(
+            vibe_path=vibe_path,
+            version=version,
+            package_name=rollback_to.package,
+            memory_package=rollback_to.memory_package,
+        )
     except Exception as exc:
         rollback.update(state="failed", error=f"cannot build a pinned install for {version}: {exc}")
         record(rollback)
@@ -665,11 +671,11 @@ def _roll_back_failed_upgrade(
     rollback["install"] = {"method": plan.method, "ok": None}
     record(rollback)
     try:
-        result = subprocess.run(
-            plan.command,
+        result = execute_upgrade_plan(
+            plan,
+            run=subprocess.run,
             capture_output=True,
             text=True,
-            env=plan.env,
             cwd=get_safe_cwd(),
             timeout=_ROLLBACK_INSTALL_TIMEOUT_SECONDS,
         )
@@ -876,6 +882,7 @@ def _run_restart_job(
             # of the three that has actually been wrong in production.
             "rollback_to": rollback_to.version if rollback_to else None,
             "rollback_package": rollback_to.package if rollback_to else None,
+            "rollback_memory_package": rollback_to.memory_package if rollback_to else None,
             "rollback_launcher": rollback_to.launcher._asdict() if rollback_to else None,
             "rollback_target_source": rollback_target_source,
             "rollback_discovery_error": rollback_discovery_error,
@@ -1106,6 +1113,8 @@ def schedule_restart(
         )
         if rollback_to.package:
             command.extend(["--rollback-package", rollback_to.package])
+        if rollback_to.memory_package:
+            command.append("--rollback-memory-package")
     env = get_restart_environment(vibe_path=vibe_path)
     log_path = _restart_log_path(job_id)
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1177,6 +1186,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prepare-show-runtime", action="store_true")
     parser.add_argument("--rollback-to")
     parser.add_argument("--rollback-package")
+    parser.add_argument("--rollback-memory-package", action="store_true")
     parser.add_argument("--rollback-python")
     parser.add_argument("--rollback-main")
     args = parser.parse_args(argv)
@@ -1193,6 +1203,7 @@ def main(argv: list[str] | None = None) -> int:
             version=args.rollback_to,
             package=args.rollback_package,
             launcher=runtime.ServiceLauncher(python=args.rollback_python, main=args.rollback_main),
+            memory_package=args.rollback_memory_package,
         )
     return _run_restart_job(
         job_id=args.job_id,

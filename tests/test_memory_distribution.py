@@ -75,6 +75,17 @@ def _run(python: Path, *args: str, cwd: Path) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def _venv(tmp_path: Path, name: str) -> Path:
+    environment = tmp_path / name
+    subprocess.run(
+        [sys.executable, "-m", "venv", str(environment)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+
+
 def test_memory_extra_and_distribution_share_one_compatibility_window() -> None:
     host = _project(ROOT / "pyproject.toml")
     memory = _project(MEMORY_PROJECT / "pyproject.toml")
@@ -179,14 +190,7 @@ def test_wheel_installation_matrix(
 ) -> None:
     core_wheel = _wheel_path("AVIBE_CORE_WHEEL")
     memory_wheel = _wheel_path("AVIBE_MEMORY_WHEEL")
-    environment = tmp_path / installation
-    subprocess.run(
-        [sys.executable, "-m", "venv", str(environment)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    python = _venv(tmp_path, installation)
     wheels = [core_wheel]
     if installation == "core+memory":
         wheels.append(memory_wheel)
@@ -226,3 +230,142 @@ def test_wheel_installation_matrix(
             ),
             cwd=tmp_path,
         )
+
+
+def test_packaged_memory_states_missing_disabled_enabled_and_incompatible(
+    tmp_path: Path,
+) -> None:
+    core_wheel = _wheel_path("AVIBE_CORE_WHEEL")
+    memory_wheel = _wheel_path("AVIBE_MEMORY_WHEEL")
+
+    missing_python = _venv(tmp_path, "missing")
+    _run(
+        missing_python,
+        "-m",
+        "pip",
+        "install",
+        "--disable-pip-version-check",
+        "--no-deps",
+        str(core_wheel),
+        cwd=tmp_path,
+    )
+    _run(
+        missing_python,
+        "-c",
+        (
+            "from types import SimpleNamespace; "
+            "from core.memory_loader import load_memory_runtime; "
+            "from vibe.memory_contract import MemoryPluginUnavailableError; "
+            "\ntry: load_memory_runtime(SimpleNamespace(enabled=True))\n"
+            "except MemoryPluginUnavailableError: pass\n"
+            "else: raise AssertionError('missing package did not fail closed')"
+        ),
+        cwd=tmp_path,
+    )
+
+    enabled_python = _venv(tmp_path, "enabled")
+    _run(
+        enabled_python,
+        "-m",
+        "pip",
+        "install",
+        "--disable-pip-version-check",
+        "--no-deps",
+        str(core_wheel),
+        str(memory_wheel),
+        cwd=tmp_path,
+    )
+    _run(
+        enabled_python,
+        "-c",
+        (
+            "import sys; from importlib.metadata import distribution; "
+            "from types import SimpleNamespace; import core.memory_loader as loader; "
+            "runtime_file = next(path for path in distribution('avibe-memory').files "
+            "if str(path) == 'avibe_memory/runtime.py').locate(); "
+            "assert 'MEMORY_RUNTIME_PROTOCOL_VERSION = 1' in runtime_file.read_text(); "
+            "assert loader.load_memory_runtime(SimpleNamespace(enabled=False)) is None; "
+            "assert 'avibe_memory.runtime' not in sys.modules; "
+            "implementation = SimpleNamespace(MEMORY_RUNTIME_PROTOCOL_VERSION=1, "
+            "create_memory_runtime=lambda config, **kwargs: "
+            "SimpleNamespace(module=object(), close=lambda: None, available=True)); "
+            "loader.importlib.import_module = lambda name: implementation; "
+            "runtime = loader.load_memory_runtime(SimpleNamespace(enabled=True)); "
+            "assert runtime.available is True"
+        ),
+        cwd=tmp_path,
+    )
+
+    incompatible_root = tmp_path / "incompatible"
+    package = incompatible_root / "avibe_memory"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "runtime.py").write_text(
+        "MEMORY_RUNTIME_PROTOCOL_VERSION = 999\n"
+        "def create_memory_runtime(config, **kwargs): raise AssertionError('must not construct')\n",
+        encoding="utf-8",
+    )
+    _run(
+        missing_python,
+        "-c",
+        (
+            "from types import SimpleNamespace; "
+            "from core.memory_loader import load_memory_runtime; "
+            "from vibe.memory_contract import MemoryPluginIncompatibleError; "
+            "\ntry: load_memory_runtime(SimpleNamespace(enabled=True))\n"
+            "except MemoryPluginIncompatibleError: pass\n"
+            "else: raise AssertionError('incompatible package did not fail closed')"
+        ),
+        cwd=incompatible_root,
+    )
+
+
+def test_packaged_memory_upgrade_and_core_only_rollback_restore_shape(
+    tmp_path: Path,
+) -> None:
+    core_wheel = _wheel_path("AVIBE_CORE_WHEEL")
+    memory_wheel = _wheel_path("AVIBE_MEMORY_WHEEL")
+    python = _venv(tmp_path, "shape-round-trip")
+    install_core = [
+        str(python),
+        "-m",
+        "pip",
+        "install",
+        "--disable-pip-version-check",
+        "--no-deps",
+        str(core_wheel),
+    ]
+    subprocess.run(install_core, check=True, capture_output=True, text=True)
+
+    _run(
+        python,
+        "-c",
+        "import importlib.util; assert importlib.util.find_spec('avibe_memory') is None",
+        cwd=tmp_path,
+    )
+    subprocess.run(
+        [*install_core[:-1], str(core_wheel), str(memory_wheel)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    _run(
+        python,
+        "-c",
+        "import importlib.util; assert importlib.util.find_spec('avibe_memory') is not None",
+        cwd=tmp_path,
+    )
+
+    subprocess.run(install_core, check=True, capture_output=True, text=True)
+    subprocess.run(
+        [str(python), "-m", "pip", "uninstall", "--yes", "avibe-memory"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    _run(
+        python,
+        "-c",
+        "import importlib.util; assert importlib.util.find_spec('avibe_memory') is None",
+        cwd=tmp_path,
+    )
