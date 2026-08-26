@@ -339,12 +339,20 @@ function Test-UvCandidate {
             }
         }
 
-        $probeCode = 'from core.install_integrity import verify_python_environment; result = verify_python_environment(__import__("sys").executable); print(result.detail); raise SystemExit(0 if result.ok else 1)'
+        $probePath = Join-Path ([System.IO.Path]::GetTempPath()) ("avibe-integrity-" + [Guid]::NewGuid().ToString("N") + ".py")
+        $probeCode = @'
+from core.install_integrity import verify_python_environment
+result = verify_python_environment(__import__("sys").executable)
+print(result.detail)
+raise SystemExit(0 if result.ok else 1)
+'@
+        Set-Content -LiteralPath $probePath -Value $probeCode -Encoding utf8
         Push-Location $WorkingDirectory
         try {
-            $probe = Invoke-NativeCommand -FilePath $candidatePython -Arguments @("-c", $probeCode)
+            $probe = Invoke-NativeCommand -FilePath $candidatePython -Arguments @($probePath)
         } finally {
             Pop-Location
+            Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue
         }
         if (-not $probe.Success) {
             return @{
