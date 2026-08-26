@@ -98,6 +98,144 @@ def test_doctor_bundles_have_identical_keys_and_interpolation() -> None:
             assert not placeholder.search(rendered), f"unresolved placeholder in {language}:{key}"
 
 
+def test_doctor_finite_vocabulary_has_one_projection_owner() -> None:
+    expected = {
+        "tunnel_state": {"healthy", "degraded", "recovering", "unknown"},
+        "tunnel_grade": {"good", "fair", "poor", "critical", "unknown"},
+        "tunnel_protocol": {"quic", "http2", "unknown"},
+        "download_kind": {"http", "dns", "tls", "timeout", "network", "permission", "disk", "io"},
+        "repair_reason": {
+            "askill_auto_install_unsupported",
+            "askill_install_path_missing",
+            "askill_install_timeout",
+            "askill_install_failed",
+            "askill_install_error",
+            "avault_platform_unsupported",
+            "avault_checksum_mismatch",
+            "avault_install_path_missing",
+            "avault_install_failed",
+            "avault_download_failed",
+            "avault_p2_release_unavailable",
+            "git_runtime_unpublished",
+        },
+        "repair_suffix": {
+            "install_already_running",
+            "platform_unsupported",
+            "manifest_missing",
+            "manifest_invalid",
+            "manifest_unavailable",
+            "manifest_unavailable_offline",
+            "manifest_download_failed",
+            "manifest_url_unsupported",
+            "archive_unavailable",
+            "archive_unavailable_offline",
+            "archive_url_unsupported",
+            "archive_download_failed",
+            "archive_checksum_mismatch",
+            "archive_size_mismatch",
+            "binary_checksum_mismatch",
+            "binary_not_runnable",
+            "binary_prepare_failed",
+            "install_missing_binary",
+            "install_failed",
+            "install_lock_failed",
+            "install_claim_failed",
+            "install_target_changed",
+            "pointer_write_failed",
+            "codesign_missing",
+            "codesign_failed",
+            "codesign_verify_failed",
+            "xattr_failed",
+        },
+        "restart_state": {"running", "scheduled", "succeeded", "failed", "skipped", "unknown"},
+        "show_runtime_provider": {"manifest-cache", "archive", "npm", "unknown"},
+    }
+    assert set(cli.DOCTOR_DISPLAY_PROJECTIONS) == set(expected)
+    for category, members in expected.items():
+        assert set(cli.DOCTOR_DISPLAY_PROJECTIONS[category]) == members
+        assert all(key.startswith("doctor.") for key in cli.DOCTOR_DISPLAY_PROJECTIONS[category].values())
+
+    assert cli._doctor_display_value("future-state", "tunnel_state", "zh") == "未知"
+    assert cli._doctor_display_value("future-kind", "download_kind", "zh") == "未知"
+
+
+def test_doctor_dependency_status_stays_machine_data_and_out_of_sentence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cli.api,
+        "dependencies_status",
+        lambda **_kwargs: {
+            "deps": [
+                {"id": "askill", "required": True, "installed": False, "status": "missing"},
+                {"id": "avault", "required": True, "installed": False, "status": "error"},
+                {
+                    "id": "tmux",
+                    "required": False,
+                    "installed": False,
+                    "status": "upgrade_required",
+                },
+            ]
+        },
+    )
+    monkeypatch.setattr(cli.api, "askill_auto_install_supported", lambda: True)
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
+
+    items = cli._managed_dependencies_doctor_items(deep=False)
+
+    expected = {
+        "dependencies.askill.not_ready": "missing",
+        "dependencies.avault.not_ready": "error",
+        "dependencies.tmux.not_ready": "upgrade_required",
+    }
+    for code, raw_status in expected.items():
+        item = next(item for item in items if item.get("code") == code)
+        assert item["dependency_status"] == raw_status
+        assert raw_status not in item["message"]
+    assert all("尚未就绪" in item["message"] for item in items if item.get("code") in expected)
+
+
+@pytest.mark.parametrize(
+    ("probe_reason", "label_marker", "english_label"),
+    [
+        ("runtime_manifest_download_failed", "Show Runtime 清单", "Show Runtime manifest"),
+        ("runtime_archive_download_failed", "Show Runtime 归档", "Show Runtime archive"),
+    ],
+)
+def test_show_runtime_download_labels_are_localized(
+    monkeypatch: pytest.MonkeyPatch,
+    probe_reason: str,
+    label_marker: str,
+    english_label: str,
+) -> None:
+    from types import SimpleNamespace
+
+    manager = SimpleNamespace(
+        status=lambda: {
+            "provider": "manifest-cache",
+            "platform": "darwin-arm64",
+            "manifest": {"runtime_version": "test"},
+            "archive": {"name": "show-runtime.tgz"},
+            "explicit_command": None,
+            "node_available": True,
+        },
+        probe_archive_reachability=lambda: {
+            "ok": False,
+            "checked": True,
+            "reason": probe_reason,
+            "download_error": {"kind": "http", "http_status": 503, "attempts": 2},
+        },
+        archive_cache_status=lambda: None,
+    )
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda **kwargs: manager)
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
+
+    items = cli._show_runtime_doctor_items(deep=True)
+    message = "\n".join(item["message"] for item in items)
+    assert label_marker in message
+    assert english_label not in message
+
+
 def test_doctor_uses_real_chinese_path_and_stable_code(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(cli.paths.AVIBE_HOME_ENV, "/tmp/avibe-doctor-home")
     rendered: dict[str, list[dict]] = {}
@@ -190,6 +328,7 @@ def test_doctor_localizes_nested_repair_details_and_missing_payload_values(
     )
     assert "the selected dependency URL" not in items[0]["message"]
     assert "所选依赖 URL" in items[0]["message"]
+    assert items[0]["download_kind"] == "timeout"
 
     from types import SimpleNamespace
 
@@ -302,6 +441,9 @@ def test_doctor_tunnel_quality_projects_every_finite_value(
     }[expected_key]
     item = next(item for item in remote_group["items"] if shape_marker in item["message"])
     assert "降级" in item["message"]
+    assert item["tunnel_state"] == "degraded"
+    assert item["tunnel_grade"] == "poor"
+    assert item["tunnel_protocol"] == "quic"
     if expected_key != "tunnelQualityRttUnavailable":
         assert "较差" in item["message"]
     if expected_key != "tunnelQualityRtt":
