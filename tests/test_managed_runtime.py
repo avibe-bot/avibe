@@ -266,6 +266,11 @@ def _age_path(path: Path) -> None:
     os.utime(path, (stamp, stamp))
 
 
+def _archive_provenance(manager: ManagedRuntimeManager) -> set[tuple[str, str]]:
+    payload = json.loads(manager._archive_provenance_path.read_text(encoding="utf-8"))
+    return {(entry["name"], entry["sha256"]) for entry in payload["archives"]}
+
+
 @pytest.mark.parametrize("runtime_kind", ["git", "memory", "model-hub"])
 def test_subclass_relative_runtime_directory_persists_an_admissible_absolute_path(
     tmp_path: Path,
@@ -1196,6 +1201,255 @@ def test_clean_archive_candidates_require_known_shape_maturity_and_unprotected_d
     assert newline_cache.is_file()
     assert unknown_cache.is_file()
     assert current_cache.is_file()
+
+
+def test_clean_retries_recent_archive_from_durable_provenance(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    manifest_path = tmp_path / "manifest.json"
+    manager = _fixture_runtime_manager(runtime_dir, manifest_path=manifest_path)
+    stale, stale_archive = _install_fixture_runtime_release(
+        manager,
+        tmp_path,
+        manifest_path,
+        label="stale",
+        version="stale",
+    )
+    current, _current_archive = _install_fixture_runtime_release(
+        manager,
+        tmp_path,
+        manifest_path,
+        label="current",
+        version="current",
+    )
+    os.utime(stale, (100, 100))
+    os.utime(current, (200, 200))
+    stale_digest = hashlib.sha256(stale_archive.read_bytes()).hexdigest()
+
+    first = manager.clean(keep_previous=0)
+
+    assert first["ok"] is True
+    assert not stale.exists() and stale_archive.is_file()
+    assert _archive_provenance(manager) == {(stale_archive.name, stale_digest)}
+
+    _age_path(stale_archive)
+    second = manager.clean(keep_previous=0)
+
+    assert second["ok"] is True
+    assert second["archives"]["candidate_count"] == 1
+    assert second["archives"]["removed_count"] == 1
+    assert not stale_archive.exists()
+    assert _archive_provenance(manager) == set()
+
+
+def test_clean_retries_archive_after_transient_unlink_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    manifest_path = tmp_path / "manifest.json"
+    manager = _fixture_runtime_manager(runtime_dir, manifest_path=manifest_path)
+    stale, stale_archive = _install_fixture_runtime_release(
+        manager,
+        tmp_path,
+        manifest_path,
+        label="stale",
+        version="stale",
+    )
+    current, _current_archive = _install_fixture_runtime_release(
+        manager,
+        tmp_path,
+        manifest_path,
+        label="current",
+        version="current",
+    )
+    os.utime(stale, (100, 100))
+    os.utime(current, (200, 200))
+    _age_path(stale_archive)
+    stale_digest = hashlib.sha256(stale_archive.read_bytes()).hexdigest()
+    real_unlink = os.unlink
+
+    def _refuse_archive(path, *args, **kwargs):
+        if path == stale_archive.name and kwargs.get("dir_fd") is not None:
+            raise OSError("archive is in use")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", _refuse_archive)
+    first = manager.clean(keep_previous=0)
+
+    assert first["ok"] is False
+    assert not stale.exists() and stale_archive.is_file()
+    assert _archive_provenance(manager) == {(stale_archive.name, stale_digest)}
+
+    monkeypatch.setattr(os, "unlink", real_unlink)
+    second = manager.clean(keep_previous=0)
+
+    assert second["ok"] is True
+    assert second["archives"]["candidate_count"] == 1
+    assert second["archives"]["removed_count"] == 1
+    assert not stale_archive.exists()
+    assert _archive_provenance(manager) == set()
+
+
+def test_clean_fails_closed_when_archive_provenance_cannot_be_persisted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    manifest_path = tmp_path / "manifest.json"
+    manager = _fixture_runtime_manager(runtime_dir, manifest_path=manifest_path)
+    stale, stale_archive = _install_fixture_runtime_release(
+        manager,
+        tmp_path,
+        manifest_path,
+        label="stale",
+        version="stale",
+    )
+    current, current_archive = _install_fixture_runtime_release(
+        manager,
+        tmp_path,
+        manifest_path,
+        label="current",
+        version="current",
+    )
+    os.utime(stale, (100, 100))
+    os.utime(current, (200, 200))
+    staging_dir = runtime_dir / "install-pending"
+    staging_dir.mkdir()
+    monkeypatch.setattr(
+        manager,
+        "_write_archive_provenance",
+        lambda _provenance: (_ for _ in ()).throw(OSError("disk is read-only")),
+    )
+
+    result = manager.clean(keep_previous=0)
+
+    assert result["ok"] is False
+    assert result["reason"] == "fixture_clean_inspection_failed"
+    assert result["removed"] == [str(staging_dir)]
+    assert result["archives"]["skipped_reason"] == "archive_inspection_failed"
+    assert not staging_dir.exists()
+    assert stale.is_dir() and stale_archive.is_file()
+    assert current.is_dir() and current_archive.is_file()
+    assert not manager._archive_provenance_path.exists()
+
+
+def test_clean_reclaims_staging_but_rejects_unsafe_archive_provenance(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    manifest_path = tmp_path / "manifest.json"
+    manager = _fixture_runtime_manager(runtime_dir, manifest_path=manifest_path)
+    stale, stale_archive = _install_fixture_runtime_release(
+        manager,
+        tmp_path,
+        manifest_path,
+        label="stale",
+        version="stale",
+    )
+    current, current_archive = _install_fixture_runtime_release(
+        manager,
+        tmp_path,
+        manifest_path,
+        label="current",
+        version="current",
+    )
+    os.utime(stale, (100, 100))
+    os.utime(current, (200, 200))
+    staging_dir = runtime_dir / "install-pending"
+    staging_dir.mkdir()
+    manager._archive_provenance_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "runtime_id": "fixture",
+                "archives": [{"name": "../outside.tgz", "sha256": "a" * 64}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = manager.clean(keep_previous=0)
+
+    assert result["ok"] is False
+    assert result["reason"] == "fixture_clean_inspection_failed"
+    assert result["removed"] == [str(staging_dir)]
+    assert result["archives"]["skipped_reason"] == "archive_inspection_failed"
+    assert not staging_dir.exists()
+    assert stale.is_dir() and stale_archive.is_file()
+    assert current.is_dir() and current_archive.is_file()
+
+
+def test_clean_dry_run_does_not_persist_archive_provenance(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    manifest_path = tmp_path / "manifest.json"
+    manager = _fixture_runtime_manager(runtime_dir, manifest_path=manifest_path)
+    stale, stale_archive = _install_fixture_runtime_release(
+        manager,
+        tmp_path,
+        manifest_path,
+        label="stale",
+        version="stale",
+    )
+    current, _current_archive = _install_fixture_runtime_release(
+        manager,
+        tmp_path,
+        manifest_path,
+        label="current",
+        version="current",
+    )
+    os.utime(stale, (100, 100))
+    os.utime(current, (200, 200))
+    _age_path(stale_archive)
+
+    preview = manager.clean(keep_previous=0, dry_run=True)
+
+    assert preview["ok"] is True
+    assert preview["removed"] == [str(stale)]
+    assert preview["archives"]["candidate_count"] == 1
+    assert stale.is_dir() and stale_archive.is_file()
+    assert not manager._archive_provenance_path.exists()
+
+
+def test_clean_keeps_recorded_archive_when_bytes_do_not_match_provenance(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    manifest_path = tmp_path / "manifest.json"
+    manager = _fixture_runtime_manager(runtime_dir, manifest_path=manifest_path)
+    stale, stale_archive = _install_fixture_runtime_release(
+        manager,
+        tmp_path,
+        manifest_path,
+        label="stale",
+        version="stale",
+    )
+    current, _current_archive = _install_fixture_runtime_release(
+        manager,
+        tmp_path,
+        manifest_path,
+        label="current",
+        version="current",
+    )
+    os.utime(stale, (100, 100))
+    os.utime(current, (200, 200))
+    stale_digest = hashlib.sha256(stale_archive.read_bytes()).hexdigest()
+    first = manager.clean(keep_previous=0)
+    assert first["ok"] is True
+    assert not stale.exists()
+    assert _archive_provenance(manager) == {(stale_archive.name, stale_digest)}
+
+    stale_archive.write_bytes(b"replacement bytes")
+    _age_path(stale_archive)
+    second = manager.clean(keep_previous=0)
+
+    assert second["ok"] is True
+    assert second["archives"]["candidate_count"] == 0
+    assert stale_archive.read_bytes() == b"replacement bytes"
+    assert _archive_provenance(manager) == {(stale_archive.name, stale_digest)}
 
 
 def test_clean_fails_closed_for_unreadable_retained_archive_metadata(

@@ -47,6 +47,8 @@ _MANIFEST_CACHE_RE = re.compile(r"^manifest-[0-9a-f]{16}\.json$")
 _ARCHIVE_MTIME_GUARD_SECONDS = 15 * 60
 _ARCHIVE_INSPECTION_FAILED = "archive_inspection_failed"
 _ARCHIVE_REMOVAL_FAILED = "archive_removal_failed"
+_ARCHIVE_PROVENANCE_FILENAME = "archive-provenance.json"
+_ARCHIVE_PROVENANCE_SCHEMA_VERSION = 1
 _PACKAGED_MANIFEST_LINEAGE = "packaged"
 _CUSTOM_MANIFEST_LINEAGE = "custom"
 _INSTALL_LOCKS: dict[str, threading.Lock] = {}
@@ -165,6 +167,7 @@ class ManagedRuntimeManager:
         self._download_error: dict[str, Any] | None = None
         self._install_lock = install_lock_for(spec.runtime_id)
         self._install_file_lock_path = self.runtime_dir / ".install.lock"
+        self._archive_provenance_path = self.runtime_dir / _ARCHIVE_PROVENANCE_FILENAME
 
     def ensure(
         self,
@@ -855,6 +858,20 @@ class ManagedRuntimeManager:
             key=lambda path: path.stat().st_mtime,
             reverse=True,
         )
+        persisted_provenance = self._read_archive_provenance()
+        candidate_paths = {path.resolve() for path in install_candidates}
+        candidate_provenance = {
+            (record.archive_name, record.archive_sha256)
+            for record in installs
+            if record.path.resolve() in candidate_paths
+            and self._archive_name_is_candidate(record.archive_name)
+        }
+        pending_provenance = persisted_provenance | candidate_provenance
+        if not dry_run and pending_provenance != persisted_provenance:
+            try:
+                self._write_archive_provenance(pending_provenance)
+            except OSError as exc:
+                raise OSError("archive provenance cannot be persisted") from exc
 
         for path in install_candidates:
             if dry_run:
@@ -879,13 +896,14 @@ class ManagedRuntimeManager:
         protected_archive_sha256s = {record.archive_sha256 for record in retained_installs}
         if current is not None:
             protected_archive_sha256s.add(self._current_archive_sha256())
-        known_archive_names = {
-            record.archive_name
+        install_provenance = {
+            (record.archive_name, record.archive_sha256)
             for record in installs
             if self._archive_name_is_candidate(record.archive_name)
         }
-        archives = self._clean_downloaded_archives(
-            known_archive_names=known_archive_names,
+        archive_provenance = pending_provenance | install_provenance
+        archives, terminal_archive_names = self._clean_downloaded_archives(
+            archive_provenance=archive_provenance,
             protected_sha256s=protected_archive_sha256s,
             dry_run=dry_run,
         )
@@ -894,10 +912,31 @@ class ManagedRuntimeManager:
         if archives.get("skipped_reason") == _ARCHIVE_INSPECTION_FAILED:
             raise OSError("downloads directory cannot be inspected")
 
+        provenance_failed = False
+        retained_provenance = {
+            pair for pair in pending_provenance if pair[0] not in terminal_archive_names
+        }
+        if not dry_run and retained_provenance != pending_provenance:
+            try:
+                self._write_archive_provenance(retained_provenance)
+            except OSError:
+                logger.warning(
+                    "Failed to retire managed %s runtime archive provenance",
+                    self.spec.runtime_id,
+                    exc_info=True,
+                )
+                provenance_failed = True
+
         return {
-            "ok": not removal_failed,
+            "ok": not removal_failed and not provenance_failed,
             "removed": removed,
-            "reason": self._reason("clean_removal_failed") if removal_failed else None,
+            "reason": (
+                self._reason("clean_inspection_failed")
+                if provenance_failed
+                else self._reason("clean_removal_failed")
+                if removal_failed
+                else None
+            ),
             "archives": archives,
         }
 
@@ -960,6 +999,53 @@ class ManagedRuntimeManager:
             except Exception as exc:  # noqa: BLE001
                 raise OSError(f"install metadata is unreadable: {metadata_path}") from exc
         return records
+
+    def _read_archive_provenance(self) -> set[tuple[str, str]]:
+        try:
+            provenance_info = self._archive_provenance_path.lstat()
+        except FileNotFoundError:
+            return set()
+        except OSError as exc:
+            raise OSError("archive provenance cannot be inspected") from exc
+        if not _is_exclusive_regular_file(provenance_info):
+            raise OSError("archive provenance is not an exclusive regular file")
+        try:
+            payload = json.loads(self._archive_provenance_path.read_text(encoding="utf-8"))
+            entries = payload.get("archives") if isinstance(payload, dict) else None
+            if (
+                payload.get("schema_version") != _ARCHIVE_PROVENANCE_SCHEMA_VERSION
+                or payload.get("runtime_id") != self.spec.runtime_id
+                or not isinstance(entries, list)
+            ):
+                raise ValueError("archive provenance document is invalid")
+            provenance: set[tuple[str, str]] = set()
+            for entry in entries:
+                name = entry.get("name") if isinstance(entry, dict) else None
+                digest = entry.get("sha256") if isinstance(entry, dict) else None
+                if (
+                    not isinstance(name, str)
+                    or not self._archive_name_is_candidate(name)
+                    or not isinstance(digest, str)
+                    or not _SHA256_RE.fullmatch(digest)
+                ):
+                    raise ValueError("archive provenance entry is invalid")
+                provenance.add((name, digest))
+            return provenance
+        except Exception as exc:  # noqa: BLE001
+            raise OSError("archive provenance is unreadable") from exc
+
+    def _write_archive_provenance(self, provenance: set[tuple[str, str]]) -> None:
+        write_json_atomic(
+            self._archive_provenance_path,
+            {
+                "schema_version": _ARCHIVE_PROVENANCE_SCHEMA_VERSION,
+                "runtime_id": self.spec.runtime_id,
+                "archives": [
+                    {"name": name, "sha256": digest}
+                    for name, digest in sorted(provenance)
+                ],
+            },
+        )
 
     def _staging_install_dirs(self) -> list[Path]:
         try:
@@ -1065,21 +1151,28 @@ class ManagedRuntimeManager:
     def _clean_downloaded_archives(
         self,
         *,
-        known_archive_names: set[str],
+        archive_provenance: set[tuple[str, str]],
         protected_sha256s: set[str],
         dry_run: bool,
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], set[str]]:
+        provenance_by_name: dict[str, set[str]] = {}
+        for name, digest in archive_provenance:
+            provenance_by_name.setdefault(name, set()).add(digest)
+        known_archive_names = set(provenance_by_name)
         downloads_dir = self.runtime_dir / "downloads"
         try:
             downloads_info = downloads_dir.lstat()
         except FileNotFoundError:
-            return self._archive_report(
-                dry_run=dry_run,
-                candidate_count=0,
-                candidate_bytes=0,
-                removed_count=0,
-                removed_bytes=0,
-                failed_count=0,
+            return (
+                self._archive_report(
+                    dry_run=dry_run,
+                    candidate_count=0,
+                    candidate_bytes=0,
+                    removed_count=0,
+                    removed_bytes=0,
+                    failed_count=0,
+                ),
+                known_archive_names,
             )
         except OSError as exc:
             raise OSError("downloads directory cannot be inspected") from exc
@@ -1088,6 +1181,7 @@ class ManagedRuntimeManager:
 
         mtime_floor = time.time() - _ARCHIVE_MTIME_GUARD_SECONDS
         candidates: list[tuple[Path, int, str, int]] = []
+        terminal_names: set[str] = set()
         if os.name == "nt":
             identity = (downloads_info.st_dev, downloads_info.st_ino)
             try:
@@ -1095,6 +1189,7 @@ class ManagedRuntimeManager:
                     names = sorted(entry.name for entry in entries)
             except OSError as exc:
                 raise OSError("downloads directory cannot be inspected") from exc
+            terminal_names.update(known_archive_names - set(names))
             for name in names:
                 if name not in known_archive_names:
                     continue
@@ -1102,6 +1197,7 @@ class ManagedRuntimeManager:
                 try:
                     entry_info = path.lstat()
                 except FileNotFoundError:
+                    terminal_names.add(name)
                     continue
                 except OSError as exc:
                     raise OSError(f"archive cannot be inspected: {name}") from exc
@@ -1119,14 +1215,17 @@ class ManagedRuntimeManager:
                         os.close(fd)
                 except OSError as exc:
                     raise OSError(f"archive cannot be inspected: {name}") from exc
-                if archive_sha256 not in protected_sha256s:
+                if (
+                    archive_sha256 in provenance_by_name[name]
+                    and archive_sha256 not in protected_sha256s
+                ):
                     candidates.append((path, entry_info.st_size, name, entry_info.st_ino))
 
             removed_count = 0
             removed_bytes = 0
             failed_count = 0
             if not dry_run:
-                for path, size, _name, inode in candidates:
+                for path, size, name, inode in candidates:
                     try:
                         current_dir = downloads_dir.lstat()
                         if (
@@ -1139,19 +1238,26 @@ class ManagedRuntimeManager:
                         if current.st_ino != inode or not _is_exclusive_regular_file(current):
                             raise OSError("archive was replaced after inspection")
                         path.unlink()
+                    except FileNotFoundError:
+                        terminal_names.add(name)
+                        continue
                     except OSError:
                         logger.warning("Failed to remove managed runtime archive %s", path, exc_info=True)
                         failed_count += 1
                         continue
                     removed_count += 1
                     removed_bytes += size
-            return self._archive_report(
-                dry_run=dry_run,
-                candidate_count=len(candidates),
-                candidate_bytes=sum(item[1] for item in candidates),
-                removed_count=removed_count,
-                removed_bytes=removed_bytes,
-                failed_count=failed_count,
+                    terminal_names.add(name)
+            return (
+                self._archive_report(
+                    dry_run=dry_run,
+                    candidate_count=len(candidates),
+                    candidate_bytes=sum(item[1] for item in candidates),
+                    removed_count=removed_count,
+                    removed_bytes=removed_bytes,
+                    failed_count=failed_count,
+                ),
+                terminal_names,
             )
 
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_DIRECTORY", 0)
@@ -1162,19 +1268,25 @@ class ManagedRuntimeManager:
                 raise OSError("downloads directory was replaced before scan")
             with os.scandir(dir_fd) as entries:
                 names = sorted(entry.name for entry in entries)
+            terminal_names.update(known_archive_names - set(names))
             for name in names:
                 if name not in known_archive_names:
                     continue
                 try:
                     entry_info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
                 except FileNotFoundError:
+                    terminal_names.add(name)
                     continue
                 except OSError as exc:
                     raise OSError(f"archive cannot be inspected: {name}") from exc
                 if not _is_exclusive_regular_file(entry_info) or entry_info.st_mtime > mtime_floor:
                     continue
                 file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-                file_fd = os.open(name, file_flags, dir_fd=dir_fd)
+                try:
+                    file_fd = os.open(name, file_flags, dir_fd=dir_fd)
+                except FileNotFoundError:
+                    terminal_names.add(name)
+                    continue
                 try:
                     opened_file = os.fstat(file_fd)
                     if (opened_file.st_dev, opened_file.st_ino) != (
@@ -1185,7 +1297,10 @@ class ManagedRuntimeManager:
                     archive_sha256 = self._sha256_from_fd(file_fd)
                 finally:
                     os.close(file_fd)
-                if archive_sha256 not in protected_sha256s:
+                if (
+                    archive_sha256 in provenance_by_name[name]
+                    and archive_sha256 not in protected_sha256s
+                ):
                     candidates.append((downloads_dir / name, entry_info.st_size, name, entry_info.st_ino))
 
             removed_count = 0
@@ -1198,19 +1313,26 @@ class ManagedRuntimeManager:
                         if current.st_ino != inode or not _is_exclusive_regular_file(current):
                             raise OSError("archive was replaced after inspection")
                         os.unlink(name, dir_fd=dir_fd)
+                    except FileNotFoundError:
+                        terminal_names.add(name)
+                        continue
                     except OSError:
                         logger.warning("Failed to remove managed runtime archive %s", path, exc_info=True)
                         failed_count += 1
                         continue
                     removed_count += 1
                     removed_bytes += size
-            return self._archive_report(
-                dry_run=dry_run,
-                candidate_count=len(candidates),
-                candidate_bytes=sum(item[1] for item in candidates),
-                removed_count=removed_count,
-                removed_bytes=removed_bytes,
-                failed_count=failed_count,
+                    terminal_names.add(name)
+            return (
+                self._archive_report(
+                    dry_run=dry_run,
+                    candidate_count=len(candidates),
+                    candidate_bytes=sum(item[1] for item in candidates),
+                    removed_count=removed_count,
+                    removed_bytes=removed_bytes,
+                    failed_count=failed_count,
+                ),
+                terminal_names,
             )
         finally:
             os.close(dir_fd)
