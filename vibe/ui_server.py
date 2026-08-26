@@ -4586,7 +4586,11 @@ async def model_hub_agent_sources_put(backend):
         return _model_hub_error(exc)
 
 
-@app.route("/api/models/agents/<backend>/chains/reorder", methods=["POST"])
+@app.route(
+    "/api/models/agents/<backend>/chains/reorder",
+    methods=["POST"],
+    allow_malformed_json=True,
+)
 async def model_hub_agent_chains_reorder_post(backend):
     from core.handlers.model_hub import ModelHubError
 

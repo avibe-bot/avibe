@@ -366,6 +366,7 @@ class CompatApp(FastAPI):
         path: str,
         methods: list[str] | tuple[str, ...] | None = None,
         defaults: dict[str, Any] | None = None,
+        allow_malformed_json: bool = False,
         **kwargs: Any,
     ):
         methods = tuple(methods or ("GET",))
@@ -380,6 +381,7 @@ class CompatApp(FastAPI):
                     func,
                     route_regex,
                     defaults,
+                    allow_malformed_json=allow_malformed_json,
                 )
 
             endpoint.__name__ = f"{func.__name__}_compat_endpoint"
@@ -496,6 +498,8 @@ class CompatApp(FastAPI):
         func: Callable[..., Any],
         route_regex: re.Pattern[str],
         defaults: dict[str, Any],
+        *,
+        allow_malformed_json: bool = False,
     ) -> Response:
         remote_addr = _test_remote_addr_from_scope(starlette_request.scope)
         if remote_addr:
@@ -513,7 +517,12 @@ class CompatApp(FastAPI):
                         break
                 if response is None:
                     compat_request._body_present = bool(await starlette_request.body())
-                    compat_request._json_payload = await _read_json_payload(starlette_request)
+                    try:
+                        compat_request._json_payload = await _read_json_payload(starlette_request)
+                    except HTTPException as exc:
+                        if not allow_malformed_json or exc.detail != "Malformed JSON":
+                            raise
+                        compat_request._json_payload = None
                     route_args = defaults | _extract_path_args(route_regex, compat_request.path)
                     response = normalize_response(await run_maybe_async(func, **route_args))
             except Exception as exc:

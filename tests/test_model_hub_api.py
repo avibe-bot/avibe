@@ -2421,6 +2421,42 @@ def test_new_source_is_placed_before_held_out_route_hops(tmp_path):
     ]
 
 
+def test_new_source_preserves_explicit_route_order(tmp_path):
+    service, store, _ = _service(tmp_path)
+    model_id = "claude-opus-4-6"
+    _set_claude_route_fixture(store, ("src_explicit01", "src_listed01"), model_id)
+    store.config.agents["claude"].sources.order = ["src_listed01"]
+    store.config.agents["claude"].routes[model_id] = ModelHubRouteConfig(
+        hops=(
+            ModelHubRouteHopConfig("src_explicit01", model_id),
+            ModelHubRouteHopConfig("src_listed01", model_id),
+        )
+    )
+    new_source = ModelHubSourceConfig(
+        id="src_new0001",
+        kind="api_key",
+        vendor="anthropic",
+        display_name="src_new0001",
+        protocol="anthropic",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id=model_id, provenance="discovered")],
+        credential_ref="cred_src_new0001",
+    )
+    config = service._clone_config(store.config)
+
+    service._apply_source_placement(config, new_source)
+
+    agent = config.agents["claude"]
+    assert agent.sources.order == ["src_listed01", "src_new0001"]
+    assert [hop.source_id for hop in agent.routes[model_id].hops] == [
+        "src_explicit01",
+        "src_listed01",
+        "src_new0001",
+    ]
+
+
 def test_reorder_route_accepts_source_order_atomically(monkeypatch, tmp_path):
     service, store, _ = _service(tmp_path)
     model_id = "claude-opus-4-6"
@@ -2486,6 +2522,29 @@ def test_reorder_route_rejects_non_object_body(monkeypatch, tmp_path, body, cont
     response = client.post(
         "/api/models/agents/claude/chains/reorder",
         content=body,
+        headers=headers,
+        base_url=base_url,
+    )
+
+    assert response.status_code == 400
+    payload = response.get_json()
+    _assert_envelope(payload, ok=False)
+    assert payload["error"] == "invalid_source_order"
+
+
+def test_reorder_route_rejects_malformed_json(monkeypatch, tmp_path):
+    service, _, _ = _service(tmp_path)
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+    headers = {
+        **csrf_headers(client, base_url),
+        "content-type": "application/json",
+    }
+
+    response = client.post(
+        "/api/models/agents/claude/chains/reorder",
+        content=b'{"order":',
         headers=headers,
         base_url=base_url,
     )

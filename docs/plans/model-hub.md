@@ -1607,8 +1607,9 @@ one pinned hop it receives.
 
 ## 9. Explicit non-goals (v3)
 
-- **No product-global or backend-wide priority list.** Execution ordering exists only
-  inside one `(backend, menu model)` Route chain.
+- **No product-global priority list.** The backend-scoped Source order is explicitly in
+  scope, and execution ordering remains configurable inside each `(backend, menu model)`
+  Route chain.
 - **Per-model ordering is explicitly in scope.** Owner ruling 2026-08-07
   supersedes v2's “No per-model ordering” non-goal. The scope is exactly §4.3 and
   §4.6's stored configured-chain input;
