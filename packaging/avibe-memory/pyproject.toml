@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "avibe-memory"
+dynamic = ["version"]
+description = "Optional in-process Memory implementation for Avibe"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "cyhhao", email = "cyhhao@users.noreply.github.com" }
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "avibe-os>=3.0.14.dev0,<3.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/avibe-bot/avibe"
+Repository = "https://github.com/avibe-bot/avibe"
+Documentation = "https://github.com/avibe-bot/avibe#readme"
+Issues = "https://github.com/avibe-bot/avibe/issues"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.version.raw-options]
+search_parent_directories = true
+
+[tool.hatch.build.hooks.custom]

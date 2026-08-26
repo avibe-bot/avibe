@@ -482,14 +482,19 @@ def test_memory_indep_017_core_workflows_run_without_avibe_memory(
     )
 
 
-def test_wave_2c_package_metadata_bundles_avibe_memory() -> None:
-    """Wave 2 keeps Memory in the avibe-os wheel and source distribution."""
+def test_wave_3a_package_metadata_separates_avibe_memory_distribution() -> None:
+    """Wave 3a keeps the implementation out of the core distribution."""
 
     metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     targets = metadata["tool"]["hatch"]["build"]["targets"]
+    memory_metadata = tomllib.loads(
+        (ROOT / "packaging/avibe-memory/pyproject.toml").read_text(encoding="utf-8")
+    )
 
-    assert "avibe_memory" in targets["wheel"]["packages"]
-    assert "avibe_memory/**" in targets["sdist"]["include"]
+    assert "avibe_memory" not in targets["wheel"]["packages"]
+    assert "avibe_memory/**" not in targets["sdist"]["include"]
+    assert "vibe/memory_runtime_manifest.json" in targets["wheel"]["exclude"]
+    assert memory_metadata["project"]["name"] == "avibe-memory"
 
 
 @pytest.mark.asyncio

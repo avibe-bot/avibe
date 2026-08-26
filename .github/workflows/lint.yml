@@ -24,6 +24,7 @@ jobs:
           cache: "pip"
           cache-dependency-path: |
             pyproject.toml
+            packaging/avibe-memory/pyproject.toml
             uv.lock
       - name: Run pre-commit (ruff)
         run: |
@@ -56,15 +57,20 @@ jobs:
           cache: "pip"
           cache-dependency-path: |
             pyproject.toml
+            packaging/avibe-memory/pyproject.toml
             uv.lock
 
       - name: Build package artifact
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          pip install build
+          pip install -e . build pytest
           python scripts/prepare_local_show_runtime_manifest.py
+          python -m build --outdir memory-dist packaging/avibe-memory
           python -m build --wheel
+          AVIBE_CORE_WHEEL="$(ls dist/avibe_os-*.whl)" \
+          AVIBE_MEMORY_WHEEL="$(ls memory-dist/avibe_memory-*.whl)" \
+            pytest tests/test_memory_distribution.py -v
 
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
