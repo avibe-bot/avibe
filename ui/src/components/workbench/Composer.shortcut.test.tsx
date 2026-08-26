@@ -132,6 +132,20 @@ describe('Composer voice shortcut', () => {
     await waitFor(() => expect(voiceMocks.getUserMedia).toHaveBeenCalledOnce());
   });
 
+  it('keeps shortcut ownership after the microphone control changes to finish', async () => {
+    renderComposer('clicked-shortcut-session');
+    const mic = await screen.findByRole('button', { name: en.chat.compose.voice });
+    await act(async () => undefined);
+    mic.focus();
+
+    fireEvent.click(mic);
+    const finish = await screen.findByRole('button', { name: en.chat.compose.stopRecording });
+    await waitFor(() => expect(document.activeElement).toBe(finish));
+
+    fireEvent.keyDown(finish, { code: 'KeyZ', altKey: true });
+    expect(voiceMocks.finish).toHaveBeenCalledOnce();
+  });
+
   it('does not advertise or handle the shortcut when voice input is disabled', async () => {
     renderComposer('disabled-shortcut-session', { disabled: true });
     const mic = await screen.findByRole('button', { name: en.chat.compose.voice });

@@ -42,6 +42,19 @@ type ControlMessage =
 const PARENT_ESCAPE_CLAIM_SELECTOR =
   'input, textarea, [contenteditable]:not([contenteditable="false"]), [data-state="open"], [role="menu"], [aria-expanded="true"][aria-haspopup], [role="dialog"]:not([data-window-id]), dialog[open]';
 
+const ANNOTATION_SHORTCUT_BLOCKING_SELECTOR = [
+  '[aria-expanded="true"][aria-haspopup]',
+  '[role="menu"][data-state="open"]',
+  '[role="listbox"][data-state="open"]',
+  '[role="dialog"]:not([data-window-id])',
+  '[role="alertdialog"]',
+  'dialog[open]',
+].join(', ');
+
+function annotationShortcutBlocked(target: Element | null): boolean {
+  return Boolean(target?.closest?.(ANNOTATION_SHORTCUT_BLOCKING_SELECTOR));
+}
+
 /**
  * `src` is the current iframe URL; changing it (first open, or a private↔public
  * re-point, or a session switch that clears it) drops the derived state back to
@@ -185,7 +198,7 @@ export function useShowPageAnnotation(src: string | null, shortcutActive = true)
       if (stateRef.current?.enabled === true) startEscapeListening();
       frameShortcutCleanupRef.current = bindFrameChord(
         iframe,
-        (event) => {
+        (event, activeInFrame) => {
           return (
             !event.defaultPrevented
             && !event.repeat
@@ -193,6 +206,7 @@ export function useShowPageAnnotation(src: string | null, shortcutActive = true)
             && stateRef.current?.available === true
             && stateRef.current.enabled !== true
             && actionShortcutMatches(event, shortcutRef.current)
+            && !annotationShortcutBlocked(activeInFrame)
           );
         },
         enableFromShortcut,
@@ -221,6 +235,7 @@ export function useShowPageAnnotation(src: string | null, shortcutActive = true)
       ) {
         return;
       }
+      if (annotationShortcutBlocked(event.target as Element | null)) return;
       event.preventDefault();
       enableFromShortcut();
     };

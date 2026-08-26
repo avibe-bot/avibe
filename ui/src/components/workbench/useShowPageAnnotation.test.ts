@@ -109,6 +109,69 @@ describe('useShowPageAnnotation shortcut', () => {
     );
   });
 
+  it('leaves the iframe shortcut with its active dialog or menu overlay', () => {
+    const { iframe } = mountBridge();
+    const postMessage = vi.spyOn(iframe.contentWindow!, 'postMessage');
+    const frameDocument = iframe.contentDocument!;
+    reportState(iframe, false);
+    postMessage.mockClear();
+
+    const dialog = frameDocument.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    const dialogButton = frameDocument.createElement('button');
+    dialog.append(dialogButton);
+    frameDocument.body.append(dialog);
+    dialogButton.focus();
+    expect(dispatchAnnotationShortcut(iframe.contentWindow!).defaultPrevented).toBe(false);
+
+    dialog.remove();
+    const menu = frameDocument.createElement('div');
+    menu.setAttribute('role', 'menu');
+    menu.dataset.state = 'open';
+    const menuItem = frameDocument.createElement('button');
+    menu.append(menuItem);
+    frameDocument.body.append(menu);
+    menuItem.focus();
+    expect(dispatchAnnotationShortcut(iframe.contentWindow!).defaultPrevented).toBe(false);
+    expect(postMessage).not.toHaveBeenCalled();
+  });
+
+  it('does not mistake persistent iframe navigation for an open overlay', () => {
+    const { iframe } = mountBridge();
+    const postMessage = vi.spyOn(iframe.contentWindow!, 'postMessage');
+    const frameDocument = iframe.contentDocument!;
+    reportState(iframe, false);
+    postMessage.mockClear();
+
+    const navigation = frameDocument.createElement('div');
+    navigation.setAttribute('role', 'menu');
+    const pageButton = frameDocument.createElement('button');
+    frameDocument.body.append(navigation, pageButton);
+    pageButton.focus();
+
+    expect(dispatchAnnotationShortcut(iframe.contentWindow!).defaultPrevented).toBe(true);
+    expect(postMessage).toHaveBeenLastCalledWith(
+      { type: 'avibe:annotation:control', action: 'enable' },
+      window.location.origin,
+    );
+  });
+
+  it('leaves the parent shortcut with a foreground overlay', () => {
+    const { iframe } = mountBridge();
+    const postMessage = vi.spyOn(iframe.contentWindow!, 'postMessage');
+    reportState(iframe, false);
+    postMessage.mockClear();
+
+    const dialog = document.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    const dialogButton = document.createElement('button');
+    dialog.append(dialogButton);
+    document.body.append(dialog);
+
+    expect(dispatchAnnotationShortcut(dialogButton).defaultPrevented).toBe(false);
+    expect(postMessage).not.toHaveBeenCalled();
+  });
+
   it('leaves parent and iframe chords alone when this Show Page is not in front', () => {
     const { iframe } = mountBridge('/show/session', false);
     const postMessage = vi.spyOn(iframe.contentWindow!, 'postMessage');

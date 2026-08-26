@@ -427,6 +427,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const recordingSessionRef = useRef<VoiceRecordingSession | null>(null);
   const recordingStartRef = useRef(false);
   const pendingVoiceInsertionRef = useRef<VoiceInsertionSnapshot | null>(null);
+  const focusNextVoiceControlRef = useRef(false);
+  const finishVoiceControlRef = useRef<HTMLButtonElement | null>(null);
   const recordingTickerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const unmountedRef = useRef(false);
   const disabledRef = useRef(disabled);
@@ -1222,6 +1224,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   );
   const [stopArmed, setStopArmed] = useState(false);
 
+  useLayoutEffect(() => {
+    if (!focusNextVoiceControlRef.current) return;
+    if (voiceControlMode === 'finish') {
+      finishVoiceControlRef.current?.focus({ preventScroll: true });
+      focusNextVoiceControlRef.current = false;
+    } else if (voiceControlMode !== 'loading') {
+      focusNextVoiceControlRef.current = false;
+    }
+  }, [voiceControlMode]);
+
   const handleVoiceShortcut = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
     if (
       !voiceShortcutAvailable
@@ -1418,7 +1430,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 onContextMenu={() => {
                   pendingVoiceInsertionRef.current = null;
                 }}
-                onClick={(event) => toggleRecording(event.detail > 0)}
+                onClick={(event) => {
+                  focusNextVoiceControlRef.current = true;
+                  toggleRecording(event.detail > 0);
+                }}
                 disabled={isVoiceControlDisabled(
                   disabled,
                   recording,
@@ -1434,6 +1449,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             )}
             {voiceControlMode === 'finish' && (
               <Button
+                ref={finishVoiceControlRef}
                 type="button"
                 variant="default"
                 size="icon"

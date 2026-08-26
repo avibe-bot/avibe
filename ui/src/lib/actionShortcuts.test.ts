@@ -98,8 +98,13 @@ describe('action shortcuts', () => {
 
   it('reserves only Avibe-owned chords relevant to these surfaces', () => {
     const enter = shortcutFromKeyboardEvent(chord({ code: 'Enter', key: 'Enter', ctrlKey: true }))!;
+    const windowClose = shortcutFromKeyboardEvent(chord({ code: 'KeyW', altKey: true }))!;
+    const dockLaunch = shortcutFromKeyboardEvent(chord({ code: 'Digit1', altKey: true }))!;
     expect(isReservedActionShortcut('voiceInput', enter)).toBe(true);
     expect(isReservedActionShortcut('showPageAnnotation', enter)).toBe(false);
+    expect(isReservedActionShortcut('showPageAnnotation', windowClose)).toBe(true);
+    expect(isReservedActionShortcut('showPageAnnotation', dockLaunch)).toBe(true);
+    expect(isReservedActionShortcut('voiceInput', windowClose)).toBe(false);
     expect(isReservedActionShortcut('voiceInput', shortcutFromKeyboardEvent(chord({ code: 'KeyK', metaKey: true }))!)).toBe(true);
     expect(isReservedActionShortcut('voiceInput', shortcutFromKeyboardEvent(chord({ code: 'KeyD', ctrlKey: true, shiftKey: true }))!)).toBe(true);
     expect(isReservedActionShortcut('voiceInput', shortcutFromKeyboardEvent(chord({ code: 'KeyL', ctrlKey: true }))!)).toBe(false);

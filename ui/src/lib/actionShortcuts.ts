@@ -182,6 +182,14 @@ export function isReservedActionShortcut(
   id: ActionShortcutId,
   shortcut: ActionShortcut,
 ): boolean {
+  const exactAlt = shortcut.altKey && !shortcut.ctrlKey && !shortcut.metaKey && !shortcut.shiftKey;
+  if (
+    id === 'showPageAnnotation'
+    && exactAlt
+    && (shortcut.code === 'KeyW' || /^Digit[1-9]$/.test(shortcut.code))
+  ) {
+    return true;
+  }
   // Both Chat composer implementations submit every non-Shift Enter.
   if (
     id === 'voiceInput'
