@@ -2779,6 +2779,8 @@ def test_runtime_clean_reclaims_each_shared_consumer_in_preview_and_real_run(
                     "runtime_version": version,
                     "platform": runtime_platform_tag(),
                     "manifest_sha256": manifest_sha,
+                    "manifest_source": "package:tests/runtime-manifest.json",
+                    "archive_name": f"fixture-{version}.tar.gz",
                     "archive_sha256": archive_sha,
                     "binary_sha256": binary_sha,
                     "bin_path": manager.spec.default_bin_path,
