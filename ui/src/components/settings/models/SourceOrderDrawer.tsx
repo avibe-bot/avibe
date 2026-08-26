@@ -234,7 +234,8 @@ export const SourceOrderDrawer: React.FC<{
     if (saving || readState !== 'ready' || available.length === 0) return;
     void orderWrite.track(async () => {
       try {
-        const echoed = await modelsApi.putAgentSources(agent.backend, { order });
+        await modelsApi.putAgentSources(agent.backend, { order });
+        const echoed = await modelsApi.reorderAgentChains(agent.backend);
         saved.current = echoed.sources?.order ?? order;
         setOrder(saved.current);
         setDirty(false);

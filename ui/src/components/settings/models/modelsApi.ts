@@ -114,6 +114,8 @@ export type ModelsApi = {
   getAgentSources(backend: AgentBackend): Promise<AgentSupply>;
   /** Total write of the exact stored source order. */
   putAgentSources(backend: AgentBackend, body: AgentSourcesPut): Promise<AgentSupply>;
+  /** Apply the stored source order to every existing route for this backend. */
+  reorderAgentChains(backend: AgentBackend): Promise<AgentSupply>;
   /** Resolution chain for one model. Hub mode only — direct answers `direct_mode`. */
   getAgentChain(backend: AgentBackend, model: string): Promise<AgentChain>;
   /** Complete overview chain projection for one Hub backend. */
@@ -452,6 +454,7 @@ export const modelsApi: ModelsApi = {
   // The body is TOTAL and closed: the route rejects unknown keys, so
   // `contract_version` is deliberately absent (unlike every other write here).
   putAgentSources: (backend, body) => call<{ agent: AgentSupply }>(`/api/models/agents/${backend}/sources`, jsonInit('PUT', body)).then((r) => r.agent),
+  reorderAgentChains: (backend) => call<{ agent: AgentSupply }>(`/api/models/agents/${backend}/chains/reorder`, jsonInit('POST')).then((r) => r.agent),
   getAgentChain: (backend, model) => call<{ chain: AgentChain }>(`/api/models/agents/${backend}/chain?model=${encodeURIComponent(model)}`).then((r) => r.chain),
   getAgentChains: (backend) => call<{ chains: AgentChain[] }>(`/api/models/agents/${backend}/chains`).then((r) => r.chains),
   putAgentChain: (backend, model, body) => call<AgentChainMutation>(`/api/models/agents/${backend}/chain?model=${encodeURIComponent(model)}`, jsonInit('PUT', body)),

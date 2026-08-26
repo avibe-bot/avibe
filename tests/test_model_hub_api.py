@@ -2265,6 +2265,31 @@ def test_source_adoption_projection_is_sorted_by_backend_and_menu_model(tmp_path
     ]
 
 
+def test_source_adoption_projection_ignores_routes_for_direct_backends(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_direct_adopted",
+        kind="api_key",
+        vendor="anthropic",
+        display_name="Direct source",
+        protocol="anthropic",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id="claude-opus-4-6", provenance="discovered")],
+        credential_ref="cred_direct_adopted",
+    )
+    store.config.sources = [source]
+    store.config.agents["claude"].routes = {
+        "claude-opus-4-6": ModelHubRouteConfig(
+            hops=(ModelHubRouteHopConfig(source.id, "claude-opus-4-6"),)
+        )
+    }
+    store.config.agents["claude"].mode = "direct"
+
+    assert service.list_sources()[0]["adopted_by"] == []
+
+
 def test_direct_to_hub_adoption_does_not_leak_partial_state_on_save_failure(tmp_path):
     class FailingStore(MemoryStore):
         def save(self, config):

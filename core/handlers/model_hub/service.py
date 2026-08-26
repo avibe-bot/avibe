@@ -1589,6 +1589,7 @@ class ModelHubService:
         result = [
             {"backend": backend, "menu_model": menu_model}
             for backend in MODEL_HUB_BACKENDS
+            if config.agents[backend].mode == "hub"
             for menu_model, route in config.agents[backend].routes.items()
             if any(hop.source_id == source_id for hop in route.hops)
         ]
