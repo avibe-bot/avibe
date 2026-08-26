@@ -337,6 +337,12 @@ def _provider_package() -> str:
     return "@ai-sdk/openai-compatible"
 
 
+# OpenCode merges custom providers with its built-ins by id. A private id keeps
+# internal title/compaction traffic on OpenCode's own providers instead of
+# sending those unrelated requests through the Model Hub turn gateway.
+_OPENCODE_MODEL_HUB_PROVIDER_ID = "avibe-model-hub"
+
+
 def _provider_base_url(gateway_base_url: str) -> str:
     return f"{gateway_base_url.rstrip('/')}/v1"
 
@@ -1007,9 +1013,9 @@ class ModelHubRuntimeRouter:
             package = _provider_package()
             base_url = _provider_base_url(gateway_base_url)
             provider = providers.setdefault(
-                provider_id,
+                _OPENCODE_MODEL_HUB_PROVIDER_ID,
                 {
-                    "name": provider_id,
+                    "name": "Avibe Model Hub",
                     "npm": package,
                     "options": {"apiKey": gateway_token, "baseURL": base_url},
                     "models": {},
@@ -1023,12 +1029,12 @@ class ModelHubRuntimeRouter:
             if self.turn_gateway is None:
                 prefix = await self._source_prefix(source.id)
                 runtime_model = f"{prefix}/{exact_model_id}"
-            provider["models"][menu_model_id] = {
+            provider["models"][identifier] = {
                 "id": runtime_model,
                 "name": (
                     model.display_name
                     if model is not None and model.display_name
-                    else menu_model_id
+                    else identifier
                 ),
             }
             projected_identifiers.append(identifier)
@@ -1082,7 +1088,10 @@ class ModelHubRuntimeRouter:
         write_atomic(self.overlay_path, content)
 
 
-def opencode_model_for_overlay(model: str | None, overlay: OpenCodeOverlay | None) -> str | None:
+def opencode_requested_model_for_overlay(
+    model: str | None,
+    overlay: OpenCodeOverlay | None,
+) -> str | None:
     if overlay is None:
         return model
     candidate = str(model or "").strip()
@@ -1093,3 +1102,13 @@ def opencode_model_for_overlay(model: str | None, overlay: OpenCodeOverlay | Non
     if candidate in overlay.checked_identifiers:
         return candidate
     raise ModelHubError("mapping_target_unavailable", status=409)
+
+
+def opencode_model_for_overlay(
+    model: str | None,
+    overlay: OpenCodeOverlay | None,
+) -> str | None:
+    requested_model = opencode_requested_model_for_overlay(model, overlay)
+    if overlay is None or requested_model is None:
+        return requested_model
+    return f"{_OPENCODE_MODEL_HUB_PROVIDER_ID}/{requested_model}"

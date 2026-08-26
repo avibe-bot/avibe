@@ -24,6 +24,7 @@ from modules.agents.model_hub import (
     claude_setting_sources_for_launch,
     launch_for_context,
     opencode_model_for_overlay,
+    opencode_requested_model_for_overlay,
     persisted_launch_identity,
 )
 
@@ -184,7 +185,12 @@ def test_opencode_overlay_requires_exact_checked_identifier():
         checked_identifiers=("openai/gpt-5", "custom/gpt-5"),
         available_identifiers=("openai/gpt-5", "custom/gpt-5"),
     )
-    assert opencode_model_for_overlay("openai/gpt-5", overlay) == "openai/gpt-5"
+    assert opencode_requested_model_for_overlay("openai/gpt-5", overlay) == (
+        "openai/gpt-5"
+    )
+    assert opencode_model_for_overlay("openai/gpt-5", overlay) == (
+        "avibe-model-hub/openai/gpt-5"
+    )
     with pytest.raises(ModelHubError):
         opencode_model_for_overlay("gpt-5", overlay)
 

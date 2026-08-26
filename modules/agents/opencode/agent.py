@@ -52,6 +52,7 @@ from modules.agents.model_hub import (
     bind_launch,
     bind_turn_mode,
     opencode_model_for_overlay,
+    opencode_requested_model_for_overlay,
     persisted_launch_identity,
     resolve_opencode_overlay_launch,
 )
@@ -1182,14 +1183,21 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             if not model_str:
                 model_str = server.get_agent_model_from_config(agent_to_use)
             opencode_cfg = getattr(self.controller.config, "opencode", None)
-            model_str = opencode_model_for_overlay(model_str, model_hub_overlay)
-            if model_hub_runtime is not None and model_str:
+            requested_model_str = opencode_requested_model_for_overlay(
+                model_str,
+                model_hub_overlay,
+            )
+            if model_hub_runtime is not None and requested_model_str:
                 model_hub_launch = await resolve_opencode_overlay_launch(
                     self.controller,
-                    model_str,
+                    requested_model_str,
                     model_hub_overlay,
                 )
                 bind_launch(request.context, model_hub_launch)
+            model_str = opencode_model_for_overlay(
+                requested_model_str,
+                model_hub_overlay,
+            )
             # Bare model id (no ``provider/`` prefix): only inject ``providerID``
             # when the user has explicitly chosen a default provider in Settings.
             # Otherwise leave ``model_dict`` unset so OpenCode keeps using its own

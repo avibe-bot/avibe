@@ -4163,7 +4163,8 @@ def test_opencode_overlay_projects_menu_identity_to_exact_hop_model(tmp_path: Pa
 
     assert overlay is not None
     payload = json.loads(overlay.content)
-    assert payload["provider"]["openai"]["models"]["menu-model"]["id"] == ("openai/menu-model")
+    provider = payload["provider"]["avibe-model-hub"]
+    assert provider["models"]["openai/menu-model"]["id"] == "openai/menu-model"
     assert overlay.launches[0].target_model == "upstream-model"
 
 
@@ -4202,10 +4203,15 @@ def test_opencode_overlay_supports_mixed_protocols_under_one_provider(tmp_path: 
     overlay = asyncio.run(router.prepare_opencode_overlay())
 
     assert overlay is not None
-    provider = json.loads(overlay.content)["provider"]["custom"]
+    payload = json.loads(overlay.content)
+    assert set(payload["provider"]) == {"avibe-model-hub"}
+    provider = payload["provider"]["avibe-model-hub"]
     assert provider["npm"] == "@ai-sdk/openai-compatible"
     assert provider["options"]["baseURL"] == "http://127.0.0.1:19000/opencode/v1"
-    assert set(provider["models"]) == {"first-model", "second-model"}
+    assert set(provider["models"]) == {
+        "custom/first-model",
+        "custom/second-model",
+    }
     assert {launch.target_model for launch in overlay.launches} == {
         "first-model",
         "second-model",
@@ -4270,11 +4276,11 @@ def test_opencode_overlay_preserves_checked_route_with_stale_exact_hop(
     overlay = asyncio.run(router.prepare_opencode_overlay())
 
     assert overlay is not None
-    provider = json.loads(overlay.content)["provider"]["openai"]
+    provider = json.loads(overlay.content)["provider"]["avibe-model-hub"]
     assert provider["models"] == {
-        "menu-model": {
+        "openai/menu-model": {
             "id": "openai/menu-model",
-            "name": "menu-model",
+            "name": "openai/menu-model",
         }
     }
     assert overlay.checked_identifiers == ("openai/menu-model",)

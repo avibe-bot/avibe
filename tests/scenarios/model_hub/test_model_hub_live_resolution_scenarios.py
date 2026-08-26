@@ -278,7 +278,7 @@ def test_unpinned_hub_projection_is_null_while_explicit_turn_resolves(
     [
         ("claude", _requested_model("claude"), "messages"),
         ("codex", _requested_model("codex"), "responses"),
-        ("opencode", _requested_model("opencode"), "messages"),
+        ("opencode", _requested_model("opencode"), "chat/completions"),
     ],
 )
 @pytest.mark.parametrize(
