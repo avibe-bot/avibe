@@ -334,7 +334,7 @@ describe('Source entity landing through the shared authority', () => {
     expect(page).not.toMatch(/const sourceMutation\s*=|activeSourceGenerations/);
     expect(page).toMatch(/await refreshAuthority\.run/);
     expect(sourceRetry).toMatch(/await refresh\(\)/);
-    expect(supplyRetry).toMatch(/await refresh\(\)/);
+    expect(supplyRetry).toMatch(/await refreshAgentPresence\(\)/);
     expect(sourceRetry).not.toMatch(/modelsApi\.listSources/);
     expect(supplyRetry).not.toMatch(/modelsApi\.listAgents/);
   });

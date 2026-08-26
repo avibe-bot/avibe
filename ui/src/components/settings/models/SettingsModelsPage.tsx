@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { ArrowLeft, Gauge, LoaderCircle, Power, Route, ScrollText } from 'lucide-react';
+import { ArrowLeft, Gauge, LoaderCircle, Power, RefreshCw, Route, ScrollText } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Badge } from '@/components/ui/badge';
@@ -399,6 +399,7 @@ export const SettingsModelsPage: React.FC = () => {
   const [sourceIntentAuthority] = React.useState(createIntentAuthority);
   const [sourceCollectionReads] = React.useState(() => createSourceCollectionReadAuthority(modelsApi));
   const [agentCollectionReads] = React.useState(() => createAgentCollectionReadAuthority(modelsApi));
+  const [presenceRefreshing, setPresenceRefreshing] = React.useState(false);
   const sourceMutationReport = useSourceMutationReport();
   const overviewRef = React.useRef<HTMLDivElement>(null);
   const pageRef = React.useRef<HTMLDivElement>(null);
@@ -729,19 +730,27 @@ export const SettingsModelsPage: React.FC = () => {
     return result;
   }, [refresh, sourceCollectionReads, sourceEntityAuthority, sourceWriteRegistry]);
 
+  const refreshAgentPresence = React.useCallback(async () => {
+    setPresenceRefreshing(true);
+    try {
+      const result = await agentCollectionReads.refresh();
+      if (!aliveRef.current || result.kind === 'stale') return;
+      setSupplyRead(readyRegion(result.value));
+    } finally {
+      if (aliveRef.current) setPresenceRefreshing(false);
+    }
+  }, [agentCollectionReads]);
+
   React.useEffect(() => {
     let current = true;
-    void refresh().then(async () => {
-      try {
-        const result = await agentCollectionReads.refresh();
-        if (!current || !aliveRef.current || result.kind === 'stale') return;
-        setSupplyRead(readyRegion(result.value));
-      } catch {
+    void refresh().then(() => {
+      if (!current) return;
+      void refreshAgentPresence().catch(() => {
         // The fast snapshot remains authoritative if optional deep discovery fails.
-      }
+      });
     });
     return () => { current = false; };
-  }, [agentCollectionReads, refresh]);
+  }, [refresh, refreshAgentPresence]);
 
   const retrySources = React.useCallback(async () => {
     setSourcesRead(beginRegionRead);
@@ -749,9 +758,13 @@ export const SettingsModelsPage: React.FC = () => {
   }, [refresh]);
 
   const retrySupply = React.useCallback(async () => {
-    setSupplyRead(beginRegionRead);
-    await refresh();
-  }, [refresh]);
+    if (presenceRefreshing) return;
+    try {
+      await refreshAgentPresence();
+    } catch {
+      if (aliveRef.current) setSupplyRead(failRegionRead);
+    }
+  }, [presenceRefreshing, refreshAgentPresence]);
 
   const retryEvents = React.useCallback(async () => {
     await refreshEventHead();
@@ -1162,6 +1175,16 @@ export const SettingsModelsPage: React.FC = () => {
                 directCount={directEmpty ? installedAgents.length : undefined}
               />
               {runtimeConfigurationVisible && !directEmpty && <TakeoverPill count={takeoverCount} />}
+              {runtimeConfigurationVisible && <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="size-8"
+                disabled={presenceRefreshing}
+                aria-label={t('settings.models.direct.action.refreshAgents')}
+                title={t('settings.models.direct.action.refreshAgents')}
+                onClick={() => void retrySupply()}
+              ><RefreshCw aria-hidden className={cn('size-3.5', presenceRefreshing && 'animate-spin')} /></Button>}
               <span title={runtimeSwitchLabel}>
                 <ToggleSwitch
                   enabled={runtimeEnabled}

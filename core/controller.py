@@ -455,7 +455,7 @@ class Controller:
 
         def cli_present(backend: str) -> bool:
             # Payload assembly runs on the controller loop. Read only the last
-            # worker-produced snapshot here; a missing/erroring probe is false.
+            # complete worker-produced snapshot here.
             return cli_presence.get(backend, False)
 
         def refresh_cli_presence(include_npm_global: bool) -> None:
@@ -480,7 +480,7 @@ class Controller:
                 )
             except Exception:
                 logger.warning("Model Hub CLI presence probe failed", exc_info=True)
-                resolved_paths = {}
+                return
             refreshed = {
                 backend: resolved_paths.get(configured_path) is not None
                 for backend, configured_path in configured_paths.items()

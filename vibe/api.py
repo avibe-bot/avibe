@@ -439,14 +439,24 @@ def resolve_cli_paths(
 ) -> dict[str, str | None]:
     """Resolve a CLI batch while querying each npm installation only once."""
 
-    resolved = {
-        binary: resolve_cli_path(binary, include_npm_global=False)
-        for binary in binaries
-    }
+    resolved: dict[str, str | None] = {}
+    for binary in binaries:
+        try:
+            resolved[binary] = resolve_cli_path(
+                binary,
+                include_npm_global=False,
+            )
+        except Exception:
+            logger.warning("CLI path probe failed for %s", binary, exc_info=True)
+            resolved[binary] = None
     if not include_npm_global or all(path is not None for path in resolved.values()):
         return resolved
 
-    prefixes = _npm_global_prefixes()
+    try:
+        prefixes = _npm_global_prefixes()
+    except Exception:
+        logger.warning("npm global prefix probe failed", exc_info=True)
+        return resolved
     for binary, path in resolved.items():
         if path is not None or not binary:
             continue

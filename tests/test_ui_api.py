@@ -1687,6 +1687,28 @@ def test_resolve_cli_paths_finds_backend_in_inactive_nvm_version_without_npm_que
     assert api.resolve_cli_paths(["codex"]) == {"codex": str(inactive_codex)}
 
 
+def test_resolve_cli_paths_preserves_completed_paths_when_other_probes_fail(
+    monkeypatch,
+):
+    def resolve(binary, *, include_npm_global):
+        assert include_npm_global is False
+        if binary == "codex":
+            raise OSError("NVM inventory changed during discovery")
+        return f"/resolved/{binary}" if binary == "claude" else None
+
+    def fail_prefix_probe():
+        raise OSError("npm disappeared")
+
+    monkeypatch.setattr(api, "resolve_cli_path", resolve)
+    monkeypatch.setattr(api, "_npm_global_prefixes", fail_prefix_probe)
+
+    assert api.resolve_cli_paths(["claude", "codex", "opencode"]) == {
+        "claude": "/resolved/claude",
+        "codex": None,
+        "opencode": None,
+    }
+
+
 def test_install_agent_returns_resolved_path(monkeypatch):
     class CompletedProcess:
         returncode = 0

@@ -256,6 +256,46 @@ describe('SettingsModelsPage surface branches', () => {
     expect(modelsApi.refreshAgentPresence).toHaveBeenCalledOnce();
   });
 
+  it('retries deep backend detection without remounting the page', async () => {
+    const unavailable = [
+      { ...directAgent('claude'), cli_present: false },
+      { ...directAgent('codex'), cli_present: false },
+      { ...directAgent('opencode'), cli_present: false },
+    ];
+    const available = [
+      unavailable[0],
+      directAgent('codex'),
+      unavailable[2],
+    ];
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'listAgents')
+      .mockResolvedValueOnce(unavailable)
+      .mockResolvedValueOnce(unavailable)
+      .mockResolvedValue(available);
+    vi.mocked(modelsApi.refreshAgentPresence)
+      .mockResolvedValueOnce(unavailable)
+      .mockResolvedValueOnce(available);
+    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
+    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+
+    render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <SettingsModelsPage />
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    expect(await screen.findByText(/No agent backend was found|没有找到 Agent 后端/i)).toBeTruthy();
+    const retry = await screen.findByRole('button', { name: /Detect Agent backends again|重新检测 Agent 后端/i });
+    await waitFor(() => expect((retry as HTMLButtonElement).disabled).toBe(false));
+    const user = userEvent.setup();
+    await user.click(retry);
+
+    expect(await screen.findByRole('button', { name: /^Switch to Gateway$|^切换到网关$/i })).toBeTruthy();
+    expect(modelsApi.refreshAgentPresence).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps an unread runtime visible on the direct-only surface', async () => {
     vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
     vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([

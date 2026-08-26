@@ -65,9 +65,12 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
     monkeypatch.setattr(turn_gateway, "ModelHubTurnGateway", Gateway)
     monkeypatch.setattr(agent_model_hub, "ModelHubRuntimeRouter", Router)
     presence_probes = []
+    probe_failure = [False]
 
     def resolve_cli_paths(binaries, *, include_npm_global=True):
         presence_probes.append((binaries, include_npm_global))
+        if probe_failure[0]:
+            raise OSError("CLI inventory unavailable")
         return {
             binary: f"/usr/bin/{binary}" if binary == "codex" else None
             for binary in binaries
@@ -94,6 +97,10 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
     assert captured["cli_present_override"]("codex") is True
     assert captured["cli_present_override"]("claude") is False
     assert presence_probes == [(["claude", "codex", "opencode"], False)]
+    probe_failure[0] = True
+    captured["cli_presence_refresh"](True)
+    assert captured["cli_present_override"]("codex") is True
+    assert presence_probes[-1] == (["claude", "codex", "opencode"], True)
     assert controller.model_hub_turn_gateway.language_provider() == "zh"
     assert calls == [
         ("gateway", service, controller.model_hub_turn_gateway.language_provider),

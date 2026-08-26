@@ -751,7 +751,8 @@
           }
         },
         "action": {
-          "switchToGateway": "Switch to gateway"
+          "switchToGateway": "Switch to gateway",
+          "refreshAgents": "Detect Agent backends again"
         },
         "benefits": {
           "title": "Switch to the gateway and you gain three things",

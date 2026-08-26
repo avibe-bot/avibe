@@ -751,7 +751,8 @@
           }
         },
         "action": {
-          "switchToGateway": "切换到网关"
+          "switchToGateway": "切换到网关",
+          "refreshAgents": "重新检测 Agent 后端"
         },
         "benefits": {
           "title": "切换到网关，你会多出三件事",
