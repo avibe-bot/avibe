@@ -665,6 +665,54 @@ async def test_disabled_preflight_uses_one_temporary_runtime() -> None:
     assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
 
 
+@pytest.mark.parametrize("operation", ("preflight", "install"))
+@pytest.mark.asyncio
+async def test_explicit_recovery_retries_after_cached_plugin_failure(
+    operation: str,
+) -> None:
+    controller = Controller.__new__(Controller)
+    controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)
+    controller.memory_adapter = DisabledMemoryAdapter()
+    controller.memory_runtime = None
+    controller.memory_module = None
+    controller._memory_reconcile_task = None
+    controller._memory_plugin_error = MemoryPluginUnavailableError("startup failed")
+    candidate = replace(controller.config.memory, enabled=True)
+    calls: list[tuple[str, object]] = []
+
+    class _Runtime:
+        module = object()
+        closed = False
+        retired = False
+
+        async def preflight(self, config) -> dict[str, object]:
+            calls.append(("preflight", config))
+            return {"ok": True}
+
+        async def install_artifact(self) -> dict[str, object]:
+            calls.append(("install", controller.config.memory))
+            return {"ok": True}
+
+        async def close(self) -> None:
+            self.closed = True
+
+    runtime = _Runtime()
+    controller._create_memory_runtime = lambda config, **_kwargs: runtime
+
+    if operation == "preflight":
+        result = await controller.preflight_memory(candidate)
+        expected_calls = [("preflight", candidate)]
+    else:
+        result = await controller.install_memory_runtime()
+        expected_calls = [("install", controller.config.memory)]
+
+    assert result == {"ok": True}
+    assert calls == expected_calls
+    assert runtime.closed is True
+    assert controller._memory_plugin_error is None
+    assert controller.memory_runtime is None
+
+
 @pytest.mark.asyncio
 async def test_disabled_install_owns_runtime_until_successful_close() -> None:
     controller = Controller.__new__(Controller)

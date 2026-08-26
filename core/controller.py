@@ -936,6 +936,7 @@ class Controller:
         memory_config: MemoryConfig | None = None,
         *,
         allow_disabled: bool = False,
+        retry_plugin_error: bool = False,
     ) -> AsyncIterator[_MemoryRuntimeLease]:
         """Lease the sole runtime for one non-destructive explicit operation."""
 
@@ -970,7 +971,7 @@ class Controller:
             temporary = runtime is None
             if temporary:
                 plugin_error = getattr(self, "_memory_plugin_error", None)
-                if plugin_error is not None:
+                if plugin_error is not None and not retry_plugin_error:
                     raise plugin_error
                 runtime = self._create_memory_runtime(
                     selected_config,
@@ -1025,13 +1026,19 @@ class Controller:
     async def preflight_memory(self, memory_config: MemoryConfig) -> dict[str, Any]:
         """Preflight a candidate without activating capture on a disabled host."""
 
-        async with self._borrow_memory_runtime(memory_config) as lease:
+        async with self._borrow_memory_runtime(
+            memory_config,
+            retry_plugin_error=True,
+        ) as lease:
             return await lease.runtime.preflight(memory_config)
 
     async def install_memory_runtime(self) -> dict[str, Any]:
         """Install the managed artifact through Controller runtime ownership."""
 
-        async with self._borrow_memory_runtime(allow_disabled=True) as lease:
+        async with self._borrow_memory_runtime(
+            allow_disabled=True,
+            retry_plugin_error=True,
+        ) as lease:
             return await lease.runtime.install_artifact()
 
     async def reconcile_memory(self, memory_config: MemoryConfig) -> dict[str, Any]:
