@@ -516,7 +516,37 @@ def test_memory_cli_locale_read_failure_keeps_closed_service_down_error(monkeypa
     monkeypatch.setattr(internal_client, "memory_status_sync", unavailable)
 
     assert cli.cmd_memory(args) == 1
-    assert capsys.readouterr().err.strip() == "Memory status failed: memory_sidecar_unavailable"
+    assert capsys.readouterr().err.strip() == "Memory status failed: Memory sidecar unavailable"
+
+
+@pytest.mark.parametrize(
+    ("code", "label"),
+    [
+        ("memory_plugin_unavailable", "Memory implementation unavailable"),
+        ("memory_plugin_incompatible", "Memory implementation is incompatible"),
+    ],
+)
+def test_memory_cli_plugin_failure_localizes_human_error_without_changing_json_code(
+    monkeypatch,
+    capsys,
+    code,
+    label,
+) -> None:
+    args = cli.build_parser().parse_args(["memory", "status"])
+    monkeypatch.setattr(cli, "_memory_cli_language", lambda: "en")
+    monkeypatch.setattr(
+        internal_client,
+        "memory_status_sync",
+        lambda **_kwargs: {
+            "status_code": 503,
+            "body": {"status": "failed", "error": code},
+        },
+    )
+
+    assert cli.cmd_memory(args) == 1
+    error = capsys.readouterr().err.strip()
+    assert label in error
+    assert code not in error
 
 
 @pytest.mark.parametrize("outcome", ["accepted", "duplicate"])

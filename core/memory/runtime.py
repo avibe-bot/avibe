@@ -35,7 +35,6 @@ from core.memory.artifact import (
     MemoryRuntimeActivationError,
     get_memory_artifact_manager,
 )
-from core.memory.attachments import IM_ATTACHMENT_CAPTURE_PLATFORMS
 from core.blocking import run_blocking
 from core.memory.confined_filesystem import (
     ConfinedFilesystemError,
@@ -59,6 +58,7 @@ from core.memory.supervisor import (
     EverOSSupervisorFactory,
     EverOSSupervisorStatus,
 )
+from vibe.memory_contract import IM_ATTACHMENT_CAPTURE_PLATFORMS
 from core.memory.processing_record import (
     AnomalyProjection,
     FailureLogObservation,
@@ -84,6 +84,7 @@ from vibe.memory_project_ids import (
     MEMORY_SEARCH_ALL_PROJECTS,
 )
 from core.memory.store import MemoryStore, is_principal_id
+from core.memory_loader import MEMORY_LIST_CURSOR_MAX_BYTES
 from core.memory.types import (
     MemoryFailureLogEntry,
     MemoryItem,
@@ -106,6 +107,8 @@ from vibe.memory_contract import MemoryStoreUnavailableError
 
 logger = logging.getLogger(__name__)
 
+MEMORY_RUNTIME_PROTOCOL_VERSION = 1
+
 ProcessingEvent = Callable[
     [Literal["fault", "recovered"], Literal["credential", "engine"] | None, str, int],
     Awaitable[bool],
@@ -114,7 +117,6 @@ ProcessingEvent = Callable[
 
 ARTIFACT_ACTIVATION_TIMEOUT_SECONDS = 90.0
 _MEMORY_LIST_CURSOR_VERSION = 3
-MEMORY_LIST_CURSOR_MAX_BYTES = 8192
 _MEMORY_LIST_PROVIDER_PAGE_SIZE = 20
 _MEMORY_LIST_PROVIDER_MAX_PAGE = 1_000_000
 _MEMORY_LIST_AGGREGATE_TIMEOUT_SECONDS = 20.0

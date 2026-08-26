@@ -19,6 +19,8 @@ from core.controller import Controller
 from core.memory import CaptureRequest, CaptureSkipped
 from core.memory_adapter import DisabledMemoryAdapter, EnabledMemoryAdapter, TurnAccepted
 from vibe.memory_contract import (
+    MemoryPluginIncompatibleError,
+    MemoryPluginUnavailableError,
     MemoryRuntimeCloseUnprovedError,
     MemoryStoreUnavailableError,
 )
@@ -58,6 +60,39 @@ def _memory_state_entries(home: Path) -> list[Path]:
             for part in path.relative_to(home).parts
         )
     ]
+
+
+def test_memory_cli_session_keeps_authenticated_boundary_when_plugin_is_unavailable() -> None:
+    controller = Controller.__new__(Controller)
+    controller.config = types.SimpleNamespace(
+        memory=types.SimpleNamespace(enabled=True),
+    )
+    controller._memory_plugin_error = MemoryPluginUnavailableError("injected")
+    controller._memory_scopes_by_session = {}
+    controller._memory_cli_facts_by_session = {}
+    controller._memory_plugin_cli_sessions = set()
+    controller._memory_admission = lambda: pytest.fail(
+        "plugin failure must be projected before admission imports"
+    )
+    controller._memory_turn_facts = lambda _context: pytest.fail(
+        "plugin failure must be projected before facts imports"
+    )
+    context = types.SimpleNamespace(
+        platform_specific={
+            "agent_session_target": {"id": "session-plugin"},
+        },
+        platform="avibe",
+    )
+
+    assert Controller.configure_memory_cli_session(
+        controller,
+        context,
+        admitted=True,
+    )
+    assert Controller.memory_scope_for_cli_session(controller, "session-plugin") == (
+        "__memory_plugin_error__",
+        "default",
+    )
 
 
 async def _start_disabled_cleanup(
@@ -265,6 +300,78 @@ assert not BLOCKED.intersection(sys.modules)
     assert _memory_state_entries(tmp_path / "home") == []
 
 
+def test_enabled_controller_degrades_when_runtime_attribute_probe_fails(
+    tmp_path: Path,
+) -> None:
+    script = r'''
+import sys
+import types
+
+from config.v2_compat import to_app_config
+from config.v2_config import V2Config
+from core.controller import Controller
+from core.memory_adapter import DisabledMemoryAdapter
+from vibe.memory_contract import MemoryPluginUnavailableError
+
+
+class BrokenRuntime(types.ModuleType):
+    def __getattr__(self, name):
+        if name in {"MEMORY_RUNTIME_PROTOCOL_VERSION", "create_memory_runtime"}:
+            raise RuntimeError("broken optional runtime attribute")
+        raise AttributeError(name)
+
+
+sys.modules["core.memory.runtime"] = BrokenRuntime("core.memory.runtime")
+config = to_app_config(V2Config.from_payload({
+    "platform": "avibe",
+    "platforms": {"enabled": [], "primary": "avibe"},
+    "mode": "self_host",
+    "version": "v2",
+    "runtime": {"default_cwd": "_tmp", "log_level": "INFO"},
+    "agents": {
+        "default_backend": "opencode",
+        "opencode": {"enabled": True, "cli_path": "opencode"},
+    },
+    "memory": {
+        "enabled": True,
+        "processing": {
+            "llm": {
+                "base_url": "https://llm.example.test/v1",
+                "model": "chat",
+                "api_key": "llm-key",
+            },
+            "embedding": {
+                "base_url": "https://embed.example.test/v1",
+                "model": "embed",
+                "api_key": "embed-key",
+            },
+        },
+    },
+    "setup_completed": True,
+}))
+controller = Controller(config)
+assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
+assert controller.memory_runtime is None
+assert isinstance(controller._memory_plugin_error, MemoryPluginUnavailableError)
+'''
+    environment = os.environ.copy()
+    environment["AVIBE_HOME"] = str(tmp_path / "home")
+    environment["HOME"] = str(tmp_path)
+    environment["PYTHONPATH"] = str(ROOT)
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
 def test_host_surfaces_import_with_evacuated_memory_leaves_blocked(
     tmp_path: Path,
 ) -> None:
@@ -456,6 +563,7 @@ async def test_memory_reconcile_lazily_enters_and_leaves_enabled_runtime(
     class _Runtime:
         def __init__(self) -> None:
             self.module = object()
+            self.available = True
             self.closed = False
 
         async def reconcile(self, config) -> dict[str, object]:
@@ -475,6 +583,7 @@ async def test_memory_reconcile_lazily_enters_and_leaves_enabled_runtime(
         return runtime
 
     runtime_module = types.ModuleType("core.memory.runtime")
+    runtime_module.MEMORY_RUNTIME_PROTOCOL_VERSION = 1
     runtime_module.create_memory_runtime = create_memory_runtime
     monkeypatch.setitem(sys.modules, "core.memory.runtime", runtime_module)
 
@@ -547,7 +656,7 @@ async def test_disabled_preflight_uses_one_temporary_runtime() -> None:
             self.closed = True
 
     runtime = _Runtime()
-    controller._create_memory_runtime = lambda config: runtime
+    controller._create_memory_runtime = lambda config, **_kwargs: runtime
 
     assert await controller.preflight_memory(candidate) == {"ok": True}
     assert calls == [candidate]
@@ -555,6 +664,101 @@ async def test_disabled_preflight_uses_one_temporary_runtime() -> None:
     assert controller.memory_runtime is None
     assert controller.memory_module is None
     assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
+
+
+@pytest.mark.parametrize("operation", ("preflight", "install"))
+@pytest.mark.asyncio
+async def test_explicit_recovery_retries_after_cached_plugin_failure(
+    operation: str,
+) -> None:
+    controller = Controller.__new__(Controller)
+    controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)
+    controller.memory_adapter = DisabledMemoryAdapter()
+    controller.memory_runtime = None
+    controller.memory_module = None
+    controller._memory_reconcile_task = None
+    controller._memory_plugin_error = MemoryPluginUnavailableError("startup failed")
+    candidate = replace(controller.config.memory, enabled=True)
+    calls: list[tuple[str, object]] = []
+
+    class _Runtime:
+        module = object()
+        closed = False
+        retired = False
+
+        async def preflight(self, config) -> dict[str, object]:
+            calls.append(("preflight", config))
+            return {"ok": True}
+
+        async def install_artifact(self) -> dict[str, object]:
+            calls.append(("install", controller.config.memory))
+            return {"ok": True}
+
+        async def close(self) -> None:
+            self.closed = True
+
+    runtime = _Runtime()
+    controller._create_memory_runtime = lambda config, **_kwargs: runtime
+
+    if operation == "preflight":
+        result = await controller.preflight_memory(candidate)
+        expected_calls = [("preflight", candidate)]
+    else:
+        result = await controller.install_memory_runtime()
+        expected_calls = [("install", controller.config.memory)]
+
+    assert result == {"ok": True}
+    assert calls == expected_calls
+    assert runtime.closed is True
+    assert controller._memory_plugin_error is None
+    assert controller.memory_runtime is None
+
+
+@pytest.mark.asyncio
+async def test_ordinary_memory_read_keeps_cached_plugin_failure_without_retry() -> None:
+    controller = Controller.__new__(Controller)
+    controller.config = types.SimpleNamespace(
+        memory=replace(_disabled_app_config().memory, enabled=True)
+    )
+    controller.memory_runtime = None
+    controller._memory_reconcile_task = None
+    failure = MemoryPluginUnavailableError("startup failed")
+    controller._memory_plugin_error = failure
+    controller._create_memory_runtime = lambda *_args, **_kwargs: pytest.fail(
+        "ordinary reads must not retry a cached plugin failure"
+    )
+
+    with pytest.raises(MemoryPluginUnavailableError) as raised:
+        await controller.memory_projects_payload(
+            verified_user_key=None,
+            cli_scope=("u-11111111111111111111111111111111", "default"),
+        )
+
+    assert raised.value is failure
+
+
+@pytest.mark.asyncio
+async def test_explicit_recovery_caches_typed_retry_failure() -> None:
+    controller = Controller.__new__(Controller)
+    controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)
+    controller.memory_adapter = DisabledMemoryAdapter()
+    controller.memory_runtime = None
+    controller.memory_module = None
+    controller._memory_reconcile_task = None
+    controller._memory_plugin_error = MemoryPluginUnavailableError("startup failed")
+    candidate = replace(controller.config.memory, enabled=True)
+    retry_failure = MemoryPluginIncompatibleError("still incompatible")
+
+    def create_runtime(_config, **_kwargs):
+        raise retry_failure
+
+    controller._create_memory_runtime = create_runtime
+
+    with pytest.raises(MemoryPluginIncompatibleError) as raised:
+        await controller.preflight_memory(candidate)
+
+    assert raised.value is retry_failure
+    assert controller._memory_plugin_error is retry_failure
 
 
 @pytest.mark.asyncio
@@ -566,6 +770,7 @@ async def test_disabled_install_owns_runtime_until_successful_close() -> None:
     controller.memory_module = None
     controller._memory_reconcile_task = None
     events: list[str] = []
+    loader_flags: list[bool] = []
 
     class _Runtime:
         def __init__(self) -> None:
@@ -587,9 +792,15 @@ async def test_disabled_install_owns_runtime_until_successful_close() -> None:
             self.closed = True
 
     runtime = _Runtime()
-    controller._create_memory_runtime = lambda config: runtime
+
+    def create_runtime(config, **kwargs):
+        loader_flags.append(bool(kwargs["allow_disabled"]))
+        return runtime
+
+    controller._create_memory_runtime = create_runtime
 
     assert await controller.install_memory_runtime() == {"ok": True}
+    assert loader_flags == [True]
     assert events == ["install", "retire", "close"]
     assert controller.memory_runtime is None
     assert controller.memory_module is None
@@ -629,7 +840,9 @@ async def test_cancelled_install_does_not_cancel_shared_disabled_cleanup() -> No
 
     cleanup_task = asyncio.create_task(cleanup())
     controller._memory_disabled_cleanup_task = cleanup_task
-    controller._create_memory_runtime = lambda config: created.append(config) or _Runtime()
+    controller._create_memory_runtime = (
+        lambda config, **_kwargs: created.append(config) or _Runtime()
+    )
 
     first = asyncio.create_task(controller.install_memory_runtime())
     await cleanup_started.wait()
@@ -676,7 +889,7 @@ async def test_temporary_close_failure_retains_fenced_controller_ownership() -> 
 
     runtime = _Runtime()
 
-    def create(config):
+    def create(config, **_kwargs):
         created.append(config)
         return runtime
 
@@ -712,7 +925,7 @@ async def test_disabled_status_reports_retained_fenced_runtime_truthfully() -> N
         retired=True,
     )
     controller.memory_runtime = runtime
-    controller._create_memory_runtime = lambda _config: pytest.fail(
+    controller._create_memory_runtime = lambda _config, **_kwargs: pytest.fail(
         "disabled status must not construct Memory"
     )
 
@@ -749,7 +962,7 @@ async def test_temporary_close_without_closed_proof_retains_ownership() -> None:
             return None
 
     runtime = _Runtime()
-    controller._create_memory_runtime = lambda _config: runtime
+    controller._create_memory_runtime = lambda _config, **_kwargs: runtime
 
     with pytest.raises(RuntimeError, match="closed proof"):
         await controller.preflight_memory(
@@ -799,7 +1012,7 @@ async def test_disable_close_failure_fences_rollback_and_destructive_reuse() -> 
     controller.memory_runtime = runtime
     controller.memory_module = runtime.module
 
-    def create(config):
+    def create(config, **_kwargs):
         created.append(config)
         raise AssertionError("rollback must not construct a second runtime")
 
@@ -879,7 +1092,7 @@ async def test_disabled_dashboard_reads_do_not_construct_runtime() -> None:
     controller._memory_disabled_cleanup_task = None
     factory_calls: list[object] = []
 
-    def create_runtime(config):
+    def create_runtime(config, **_kwargs):
         factory_calls.append(config)
         raise AssertionError("disabled dashboard reads must not construct Memory")
 
@@ -925,7 +1138,7 @@ async def test_disabled_wake_and_remember_are_host_derived_without_runtime() -> 
     controller.memory_adapter = DisabledMemoryAdapter()
     controller.memory_runtime = None
     controller.memory_module = None
-    controller._create_memory_runtime = lambda _config: pytest.fail(
+    controller._create_memory_runtime = lambda _config, **_kwargs: pytest.fail(
         "disabled outcomes must not construct Memory"
     )
 
@@ -948,6 +1161,35 @@ async def test_disabled_wake_and_remember_are_host_derived_without_runtime() -> 
 
 
 @pytest.mark.asyncio
+async def test_plugin_failure_rechecked_after_blocked_capture_lock() -> None:
+    controller = Controller.__new__(Controller)
+    controller.config = types.SimpleNamespace(memory=types.SimpleNamespace(enabled=True))
+    controller._memory_plugin_error = None
+    controller.memory_runtime = None
+    controller._memory_runtime_generation = 1
+    request = CaptureRequest(
+        source_message_id="message-1",
+        session_id="session-1",
+        principal_id="u-11111111111111111111111111111111",
+        project_id="default",
+        provenance="agent",
+        text="remember this",
+        occurred_at_ms=1,
+    )
+
+    gate = controller._memory_replacement_lock()
+    await gate.acquire()
+    capture = asyncio.create_task(controller.capture_memory(request))
+    await asyncio.sleep(0)
+    assert not capture.done()
+    controller._memory_plugin_error = MemoryPluginUnavailableError("injected")
+    gate.release()
+
+    with pytest.raises(MemoryPluginUnavailableError):
+        await capture
+
+
+@pytest.mark.asyncio
 async def test_disabled_store_backed_read_is_gated_before_runtime_construction() -> None:
     controller = Controller.__new__(Controller)
     controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)
@@ -956,7 +1198,7 @@ async def test_disabled_store_backed_read_is_gated_before_runtime_construction()
     controller.memory_module = None
     controller._memory_reconcile_task = None
 
-    controller._create_memory_runtime = lambda _config: pytest.fail(
+    controller._create_memory_runtime = lambda _config, **_kwargs: pytest.fail(
         "disabled reads must not construct Memory"
     )
 
@@ -1026,7 +1268,7 @@ async def test_enabled_status_reprojects_when_disabled_before_borrow() -> None:
         await borrow_release.wait()
 
     controller._await_disabled_memory_cleanup = await_cleanup
-    controller._create_memory_runtime = lambda _config: pytest.fail(
+    controller._create_memory_runtime = lambda _config, **_kwargs: pytest.fail(
         "status must re-project disabled state before constructing Memory"
     )
     status_task = asyncio.create_task(controller.memory_status_payload())
@@ -1246,7 +1488,7 @@ async def test_concurrent_temporary_borrows_share_runtime_until_final_release() 
             self.close_calls += 1
             self.closed = True
 
-    def create_runtime(_config) -> _Runtime:
+    def create_runtime(_config, **_kwargs) -> _Runtime:
         runtime = _Runtime()
         created.append(runtime)
         return runtime
@@ -1310,7 +1552,7 @@ async def test_temporary_borrows_do_not_share_different_configs() -> None:
         async def close(self) -> None:
             self.closed = True
 
-    def create_runtime(config) -> _Runtime:
+    def create_runtime(config, **_kwargs) -> _Runtime:
         created.append(config)
         return _Runtime(config)
 

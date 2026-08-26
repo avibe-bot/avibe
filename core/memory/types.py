@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import json
-import math
 from dataclasses import dataclass
 from typing import Any, Literal, TypeAlias
 
 from vibe.memory_contract import (
     CLOSED_MEMORY_ERROR_CODES,
-    MAX_AGENTIC_TIMEOUT_SECONDS,
+    MAX_AGENTIC_TIMEOUT_SECONDS as MAX_AGENTIC_TIMEOUT_SECONDS,
     MemoryErrorCode,
+    RecallPolicy,
     is_memory_error_code,
 )
 
@@ -376,106 +376,6 @@ def memory_list_page_payload(result: MemoryListPage) -> dict[str, Any]:
         "total_count": result.total_count,
         "warnings": list(result.warnings),
     }
-
-
-@dataclass(frozen=True)
-class RecallPolicy:
-    """One bounded, single-run provider-neutral recall decision request."""
-
-    mode: RecallMode = "hybrid"
-    max_results: int = 8
-    include_profile: bool = True
-    include_current_session: bool = False
-    timeout_seconds: float | None = None
-    max_model_calls: int | None = None
-    cost_budget_tokens: int | None = None
-
-    def __post_init__(self) -> None:
-        if self.mode not in {"auto", "keyword", "vector", "hybrid", "agentic"}:
-            raise ValueError("invalid recall mode")
-        if (
-            isinstance(self.max_results, bool)
-            or not isinstance(self.max_results, int)
-            or not 1 <= self.max_results <= 20
-        ):
-            raise ValueError("invalid recall result limit")
-        if type(self.include_profile) is not bool or type(self.include_current_session) is not bool:
-            raise ValueError("invalid recall include policy")
-        if self.mode == "agentic":
-            if (
-                self.timeout_seconds is None
-                or isinstance(self.timeout_seconds, bool)
-                or not isinstance(self.timeout_seconds, (int, float))
-                or not math.isfinite(float(self.timeout_seconds))
-                or not 0 < float(self.timeout_seconds) <= MAX_AGENTIC_TIMEOUT_SECONDS
-                or isinstance(self.max_model_calls, bool)
-                or not isinstance(self.max_model_calls, int)
-                or not 1 <= self.max_model_calls <= 4
-                or isinstance(self.cost_budget_tokens, bool)
-                or not isinstance(self.cost_budget_tokens, int)
-                or not 1 <= self.cost_budget_tokens <= 32_000
-            ):
-                raise ValueError("agentic recall requires bounded budgets")
-        elif any(
-            value is not None
-            for value in (
-                self.timeout_seconds,
-                self.max_model_calls,
-                self.cost_budget_tokens,
-            )
-        ):
-            raise ValueError("non-agentic recall cannot carry agentic budgets")
-
-    @classmethod
-    def from_payload(cls, value: object) -> "RecallPolicy":
-        if not isinstance(value, dict):
-            raise ValueError("invalid recall policy")
-        allowed = {
-            "mode",
-            "max_results",
-            "include_profile",
-            "include_current_session",
-            "timeout_seconds",
-            "max_model_calls",
-            "cost_budget_tokens",
-        }
-        if not set(value).issubset(allowed):
-            raise ValueError("invalid recall policy")
-        mode = value.get("mode", "hybrid")
-        budget_fields = {
-            "timeout_seconds",
-            "max_model_calls",
-            "cost_budget_tokens",
-        }
-        if mode == "agentic":
-            if not {"max_results", *budget_fields}.issubset(value):
-                raise ValueError("agentic recall requires explicit budgets")
-        elif set(value).intersection(budget_fields):
-            raise ValueError("non-agentic recall cannot carry agentic budgets")
-        return cls(
-            mode=mode,
-            max_results=value.get("max_results", 8),
-            include_profile=value.get("include_profile", True),
-            include_current_session=value.get("include_current_session", False),
-            timeout_seconds=value.get("timeout_seconds"),
-            max_model_calls=value.get("max_model_calls"),
-            cost_budget_tokens=value.get("cost_budget_tokens"),
-        )
-
-    def payload(self) -> dict[str, object]:
-        payload: dict[str, object] = {
-            "mode": self.mode,
-            "max_results": self.max_results,
-            "include_profile": self.include_profile,
-            "include_current_session": self.include_current_session,
-        }
-        if self.mode == "agentic":
-            payload.update(
-                timeout_seconds=self.timeout_seconds,
-                max_model_calls=self.max_model_calls,
-                cost_budget_tokens=self.cost_budget_tokens,
-            )
-        return payload
 
 
 @dataclass(frozen=True)

@@ -54,6 +54,12 @@ def is_persisted_memory_project_id(value: object) -> bool:
     return is_legacy_memory_project_id(value) or is_new_stored_memory_project_id(value)
 
 
+def is_project_id(value: object) -> bool:
+    """Validate any released or current Memory project identifier."""
+
+    return is_persisted_memory_project_id(value)
+
+
 def parse_writable_memory_project(value: object) -> str:
     """Parse a remember/capture project. Missing/null is not handled here."""
 

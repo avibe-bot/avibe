@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import ast
+import builtins
 import contextlib
 import inspect
 import socket
@@ -39,7 +40,11 @@ from core import internal_server, session_turns
 from core.controller import Controller
 from core.message_context import build_context_turn_sink_key
 from core.vibe_agents import VibeAgentStore
-from vibe.memory_contract import MemoryStoreUnavailableError
+from vibe.memory_contract import (
+    MemoryPluginIncompatibleError,
+    MemoryPluginUnavailableError,
+    MemoryStoreUnavailableError,
+)
 from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
 from core.services.agent_steering import SteerOutcome, result as steer_result
 from core.services.dispatch import (
@@ -444,6 +449,27 @@ def test_memory_internal_routes_cannot_bypass_controller_lifecycle() -> None:
     assert reflective_bypasses == []
 
 
+def test_memory_internal_server_keeps_implementation_imports_out_of_host_boundary() -> None:
+    tree = ast.parse(Path(internal_server.__file__).read_text(encoding="utf-8"))
+    implementation_imports: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            if node.module == "core.memory" and [alias.name for alias in node.names] != [
+                "CaptureRequest"
+            ]:
+                implementation_imports.append(node.module)
+            elif node.module.startswith("core.memory.") and node.module != "core.memory_loader":
+                implementation_imports.append(node.module)
+        elif isinstance(node, ast.Import):
+            implementation_imports.extend(
+                alias.name
+                for alias in node.names
+                if alias.name == "core.memory" or alias.name.startswith("core.memory.")
+            )
+
+    assert implementation_imports == []
+
+
 def test_disabled_memory_status_route_uses_host_projection_without_runtime() -> None:
     from core.memory_adapter import DisabledMemoryAdapter
 
@@ -523,6 +549,148 @@ def test_memory_projects_unknown_lifecycle_failure_uses_stable_envelope() -> Non
         "status": "failed",
         "error": "memory_store_unavailable",
     }
+
+
+@pytest.mark.parametrize(
+    ("error_type", "expected_code"),
+    [
+        ("MemoryPluginUnavailableError", "memory_plugin_unavailable"),
+        ("MemoryPluginIncompatibleError", "memory_plugin_incompatible"),
+    ],
+)
+def test_memory_projects_plugin_failure_uses_stable_plugin_envelope(
+    error_type: str,
+    expected_code: str,
+) -> None:
+    from core import internal_server as server
+    from vibe.memory_http_headers import CALLER_SESSION_HEADER
+    from vibe.memory_contract import (
+        MemoryPluginIncompatibleError,
+        MemoryPluginUnavailableError,
+    )
+
+    error_class = {
+        "MemoryPluginUnavailableError": MemoryPluginUnavailableError,
+        "MemoryPluginIncompatibleError": MemoryPluginIncompatibleError,
+    }[error_type]
+    controller = _build_controller_double()
+    controller.memory_scope_for_cli_session.return_value = (
+        "u-11111111111111111111111111111111",
+        "default",
+    )
+    controller.memory_projects_payload = AsyncMock(side_effect=error_class("injected"))
+    app = server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.get(
+                "/internal/memory/projects",
+                headers={CALLER_SESSION_HEADER: "session-1"},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 503
+    assert response.json() == {"status": "failed", "error": expected_code}
+
+
+def test_memory_projects_plugin_failure_preserves_admitted_cli_session_boundary() -> None:
+    from core import internal_server as server
+    from vibe.memory_http_headers import CALLER_SESSION_HEADER
+    from vibe.memory_contract import MemoryPluginUnavailableError
+
+    controller = Controller.__new__(Controller)
+    controller.config = SimpleNamespace(memory=SimpleNamespace(enabled=True))
+    controller._memory_plugin_error = MemoryPluginUnavailableError("injected")
+    controller._memory_scopes_by_session = {}
+    controller._memory_cli_facts_by_session = {}
+    controller._memory_plugin_cli_sessions = set()
+    controller._memory_admission = lambda: pytest.fail(
+        "plugin failure must be projected before admission imports"
+    )
+    controller._memory_turn_facts = lambda _context: pytest.fail(
+        "plugin failure must be projected before facts imports"
+    )
+    controller.memory_projects_payload = AsyncMock(
+        side_effect=MemoryPluginUnavailableError("injected")
+    )
+
+    context = SimpleNamespace(
+        platform_specific={
+            "agent_session_target": {"id": "session-1"},
+        },
+        platform="avibe",
+    )
+    assert Controller.configure_memory_cli_session(
+        controller,
+        context,
+        admitted=True,
+    )
+    assert controller._memory_plugin_cli_sessions == {"session-1"}
+    app = server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.get(
+                "/internal/memory/projects",
+                headers={CALLER_SESSION_HEADER: "session-1"},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 503
+    assert response.json() == {"status": "failed", "error": "memory_plugin_unavailable"}
+
+
+@pytest.mark.parametrize(
+    ("plugin_error", "expected_error"),
+    [
+        (MemoryPluginUnavailableError("injected"), "memory_plugin_unavailable"),
+        (MemoryPluginIncompatibleError("injected"), "memory_plugin_incompatible"),
+    ],
+)
+def test_memory_remember_plugin_failure_uses_stable_plugin_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+    plugin_error: BaseException,
+    expected_error: str,
+) -> None:
+    from vibe.memory_http_headers import CALLER_SESSION_HEADER
+
+    controller = Controller.__new__(Controller)
+    controller.config = SimpleNamespace(memory=SimpleNamespace(enabled=True))
+    controller._memory_plugin_error = plugin_error
+    controller.memory_scope_for_cli_session = lambda _session_id: (
+        "u-11111111111111111111111111111111",
+        "default",
+    )
+    controller.capture_memory = Mock(
+        side_effect=AssertionError("plugin failure must short-circuit before capture")
+    )
+    real_import = builtins.__import__
+
+    def fail_memory_type_import(name, *args, **kwargs):
+        if name == "core.memory" or name.startswith("core.memory."):
+            raise RuntimeError("optional implementation import failed")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fail_memory_type_import)
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                "/internal/memory/remember",
+                headers={CALLER_SESSION_HEADER: "session-1"},
+                json={"text": "remember this"},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 503
+    assert response.json() == {"status": "failed", "error": expected_error}
 
 
 def test_memory_install_route_delegates_to_controller_lifecycle() -> None:
@@ -866,6 +1034,44 @@ def test_memory_search_accepts_bounded_agentic_policy_from_cli_session() -> None
     assert current_session_id == "ses-memory"
 
 
+def test_memory_search_route_does_not_import_memory_types_on_request(monkeypatch) -> None:
+    import builtins
+
+    from vibe.memory_http_headers import CALLER_SESSION_HEADER
+
+    controller = _build_controller_double()
+    controller.memory_scope_for_cli_session.return_value = (
+        "u-11111111111111111111111111111111",
+        "default",
+    )
+    controller.memory_search_payload = AsyncMock(
+        return_value={"status": "ok", "items": []}
+    )
+    app = internal_server.create_app(controller)
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "core.memory.types":
+            raise RuntimeError("optional implementation initializer")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                "/internal/memory/search",
+                headers={CALLER_SESSION_HEADER: "ses-memory"},
+                json={"query": "connect the clues", "policy": {"mode": "keyword"}},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "items": []}
+
+
 def test_memory_list_binds_cli_session_and_uses_exact_provider_page() -> None:
     from vibe.memory_http_headers import CALLER_SESSION_HEADER
 
@@ -1167,9 +1373,11 @@ def test_memory_list_rejects_surrogate_aggregate_cursor_at_controller_boundary()
     runtime.list_all_episodes_payload.assert_not_awaited()
 
 
-def test_memory_list_accepts_maximum_aggregate_cursor_transport_bound() -> None:
+def test_memory_list_accepts_maximum_aggregate_cursor_transport_bound(monkeypatch) -> None:
+    import builtins
+
     from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
-    from core.memory.runtime import MEMORY_LIST_CURSOR_MAX_BYTES
+    from core.memory_loader import MEMORY_LIST_CURSOR_MAX_BYTES
     from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
     secret = "test-memory-ui-secret"
@@ -1188,6 +1396,14 @@ def test_memory_list_accepts_maximum_aggregate_cursor_transport_bound() -> None:
     app = internal_server.create_app(controller, memory_ui_secret=secret)
     path = "/internal/memory/list"
     user_key = "avibe:local"
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "core.memory.runtime":
+            raise RuntimeError("optional implementation initializer")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
 
     async def _exercise() -> httpx.Response:
         transport = httpx.ASGITransport(app=app)

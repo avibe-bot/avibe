@@ -84,6 +84,8 @@ describe('Memory UI copy contracts', () => {
       'memory_local_data_unusable',
       'memory_repair_not_required',
       'memory_delete_data_failed',
+      'memory_plugin_unavailable',
+      'memory_plugin_incompatible',
     ] as const) {
       expect(bundles[language].errors[key]).toBeTruthy();
     }

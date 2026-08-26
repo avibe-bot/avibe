@@ -36,14 +36,11 @@ from core.memory.types import (
     MemoryContentKind,
     MemoryErrorCode,
 )
+from vibe.memory_contract import IM_ATTACHMENT_CAPTURE_PLATFORMS
 
 MAX_PINNED_ATTACHMENTS = 8
 MAX_PINNED_ATTACHMENT_BYTES = 25 * 1024 * 1024
 MAX_PINNED_BUNDLE_BYTES = 100 * 1024 * 1024
-IM_ATTACHMENT_CAPTURE_PLATFORMS = frozenset(
-    {"slack", "discord", "telegram", "lark", "wechat"}
-)
-
 _COPY_CHUNK_BYTES = 1024 * 1024
 _MAX_ATTACHMENT_NAME_BYTES = 512
 _OFFICE_CONVERSION_BUNDLE_BUDGET_SECONDS = 30.0

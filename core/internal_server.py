@@ -49,16 +49,29 @@ from sqlalchemy.exc import IntegrityError
 from config import paths
 from config.atomic_io import write_atomic
 from core.delivery_target import normalize_message_kind
+from core.memory_loader import MEMORY_LIST_CURSOR_MAX_BYTES
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED
 from modules.im.base import MessageContext
 from storage.db import get_cached_sqlite_engine
-from vibe.memory_contract import MemoryStoreUnavailableError
+from vibe.memory_contract import (
+    MemoryPluginIncompatibleError,
+    MemoryPluginUnavailableError,
+    MemoryStoreUnavailableError,
+)
 from vibe.message_identity import HARNESS_TYPE, is_input_turn
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from core.controller import Controller
 
 logger = logging.getLogger(__name__)
+
+
+def _memory_plugin_error_code(error: BaseException) -> str:
+    return (
+        "memory_plugin_incompatible"
+        if isinstance(error, MemoryPluginIncompatibleError)
+        else "memory_plugin_unavailable"
+    )
 _SOCKET_MODE = 0o600
 _SOCKET_UMASK_MODE = 0o700
 _CHECK_POSIX_SOCKET_MODE = os.name != "nt"
@@ -1001,21 +1014,29 @@ def create_app(
     async def _reconcile_memory() -> Any:
         """Hot-apply persisted Memory configuration on the controller loop."""
 
-        from core.memory.artifact import MemoryRuntimeActivationError
-
         try:
             from config.v2_config import V2Config
 
             config = await asyncio.to_thread(V2Config.load)
             result = await controller.reconcile_memory(config.memory)
             return JSONResponse(status_code=200, content=result)
-        except MemoryRuntimeActivationError:
-            logger.exception("internal memory runtime activation failed during reconcile")
+        except ImportError:
             return JSONResponse(
                 status_code=503,
-                content={"ok": False, "error": "memory_runtime_install_failed"},
+                content={"ok": False, "error": "memory_plugin_unavailable"},
             )
-        except Exception:
+        except Exception as exc:
+            if type(exc).__name__ == "MemoryRuntimeActivationError":
+                logger.exception("internal memory runtime activation failed during reconcile")
+                return JSONResponse(
+                    status_code=503,
+                    content={"ok": False, "error": "memory_runtime_install_failed"},
+                )
+            if isinstance(exc, (MemoryPluginUnavailableError, MemoryPluginIncompatibleError)):
+                return JSONResponse(
+                    status_code=503,
+                    content={"ok": False, "error": _memory_plugin_error_code(exc)},
+                )
             logger.exception("internal memory reconcile failed")
             return JSONResponse(
                 status_code=503,
@@ -1028,6 +1049,8 @@ def create_app(
 
         try:
             result = await controller.wake_memory()
+        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
+            result = {"ok": False, "state": "degraded", "error": _memory_plugin_error_code(exc)}
         except Exception:
             logger.exception("internal memory wake failed")
             result = {"ok": False, "state": "degraded", "error": "memory_wake_failed"}
@@ -1069,6 +1092,13 @@ def create_app(
             )
         try:
             result = await handler(confirm_loss=True)
+        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
+            result = {
+                "ok": False,
+                "operation": operation,
+                "error": _memory_plugin_error_code(exc),
+                "result": "failed",
+            }
         except Exception:
             logger.exception("internal Memory %s failed", operation)
             result = {
@@ -1141,6 +1171,12 @@ def create_app(
                 status_code=400,
                 content={"ok": False, "operation": "reconfigure", "error": "memory_invalid_input"},
             )
+        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
+            result = {
+                "ok": False,
+                "operation": "reconfigure",
+                "error": _memory_plugin_error_code(exc),
+            }
         except Exception:
             logger.exception("internal Memory reconfigure failed")
             result = {
@@ -1160,6 +1196,11 @@ def create_app(
         try:
             result = await controller.install_memory_runtime()
             return JSONResponse(status_code=200, content=result)
+        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "reason": _memory_plugin_error_code(exc)},
+            )
         except Exception:
             logger.exception("internal memory runtime install failed")
             return JSONResponse(status_code=503, content={"ok": False, "reason": "memory_runtime_install_failed"})
@@ -1177,6 +1218,11 @@ def create_app(
             if not callable(preflight):
                 return JSONResponse(status_code=503, content={"ok": False, "error": "memory_runtime_missing"})
             return JSONResponse(status_code=200, content=await preflight(config))
+        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": _memory_plugin_error_code(exc)},
+            )
         except Exception:
             logger.exception("internal memory preflight failed")
             return JSONResponse(status_code=503, content={"ok": False, "error": "memory_processing_failed"})
@@ -1189,12 +1235,24 @@ def create_app(
             return None
         resolve = getattr(controller, "memory_scope_for_cli_session", None)
         scope = resolve(session_id) if callable(resolve) else None
-        from core.memory.store import is_principal_id, is_project_id
+        if not bool(getattr(getattr(getattr(controller, "config", None), "memory", None), "enabled", False)):
+            return None
+        plugin_sessions = getattr(controller, "_memory_plugin_cli_sessions", None)
+        if (
+            getattr(controller, "_memory_plugin_error", None) is not None
+            and isinstance(plugin_sessions, set)
+            and session_id in plugin_sessions
+            and isinstance(scope, tuple)
+            and len(scope) == 2
+        ):
+            return scope
+        from vibe.memory_contract import is_memory_principal_id
+        from vibe.memory_project_ids import is_project_id
 
         if (
             isinstance(scope, tuple)
             and len(scope) == 2
-            and is_principal_id(scope[0])
+            and is_memory_principal_id(scope[0])
             and is_project_id(scope[1])
         ):
             return scope
@@ -1303,6 +1361,8 @@ def create_app(
     async def _memory_status() -> Any:
         try:
             return await controller.memory_status_payload()
+        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
+            return JSONResponse(status_code=503, content={"error": _memory_plugin_error_code(exc)})
         except Exception:
             logger.warning("internal memory status failed")
             return JSONResponse(status_code=503, content={"error": "memory_store_unavailable"})
@@ -1312,6 +1372,11 @@ def create_app(
         try:
             return await controller.memory_processing_record_payload(
                 verified_user_key=_verified_memory_ui_user_key(request)
+            )
+        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": _memory_plugin_error_code(exc)},
             )
         except Exception:
             logger.warning("internal memory Processing Record read failed")
@@ -1326,6 +1391,8 @@ def create_app(
             return await controller.memory_failure_log_payload(
                 verified_user_key=_verified_memory_ui_user_key(request)
             )
+        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
+            return JSONResponse(status_code=503, content={"error": _memory_plugin_error_code(exc)})
         except Exception:
             logger.warning("internal memory failure log failed")
             return JSONResponse(status_code=503, content={"error": "memory_store_unavailable"})
@@ -1335,6 +1402,11 @@ def create_app(
         try:
             return await controller.memory_maintenance_payload(
                 verified_user_key=_verified_memory_ui_user_key(request)
+            )
+        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": _memory_plugin_error_code(exc)},
             )
         except Exception:
             logger.warning("internal memory maintenance read failed")
@@ -1358,6 +1430,11 @@ def create_app(
             return JSONResponse(
                 status_code=503,
                 content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": _memory_plugin_error_code(exc)},
             )
         except PermissionError:
             return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
@@ -1398,6 +1475,11 @@ def create_app(
             return JSONResponse(
                 status_code=503,
                 content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": _memory_plugin_error_code(exc)},
             )
         except PermissionError:
             return JSONResponse(
@@ -1444,6 +1526,11 @@ def create_app(
                 status_code=503,
                 content={"status": "failed", "error": "memory_store_unavailable"},
             )
+        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": _memory_plugin_error_code(exc)},
+            )
         except PermissionError:
             return JSONResponse(
                 status_code=403,
@@ -1478,6 +1565,12 @@ def create_app(
             return await controller.memory_projects_payload(
                 verified_user_key=verified_user_key,
                 cli_scope=cli_scope,
+            )
+        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
+            logger.warning("internal memory project list failed")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": _memory_plugin_error_code(exc)},
             )
         except MemoryStoreUnavailableError:
             logger.warning("internal memory project list failed")
@@ -1517,9 +1610,9 @@ def create_app(
             parse_agent_search_project,
             parse_ui_search_project,
         )
-        from core.memory.types import RecallPolicy
-
         try:
+            from vibe.memory_contract import RecallPolicy
+
             policy = RecallPolicy.from_payload(payload.get("policy"))
             raw_project = omitted_project_to_default(payload.get("project"))
             if str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip():
@@ -1528,6 +1621,8 @@ def create_app(
                 project_id = parse_agent_search_project(raw_project)
         except (TypeError, ValueError):
             return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+        except ImportError:
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_plugin_unavailable"})
         current_session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip() or None
         try:
             return await controller.memory_search_payload(
@@ -1544,6 +1639,11 @@ def create_app(
             return JSONResponse(
                 status_code=503,
                 content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": _memory_plugin_error_code(exc)},
             )
         except PermissionError:
             return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
@@ -1579,8 +1679,6 @@ def create_app(
             parse_agent_search_project,
             parse_ui_search_project,
         )
-        from core.memory.runtime import MEMORY_LIST_CURSOR_MAX_BYTES
-
         is_ui = bool(str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip())
         limit = payload.get("limit", 20)
         origin = payload.get("origin", "user")
@@ -1673,6 +1771,11 @@ def create_app(
                 status_code=503,
                 content={"status": "failed", "error": "memory_store_unavailable"},
             )
+        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": _memory_plugin_error_code(exc)},
+            )
         except PermissionError:
             return JSONResponse(
                 status_code=403,
@@ -1710,7 +1813,6 @@ def create_app(
         except ValueError:
             return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
 
-        from core.memory import CaptureRequest
         from vibe.memory_http_headers import CALLER_SESSION_HEADER
 
         session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip()
@@ -1718,6 +1820,14 @@ def create_app(
         source_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
 
         try:
+            plugin_error = getattr(controller, "_memory_plugin_error", None)
+            if isinstance(
+                plugin_error,
+                (MemoryPluginUnavailableError, MemoryPluginIncompatibleError),
+            ):
+                raise plugin_error
+            from core.memory import CaptureRequest
+
             capture = getattr(controller, "capture_memory", None)
             if not callable(capture):
                 return JSONResponse(
@@ -1737,7 +1847,43 @@ def create_app(
                     occurred_at_ms=int(time.time() * 1000),
                 )
             )
+        except (MemoryPluginUnavailableError, MemoryPluginIncompatibleError) as exc:
+            logger.warning("internal memory remember failed")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": _memory_plugin_error_code(exc)},
+            )
+        except ImportError:
+            plugin_error = getattr(controller, "_memory_plugin_error", None)
+            if isinstance(
+                plugin_error,
+                (MemoryPluginUnavailableError, MemoryPluginIncompatibleError),
+            ):
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "status": "failed",
+                        "error": _memory_plugin_error_code(plugin_error),
+                    },
+                )
+            logger.warning("internal memory remember implementation unavailable")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_plugin_unavailable"},
+            )
         except Exception:
+            plugin_error = getattr(controller, "_memory_plugin_error", None)
+            if isinstance(
+                plugin_error,
+                (MemoryPluginUnavailableError, MemoryPluginIncompatibleError),
+            ):
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "status": "failed",
+                        "error": _memory_plugin_error_code(plugin_error),
+                    },
+                )
             logger.warning("internal memory remember failed")
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_store_unavailable"})
         response: dict[str, Any] = {"status": receipt.status}

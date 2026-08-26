@@ -330,9 +330,14 @@ async def test_delete_data_lazily_constructs_runtime_after_disabled_restart(
     controller.memory_module = None
     controller.memory_adapter = DisabledMemoryAdapter()
     created: list[MemoryConfig] = []
+    loader_flags: list[bool] = []
 
-    def create_memory_runtime(config: MemoryConfig) -> _Runtime:
+    def create_memory_runtime(
+        config: MemoryConfig,
+        **kwargs: object,
+    ) -> _Runtime:
         created.append(config)
+        loader_flags.append(bool(kwargs["allow_disabled"]))
         return runtime
 
     monkeypatch.setattr(controller, "_create_memory_runtime", create_memory_runtime)
@@ -344,6 +349,7 @@ async def test_delete_data_lazily_constructs_runtime_after_disabled_restart(
     assert result["state"] == "disabled"
     assert result["data_deleted"] is True
     assert created == [controller.config.memory]
+    assert loader_flags == [True]
     assert controller.memory_runtime is None
     assert controller.memory_module is None
     assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
@@ -364,7 +370,10 @@ async def test_disable_vs_delete_race_closes_temporary_runtime_on_early_return(
     temporary = _Runtime(tmp_path)
     created: list[MemoryConfig] = []
 
-    def create_memory_runtime(config: MemoryConfig) -> _Runtime:
+    def create_memory_runtime(
+        config: MemoryConfig,
+        **_kwargs: object,
+    ) -> _Runtime:
         created.append(config)
         return temporary
 
