@@ -1117,6 +1117,22 @@ def test_runtime_install_crosses_the_controller_rpc_boundary(monkeypatch):
     assert calls == [("runtime_install", None)]
 
 
+def test_reorder_client_preserves_explicit_null_order(monkeypatch):
+    from vibe import model_hub_client
+
+    calls = []
+
+    async def rpc(operation, payload=None):
+        calls.append((operation, payload))
+        return {"sources": {"order": []}, "routes": {}}
+
+    monkeypatch.setattr(model_hub_client, "_rpc", rpc)
+
+    asyncio.run(ModelHubRemoteService().reorder_agent_chains("claude", None))
+
+    assert calls == [("reorder_agent_chains", {"backend": "claude", "order": None})]
+
+
 def test_runtime_start_is_allowlisted_by_controller_rpc(tmp_path):
     from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
 
@@ -2405,6 +2421,25 @@ def test_reorder_route_accepts_source_order_atomically(monkeypatch, tmp_path):
         "src_second001",
         "src_first0001",
     ]
+
+
+def test_reorder_route_rejects_explicit_null_order(monkeypatch, tmp_path):
+    service, _, _ = _service(tmp_path)
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+
+    response = client.post(
+        "/api/models/agents/claude/chains/reorder",
+        json={"order": None},
+        headers=csrf_headers(client, base_url),
+        base_url=base_url,
+    )
+
+    assert response.status_code == 400
+    payload = response.get_json()
+    _assert_envelope(payload, ok=False)
+    assert payload["error"] == "invalid_source_order"
 
 
 def test_ui_model_hub_default_is_controller_rpc_client(monkeypatch):

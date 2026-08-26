@@ -785,6 +785,18 @@ export const SettingsModelsPage: React.FC = () => {
           const authoritative = result.value;
           setSupplyRead(readyRegion(authoritative));
           const committed = authoritative.some((row) => row.backend === agent.backend && row.mode === 'direct');
+          if (committed) {
+            const sourceSnapshot = sourceEntityAuthority.beginSnapshot();
+            try {
+              const sourceResult = await sourceCollectionReads.read();
+              if (sourceResult.kind === 'current') {
+                sourceEntityAuthority.settleSnapshot(sourceSnapshot, sourceResult.value);
+              }
+            } catch {
+              // The mode read is still authoritative; keep the source projection
+              // stale and let the page's normal refresh/retry path recover it.
+            }
+          }
           setSwitchFailures((previous) => {
             const next = new Set(previous);
             if (committed) next.delete(agent.backend);

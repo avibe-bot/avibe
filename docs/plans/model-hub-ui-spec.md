@@ -3767,7 +3767,7 @@ the two would disagree the first time it grew.
 The 移出 in §1.3's drawer is not a caller, because it is not yet a request. It moves a row
 between two sections of an open drawer and sends nothing; 取消 discards it, and only
 保存顺序 persists the order and applies the reorder operation in one request. That request
-has a guard, so no confirmation is needed. A guard hung on the click would fire
+has no guard, so no confirmation is needed. A guard hung on the click would fire
 on an edit the user can still take back, and would not fire on the edit that actually
 lands. The two unguarded model operations do not come here either: adding an entry and
 editing an entry's tiers touch neither an entry's identity nor any chain that references

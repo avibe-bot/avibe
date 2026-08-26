@@ -999,10 +999,19 @@ describe('SettingsModelsPage surface branches', () => {
 
   it('reconciles a lost Direct-mode response before rendering failure', async () => {
     const direct = { ...takeoverAgent, mode: 'direct' as const, sources: null, routes: null, supply_status: null, model_supply: null };
+    const staleSource = {
+      ...retainedSource,
+      id: 'src_head',
+      display_name: 'Paused source',
+      adopted_by: [{ backend: 'codex' as const, menu_model: 'gpt-5.6-sol' }],
+    };
+    const freshSource = { ...staleSource, adopted_by: [] };
     const agentRead = vi.spyOn(modelsApi, 'listAgents')
       .mockResolvedValueOnce([takeoverAgent])
       .mockResolvedValueOnce([direct]);
-    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([retainedSource]);
+    const sourceRead = vi.spyOn(modelsApi, 'listSources')
+      .mockResolvedValueOnce([staleSource])
+      .mockResolvedValueOnce([freshSource]);
     vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
     vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
     vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([takeoverChain]);
@@ -1022,6 +1031,8 @@ describe('SettingsModelsPage surface branches', () => {
     expect(screen.queryByText(/did not go through|没切换成功/i)).toBeNull();
     expect(setMode).toHaveBeenCalledOnce();
     expect(agentRead).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(sourceRead).toHaveBeenCalledTimes(2));
+    expect(screen.getByText(/Available · not currently supplying|可用 · 当前未供给/i)).toBeTruthy();
   });
 
   it('keeps retained supply rows but clears derived chain claims when a later supply read fails', async () => {
