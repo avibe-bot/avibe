@@ -1008,6 +1008,37 @@
   border-color: var(--model-hub-wash-24);
   color: var(--muted);
 }
+/* A suggestion is a value this source has not declared, so it is drawn as the
+   absence of one: the saved chip's box with a hairline outline instead of a
+   fill. It is never a vocabulary — clicking one types it, and typing anything
+   else remains equally valid. */
+.model-hub-source-tier-suggest {
+  padding: var(--model-hub-source-chip-padding-y) var(--model-hub-source-chip-padding-x);
+  border-color: var(--model-hub-wash-24);
+  border-style: dashed;
+  color: var(--model-hub-ink-73);
+}
+.model-hub-source-tier-suggest:hover { border-color: var(--model-hub-wash-33); color: var(--foreground); }
+.model-hub-source-tier-note {
+  color: var(--model-hub-source-footnote-ink);
+  font-size: var(--model-hub-source-tier-size);
+  line-height: 15px;
+}
+/* The row's add affordance is drawn only while a pointer is on the row. It keeps
+   the box it reserves either way, so revealing it moves no chip and changes no
+   row height — the row answers a hover with fill alone. A keyboard reaches the
+   cell by focus and gets the same reveal; a touch device has no hover to answer
+   with, so the pill is removed there rather than left as a blank gap, and the
+   cell itself stays the tappable way into the editor. */
+@media (hover: hover) {
+  .model-hub-source-table-row:hover { background: var(--model-hub-wash-0a); }
+  .model-hub-source-tier-reveal { opacity: 0; transition: opacity 120ms ease; }
+  .model-hub-source-table-row:hover .model-hub-source-tier-reveal,
+  .model-hub-source-tier-cell:focus-visible .model-hub-source-tier-reveal { opacity: 1; }
+}
+@media (hover: none) {
+  .model-hub-source-tier-reveal { display: none; }
+}
 .model-hub-source-tier-empty {
   color: var(--model-hub-ink-59);
   font-size: var(--model-hub-source-age-size);

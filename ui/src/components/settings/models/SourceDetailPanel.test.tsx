@@ -22,13 +22,15 @@ import { GuardGapList } from './GuardGapList';
 import { REPAIR_DESTINATION, REPAIR_LABEL_KEY, repairAction, type RepairKind } from './repair';
 import { SourceDetailPanel } from './SourceDetailPanel';
 import { SourceMutationReport } from './SourceMutationReport';
+import { TIER_SUGGESTIONS } from './tierSuggestions';
 import {
   COOLDOWN_DETAIL_KEYS,
   ERROR_DETAIL_KEYS,
   NEEDS_ACTION_DETAIL_KEYS,
+  SOURCE_PROTOCOLS,
   SOURCE_STATUSES,
 } from './types';
-import type { Source, SourceDetailKey, SourceKind, SupplyChannel } from './types';
+import type { Source, SourceDetailKey, SourceKind, SourceProtocol, SupplyChannel } from './types';
 import { useSourceMutationReport } from './useSourceMutationReport';
 
 const source: Source = {
@@ -164,6 +166,17 @@ const renderPanel = (adoptedBy: Source['adopted_by'] = undefined) => render(
     </I18nextProvider>
   </ToastProvider>,
 );
+
+const renderProtocol = (protocol: SourceProtocol, models: Source['models'] = source.models) => render(
+  <ToastProvider>
+    <I18nextProvider i18n={i18n}>
+      <ReportOwnedPanel source={{ ...source, protocol, models }} trackMutation={immediateTrack} onReauth={noReauth} />
+    </I18nextProvider>
+  </ToastProvider>,
+);
+/** Read by the class the stylesheet owns: the ghost chip has no other identity. */
+const suggestedTiers = () => Array.from(document.querySelectorAll('.model-hub-source-tier-suggest'))
+  .map((chip) => chip.textContent?.trim() ?? '');
 
 const EchoPanel: React.FC<{
   reconcile?: () => Promise<SourceMutationLanding['verdict'] | void> | SourceMutationLanding['verdict'] | void;
@@ -998,6 +1011,107 @@ describe('SourceDetailPanel', () => {
     await userEvent.click(screen.getByRole('button', { name: /Remove high|移除 high/i }));
 
     await waitFor(() => expect(update).toHaveBeenCalledWith(source.id, 'model-a', []));
+  });
+
+  it('leaves a resting row to its model and the tiers it already carries', () => {
+    renderProtocol('openai_responses');
+    expect(suggestedTiers()).toEqual([]);
+    expect(screen.queryByText(/sent exactly as typed|按你输入的原样发送/i)).toBeNull();
+    // The add affordance is not absent from the row, only from what a resting row
+    // draws — keeping the box it reserves is what lets revealing it move nothing.
+    const cell = screen.getByRole('button', { name: /high/i });
+    expect(cell.querySelector('.model-hub-source-tier-add.model-hub-source-tier-reveal')).toBeTruthy();
+  });
+
+  // The suggestion set is discovered from its total protocol Record, so a protocol
+  // added later fails here until that table decides what it offers — and what it
+  // decides is what the open editor draws, minus whatever the model already has.
+  it('offers exactly the tiers its proved protocol names, and only while editing', async () => {
+    for (const protocol of SOURCE_PROTOCOLS) {
+      renderProtocol(protocol);
+      expect(suggestedTiers()).toEqual([]);
+      await userEvent.click(screen.getByRole('button', { name: /high/i }));
+      expect(suggestedTiers()).toEqual(TIER_SUGGESTIONS[protocol].filter((tier) => tier !== 'high'));
+      cleanup();
+    }
+  });
+
+  it('adds a suggested tier through the same write typing it would take', async () => {
+    const update = vi.spyOn(modelsApi, 'updateModelReasoningEfforts').mockResolvedValueOnce({
+      ...source,
+      models: [{ ...source.models[0], reasoning_efforts: ['high', 'low'] }],
+    });
+    renderProtocol('openai_responses');
+    await userEvent.click(screen.getByRole('button', { name: /high/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^Add low$|^添加 low$/ }));
+
+    await waitFor(() => expect(update).toHaveBeenCalledWith(source.id, 'model-a', ['high', 'low']));
+  });
+
+  it('keeps a suggestion out of the draft and off the wire until it is clicked', async () => {
+    const update = vi.spyOn(modelsApi, 'updateModelReasoningEfforts');
+    renderProtocol('openai_chat');
+    await userEvent.click(screen.getByRole('button', { name: /high/i }));
+
+    expect(suggestedTiers().length).toBeGreaterThan(0);
+    expect((screen.getByPlaceholderText(/Enter to add|回车添加/i) as HTMLInputElement).value).toBe('');
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('collapses the editor on Escape and on a click elsewhere', async () => {
+    renderProtocol('openai_responses');
+    await userEvent.click(screen.getByRole('button', { name: /high/i }));
+    await userEvent.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByPlaceholderText(/Enter to add|回车添加/i)).toBeNull());
+    expect(suggestedTiers()).toEqual([]);
+
+    await userEvent.click(screen.getByRole('button', { name: /high/i }));
+    await userEvent.click(screen.getByRole('heading', { name: source.display_name as string }));
+    await waitFor(() => expect(screen.queryByPlaceholderText(/Enter to add|回车添加/i)).toBeNull());
+  });
+
+  it('hands the editor to the row that was clicked instead of opening a second one', async () => {
+    renderProtocol('openai_responses', [
+      source.models[0],
+      { id: 'model-b', display_name: null, origin: 'discovered', reasoning_efforts: [] },
+    ]);
+    await userEvent.click(screen.getByRole('button', { name: /high/i }));
+    expect(screen.getAllByPlaceholderText(/Enter to add|回车添加/i)).toHaveLength(1);
+
+    await userEvent.click(screen.getByRole('button', { name: /No tiers set|未设置档位/i }));
+
+    const inputs = screen.getAllByPlaceholderText(/Enter to add|回车添加/i);
+    expect(inputs).toHaveLength(1);
+    expect(document.activeElement).toBe(inputs[0]);
+  });
+
+  // Hover is a reveal, not a layout change, and the row answers it with fill
+  // alone. Asserted against the stylesheet because jsdom resolves neither a media
+  // query nor a hover state, and this half of the interaction is CSS-owned.
+  it('reveals the add affordance on hover without moving the row', () => {
+    const css = readFileSync(join(process.cwd(), 'src/components/settings/models/modelHubSurface.css'), 'utf8');
+    const pointer = css.slice(css.indexOf('@media (hover: hover)'), css.indexOf('@media (hover: none)'));
+    const touch = css.slice(css.indexOf('@media (hover: none)'));
+    expect(pointer).toMatch(/\.model-hub-source-table-row:hover \{ background: var\(--model-hub-wash-0a\); \}/);
+    expect(pointer).toMatch(/\.model-hub-source-tier-reveal \{ opacity: 0;/);
+    expect(pointer).toMatch(/\.model-hub-source-table-row:hover \.model-hub-source-tier-reveal,[\s\S]*?opacity: 1;/);
+    expect(pointer).not.toMatch(/display: none|height|padding|margin|border/);
+    expect(touch).toMatch(/\.model-hub-source-tier-reveal \{ display: none; \}/);
+  });
+
+  it('explains standby beside the label rather than in a place the reader must find', async () => {
+    renderPanel([]);
+    expect(screen.getByText(/^Standby$|^备用$/i)).toBeTruthy();
+
+    // Reached by keyboard, not by hover alone: the sentence is the only thing on
+    // the bar that says a just-added source is fine, so it cannot be pointer-only.
+    const hint = screen.getByRole('button', { name: /What standby means|备用是什么意思/i });
+    hint.focus();
+    await userEvent.keyboard('{Enter}');
+    expect(await screen.findByText(/serves a route through it|它就会显示为使用中/i)).toBeTruthy();
+
+    await userEvent.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByText(/serves a route through it|它就会显示为使用中/i)).toBeNull());
   });
 
   it('sends a manual-model removal before showing any guarded-change confirm', async () => {

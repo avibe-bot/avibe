@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { sourceStatePresentation } from './sourceStatePresentation';
+import { sourceStatePresentation, type SourceStateSurface } from './sourceStatePresentation';
+import { SOURCE_STATUSES } from './types';
 import type { SourceState, SourceStatus } from './types';
 
 const state = (status: SourceStatus, over: Partial<SourceState> = {}): SourceState => ({
@@ -58,6 +59,31 @@ describe('sourceStatePresentation', () => {
       'en',
       Date.parse('2026-08-11T10:00:00Z'),
     ).key).toBe('settings.models.upstream.state.unavailableDue');
+  });
+
+  // The explanation belongs to the reading, not to one surface: every path that
+  // produces 备用 carries it and no other state borrows it. Stated over the whole
+  // status union and both surfaces so a status added later has to decide rather
+  // than inherit silence, and so a surface cannot quietly drop the sentence.
+  it('explains the standby reading wherever it is produced, and nothing else', () => {
+    const surfaces: SourceStateSurface[] = ['card', 'detail'];
+    const adoptions = [
+      undefined,
+      { known: true, backends: [], native: false },
+      { known: true, backends: ['Claude Code'], native: false },
+    ];
+    const readings = SOURCE_STATUSES.flatMap((status) => surfaces.flatMap((surface) => adoptions.map(
+      (adoption) => sourceStatePresentation(state(status), surface, 'en', 0, adoption),
+    )));
+
+    for (const reading of readings) {
+      expect(Boolean(reading.hint)).toBe(reading.key === 'settings.models.upstream.state.standby');
+    }
+    expect(readings.filter((reading) => reading.hint).length).toBeGreaterThan(0);
+    expect(sourceStatePresentation(state('standby'), 'detail', 'en', 0).hint).toEqual({
+      labelKey: 'settings.models.sourceDetail.status.standbyHintLabel',
+      bodyKey: 'settings.models.sourceDetail.status.standbyHint',
+    });
   });
 
   it('maps each needs-action cause to the copy register', () => {

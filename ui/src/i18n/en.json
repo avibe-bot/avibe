@@ -1451,6 +1451,8 @@
             "accountBanned": "Account restricted"
           },
           "error": "Error",
+          "standbyHintLabel": "What standby means",
+          "standbyHint": "This source is healthy. It reads as in use once a backend in Gateway mode serves a route through it.",
           "listUpdated": "· model list updated {{time}}"
         },
         "summary_one": "{{host}} · {{count}} model",
@@ -1536,7 +1538,9 @@
           "addFirst": "+ Add tier",
           "add": "+ Tier",
           "inputHint": "Enter to add · any text",
-          "remove": "Remove {{tier}}"
+          "remove": "Remove {{tier}}",
+          "suggest": "Add {{tier}}",
+          "note": "Tiers are sent exactly as typed. A model with no tiers is still routable — its requests are sent without the effort parameter."
         },
         "addRow": {
           "hint": "Use this when a model is not discoverable, or when you only want one of them"
