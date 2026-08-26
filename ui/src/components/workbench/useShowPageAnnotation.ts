@@ -3,7 +3,6 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { actionShortcutMatches, isPlainEscape, useActionShortcuts } from '../../lib/actionShortcuts';
 import { useLatestRef } from '../../lib/useLatestRef';
 import { bindFrameChord } from '../apps/windowChords';
-import { inShortcutBlockingOverlay } from './chatShortcuts';
 
 // postMessage bridge between the chat host and the annotation overlay running
 // inside the chat's Show Page iframe (plan show-page-annotation-phase1 §3).
@@ -41,7 +40,7 @@ type ControlMessage =
   | { type: 'avibe:annotation:query' };
 
 const PARENT_ESCAPE_CLAIM_SELECTOR =
-  'input, textarea, [contenteditable]:not([contenteditable="false"])';
+  'input, textarea, [contenteditable]:not([contenteditable="false"]), [data-state="open"], [role="menu"], [aria-expanded="true"][aria-haspopup], [role="dialog"]:not([data-window-id]), dialog[open]';
 
 /**
  * `src` is the current iframe URL; changing it (first open, or a private↔public
@@ -111,7 +110,7 @@ export function useShowPageAnnotation(src: string | null, shortcutActive = true)
     if (!isPlainEscape(event) || event.defaultPrevented) return;
     const target = event.target;
     if (target instanceof Element && target.closest(PARENT_ESCAPE_CLAIM_SELECTOR)) return;
-    if (inShortcutBlockingOverlay(target as Element | null, document)) return;
+    if (document.querySelector('[role="menu"]')) return;
 
     try {
       const frameDocument = iframeRef.current?.contentDocument;
@@ -186,13 +185,7 @@ export function useShowPageAnnotation(src: string | null, shortcutActive = true)
       if (stateRef.current?.enabled === true) startEscapeListening();
       frameShortcutCleanupRef.current = bindFrameChord(
         iframe,
-        (event, activeInFrame) => {
-          let frameDocument: Document | undefined;
-          try {
-            frameDocument = iframe.contentDocument ?? undefined;
-          } catch {
-            frameDocument = undefined;
-          }
+        (event) => {
           return (
             !event.defaultPrevented
             && !event.repeat
@@ -200,7 +193,6 @@ export function useShowPageAnnotation(src: string | null, shortcutActive = true)
             && stateRef.current?.available === true
             && stateRef.current.enabled !== true
             && actionShortcutMatches(event, shortcutRef.current)
-            && !inShortcutBlockingOverlay(activeInFrame, frameDocument)
           );
         },
         enableFromShortcut,
@@ -229,8 +221,6 @@ export function useShowPageAnnotation(src: string | null, shortcutActive = true)
       ) {
         return;
       }
-      const target = event.target;
-      if (inShortcutBlockingOverlay(target as Element | null, document)) return;
       event.preventDefault();
       enableFromShortcut();
     };

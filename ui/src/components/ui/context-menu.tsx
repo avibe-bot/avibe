@@ -73,7 +73,6 @@ export const ContextMenu: React.FC<{
       />
       <div
         role="menu"
-        data-shortcut-overlay="open"
         style={{ left, top, width }}
         className="fixed z-50 rounded-lg border border-border bg-surface-3 p-1 shadow-[0_12px_30px_-8px_rgba(0,0,0,0.7)]"
       >

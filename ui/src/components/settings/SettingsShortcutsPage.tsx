@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useState } from 'react';
 import { Keyboard, RotateCcw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
@@ -11,7 +11,6 @@ import {
   isPlainEscape,
   readActionShortcuts,
   shortcutFromKeyboardEvent,
-  shortcutFromKeyboardEventWithLayout,
   useActionShortcutLabel,
   useActionShortcuts,
   writeActionShortcuts,
@@ -28,7 +27,7 @@ export const SettingsShortcutsPage: React.FC = () => {
   const shortcuts = useActionShortcuts();
   const [capturing, setCapturing] = useState<ActionShortcutId | null>(null);
   const [error, setError] = useState<{ id: ActionShortcutId; message: string } | null>(null);
-  const captureRequestRef = useRef(0);
+  const [persistError, setPersistError] = useState<string | null>(null);
   const shortcutLabels: Record<ActionShortcutId, string> = {
     voiceInput: useActionShortcutLabel(shortcuts.voiceInput),
     showPageAnnotation: useActionShortcutLabel(shortcuts.showPageAnnotation),
@@ -36,12 +35,11 @@ export const SettingsShortcutsPage: React.FC = () => {
 
   const actionLabel = (id: ActionShortcutId): string => t(`settings.shortcuts.${id}.title`);
 
-  const capture = async (id: ActionShortcutId, event: React.KeyboardEvent<HTMLButtonElement>) => {
+  const capture = (id: ActionShortcutId, event: React.KeyboardEvent<HTMLButtonElement>) => {
     if (capturing !== id) return;
     event.preventDefault();
     event.stopPropagation();
     if (isPlainEscape(event)) {
-      captureRequestRef.current += 1;
       setCapturing(null);
       setError(null);
       return;
@@ -62,10 +60,7 @@ export const SettingsShortcutsPage: React.FC = () => {
     }
     const storedShortcuts = readActionShortcuts();
     const conflict = SHORTCUT_IDS.find(
-      (candidate) => candidate !== id && (
-        actionShortcutsEqual(shortcuts[candidate], next)
-        || actionShortcutsEqual(storedShortcuts[candidate], next)
-      ),
+      (candidate) => candidate !== id && actionShortcutsEqual(storedShortcuts[candidate], next),
     );
     if (conflict) {
       setError({
@@ -75,27 +70,11 @@ export const SettingsShortcutsPage: React.FC = () => {
       return;
     }
 
-    setError(null);
-    const request = ++captureRequestRef.current;
-    const layoutAware = await shortcutFromKeyboardEventWithLayout(event.nativeEvent);
-    if (request !== captureRequestRef.current || !layoutAware) return;
-    if (isReservedActionShortcut(id, layoutAware)) {
-      setError({ id, message: t('settings.shortcuts.reserved') });
+    if (!writeActionShortcuts({ ...storedShortcuts, [id]: next })) {
+      setPersistError(t('settings.shortcuts.saveFailed'));
       return;
     }
-    const latestStoredShortcuts = readActionShortcuts();
-    const latestConflict = SHORTCUT_IDS.find(
-      (candidate) => candidate !== id
-        && actionShortcutsEqual(latestStoredShortcuts[candidate], layoutAware),
-    );
-    if (latestConflict) {
-      setError({
-        id,
-        message: t('settings.shortcuts.conflict', { action: actionLabel(latestConflict) }),
-      });
-      return;
-    }
-    writeActionShortcuts({ ...latestStoredShortcuts, [id]: layoutAware });
+    setPersistError(null);
     setCapturing(null);
     setError(null);
   };
@@ -111,15 +90,14 @@ export const SettingsShortcutsPage: React.FC = () => {
           aria-label={t('settings.shortcuts.change', { action: actionLabel(id) })}
           aria-pressed={active}
           onClick={() => {
-            captureRequestRef.current += 1;
             setCapturing(active ? null : id);
             setError(null);
+            setPersistError(null);
           }}
           onBlur={() => {
-            captureRequestRef.current += 1;
             setCapturing((current) => (current === id ? null : current));
           }}
-          onKeyDown={(event) => { void capture(id, event); }}
+          onKeyDown={(event) => capture(id, event)}
           className={clsx(
             'flex h-9 w-full items-center justify-between gap-3 rounded-lg border bg-surface-2 px-3 text-left transition-colors md:w-[190px]',
             'focus:outline-none focus:ring-2 focus:ring-mint/40',
@@ -154,10 +132,13 @@ export const SettingsShortcutsPage: React.FC = () => {
           variant="secondary"
           size="xs"
           onClick={() => {
-            captureRequestRef.current += 1;
-            writeActionShortcuts(defaultActionShortcuts());
+            if (!writeActionShortcuts(defaultActionShortcuts())) {
+              setPersistError(t('settings.shortcuts.saveFailed'));
+              return;
+            }
             setCapturing(null);
             setError(null);
+            setPersistError(null);
           }}
         >
           <RotateCcw className="size-3.5" />
@@ -165,6 +146,11 @@ export const SettingsShortcutsPage: React.FC = () => {
         </Button>
       }
     >
+      {persistError && (
+        <p role="alert" className="text-xs text-destructive-ink">
+          {persistError}
+        </p>
+      )}
       <SettingsPanel
         title={
           <span className="inline-flex items-center gap-2">

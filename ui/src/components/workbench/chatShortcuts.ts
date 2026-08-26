@@ -6,26 +6,6 @@ import { isApplePlatform } from '../../lib/platform';
 
 type ChordEvent = Pick<KeyboardEvent, 'altKey' | 'ctrlKey' | 'metaKey' | 'shiftKey' | 'code'>;
 
-const SHORTCUT_BLOCKING_TARGET_SELECTOR = [
-  '[data-shortcut-capture="active"]',
-  '[data-shortcut-overlay="open"]',
-  '[aria-expanded="true"][aria-haspopup]',
-  '[role="menu"][data-state="open"]',
-  '[role="listbox"][data-state="open"]',
-  '[role="dialog"]:not([data-window-id])',
-  '[role="alertdialog"]',
-  'dialog[open]',
-].join(', ');
-
-const SHORTCUT_OPEN_OVERLAY_SELECTOR = [
-  '[data-shortcut-capture="active"]',
-  '[data-shortcut-overlay="open"]',
-  '[aria-expanded="true"][aria-haspopup]',
-  '[role="menu"][data-state="open"]',
-  '[role="listbox"][data-state="open"]',
-  'dialog[open]',
-].join(', ');
-
 /**
  * ⌘⇧D / Ctrl+Shift+D — archive the session the user is reading.
  *
@@ -55,29 +35,6 @@ export function isArchiveSessionChord(event: ChordEvent): boolean {
  */
 export function inForegroundSurface(el: Element | null): boolean {
   return !!el?.closest?.('[data-window-id], [data-window-owner-id], [role="dialog"], [role="alertdialog"]');
-}
-
-/**
- * True when an explicitly open temporary overlay owns keyboard input. A bare
- * ARIA role is not enough: Show Pages may contain persistent navigation menus.
- * The root check covers overlays that keep focus on their trigger while open.
- */
-export function inShortcutBlockingOverlay(
-  el: Element | null,
-  root?: Pick<Document, 'querySelectorAll'>,
-): boolean {
-  const visibleRootOverlay = Array.from(
-    root?.querySelectorAll(SHORTCUT_OPEN_OVERLAY_SELECTOR) ?? [],
-  ).some((overlay) => {
-    const checkVisibility = (overlay as Element & { checkVisibility?: () => boolean }).checkVisibility;
-    return typeof checkVisibility === 'function'
-      ? checkVisibility.call(overlay)
-      : overlay.getClientRects().length > 0;
-  });
-  return (
-    !!el?.closest?.(SHORTCUT_BLOCKING_TARGET_SELECTOR)
-    || visibleRootOverlay
-  );
 }
 
 /**

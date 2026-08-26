@@ -63,7 +63,6 @@ import {
   type SessionSearchResult,
 } from './MentionEditor';
 import type { MentionReference } from '../../lib/mentions';
-import { inForegroundSurface, inShortcutBlockingOverlay } from './chatShortcuts';
 
 export type ComposerAttachment = {
   localId: string;
@@ -348,9 +347,6 @@ export interface ComposerProps {
    *  never pops the on-screen keyboard). The chat composer remounts per session,
    *  so this also covers opening / switching sessions. */
   autoFocus?: boolean;
-  /** The chat surface currently owns keyboard commands. False while a Show Page
-   *  or app window is in front of this still-mounted composer. */
-  voiceShortcutActive?: boolean;
   /** When BOTH are provided, the input upgrades to the rich mention editor:
    *  `@` autocompletes enabled Agents, `#` autocompletes Sessions. Leaving them
    *  unset keeps the plain textarea (e.g. the Workbench home). */
@@ -388,7 +384,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   className,
   sessionId,
   autoFocus = false,
-  voiceShortcutActive = true,
   onSearchAgents,
   onSearchSessions,
 }, ref) {
@@ -1217,8 +1212,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const voiceCaptureActive = recording || voiceProcessing;
   const voiceDiscardAvailable = recording || voiceRetainedSession !== null;
   const voiceShortcutAvailable = (
-    voiceShortcutActive
-    && (voiceControlMode === 'record' || voiceControlMode === 'finish')
+    (voiceControlMode === 'record' || voiceControlMode === 'finish')
     && !isVoiceControlDisabled(
       disabled,
       recording,
@@ -1228,24 +1222,18 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   );
   const [stopArmed, setStopArmed] = useState(false);
 
-  useEffect(() => {
-    if (!voiceShortcutAvailable) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (
-        event.defaultPrevented
-        || event.repeat
-        || !actionShortcutMatches(event, voiceInputShortcut)
-        || inForegroundSurface(event.target as Element | null)
-        || inShortcutBlockingOverlay(event.target as Element | null, document)
-      ) {
-        return;
-      }
-      event.preventDefault();
-      if (voiceControlMode === 'finish') stopRecording();
-      else void startRecording(captureVoiceInsertion());
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
+  const handleVoiceShortcut = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (
+      !voiceShortcutAvailable
+      || event.defaultPrevented
+      || event.repeat
+      || !actionShortcutMatches(event.nativeEvent, voiceInputShortcut)
+    ) {
+      return;
+    }
+    event.preventDefault();
+    if (voiceControlMode === 'finish') stopRecording();
+    else void startRecording(captureVoiceInsertion());
   }, [
     captureVoiceInsertion,
     startRecording,
@@ -1322,7 +1310,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   };
 
   return (
-    <div className={cn('mx-auto flex w-full max-w-[1080px] flex-col gap-2', className)}>
+    <div
+      className={cn('mx-auto flex w-full max-w-[1080px] flex-col gap-2', className)}
+      onKeyDown={handleVoiceShortcut}
+    >
       {mediaEnabled && attachments.length > 0 && (
         <div className="flex flex-wrap gap-2">
           {attachments.map((att) => (

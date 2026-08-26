@@ -272,7 +272,6 @@ export const ChatPage: React.FC = () => {
   const { unreadBySession, markRead: markInboxRead } = useWorkbenchInbox({ feed: false });
   const { focusedId: foregroundAppWindowId, focusCanvas } = useWindowManager();
   const isDesktop = useIsDesktop();
-  const foregroundShortcutOwnerId = isDesktop ? foregroundAppWindowId : null;
   const pageActive = usePageActive();
   // The mobile chat surface is a fixed full-screen flex column; this keeps the
   // composer glued to the iOS keyboard (settle-then-correct; see the hook).
@@ -377,7 +376,7 @@ export const ChatPage: React.FC = () => {
   // remounted overlay before it rebroadcasts. Re-points reset via the URL change.
   const annotation = useShowPageAnnotation(
     showPageActive ? showPageUrl : null,
-    showPageActive && foregroundShortcutOwnerId === null,
+    showPageActive && (!isDesktop || foregroundAppWindowId === null),
   );
   useEffect(() => {
     const sid = sessionId;
@@ -2854,7 +2853,6 @@ export const ChatPage: React.FC = () => {
           onDraftChange={onDraftChange}
           onSearchAgents={searchAgents}
           onSearchSessions={searchSessions}
-          voiceShortcutActive={!showPageActive && foregroundShortcutOwnerId === null}
           readOnlyReason={readOnlyReason}
         />}
       </div>
@@ -3232,14 +3230,13 @@ interface ComposeProps {
   onDraftChange: (text: string) => void;
   onSearchAgents: ComposerProps['onSearchAgents'];
   onSearchSessions: ComposerProps['onSearchSessions'];
-  voiceShortcutActive: boolean;
   // Read-only session: the composer is inert and explains why — which is the reason
   // this is the REASON and not a boolean. "Archived, read-only" is the wrong sentence
   // on a runtime-owned row that was never archived.
   readOnlyReason: SessionReadOnlyReason | null;
 }
 
-const Compose: React.FC<ComposeProps> = ({ composerRef, onSend, onStop, busy, sessionId, initialDraft, onDraftChange, onSearchAgents, onSearchSessions, voiceShortcutActive, readOnlyReason }) => {
+const Compose: React.FC<ComposeProps> = ({ composerRef, onSend, onStop, busy, sessionId, initialDraft, onDraftChange, onSearchAgents, onSearchSessions, readOnlyReason }) => {
   const { t } = useTranslation();
   const readOnly = readOnlyReason !== null;
   return (
@@ -3261,7 +3258,6 @@ const Compose: React.FC<ComposeProps> = ({ composerRef, onSend, onStop, busy, se
         onDraftChange={onDraftChange}
         onSearchAgents={onSearchAgents}
         onSearchSessions={onSearchSessions}
-        voiceShortcutActive={voiceShortcutActive}
         // Read-only archived session: reuse the composer's own disabled +
         // placeholder props rather than swapping in a notice bar. ``busy`` is NOT
         // reliably false here — archive commits before the controller turn is

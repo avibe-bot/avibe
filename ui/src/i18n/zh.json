@@ -309,7 +309,11 @@
       "modifierRequired": "请包含 Option、Alt、Command 或 Control。",
       "reserved": "这个快捷键已被 Avibe 使用。",
       "conflict": "已被{{action}}使用。",
+      "saveFailed": "无法在当前浏览器中保存快捷键。",
       "modifierLabels": {
+        "control": "Control",
+        "option": "Option",
+        "command": "Command",
         "ctrl": "Ctrl",
         "alt": "Alt",
         "shift": "Shift",

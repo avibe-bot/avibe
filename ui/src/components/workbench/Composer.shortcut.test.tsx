@@ -61,7 +61,7 @@ void i18n.use(initReactI18next).init({
 
 const renderComposer = (
   sessionId = 'shortcut-session',
-  state: { disabled?: boolean; voiceShortcutActive?: boolean } = {},
+  state: { disabled?: boolean } = {},
 ) => render(
   <I18nextProvider i18n={i18n}>
     <ToastProvider>
@@ -89,7 +89,6 @@ beforeEach(() => {
     configurable: true,
     value: 'Linux x86_64',
   });
-  Object.defineProperty(navigator, 'keyboard', { configurable: true, value: undefined });
   Object.defineProperty(window, 'matchMedia', {
     configurable: true,
     value: vi.fn().mockReturnValue({ matches: false }),
@@ -109,31 +108,28 @@ describe('Composer voice shortcut', () => {
     expect(mic.getAttribute('title')).toBe(
       'Press Alt+Z for voice input, press it again to finish, or press Esc to cancel',
     );
+    const textbox = screen.getByRole('textbox');
 
     await act(async () => undefined);
-    fireEvent.keyDown(window, { code: 'KeyZ', altKey: true });
+    fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
     await waitFor(() => expect(voiceMocks.getUserMedia).toHaveBeenCalledOnce());
     const finish = await screen.findByRole('button', { name: en.chat.compose.stopRecording });
     expect(finish.getAttribute('title')).toBe(mic.getAttribute('title'));
 
-    fireEvent.keyDown(window, { code: 'KeyZ', altKey: true });
+    fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
     expect(voiceMocks.finish).toHaveBeenCalledOnce();
   });
 
-  it('leaves the shortcut with an open menu', async () => {
-    renderComposer('menu-shortcut-session');
-    await screen.findByRole('button', { name: en.chat.compose.voice });
+  it('does not handle the shortcut outside the composer', async () => {
+    renderComposer('scoped-shortcut-session');
+    const textbox = screen.getByRole('textbox');
     await act(async () => undefined);
 
-    const menuTrigger = document.createElement('button');
-    menuTrigger.setAttribute('aria-haspopup', 'menu');
-    menuTrigger.setAttribute('aria-expanded', 'true');
-    Object.defineProperty(menuTrigger, 'checkVisibility', { value: () => true });
-    document.body.append(menuTrigger);
     fireEvent.keyDown(window, { code: 'KeyZ', altKey: true });
-
     expect(voiceMocks.getUserMedia).not.toHaveBeenCalled();
-    menuTrigger.remove();
+
+    fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
+    await waitFor(() => expect(voiceMocks.getUserMedia).toHaveBeenCalledOnce());
   });
 
   it('does not advertise or handle the shortcut when voice input is disabled', async () => {
@@ -142,7 +138,7 @@ describe('Composer voice shortcut', () => {
 
     expect(mic.hasAttribute('disabled')).toBe(true);
     expect(mic.getAttribute('title')).toBe(en.chat.compose.voice);
-    fireEvent.keyDown(window, { code: 'KeyZ', altKey: true });
+    fireEvent.keyDown(screen.getByRole('textbox'), { code: 'KeyZ', altKey: true });
     expect(voiceMocks.getUserMedia).not.toHaveBeenCalled();
   });
 
@@ -150,7 +146,6 @@ describe('Composer voice shortcut', () => {
     const shortcuts = defaultActionShortcuts();
     shortcuts.voiceInput = {
       code: 'Escape',
-      displayKey: 'Escape',
       altKey: true,
       ctrlKey: false,
       metaKey: false,
@@ -159,12 +154,13 @@ describe('Composer voice shortcut', () => {
     writeActionShortcuts(shortcuts);
     renderComposer('escape-shortcut-session');
     await screen.findByRole('button', { name: en.chat.compose.voice });
+    const textbox = screen.getByRole('textbox');
     await act(async () => undefined);
 
-    fireEvent.keyDown(window, { code: 'Escape', key: 'Escape', altKey: true });
+    fireEvent.keyDown(textbox, { code: 'Escape', key: 'Escape', altKey: true });
     await waitFor(() => expect(voiceMocks.getUserMedia).toHaveBeenCalledOnce());
     await screen.findByRole('button', { name: en.chat.compose.stopRecording });
-    fireEvent.keyDown(window, { code: 'Escape', key: 'Escape', altKey: true });
+    fireEvent.keyDown(textbox, { code: 'Escape', key: 'Escape', altKey: true });
     expect(voiceMocks.finish).toHaveBeenCalledOnce();
     expect(voiceMocks.abort).not.toHaveBeenCalled();
 

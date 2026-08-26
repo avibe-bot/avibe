@@ -309,7 +309,11 @@
       "modifierRequired": "Include Option, Alt, Command, or Control.",
       "reserved": "This shortcut is already used by Avibe.",
       "conflict": "Already used by {{action}}.",
+      "saveFailed": "Couldn't save the shortcut in this browser.",
       "modifierLabels": {
+        "control": "Control",
+        "option": "Option",
+        "command": "Command",
         "ctrl": "Ctrl",
         "alt": "Alt",
         "shift": "Shift",

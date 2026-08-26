@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import { useMemo, useSyncExternalStore } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 
@@ -8,8 +8,6 @@ export type ActionShortcutId = 'voiceInput' | 'showPageAnnotation';
 
 export type ActionShortcut = {
   code: string;
-  /** Layout-aware key legend captured when the shortcut was assigned. */
-  displayKey?: string;
   altKey: boolean;
   ctrlKey: boolean;
   metaKey: boolean;
@@ -22,12 +20,6 @@ type ShortcutEvent = Pick<
   KeyboardEvent,
   'altKey' | 'code' | 'ctrlKey' | 'key' | 'metaKey' | 'shiftKey'
 > & Partial<Pick<KeyboardEvent, 'getModifierState'>>;
-
-type KeyboardLayoutProvider = {
-  getLayoutMap: () => Promise<Pick<Map<string, string>, 'get'>>;
-  addEventListener?: (type: 'layoutchange', listener: EventListener) => void;
-  removeEventListener?: (type: 'layoutchange', listener: EventListener) => void;
-};
 
 type ReadableStorage = Pick<Storage, 'getItem'>;
 type WritableStorage = Pick<Storage, 'setItem'>;
@@ -63,14 +55,13 @@ const MODIFIER_CODES = new Set([
   'ShiftRight',
 ]);
 
-const BROWSER_RESERVED_PRIMARY_KEYS = new Set([
-  'L', // focus location bar
-  'N', // new window
-  'Q', // quit browser
-  'T', // new/reopen tab
-]);
-
-const cloneShortcut = (shortcut: ActionShortcut): ActionShortcut => ({ ...shortcut });
+const cloneShortcut = (shortcut: ActionShortcut): ActionShortcut => ({
+  code: shortcut.code,
+  altKey: shortcut.altKey,
+  ctrlKey: shortcut.ctrlKey,
+  metaKey: shortcut.metaKey,
+  shiftKey: shortcut.shiftKey,
+});
 
 export const defaultActionShortcuts = (): ActionShortcuts => ({
   voiceInput: cloneShortcut(DEFAULT_ACTION_SHORTCUTS.voiceInput),
@@ -99,10 +90,6 @@ function isActionShortcut(value: unknown): value is ActionShortcut {
     && typeof shortcut.ctrlKey === 'boolean'
     && typeof shortcut.metaKey === 'boolean'
     && typeof shortcut.shiftKey === 'boolean'
-    && (
-      shortcut.displayKey === undefined
-      || (typeof shortcut.displayKey === 'string' && shortcut.displayKey.length > 0)
-    )
     && (shortcut.altKey || shortcut.ctrlKey || shortcut.metaKey)
   );
 }
@@ -136,26 +123,19 @@ export function readActionShortcuts(storage?: ReadableStorage): ActionShortcuts 
 export function writeActionShortcuts(
   shortcuts: ActionShortcuts,
   storage?: WritableStorage,
-): void {
+): boolean {
   const normalized = normalizeActionShortcuts(shortcuts);
   try {
     const target = storage ?? (typeof window !== 'undefined' ? window.localStorage : undefined);
-    target?.setItem(ACTION_SHORTCUTS_STORAGE_KEY, JSON.stringify(normalized));
+    if (!target) return false;
+    target.setItem(ACTION_SHORTCUTS_STORAGE_KEY, JSON.stringify(normalized));
   } catch {
-    return;
+    return false;
   }
   if (typeof window !== 'undefined' && storage === undefined) {
     window.dispatchEvent(new Event(ACTION_SHORTCUTS_CHANGED_EVENT));
   }
-}
-
-function normalizedDisplayKey(value: string | undefined): string | undefined {
-  if (!value || value === 'Dead' || value === 'Unidentified') return undefined;
-  if (value === ' ') return undefined;
-  const glyphs = Array.from(value);
-  if (glyphs.length !== 1) return undefined;
-  const uppercased = value.toLocaleUpperCase();
-  return Array.from(uppercased).length === 1 ? uppercased : undefined;
+  return true;
 }
 
 export function isPlainEscape(
@@ -178,34 +158,12 @@ export function shortcutFromKeyboardEvent(event: ShortcutEvent): ActionShortcut 
   if (isAltGraphShortcutEvent(event)) return null;
   const shortcut: ActionShortcut = {
     code: event.code,
-    displayKey: normalizedDisplayKey(event.key),
     altKey: event.altKey,
     ctrlKey: event.ctrlKey,
     metaKey: event.metaKey,
     shiftKey: event.shiftKey,
   };
   return isActionShortcut(shortcut) ? shortcut : null;
-}
-
-/** Resolve the physical code to the legend on the active keyboard layout. */
-export async function shortcutFromKeyboardEventWithLayout(
-  event: ShortcutEvent,
-  keyboard: KeyboardLayoutProvider | undefined = (
-    typeof navigator === 'undefined'
-      ? undefined
-      : (navigator as Navigator & { keyboard?: KeyboardLayoutProvider }).keyboard
-  ),
-): Promise<ActionShortcut | null> {
-  // Read the native event before awaiting; the returned shortcut is the snapshot.
-  const shortcut = shortcutFromKeyboardEvent(event);
-  if (!shortcut || !keyboard) return shortcut;
-  try {
-    const layout = await keyboard.getLayoutMap();
-    const displayKey = normalizedDisplayKey(layout.get(shortcut.code));
-    return displayKey ? { ...shortcut, displayKey } : shortcut;
-  } catch {
-    return shortcut;
-  }
 }
 
 export function actionShortcutMatches(event: ShortcutEvent, shortcut: ActionShortcut): boolean {
@@ -219,31 +177,12 @@ export function actionShortcutMatches(event: ShortcutEvent, shortcut: ActionShor
   );
 }
 
-function actionShortcutLayoutKey(shortcut: ActionShortcut): string | undefined {
-  const displayKey = normalizedDisplayKey(shortcut.displayKey);
-  if (displayKey) return displayKey;
-  const match = /^Key([A-Z])$/.exec(shortcut.code);
-  return match?.[1];
-}
-
-function shortcutUsesLayoutKey(shortcut: ActionShortcut, key: string): boolean {
-  return actionShortcutLayoutKey(shortcut) === key;
-}
-
-/** Chords already owned by the browser, shell, or action surface cannot be assigned. */
+/** Chords already owned by Avibe on the same surface cannot be assigned. */
 export function isReservedActionShortcut(
   id: ActionShortcutId,
   shortcut: ActionShortcut,
 ): boolean {
-  const exactAlt = shortcut.altKey && !shortcut.ctrlKey && !shortcut.metaKey && !shortcut.shiftKey;
-  if (exactAlt && (
-    shortcut.code === 'KeyW'
-    || /^Digit[1-9]$/.test(shortcut.code)
-  )) {
-    return true;
-  }
-  // Both Chat composer implementations submit every non-Shift Enter before
-  // the window-level voice listener can run.
+  // Both Chat composer implementations submit every non-Shift Enter.
   if (
     id === 'voiceInput'
     && !shortcut.shiftKey
@@ -252,25 +191,7 @@ export function isReservedActionShortcut(
     return true;
   }
   // AppShell owns search even when an extra modifier is present.
-  if (shortcutUsesLayoutKey(shortcut, 'K') && (shortcut.ctrlKey || shortcut.metaKey)) return true;
-  // Browsers and the OS consume these before page content can reliably cancel
-  // them, so accepting them would save a shortcut that never fires.
-  if (!shortcut.altKey && (shortcut.ctrlKey || shortcut.metaKey) && (
-    BROWSER_RESERVED_PRIMARY_KEYS.has(actionShortcutLayoutKey(shortcut) ?? '')
-    || /^Digit[0-9]$/.test(shortcut.code)
-    || shortcut.code === 'Tab'
-  )) {
-    return true;
-  }
-  if (shortcut.code === 'Tab' && (shortcut.altKey || shortcut.metaKey)) return true;
-  // Window close/minimize accepts Shift but yields when Alt is held.
-  if (
-    (shortcutUsesLayoutKey(shortcut, 'W') || shortcutUsesLayoutKey(shortcut, 'M'))
-    && !shortcut.altKey
-    && (shortcut.ctrlKey || shortcut.metaKey)
-  ) {
-    return true;
-  }
+  if (shortcut.code === 'KeyK' && (shortcut.ctrlKey || shortcut.metaKey)) return true;
   // Chat archive is exact Ctrl/Command+Shift+D.
   return (
     shortcut.code === 'KeyD'
@@ -278,23 +199,6 @@ export function isReservedActionShortcut(
     && !shortcut.altKey
     && shortcut.ctrlKey !== shortcut.metaKey
   );
-}
-
-export function resolveActionShortcutsForLayout(
-  shortcuts: ActionShortcuts,
-  layoutKeys: Partial<Record<ActionShortcutId, string>>,
-): ActionShortcuts {
-  const defaults = defaultActionShortcuts();
-  const resolve = (id: ActionShortcutId): ActionShortcut => {
-    const layoutKey = normalizedDisplayKey(layoutKeys[id]);
-    const candidate = layoutKey ? { ...shortcuts[id], displayKey: layoutKey } : shortcuts[id];
-    return isReservedActionShortcut(id, candidate) ? defaults[id] : candidate;
-  };
-  const voiceInput = resolve('voiceInput');
-  const showPageAnnotation = resolve('showPageAnnotation');
-  return actionShortcutsEqual(voiceInput, showPageAnnotation)
-    ? defaults
-    : { voiceInput, showPageAnnotation };
 }
 
 const SYMBOL_KEY_LABELS: Readonly<Record<string, string>> = {
@@ -361,23 +265,16 @@ export function formatActionShortcut(
   shortcut: ActionShortcut,
   t: TFunction,
   apple = isApplePlatform(),
-  layoutKey?: string,
 ): string {
-  const key = shortcut.code.startsWith('Numpad')
-    ? actionShortcutKeyLabel(shortcut.code, t)
-    : (
-      normalizedDisplayKey(layoutKey)
-      ?? normalizedDisplayKey(shortcut.displayKey)
-      ?? actionShortcutKeyLabel(shortcut.code, t)
-    );
+  const key = actionShortcutKeyLabel(shortcut.code, t);
   if (apple) {
     return [
-      shortcut.ctrlKey ? '⌃' : '',
-      shortcut.altKey ? '⌥' : '',
-      shortcut.shiftKey ? '⇧' : '',
-      shortcut.metaKey ? '⌘' : '',
+      shortcut.ctrlKey ? t('settings.shortcuts.modifierLabels.control') : '',
+      shortcut.altKey ? t('settings.shortcuts.modifierLabels.option') : '',
+      shortcut.shiftKey ? t('settings.shortcuts.modifierLabels.shift') : '',
+      shortcut.metaKey ? t('settings.shortcuts.modifierLabels.command') : '',
       key,
-    ].join('');
+    ].filter(Boolean).join('+');
   }
   return [
     shortcut.ctrlKey ? t('settings.shortcuts.modifierLabels.ctrl') : '',
@@ -388,50 +285,9 @@ export function formatActionShortcut(
   ].filter(Boolean).join('+');
 }
 
-function activeKeyboardLayoutProvider(): KeyboardLayoutProvider | undefined {
-  if (typeof navigator === 'undefined') return undefined;
-  return (navigator as Navigator & { keyboard?: KeyboardLayoutProvider }).keyboard;
-}
-
-function useActiveLayoutKey(code: string): string | undefined {
-  const [resolved, setResolved] = useState<{ code: string; key?: string }>({ code: '' });
-
-  useEffect(() => {
-    const keyboard = activeKeyboardLayoutProvider();
-    let active = true;
-    let request = 0;
-
-    const refresh = () => {
-      const currentRequest = ++request;
-      if (!keyboard) {
-        setResolved({ code });
-        return;
-      }
-      void keyboard.getLayoutMap().then((layout) => {
-        if (!active || currentRequest !== request) return;
-        setResolved({ code, key: normalizedDisplayKey(layout.get(code)) });
-      }).catch(() => {
-        if (!active || currentRequest !== request) return;
-        setResolved({ code });
-      });
-    };
-    const onLayoutChange: EventListener = () => refresh();
-
-    refresh();
-    keyboard?.addEventListener?.('layoutchange', onLayoutChange);
-    return () => {
-      active = false;
-      keyboard?.removeEventListener?.('layoutchange', onLayoutChange);
-    };
-  }, [code]);
-
-  return resolved.code === code ? resolved.key : undefined;
-}
-
 export function useActionShortcutLabel(shortcut: ActionShortcut): string {
   const { t } = useTranslation();
-  const layoutKey = useActiveLayoutKey(shortcut.code);
-  return formatActionShortcut(shortcut, t, isApplePlatform(), layoutKey);
+  return formatActionShortcut(shortcut, t);
 }
 
 const defaultSnapshot = JSON.stringify(defaultActionShortcuts());
@@ -459,14 +315,5 @@ export function useActionShortcuts(): ActionShortcuts {
     shortcutSnapshot,
     () => defaultSnapshot,
   );
-  const stored = useMemo(() => normalizeActionShortcuts(JSON.parse(snapshot)), [snapshot]);
-  const voiceInputLayoutKey = useActiveLayoutKey(stored.voiceInput.code);
-  const annotationLayoutKey = useActiveLayoutKey(stored.showPageAnnotation.code);
-  return useMemo(
-    () => resolveActionShortcutsForLayout(stored, {
-      voiceInput: voiceInputLayoutKey,
-      showPageAnnotation: annotationLayoutKey,
-    }),
-    [annotationLayoutKey, stored, voiceInputLayoutKey],
-  );
+  return useMemo(() => normalizeActionShortcuts(JSON.parse(snapshot)), [snapshot]);
 }

@@ -15,7 +15,6 @@ describe('ContextMenu', () => {
         <button type="button">Menu item</button>
       </ContextMenu>,
     );
-    expect(document.querySelector('[role="menu"]')?.getAttribute('data-shortcut-overlay')).toBe('open');
     const event = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
 
     act(() => window.dispatchEvent(event));
