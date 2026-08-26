@@ -68,6 +68,7 @@ const renderLayout = (path: string) => render(
   <MemoryRouter initialEntries={[path]}>
     <Routes>
       <Route path="/settings" element={<SettingsLayoutHarness />}>
+        <Route path="models" element={<div>models-body</div>} />
         <Route path="replies" element={<div>replies-body</div>} />
         <Route path="service" element={<div>service-body</div>} />
         <Route path="platforms" element={<div>platforms-body</div>} />
@@ -113,6 +114,27 @@ describe('SettingsLayout', () => {
     expect(shell?.className).toContain('min-h-0');
     expect(shell?.className).toContain('md:h-auto');
     expect(shell?.className).not.toContain('min-h-full');
+  });
+
+  it.each(['/settings/models', '/settings/models/'])(
+    'lets Model Hub fill the route pane at %s',
+    (path) => {
+      renderLayout(path);
+
+      const modelHubFrame = screen.getByText('models-body').parentElement;
+      expect(modelHubFrame?.className).toContain('min-h-full');
+      expect(modelHubFrame?.className).not.toContain('mx-auto');
+      expect(modelHubFrame?.className).not.toContain('max-w-[1180px]');
+    },
+  );
+
+  it('keeps standard settings pages constrained', () => {
+    renderLayout('/settings/replies');
+
+    const standardFrame = screen.getByText('replies-body').parentElement;
+    expect(standardFrame?.className).toContain('mx-auto');
+    expect(standardFrame?.className).toContain('max-w-[1180px]');
+    expect(standardFrame?.className).not.toContain('min-h-full');
   });
 
   it('renders the three-group rail and feature-gated owner sections', async () => {
