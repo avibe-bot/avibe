@@ -28,7 +28,6 @@ from vibe.upgrade import (
     get_restart_invocation_command,
     get_restart_shell_command,
     defer_upgrade_activation,
-    prune_atomic_uv_install_generations,
     get_running_vibe_path,
     get_safe_cwd,
     installed_package_name,
@@ -199,56 +198,28 @@ def test_activate_upgrade_candidate_replaces_windows_hardlink_launcher(monkeypat
     assert launcher.resolve() == candidate.resolve()
 
 
-def test_prune_atomic_uv_install_generations_keeps_active_and_rollback(monkeypatch, tmp_path):
-    from vibe import upgrade
-
-    root = tmp_path / "generations"
-    active = root / "active" / "bin" / "vibe"
-    rollback = root / "rollback" / "bin" / "vibe"
-    stale = root / "stale" / "bin" / "vibe"
-    for path in (active, rollback, stale):
-        path.parent.mkdir(parents=True)
-        path.write_text(path.parent.parent.name, encoding="utf-8")
-    monkeypatch.setattr(upgrade, "atomic_uv_install_root", lambda: root)
-
-    removed = prune_atomic_uv_install_generations(keep=(active, rollback), min_age_seconds=0)
-
-    assert removed == [stale.parent.parent]
-    assert active.exists()
-    assert rollback.exists()
-    assert not stale.parent.parent.exists()
-
-
-def test_activation_retains_the_generation_serving_a_live_process(monkeypatch, tmp_path):
+def test_activation_leaves_every_other_generation_untouched(monkeypatch, tmp_path):
     from vibe import upgrade
 
     root = tmp_path / "generations"
     launcher = tmp_path / "bin" / "vibe"
     previous = root / "previous" / "bin" / "vibe"
-    running_python = root / "running" / "tools" / "avibe-os" / "bin" / "python"
     candidate = root / "candidate" / "bin" / "vibe"
-    stale = root / "stale" / "bin" / "vibe"
-    for path in (previous, candidate, stale):
+    unrelated = root / "unrelated" / "bin" / "vibe"
+    for path in (previous, candidate, unrelated):
         path.parent.mkdir(parents=True)
         path.write_text(path.parent.parent.name, encoding="utf-8")
         path.chmod(0o755)
-    shared_python = tmp_path / "shared-python" / "python"
-    shared_python.parent.mkdir()
-    shared_python.write_text("python", encoding="utf-8")
-    running_python.parent.mkdir(parents=True)
-    running_python.symlink_to(shared_python)
     launcher.parent.mkdir(parents=True)
     launcher.symlink_to(previous)
     monkeypatch.setattr(upgrade, "atomic_uv_install_root", lambda: root)
-    monkeypatch.setattr(upgrade, "running_install_paths", lambda: (running_python,))
     monkeypatch.setattr(upgrade, "verify_upgrade_candidate", lambda _activation: upgrade.IntegrityResult(True, 1))
 
     upgrade.activate_upgrade_candidate(upgrade.AtomicActivation(launcher, candidate, root / "previous"))
 
     assert launcher.resolve() == candidate.resolve()
     assert previous.exists()
-    assert running_python.exists()
-    assert not stale.parent.parent.exists()
+    assert unrelated.exists()
 
 
 def test_activation_compares_source_generation_by_filesystem_identity(monkeypatch, tmp_path):
@@ -360,7 +331,6 @@ def test_installer_rejects_a_snapshot_superseded_by_runtime_activation(monkeypat
     launcher.symlink_to(old)
     installer_activation = upgrade.AtomicActivation(launcher, installer_candidate, root / "old")
     monkeypatch.setattr(upgrade, "atomic_uv_install_root", lambda: root)
-    monkeypatch.setattr(upgrade, "running_install_paths", lambda: ())
     monkeypatch.setattr(upgrade, "restart_is_pending", lambda: False)
     monkeypatch.setattr(upgrade, "verify_upgrade_candidate", lambda _activation: upgrade.IntegrityResult(True, 1))
 

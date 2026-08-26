@@ -563,35 +563,19 @@ function Install-Vibe {
 
 function Test-Installation {
     Write-Info "Verifying installation..."
-    
-    # Refresh PATH
-    $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+
     $stableBin = Get-StableBinDirectory
-    $env:Path += ";$stableBin"
-    
-    if (Test-Command "vibe") {
+    $stableLauncher = Join-Path $stableBin "vibe.exe"
+    $persistedPath = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+    $env:Path = "$stableBin;$persistedPath"
+
+    if (Test-Path -LiteralPath $stableLauncher) {
         Write-Success "vibe command is available"
         Write-Host ""
-        & vibe --help
+        & $stableLauncher --help
         return $true
     }
-    
-    # Check common install locations
-    $vibeLocations = @(
-        (Join-Path $stableBin "vibe.exe")
-    )
-    
-    foreach ($loc in $vibeLocations) {
-        if (Test-Path $loc) {
-            Write-Warning "vibe installed at $loc but not in PATH"
-            Write-Host ""
-            Write-Host "Add this directory to your PATH:" -ForegroundColor Yellow
-            Write-Host "  $(Split-Path $loc)"
-            Write-Host ""
-            return $true
-        }
-    }
-    
+
     Write-Error "Installation verification failed. vibe command not found."
 }
 
@@ -601,13 +585,14 @@ function Prepare-ShowRuntime {
         return
     }
 
-    if (-not (Test-Command "vibe")) {
+    $stableLauncher = Join-Path (Get-StableBinDirectory) "vibe.exe"
+    if (-not (Test-Path -LiteralPath $stableLauncher)) {
         Write-Warning "Show Runtime was not prepared because the vibe command is not available yet"
         return
     }
 
     Write-Info "Preparing Show Runtime for this platform..."
-    $result = Invoke-NativeCommand -FilePath "vibe" -Arguments @("runtime", "prepare", "--strict")
+    $result = Invoke-NativeCommand -FilePath $stableLauncher -Arguments @("runtime", "prepare", "--strict")
     if ($result.Success) {
         Write-Success "Show Runtime is ready"
         return

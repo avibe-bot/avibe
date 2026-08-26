@@ -687,6 +687,9 @@ def test_windows_installer_honors_configured_tool_bin_and_cross_volume_copy_fall
     assert "[System.IO.File]::Move($replacement, $StableLauncher)" in powershell
     assert "Start-Process -FilePath" not in powershell
     assert "& $FilePath @Arguments" in powershell
+    assert '$env:Path = "$stableBin;$persistedPath"' in powershell
+    assert "& $stableLauncher --help" in powershell
+    assert 'Invoke-NativeCommand -FilePath $stableLauncher -Arguments @("runtime", "prepare", "--strict")' in powershell
 
 
 def test_install_script_candidate_probes_ignore_python_path_overrides():

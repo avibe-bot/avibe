@@ -16,7 +16,7 @@ import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, NamedTuple, cast
+from typing import NamedTuple, cast
 from uuid import uuid4
 
 from config import paths as config_paths
@@ -42,9 +42,6 @@ UV_FALLBACK_BIN_DIRS = (".local/bin", ".cargo/bin")
 UPGRADE_INSTALL_TIMEOUT_SECONDS = 30 * 60
 RESTART_PENDING_GRACE_SECONDS = 5 * 60
 DEFERRED_ACTIVATION_TIMEOUT_SECONDS = 5 * 60
-# Once a new generation is validated, only active and rollback generations are
-# retained. Failed candidates are discarded by the callers before activation.
-ATOMIC_GENERATION_RETENTION_SECONDS = 0
 # A spec that names nothing but a package, so appending ``==<version>`` to it
 # yields a requirement rather than a broken string. PEP 508 names only:
 # anything with a path separator, a URL scheme, extras, a marker, or a version
@@ -459,82 +456,6 @@ def activation_block_reason(activation: AtomicActivation) -> str | None:
     return None
 
 
-def _process_python_path(pid: int | None) -> Path | None:
-    if not pid:
-        return None
-    command = runtime_mod.get_process_command(pid)
-    if not command:
-        return None
-    try:
-        argv = [part.strip("\"'") for part in shlex.split(command, posix=(os.name != "nt"))]
-    except ValueError:
-        return None
-    if argv and Path(argv[0]).name.lower() == "systemd-run" and "--" in argv:
-        argv = argv[argv.index("--") + 1 :]
-    if not argv or not Path(argv[0]).name.lower().startswith("python"):
-        return None
-    return Path(argv[0]).expanduser()
-
-
-def running_install_paths() -> tuple[Path, ...]:
-    """Paths whose generations are still executing and therefore cannot be pruned."""
-
-    paths: list[Path] = [Path(sys.executable).expanduser()]
-    pids = [runtime_mod.resolve_service_owner_pid(include_starting=True)]
-    pids.extend(runtime_mod.extra_service_process_pids())
-    ui_pid_path = config_paths.get_runtime_ui_pid_path()
-    try:
-        ui_pid = int(ui_pid_path.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        ui_pid = None
-    if ui_pid and runtime_mod.ui_pid_file_points_to_running_ui(ui_pid_path):
-        pids.append(ui_pid)
-    for pid in pids:
-        if (python_path := _process_python_path(pid)) is not None:
-            paths.append(python_path)
-    return tuple(dict.fromkeys(paths))
-
-
-def prune_atomic_uv_install_generations(
-    *,
-    keep: Iterable[Path] = (),
-    min_age_seconds: float = ATOMIC_GENERATION_RETENTION_SECONDS,
-) -> list[Path]:
-    """Remove old abandoned generations while retaining active/rollback installs."""
-
-    try:
-        root = atomic_uv_install_root().expanduser().resolve()
-        if not root.is_dir():
-            return []
-    except OSError:
-        logger.warning("failed to access atomic Avibe install generations", exc_info=True)
-        return []
-    kept = {
-        generation
-        for path in keep
-        if (generation := _generation_for_path(Path(path), root)) is not None
-    }
-    now = time.time()
-    try:
-        generations = list(root.iterdir())
-    except OSError:
-        logger.warning("failed to enumerate atomic Avibe install generations %s", root, exc_info=True)
-        return []
-    removed: list[Path] = []
-    for generation in generations:
-        if not generation.is_dir() or generation in kept:
-            continue
-        try:
-            if now - generation.stat().st_mtime < min_age_seconds:
-                continue
-            shutil.rmtree(generation)
-        except OSError:
-            logger.warning("failed to prune atomic Avibe install generation %s", generation, exc_info=True)
-            continue
-        removed.append(generation)
-    return removed
-
-
 def discard_atomic_uv_install_generation(path: Path | str) -> bool:
     """Remove one failed candidate generation without touching active installs."""
 
@@ -599,12 +520,7 @@ def activate_upgrade_candidate(activation: AtomicActivation) -> None:
     launcher = activation.launcher
     launcher.parent.mkdir(parents=True, exist_ok=True)
     replacement = launcher.parent / f".{launcher.name}.avibe-{uuid4().hex}.new"
-    previous_target: Path | None = None
     root = atomic_uv_install_root().expanduser().resolve()
-    previous_generation = _launcher_generation(launcher, root)
-    with contextlib.suppress(OSError, RuntimeError):
-        if launcher.exists() or launcher.is_symlink():
-            previous_target = launcher.resolve()
     try:
         _prepare_launcher_replacement(replacement, activation.candidate_launcher)
         os.replace(replacement, launcher)
@@ -613,14 +529,6 @@ def activate_upgrade_candidate(activation: AtomicActivation) -> None:
             replacement.unlink()
         raise
     _update_launcher_generation_marker(launcher, activation.candidate_launcher, root)
-    if _generation_for_path(activation.candidate_launcher, root) is not None:
-        keep_paths = [activation.candidate_launcher, *running_install_paths()]
-        if previous_target:
-            keep_paths.append(previous_target)
-        if previous_generation:
-            keep_paths.append(previous_generation)
-        keep = tuple(keep_paths)
-        prune_atomic_uv_install_generations(keep=keep)
 
 
 def activate_installer_candidate(activation: AtomicActivation) -> None:

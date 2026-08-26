@@ -13,6 +13,7 @@ import base64
 import csv
 import hashlib
 import importlib.metadata as importlib_metadata
+import json
 import os
 import subprocess
 import tempfile
@@ -28,6 +29,7 @@ from packaging.utils import canonicalize_name
 
 
 RUNTIME_DISTRIBUTIONS = ("avibe-os", "vibe-remote")
+RUNTIME_PROBE_PREFIX = "avibe-runtime-distributions:"
 
 
 @dataclass(frozen=True)
@@ -48,6 +50,15 @@ class IntegrityResult:
         if len(self.failures) > 5:
             suffix += f", and {len(self.failures) - 5} more"
         return suffix
+
+
+@dataclass(frozen=True)
+class DependencyGraph:
+    """Installed distributions reachable from Avibe's wheel metadata."""
+
+    distributions: tuple[str, ...] = ()
+    records: tuple[str, ...] = ()
+    failures: tuple[str, ...] = ()
 
 
 def isolated_probe_environment() -> dict[str, str]:
@@ -125,16 +136,20 @@ def record_paths(site_packages: Path, distribution_names: Iterable[str] | None =
 
     wanted = None
     if distribution_names is not None:
-        wanted = {name.replace("-", "_").lower() for name in distribution_names}
+        wanted = {canonicalize_name(name) for name in distribution_names}
     paths: list[Path] = []
     for record in sorted(site_packages.glob("*.dist-info/RECORD")):
-        if wanted is not None:
-            stem = record.parent.name.removesuffix(".dist-info")
-            package = stem.rsplit("-", 1)[0].replace("-", "_").lower()
-            if package not in wanted:
-                continue
+        if wanted is not None and record_distribution_name(record) not in wanted:
+            continue
         paths.append(record)
     return paths
+
+
+def record_distribution_name(record: Path) -> str:
+    """Return the canonical distribution name owning one wheel RECORD."""
+
+    stem = record.parent.name.removesuffix(".dist-info")
+    return canonicalize_name(stem.rsplit("-", 1)[0])
 
 
 def verify_site_packages(
@@ -152,11 +167,32 @@ def verify_site_packages(
 
     root = Path(site_packages).expanduser().resolve()
     records = record_paths(root, distribution_names)
+    return verify_record_files(root, records)
+
+
+def verify_record_files(site_packages: Path | str, records: Iterable[Path]) -> IntegrityResult:
+    """Verify exact wheel RECORD files selected by the candidate interpreter."""
+
+    root = Path(site_packages).expanduser().resolve()
+    failures: list[str] = []
+    safe_records: list[Path] = []
+    for record in records:
+        try:
+            record = Path(record).expanduser().resolve()
+            record.relative_to(root)
+        except (OSError, RuntimeError, ValueError):
+            failures.append(f"unsafe RECORD path {record}")
+            continue
+        if record.name != "RECORD" or not record.parent.name.endswith(".dist-info"):
+            failures.append(f"unsafe RECORD path {record}")
+            continue
+        safe_records.append(record)
+    records = tuple(safe_records)
     if not records:
-        return IntegrityResult(False, failures=(f"no RECORD file under {root}",))
+        failures.append(f"no RECORD file under {root}")
+        return IntegrityResult(False, failures=tuple(failures))
 
     checked = 0
-    failures: list[str] = []
     for record_path in records:
         try:
             rows = list(csv.reader(record_path.read_text(encoding="utf-8").splitlines()))
@@ -234,9 +270,9 @@ def runtime_import_modules() -> tuple[str, ...]:
     )
 
 
-def dependency_graph_failures(
+def inspect_dependency_graph(
     distribution_names: Iterable[str] = RUNTIME_DISTRIBUTIONS,
-) -> tuple[str, ...]:
+) -> DependencyGraph:
     """Validate the installed dependency closure rooted at Avibe's wheel metadata."""
 
     candidates = tuple(distribution_names)
@@ -250,7 +286,7 @@ def dependency_graph_failures(
         except importlib_metadata.PackageNotFoundError:
             continue
     if root is None:
-        return (f"missing runtime distribution: {' or '.join(candidates)}",)
+        return DependencyGraph(failures=(f"missing runtime distribution: {' or '.join(candidates)}",))
 
     root_name = canonicalize_name(root.metadata.get("Name") or root_candidate)
     distributions = {root_name: root}
@@ -305,19 +341,39 @@ def dependency_graph_failures(
             if dependency_name not in processed_extras or previous_extras != frozenset(dependency_extras):
                 pending.append(dependency_name)
 
-    return tuple(sorted(failures))
+    records: list[str] = []
+    for distribution_name, distribution in distributions.items():
+        record = next(
+            (
+                file
+                for file in (distribution.files or ())
+                if file.name == "RECORD" and file.parent.name.endswith(".dist-info")
+            ),
+            None,
+        )
+        if record is None:
+            failures.add(f"no RECORD for dependency {distribution_name}")
+            continue
+        records.append(str(distribution.locate_file(record)))
+
+    return DependencyGraph(
+        distributions=tuple(sorted(distributions)),
+        records=tuple(sorted(dict.fromkeys(records))),
+        failures=tuple(sorted(failures)),
+    )
 
 
-def probe_runtime_environment(required_imports: Iterable[str] | None = None) -> None:
+def probe_runtime_environment(required_imports: Iterable[str] | None = None) -> tuple[str, ...]:
     """Raise when declared dependencies or registered platform imports are broken."""
 
-    failures = dependency_graph_failures()
-    if failures:
-        raise RuntimeError("; ".join(failures))
+    graph = inspect_dependency_graph()
+    if graph.failures:
+        raise RuntimeError("; ".join(graph.failures))
     modules = runtime_import_modules() if required_imports is None else tuple(required_imports)
     for module in modules:
         if module:
             import_module(module)
+    return graph.records
 
 
 def verify_python_environment(
@@ -333,27 +389,51 @@ def verify_python_environment(
     if not site_packages:
         return IntegrityResult(False, failures=(f"no site-packages for {executable}",))
 
-    failures: list[str] = []
-    checked = 0
-    for site_package in site_packages:
-        result = verify_site_packages(site_package)
-        checked += result.checked_files
-        failures.extend(result.failures)
-    if failures:
-        return IntegrityResult(False, checked_files=checked, failures=tuple(failures))
-
     probe_call = (
         "probe_runtime_environment()"
         if required_imports is None
         else f"probe_runtime_environment({tuple(module for module in required_imports if module)!r})"
     )
-    code = f"from core.install_integrity import probe_runtime_environment; {probe_call}"
+    code = (
+        "import json; "
+        "from core.install_integrity import probe_runtime_environment; "
+        f"print({RUNTIME_PROBE_PREFIX!r} + json.dumps({probe_call}))"
+    )
     try:
         process = run_isolated_probe([executable, "-c", code], timeout=timeout)
     except (OSError, subprocess.SubprocessError) as exc:
-        return IntegrityResult(False, checked_files=checked, failures=(f"runtime probe failed: {exc}",))
+        return IntegrityResult(False, failures=(f"runtime probe failed: {exc}",))
     if process.returncode != 0:
         detail = (process.stderr or process.stdout or "runtime probe failed").strip().splitlines()[-1]
-        return IntegrityResult(False, checked_files=checked, failures=(f"runtime probe failed: {detail}",))
+        return IntegrityResult(False, failures=(f"runtime probe failed: {detail}",))
+
+    dependency_line = next(
+        (line for line in process.stdout.splitlines() if line.startswith(RUNTIME_PROBE_PREFIX)),
+        None,
+    )
+    try:
+        record_names = tuple(json.loads(dependency_line.removeprefix(RUNTIME_PROBE_PREFIX)))
+    except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+        return IntegrityResult(False, failures=("runtime probe did not report its dependency records",))
+
+    failures: list[str] = []
+    checked = 0
+    records_by_site: dict[Path, list[Path]] = {site_package: [] for site_package in site_packages}
+    for record_name in record_names:
+        try:
+            record = Path(record_name).expanduser().resolve()
+            site_package = next(root for root in site_packages if record.is_relative_to(root))
+        except (OSError, RuntimeError, StopIteration):
+            failures.append(f"dependency RECORD outside candidate site-packages: {record_name}")
+            continue
+        records_by_site[site_package].append(record)
+    for site_package, records in records_by_site.items():
+        if not records:
+            continue
+        result = verify_record_files(site_package, records)
+        checked += result.checked_files
+        failures.extend(result.failures)
+    if failures:
+        return IntegrityResult(False, checked_files=checked, failures=tuple(failures))
 
     return IntegrityResult(True, checked_files=checked)

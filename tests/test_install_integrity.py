@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import json
 import stat
 import subprocess
 from pathlib import Path
@@ -10,14 +11,18 @@ from core import install_integrity
 from core.install_integrity import verify_site_packages
 
 
-def _write_record(root, relative: str, content: bytes) -> None:
+def _write_record(root, relative: str, content: bytes, *, distribution: str = "demo_pkg") -> None:
     path = root / relative
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(content)
     digest = base64.urlsafe_b64encode(hashlib.sha256(content).digest()).decode().rstrip("=")
-    record = root / "demo_pkg-1.0.dist-info" / "RECORD"
+    record = root / f"{distribution}-1.0.dist-info" / "RECORD"
     record.parent.mkdir(parents=True, exist_ok=True)
     record.write_text(f"{relative},sha256={digest},{len(content)}\n", encoding="utf-8")
+
+
+def _runtime_probe_output(*records: Path) -> str:
+    return f"{install_integrity.RUNTIME_PROBE_PREFIX}{json.dumps([str(record) for record in records])}\n"
 
 
 def test_verify_site_packages_accepts_complete_record(tmp_path):
@@ -68,7 +73,11 @@ def test_verify_python_environment_probes_use_private_empty_directories(monkeypa
                 "cwd_entries": tuple(cwd.iterdir()),
             }
         )
-        stdout = f"{site_packages}\n" if len(calls) == 1 else ""
+        stdout = (
+            f"{site_packages}\n"
+            if len(calls) == 1
+            else _runtime_probe_output(site_packages / "demo_pkg-1.0.dist-info" / "RECORD")
+        )
         return subprocess.CompletedProcess(args[0], 0, stdout=stdout, stderr="")
 
     monkeypatch.setattr(install_integrity.subprocess, "run", fake_run)
@@ -96,7 +105,12 @@ def test_candidate_probe_does_not_inherit_pythonpath(monkeypatch, tmp_path):
         calls.append(kwargs)
         if len(calls) == 1:
             return subprocess.CompletedProcess(args[0], 0, stdout=f"{site_packages}\n", stderr="")
-        return subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(
+            args[0],
+            0,
+            stdout=_runtime_probe_output(site_packages / "demo_pkg-1.0.dist-info" / "RECORD"),
+            stderr="",
+        )
 
     monkeypatch.setenv("PYTHONPATH", str(tmp_path))
     monkeypatch.setattr(install_integrity.subprocess, "run", fake_run)
@@ -191,11 +205,15 @@ def test_dependency_graph_rejects_a_wholly_missing_declared_distribution(monkeyp
             metadata={"Name": "avibe-os"},
             version="1.0",
             requires=("slack-sdk>=3.26", "discord.py>=2.4"),
+            files=(Path("avibe_os-1.0.dist-info/RECORD"),),
+            locate_file=lambda path: Path("/site-packages") / path,
         ),
         "slack-sdk": SimpleNamespace(
             metadata={"Name": "slack-sdk"},
             version="3.30",
             requires=(),
+            files=(Path("slack_sdk-3.30.dist-info/RECORD"),),
+            locate_file=lambda path: Path("/site-packages") / path,
         ),
     }
 
@@ -207,4 +225,41 @@ def test_dependency_graph_rejects_a_wholly_missing_declared_distribution(monkeyp
 
     monkeypatch.setattr(install_integrity.importlib_metadata, "distribution", distribution)
 
-    assert install_integrity.dependency_graph_failures() == ("missing dependency: discord.py",)
+    graph = install_integrity.inspect_dependency_graph()
+
+    assert graph.distributions == ("avibe-os", "slack-sdk")
+    assert graph.records == (
+        "/site-packages/avibe_os-1.0.dist-info/RECORD",
+        "/site-packages/slack_sdk-3.30.dist-info/RECORD",
+    )
+    assert graph.failures == ("missing dependency: discord.py",)
+
+
+def test_verify_python_environment_ignores_unrelated_distributions(monkeypatch, tmp_path):
+    site_packages = tmp_path / "lib" / "python3.12" / "site-packages"
+    _write_record(site_packages, "demo_pkg/__init__.py", b"value = 1\n")
+    unrelated = site_packages / "unrelated-1.0.dist-info" / "RECORD"
+    unrelated.parent.mkdir(parents=True)
+    unrelated.write_text("unrelated/missing.py,,\n", encoding="utf-8")
+    executable = tmp_path / "bin" / "python3"
+    executable.parent.mkdir()
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o755)
+    calls = 0
+
+    def fake_run(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        stdout = (
+            f"{site_packages}\n"
+            if calls == 1
+            else _runtime_probe_output(site_packages / "demo_pkg-1.0.dist-info" / "RECORD")
+        )
+        return subprocess.CompletedProcess(args[0], 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(install_integrity.subprocess, "run", fake_run)
+
+    result = install_integrity.verify_python_environment(executable, required_imports=("demo_pkg",))
+
+    assert result.ok is True
+    assert result.checked_files == 1
