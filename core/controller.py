@@ -973,10 +973,17 @@ class Controller:
                 plugin_error = getattr(self, "_memory_plugin_error", None)
                 if plugin_error is not None and not retry_plugin_error:
                     raise plugin_error
-                runtime = self._create_memory_runtime(
-                    selected_config,
-                    allow_disabled=allow_disabled,
-                )
+                try:
+                    runtime = self._create_memory_runtime(
+                        selected_config,
+                        allow_disabled=allow_disabled,
+                    )
+                except (
+                    MemoryPluginUnavailableError,
+                    MemoryPluginIncompatibleError,
+                ) as exc:
+                    self._memory_plugin_error = exc
+                    raise
                 self._attach_memory_runtime_locked(
                     runtime,
                     capture_enabled=bool(self.config.memory.enabled),

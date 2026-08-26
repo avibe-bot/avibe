@@ -19,6 +19,7 @@ from core.controller import Controller
 from core.memory import CaptureRequest, CaptureSkipped
 from core.memory_adapter import DisabledMemoryAdapter, EnabledMemoryAdapter, TurnAccepted
 from vibe.memory_contract import (
+    MemoryPluginIncompatibleError,
     MemoryPluginUnavailableError,
     MemoryRuntimeCloseUnprovedError,
     MemoryStoreUnavailableError,
@@ -711,6 +712,53 @@ async def test_explicit_recovery_retries_after_cached_plugin_failure(
     assert runtime.closed is True
     assert controller._memory_plugin_error is None
     assert controller.memory_runtime is None
+
+
+@pytest.mark.asyncio
+async def test_ordinary_memory_read_keeps_cached_plugin_failure_without_retry() -> None:
+    controller = Controller.__new__(Controller)
+    controller.config = types.SimpleNamespace(
+        memory=replace(_disabled_app_config().memory, enabled=True)
+    )
+    controller.memory_runtime = None
+    controller._memory_reconcile_task = None
+    failure = MemoryPluginUnavailableError("startup failed")
+    controller._memory_plugin_error = failure
+    controller._create_memory_runtime = lambda *_args, **_kwargs: pytest.fail(
+        "ordinary reads must not retry a cached plugin failure"
+    )
+
+    with pytest.raises(MemoryPluginUnavailableError) as raised:
+        await controller.memory_projects_payload(
+            verified_user_key=None,
+            cli_scope=("u-11111111111111111111111111111111", "default"),
+        )
+
+    assert raised.value is failure
+
+
+@pytest.mark.asyncio
+async def test_explicit_recovery_caches_typed_retry_failure() -> None:
+    controller = Controller.__new__(Controller)
+    controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)
+    controller.memory_adapter = DisabledMemoryAdapter()
+    controller.memory_runtime = None
+    controller.memory_module = None
+    controller._memory_reconcile_task = None
+    controller._memory_plugin_error = MemoryPluginUnavailableError("startup failed")
+    candidate = replace(controller.config.memory, enabled=True)
+    retry_failure = MemoryPluginIncompatibleError("still incompatible")
+
+    def create_runtime(_config, **_kwargs):
+        raise retry_failure
+
+    controller._create_memory_runtime = create_runtime
+
+    with pytest.raises(MemoryPluginIncompatibleError) as raised:
+        await controller.preflight_memory(candidate)
+
+    assert raised.value is retry_failure
+    assert controller._memory_plugin_error is retry_failure
 
 
 @pytest.mark.asyncio
