@@ -1239,10 +1239,14 @@ class MemoryRuntime:
         # Derived from this request's own result. Reading it off the shared
         # provider let a concurrent read for another principal decide what this
         # caller was told.
-        empty = isinstance(result, MemoryItems) and not result.items
+        confirmed_empty = (
+            isinstance(result, MemoryItems)
+            and not result.items
+            and not result.warnings
+        )
         return {
             **_result_payload(result),
-            "profile_warning": "empty" if empty else None,
+            "profile_warning": "empty" if confirmed_empty else None,
         }
 
     async def list_episodes_payload(

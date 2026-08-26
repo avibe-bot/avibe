@@ -12,6 +12,7 @@ from core.memory.everos import ProviderHealthSnapshot
 from core.memory.processing_record import RuntimeHealthProjection, SourceObservation
 from core.memory.runtime import MemoryConfig, MemoryRuntime
 from core.memory.store import MemoryStore
+from core.memory.types import MemoryItems
 
 
 def _runtime(tmp_path: Path) -> MemoryRuntime:
@@ -24,6 +25,37 @@ def _runtime(tmp_path: Path) -> MemoryRuntime:
         store=store,
         effective_home=tmp_path,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("warnings", "expected_warning"),
+    [
+        ((), "empty"),
+        (("memory_search_partial",), None),
+    ],
+)
+async def test_profile_payload_only_labels_confirmed_empty_results(
+    tmp_path: Path,
+    warnings: tuple[str, ...],
+    expected_warning: str | None,
+) -> None:
+    runtime = _runtime(tmp_path)
+
+    async def profile(**_kwargs: object) -> MemoryItems:
+        return MemoryItems(warnings=warnings)
+
+    runtime.module.profile = profile
+
+    payload = await runtime.profile_payload("owner-1", "default")
+
+    assert payload == {
+        "status": "ok",
+        "items": [],
+        "warnings": list(warnings),
+        "profile_warning": expected_warning,
+    }
+    await runtime.close()
 
 
 def _write_legacy_clear_journal(store: MemoryStore, *, open_slot: object = None) -> Path:

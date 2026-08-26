@@ -204,11 +204,11 @@ export const AppShell: React.FC = () => {
     }).catch(() => {});
   }, [api, capabilities.can_manage_instance, i18n]);
 
-  // Global ⌘K / Ctrl+K toggles the message-search palette. Intercept the chord
-  // everywhere (it's a deliberate command, so it wins even from the composer);
-  // the palette's own input/Esc/arrow handling takes over once it is open.
+  // Global ⌘K / Ctrl+K toggles the message-search palette. A closer surface may
+  // consume the same user-configured chord first; otherwise search owns it.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
         e.preventDefault();
         setSearchOpen((prev) => !prev);

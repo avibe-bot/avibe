@@ -81,7 +81,7 @@ export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) 
   const { t } = useTranslation();
   const api = useApi();
   // Only a SUCCESSFUL response is the benign Provider-A case: `profile_warning:'empty'`
-  // (or simply zero items) renders as the graceful "not available"/empty copy. A closed
+  // (or simply zero items) renders as the graceful empty-state copy. A closed
   // failure — sidecar down, provider outage, timeout, etc. — is a real ERROR, and the
   // resource surfaces it distinctly per its code.
   const { data, error, loading, reload } = useMemoryResource<MemoryItemsOk>({
@@ -102,6 +102,8 @@ export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) 
   }
 
   const items = data?.items ?? null;
+  const partial = data?.warnings.includes('memory_search_partial') ?? false;
+  const partialEmpty = partial && items !== null && items.length === 0;
 
   return (
     <div className="flex flex-col gap-3">
@@ -112,7 +114,7 @@ export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) 
           {t('memory.profile.refresh')}
         </Button>
       </div>
-      {data?.warnings.includes('memory_search_partial') ? (
+      {partial ? (
         <div className="rounded-lg border border-border bg-surface px-4 py-3 text-sm text-muted">
           {t('memory.profile.partial')}
         </div>
@@ -124,9 +126,9 @@ export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) 
           <Loader2 className="size-4 animate-spin" />
           {t('memory.profile.loading')}
         </div>
-      ) : data?.profile_warning === 'empty' ? (
+      ) : partialEmpty ? null : data?.profile_warning === 'empty' ? (
         <div className="rounded-2xl border border-gold/30 bg-gold/[0.06] p-6 text-center text-[13px] text-foreground">
-          {t('memory.profile.warningUnavailable')}
+          {t('memory.profile.warningEmpty')}
         </div>
       ) : !items || items.length === 0 ? (
         <div className="rounded-2xl border border-dashed border-border bg-surface p-8 text-center text-sm text-muted">
