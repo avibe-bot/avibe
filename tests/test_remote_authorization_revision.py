@@ -111,6 +111,48 @@ def _organization_cookie(
     )
 
 
+def _legacy_show_page_cookie(config: V2Config) -> tuple[str, str]:
+    now = int(time.time())
+    reference = remote_access_authorization_service.upsert_scoped(
+        reference=None,
+        instance_id="inst_123",
+        subject="user-1",
+        email="user-1@example.com",
+        scope_kind="show_page",
+        scope_ref="show-1",
+        authorization_state="current",
+        claims={
+            "vibe_instance_id": "inst_123",
+            "vibe_instance_role": "viewer",
+            "vibe_instance_access_source": "show_page_email",
+            "vibe_show_page_id": "show-1",
+            "vibe_instance_authorization_revision": 41,
+            "claims_issued_at": now,
+        },
+        last_checked_at=now,
+        updated_at=now,
+        expected_binding_generation=(
+            remote_access_authorization_service.current_instance_binding_generation()
+        ),
+    )
+    return (
+        remote_access._encode_session_cookie(
+            config.remote_access.vibe_cloud.session_secret,
+            {
+                "email": "user-1@example.com",
+                "sub": "user-1",
+                "instance_id": "inst_123",
+                "iat": now,
+                "exp": now + remote_access.PERSONAL_SESSION_TTL_SECONDS,
+                "claims_issued_at": now,
+                "browser_session_id": "legacy-browser-session-1234",
+                "authorization_ref": reference,
+            },
+        ),
+        reference,
+    )
+
+
 def _authorization_context_response(
     config: V2Config,
     request_payload: dict[str, Any],
@@ -233,6 +275,81 @@ def test_cached_authorization_from_previous_instance_kind_refreshes_before_perso
     )
     assert record is not None
     assert record["claims"]["vibe_instance_kind"] == "personal"
+
+
+def test_retired_show_page_reference_rotates_on_first_successful_request(
+    monkeypatch,
+    tmp_path,
+):
+    config = _paired_config(tmp_path)
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="organization",
+    )
+    _organization_cookie(config)
+    legacy_cookie, _ = _legacy_show_page_cookie(config)
+    calls = 0
+
+    def refresh(_config, _method, _suffix, payload, **kwargs):
+        nonlocal calls
+        calls += 1
+        return _authorization_context_response(config, payload, revision=41)
+
+    monkeypatch.setattr(remote_access, "_device_json_request", refresh)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        legacy_cookie,
+        domain="alex.avibe.bot",
+    )
+
+    first = client.get("/api/session", base_url="https://alex.avibe.bot")
+    second = client.get("/api/session", base_url="https://alex.avibe.bot")
+
+    assert first.status_code == 200
+    assert remote_access.SESSION_COOKIE_NAME in "\n".join(
+        first.headers.getlist("set-cookie")
+    )
+    assert second.status_code == 200
+    assert calls == 1
+
+
+def test_retired_show_page_reference_keeps_revocation_on_the_old_cookie(
+    monkeypatch,
+    tmp_path,
+):
+    config = _paired_config(tmp_path)
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="organization",
+    )
+    _organization_cookie(config)
+    legacy_cookie, legacy_reference = _legacy_show_page_cookie(config)
+    identity = remote_access.parse_session_identity(config, legacy_cookie)
+    assert identity is not None
+    calls = 0
+
+    def deny(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise remote_access.BackendRequestError(403, {"error": "access_denied"})
+
+    monkeypatch.setattr(remote_access, "_device_json_request", deny)
+
+    first = remote_access.resolve_current_authorization(config, identity)
+    second = remote_access.resolve_current_authorization(config, identity)
+    stored = remote_access_authorization_service.load_reference_record(
+        reference=legacy_reference,
+        instance_id="inst_123",
+        subject="user-1",
+        now=int(time.time()),
+    )
+
+    assert first.state == "revoked"
+    assert second.state == "revoked"
+    assert stored is not None
+    assert stored["authorization_state"] == "revoked"
+    assert calls == 1
 
 
 def test_partial_pairing_cannot_restore_cached_personal_authorization(tmp_path):
