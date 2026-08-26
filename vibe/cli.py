@@ -75,6 +75,7 @@ from vibe.upgrade import (
     cache_running_vibe_path,
     get_latest_version_info,
     get_safe_cwd,
+    discard_atomic_uv_install_generation,
     should_skip_show_runtime_prepare,
     UPGRADE_INSTALL_TIMEOUT_SECONDS,
 )
@@ -14446,6 +14447,7 @@ def cmd_upgrade():
                 try:
                     activate_upgrade_candidate(plan.activation)
                 except Exception as exc:  # noqa: BLE001
+                    discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
                     print(f"\033[31mUpgrade candidate failed integrity verification: {exc}\033[0m")
                     return 1
             elif plan.method == "pip":
@@ -14477,9 +14479,13 @@ def cmd_upgrade():
                 print("Avibe was not running; the new version will be used next time you start it.")
             return 0
         else:
+            if plan.activation is not None:
+                discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
             print(f"\033[31mUpgrade failed:\033[0m\n{result.stderr}")
             return 1
     except Exception as e:
+        if plan.activation is not None:
+            discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
         print(f"\033[31mUpgrade failed: {e}\033[0m")
         return 1
 

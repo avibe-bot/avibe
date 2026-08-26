@@ -22,7 +22,11 @@ VIBE_TOOL_BIN_DIR=""
 VIBE_CANDIDATE_BIN_PATH=""
 ORIGINAL_PATH="$PATH"
 if [ -n "${AVIBE_HOME:-}" ]; then
-    AVIBE_RUNTIME_HOME="$AVIBE_HOME"
+    AVIBE_RUNTIME_HOME="${AVIBE_HOME/#\~/$HOME}"
+    case "$AVIBE_RUNTIME_HOME" in
+        /*) ;;
+        *) AVIBE_RUNTIME_HOME="$PWD/$AVIBE_RUNTIME_HOME" ;;
+    esac
 elif [ -e "$HOME/.avibe" ] || [ -L "$HOME/.avibe" ]; then
     AVIBE_RUNTIME_HOME="$HOME/.avibe"
 elif [ -e "$HOME/.vibe_remote" ] || [ -L "$HOME/.vibe_remote" ]; then
@@ -426,10 +430,12 @@ uv_tool_install() {
         VIBE_CANDIDATE_BIN_PATH="$generation_bin/vibe"
         if [ ! -x "$VIBE_CANDIDATE_BIN_PATH" ]; then
             warn "uv completed but the candidate vibe launcher was not created"
+            rm -rf -- "$generation_root"
             return 1
         fi
         if ! verify_uv_candidate "$VIBE_CANDIDATE_BIN_PATH"; then
             warn "uv completed but the candidate Avibe environment failed integrity checks"
+            rm -rf -- "$generation_root"
             return 1
         fi
         local replacement="$stable_bin_dir/.vibe.avibe-${RANDOM}.new"
@@ -439,6 +445,7 @@ uv_tool_install() {
         VIBE_BIN_PATH="$stable_bin_dir/vibe"
         return 0
     fi
+    rm -rf -- "$generation_root"
     return 1
 }
 
@@ -469,6 +476,13 @@ verify_uv_candidate() {
         [ -n "$detail" ] && warn "$detail"
         return 1
     }
+    if ! (
+        cd "$AVIBE_RUNTIME_HOME" || exit 1
+        "$candidate" --help >/dev/null 2>&1
+    ); then
+        warn "candidate vibe launcher failed its startup probe"
+        return 1
+    fi
     return 0
 }
 

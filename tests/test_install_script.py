@@ -227,6 +227,30 @@ def test_install_script_keeps_vibe_available_on_current_path(tmp_path):
     assert uv_log.read_text(encoding="utf-8")
 
 
+def test_install_script_canonicalizes_relative_avibe_home(tmp_path):
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    path_dir = tmp_path / "path-bin"
+    path_dir.mkdir()
+    uv_log = tmp_path / "uv-tool-bin-dir.txt"
+    _write_fake_uv(path_dir / "uv", uv_log)
+
+    env = os.environ.copy()
+    env["HOME"] = str(home_dir)
+    env["AVIBE_HOME"] = "relative-avibe"
+    env["PATH"] = os.pathsep.join([str(path_dir), "/usr/bin", "/bin"])
+
+    install_result = _install(env, cwd=tmp_path)
+
+    assert install_result.returncode == 0, install_result.stdout + install_result.stderr
+    launcher = path_dir / "vibe"
+    assert launcher.is_symlink()
+    target = Path(os.readlink(launcher))
+    assert target.is_absolute()
+    assert target.is_file()
+    assert target.is_relative_to(tmp_path / "relative-avibe" / "runtime" / "install-generations")
+
+
 def test_install_script_keeps_active_launcher_when_uv_install_fails(tmp_path):
     home_dir = tmp_path / "home"
     home_dir.mkdir()

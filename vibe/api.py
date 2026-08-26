@@ -64,6 +64,7 @@ from vibe.build_identity import get_build_identity
 from vibe.upgrade import (
     activate_upgrade_candidate,
     build_upgrade_plan,
+    discard_atomic_uv_install_generation,
     get_latest_version_info,
     get_running_vibe_path,
     get_safe_cwd,
@@ -6151,6 +6152,7 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                 try:
                     activate_upgrade_candidate(plan.activation)
                 except Exception as exc:  # noqa: BLE001
+                    discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
                     return {
                         "ok": False,
                         "message": "Upgrade candidate failed integrity verification",
@@ -6198,6 +6200,8 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                 "restarting": restarting,
             }
         else:
+            if plan.activation is not None:
+                discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
             return {
                 "ok": False,
                 "message": "Upgrade failed",
@@ -6205,6 +6209,8 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                 "restarting": False,
             }
     except subprocess.TimeoutExpired:
+        if plan.activation is not None:
+            discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
         return {
             "ok": False,
             "message": "Upgrade timed out",
@@ -6212,6 +6218,8 @@ def do_upgrade(auto_restart: bool = True) -> dict:
             "restarting": False,
         }
     except Exception as e:
+        if plan.activation is not None:
+            discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
         return {"ok": False, "message": str(e), "output": None, "restarting": False}
 
 

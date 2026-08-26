@@ -262,6 +262,10 @@ function Invoke-UvToolInstallAttempt {
     } else {
         $defaultHome
     }
+    if (-not [System.IO.Path]::IsPathRooted($runtimeHome)) {
+        $runtimeHome = Join-Path (Get-Location) $runtimeHome
+    }
+    $runtimeHome = [System.IO.Path]::GetFullPath($runtimeHome)
     $generationRoot = Join-Path (Join-Path $runtimeHome "runtime\install-generations") ([Guid]::NewGuid().ToString("N"))
     $generationTools = Join-Path $generationRoot "tools"
     $generationBin = Join-Path $generationRoot "bin"
@@ -275,11 +279,13 @@ function Invoke-UvToolInstallAttempt {
         $env:UV_TOOL_BIN_DIR = $generationBin
         $result = Invoke-NativeCommand -FilePath "uv" -Arguments (@("tool", "install") + $Arguments)
         if (-not $result.Success) {
+            Remove-Item -LiteralPath $generationRoot -Recurse -Force -ErrorAction SilentlyContinue
             return $result
         }
 
         $candidate = Join-Path $generationBin "vibe.exe"
         if (-not (Test-Path $candidate)) {
+            Remove-Item -LiteralPath $generationRoot -Recurse -Force -ErrorAction SilentlyContinue
             return @{
                 Success = $false
                 ExitCode = 1
@@ -289,7 +295,23 @@ function Invoke-UvToolInstallAttempt {
 
         $integrity = Test-UvCandidate -Candidate $candidate -GenerationTools $generationTools -WorkingDirectory $runtimeHome
         if (-not $integrity.Success) {
+            Remove-Item -LiteralPath $generationRoot -Recurse -Force -ErrorAction SilentlyContinue
             return $integrity
+        }
+
+        Push-Location $runtimeHome
+        try {
+            $launcherProbe = Invoke-NativeCommand -FilePath $candidate -Arguments @("--help")
+        } finally {
+            Pop-Location
+        }
+        if (-not $launcherProbe.Success) {
+            Remove-Item -LiteralPath $generationRoot -Recurse -Force -ErrorAction SilentlyContinue
+            return @{
+                Success = $false
+                ExitCode = $launcherProbe.ExitCode
+                Output = if ($launcherProbe.Output) { $launcherProbe.Output } else { "candidate vibe launcher failed its startup probe" }
+            }
         }
 
         $replacement = Join-Path $stableBin ("vibe.exe.avibe-" + [Guid]::NewGuid().ToString("N") + ".new")

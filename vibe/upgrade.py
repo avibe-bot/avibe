@@ -32,7 +32,9 @@ SHOW_RUNTIME_SKIP_ENV = "VIBE_INSTALL_SKIP_SHOW_RUNTIME"
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 UV_FALLBACK_BIN_DIRS = (".local/bin", ".cargo/bin")
 UPGRADE_INSTALL_TIMEOUT_SECONDS = 30 * 60
-ATOMIC_GENERATION_RETENTION_SECONDS = 24 * 60 * 60
+# Once a new generation is validated, only active and rollback generations are
+# retained. Failed candidates are discarded by the callers before activation.
+ATOMIC_GENERATION_RETENTION_SECONDS = 0
 # A spec that names nothing but a package, so appending ``==<version>`` to it
 # yields a requirement rather than a broken string. PEP 508 names only:
 # anything with a path separator, a URL scheme, extras, a marker, or a version
@@ -226,6 +228,21 @@ def prune_atomic_uv_install_generations(
             continue
         removed.append(generation)
     return removed
+
+
+def discard_atomic_uv_install_generation(path: Path | str) -> bool:
+    """Remove one failed candidate generation without touching active installs."""
+
+    root = atomic_uv_install_root().expanduser().resolve()
+    generation = _generation_for_path(Path(path), root)
+    if generation is None or not generation.is_dir():
+        return False
+    try:
+        shutil.rmtree(generation)
+    except OSError:
+        logger.warning("failed to discard atomic Avibe install generation %s", generation, exc_info=True)
+        return False
+    return True
 
 
 def verify_upgrade_candidate(activation: AtomicActivation) -> IntegrityResult:
