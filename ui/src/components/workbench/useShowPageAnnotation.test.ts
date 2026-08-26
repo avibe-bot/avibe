@@ -109,6 +109,35 @@ describe('useShowPageAnnotation shortcut', () => {
     );
   });
 
+  it('leaves the iframe shortcut with a dialog or menu layered over the page', () => {
+    const { iframe } = mountBridge();
+    const postMessage = vi.spyOn(iframe.contentWindow!, 'postMessage');
+    const frameDocument = iframe.contentDocument!;
+    reportState(iframe, false);
+    postMessage.mockClear();
+
+    const dialog = frameDocument.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    const dialogButton = frameDocument.createElement('button');
+    dialog.append(dialogButton);
+    frameDocument.body.append(dialog);
+    dialogButton.focus();
+    const dialogEvent = dispatchAnnotationShortcut(iframe.contentWindow!);
+    expect(dialogEvent.defaultPrevented).toBe(false);
+    expect(postMessage).not.toHaveBeenCalled();
+
+    dialog.remove();
+    const trigger = frameDocument.createElement('button');
+    frameDocument.body.append(trigger);
+    trigger.focus();
+    const menu = frameDocument.createElement('div');
+    menu.setAttribute('role', 'menu');
+    frameDocument.body.append(menu);
+    const menuEvent = dispatchAnnotationShortcut(iframe.contentWindow!);
+    expect(menuEvent.defaultPrevented).toBe(false);
+    expect(postMessage).not.toHaveBeenCalled();
+  });
+
   it('leaves parent and iframe chords alone when this Show Page is not in front', () => {
     const { iframe } = mountBridge('/show/session', false);
     const postMessage = vi.spyOn(iframe.contentWindow!, 'postMessage');

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Keyboard, RotateCcw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
@@ -9,6 +9,7 @@ import {
   formatActionShortcut,
   isReservedActionShortcut,
   shortcutFromKeyboardEvent,
+  shortcutFromKeyboardEventWithLayout,
   useActionShortcuts,
   writeActionShortcuts,
   type ActionShortcutId,
@@ -24,10 +25,11 @@ export const SettingsShortcutsPage: React.FC = () => {
   const shortcuts = useActionShortcuts();
   const [capturing, setCapturing] = useState<ActionShortcutId | null>(null);
   const [error, setError] = useState<{ id: ActionShortcutId; message: string } | null>(null);
+  const captureRequestRef = useRef(0);
 
   const actionLabel = (id: ActionShortcutId): string => t(`settings.shortcuts.${id}.title`);
 
-  const capture = (id: ActionShortcutId, event: React.KeyboardEvent<HTMLButtonElement>) => {
+  const capture = async (id: ActionShortcutId, event: React.KeyboardEvent<HTMLButtonElement>) => {
     if (capturing !== id) return;
     event.preventDefault();
     event.stopPropagation();
@@ -38,6 +40,7 @@ export const SettingsShortcutsPage: React.FC = () => {
       && !event.metaKey
       && !event.shiftKey
     ) {
+      captureRequestRef.current += 1;
       setCapturing(null);
       setError(null);
       return;
@@ -63,7 +66,10 @@ export const SettingsShortcutsPage: React.FC = () => {
       return;
     }
 
-    writeActionShortcuts({ ...shortcuts, [id]: next });
+    const request = ++captureRequestRef.current;
+    const layoutAware = await shortcutFromKeyboardEventWithLayout(event.nativeEvent);
+    if (request !== captureRequestRef.current || !layoutAware) return;
+    writeActionShortcuts({ ...shortcuts, [id]: layoutAware });
     setCapturing(null);
     setError(null);
   };
@@ -79,11 +85,15 @@ export const SettingsShortcutsPage: React.FC = () => {
           aria-label={t('settings.shortcuts.change', { action: actionLabel(id) })}
           aria-pressed={active}
           onClick={() => {
+            captureRequestRef.current += 1;
             setCapturing(active ? null : id);
             setError(null);
           }}
-          onBlur={() => setCapturing((current) => (current === id ? null : current))}
-          onKeyDown={(event) => capture(id, event)}
+          onBlur={() => {
+            captureRequestRef.current += 1;
+            setCapturing((current) => (current === id ? null : current));
+          }}
+          onKeyDown={(event) => { void capture(id, event); }}
           className={clsx(
             'flex h-9 w-full items-center justify-between gap-3 rounded-lg border bg-surface-2 px-3 text-left transition-colors md:w-[190px]',
             'focus:outline-none focus:ring-2 focus:ring-mint/40',
@@ -118,6 +128,7 @@ export const SettingsShortcutsPage: React.FC = () => {
           variant="secondary"
           size="xs"
           onClick={() => {
+            captureRequestRef.current += 1;
             writeActionShortcuts(defaultActionShortcuts());
             setCapturing(null);
             setError(null);

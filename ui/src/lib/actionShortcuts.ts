@@ -6,6 +6,8 @@ export type ActionShortcutId = 'voiceInput' | 'showPageAnnotation';
 
 export type ActionShortcut = {
   code: string;
+  /** Layout-aware key legend captured when the shortcut was assigned. */
+  displayKey?: string;
   altKey: boolean;
   ctrlKey: boolean;
   metaKey: boolean;
@@ -16,8 +18,12 @@ export type ActionShortcuts = Record<ActionShortcutId, ActionShortcut>;
 
 type ShortcutEvent = Pick<
   KeyboardEvent,
-  'altKey' | 'code' | 'ctrlKey' | 'metaKey' | 'shiftKey'
+  'altKey' | 'code' | 'ctrlKey' | 'key' | 'metaKey' | 'shiftKey'
 >;
+
+type KeyboardLayoutProvider = {
+  getLayoutMap: () => Promise<Pick<Map<string, string>, 'get'>>;
+};
 
 type ReadableStorage = Pick<Storage, 'getItem'>;
 type WritableStorage = Pick<Storage, 'setItem'>;
@@ -89,6 +95,10 @@ function isActionShortcut(value: unknown): value is ActionShortcut {
     && typeof shortcut.ctrlKey === 'boolean'
     && typeof shortcut.metaKey === 'boolean'
     && typeof shortcut.shiftKey === 'boolean'
+    && (
+      shortcut.displayKey === undefined
+      || (typeof shortcut.displayKey === 'string' && shortcut.displayKey.length > 0)
+    )
     && (shortcut.altKey || shortcut.ctrlKey || shortcut.metaKey)
   );
 }
@@ -135,15 +145,52 @@ export function writeActionShortcuts(
   }
 }
 
+function normalizedDisplayKey(value: string | undefined): string | undefined {
+  if (!value || value === 'Dead' || value === 'Unidentified') return undefined;
+  if (value === ' ') return 'Space';
+  const glyphs = Array.from(value);
+  if (glyphs.length !== 1) return undefined;
+  return value.toLocaleUpperCase();
+}
+
 export function shortcutFromKeyboardEvent(event: ShortcutEvent): ActionShortcut | null {
   const shortcut: ActionShortcut = {
     code: event.code,
+    displayKey: normalizedDisplayKey(event.key),
     altKey: event.altKey,
     ctrlKey: event.ctrlKey,
     metaKey: event.metaKey,
     shiftKey: event.shiftKey,
   };
   return isActionShortcut(shortcut) ? shortcut : null;
+}
+
+/** Resolve the physical code to the legend on the active keyboard layout. */
+export async function shortcutFromKeyboardEventWithLayout(
+  event: ShortcutEvent,
+  keyboard: KeyboardLayoutProvider | undefined = (
+    typeof navigator === 'undefined'
+      ? undefined
+      : (navigator as Navigator & { keyboard?: KeyboardLayoutProvider }).keyboard
+  ),
+): Promise<ActionShortcut | null> {
+  // Snapshot before awaiting: callers commonly pass React's native event.
+  const shortcut = shortcutFromKeyboardEvent({
+    altKey: event.altKey,
+    code: event.code,
+    ctrlKey: event.ctrlKey,
+    key: event.key,
+    metaKey: event.metaKey,
+    shiftKey: event.shiftKey,
+  });
+  if (!shortcut || !keyboard) return shortcut;
+  try {
+    const layout = await keyboard.getLayoutMap();
+    const displayKey = normalizedDisplayKey(layout.get(shortcut.code));
+    return displayKey ? { ...shortcut, displayKey } : shortcut;
+  } catch {
+    return shortcut;
+  }
 }
 
 export function actionShortcutMatches(event: ShortcutEvent, shortcut: ActionShortcut): boolean {
@@ -234,7 +281,7 @@ export function formatActionShortcut(
   shortcut: ActionShortcut,
   apple = isApplePlatform(),
 ): string {
-  const key = actionShortcutKeyLabel(shortcut.code);
+  const key = shortcut.displayKey ?? actionShortcutKeyLabel(shortcut.code);
   if (apple) {
     return [
       shortcut.ctrlKey ? '⌃' : '',

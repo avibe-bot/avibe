@@ -8,11 +8,13 @@ import {
   isReservedActionShortcut,
   readActionShortcuts,
   shortcutFromKeyboardEvent,
+  shortcutFromKeyboardEventWithLayout,
   writeActionShortcuts,
 } from './actionShortcuts';
 
 const chord = (overrides: Partial<KeyboardEvent> = {}) => ({
   code: 'KeyZ',
+  key: 'z',
   altKey: false,
   ctrlKey: false,
   metaKey: false,
@@ -31,20 +33,32 @@ describe('action shortcuts', () => {
   });
 
   it('captures only modified non-modifier keys and matches the exact chord', () => {
-    expect(shortcutFromKeyboardEvent(chord({ code: 'KeyV', altKey: true }))).toEqual({
+    expect(shortcutFromKeyboardEvent(chord({ code: 'KeyV', key: 'v', altKey: true }))).toEqual({
       code: 'KeyV',
+      displayKey: 'V',
       altKey: true,
       ctrlKey: false,
       metaKey: false,
       shiftKey: false,
     });
-    expect(shortcutFromKeyboardEvent(chord({ code: 'KeyV' }))).toBeNull();
-    expect(shortcutFromKeyboardEvent(chord({ code: 'KeyV', shiftKey: true }))).toBeNull();
-    expect(shortcutFromKeyboardEvent(chord({ code: 'AltLeft', altKey: true }))).toBeNull();
+    expect(shortcutFromKeyboardEvent(chord({ code: 'KeyV', key: 'v' }))).toBeNull();
+    expect(shortcutFromKeyboardEvent(chord({ code: 'KeyV', key: 'V', shiftKey: true }))).toBeNull();
+    expect(shortcutFromKeyboardEvent(chord({ code: 'AltLeft', key: 'Alt', altKey: true }))).toBeNull();
 
-    const shortcut = shortcutFromKeyboardEvent(chord({ code: 'KeyV', altKey: true }))!;
-    expect(actionShortcutMatches(chord({ code: 'KeyV', altKey: true }), shortcut)).toBe(true);
-    expect(actionShortcutMatches(chord({ code: 'KeyV', altKey: true, shiftKey: true }), shortcut)).toBe(false);
+    const shortcut = shortcutFromKeyboardEvent(chord({ code: 'KeyV', key: 'v', altKey: true }))!;
+    expect(actionShortcutMatches(chord({ code: 'KeyV', key: 'v', altKey: true }), shortcut)).toBe(true);
+    expect(actionShortcutMatches(chord({ code: 'KeyV', key: 'V', altKey: true, shiftKey: true }), shortcut)).toBe(false);
+  });
+
+  it('keeps matching the physical code while displaying the active layout key', async () => {
+    const shortcut = await shortcutFromKeyboardEventWithLayout(
+      chord({ code: 'KeyV', key: 'v', ctrlKey: true }),
+      { getLayoutMap: async () => new Map([['KeyV', 'k']]) },
+    );
+
+    expect(shortcut).toMatchObject({ code: 'KeyV', displayKey: 'K', ctrlKey: true });
+    expect(formatActionShortcut(shortcut!, false)).toBe('Ctrl+K');
+    expect(actionShortcutMatches(chord({ code: 'KeyV', key: 'k', ctrlKey: true }), shortcut!)).toBe(true);
   });
 
   it('keeps shell-wide commands out of the configurable shortcut namespace', () => {
@@ -62,6 +76,7 @@ describe('action shortcuts', () => {
     const setItem = vi.fn();
     const custom = defaultActionShortcuts();
     custom.voiceInput.code = 'KeyV';
+    custom.voiceInput.displayKey = 'K';
     writeActionShortcuts(custom, { setItem });
 
     expect(setItem).toHaveBeenCalledWith(ACTION_SHORTCUTS_STORAGE_KEY, JSON.stringify(custom));

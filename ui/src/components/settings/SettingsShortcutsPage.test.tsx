@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { createInstance } from 'i18next';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -23,18 +23,28 @@ const renderPage = () => render(
   </I18nextProvider>,
 );
 
-beforeEach(() => window.localStorage.clear());
+beforeEach(() => {
+  window.localStorage.clear();
+  Object.defineProperty(navigator, 'keyboard', { configurable: true, value: undefined });
+});
 afterEach(cleanup);
 
 describe('SettingsShortcutsPage', () => {
-  it('records a new chord immediately and restores both defaults', () => {
+  it('records a new chord with its active-layout legend and restores both defaults', async () => {
+    Object.defineProperty(navigator, 'keyboard', {
+      configurable: true,
+      value: { getLayoutMap: async () => new Map([['KeyV', 'k']]) },
+    });
     renderPage();
     const voice = screen.getByRole('button', { name: 'Change Chat voice input shortcut' });
 
     fireEvent.click(voice);
-    fireEvent.keyDown(voice, { code: 'KeyV', altKey: true });
-    expect(readActionShortcuts().voiceInput.code).toBe('KeyV');
-    expect(voice.textContent).toContain('Alt+V');
+    fireEvent.keyDown(voice, { code: 'KeyV', key: 'v', altKey: true });
+    await waitFor(() => expect(readActionShortcuts().voiceInput).toMatchObject({
+      code: 'KeyV',
+      displayKey: 'K',
+    }));
+    expect(voice.textContent).toContain('Alt+K');
 
     fireEvent.click(screen.getByRole('button', { name: 'Restore defaults' }));
     expect(readActionShortcuts()).toMatchObject({

@@ -181,14 +181,23 @@ export function useShowPageAnnotation(src: string | null, shortcutActive = true)
       if (stateRef.current?.enabled === true) startEscapeListening();
       frameShortcutCleanupRef.current = bindFrameChord(
         iframe,
-        (event) => (
-          !event.defaultPrevented
-          && !event.repeat
-          && shortcutActiveRef.current
-          && stateRef.current?.available === true
-          && stateRef.current.enabled !== true
-          && actionShortcutMatches(event, shortcutRef.current)
-        ),
+        (event, activeInFrame) => {
+          let frameDocument: Document | undefined;
+          try {
+            frameDocument = iframe.contentDocument ?? undefined;
+          } catch {
+            frameDocument = undefined;
+          }
+          return (
+            !event.defaultPrevented
+            && !event.repeat
+            && shortcutActiveRef.current
+            && stateRef.current?.available === true
+            && stateRef.current.enabled !== true
+            && actionShortcutMatches(event, shortcutRef.current)
+            && !inShortcutBlockingOverlay(activeInFrame, frameDocument)
+          );
+        },
         enableFromShortcut,
       );
     },
