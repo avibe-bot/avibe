@@ -295,6 +295,16 @@ wheels = [
 ]
 
 [[package]]
+name = "avibe-memory"
+source = { directory = "packaging/avibe-memory" }
+dependencies = [
+    { name = "avibe-os" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "avibe-os", specifier = ">=3.0.14.dev0,<3.1" }]
+
+[[package]]
 name = "avibe-os"
 source = { editable = "." }
 dependencies = [
@@ -331,6 +341,11 @@ dependencies = [
     { name = "uvicorn", extra = ["standard"] },
 ]
 
+[package.optional-dependencies]
+memory = [
+    { name = "avibe-memory" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "jsonschema" },
@@ -345,6 +360,7 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.13.0" },
     { name = "anyio", specifier = ">=4.0.0" },
     { name = "apscheduler", specifier = ">=3.10.4" },
+    { name = "avibe-memory", marker = "extra == 'memory'", directory = "packaging/avibe-memory" },
     { name = "claude-agent-sdk", specifier = ">=0.2.93" },
     { name = "cryptography", specifier = ">=42.0" },
     { name = "discord-py", specifier = ">=2.4.0" },
@@ -372,6 +388,7 @@ requires-dist = [
     { name = "typing-extensions", specifier = ">=4.12.2" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.27" },
 ]
+provides-extras = ["memory"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -24,6 +24,7 @@ jobs:
           cache: "pip"
           cache-dependency-path: |
             pyproject.toml
+            packaging/avibe-memory/pyproject.toml
             uv.lock
       - name: Run pre-commit (ruff)
         run: |
@@ -34,6 +35,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          # Both distributions use VCS-derived versions; a shallow PR merge
+          # checkout falls back to 0.1.dev1 instead of the 3.0 release line.
+          fetch-depth: 0
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
@@ -56,15 +61,20 @@ jobs:
           cache: "pip"
           cache-dependency-path: |
             pyproject.toml
+            packaging/avibe-memory/pyproject.toml
             uv.lock
 
       - name: Build package artifact
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          pip install build
+          pip install -e . build pytest
           python scripts/prepare_local_show_runtime_manifest.py
+          python -m build --outdir memory-dist packaging/avibe-memory
           python -m build --wheel
+          AVIBE_CORE_WHEEL="$(ls dist/avibe_os-*.whl)" \
+          AVIBE_MEMORY_WHEEL="$(ls memory-dist/avibe_memory-*.whl)" \
+            pytest tests/test_memory_distribution.py -v
 
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:

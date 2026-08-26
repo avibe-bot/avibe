@@ -78,6 +78,11 @@ dependencies = [
     "prometheus-client>=0.20.0",
 ]
 
+[project.optional-dependencies]
+memory = [
+    "avibe-memory>=3.0.14.dev0,<3.1",
+]
+
 [project.urls]
 Homepage = "https://github.com/avibe-bot/avibe"
 Repository = "https://github.com/avibe-bot/avibe"
@@ -100,14 +105,14 @@ artifacts = [
     "vibe/show_runtime_manifest.json",
     "vibe/tmux_runtime_manifest.json",
     "vibe/git_runtime_manifest.json",
-    "vibe/memory_runtime_manifest.json",
     "vibe/model_hub_runtime/cliproxyapi_manifest.json",
 ]
 
 [tool.hatch.build.hooks.custom]
 
 [tool.hatch.build.targets.wheel]
-packages = ["vibe", "config", "core", "modules", "storage", "avibe_memory"]
+packages = ["vibe", "config", "core", "modules", "storage"]
+exclude = ["vibe/memory_runtime_manifest.json"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "main.py" = "vibe/service_main.py"
@@ -121,7 +126,6 @@ include = [
     "core/**",
     "modules/**",
     "storage/**",
-    "avibe_memory/**",
     "hatch_build.py",
     "main.py",
     "scripts/prepare_local_show_runtime_manifest.py",
@@ -130,11 +134,11 @@ include = [
     "vibe/show_runtime_manifest.json",
     "vibe/tmux_runtime_manifest.json",
     "vibe/git_runtime_manifest.json",
-    "vibe/memory_runtime_manifest.json",
     "vibe/model_hub_runtime/cliproxyapi_manifest.json",
     "README.md",
     "LICENSE",
 ]
+exclude = ["vibe/memory_runtime_manifest.json"]
 
 [tool.ruff]
 line-length = 120
@@ -158,3 +162,6 @@ dev = [
     "pytest>=9.0.3",
     "pytest-asyncio>=1.4.0",
 ]
+
+[tool.uv.sources]
+avibe-memory = { path = "packaging/avibe-memory" }

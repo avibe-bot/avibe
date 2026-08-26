@@ -257,6 +257,11 @@ jobs:
           echo "SETUPTOOLS_SCM_PRETEND_VERSION=$PACKAGE_VERSION" >> "$GITHUB_ENV"
           echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS=$PACKAGE_VERSION" >> "$GITHUB_ENV"
 
+      - name: Block Memory Wave 3a release until Waves 3b and 3c
+        run: |
+          echo "::error title=Memory Wave 3a release blocked::Wave 3b must preserve the optional package across upgrade and rollback, and Wave 3c must own manifest validation and memory-first publication."
+          exit 1
+
       - name: Verify Show Runtime release assets
         run: |
           python - <<'PY'
