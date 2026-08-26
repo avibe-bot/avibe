@@ -5,10 +5,9 @@ import { useShowPageAnnotation } from './useShowPageAnnotation';
 
 export const ShowPageAnnotationHost: React.FC<{
   src: string | null;
-  shortcutActive: boolean;
   children: ReactNode;
-}> = ({ src, shortcutActive, children }) => {
-  const annotation = useShowPageAnnotation(src, shortcutActive);
+}> = ({ src, children }) => {
+  const annotation = useShowPageAnnotation(src);
   return (
     <ShowPageAnnotationHostContext.Provider value={{ src, annotation }}>
       {children}

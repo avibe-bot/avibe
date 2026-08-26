@@ -28,6 +28,8 @@ export interface AnnotationBridge {
   setIframe: React.RefCallback<HTMLIFrameElement>;
   /** Attach to the iframe `onLoad` to re-sync after a (re)load / re-point. */
   handleIframeLoad: () => void;
+  /** Attach to the owning Show Page surface for parent-document keystrokes. */
+  handleShortcutKeyDown: React.KeyboardEventHandler<HTMLElement>;
   /** `enable` without a mode uses the overlay's remembered mode (§3). */
   enable: (mode?: AnnotationMode) => void;
   disable: () => void;
@@ -61,14 +63,13 @@ function annotationShortcutBlocked(target: Element | null): boolean {
  * "unknown" so the control disables until the freshly loaded overlay reports —
  * and so one session's state never briefly shows over another's page.
  */
-export function useShowPageAnnotation(src: string | null, shortcutActive = true): AnnotationBridge {
+export function useShowPageAnnotation(src: string | null): AnnotationBridge {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const frameShortcutCleanupRef = useRef<() => void>(() => undefined);
   const [state, setState] = useState<AnnotationState | null>(null);
   const [lastSrc, setLastSrc] = useState(src);
   const { showPageAnnotation: annotationShortcut } = useActionShortcuts();
   const stateRef = useLatestRef(state);
-  const shortcutActiveRef = useLatestRef(shortcutActive);
   const shortcutRef = useLatestRef(annotationShortcut);
 
   // The loaded page changed — the new overlay hasn't reported yet, so drop back
@@ -185,6 +186,21 @@ export function useShowPageAnnotation(src: string | null, shortcutActive = true)
     post({ type: 'avibe:annotation:control', action: 'enable' });
   }, [post, stateRef]);
 
+  const handleShortcutKeyDown = useCallback<React.KeyboardEventHandler<HTMLElement>>((event) => {
+    if (
+      event.defaultPrevented
+      || event.repeat
+      || stateRef.current?.available !== true
+      || stateRef.current.enabled
+      || !actionShortcutMatches(event.nativeEvent, shortcutRef.current)
+      || annotationShortcutBlocked(event.target as Element | null)
+    ) {
+      return;
+    }
+    event.preventDefault();
+    enableFromShortcut();
+  }, [enableFromShortcut, shortcutRef, stateRef]);
+
   const setIframe = useCallback<React.RefCallback<HTMLIFrameElement>>(
     (iframe) => {
       if (iframeRef.current !== iframe) {
@@ -202,7 +218,6 @@ export function useShowPageAnnotation(src: string | null, shortcutActive = true)
           return (
             !event.defaultPrevented
             && !event.repeat
-            && shortcutActiveRef.current
             && stateRef.current?.available === true
             && stateRef.current.enabled !== true
             && actionShortcutMatches(event, shortcutRef.current)
@@ -214,7 +229,6 @@ export function useShowPageAnnotation(src: string | null, shortcutActive = true)
     },
     [
       enableFromShortcut,
-      shortcutActiveRef,
       shortcutRef,
       startEscapeListening,
       startListening,
@@ -225,27 +239,17 @@ export function useShowPageAnnotation(src: string | null, shortcutActive = true)
 
   useEffect(() => () => frameShortcutCleanupRef.current(), []);
 
-  useEffect(() => {
-    if (!shortcutActive || state?.available !== true || state.enabled || !iframeRef.current) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (
-        event.defaultPrevented
-        || event.repeat
-        || !actionShortcutMatches(event, annotationShortcut)
-      ) {
-        return;
-      }
-      if (annotationShortcutBlocked(event.target as Element | null)) return;
-      event.preventDefault();
-      enableFromShortcut();
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [annotationShortcut, enableFromShortcut, shortcutActive, state?.available, state?.enabled]);
-
   // On (re)load the overlay broadcasts its state on mount, but the parent
   // listener is already attached, so we also query as a backstop (§3).
   const handleIframeLoad = useCallback(() => post({ type: 'avibe:annotation:query' }), [post]);
 
-  return { state, setIframe, handleIframeLoad, enable, disable, setMode };
+  return {
+    state,
+    setIframe,
+    handleIframeLoad,
+    handleShortcutKeyDown,
+    enable,
+    disable,
+    setMode,
+  };
 }

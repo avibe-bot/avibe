@@ -262,6 +262,7 @@ export const AppWindow: React.FC<{
       // and React/the browser moves focus out automatically.
       inert={win.minimized}
       tabIndex={-1}
+      onKeyDown={annotationHost?.annotation.handleShortcutKeyDown}
       onPointerDownCapture={() => {
         // Capture runs before toolbar controls stop propagation, so every pointer
         // activation claims the window without stealing DOM focus from the target.

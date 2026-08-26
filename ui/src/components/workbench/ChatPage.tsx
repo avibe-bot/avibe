@@ -374,10 +374,7 @@ export const ChatPage: React.FC = () => {
   // closing then reopening the SAME session's page (showPageUrl unchanged) would
   // show the stale enabled/mode and could send control messages to the freshly
   // remounted overlay before it rebroadcasts. Re-points reset via the URL change.
-  const annotation = useShowPageAnnotation(
-    showPageActive ? showPageUrl : null,
-    showPageActive && (!isDesktop || foregroundAppWindowId === null),
-  );
+  const annotation = useShowPageAnnotation(showPageActive ? showPageUrl : null);
   useEffect(() => {
     const sid = sessionId;
     if (!sid || !showPageAccessDenied) return;
@@ -2689,6 +2686,7 @@ export const ChatPage: React.FC = () => {
       <div
         ref={chatSurfaceRef}
         className="fixed inset-0 z-40 flex flex-col bg-background pt-[env(safe-area-inset-top)] md:relative md:inset-auto md:z-auto md:-mx-10 md:-my-8 md:h-[var(--app-vvh)] md:bg-transparent md:pt-0"
+        onKeyDown={annotation.handleShortcutKeyDown}
         onPointerDownCapture={focusCanvas}
         {...fileDropHandlers}
       >

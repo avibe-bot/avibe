@@ -96,17 +96,17 @@ describe('action shortcuts', () => {
     expect(isPlainEscape(chord({ code: 'Escape', key: 'Escape', altKey: true }))).toBe(false);
   });
 
-  it('reserves only Avibe-owned chords relevant to these surfaces', () => {
+  it('reserves only chords owned by the same action surface', () => {
     const enter = shortcutFromKeyboardEvent(chord({ code: 'Enter', key: 'Enter', ctrlKey: true }))!;
     const windowClose = shortcutFromKeyboardEvent(chord({ code: 'KeyW', altKey: true }))!;
     const dockLaunch = shortcutFromKeyboardEvent(chord({ code: 'Digit1', altKey: true }))!;
     expect(isReservedActionShortcut('voiceInput', enter)).toBe(true);
     expect(isReservedActionShortcut('showPageAnnotation', enter)).toBe(false);
-    expect(isReservedActionShortcut('showPageAnnotation', windowClose)).toBe(true);
-    expect(isReservedActionShortcut('showPageAnnotation', dockLaunch)).toBe(true);
+    expect(isReservedActionShortcut('showPageAnnotation', windowClose)).toBe(false);
+    expect(isReservedActionShortcut('showPageAnnotation', dockLaunch)).toBe(false);
     expect(isReservedActionShortcut('voiceInput', windowClose)).toBe(false);
-    expect(isReservedActionShortcut('voiceInput', shortcutFromKeyboardEvent(chord({ code: 'KeyK', metaKey: true }))!)).toBe(true);
-    expect(isReservedActionShortcut('voiceInput', shortcutFromKeyboardEvent(chord({ code: 'KeyD', ctrlKey: true, shiftKey: true }))!)).toBe(true);
+    expect(isReservedActionShortcut('voiceInput', shortcutFromKeyboardEvent(chord({ code: 'KeyK', metaKey: true }))!)).toBe(false);
+    expect(isReservedActionShortcut('voiceInput', shortcutFromKeyboardEvent(chord({ code: 'KeyD', ctrlKey: true, shiftKey: true }))!)).toBe(false);
     expect(isReservedActionShortcut('voiceInput', shortcutFromKeyboardEvent(chord({ code: 'KeyL', ctrlKey: true }))!)).toBe(false);
   });
 

@@ -60,16 +60,13 @@ describe('SettingsShortcutsPage', () => {
       .toContain('Option+X');
   });
 
-  it('rejects modifierless, conflicting, AltGraph, and Avibe-owned chords', () => {
+  it('rejects modifierless, conflicting, AltGraph, and composer-owned chords', () => {
     renderPage();
     const voice = screen.getByRole('button', { name: 'Change Chat voice input shortcut' });
 
     fireEvent.click(voice);
     fireEvent.keyDown(voice, { code: 'KeyV' });
     expect(screen.getByRole('alert').textContent).toBe('Include Option, Alt, Command, or Control.');
-
-    fireEvent.keyDown(voice, { code: 'KeyK', metaKey: true });
-    expect(screen.getByRole('alert').textContent).toBe('This shortcut is already used by Avibe.');
 
     const altGraph = new KeyboardEvent('keydown', {
       bubbles: true,
@@ -84,9 +81,22 @@ describe('SettingsShortcutsPage', () => {
     fireEvent(voice, altGraph);
     expect(screen.getByRole('alert').textContent).toBe('This shortcut is already used by Avibe.');
 
+    fireEvent.keyDown(voice, { code: 'Enter', key: 'Enter', ctrlKey: true });
+    expect(screen.getByRole('alert').textContent).toBe('This shortcut is already used by Avibe.');
+
     fireEvent.keyDown(voice, { code: 'KeyX', altKey: true });
     expect(screen.getByRole('alert').textContent).toBe('Already used by Show Page annotation mode.');
     expect(readActionShortcuts().voiceInput.code).toBe('KeyZ');
+  });
+
+  it('allows shell chords because the focused action surface owns them first', () => {
+    renderPage();
+    const voice = screen.getByRole('button', { name: 'Change Chat voice input shortcut' });
+
+    fireEvent.click(voice);
+    fireEvent.keyDown(voice, { code: 'KeyK', key: 'k', metaKey: true });
+
+    expect(readActionShortcuts().voiceInput).toMatchObject({ code: 'KeyK', metaKey: true });
   });
 
   it('keeps capture active and reports a failed customization write', () => {

@@ -13,11 +13,11 @@ afterEach(() => {
   document.body.replaceChildren();
 });
 
-const mountBridge = (initialSrc: string | null = '/show/session', shortcutActive = true) => {
+const mountBridge = (initialSrc: string | null = '/show/session') => {
   const iframe = document.createElement('iframe');
   document.body.append(iframe);
-  const hook = renderHook(({ src, active }) => useShowPageAnnotation(src, active), {
-    initialProps: { src: initialSrc, active: shortcutActive },
+  const hook = renderHook(({ src }) => useShowPageAnnotation(src), {
+    initialProps: { src: initialSrc },
   });
 
   act(() => hook.result.current.setIframe(iframe));
@@ -76,24 +76,42 @@ const dispatchAnnotationShortcut = (target: EventTarget) => {
 };
 
 describe('useShowPageAnnotation shortcut', () => {
-  it('enters annotation from the active parent surface and leaves exit to Escape', () => {
+  it('leaves the shortcut to the parent surface outside the Show Page frame', () => {
     const { iframe } = mountBridge();
     const postMessage = vi.spyOn(iframe.contentWindow!, 'postMessage');
     reportState(iframe, false);
     postMessage.mockClear();
 
-    const enableEvent = dispatchAnnotationShortcut(document.body);
-    expect(enableEvent.defaultPrevented).toBe(true);
+    const event = dispatchAnnotationShortcut(document.body);
+    expect(event.defaultPrevented).toBe(false);
+    expect(postMessage).not.toHaveBeenCalled();
+  });
+
+  it('enters annotation from the owning parent surface', () => {
+    const { iframe, result } = mountBridge();
+    const postMessage = vi.spyOn(iframe.contentWindow!, 'postMessage');
+    reportState(iframe, false);
+    postMessage.mockClear();
+    const nativeEvent = new KeyboardEvent('keydown', {
+      code: 'KeyX',
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    act(() => result.current.handleShortcutKeyDown({
+      defaultPrevented: false,
+      repeat: false,
+      target: document.body,
+      nativeEvent,
+      preventDefault: () => nativeEvent.preventDefault(),
+    } as React.KeyboardEvent<HTMLElement>));
+
+    expect(nativeEvent.defaultPrevented).toBe(true);
     expect(postMessage).toHaveBeenLastCalledWith(
       { type: 'avibe:annotation:control', action: 'enable' },
       window.location.origin,
     );
-
-    reportState(iframe, true);
-    postMessage.mockClear();
-    const enabledEvent = dispatchAnnotationShortcut(document.body);
-    expect(enabledEvent.defaultPrevented).toBe(false);
-    expect(postMessage).not.toHaveBeenCalled();
   });
 
   it('binds the same shortcut inside the focused Show Page iframe', () => {
@@ -156,35 +174,6 @@ describe('useShowPageAnnotation shortcut', () => {
     );
   });
 
-  it('leaves the parent shortcut with a foreground overlay', () => {
-    const { iframe } = mountBridge();
-    const postMessage = vi.spyOn(iframe.contentWindow!, 'postMessage');
-    reportState(iframe, false);
-    postMessage.mockClear();
-
-    const dialog = document.createElement('div');
-    dialog.setAttribute('role', 'dialog');
-    const dialogButton = document.createElement('button');
-    dialog.append(dialogButton);
-    document.body.append(dialog);
-
-    expect(dispatchAnnotationShortcut(dialogButton).defaultPrevented).toBe(false);
-    expect(postMessage).not.toHaveBeenCalled();
-  });
-
-  it('leaves parent and iframe chords alone when this Show Page is not in front', () => {
-    const { iframe } = mountBridge('/show/session', false);
-    const postMessage = vi.spyOn(iframe.contentWindow!, 'postMessage');
-    reportState(iframe, false);
-    postMessage.mockClear();
-
-    const event = dispatchAnnotationShortcut(document.body);
-    expect(event.defaultPrevented).toBe(false);
-    expect(postMessage).not.toHaveBeenCalled();
-
-    dispatchAnnotationShortcut(iframe.contentWindow!);
-    expect(postMessage).not.toHaveBeenCalled();
-  });
 });
 
 describe('useShowPageAnnotation host Escape forwarding', () => {

@@ -177,35 +177,16 @@ export function actionShortcutMatches(event: ShortcutEvent, shortcut: ActionShor
   );
 }
 
-/** Chords already owned by Avibe on the same surface cannot be assigned. */
+/** Chords already owned by the action's own surface cannot be assigned. */
 export function isReservedActionShortcut(
   id: ActionShortcutId,
   shortcut: ActionShortcut,
 ): boolean {
-  const exactAlt = shortcut.altKey && !shortcut.ctrlKey && !shortcut.metaKey && !shortcut.shiftKey;
-  if (
-    id === 'showPageAnnotation'
-    && exactAlt
-    && (shortcut.code === 'KeyW' || /^Digit[1-9]$/.test(shortcut.code))
-  ) {
-    return true;
-  }
   // Both Chat composer implementations submit every non-Shift Enter.
-  if (
+  return (
     id === 'voiceInput'
     && !shortcut.shiftKey
     && (shortcut.code === 'Enter' || shortcut.code === 'NumpadEnter')
-  ) {
-    return true;
-  }
-  // AppShell owns search even when an extra modifier is present.
-  if (shortcut.code === 'KeyK' && (shortcut.ctrlKey || shortcut.metaKey)) return true;
-  // Chat archive is exact Ctrl/Command+Shift+D.
-  return (
-    shortcut.code === 'KeyD'
-    && shortcut.shiftKey
-    && !shortcut.altKey
-    && shortcut.ctrlKey !== shortcut.metaKey
   );
 }
 

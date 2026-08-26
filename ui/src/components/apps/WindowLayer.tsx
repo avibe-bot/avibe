@@ -18,7 +18,7 @@ import {
 } from './showPageWindowState';
 import { inTerminalSurface, inTextEntrySurface, windowIdForKeyboardTarget } from './windowChords';
 import { shouldGuardUnload } from './windowUnload';
-import { isDesktopViewport, useIsDesktop } from '../../lib/useIsDesktop';
+import { isDesktopViewport } from '../../lib/useIsDesktop';
 
 const ShowPageWindow: React.FC<{
   archived: boolean;
@@ -27,11 +27,10 @@ const ShowPageWindow: React.FC<{
   layerWidth: number;
   revalidateVersion: number;
   sessionId: string;
-  shortcutActive: boolean;
   win: WindowInstance;
-}> = ({ archived, iconVersion, layerHeight, layerWidth, revalidateVersion, sessionId, shortcutActive, win }) => {
+}> = ({ archived, iconVersion, layerHeight, layerWidth, revalidateVersion, sessionId, win }) => {
   const api = useApi();
-  const { focusedId, setTitle } = useWindowManager();
+  const { setTitle } = useWindowManager();
   const [status, setStatus] = useState<ShowPageWindowStatus>(sessionId ? 'loading' : 'missing');
 
   useEffect(() => {
@@ -59,10 +58,7 @@ const ShowPageWindow: React.FC<{
 
   const src = showPageWindowSource(sessionId, status, archived);
   return (
-    <ShowPageAnnotationHost
-      src={src}
-      shortcutActive={shortcutActive && src !== null && !win.minimized && focusedId === win.id}
-    >
+    <ShowPageAnnotationHost src={src}>
       <AppWindow win={win} layerWidth={layerWidth} layerHeight={layerHeight} iconVersion={iconVersion} />
     </ShowPageAnnotationHost>
   );
@@ -77,7 +73,6 @@ const ShowPageWindow: React.FC<{
 export const WindowLayer: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
-  const isDesktop = useIsDesktop();
   const { order, pins } = useDock();
   const { windows, close, focus, minimize, openApp, restore, setParams, setTitle, confirmClose } =
     useWindowManager();
@@ -133,6 +128,7 @@ export const WindowLayer: React.FC = () => {
   // so its Ctrl control-chars (^W/^M) reach the shell (see inTerminalSurface).
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
       const active = document.activeElement;
       if (e.ctrlKey && !e.metaKey && inTerminalSurface(active)) return;
@@ -158,6 +154,7 @@ export const WindowLayer: React.FC = () => {
   // keep Option+W for character entry — consistent with the Alt+1-9 chord.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       if (e.code !== 'KeyW' || !e.altKey || e.metaKey || e.ctrlKey || e.shiftKey) return;
       const active = document.activeElement;
       if (inTextEntrySurface(active)) return;
@@ -196,6 +193,7 @@ export const WindowLayer: React.FC = () => {
   // for character entry; the Windows layer is desktop-only.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       if (!isDesktopViewport()) return;
       const index = dockIndexFromShortcut(e);
       const target = e.target instanceof Element ? e.target : document.activeElement;
@@ -310,7 +308,6 @@ export const WindowLayer: React.FC = () => {
             layerWidth={size.w}
             revalidateVersion={showPageRevalidateVersion}
             sessionId={sid ?? ''}
-            shortcutActive={isDesktop}
             win={w}
           />
         );
