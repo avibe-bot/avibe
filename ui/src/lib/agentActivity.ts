@@ -239,6 +239,23 @@ export const activityDurationParts = (
   return { minutes: Math.floor(totalSeconds / 60), seconds: totalSeconds % 60 };
 };
 
+// Precise elapsed clock for the live activity card. Keep the compact MM:SS
+// shape below one hour, then expose hours and days instead of letting minutes
+// grow into an increasingly hard-to-read total.
+export const formatActivityElapsedClock = (ms: number, daySuffix: string): string => {
+  const totalSeconds = Number.isFinite(ms) ? Math.max(0, Math.floor(ms / 1000)) : 0;
+  const days = Math.floor(totalSeconds / 86_400);
+  const hours = Math.floor((totalSeconds % 86_400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const pad = (value: number) => String(value).padStart(2, '0');
+
+  const clock = hours > 0 || days > 0
+    ? `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`
+    : `${pad(minutes)}:${pad(seconds)}`;
+  return days > 0 ? `${days}${daySuffix} ${clock}` : clock;
+};
+
 // ===== Tool-call summary v2 (A/D): 3-tier degrade, frontend-only parse =====
 // ``ActivityRow.text`` for a tool call is the backend ``format_toolcall`` STRING —
 // ``🔧 `ToolName` `{compact json}` `` (base_formatter.py). Tool names and arg keys
