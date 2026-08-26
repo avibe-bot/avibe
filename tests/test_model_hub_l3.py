@@ -86,6 +86,7 @@ from modules.agents.model_hub import (
     _localized_launch_error,
     bind_launch,
     bind_turn_mode,
+    opencode_model_catalog_for_overlay,
 )
 from storage.models import agent_sessions, messages, metadata
 from vibe.i18n import t as i18n_t
@@ -4248,6 +4249,15 @@ def test_opencode_overlay_projects_menu_identity_to_exact_hop_model(tmp_path: Pa
         "low": {"reasoningEffort": "low"},
     }
     assert overlay.launches[0].target_model == "upstream-model"
+    assert opencode_model_catalog_for_overlay(overlay) == {
+        "providers": [
+            {
+                "id": overlay.provider_id,
+                "models": provider["models"],
+            }
+        ],
+        "default": {},
+    }
 
 
 def test_opencode_overlay_private_provider_id_is_credential_scoped(

@@ -44,6 +44,7 @@ from core.handlers.model_hub.service import (
 from core.services.settings import load_config_or_default
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 from vibe.codex_config import format_toml_basic_string
+from vibe.opencode_config import model_hub_runtime_provider_id
 
 
 LaunchChannel = Literal["direct", "native_cli", "hub"]
@@ -336,16 +337,6 @@ def _provider_package() -> str:
     # OpenCode speaks one stable frontend protocol to the local Gateway. The
     # persisted exact hop selects the upstream protocol behind that boundary.
     return "@ai-sdk/openai-compatible"
-
-
-_OPENCODE_MODEL_HUB_PROVIDER_PREFIX = "avibe-model-hub-"
-
-
-def _opencode_model_hub_provider_id(gateway_token: str) -> str:
-    """Derive an overlay-private provider namespace from its runtime credential."""
-
-    digest = hashlib.sha256(gateway_token.encode()).hexdigest()[:24]
-    return f"{_OPENCODE_MODEL_HUB_PROVIDER_PREFIX}{digest}"
 
 
 def _provider_base_url(gateway_base_url: str) -> str:
@@ -978,7 +969,7 @@ class ModelHubRuntimeRouter:
             process_scope="opencode:shared-server",
             turn_id=None,
         )
-        overlay_provider_id = _opencode_model_hub_provider_id(gateway_token)
+        overlay_provider_id = model_hub_runtime_provider_id(gateway_token)
         providers: dict[str, dict[str, Any]] = {}
         projected_identifiers: list[str] = []
         available_identifiers: list[str] = []
@@ -1125,3 +1116,17 @@ def opencode_model_for_overlay(
     if overlay is None or requested_model is None:
         return requested_model
     return f"{overlay.provider_id}/{requested_model}"
+
+
+def opencode_model_catalog_for_overlay(
+    overlay: OpenCodeOverlay,
+) -> dict[str, Any]:
+    """Project the private overlay into the model metadata needed by its turn."""
+
+    payload = json.loads(overlay.content)
+    provider = payload.get("provider", {}).get(overlay.provider_id, {})
+    models = provider.get("models", {}) if isinstance(provider, dict) else {}
+    return {
+        "providers": [{"id": overlay.provider_id, "models": models}],
+        "default": {},
+    }

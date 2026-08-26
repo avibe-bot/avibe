@@ -429,6 +429,19 @@ def test_upsert_custom_provider_refuses_existing_builtin_block(tmp_path: Path) -
         )
 
 
+def test_upsert_custom_provider_refuses_model_hub_runtime_namespace(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="provider_id already exists"):
+        upsert_opencode_custom_provider(
+            "avibe-model-hub-0123456789abcdef01234567",
+            "Runtime Shadow",
+            "openai-compatible",
+            "https://relay.example/v1",
+            home=tmp_path,
+        )
+
+
 def test_remove_custom_provider_deletes_only_custom_block(tmp_path: Path) -> None:
     upsert_opencode_provider_base_url("openai", "https://relay.example/v1", home=tmp_path)
     upsert_opencode_custom_provider(

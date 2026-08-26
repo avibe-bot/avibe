@@ -178,6 +178,57 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
             "/tmp/a%2520b",
         )
 
+    async def test_user_catalog_boundary_excludes_model_hub_runtime_provider(self):
+        private_id = "avibe-model-hub-0123456789abcdef01234567"
+
+        class _CatalogSession(_FakeSession):
+            def get(self, url, headers=None, timeout=None):
+                self.gets.append({"url": url, "headers": headers, "timeout": timeout})
+                if url.endswith("/config/providers"):
+                    payload = {
+                        "providers": [
+                            {"id": private_id, "models": {"openai/gpt-5": {}}},
+                            {"id": "openai", "models": {"gpt-5": {}}},
+                        ],
+                        "default": {
+                            private_id: "openai/gpt-5",
+                            "openai": "gpt-5",
+                        },
+                    }
+                elif url.endswith("/provider"):
+                    payload = {
+                        "all": {
+                            private_id: {"id": private_id},
+                            "openai": {"id": "openai"},
+                        },
+                        "connected": [private_id, "openai"],
+                    }
+                else:
+                    payload = {
+                        "model": f"{private_id}/openai/gpt-5",
+                        "provider": {
+                            private_id: {"options": {"apiKey": "private"}},
+                            "openai": {},
+                        },
+                    }
+                return _FakeResponse(status=200, json_data=payload)
+
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        session = _CatalogSession()
+        manager._get_http_session = AsyncMock(return_value=session)  # type: ignore[method-assign]
+        manager.ensure_running = AsyncMock()  # type: ignore[method-assign]
+
+        models = await manager.get_available_models("/tmp/work")
+        providers = await manager.get_providers()
+        config = await manager.get_default_config("/tmp/work")
+
+        self.assertEqual([row["id"] for row in models["providers"]], ["openai"])
+        self.assertEqual(models["default"], {"openai": "gpt-5"})
+        self.assertEqual(set(providers["all"]), {"openai"})
+        self.assertEqual(providers["connected"], ["openai"])
+        self.assertNotIn("model", config)
+        self.assertEqual(set(config["provider"]), {"openai"})
+
     async def test_ensure_running_restarts_healthy_server_when_caller_context_plugin_changes(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
         restarted = []

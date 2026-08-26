@@ -33,6 +33,7 @@ from modules.agents.opencode.config_reconciler import OpenCodeConfigReconciler
 from vibe import runtime
 from vibe.opencode_config import (
     get_opencode_custom_provider_adapter,
+    is_model_hub_runtime_provider_id,
     load_first_opencode_user_config,
     read_opencode_provider_auth_entries,
 )
@@ -58,6 +59,58 @@ def _percent_encode_path(path: str) -> str:
     misinterpreted by the receiving end.
     """
     return _url_quote(path, safe="/")
+
+
+def _public_opencode_catalog(payload: Any) -> Any:
+    """Remove runtime-only Model Hub providers at the user catalog boundary."""
+
+    if not isinstance(payload, dict):
+        return payload
+    projected = dict(payload)
+
+    def _provider_id(entry: object) -> object:
+        if isinstance(entry, dict):
+            return entry.get("id") or entry.get("provider_id") or entry.get("name")
+        return entry
+
+    for key in ("providers", "all"):
+        value = projected.get(key)
+        if isinstance(value, list):
+            projected[key] = [
+                entry
+                for entry in value
+                if not is_model_hub_runtime_provider_id(_provider_id(entry))
+            ]
+        elif isinstance(value, dict):
+            projected[key] = {
+                provider_id: entry
+                for provider_id, entry in value.items()
+                if not is_model_hub_runtime_provider_id(provider_id)
+            }
+
+    connected = projected.get("connected")
+    if isinstance(connected, list):
+        projected["connected"] = [
+            provider_id
+            for provider_id in connected
+            if not is_model_hub_runtime_provider_id(provider_id)
+        ]
+
+    for key in ("default", "provider"):
+        value = projected.get(key)
+        if isinstance(value, dict):
+            projected[key] = {
+                provider_id: entry
+                for provider_id, entry in value.items()
+                if not is_model_hub_runtime_provider_id(provider_id)
+            }
+
+    model = projected.get("model")
+    if isinstance(model, str) and is_model_hub_runtime_provider_id(
+        model.split("/", 1)[0]
+    ):
+        projected.pop("model", None)
+    return projected
 
 
 def native_part_id_for_attempt(attempt_id: str) -> str:
@@ -1866,7 +1919,7 @@ class OpenCodeServerManager:
                     headers={"x-opencode-directory": _percent_encode_path(directory)},
                 ) as resp:
                     if resp.status == 200:
-                        return await resp.json()
+                        return _public_opencode_catalog(await resp.json())
                     return {"providers": [], "default": {}}
             except Exception as e:
                 logger.warning(f"Failed to get available models: {e}")
@@ -1887,7 +1940,7 @@ class OpenCodeServerManager:
                     headers={"x-opencode-directory": _percent_encode_path(directory)},
                 ) as resp:
                     if resp.status == 200:
-                        return await resp.json()
+                        return _public_opencode_catalog(await resp.json())
                     return {}
             except Exception as e:
                 logger.warning(f"Failed to get default config: {e}")
@@ -1931,9 +1984,9 @@ class OpenCodeServerManager:
                 )
 
     async def get_providers(self) -> Dict[str, Any]:
-        """Fetch the full provider catalog from the running OpenCode server.
+        """Fetch the user-visible provider catalog from the OpenCode server.
 
-        Returns the raw shape OpenCode reports: ``{all: {...}, default:
+        Preserves the shape OpenCode reports: ``{all: {...}, default:
         {...}, connected: [...]}``. Callers (``vibe.api.get_opencode_providers``)
         merge this with the auth-method map from ``get_provider_auth`` to
         produce the per-card ``configured`` / ``oauth_available`` /
@@ -1947,7 +2000,7 @@ class OpenCodeServerManager:
             try:
                 async with session.get(f"{self.base_url}/provider") as resp:
                     if resp.status == 200:
-                        return await resp.json()
+                        return _public_opencode_catalog(await resp.json())
                     return {}
             except Exception as e:
                 logger.warning(f"Failed to get OpenCode providers: {e}")

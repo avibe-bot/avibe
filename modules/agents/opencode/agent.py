@@ -52,6 +52,7 @@ from modules.agents.model_hub import (
     bind_launch,
     bind_turn_mode,
     opencode_model_for_overlay,
+    opencode_model_catalog_for_overlay,
     opencode_requested_model_for_overlay,
     persisted_launch_identity,
     resolve_opencode_overlay_launch,
@@ -1217,7 +1218,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 reasoning_effort = getattr(opencode_cfg, "default_reasoning_effort", None)
             if model_dict:
                 try:
-                    model_catalog = await server.get_available_models(request.working_path)
+                    model_catalog = (
+                        opencode_model_catalog_for_overlay(model_hub_overlay)
+                        if model_hub_overlay is not None
+                        else await server.get_available_models(request.working_path)
+                    )
                     resolved_model_id = resolve_opencode_model_id(
                         model_catalog,
                         model_dict.get("providerID"),
