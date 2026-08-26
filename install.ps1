@@ -54,13 +54,25 @@ function Test-Command {
     return $?
 }
 
+function Resolve-InstallPath {
+    param([string]$Path)
+
+    $expanded = $Path
+    if ($expanded -eq "~") {
+        $expanded = $env:USERPROFILE
+    } elseif ($expanded.StartsWith("~\") -or $expanded.StartsWith("~/")) {
+        $expanded = Join-Path $env:USERPROFILE $expanded.Substring(2)
+    }
+    if (-not [System.IO.Path]::IsPathRooted($expanded)) {
+        $expanded = Join-Path (Get-Location) $expanded
+    }
+    return [System.IO.Path]::GetFullPath($expanded)
+}
+
 function Get-StableBinDirectory {
     $configured = $env:UV_TOOL_BIN_DIR
     $directory = if ($configured) { $configured } else { Join-Path $env:USERPROFILE ".local\bin" }
-    if (-not [System.IO.Path]::IsPathRooted($directory)) {
-        $directory = Join-Path (Get-Location) $directory
-    }
-    return [System.IO.Path]::GetFullPath($directory)
+    return Resolve-InstallPath $directory
 }
 
 function Get-GenerationPath {
@@ -248,14 +260,11 @@ function Invoke-NativeCommand {
     $stderrPath = [System.IO.Path]::GetTempFileName()
 
     try {
-        $process = Start-Process -FilePath $FilePath `
-            -ArgumentList $Arguments `
-            -RedirectStandardOutput $stdoutPath `
-            -RedirectStandardError $stderrPath `
-            -NoNewWindow `
-            -Wait `
-            -PassThru `
-            -ErrorAction Stop
+        # PowerShell's call operator preserves the argument vector. In
+        # contrast, Start-Process joins ArgumentList with spaces and loses the
+        # boundaries around paths containing whitespace.
+        & $FilePath @Arguments 1> $stdoutPath 2> $stderrPath
+        $exitCode = $LASTEXITCODE
 
         $stdout = if (Test-Path $stdoutPath) { [System.IO.File]::ReadAllText($stdoutPath) } else { "" }
         $stderr = if (Test-Path $stderrPath) { [System.IO.File]::ReadAllText($stderrPath) } else { "" }
@@ -269,8 +278,8 @@ function Invoke-NativeCommand {
         }
 
         return @{
-            Success = ($process.ExitCode -eq 0)
-            ExitCode = $process.ExitCode
+            Success = ($exitCode -eq 0)
+            ExitCode = $exitCode
             Output = ($capturedOutput -join [System.Environment]::NewLine).Trim()
         }
     } catch {
@@ -304,6 +313,55 @@ function Invoke-NativeCommand {
     }
 }
 
+function Activate-LegacyInstallCandidate {
+    param(
+        [string]$Candidate,
+        [string]$StableLauncher,
+        [string]$StableBin,
+        [string]$GenerationRoot
+    )
+
+    $probe = Invoke-NativeCommand -FilePath $Candidate -Arguments @("--help")
+    if (-not $probe.Success) {
+        return @{
+            Success = $false
+            ExitCode = $probe.ExitCode
+            Output = if ($probe.Output) { $probe.Output } else { "candidate vibe launcher failed its startup probe" }
+        }
+    }
+
+    $replacement = Join-Path $StableBin ("vibe.exe.avibe-" + [Guid]::NewGuid().ToString("N") + ".new")
+    try {
+        try {
+            New-Item -ItemType SymbolicLink -Path $replacement -Target $Candidate -ErrorAction Stop | Out-Null
+        } catch {
+            try {
+                New-Item -ItemType HardLink -Path $replacement -Target $Candidate -ErrorAction Stop | Out-Null
+            } catch {
+                Copy-Item -LiteralPath $Candidate -Destination $replacement -Force -ErrorAction Stop
+            }
+        }
+        Move-Item -Force -Path $replacement -Destination $StableLauncher
+    } catch {
+        Remove-Item -LiteralPath $replacement -Force -ErrorAction SilentlyContinue
+        return @{ Success = $false; ExitCode = 1; Output = (($_ | Out-String).Trim()) }
+    }
+
+    $markerReplacement = $null
+    try {
+        $marker = Join-Path $StableBin ".vibe.exe.avibe-generation"
+        $markerReplacement = Join-Path $StableBin (".vibe.exe.avibe-generation-" + [Guid]::NewGuid().ToString("N") + ".new")
+        Set-Content -LiteralPath $markerReplacement -Value $GenerationRoot -Encoding UTF8
+        Move-Item -Force -Path $markerReplacement -Destination $marker
+    } catch {
+        if ($markerReplacement) {
+            Remove-Item -LiteralPath $markerReplacement -Force -ErrorAction SilentlyContinue
+        }
+        Write-Warning "Could not record the legacy install generation; retained all installed generations."
+    }
+    return @{ Success = $true; ExitCode = 0; Output = "" }
+}
+
 function Invoke-UvToolInstallAttempt {
     param([string[]]$Arguments)
 
@@ -318,10 +376,7 @@ function Invoke-UvToolInstallAttempt {
     } else {
         $defaultHome
     }
-    if (-not [System.IO.Path]::IsPathRooted($runtimeHome)) {
-        $runtimeHome = Join-Path (Get-Location) $runtimeHome
-    }
-    $runtimeHome = [System.IO.Path]::GetFullPath($runtimeHome)
+    $runtimeHome = Resolve-InstallPath $runtimeHome
     $generationRoot = Join-Path (Join-Path $runtimeHome "runtime\install-generations") ([Guid]::NewGuid().ToString("N"))
     $generationTools = Join-Path $generationRoot "tools"
     $generationBin = Join-Path $generationRoot "bin"
@@ -357,15 +412,27 @@ function Invoke-UvToolInstallAttempt {
         Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
         Push-Location $runtimeHome
         try {
-            $activationArguments = @(
-                "__activate-install",
-                "--launcher", $stableLauncher,
-                "--candidate", $candidate
-            )
-            if ($previousGeneration) {
-                $activationArguments += @("--source-generation", $previousGeneration)
+            $protocol = Invoke-NativeCommand -FilePath $candidate -Arguments @("__activate-install", "--protocol-version")
+            if ($protocol.Success -and $protocol.Output.Trim() -eq "1") {
+                $activationArguments = @(
+                    "__activate-install",
+                    "--launcher", $stableLauncher,
+                    "--candidate", $candidate
+                )
+                if ($previousGeneration) {
+                    $activationArguments += @("--source-generation", $previousGeneration)
+                }
+                $activation = Invoke-NativeCommand -FilePath $candidate -Arguments $activationArguments
+            } else {
+                # Older released wheels predate the shared activation
+                # protocol. Switch atomically but retain every generation; a
+                # later protocol-aware install owns lifecycle cleanup.
+                $activation = Activate-LegacyInstallCandidate `
+                    -Candidate $candidate `
+                    -StableLauncher $stableLauncher `
+                    -StableBin $stableBin `
+                    -GenerationRoot $generationRoot
             }
-            $activation = Invoke-NativeCommand -FilePath $candidate -Arguments $activationArguments
         } finally {
             Pop-Location
             if ($null -eq $previousPythonPath) { Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue } else { $env:PYTHONPATH = $previousPythonPath }

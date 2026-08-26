@@ -52,6 +52,13 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
         #!/usr/bin/env bash
         set -euo pipefail
         if [ "${{1:-}}" = "__activate-install" ]; then
+            if [ "${{2:-}}" = "--protocol-version" ]; then
+                if [ "${{VIBE_TEST_LEGACY_ACTIVATION:-}}" = "1" ]; then
+                    exit 2
+                fi
+                echo "1"
+                exit 0
+            fi
             if [ "${{VIBE_TEST_CANDIDATE_PROBE_FAIL:-}}" = "1" ]; then
                 echo "candidate import failed" >&2
                 exit 19
@@ -291,6 +298,27 @@ def test_repeated_installer_runs_prune_old_generations(tmp_path):
     assert len(first_generations) == 1
     assert len(generations) == 2
     assert all(path.is_dir() for path in generations)
+
+
+def test_install_script_activates_a_wheel_without_the_shared_protocol(tmp_path):
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    path_dir = tmp_path / "path-bin"
+    path_dir.mkdir()
+    uv_log = tmp_path / "uv-tool-bin-dir.txt"
+    _write_fake_uv(path_dir / "uv", uv_log)
+
+    env = os.environ.copy()
+    env["HOME"] = str(home_dir)
+    env["PATH"] = os.pathsep.join([str(path_dir), "/usr/bin", "/bin"])
+    env["VIBE_TEST_LEGACY_ACTIVATION"] = "1"
+
+    install_result = _install(env)
+    version_result = _vibe_version(env)
+
+    assert install_result.returncode == 0, install_result.stdout + install_result.stderr
+    assert version_result.returncode == 0, version_result.stdout + version_result.stderr
+    assert "avibe-os 9.9.9" in version_result.stdout
 
 
 def test_install_script_keeps_active_launcher_when_uv_install_fails(tmp_path):
@@ -552,16 +580,22 @@ def test_windows_installer_honors_configured_tool_bin_and_cross_volume_copy_fall
     powershell = INSTALL_POWERSHELL.read_text(encoding="utf-8")
 
     assert "function Get-StableBinDirectory" in powershell
+    assert "function Resolve-InstallPath" in powershell
+    assert '$expanded.StartsWith("~\\")' in powershell
     assert "$configured = $env:UV_TOOL_BIN_DIR" in powershell
     assert '"__activate-install"' in powershell
+    assert '"--protocol-version"' in powershell
     assert '$activationArguments += @("--source-generation", $previousGeneration)' in powershell
     assert "function Remove-StaleInstallGenerations" not in powershell
-    assert "New-Item -ItemType HardLink" not in powershell
+    assert "function Activate-LegacyInstallCandidate" in powershell
+    assert "Start-Process -FilePath" not in powershell
+    assert "& $FilePath @Arguments" in powershell
 
 
 def test_install_script_candidate_probes_ignore_python_path_overrides():
     script = INSTALL_SCRIPT.read_text(encoding="utf-8")
     assert 'env -u PYTHONPATH -u PYTHONHOME "$VIBE_CANDIDATE_BIN_PATH" "${activation_args[@]}"' in script
+    assert "__activate-install --protocol-version" in script
     assert 'activation_args+=(--source-generation "$source_generation")' in script
     assert "verify_uv_candidate" not in script
     powershell = INSTALL_POWERSHELL.read_text(encoding="utf-8")

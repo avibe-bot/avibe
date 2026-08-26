@@ -226,10 +226,15 @@ def test_activation_retains_the_generation_serving_a_live_process(monkeypatch, t
     running_python = root / "running" / "tools" / "avibe-os" / "bin" / "python"
     candidate = root / "candidate" / "bin" / "vibe"
     stale = root / "stale" / "bin" / "vibe"
-    for path in (previous, running_python, candidate, stale):
+    for path in (previous, candidate, stale):
         path.parent.mkdir(parents=True)
         path.write_text(path.parent.parent.name, encoding="utf-8")
         path.chmod(0o755)
+    shared_python = tmp_path / "shared-python" / "python"
+    shared_python.parent.mkdir()
+    shared_python.write_text("python", encoding="utf-8")
+    running_python.parent.mkdir(parents=True)
+    running_python.symlink_to(shared_python)
     launcher.parent.mkdir(parents=True)
     launcher.symlink_to(previous)
     monkeypatch.setattr(upgrade, "atomic_uv_install_root", lambda: root)
@@ -242,6 +247,30 @@ def test_activation_retains_the_generation_serving_a_live_process(monkeypatch, t
     assert previous.exists()
     assert running_python.exists()
     assert not stale.parent.parent.exists()
+
+
+def test_activation_compares_source_generation_by_filesystem_identity(monkeypatch, tmp_path):
+    from vibe import upgrade
+
+    physical_home = tmp_path / "physical-home"
+    logical_home = tmp_path / "logical-home"
+    logical_home.symlink_to(physical_home, target_is_directory=True)
+    root = physical_home / "runtime" / "install-generations"
+    source = root / "source" / "bin" / "vibe"
+    launcher = tmp_path / "bin" / "vibe"
+    source.parent.mkdir(parents=True)
+    launcher.parent.mkdir()
+    source.write_text("source", encoding="utf-8")
+    launcher.symlink_to(source)
+    monkeypatch.setattr(upgrade, "atomic_uv_install_root", lambda: root)
+
+    activation = upgrade.AtomicActivation(
+        launcher,
+        root / "candidate" / "bin" / "vibe",
+        logical_home / "runtime" / "install-generations" / "source",
+    )
+
+    assert upgrade.atomic_activation_source_is_current(activation)
 
 
 def test_installer_activation_uses_the_shared_locked_boundary(monkeypatch, tmp_path):
@@ -264,6 +293,13 @@ def test_installer_activation_uses_the_shared_locked_boundary(monkeypatch, tmp_p
     upgrade.activate_installer_candidate(activation)
 
     assert events == ["lock-enter", "activate", "lock-exit"]
+
+
+def test_installer_activation_reports_its_protocol_version(capsys):
+    from vibe import cli
+
+    assert cli._dispatch_installer_activation(["--protocol-version"]) == 0
+    assert capsys.readouterr().out == "1\n"
 
 
 def test_installer_rejects_a_snapshot_superseded_by_runtime_activation(monkeypatch, tmp_path):

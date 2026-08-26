@@ -16819,6 +16819,9 @@ def _dispatch_deferred_upgrade_activation(argv: list[str]) -> int:
 def _dispatch_installer_activation(argv: list[str]) -> int:
     """Activate a staged one-command install through the shared Python owner."""
 
+    if argv == ["--protocol-version"]:
+        print("1")
+        return 0
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--launcher", required=True)
     parser.add_argument("--candidate", required=True)

@@ -1083,6 +1083,12 @@ def schedule_restart(
 ) -> dict:
     """Serialize every restart seed with install activation and pruning."""
 
+    from storage.migrations import guard_source_checkout_default_state_bootstrap
+
+    # The lock lives under the runtime directory. Preserve the development
+    # guard's contract by checking it before lock acquisition can create that
+    # directory.
+    guard_source_checkout_default_state_bootstrap()
     with atomic_upgrade_lock():
         return _schedule_restart_locked(
             delay_seconds=delay_seconds,
@@ -1126,10 +1132,7 @@ def _schedule_restart_locked(
     is the only place they are put back together.
     """
     from core.memory.ui_access import process_ui_read_secret
-    from storage.migrations import guard_source_checkout_default_state_bootstrap
-
     memory_ui_secret = memory_ui_secret or process_ui_read_secret()
-    guard_source_checkout_default_state_bootstrap()
     job_id = uuid.uuid4().hex[:12]
     if python_executable:
         invocation = [python_executable, "-c", "from vibe.cli import main; main()", "restart"]

@@ -56,7 +56,8 @@ def test_verify_python_environment_import_probe_does_not_use_caller_cwd(monkeypa
 
     def fake_run(*args, **kwargs):
         calls.append(kwargs)
-        return subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
+        stdout = f"{site_packages}\n" if len(calls) == 1 else ""
+        return subprocess.CompletedProcess(args[0], 0, stdout=stdout, stderr="")
 
     monkeypatch.setattr(install_integrity.subprocess, "run", fake_run)
 
@@ -127,6 +128,24 @@ def test_site_discovery_probe_respects_disabled_user_site(monkeypatch, tmp_path)
     install_integrity.site_packages_for_python(executable)
 
     assert "ENABLE_USER_SITE" in calls[0]
+
+
+def test_site_discovery_ignores_other_python_versions_in_the_same_prefix(monkeypatch, tmp_path):
+    selected = tmp_path / "lib" / "python3.12" / "site-packages"
+    sibling = tmp_path / "lib" / "python3.11" / "site-packages"
+    _write_record(selected, "demo_pkg/__init__.py", b"value = 1\n")
+    _write_record(sibling, "demo_pkg/__init__.py", b"value = 1\n")
+    executable = tmp_path / "bin" / "python3"
+    executable.parent.mkdir()
+    executable.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(
+        install_integrity.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, stdout=f"{selected}\n", stderr=""),
+    )
+
+    assert install_integrity.site_packages_for_python(executable) == [selected.resolve()]
 
 
 def test_verify_site_packages_accepts_dist_packages_entry_point(tmp_path):

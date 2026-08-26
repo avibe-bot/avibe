@@ -56,7 +56,6 @@ def site_packages_for_python(python_executable: str | os.PathLike[str]) -> list[
     # a shared Python binary, while their import path and sysconfig point at
     # the tool environment selected through that symlink.
     executable = Path(python_executable).expanduser()
-    root = executable.parent.parent
     discovered: list[Path] = []
     probe = (
         "import site, sysconfig; "
@@ -82,22 +81,15 @@ def site_packages_for_python(python_executable: str | os.PathLike[str]) -> list[
     if result is not None and result.returncode == 0:
         discovered.extend(Path(line).expanduser() for line in result.stdout.splitlines() if line.strip())
 
-    heuristic = [
-        *sorted((root / "lib").glob("python*/site-packages")),
-        *sorted((root / "lib").glob("python*/dist-packages")),
-        root / "Lib" / "site-packages",
-    ]
     def has_record(path: Path) -> bool:
         return path.is_dir() and any(path.glob("*.dist-info/RECORD"))
 
-    # Prefer the environment-local layout. If it is absent (for example a
-    # system Python with a pip user install), retain interpreter-reported
-    # locations that actually contain wheel metadata. Some Windows Python
-    # builds report their environment root as ``purelib``; accepting that path
-    # would make an unrelated top-level directory fail with "no RECORD".
-    local = [path for path in heuristic if path.is_dir()]
-    reported = [path for path in discovered if has_record(path)]
-    discovered = [*local, *reported] if local else reported
+    # The probed interpreter owns its import-path boundary. Filesystem globs
+    # cannot infer that boundary when a prefix contains multiple Python
+    # versions, so accept only interpreter-reported locations with wheel
+    # metadata. A probe that cannot run is an invalid candidate, not a reason
+    # to verify a sibling interpreter's packages.
+    discovered = [path for path in discovered if has_record(path)]
     candidates: list[Path] = []
     seen: set[Path] = set()
     for path in discovered:

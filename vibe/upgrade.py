@@ -328,13 +328,34 @@ def get_cli_launcher_path(launcher: runtime_mod.ServiceLauncher) -> Path | None:
 
 
 def _generation_for_path(path: Path, root: Path) -> Path | None:
+    """Return the canonical generation containing a logical install path.
+
+    The leaf may itself be a symlink, as uv-managed Python launchers commonly
+    are. Walk its logical ancestors and resolve only the candidate generation
+    directory so the shared interpreter target cannot erase generation
+    ownership.
+    """
+
     try:
-        relative = path.expanduser().resolve().relative_to(root.expanduser().resolve())
-    except (OSError, RuntimeError, ValueError):
+        root = root.expanduser().resolve()
+        expanded = path.expanduser()
+    except (OSError, RuntimeError):
         return None
-    if not relative.parts:
-        return None
-    return root.expanduser().resolve() / relative.parts[0]
+    ancestors = [expanded, *expanded.parents]
+    try:
+        resolved_path = expanded.resolve()
+    except (OSError, RuntimeError):
+        resolved_path = None
+    if resolved_path is not None:
+        ancestors.extend((resolved_path, *resolved_path.parents))
+    for ancestor in dict.fromkeys(ancestors):
+        try:
+            resolved = ancestor.resolve()
+        except (OSError, RuntimeError):
+            continue
+        if resolved.parent == root:
+            return resolved
+    return None
 
 
 def _generation_for_hardlink(launcher: Path, root: Path) -> Path | None:
@@ -401,7 +422,12 @@ def _update_launcher_generation_marker(launcher: Path, target: Path, root: Path)
 def atomic_activation_source_is_current(activation: AtomicActivation) -> bool:
     """Check that the stable launcher still points at the source we measured."""
 
-    return _launcher_generation(activation.launcher, atomic_uv_install_root()) == activation.source_generation
+    root = atomic_uv_install_root()
+    current = _launcher_generation(activation.launcher, root)
+    if activation.source_generation is None:
+        return current is None
+    source = _generation_for_path(activation.source_generation, root)
+    return source is not None and current == source
 
 
 def activation_block_reason(activation: AtomicActivation) -> str | None:
