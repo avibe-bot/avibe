@@ -141,6 +141,23 @@ def test_an_added_check_is_a_tightening_but_a_membership_widening_is_not():
     assert guard.schema_tightenings(narrow, wider) == []
 
 
+def test_check_relaxation_preserves_literal_case_and_positive_context():
+    uppercase = _schema("create table records (code text check (code = 'A'))")
+    lowercase = _schema("create table records (code text check (code = 'a'))")
+    negated_narrow = _schema(
+        "create table records (state text check (not (state = 'ready')))"
+    )
+    negated_wider_membership = _schema(
+        "create table records (state text check (not (state in ('ready', 'done'))))"
+    )
+
+    assert [item.kind for item in guard.schema_tightenings(uppercase, lowercase)] == ["check"]
+    assert [
+        item.kind
+        for item in guard.schema_tightenings(negated_narrow, negated_wider_membership)
+    ] == ["check"]
+
+
 @pytest.mark.parametrize(
     ("operation", "safe_step", "kind", "detail"),
     [
@@ -172,7 +189,7 @@ def test_an_added_check_is_a_tightening_but_a_membership_widening_is_not():
         ),
         (
             'op.create_check_constraint("ck_records_slug", "records", "length(slug) > 0")',
-            "op.execute(\"update records set slug = 'legacy' where slug is null\")",
+            "op.execute(\"update records set slug = 'legacy'\")",
             "check",
             "length(slug) > 0",
         ),
@@ -222,6 +239,59 @@ def upgrade():
     assert not guard.analyze_migration_source(source).establishes(tightening)
 
 
+@pytest.mark.parametrize(
+    ("constraint", "tightening"),
+    [
+        (
+            'op.alter_column("records", "slug", nullable=False)',
+            _tightening("not_null", "records", "column slug became NOT NULL", column="slug"),
+        ),
+        (
+            'op.create_check_constraint("ck_records_slug", "records", "slug is not null")',
+            _tightening(
+                "check",
+                "records",
+                "slug is not null",
+                terms=frozenset({"slug"}),
+            ),
+        ),
+    ],
+)
+def test_a_data_step_must_prove_the_tightened_predicate(constraint, tightening):
+    source = f"""
+def upgrade():
+    op.execute("update records set slug = slug")
+    {constraint}
+"""
+
+    assert not guard.analyze_migration_source(source).establishes(tightening)
+
+
+def test_a_repair_in_the_opposite_branch_does_not_establish_a_constraint():
+    source = """
+def upgrade():
+    if has_legacy_rows():
+        op.execute("update records set slug = 'legacy'")
+    else:
+        op.alter_column("records", "slug", nullable=False)
+"""
+    tightening = _tightening(
+        "not_null",
+        "records",
+        "column slug became NOT NULL",
+        column="slug",
+    )
+
+    assert not guard.analyze_migration_source(source).establishes(tightening)
+
+    repeated_constraint = source.replace(
+        'op.execute("update records set slug = \'legacy\'")',
+        'op.execute("update records set slug = \'legacy\'")\n'
+        '        op.alter_column("records", "slug", nullable=False)',
+    )
+    assert not guard.analyze_migration_source(repeated_constraint).establishes(tightening)
+
+
 def test_a_backfill_from_the_column_being_removed_establishes_the_new_not_null_shape():
     source = """
 def upgrade():
@@ -239,6 +309,7 @@ def upgrade():
             "records",
             "column audience became NOT NULL",
             column="audience",
+            incoming_not_null_columns=frozenset({"visibility"}),
         )
     )
     assert any(effect.kind == "data" and "visibility" in effect.detail for effect in analysis.effects)
@@ -252,12 +323,28 @@ def upgrade():
     assert analysis.establishes(backfill)
 
 
-def test_dropping_a_replaced_column_without_a_preceding_backfill_is_rejected():
+def test_an_independent_add_and_drop_do_not_invent_a_backfill_obligation():
     source = """
 def upgrade():
     op.add_column("records", sa.Column("audience", sa.String(), nullable=True))
     with op.batch_alter_table("records") as batch:
         batch.drop_column("visibility")
+"""
+    analysis = guard.analyze_migration_source(source)
+    incoming = _schema("create table records (visibility text not null)")
+    assert all(
+        tightening.kind != "backfill"
+        for tightening in analysis.tightenings_against(incoming)
+    )
+
+
+def test_a_column_replacement_with_a_late_backfill_is_rejected():
+    source = """
+def upgrade():
+    op.add_column("records", sa.Column("audience", sa.String(), nullable=True))
+    with op.batch_alter_table("records") as batch:
+        batch.drop_column("visibility")
+    op.execute("update records set audience = visibility")
 """
     analysis = guard.analyze_migration_source(source)
     incoming = _schema("create table records (visibility text not null)")
@@ -357,7 +444,50 @@ def upgrade():
     assert guard.analyze_migration_source(source).establishes(tightening)
 
 
-def test_a_column_default_can_establish_its_own_check():
+def test_a_partial_unique_predicate_must_exclude_old_rows_as_a_whole():
+    source = """
+def upgrade():
+    op.add_column("records", sa.Column("scope_id", sa.String(), nullable=True))
+    op.create_index(
+        "uq_records_scope", "records", ["scope_id"], unique=True,
+        sqlite_where=sa.text("scope_id is not null or status = 'active'"),
+    )
+"""
+    tightening = _tightening(
+        "unique",
+        "records",
+        "UNIQUE(scope_id) WHERE scope_id is not null or status = 'active'",
+        terms=frozenset({"scope_id"}),
+        predicate="scope_id is not null or status = 'active'",
+        new_null_columns=frozenset({"scope_id"}),
+    )
+
+    assert not guard.analyze_migration_source(source).establishes(tightening)
+
+
+def test_keyword_only_unique_index_arguments_are_analyzed():
+    source = """
+def upgrade():
+    op.execute("delete from records where slug in (select slug from records group by slug having count(*) > 1)")
+    op.create_index(
+        index_name="uq_records_slug",
+        table_name="records",
+        columns=["slug"],
+        unique=True,
+    )
+"""
+    tightening = _tightening(
+        "unique",
+        "records",
+        "UNIQUE(slug)",
+        terms=frozenset({"slug"}),
+    )
+
+    assert guard.analyze_migration_source(source).establishes(tightening)
+
+
+@pytest.mark.parametrize("expression", ["revision >= 0", "revision = 0"])
+def test_a_column_default_can_establish_its_own_check(expression):
     source = """
 def upgrade():
     op.add_column(
@@ -365,18 +495,18 @@ def upgrade():
         sa.Column(
             "revision",
             sa.Integer(),
-            sa.CheckConstraint("revision >= 0"),
+            sa.CheckConstraint(EXPRESSION),
             nullable=False,
             server_default="0",
         ),
     )
-"""
+""".replace("EXPRESSION", repr(expression))
 
     assert guard.analyze_migration_source(source).establishes(
         _tightening(
             "check",
             "records",
-            "revision >= 0",
+            expression,
             terms=frozenset({"revision"}),
         )
     )

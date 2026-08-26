@@ -670,7 +670,6 @@ def _alembic_config(db_path: Path, versions: Path | None = None) -> Config:
 
 
 _UNKNOWN = object()
-_SQL_SPACE = re.compile(r"\s+")
 _SQL_IDENTIFIER = r'["`\[]?([A-Za-z_][A-Za-z0-9_]*)["`\]]?'
 _DML_TARGET = re.compile(
     rf"(?is)^\s*(?:update\s+{_SQL_IDENTIFIER}|delete\s+from\s+{_SQL_IDENTIFIER}|"
@@ -683,7 +682,41 @@ _UNIQUE_TARGET = re.compile(rf"(?is)^\s*create\s+unique\s+index\b.*?\bon\s+{_SQL
 def _normalized_sql(value: str | None) -> str:
     if value is None:
         return ""
-    return _SQL_SPACE.sub(" ", value.strip()).lower()
+    normalized: list[str] = []
+    quote: str | None = None
+    closing_quote: str | None = None
+    pending_space = False
+    index = 0
+    value = value.strip()
+    while index < len(value):
+        character = value[index]
+        if quote is not None:
+            normalized.append(character)
+            if character == closing_quote:
+                if quote in {"'", '"'} and index + 1 < len(value) and value[index + 1] == character:
+                    normalized.append(value[index + 1])
+                    index += 1
+                else:
+                    quote = None
+                    closing_quote = None
+            index += 1
+            continue
+        if character in {"'", '"', "`", "["}:
+            if pending_space and normalized:
+                normalized.append(" ")
+            pending_space = False
+            quote = character
+            closing_quote = "]" if character == "[" else character
+            normalized.append(character)
+        elif character.isspace():
+            pending_space = True
+        else:
+            if pending_space and normalized:
+                normalized.append(" ")
+            pending_space = False
+            normalized.append(character.lower())
+        index += 1
+    return "".join(normalized)
 
 
 def _effective_default(value: object) -> object | None:
@@ -743,6 +776,7 @@ class SchemaTightening:
     terms: frozenset[str] | None = None
     predicate: str | None = None
     new_null_columns: frozenset[str] = frozenset()
+    incoming_not_null_columns: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -755,6 +789,8 @@ class SourceEffect:
     default: object = _UNKNOWN
     terms: frozenset[str] | None = None
     predicate: str | None = None
+    affinity: str | None = None
+    path: tuple[tuple[int, bool], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -803,85 +839,82 @@ class MigrationSourceAnalysis:
 
     def establishes(self, tightening: SchemaTightening) -> bool:
         candidates = [
+            effect for effect in self.effects if self._matches(effect, tightening)
+        ]
+        return bool(candidates) and all(
+            self._establishes_before(candidate, tightening)
+            for candidate in candidates
+        )
+
+    def _establishes_before(self, candidate: SourceEffect, tightening: SchemaTightening) -> bool:
+        preceding = [
             effect
             for effect in self.effects
-            if self._matches(effect, tightening)
+            if effect.order < candidate.order
+            and all(branch in candidate.path for branch in effect.path)
         ]
-        if not candidates:
-            return False
-        cutoff = min(effect.order for effect in candidates)
-
         if any(
-            effect.kind == "reset"
-            and effect.table == tightening.table
-            and effect.order < cutoff
-            for effect in self.effects
+            effect.kind == "reset" and effect.table == tightening.table
+            for effect in preceding
         ):
             return True
 
-        if any(
-            effect.kind == "data"
-            and effect.table == tightening.table
-            and effect.order < cutoff
-            and re.fullmatch(
-                rf"delete\s+from\s+[\"`\[]?{re.escape(tightening.table)}[\"`\]]?\s*;?",
-                effect.detail,
-            )
-            for effect in self.effects
-        ):
+        data = [
+            effect
+            for effect in preceding
+            if effect.kind == "data" and effect.table == tightening.table
+        ]
+        if any(_deletes_every_row(effect.detail, tightening.table) for effect in data):
             return True
 
         subjects = self._subjects(tightening)
-        if tightening.kind == "backfill" and any(
-            effect.kind == "data"
-            and effect.table == tightening.table
-            and effect.order < cutoff
-            and tightening.column is not None
-            and re.search(rf"\b{re.escape(tightening.column)}\b", effect.detail)
-            and any(re.search(rf"\b{re.escape(target)}\b", effect.detail) for target in tightening.terms or ())
-            for effect in self.effects
-        ):
-            return True
-        if any(
-            effect.kind in {"data", "validation"}
-            and effect.table == tightening.table
-            and effect.order < cutoff
-            and (
-                tightening.kind != "unique"
-                or effect.kind == "validation"
-                or effect.detail.startswith("delete from ")
+        if tightening.kind == "backfill":
+            return any(
+                tightening.column is not None
+                and re.search(rf"\b{re.escape(tightening.column)}\b", effect.detail)
+                and any(
+                    re.search(rf"\b{re.escape(target)}\b", effect.detail)
+                    for target in tightening.terms or ()
+                )
+                for effect in data
             )
+        if tightening.kind == "unique" and any(
+            effect.table == tightening.table
+            and effect.kind in {"data", "validation"}
+            and (effect.kind == "validation" or effect.detail.startswith("delete from "))
             and subjects
             and all(re.search(rf"\b{re.escape(subject)}\b", effect.detail) for subject in subjects)
-            for effect in self.effects
+            for effect in preceding
         ):
             return True
 
         additions = [
             effect
-            for effect in self.effects
+            for effect in preceding
             if effect.kind == "column"
             and effect.table == tightening.table
-            and effect.order < cutoff
             and effect.column is not None
         ]
         if tightening.kind == "unique" and tightening.predicate:
-            added_null_is_excluded = any(
-                re.search(rf"\b{re.escape(column)}\b\s+is\s+not\s+null", tightening.predicate)
-                for column in tightening.new_null_columns
-            )
-            return added_null_is_excluded or any(
-                re.search(rf"\b{re.escape(effect.column or '')}\b\s+is\s+not\s+null", tightening.predicate)
-                for effect in additions
-                if effect.default is None
+            return _predicate_excludes_old_rows(
+                tightening.predicate,
+                additions,
+                tightening.new_null_columns,
             )
         if tightening.kind == "not_null":
-            return any(
+            if any(
                 effect.column == tightening.column and effect.default is not None
                 for effect in additions
-            )
+            ):
+                return True
+            return any(_data_establishes_not_null(effect.detail, tightening) for effect in data)
         if tightening.kind == "check":
-            return _check_holds_for_added_defaults(tightening.detail, additions)
+            if _check_holds_for_added_defaults(tightening.detail, additions):
+                return True
+            return any(
+                _data_establishes_check(effect.detail, tightening, additions)
+                for effect in data
+            )
         return False
 
     def tightenings_against(self, schema: SchemaGuarantees) -> list[SchemaTightening]:
@@ -900,6 +933,9 @@ class MigrationSourceAnalysis:
                 additions[effect.table].add(effect.column)
             if table is None:
                 continue
+            incoming_not_null = frozenset(
+                column.name for column in table.columns if column.not_null
+            )
             if effect.kind == "not_null" and effect.column:
                 prior = table.column_map().get(effect.column)
                 if prior is None or not prior.not_null:
@@ -909,6 +945,7 @@ class MigrationSourceAnalysis:
                             effect.table or "",
                             f"column {effect.column} becomes NOT NULL",
                             column=effect.column,
+                            incoming_not_null_columns=incoming_not_null,
                         )
                     )
             elif effect.kind == "unique":
@@ -921,6 +958,7 @@ class MigrationSourceAnalysis:
                             effect.detail,
                             terms=effect.terms,
                             predicate=effect.predicate,
+                            incoming_not_null_columns=incoming_not_null,
                         )
                     )
             elif effect.kind == "check" and effect.detail != "<unresolved check>" and not any(
@@ -937,17 +975,32 @@ class MigrationSourceAnalysis:
                         effect.table or "",
                         effect.detail,
                         terms=terms or None,
+                        incoming_not_null_columns=incoming_not_null,
                     )
                 )
             elif effect.kind == "drop_column" and effect.column and additions[effect.table or ""]:
-                related = ", ".join(sorted(additions[effect.table or ""]))
+                related_columns = frozenset(
+                    target
+                    for target in additions[effect.table or ""]
+                    if any(
+                        data.kind == "data"
+                        and data.table == effect.table
+                        and re.search(rf"\b{re.escape(effect.column)}\b", data.detail)
+                        and re.search(rf"\b{re.escape(target)}\b", data.detail)
+                        for data in self.effects
+                    )
+                )
+                if not related_columns:
+                    continue
+                related = ", ".join(sorted(related_columns))
                 tightenings.append(
                     SchemaTightening(
                         "backfill",
                         effect.table or "",
                         f"column {effect.column} is dropped after adding {related}",
                         column=effect.column,
-                        terms=frozenset(additions[effect.table or ""]),
+                        terms=related_columns,
+                        incoming_not_null_columns=incoming_not_null,
                     )
                 )
         return tightenings
@@ -1090,6 +1143,9 @@ def schema_tightenings(before: SchemaGuarantees, after: SchemaGuarantees) -> lis
         new = current[table]
         old_columns = old.column_map()
         new_columns = new.column_map()
+        incoming_not_null = frozenset(
+            column.name for column in old.columns if column.not_null
+        )
         new_null_columns = frozenset(
             column
             for column, definition in new_columns.items()
@@ -1104,6 +1160,7 @@ def schema_tightenings(before: SchemaGuarantees, after: SchemaGuarantees) -> lis
                         table,
                         f"new column {column} is NOT NULL",
                         column=column,
+                        incoming_not_null_columns=incoming_not_null,
                     )
                 )
             elif prior is not None and not prior.not_null and definition.not_null:
@@ -1113,6 +1170,7 @@ def schema_tightenings(before: SchemaGuarantees, after: SchemaGuarantees) -> lis
                         table,
                         f"column {column} became NOT NULL",
                         column=column,
+                        incoming_not_null_columns=incoming_not_null,
                     )
                 )
         for guarantee in sorted(new.unique, key=repr):
@@ -1128,6 +1186,7 @@ def schema_tightenings(before: SchemaGuarantees, after: SchemaGuarantees) -> lis
                     terms=guarantee.terms,
                     predicate=predicate,
                     new_null_columns=new_null_columns,
+                    incoming_not_null_columns=incoming_not_null,
                 )
             )
         for check in sorted(new.checks - old.checks):
@@ -1137,7 +1196,15 @@ def schema_tightenings(before: SchemaGuarantees, after: SchemaGuarantees) -> lis
                     for column in new_columns
                     if re.search(rf"\b{re.escape(column)}\b", check)
                 )
-                tightenings.append(SchemaTightening("check", table, check, terms=terms or None))
+                tightenings.append(
+                    SchemaTightening(
+                        "check",
+                        table,
+                        check,
+                        terms=terms or None,
+                        incoming_not_null_columns=incoming_not_null,
+                    )
+                )
     return tightenings
 
 
@@ -1158,6 +1225,8 @@ def _check_implies(existing: str, candidate: str) -> bool:
     """
     if existing == candidate:
         return True
+    if re.search(r"\bnot\b", candidate):
+        return False
     membership = re.compile(
         r"\b([A-Za-z_][A-Za-z0-9_]*)\s+in\s*\((('[^']*'|\"[^\"]*\")(\s*,\s*('[^']*'|\"[^\"]*\"))*)\)"
     )
@@ -1228,6 +1297,44 @@ def _string_arg(call: ast.Call, index: int, constants: dict[str, object]) -> str
     return value if isinstance(value, str) else None
 
 
+def _argument(
+    call: ast.Call,
+    index: int,
+    keyword: str,
+    constants: dict[str, object],
+) -> object:
+    if len(call.args) > index:
+        return _static_value(call.args[index], constants)
+    return _keyword(call, keyword, constants)
+
+
+def _string_argument(
+    call: ast.Call,
+    index: int,
+    keyword: str,
+    constants: dict[str, object],
+) -> str | None:
+    value = _argument(call, index, keyword, constants)
+    return value if isinstance(value, str) else None
+
+
+def _column_affinity(column: ast.Call) -> str | None:
+    if len(column.args) < 2 or not isinstance(column.args[1], ast.Call):
+        return None
+    name = _call_name(column.args[1].func).rsplit(".", 1)[-1].lower()
+    if "int" in name or name == "boolean":
+        return "INTEGER"
+    if any(token in name for token in ("char", "clob", "text", "string")):
+        return "TEXT"
+    if any(token in name for token in ("real", "floa", "doub")):
+        return "REAL"
+    if "blob" in name or "binary" in name:
+        return "BLOB"
+    if any(token in name for token in ("numeric", "decimal", "date", "time")):
+        return "NUMERIC"
+    return None
+
+
 def _sql_match_target(pattern: re.Pattern[str], sql: str) -> str | None:
     match = pattern.search(sql)
     if match is None:
@@ -1249,12 +1356,13 @@ class _MigrationSourceScanner:
                     self.constants[node.targets[0].id] = value
         self.effects: list[SourceEffect] = []
         self.order = 0
+        self.current_path: tuple[tuple[int, bool], ...] = ()
 
     def scan(self) -> MigrationSourceAnalysis:
         upgrade = self.functions.get("upgrade")
         if upgrade is None:
             return MigrationSourceAnalysis(())
-        self._block(upgrade.body, {}, set(), False, dict(self.constants))
+        self._block(upgrade.body, {}, set(), False, dict(self.constants), ())
         return MigrationSourceAnalysis(tuple(self.effects))
 
     def _record(
@@ -1267,18 +1375,21 @@ class _MigrationSourceScanner:
         default: object = _UNKNOWN,
         terms: frozenset[str] | None = None,
         predicate: str | None = None,
+        affinity: str | None = None,
     ) -> None:
         self.order += 1
         self.effects.append(
             SourceEffect(
-                self.order,
-                kind,
-                table,
-                detail,
-                column,
-                default,
-                terms,
-                predicate,
+                order=self.order,
+                kind=kind,
+                table=table,
+                detail=detail,
+                column=column,
+                default=default,
+                terms=terms,
+                predicate=predicate,
+                affinity=affinity,
+                path=self.current_path,
             )
         )
 
@@ -1289,32 +1400,47 @@ class _MigrationSourceScanner:
         stack: set[str],
         validating: bool,
         values: dict[str, object],
+        path: tuple[tuple[int, bool], ...],
     ) -> None:
         for statement in statements:
             if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 continue
-            if isinstance(statement, (ast.If, ast.For, ast.AsyncFor, ast.While)):
+            if isinstance(statement, ast.If):
                 self._expr(
-                    statement.test if isinstance(statement, (ast.If, ast.While)) else statement.iter,
+                    statement.test,
                     batches,
                     stack,
                     validating,
                     values,
+                    path,
                 )
-                self._block(statement.body, dict(batches), stack, validating, dict(values))
-                self._block(statement.orelse, dict(batches), stack, validating, dict(values))
+                branch = statement.lineno
+                self._block(statement.body, dict(batches), stack, validating, dict(values), (*path, (branch, True)))
+                self._block(statement.orelse, dict(batches), stack, validating, dict(values), (*path, (branch, False)))
+                continue
+            if isinstance(statement, (ast.For, ast.AsyncFor, ast.While)):
+                self._expr(
+                    statement.test if isinstance(statement, ast.While) else statement.iter,
+                    batches,
+                    stack,
+                    validating,
+                    values,
+                    path,
+                )
+                self._block(statement.body, dict(batches), stack, validating, dict(values), path)
+                self._block(statement.orelse, dict(batches), stack, validating, dict(values), path)
                 continue
             if isinstance(statement, ast.Try):
-                self._block(statement.body, dict(batches), stack, validating, dict(values))
+                self._block(statement.body, dict(batches), stack, validating, dict(values), path)
                 for handler in statement.handlers:
-                    self._block(handler.body, dict(batches), stack, validating, dict(values))
-                self._block(statement.orelse, dict(batches), stack, validating, dict(values))
-                self._block(statement.finalbody, dict(batches), stack, validating, dict(values))
+                    self._block(handler.body, dict(batches), stack, validating, dict(values), path)
+                self._block(statement.orelse, dict(batches), stack, validating, dict(values), path)
+                self._block(statement.finalbody, dict(batches), stack, validating, dict(values), path)
                 continue
             if isinstance(statement, (ast.With, ast.AsyncWith)):
                 nested = dict(batches)
                 for item in statement.items:
-                    self._expr(item.context_expr, batches, stack, validating, values)
+                    self._expr(item.context_expr, batches, stack, validating, values, path)
                     if (
                         isinstance(item.optional_vars, ast.Name)
                         and isinstance(item.context_expr, ast.Call)
@@ -1323,7 +1449,7 @@ class _MigrationSourceScanner:
                         table = _string_arg(item.context_expr, 0, values)
                         if table:
                             nested[item.optional_vars.id] = table
-                self._block(statement.body, nested, stack, validating, dict(values))
+                self._block(statement.body, nested, stack, validating, dict(values), path)
                 continue
             if isinstance(statement, ast.Assign) and len(statement.targets) == 1 and isinstance(statement.targets[0], ast.Name):
                 value = _static_value(statement.value, values)
@@ -1331,7 +1457,7 @@ class _MigrationSourceScanner:
                     values[statement.targets[0].id] = value
             for child in ast.iter_child_nodes(statement):
                 if isinstance(child, ast.expr):
-                    self._expr(child, batches, stack, validating, values)
+                    self._expr(child, batches, stack, validating, values, path)
 
     def _expr(
         self,
@@ -1340,16 +1466,17 @@ class _MigrationSourceScanner:
         stack: set[str],
         validating: bool,
         values: dict[str, object],
+        path: tuple[tuple[int, bool], ...],
     ) -> None:
         if not isinstance(node, ast.Call):
             for child in ast.iter_child_nodes(node):
-                self._expr(child, batches, stack, validating, values)
+                self._expr(child, batches, stack, validating, values, path)
             return
         name = _call_name(node.func)
         local = self.functions.get(name)
         if local is not None and name not in stack:
             for child in [*node.args, *(keyword.value for keyword in node.keywords)]:
-                self._expr(child, batches, stack, validating, values)
+                self._expr(child, batches, stack, validating, values, path)
             local_values = dict(values)
             for parameter, argument in zip(local.args.args, node.args, strict=False):
                 value = _static_value(argument, values)
@@ -1361,12 +1488,12 @@ class _MigrationSourceScanner:
                     if value is not _UNKNOWN:
                         local_values[keyword.arg] = value
             helper_validates = any(isinstance(item, ast.Raise) for item in ast.walk(local))
-            self._block(local.body, {}, stack | {name}, helper_validates, local_values)
+            self._block(local.body, {}, stack | {name}, helper_validates, local_values, path)
             return
-        self._expr(node.func, batches, stack, validating, values)
+        self._expr(node.func, batches, stack, validating, values, path)
         for child in [*node.args, *(keyword.value for keyword in node.keywords)]:
-            self._expr(child, batches, stack, validating, values)
-        self._call(node, name, batches, validating, values)
+            self._expr(child, batches, stack, validating, values, path)
+        self._call(node, name, batches, validating, values, path)
 
     def _call(
         self,
@@ -1375,7 +1502,9 @@ class _MigrationSourceScanner:
         batches: dict[str, str],
         validation: bool,
         values: dict[str, object],
+        path: tuple[tuple[int, bool], ...],
     ) -> None:
+        self.current_path = path
         sql = _static_value(call.args[0], values) if call.args and name.endswith(("execute", "exec_driver_sql")) else _UNKNOWN
         if isinstance(sql, str):
             data_table = _sql_match_target(_DML_TARGET, sql)
@@ -1399,9 +1528,9 @@ class _MigrationSourceScanner:
         owner, _, operation = name.rpartition(".")
         batch_table = batches.get(owner)
         if operation == "create_index" and _keyword(call, "unique", values, False) is True:
-            table = batch_table or _string_arg(call, 1, values)
+            table = batch_table or _string_argument(call, 1, "table_name", values)
             index = 1 if batch_table else 2
-            columns = _static_value(call.args[index], values) if len(call.args) > index else _UNKNOWN
+            columns = _argument(call, index, "columns", values)
             terms = (
                 frozenset(str(column) for column in columns)
                 if isinstance(columns, tuple) and all(isinstance(column, str) for column in columns)
@@ -1418,9 +1547,9 @@ class _MigrationSourceScanner:
                 predicate=predicate,
             )
         elif operation == "create_unique_constraint":
-            table = batch_table or _string_arg(call, 1, values)
+            table = batch_table or _string_argument(call, 1, "table_name", values)
             index = 1 if batch_table else 2
-            columns = _static_value(call.args[index], values) if len(call.args) > index else _UNKNOWN
+            columns = _argument(call, index, "columns", values)
             terms = (
                 frozenset(str(column) for column in columns)
                 if isinstance(columns, tuple) and all(isinstance(column, str) for column in columns)
@@ -1429,25 +1558,40 @@ class _MigrationSourceScanner:
             term_sql = ", ".join(columns) if terms is not None else "<unresolved>"
             self._record("unique", table, _unique_detail(term_sql, None), terms=terms)
         elif operation == "create_check_constraint":
-            table = batch_table or _string_arg(call, 1, values)
+            table = batch_table or _string_argument(call, 1, "table_name", values)
             index = 1 if batch_table else 2
-            expression = _static_value(call.args[index], values) if len(call.args) > index else _UNKNOWN
+            expression = _argument(call, index, "condition", values)
             detail = _normalized_sql(expression) if isinstance(expression, str) else "<unresolved check>"
             self._record("check", table, detail)
         elif operation == "alter_column" and _keyword(call, "nullable", values) is False:
-            table = batch_table or _string_arg(call, 0, values)
+            table = batch_table or _string_argument(call, 0, "table_name", values)
             column_index = 0 if batch_table else 1
-            column = _string_arg(call, column_index, values)
+            column = _string_argument(call, column_index, "column_name", values)
             self._record("not_null", table, "alter_column", column=column)
         elif operation in {"add_column", "add_column_if_not_exists"}:
-            table = batch_table or _string_arg(call, 0, values)
-            column_node = call.args[0] if batch_table and call.args else call.args[1] if len(call.args) > 1 else None
+            table = batch_table or _string_argument(call, 0, "table_name", values)
+            column_index = 0 if batch_table else 1
+            column_node = (
+                call.args[column_index]
+                if len(call.args) > column_index
+                else next(
+                    (keyword.value for keyword in call.keywords if keyword.arg == "column"),
+                    None,
+                )
+            )
             if not isinstance(column_node, ast.Call):
                 return
             column = _string_arg(column_node, 0, values)
             nullable = _keyword(column_node, "nullable", values, True)
             default = _effective_default(_keyword(column_node, "server_default", values, None))
-            self._record("column", table, "add_column", column=column, default=default)
+            self._record(
+                "column",
+                table,
+                "add_column",
+                column=column,
+                default=default,
+                affinity=_column_affinity(column_node),
+            )
             if any(
                 isinstance(nested, ast.Call) and _call_name(nested.func).endswith("CheckConstraint")
                 for nested in ast.walk(column_node)
@@ -1459,18 +1603,19 @@ class _MigrationSourceScanner:
             if nullable is False:
                 self._record("not_null", table, "add_column", column=column)
         elif operation == "drop_column":
-            table = batch_table or _string_arg(call, 0, values)
+            table = batch_table or _string_argument(call, 0, "table_name", values)
             column_index = 0 if batch_table else 1
             self._record(
                 "drop_column",
                 table,
                 "drop_column",
-                column=_string_arg(call, column_index, values),
+                column=_string_argument(call, column_index, "column_name", values),
             )
         elif operation == "drop_table":
             self._record("reset", _string_arg(call, 0, values), "drop_table")
         elif operation == "create_table":
             table = _string_arg(call, 0, values)
+            self._record("reset", table, "create_table")
             for item in call.args[1:]:
                 if not isinstance(item, ast.Call):
                     continue
@@ -1479,7 +1624,14 @@ class _MigrationSourceScanner:
                     column = _string_arg(item, 0, values)
                     nullable = _keyword(item, "nullable", values, True)
                     default = _effective_default(_keyword(item, "server_default", values, None))
-                    self._record("column", table, "create_table column", column=column, default=default)
+                    self._record(
+                        "column",
+                        table,
+                        "create_table column",
+                        column=column,
+                        default=default,
+                        affinity=_column_affinity(item),
+                    )
                     if nullable is False:
                         self._record("not_null", table, "create_table column", column=column)
                     for nested in ast.walk(item):
@@ -1507,26 +1659,250 @@ def analyze_migration_source(source: str) -> MigrationSourceAnalysis:
     return _MigrationSourceScanner(source).scan()
 
 
-def _check_holds_for_added_defaults(expression: str, additions: list[SourceEffect]) -> bool:
-    known = [effect for effect in additions if effect.default is not _UNKNOWN and effect.column]
-    if not known:
-        return False
-    aliases = ", ".join(f"? as {_quoted_identifier(effect.column or '')}" for effect in known)
-    values = tuple(effect.default for effect in known)
+def _deletes_every_row(sql: str, table: str) -> bool:
+    return bool(
+        re.fullmatch(
+            rf"delete\s+from\s+[\"`\[]?{re.escape(table)}[\"`\]]?\s*;?",
+            sql,
+        )
+    )
+
+
+def _find_top_level_keyword(sql: str, keyword: str) -> int | None:
+    depth = 0
+    quote: str | None = None
+    closing_quote: str | None = None
+    index = 0
+    while index < len(sql):
+        character = sql[index]
+        if quote is not None:
+            if character == closing_quote:
+                if quote in {"'", '"'} and index + 1 < len(sql) and sql[index + 1] == character:
+                    index += 1
+                else:
+                    quote = None
+                    closing_quote = None
+        elif character in {"'", '"', "`", "["}:
+            quote = character
+            closing_quote = "]" if character == "[" else character
+        elif character == "(":
+            depth += 1
+        elif character == ")":
+            depth = max(0, depth - 1)
+        elif depth == 0 and sql[index : index + len(keyword)].lower() == keyword:
+            before = sql[index - 1] if index else " "
+            after_index = index + len(keyword)
+            after = sql[after_index] if after_index < len(sql) else " "
+            if not (before.isalnum() or before == "_") and not (after.isalnum() or after == "_"):
+                return index
+        index += 1
+    return None
+
+
+def _split_top_level(sql: str, separator: str) -> list[str]:
+    pieces: list[str] = []
+    start = 0
+    while (index := _find_top_level_keyword(sql[start:], separator)) is not None:
+        absolute = start + index
+        pieces.append(sql[start:absolute].strip())
+        start = absolute + len(separator)
+    pieces.append(sql[start:].strip())
+    return pieces
+
+
+def _update_assignment(sql: str, column: str) -> tuple[str, str | None] | None:
+    match = re.match(rf"update\s+{_SQL_IDENTIFIER}\s+set\s+(.+)$", sql, re.DOTALL)
+    if match is None:
+        return None
+    body = match.group(2).rstrip("; ")
+    where_at = _find_top_level_keyword(body, "where")
+    where = body[where_at + len("where") :].strip() if where_at is not None else None
+    assignments = body[:where_at].strip() if where_at is not None else body
+    for assignment in _split_top_level(assignments, ","):
+        assignment_match = re.match(
+            rf"[\"`\[]?{re.escape(column)}[\"`\]]?\s*=\s*(.+)$",
+            assignment,
+            re.DOTALL,
+        )
+        if assignment_match is not None:
+            return assignment_match.group(1).strip(), where
+    return None
+
+
+def _literal_sql_value(expression: str) -> object:
+    without_literals = re.sub(r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"", "", expression)
+    identifiers = set(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", without_literals))
+    if identifiers - {"false", "null", "true"}:
+        return _UNKNOWN
     connection = sqlite3.connect(":memory:")
     try:
-        # SQLite rejects a CHECK only when it evaluates to integer zero; NULL is
-        # accepted. New nullable columns therefore establish predicates that stay
-        # unknown for old rows, but not predicates such as ``column IS NOT NULL``.
+        row = connection.execute(f"select {expression}").fetchone()
+    except sqlite3.Error:
+        return _UNKNOWN
+    finally:
+        connection.close()
+    return _UNKNOWN if row is None else row[0]
+
+
+def _static_sql_values(expression: str) -> tuple[object, ...] | None:
+    direct = _literal_sql_value(expression)
+    if direct is not _UNKNOWN:
+        return (direct,)
+    if not expression.lstrip().startswith("case "):
+        return None
+    branches = re.findall(
+        r"\bthen\s+(.+?)(?=\s+when\b|\s+else\b|\s+end\b)",
+        expression,
+        re.DOTALL,
+    )
+    fallback = re.search(r"\belse\s+(.+?)\s+end\b", expression, re.DOTALL)
+    if not branches or fallback is None:
+        return None
+    values = tuple(_literal_sql_value(item.strip()) for item in [*branches, fallback.group(1)])
+    return None if _UNKNOWN in values else values
+
+
+def _strip_outer_parentheses(expression: str) -> str:
+    expression = expression.strip()
+    while expression.startswith("(") and expression.endswith(")"):
+        inner = expression[1:-1].strip()
+        if _find_top_level_keyword(inner, "or") is None and _find_top_level_keyword(inner, "and") is None:
+            expression = inner
+        else:
+            break
+    return expression
+
+
+def _data_establishes_not_null(sql: str, tightening: SchemaTightening) -> bool:
+    if tightening.column is None:
+        return False
+    assignment = _update_assignment(sql, tightening.column)
+    if assignment is None:
+        return False
+    expression, where = assignment
+    if where is not None and _strip_outer_parentheses(where) != f"{tightening.column} is null":
+        return False
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", expression):
+        return expression in tightening.incoming_not_null_columns
+    values = _static_sql_values(expression)
+    return values is not None and all(value is not None for value in values)
+
+
+def _typed_alias(effect: SourceEffect, value: object) -> tuple[str, object]:
+    placeholder = f"cast(? as {effect.affinity})" if effect.affinity else "?"
+    return f"{placeholder} as {_quoted_identifier(effect.column or '')}", value
+
+
+def _expression_result(
+    expression: str,
+    bindings: list[tuple[SourceEffect, object]],
+    *,
+    check_semantics: bool,
+) -> bool | None:
+    if not bindings:
+        return None
+    aliases_and_values = [_typed_alias(effect, value) for effect, value in bindings]
+    aliases = ", ".join(alias for alias, _ in aliases_and_values)
+    values = tuple(value for _, value in aliases_and_values)
+    verdict = f"case when ({expression}) is 0 then 0 else 1 end" if check_semantics else f"case when ({expression}) then 1 else 0 end"
+    connection = sqlite3.connect(":memory:")
+    try:
         row = connection.execute(
-            f"select case when ({expression}) is 0 then 0 else 1 end from (select {aliases})",
+            f"select {verdict} from (select {aliases})",
             values,
         ).fetchone()
     except sqlite3.Error:
-        return False
+        return None
     finally:
         connection.close()
-    return row is not None and int(row[0]) == 1
+    return None if row is None else bool(row[0])
+
+
+def _predicate_excludes_old_rows(
+    predicate: str,
+    additions: list[SourceEffect],
+    new_null_columns: frozenset[str],
+) -> bool:
+    known_columns = {effect.column for effect in additions}
+    bindings = [
+        (effect, effect.default)
+        for effect in additions
+        if effect.column and effect.default is not _UNKNOWN
+    ]
+    bindings.extend(
+        (
+            SourceEffect(0, "column", None, "new nullable column", column=column),
+            None,
+        )
+        for column in new_null_columns - known_columns
+    )
+    if _expression_result(predicate, bindings, check_semantics=False) is False:
+        return True
+    if _find_top_level_keyword(predicate, "or") is not None:
+        return False
+    return any(
+        _expression_result(conjunct, bindings, check_semantics=False) is False
+        for conjunct in _split_top_level(predicate, "and")
+    )
+
+
+def _delete_establishes_check(sql: str, expression: str) -> bool:
+    match = re.match(rf"delete\s+from\s+{_SQL_IDENTIFIER}\s+where\s+(.+?);?$", sql, re.DOTALL)
+    if match is None:
+        return False
+    where = _strip_outer_parentheses(match.group(2).strip())
+    check = _strip_outer_parentheses(expression)
+    positive = re.sub(r"\s+not\s+in\s+", " in ", check, count=1)
+    return positive != check and where == positive
+
+
+def _data_establishes_check(
+    sql: str,
+    tightening: SchemaTightening,
+    additions: list[SourceEffect],
+) -> bool:
+    if sql.startswith("delete from "):
+        return _delete_establishes_check(sql, tightening.detail)
+    subjects = MigrationSourceAnalysis._subjects(tightening)
+    assignments: dict[str, tuple[object, ...]] = {}
+    for subject in subjects:
+        assignment = _update_assignment(sql, subject)
+        if assignment is None or assignment[1] is not None:
+            return False
+        values = _static_sql_values(assignment[0])
+        if values is None:
+            return False
+        assignments[subject] = values
+    if not assignments:
+        return False
+    effects = {
+        effect.column: effect
+        for effect in additions
+        if effect.column is not None
+    }
+    ordered = sorted(assignments)
+
+    def every_combination(index: int, bindings: list[tuple[SourceEffect, object]]) -> bool:
+        if index == len(ordered):
+            return _expression_result(tightening.detail, bindings, check_semantics=True) is True
+        column = ordered[index]
+        effect = effects.get(column) or SourceEffect(0, "column", tightening.table, "updated", column=column)
+        return all(
+            every_combination(index + 1, [*bindings, (effect, value)])
+            for value in assignments[column]
+        )
+
+    return every_combination(0, [])
+
+
+def _check_holds_for_added_defaults(expression: str, additions: list[SourceEffect]) -> bool:
+    bindings = [
+        (effect, effect.default)
+        for effect in additions
+        if effect.default is not _UNKNOWN and effect.column
+    ]
+    # SQLite rejects a CHECK only when it evaluates to integer zero; NULL is accepted.
+    return _expression_result(expression, bindings, check_semantics=True) is True
 
 
 def _current_heads(connection: sqlite3.Connection) -> tuple[str, ...]:
