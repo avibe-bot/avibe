@@ -2244,6 +2244,51 @@ def test_config_post_restarts_running_service_when_backend_reconcile_is_unavaila
     assert restart_calls == [True]
 
 
+def test_config_post_reports_backend_restart_not_scheduled_while_package_busy(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import api
+    from vibe import internal_client
+    from vibe import runtime
+
+    payload = _full_config_payload()
+    payload["agents"]["opencode"]["enabled"] = False
+    api.save_config(payload)
+
+    async def _reconcile_agent_backends(_backends):
+        raise internal_client.InternalServerUnavailable("missing socket")
+
+    monkeypatch.setattr(internal_client, "reconcile_agent_backends", _reconcile_agent_backends)
+    monkeypatch.setattr(runtime, "service_process_running", lambda: True)
+    monkeypatch.setattr(
+        ui_server,
+        "_schedule_service_restart_for_config_fallback",
+        lambda: {
+            "ok": False,
+            "code": "restart_not_scheduled_package_busy",
+            "error": "a package operation is in progress; restart was not scheduled",
+            "restart": {},
+        },
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/api/config",
+        json={"agents": {"opencode": {"enabled": True}}},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    runtime_result = response.get_json()["agent_backend_runtime"]
+    assert runtime_result["restart_scheduled"] is False
+    assert runtime_result["restart_code"] == "restart_not_scheduled_package_busy"
+    assert runtime_result["restart_error"] == (
+        "a package operation is in progress; restart was not scheduled"
+    )
+
+
 def test_config_post_non_platform_change_does_not_reconcile_platforms(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     from vibe import api
@@ -2340,6 +2385,58 @@ def test_config_post_schedules_service_restart_when_hot_reconcile_fails(monkeypa
     assert runtime["restart_scheduled"] is True
     assert runtime["body"]["error"] == "IM thread for discord did not stop within timeout"
     assert restart_calls == [True]
+
+
+def test_config_post_reports_platform_restart_not_scheduled_while_package_busy(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import api
+    from vibe import internal_client
+
+    payload = _full_config_payload()
+    payload["platforms"] = {"enabled": ["discord"], "primary": "discord"}
+    api.save_config(payload)
+
+    async def _reconcile_platforms():
+        raise internal_client.InternalServerUnavailable("missing socket")
+
+    monkeypatch.setattr(internal_client, "reconcile_platforms", _reconcile_platforms)
+    monkeypatch.setattr(
+        ui_server,
+        "_schedule_service_restart_for_config_fallback",
+        lambda: {
+            "ok": False,
+            "code": "restart_not_scheduled_package_busy",
+            "error": "a package operation is in progress; restart was not scheduled",
+            "restart": {},
+        },
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/api/config",
+        json={
+            "platforms": {
+                "enabled": ["discord", "slack"],
+                "primary": "discord",
+            },
+            "slack": {
+                "bot_token": "xoxb-hot-token",
+                "app_token": "xapp-hot-token",
+            },
+        },
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    runtime_result = response.get_json()["platform_runtime"]
+    assert runtime_result["restart_scheduled"] is False
+    assert runtime_result["restart_code"] == "restart_not_scheduled_package_busy"
+    assert runtime_result["restart_error"] == (
+        "a package operation is in progress; restart was not scheduled"
+    )
 
 
 def test_config_restart_fallback_marks_pending_restart_when_restart_in_flight(monkeypatch, tmp_path):
@@ -2467,10 +2564,11 @@ def test_config_restart_fallback_does_not_mark_pending_for_package_contention_al
 
     result = ui_server._schedule_service_restart_for_config_fallback()
 
-    assert result["ok"] is True
+    assert result["ok"] is False
     assert result == {
-        "ok": True,
+        "ok": False,
         "code": "restart_not_scheduled_package_busy",
+        "error": "a package operation is in progress; restart was not scheduled",
         "restart": {},
     }
     assert runtime.read_json(restart_supervisor._pending_restart_path()) is None
@@ -2512,6 +2610,109 @@ def test_config_restart_fallback_timeout_marks_pending_for_a_live_restart(
     assert result["restart"] == restart_status
     pending = runtime.read_json(restart_supervisor._pending_restart_path())
     assert pending["restart_job_id"] == "job-live"
+
+
+def test_config_restart_fallback_timeout_reacquires_when_restart_finishes(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import restart_supervisor
+    from vibe import runtime
+
+    runtime.get_restart_status_path().parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_json(
+        runtime.get_restart_status_path(),
+        {"state": "running", "job_id": "job-finishing", "supervisor_pid": 4242},
+    )
+    lock_timeouts: list[float | None] = []
+    mutation_lease_held = False
+
+    @contextmanager
+    def mutation_lock(*, timeout_seconds=None):
+        nonlocal mutation_lease_held
+        lock_timeouts.append(timeout_seconds)
+        if len(lock_timeouts) == 1:
+            raise MigrationLockTimeout("package mutation is still running")
+        mutation_lease_held = True
+        try:
+            yield
+        finally:
+            mutation_lease_held = False
+
+    in_flight_results = iter([True, False])
+
+    def schedule_restart(**kwargs):
+        assert mutation_lease_held is True
+        assert kwargs == {
+            "delay_seconds": 0.0,
+            "trigger": "web-ui-config",
+            "scope": "service",
+        }
+        return {"job_id": "job-reacquired"}
+
+    monkeypatch.setattr(ui_server, "package_mutation_lock", mutation_lock)
+    monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: next(in_flight_results))
+    monkeypatch.setattr(restart_supervisor, "schedule_restart", schedule_restart)
+
+    result = ui_server._schedule_service_restart_for_config_fallback()
+
+    assert result == {
+        "ok": True,
+        "restart": {"job_id": "job-reacquired"},
+        "code": "restart_scheduled_after_in_flight_finished",
+    }
+    assert lock_timeouts[0] is None
+    assert lock_timeouts[1] == ui_server._RESTART_REACQUIRE_TIMEOUT_SECONDS
+    assert 0 <= lock_timeouts[1] <= 5
+    assert runtime.read_json(restart_supervisor._pending_restart_path()) is None
+    assert mutation_lease_held is False
+
+
+def test_config_restart_fallback_timeout_cleans_marker_when_reacquire_is_busy(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import restart_supervisor
+    from vibe import runtime
+
+    restart_status = {
+        "state": "running",
+        "job_id": "job-finishing",
+        "supervisor_pid": 4242,
+    }
+    runtime.get_restart_status_path().parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_json(runtime.get_restart_status_path(), restart_status)
+    lock_timeouts: list[float | None] = []
+
+    @contextmanager
+    def blocked_mutation_lock(*, timeout_seconds=None):
+        lock_timeouts.append(timeout_seconds)
+        raise MigrationLockTimeout("package mutation is still running")
+        yield
+
+    in_flight_results = iter([True, False])
+    monkeypatch.setattr(ui_server, "package_mutation_lock", blocked_mutation_lock)
+    monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: next(in_flight_results))
+    monkeypatch.setattr(
+        restart_supervisor,
+        "schedule_restart",
+        lambda **kwargs: pytest.fail("restart must not be scheduled without the lease"),
+    )
+
+    result = ui_server._schedule_service_restart_for_config_fallback()
+
+    assert result == {
+        "ok": False,
+        "code": "restart_not_scheduled_package_busy",
+        "error": "a package operation is in progress; restart was not scheduled",
+        "restart": restart_status,
+    }
+    assert lock_timeouts[0] is None
+    assert lock_timeouts[1] == ui_server._RESTART_REACQUIRE_TIMEOUT_SECONDS
+    assert 0 <= lock_timeouts[1] <= 5
+    assert runtime.read_json(restart_supervisor._pending_restart_path()) is None
 
 
 def test_static_ui_assets_use_cache_headers(monkeypatch, tmp_path):
@@ -3149,6 +3350,137 @@ def test_wechat_qr_poll_marks_bind_hint_and_schedules_managed_restart(monkeypatc
     ]
     assert bound_users == ["wx-user"]
     assert restart_calls == [True]
+
+
+def test_wechat_qr_restart_holds_package_lease_through_scheduling(monkeypatch):
+    from vibe import restart_supervisor
+
+    mutation_lease_held = False
+
+    @contextmanager
+    def mutation_lock():
+        nonlocal mutation_lease_held
+        mutation_lease_held = True
+        try:
+            yield
+        finally:
+            mutation_lease_held = False
+
+    def schedule_restart(**kwargs):
+        assert mutation_lease_held is True
+        assert kwargs == {"delay_seconds": 2.0, "trigger": "wechat-qr-login"}
+        return {"job_id": "wechat-restart"}
+
+    monkeypatch.setattr(ui_server, "package_mutation_lock", mutation_lock)
+    monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: False)
+    monkeypatch.setattr(restart_supervisor, "schedule_restart", schedule_restart)
+
+    assert ui_server._schedule_wechat_qr_login_restart() == {
+        "job_id": "wechat-restart",
+    }
+    assert mutation_lease_held is False
+
+
+def test_wechat_qr_restart_marks_pending_for_an_in_flight_restart(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import restart_supervisor
+    from vibe import runtime
+
+    restart_status = {
+        "state": "running",
+        "job_id": "job-live",
+        "supervisor_pid": 4242,
+    }
+    runtime.get_restart_status_path().parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_json(runtime.get_restart_status_path(), restart_status)
+
+    @contextmanager
+    def mutation_lock():
+        yield
+
+    monkeypatch.setattr(ui_server, "package_mutation_lock", mutation_lock)
+    monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: True)
+    monkeypatch.setattr(
+        restart_supervisor,
+        "schedule_restart",
+        lambda **kwargs: pytest.fail("a second restart must not be scheduled"),
+    )
+
+    result = ui_server._schedule_wechat_qr_login_restart()
+
+    assert result["code"] == "restart_pending_after_in_progress"
+    assert result["restart"] == restart_status
+    pending = runtime.read_json(restart_supervisor._pending_restart_path())
+    assert pending["restart_job_id"] == "job-live"
+    assert pending["trigger"] == "wechat-qr-login-pending"
+
+
+def test_wechat_qr_restart_marks_pending_after_lease_timeout_with_live_restart(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import restart_supervisor
+    from vibe import runtime
+
+    restart_status = {
+        "state": "running",
+        "job_id": "job-live",
+        "supervisor_pid": 4242,
+    }
+    runtime.get_restart_status_path().parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_json(runtime.get_restart_status_path(), restart_status)
+
+    @contextmanager
+    def blocked_mutation_lock():
+        raise MigrationLockTimeout("package mutation is still running")
+        yield
+
+    monkeypatch.setattr(ui_server, "package_mutation_lock", blocked_mutation_lock)
+    monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: True)
+    monkeypatch.setattr(
+        restart_supervisor,
+        "schedule_restart",
+        lambda **kwargs: pytest.fail("a second restart must not be scheduled"),
+    )
+
+    result = ui_server._schedule_wechat_qr_login_restart()
+
+    assert result["code"] == "restart_pending_after_in_progress"
+    assert result["restart"] == restart_status
+    pending = runtime.read_json(restart_supervisor._pending_restart_path())
+    assert pending["restart_job_id"] == "job-live"
+
+
+def test_wechat_qr_restart_reports_busy_after_lease_timeout_without_restart(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import restart_supervisor
+    from vibe import runtime
+
+    runtime.get_restart_status_path().parent.mkdir(parents=True, exist_ok=True)
+
+    @contextmanager
+    def blocked_mutation_lock():
+        raise MigrationLockTimeout("package mutation is still running")
+        yield
+
+    monkeypatch.setattr(ui_server, "package_mutation_lock", blocked_mutation_lock)
+    monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: False)
+    monkeypatch.setattr(
+        restart_supervisor,
+        "schedule_restart",
+        lambda **kwargs: pytest.fail("restart must not be scheduled without the lease"),
+    )
+
+    assert ui_server._schedule_wechat_qr_login_restart() == {
+        "ok": False,
+        "code": "restart_not_scheduled_package_busy",
+        "error": "a package operation is in progress; restart was not scheduled",
+        "restart": {},
+    }
 
 
 def test_wechat_qr_poll_passes_verify_code(monkeypatch):

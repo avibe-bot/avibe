@@ -146,7 +146,10 @@ def execute_upgrade_plan(
 
 
 @contextmanager
-def package_mutation_lock():
+def package_mutation_lock(
+    *,
+    timeout_seconds: float | None = PACKAGE_MUTATION_LOCK_TIMEOUT_SECONDS,
+):
     """Serialize every resolver/install transaction across Avibe processes."""
 
     from config import paths
@@ -156,7 +159,7 @@ def package_mutation_lock():
     lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with MigrationFileLock(
         lock_path,
-        timeout_seconds=PACKAGE_MUTATION_LOCK_TIMEOUT_SECONDS,
+        timeout_seconds=timeout_seconds,
     ):
         yield
 

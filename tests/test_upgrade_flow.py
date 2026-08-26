@@ -34,6 +34,7 @@ from vibe.upgrade import (
     get_safe_cwd,
     installed_metadata_describes_running_code,
     installed_package_name,
+    package_mutation_lock,
     pinned_package_spec,
     RollbackTarget,
     rollback_target,
@@ -447,6 +448,29 @@ def test_package_plan_holds_the_shared_mutation_lease_for_resolution_and_install
         (["installer", "install"], True),
     ]
     assert held is False
+
+
+def test_package_mutation_lock_forwards_a_bounded_retry_timeout(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    observed: list[float | None] = []
+
+    class FakeLock:
+        def __init__(self, lock_path, *, timeout_seconds):
+            assert lock_path.name == "package-mutation.lock"
+            observed.append(timeout_seconds)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return None
+
+    monkeypatch.setattr("storage.lock.MigrationFileLock", FakeLock)
+
+    with package_mutation_lock(timeout_seconds=1.0):
+        pass
+
+    assert observed == [1.0]
 
 
 @pytest.mark.parametrize(

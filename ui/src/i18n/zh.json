@@ -1778,6 +1778,8 @@
     "memory_runtime_missing": "memory-runtime 依赖尚未安装。",
     "memory_runtime_unsupported": "memory-runtime 依赖在此平台上不受支持。",
     "memory_runtime_install_failed": "memory-runtime 依赖安装失败。",
+    "memory_runtime_restart_required": "Memory 包已安装，请重启 Avibe 以启用。",
+    "restart_in_progress": "已有重启正在进行，请等待其完成后再试。",
     "memory_runtime_install_requires_disabled_memory": "记忆运行时正在使用中。请先在「设置 → 记忆」中关闭记忆，再修复。",
     "memory_reconcile_failed": "Avibe 无法应用记忆设置。请查看运行时日志了解失败步骤。",
     "memory_sidecar_unavailable": "记忆 sidecar 当前不可访问。",

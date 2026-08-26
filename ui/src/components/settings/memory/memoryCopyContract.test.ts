@@ -86,8 +86,21 @@ describe('Memory UI copy contracts', () => {
       'memory_delete_data_failed',
       'memory_plugin_unavailable',
       'memory_plugin_incompatible',
+      'memory_runtime_restart_required',
+      'restart_in_progress',
     ] as const) {
       expect(bundles[language].errors[key]).toBeTruthy();
     }
+  });
+
+  it('keeps dependency restart guidance explicit in both locales', () => {
+    expect(en.errors.memory_runtime_restart_required).toBe(
+      'Memory package installed. Restart Avibe to activate it.',
+    );
+    expect(en.errors.restart_in_progress).toBe(
+      'A restart is already in progress. Try again after it finishes.',
+    );
+    expect(zh.errors.memory_runtime_restart_required).toBe('Memory 包已安装，请重启 Avibe 以启用。');
+    expect(zh.errors.restart_in_progress).toBe('已有重启正在进行，请等待其完成后再试。');
   });
 });

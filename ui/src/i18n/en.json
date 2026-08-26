@@ -1778,6 +1778,8 @@
     "memory_runtime_missing": "The memory-runtime dependency isn't installed yet.",
     "memory_runtime_unsupported": "The memory-runtime dependency isn't supported on this platform.",
     "memory_runtime_install_failed": "The memory-runtime dependency failed to install.",
+    "memory_runtime_restart_required": "Memory package installed. Restart Avibe to activate it.",
+    "restart_in_progress": "A restart is already in progress. Try again after it finishes.",
     "memory_runtime_install_requires_disabled_memory": "Turn Memory off in Settings \u2192 Memory before repairing a running Memory runtime.",
     "memory_reconcile_failed": "Avibe couldn't apply the Memory settings. Check the runtime logs for the failing step.",
     "memory_sidecar_unavailable": "The Memory sidecar isn't reachable right now.",
