@@ -315,6 +315,7 @@ class ModelHubTurnGateway:
             self.correlation.prepare_gateway_turn(
                 backend=backend,
                 token=token,
+                turn_id=turn_id,
                 requested_model_id=requested_model_id,
                 resolved_model_id=resolved_model_id,
                 source_id=source_id,
@@ -612,6 +613,15 @@ class ModelHubTurnGateway:
                 turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
             )
         resolution_model = terminalizer.resolution_model(model_id)
+        if resolution_model is None:
+            terminalizer.fail("protocol_error")
+            return self._terminal_error_response(
+                execution,
+                terminalizer,
+                status=409,
+                code="mapping_target_unavailable",
+                turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
+            )
 
         def observe_attempt(
             source_id: str,

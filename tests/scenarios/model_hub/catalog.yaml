@@ -409,6 +409,12 @@ scenarios:
     kind: authentication
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py::test_mh_static_credential_failure_does_not_retry_or_claim_takeover
+  - id: MH-EFFORT-001
+    name: An undeclared requested effort is omitted from the exact-hop request and the turn still completes
+    status: covered
+    kind: compatibility
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_effort_001_undeclared_effort_is_omitted_and_turn_completes
   - id: MH-TURN-RESULT-001
     name: All terminal outcomes are closed schema-valid provenance products
     status: covered
