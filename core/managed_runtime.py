@@ -809,6 +809,18 @@ class ManagedRuntimeManager:
         if current is not None and current not in resolved_install_dirs:
             raise OSError("current.json is unreadable")
 
+        # Sibling metadata is not needed to reclaim abandoned staging.
+        staging_candidates = self._staging_install_dirs()
+        removal_failed = False
+        for path in staging_candidates:
+            if dry_run:
+                removed.append(str(path))
+                continue
+            if self._remove_tree(path):
+                removed.append(str(path))
+            else:
+                removal_failed = True
+
         downloads_present = self._downloads_namespace_present()
         installs = (
             self._read_managed_install_records(install_dirs)
@@ -843,10 +855,8 @@ class ManagedRuntimeManager:
             key=lambda path: path.stat().st_mtime,
             reverse=True,
         )
-        staging_candidates = self._staging_install_dirs()
-        removal_failed = False
 
-        for path in [*staging_candidates, *install_candidates]:
+        for path in install_candidates:
             if dry_run:
                 removed.append(str(path))
                 continue

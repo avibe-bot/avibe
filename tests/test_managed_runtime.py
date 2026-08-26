@@ -1233,6 +1233,44 @@ def test_clean_fails_closed_for_unreadable_retained_archive_metadata(
     assert current.is_dir() and current_archive.is_file()
 
 
+def test_clean_reclaims_staging_before_unreadable_install_metadata_failure(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    manifest_path = tmp_path / "manifest.json"
+    manager = _fixture_runtime_manager(runtime_dir, manifest_path=manifest_path)
+    rollback, rollback_archive = _install_fixture_runtime_release(
+        manager,
+        tmp_path,
+        manifest_path,
+        label="rollback",
+        version="rollback",
+    )
+    current, current_archive = _install_fixture_runtime_release(
+        manager,
+        tmp_path,
+        manifest_path,
+        label="current",
+        version="current",
+    )
+    (rollback / manager.spec.metadata_filename).write_text("{", encoding="utf-8")
+    staging_dir = runtime_dir / "install-pending"
+    staging_dir.mkdir()
+    for archive_path in (rollback_archive, current_archive):
+        _age_path(archive_path)
+
+    result = manager.clean(keep_previous=1)
+
+    assert result["ok"] is False
+    assert result["reason"] == "fixture_clean_inspection_failed"
+    assert result["removed"] == [str(staging_dir)]
+    assert result["archives"]["outcome"] == "skipped"
+    assert result["archives"]["skipped_reason"] == "archive_inspection_failed"
+    assert not staging_dir.exists()
+    assert rollback.is_dir() and rollback_archive.is_file()
+    assert current.is_dir() and current_archive.is_file()
+
+
 def test_clean_does_not_report_an_install_directory_that_removal_did_not_reclaim(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
