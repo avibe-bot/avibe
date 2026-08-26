@@ -126,6 +126,7 @@ class CodexAgent(BaseAgent):
         super().__init__(controller)
         self.codex_config = codex_config
         self._registered_runtime = registered_runtime
+        self._model_hub_catalog_path: Path | None = None
 
         # cwd → CodexTransport (one persistent process per working dir)
         self._transports: Dict[str, CodexTransport] = {}
@@ -782,9 +783,27 @@ class CodexAgent(BaseAgent):
 
     async def refresh_runtime_config(self, codex_config: Any) -> None:
         """Reload persisted runtime config before respawning app-server transports."""
+        from vibe import backend_model_catalog
+
+        model_hub_catalog_path = await asyncio.to_thread(
+            backend_model_catalog.prepare_codex_hub_catalog,
+            codex_config.binary,
+        )
         self.codex_config = codex_config
         self.controller.config.codex = codex_config
+        self._model_hub_catalog_path = model_hub_catalog_path
         await self.refresh_auth_state()
+
+    async def prepare_model_hub_runtime(self) -> Path:
+        """Bind Hub metadata to this Agent's exact configured Codex binary."""
+        from vibe import backend_model_catalog
+
+        path = await asyncio.to_thread(
+            backend_model_catalog.prepare_codex_hub_catalog,
+            self.codex_config.binary,
+        )
+        self._model_hub_catalog_path = path
+        return path
 
     async def prepare_resume_binding(
         self,
@@ -1602,17 +1621,11 @@ class CodexAgent(BaseAgent):
                     runtime_fingerprint = "direct"
                     if launch is not None:
                         from modules.agents.model_hub import build_codex_hub_launch
-                        from vibe import backend_model_catalog
-
-                        model_catalog_path = await asyncio.to_thread(
-                            backend_model_catalog.prepare_codex_hub_catalog,
-                            self.codex_config.binary,
-                        )
                         runtime_args, runtime_env = build_codex_hub_launch(
                             [],
                             os.environ.copy(),
                             launch,
-                            model_catalog_path=model_catalog_path,
+                            model_catalog_path=self._model_hub_catalog_path,
                         )
                         runtime_fingerprint = launch.fingerprint
 

@@ -3757,7 +3757,8 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
         agent._session_locks = {}
         agent._session_mgr = SimpleNamespace(sessions_for_cwd=lambda cwd: [])
         agent.codex_config = SimpleNamespace(binary="codex", extra_args=[])
-        agent.controller = SimpleNamespace()
+        agent._model_hub_catalog_path = None
+        agent.controller = SimpleNamespace(config=SimpleNamespace(codex=agent.codex_config))
         agent._runtime_ownership_snapshot_for_cwd = Mock(
             return_value=SimpleNamespace(blocks_transport_replacement=False)
         )
@@ -3994,19 +3995,64 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
                 gateway_base_url="http://127.0.0.1:8317",
                 gateway_token="ephemeral-token",
             )
+            agent._model_hub_catalog_path = Path(cwd) / "codex-hub-catalog.json"
 
             with patch(
                 "vibe.backend_model_catalog.prepare_codex_hub_catalog",
-                return_value=Path(cwd) / "codex-hub-catalog.json",
             ) as prepare_catalog:
                 with self.assertRaisesRegex(RuntimeError, "durable owner"):
                     await agent._get_or_create_transport(cwd, launch)
 
-            prepare_catalog.assert_called_once_with(agent.codex_config.binary)
+            prepare_catalog.assert_not_called()
             existing.stop.assert_not_awaited()
             self.assertIs(agent._transports[cwd], existing)
 
-    async def test_failed_hub_catalog_export_preserves_existing_transport_and_threads(self):
+    async def test_runtime_config_prepares_exact_catalog_before_switching_generation(self):
+        agent = self._agent()
+        previous_config = agent.codex_config
+        previous_catalog = Path("/runtime/codex-old.json")
+        next_catalog = Path("/runtime/codex-new.json")
+        agent._model_hub_catalog_path = previous_catalog
+        next_config = SimpleNamespace(binary="/opt/codex-next", extra_args=[])
+        agent.refresh_auth_state = AsyncMock()
+
+        def prepare(binary):
+            self.assertEqual(binary, next_config.binary)
+            self.assertIs(agent.codex_config, previous_config)
+            self.assertEqual(agent._model_hub_catalog_path, previous_catalog)
+            return next_catalog
+
+        with patch(
+            "vibe.backend_model_catalog.prepare_codex_hub_catalog",
+            side_effect=prepare,
+        ):
+            await agent.refresh_runtime_config(next_config)
+
+        self.assertIs(agent.codex_config, next_config)
+        self.assertIs(agent.controller.config.codex, next_config)
+        self.assertEqual(agent._model_hub_catalog_path, next_catalog)
+        agent.refresh_auth_state.assert_awaited_once_with()
+
+    async def test_runtime_config_catalog_failure_preserves_previous_generation(self):
+        agent = self._agent()
+        previous_config = agent.codex_config
+        previous_catalog = Path("/runtime/codex-old.json")
+        agent._model_hub_catalog_path = previous_catalog
+        agent.refresh_auth_state = AsyncMock()
+        next_config = SimpleNamespace(binary="/opt/codex-next", extra_args=[])
+
+        with patch(
+            "vibe.backend_model_catalog.prepare_codex_hub_catalog",
+            side_effect=RuntimeError("catalog export failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "catalog export failed"):
+                await agent.refresh_runtime_config(next_config)
+
+        self.assertIs(agent.codex_config, previous_config)
+        self.assertEqual(agent._model_hub_catalog_path, previous_catalog)
+        agent.refresh_auth_state.assert_not_awaited()
+
+    async def test_missing_prepared_hub_catalog_preserves_existing_transport_and_threads(self):
         agent = self._agent()
         with tempfile.TemporaryDirectory() as cwd:
             existing = SimpleNamespace(
@@ -4034,11 +4080,11 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
 
             with patch(
                 "vibe.backend_model_catalog.prepare_codex_hub_catalog",
-                side_effect=RuntimeError("catalog export failed"),
-            ):
-                with self.assertRaisesRegex(RuntimeError, "catalog export failed"):
+            ) as prepare_catalog:
+                with self.assertRaisesRegex(ValueError, "provider-safe model catalog"):
                     await agent._get_or_create_transport(cwd, launch)
 
+            prepare_catalog.assert_not_called()
             existing.stop.assert_not_awaited()
             self.assertIs(agent._transports[cwd], existing)
             agent._session_mgr.invalidate_thread.assert_not_called()

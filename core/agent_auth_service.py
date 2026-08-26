@@ -1950,7 +1950,7 @@ class AgentAuthService:
         logger.info("Unregistered disabled %s backend after runtime config refresh", backend)
         return True
 
-    def _register_missing_backend_agent(self, backend: str, runtime_config: Any) -> bool:
+    async def _register_missing_backend_agent(self, backend: str, runtime_config: Any) -> bool:
         agent_service = getattr(self.controller, "agent_service", None)
         if agent_service is None or backend in getattr(agent_service, "agents", {}):
             return False
@@ -1958,8 +1958,10 @@ class AgentAuthService:
         if backend == "codex":
             from modules.agents.codex import CodexAgent
 
+            agent = CodexAgent(self.controller, runtime_config)
+            await agent.prepare_model_hub_runtime()
             self.controller.config.codex = runtime_config
-            agent_service.register(CodexAgent(self.controller, runtime_config))
+            agent_service.register(agent)
         elif backend == "opencode":
             from modules.agents.opencode import OpenCodeAgent
 
@@ -1994,7 +1996,10 @@ class AgentAuthService:
                 if runtime_config is None:
                     await self._unregister_disabled_backend_agent(backend)
                     return
-                if runtime_config is not None and self._register_missing_backend_agent(backend, runtime_config):
+                if runtime_config is not None and await self._register_missing_backend_agent(
+                    backend,
+                    runtime_config,
+                ):
                     return
                 if force and backend == "opencode":
                     agent = getattr(agent_service, "agents", {}).get(backend)
