@@ -721,9 +721,9 @@
             "body": "确认运行状态前不会显示网关配置。"
           }
         },
-        "gatewayInfo": {
-          "label": "什么是网关",
-          "body": "网关是本机的一层调度：它持有你添加的来源，按你配置的顺序供给各个 Agent。"
+        "modelsInfo": {
+          "label": "什么是模型",
+          "body": "模型是 Agent 使用的型号。你可以查看每个型号现在能否运行、由谁供给，需要时为单个型号指定路由。"
         },
         "tab": {
           "hub": "来源与网关",
@@ -832,7 +832,9 @@
         "retry": "重试"
       },
       "gateway": {
-        "heading": "网关",
+        "heading": "网关路由",
+        "infoLabel": "什么是网关路由",
+        "info": "网关路由决定每个 Agent 的型号先使用哪个上游来源；额度不足或出错时自动切换下一优先级。",
         "sourceOrder": "调整优先级",
         "switchToGateway": "切换到网关",
         "switchToDirect": "切到直连",
@@ -907,11 +909,13 @@
       },
       "upstream": {
         "heading": "上游来源",
+        "infoLabel": "什么是上游来源",
+        "info": "上游来源是账号或 API Key。网关从这里获取型号，再按路由供给 Agent。",
         "count_one": "{{count}} 个",
         "count_other": "{{count}} 个",
         "group": {
           "native": "本机原生",
-          "hub": "网关持有"
+          "hub": "接入网关"
         },
         "kind": {
           "nativeCredential": "原生 · 本机凭据",
@@ -952,7 +956,7 @@
         "count_other": "{{count}} 个",
         "group": {
           "native": "本机原生",
-          "hub": "网关持有"
+          "hub": "接入网关"
         },
         "subtitle": "管理全局共用的账号和型号清单；来源顺序在各 Agent 卡片中调整",
         "modelCount_one": "{{count}} 个型号",
@@ -973,8 +977,9 @@
         "oauthSignedOut": "CLI 订阅未登录"
       },
       "order": {
-        "title": "{{backend}} · 来源顺序",
-        "subtitle": "这个后端存下来的来源顺序。改动它不会改动任何已配置的路由链。",
+        "title": "{{backend}} · 全局路由优先级",
+        "subtitle": "排在前面的上游将优先被使用。当额度不足或出错时自动切换下一优先级。",
+        "infoLabel": "什么是全局路由优先级",
         "reorder": "调整来源顺序",
         "section": {
           "ordered": "排在这条顺序里",

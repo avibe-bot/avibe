@@ -39,8 +39,8 @@ export const SourcesCard: React.FC<{
         <span className="flex items-center gap-[7px]">
           <h2 className="text-[16px] font-bold leading-[23px] text-foreground">{t('settings.models.upstream.heading')}</h2>
           <ModelHubInfoHint
-            label={t('settings.models.shell.gatewayInfo.label')}
-            content={t('settings.models.shell.gatewayInfo.body')}
+            label={t('settings.models.upstream.infoLabel')}
+            content={t('settings.models.upstream.info')}
             className="model-hub-upstream-info"
           />
         </span>

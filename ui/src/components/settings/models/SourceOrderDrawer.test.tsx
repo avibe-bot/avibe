@@ -73,6 +73,9 @@ describe('SourceOrderDrawer keyboard ordering', () => {
     vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent);
     renderDrawer();
     const handles = await screen.findAllByRole('button', { name: 'Reorder source' });
+    expect(screen.getByRole('heading', { name: 'Claude Code · Global route priority' })).toBeTruthy();
+    expect(screen.getByText('Upstream sources at the top are used first. When quota is insufficient or an error occurs, the next priority is used automatically.')).toBeTruthy();
+    expect(handles[0].className).toContain('cursor-grab');
 
     handles[0].focus();
     await user.keyboard('[Space]');

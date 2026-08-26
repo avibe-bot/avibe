@@ -262,8 +262,8 @@ const ModelHubShell: React.FC<{ actions?: React.ReactNode; detailBack?: () => vo
           : <span className="flex items-center gap-[9px]">
               <h1>{t('settings.models.shell.title')}</h1>
               <ModelHubInfoHint
-                label={t('settings.models.shell.gatewayInfo.label')}
-                content={t('settings.models.shell.gatewayInfo.body')}
+                label={t('settings.models.shell.modelsInfo.label')}
+                content={t('settings.models.shell.modelsInfo.body')}
                 className="model-hub-shell-info"
               />
             </span>}

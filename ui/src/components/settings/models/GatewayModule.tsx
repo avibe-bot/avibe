@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
 import { AgentCard } from './AgentCard';
+import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { foldRegionRead, type RegionRead } from './regionRead';
 import type { FreshRuntimeProjection } from './runtimeLifecycle';
 import type { AgentSupply, RuntimeDependency } from './types';
@@ -28,7 +29,10 @@ export const GatewayModule: React.FC<GatewayModuleProps> = ({ runtime, runtimeSn
   return (
     <section className="relative z-20 flex max-h-full min-h-[420px] w-full min-w-0 flex-col self-start overflow-hidden rounded-[14px] border border-border bg-surface">
       <header className="flex h-14 shrink-0 items-center justify-between border-b border-border px-3.5">
-        <h2 className="text-[16px] font-bold leading-[23px] text-foreground">{t('settings.models.gateway.heading')}</h2>
+        <span className="flex items-center gap-[7px]">
+          <h2 className="text-[16px] font-bold leading-[23px] text-foreground">{t('settings.models.gateway.heading')}</h2>
+          <ModelHubInfoHint label={t('settings.models.gateway.infoLabel')} content={t('settings.models.gateway.info')} className="model-hub-overview-info" />
+        </span>
         {listening && <span className="model-hub-pill model-hub-fill-0a border border-border text-muted">{listening.host}:{listening.port}</span>}
       </header>
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2 pt-3">

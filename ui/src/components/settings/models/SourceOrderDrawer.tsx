@@ -67,7 +67,7 @@ const OrderedRow: React.FC<{
         disabled={busy || inert}
         onPointerDown={(event) => !inert && controls.start(event)}
         onKeyDown={onKeyDown}
-        className={cn('model-hub-order-grip', grabbed && 'is-grabbed')}
+        className={cn('model-hub-order-grip cursor-grab active:cursor-grabbing disabled:cursor-not-allowed', grabbed && 'is-grabbed')}
       >
         <GripVertical />
       </button>
@@ -272,7 +272,7 @@ export const SourceOrderDrawer: React.FC<{
               <div className="flex min-w-0 items-center gap-[7px]">
                 <DialogPrimitive.Title className="model-hub-order-title truncate font-bold text-foreground">{title}</DialogPrimitive.Title>
                 <ModelHubInfoHint
-                  label={t('settings.models.order.subtitle')}
+                  label={t('settings.models.order.infoLabel')}
                   content={t('settings.models.order.subtitle')}
                   className="model-hub-order-info"
                 />

@@ -72,7 +72,7 @@ export const sourceStatePresentation = (
   if (state.status === 'active' && !adoption.known) {
     return { key: null, textClass: 'text-muted', dotClass: 'bg-muted' };
   }
-  if (state.status === 'active' && adoption.backends.length > 0) {
+  if ((state.status === 'active' || state.status === 'standby') && adoption.backends.length > 0) {
     if (surface === 'detail') {
       return {
         key: 'settings.models.sourceDetail.status.inUse',

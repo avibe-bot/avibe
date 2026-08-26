@@ -58,13 +58,13 @@ describe('SourcesCard footer', () => {
       </I18nextProvider>,
     );
 
-    const info = screen.getByRole('button', { name: /What the gateway is|什么是网关/i });
+    const info = screen.getByRole('button', { name: /What upstream sources are|什么是上游来源/i });
     await user.tab();
     expect(document.activeElement).toBe(info);
     await user.keyboard('[Enter]');
-    expect(await screen.findByText(/dispatch layer|调度/i)).toBeTruthy();
+    expect(await screen.findByText(/account or API key|账号或 API Key/i)).toBeTruthy();
     await user.keyboard('[Escape]');
-    await waitFor(() => expect(screen.queryByText(/dispatch layer|调度/i)).toBeNull());
+    await waitFor(() => expect(screen.queryByText(/account or API key|账号或 API Key/i)).toBeNull());
   });
 
   it('draws the two Frame 01 commands and dispatches each action', async () => {

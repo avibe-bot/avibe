@@ -1062,12 +1062,12 @@ sections. §1.8 states the direct-only body condition.
 
 | Element | Displays | Data source | Interactive | On activate |
 | --- | --- | --- | --- | --- |
-| `title` + info icon | Page name | static | icon: hover, focus **and** activation `[derived]` | Tooltip: `shell.gatewayInfo.body`, which is the icon's accessible description; `shell.gatewayInfo.label` is its accessible name |
+| `title` + info icon | Page name | static | icon: hover, focus **and** activation `[derived]` | Tooltip: `shell.modelsInfo.body`, which is the icon's accessible description; `shell.modelsInfo.label` is its accessible name |
 | Run pill | Engine liveness | `runtime-dependency.schema.json` → `status.health` `[contract]` | see the mapping below | see the mapping below |
 | Tabs ×3 | Section switch | — | yes | 来源与网关 / 用量 / 日志; the active one gets the mint underline |
-| Upstream module | Source inventory | `GET /api/models/sources` `[spec]` | rows: yes | Open 06 for that source |
+| Upstream module | Source inventory + info icon | `GET /api/models/sources` `[spec]` | info icon and rows: yes | Tooltip: `upstream.info`; open 06 for that source |
 | Dispatch rail | That upstream feeds gateway | derived, decorative | no | — |
-| Gateway module | One group per backend, each with model rows | per-backend supply + chains `[spec]` | rows, collapse, 「调整优先级」, mode switch | Open 02 / expand / open 03 for **that backend** / open 10's confirm |
+| Gateway module | One group per backend, each with model rows + info icon | per-backend supply + chains `[spec]` | info icon, rows, collapse, 「调整优先级」, mode switch | Tooltip: `gateway.info`; open 02 / expand / open 03 for **that backend** / open 10's confirm |
 | Legend | Colour → meaning | static; kept in bijection with the inks the page draws | no | — |
 
 **The Logs tab owns the switch-history feed** `[derived]`. It is absent from the
@@ -1079,11 +1079,11 @@ An unread feed keeps the card and its retry action distinct from the authoritati
 暂无切换记录 empty state. The removed 高级 placeholder has no surviving surface or copy:
 request logging and diagnostics must return as real capabilities, not as a dead row.
 
-**The info icon is a control, and its string is this file's** `[derived]`. Hover is not
-an affordance a keyboard or a touch user has, and this tooltip is the only place the page
-says what the gateway *is* — so the icon is a focusable button, activating it toggles the
-tooltip, Escape dismisses it, `shell.gatewayInfo.label` is its accessible name and
-`shell.gatewayInfo.body` its accessible description. The string is registered here
+**The info icons are controls, and their strings are this file's** `[derived]`. Hover is not
+an affordance a keyboard or a touch user has, and each tooltip explains the title beside it
+— so every icon is a focusable button, activating it toggles the
+tooltip, Escape dismisses it, `shell.modelsInfo.label` is its accessible name and
+`shell.modelsInfo.body` its accessible description. The string is registered here
 because no frame carries it, which is the one way this icon differs from §1.1's legend
 icon: that note is measured off the frame (§0.2), so that row states the trigger and
 this one states the trigger and the text. An explanation reachable only by hover is
@@ -1384,8 +1384,8 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | `shell.closed.stopping.body` `[derived]` | 运行时停止期间会隐藏网关配置。 | Gateway configuration is hidden while the runtime stops. |
 | `shell.closed.unread.title` `[derived]` | 暂时无法读取网关状态 | Model gateway status unavailable |
 | `shell.closed.unread.body` `[derived]` | 确认运行状态前不会显示网关配置。 | Configuration stays hidden until the runtime state can be confirmed. |
-| `shell.gatewayInfo.label` `[derived]` | 什么是网关 | What the gateway is |
-| `shell.gatewayInfo.body` `[derived]` | 网关是本机的一层调度:它持有你添加的来源,按你配置的顺序供给各个 Agent。 | The gateway is a dispatch layer on this machine: it holds the sources you add and supplies them to your Agents in the order you configure. |
+| `shell.modelsInfo.label` `[derived]` | 什么是模型 | What a model is |
+| `shell.modelsInfo.body` `[derived]` | 模型是 Agent 使用的型号。你可以查看每个型号现在能否运行、由谁供给,需要时为单个型号指定路由。 | A model is what an Agent uses to generate a response. You can see whether each model can run, which source supplies it, and set a route for one when needed. |
 | `install.title` `[derived]` | 安装网关组件 | Install the gateway component |
 | `install.subtitle` `[derived]` | 只安装组件,后端保持现在的方式 | Installs the component only; the backends keep working the way they do now |
 | `install.section.effects` `[derived]` | 会发生什么 | What will happen |
@@ -1410,10 +1410,12 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | `recent.empty` | 暂无切换记录 | No switches yet |
 | `recent.deletedSource` | 已删除 | deleted |
 | `upstream.heading` | 上游来源 | Upstream sources |
+| `upstream.infoLabel` `[derived]` | 什么是上游来源 | What upstream sources are |
+| `upstream.info` `[derived]` | 上游来源是账号或 API Key。网关从这里获取型号,再按路由供给 Agent。 | An upstream source is an account or API key. The gateway gets models from it and supplies them to Agents through routes. |
 | `upstream.count_one` | {{count}} 个 | {{count}} source |
 | `upstream.count_other` | {{count}} 个 | {{count}} sources |
 | `upstream.group.native` | 本机原生 | Native · on this machine |
-| `upstream.group.hub` | 网关持有 | Held by the gateway |
+| `upstream.group.hub` | 接入网关 | Connected to gateway |
 | `upstream.kind.nativeCredential` | 原生 · 本机凭据 | Native · local credential |
 | `upstream.kind.subscription` | 订阅 | Subscription |
 | `upstream.kind.apiKey` | API Key | API key |
@@ -1447,7 +1449,9 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | `upstream.repair.impact.done` `[derived]` | 完成 | Done |
 | `upstream.repair.unresolved` `[derived]` | 仍然不可用 | Still not working |
 | `upstream.repair.fail` `[derived]` | 没能完成这次凭据修复 | The credential repair did not finish |
-| `gateway.heading` | 网关 | Gateway |
+| `gateway.heading` | 网关路由 | Gateway routes |
+| `gateway.infoLabel` `[derived]` | 什么是网关路由 | What gateway routes are |
+| `gateway.info` `[derived]` | 网关路由决定每个 Agent 的型号先使用哪个上游来源;额度不足或出错时自动切换下一优先级。 | Gateway routes decide which upstream source each Agent's model uses first. When quota is insufficient or an error occurs, the next priority is used automatically. |
 | `gateway.sourceOrder` | 调整优先级 | Adjust priority |
 | `gateway.switchToGateway` | 切换到网关 | Switch to gateway |
 | `gateway.switchToDirect` | 切到直连 | Switch to direct |
@@ -2762,8 +2766,9 @@ may register the explicit operation; this one must not attach it to 保存顺序
 
 | Key | 中文 | English |
 | --- | --- | --- |
-| `title` | {{backend}} · 来源顺序 | {{backend}} · Source order |
-| `subtitle` | 这个后端存下来的来源顺序。改动它不会改动任何已配置的路由链。 | The Source order this backend stores. Changing it changes no configured Route chain. |
+| `title` | {{backend}} · 全局路由优先级 | {{backend}} · Global route priority |
+| `subtitle` | 排在前面的上游将优先被使用。当额度不足或出错时自动切换下一优先级。 | Upstream sources at the top are used first. When quota is insufficient or an error occurs, the next priority is used automatically. |
+| `infoLabel` `[derived]` | 什么是全局路由优先级 | What global route priority is |
 | `section.ordered` | 排在这条顺序里 | In this order |
 | `section.ordered.note` | 拖动排序 | Drag to reorder |
 | `section.heldOut` | 未排入这条顺序 | Not in this order |
@@ -3690,7 +3695,7 @@ them do I actually want, and what reasoning tiers does each accept?* Nothing els
 **The back icon is named rather than inferred** `[derived]`. `iGcAi` is this page's only
 route back to 01 and draws no text, so `sourceDetail.back` carries its accessible name in
 both locales — the same treatment `field.apiKey.reveal` gets one frame over and
-`shell.gatewayInfo.label` gets on 01, for the same reason: a glyph is not a name, and an
+`shell.modelsInfo.label` gets on 01, for the same reason: a glyph is not a name, and an
 icon-only control whose destination cannot be heard is a control a keyboard or
 screen-reader user cannot use. It names the destination and not the gesture —
 返回来源列表 rather than 返回 — because *back* on a page reached from several places says
@@ -3909,15 +3914,14 @@ text:
 
 | `Source.state.status` `[contract]` | Ink | Key |
 | --- | --- | --- |
-| `active`, and `adopted_by` is non-empty `[contract]` | `$--mint` | `sourceDetail.status.inUse` |
-| `active`, and `adopted_by` is empty `[contract]` | `$--muted` | `upstream.state.standby` |
-| `standby` | `$--muted` | `upstream.state.standby` |
+| `active` or `standby`, and `adopted_by` is non-empty `[contract]` | `$--mint` | `sourceDetail.status.inUse` (detail) / `upstream.state.supplying` (card) |
+| `active` or `standby`, and `adopted_by` is empty `[contract]` | `$--muted` | `upstream.state.standby` |
 | `cooldown` | `$--gold` | `upstream.state.unavailableRetry`, or `upstream.state.unavailableDue` once `retry_at` has passed `[derived]` |
 | `needs_action` | `#FF6B6B` | the `sourceDetail.status.needsAction.*` row `state.detail_key` selects `[derived]` `[contract]` |
 | `error` | `#FF6B6B` | `sourceDetail.status.error` `[derived]` |
 
-The split of `active` is the one place this bar reads a second field: 使用中 claims a backend has
-this source configured into a route, which is `adopted_by` (§1.0), not a source state. A
+The split of the two healthy statuses is the one place this bar reads a second field: 使用中
+claims a backend has this source configured into a route, which is `adopted_by` (§1.0), not a source state. A
 source can be perfectly healthy and be in nobody's chain, and saying 使用中 there would be
 the same lie as saying it about a dead credential, in the flattering direction.
 

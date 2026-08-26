@@ -59,7 +59,7 @@ describe('SourceRow', () => {
   });
 
   it('consumes persisted adoption when the source projection carries it', () => {
-    render(<I18nextProvider i18n={i18n}><SourceRow source={{ ...source, state: { ...source.state, status: 'active' }, adopted_by: [{ backend: 'codex', menu_model: 'gpt-5' }] }} onOpen={vi.fn()} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><SourceRow source={{ ...source, state: { ...source.state, status: 'standby' }, adopted_by: [{ backend: 'codex', menu_model: 'gpt-5' }] }} onOpen={vi.fn()} /></I18nextProvider>);
     expect(screen.getByText(/Supplying Codex|正在供给 Codex/i)).toBeTruthy();
   });
 

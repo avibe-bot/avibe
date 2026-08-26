@@ -34,7 +34,7 @@ export const SourceRow: React.FC<{ source: Source; onOpen: (source: Source) => v
     : source.kind === 'subscription'
       ? 'subscription'
       : 'apiKey';
-  const adopted = source.state.status === 'active' && (source.adopted_by?.length ?? 0) > 0;
+  const adopted = (source.state.status === 'active' || source.state.status === 'standby') && (source.adopted_by?.length ?? 0) > 0;
   return (
     <button
       type="button"
