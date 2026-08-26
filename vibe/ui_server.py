@@ -7474,10 +7474,10 @@ def ui_reload():
                     time.sleep(1.0)
         if not spawned:
             logger.warning(
-                "UI reload proceeding without package mutation lease after retry: %s",
+                "UI reload not scheduled after package mutation lease retry: %s",
                 "restart_not_scheduled_package_busy",
             )
-            _spawn_replacement()
+            return
 
         time.sleep(0.2)
         # Shutdown the old server to release the port
@@ -7488,14 +7488,6 @@ def ui_reload():
                 shutdown = getattr(_server, "shutdown", None)
                 if callable(shutdown):
                     shutdown()
-
-    # This try-lock is advisory only: the response stays optimistic and the
-    # worker owns the acquire/release pair required by the thread-owned lease.
-    try:
-        with package_mutation_lock(timeout_seconds=0):
-            pass
-    except MigrationLockTimeout:
-        pass
 
     # Schedule restart after response is sent
     threading.Thread(target=_restart).start()

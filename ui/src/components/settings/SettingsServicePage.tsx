@@ -6,6 +6,7 @@ import clsx from 'clsx';
 
 import { useStatus } from '@/context/StatusContext';
 import { useApi } from '@/context/ApiContext';
+import { useToast } from '@/context/ToastContext';
 import { apiFetch } from '@/lib/apiFetch';
 import { SettingsPageShell } from './SettingsPageShell';
 import { CompactField, SettingsPanel, SettingsRow } from './SettingsPrimitives';
@@ -19,6 +20,7 @@ import { applyAppTitle } from '@/lib/documentTitle';
 export const SettingsServicePage: React.FC = () => {
   const { t } = useTranslation();
   const { status, control } = useStatus();
+  const { showToast } = useToast();
   const api = useApi();
   const navigate = useNavigate();
   // Back-compat: Remote Access moved to its own page. Old deep links to the
@@ -46,6 +48,12 @@ export const SettingsServicePage: React.FC = () => {
     try {
       await control(action);
     } catch (e) {
+      const code = (e as { code?: unknown } | null)?.code;
+      if (code === 'restart_in_progress') {
+        showToast(t('settings.service.restartInProgress'), 'error');
+      } else if (code === 'restart_not_scheduled_package_busy') {
+        showToast(t('settings.service.packageMutationBusy'), 'error');
+      }
       console.error('Service control action failed', e);
     } finally {
       setLoading(false);

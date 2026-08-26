@@ -306,6 +306,10 @@
     "logFileLabel": "Log file",
     "serviceRuntimeTitle": "Runtime control",
     "serviceRuntimeSubtitle": "Start, stop, and restart the local Avibe service while checking the live process state.",
+    "service": {
+      "restartInProgress": "A restart is already in progress. Try again after it finishes.",
+      "packageMutationBusy": "A package operation is in progress. Try again after it finishes."
+    },
     "statusNow": "Current state",
     "consoleServerTitle": "Console server",
     "consoleServerHint": "Saving these values restarts only the Web UI server.",

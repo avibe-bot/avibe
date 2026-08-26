@@ -231,8 +231,6 @@ def test_ui_reload_holds_package_lease_through_spawn_and_releases_before_shutdow
     assert response.status_code == 200
     assert response.get_json()["ok"] is True
     assert events == [
-        ("lock-enter", 0),
-        ("lock-exit", 0),
         ("lock-enter", None),
         "spawn",
         "write-status",
@@ -242,13 +240,14 @@ def test_ui_reload_holds_package_lease_through_spawn_and_releases_before_shutdow
     assert server.should_exit is True
 
 
-def test_ui_reload_retries_busy_worker_then_degrades_without_changing_response(
+def test_ui_reload_retries_busy_worker_then_leaves_current_server_running(
     monkeypatch,
     caplog,
 ):
     lock_calls: list[float | None] = []
     sleeps: list[float] = []
     spawned: list[bool] = []
+    status_writes: list[bool] = []
 
     @contextmanager
     def blocked_mutation_lock(*, timeout_seconds=None):
@@ -269,7 +268,7 @@ def test_ui_reload_retries_busy_worker_then_degrades_without_changing_response(
         "spawn_background",
         lambda *args, **kwargs: spawned.append(True) or 222,
     )
-    monkeypatch.setattr(runtime, "write_status", lambda *args: None)
+    monkeypatch.setattr(runtime, "write_status", lambda *args: status_writes.append(True))
     monkeypatch.setattr("vibe.ui_server.time.sleep", lambda delay: sleeps.append(delay))
 
     client = app.test_client()
@@ -283,8 +282,9 @@ def test_ui_reload_retries_busy_worker_then_degrades_without_changing_response(
 
     assert response.status_code == 200
     assert response.get_json() == {"ok": True, "host": "127.0.0.1", "port": 5123}
-    assert lock_calls == [0, None, None]
-    assert sleeps == [1.0, 0.2]
-    assert spawned == [True]
-    assert server.should_exit is True
+    assert lock_calls == [None, None]
+    assert sleeps == [1.0]
+    assert spawned == []
+    assert status_writes == []
+    assert server.should_exit is False
     assert "restart_not_scheduled_package_busy" in caplog.text

@@ -12685,7 +12685,9 @@ def cmd_start():
                 return _restart_in_progress_exit(operation="lifecycle")
             return _cmd_start_under_package_lease()
     except MigrationLockTimeout:
-        return _restart_in_progress_exit(operation="lifecycle")
+        if restart_in_flight():
+            return _restart_in_progress_exit(operation="lifecycle")
+        return _package_mutation_busy_exit()
 
 
 def _cmd_start_under_package_lease():
@@ -12865,7 +12867,9 @@ def cmd_stop():
                 return _restart_in_progress_exit(operation="lifecycle")
             return _cmd_stop_under_package_lease()
     except MigrationLockTimeout:
-        return _restart_in_progress_exit(operation="lifecycle")
+        if restart_in_flight():
+            return _restart_in_progress_exit(operation="lifecycle")
+        return _package_mutation_busy_exit()
 
 
 def _cmd_stop_under_package_lease():
@@ -14963,6 +14967,13 @@ def _restart_in_progress_exit(*, operation: str = "restart") -> int:
     return 2
 
 
+def _package_mutation_busy_exit() -> int:
+    language = normalize_language(_configured_cli_language())
+    message = i18n_t("lifecycle.cli.packageMutationInProgressAction", language)
+    print(f"\033[33m{message}\033[0m")
+    return 2
+
+
 def _schedule_delayed_restart(delay_seconds: float) -> int:
     try:
         with package_mutation_lock():
@@ -14974,7 +14985,9 @@ def _schedule_delayed_restart(delay_seconds: float) -> int:
                 trigger="cli",
             )
     except MigrationLockTimeout:
-        return _restart_in_progress_exit()
+        if restart_in_flight():
+            return _restart_in_progress_exit()
+        return _package_mutation_busy_exit()
     print(f"Restart scheduled in {_format_restart_delay(delay_seconds)}.")
     print(f"Job ID: {result['job_id']}")
     print("This command exits immediately; the restart supervisor will run in the background.")
@@ -14995,7 +15008,9 @@ def _cmd_restart_with_delay(delay_seconds: float) -> int:
                 trigger="cli",
             )
     except MigrationLockTimeout:
-        return _restart_in_progress_exit()
+        if restart_in_flight():
+            return _restart_in_progress_exit()
+        return _package_mutation_busy_exit()
     print("Restart scheduled.")
     print(f"Job ID: {result['job_id']}")
     print("Run `vibe status` to inspect the restart result.")

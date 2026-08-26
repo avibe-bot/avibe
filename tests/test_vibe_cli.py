@@ -719,10 +719,19 @@ def test_cmd_restart_refuses_an_in_flight_restart(
 
 
 @pytest.mark.parametrize("delay_seconds", [0.0, 60.0])
+@pytest.mark.parametrize(
+    ("restart_live", "expected"),
+    [
+        (True, "restart is already in progress"),
+        (False, "package operation is already in progress"),
+    ],
+)
 def test_cmd_restart_fails_closed_when_package_lease_is_held(
     monkeypatch,
     capsys,
     delay_seconds,
+    restart_live,
+    expected,
 ):
     @contextmanager
     def blocked_mutation_lock():
@@ -730,11 +739,7 @@ def test_cmd_restart_fails_closed_when_package_lease_is_held(
         yield
 
     monkeypatch.setattr(cli, "package_mutation_lock", blocked_mutation_lock)
-    monkeypatch.setattr(
-        cli,
-        "restart_in_flight",
-        lambda: pytest.fail("status must be checked after acquiring the lease"),
-    )
+    monkeypatch.setattr(cli, "restart_in_flight", lambda: restart_live)
     monkeypatch.setattr(
         cli,
         "schedule_restart",
@@ -742,7 +747,7 @@ def test_cmd_restart_fails_closed_when_package_lease_is_held(
     )
 
     assert cli._cmd_restart_with_delay(delay_seconds) == 2
-    assert "restart is already in progress" in capsys.readouterr().out
+    assert expected in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(
@@ -830,10 +835,19 @@ def test_cli_start_stop_refuse_an_in_flight_restart(monkeypatch, capsys, command
 
 
 @pytest.mark.parametrize("command_name", ["cmd_start", "cmd_stop"])
+@pytest.mark.parametrize(
+    ("restart_live", "expected"),
+    [
+        (True, "restart is already in progress"),
+        (False, "package operation is already in progress"),
+    ],
+)
 def test_cli_start_stop_fail_closed_when_package_lease_is_held(
     monkeypatch,
     capsys,
     command_name,
+    restart_live,
+    expected,
 ):
     @contextmanager
     def blocked_mutation_lock():
@@ -841,11 +855,7 @@ def test_cli_start_stop_fail_closed_when_package_lease_is_held(
         yield
 
     monkeypatch.setattr(cli, "package_mutation_lock", blocked_mutation_lock)
-    monkeypatch.setattr(
-        cli,
-        "restart_in_flight",
-        lambda: pytest.fail("status must be checked after acquiring the lease"),
-    )
+    monkeypatch.setattr(cli, "restart_in_flight", lambda: restart_live)
     monkeypatch.setattr(
         cli,
         f"_{command_name}_under_package_lease",
@@ -854,7 +864,7 @@ def test_cli_start_stop_fail_closed_when_package_lease_is_held(
     )
 
     assert getattr(cli, command_name)() == 2
-    assert "restart is already in progress" in capsys.readouterr().out
+    assert expected in capsys.readouterr().out
 
 
 def test_cmd_stop_fails_when_live_service_survives(monkeypatch, capsys):

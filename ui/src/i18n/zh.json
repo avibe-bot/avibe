@@ -306,6 +306,10 @@
     "logFileLabel": "日志文件",
     "serviceRuntimeTitle": "运行控制",
     "serviceRuntimeSubtitle": "查看本地 Avibe 进程状态，并执行启动、停止和重启。",
+    "service": {
+      "restartInProgress": "已有重启正在进行，请等待其完成后再试。",
+      "packageMutationBusy": "已有软件包操作正在进行，请等待其完成后再试。"
+    },
     "statusNow": "当前状态",
     "consoleServerTitle": "控制台服务",
     "consoleServerHint": "保存这些值只会重启 Web UI 服务，不会重启主服务。",
