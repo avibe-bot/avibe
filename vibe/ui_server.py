@@ -6541,6 +6541,32 @@ def _restart_not_scheduled_package_busy() -> dict[str, Any]:
     }
 
 
+def _control_lock_timeout_response(*, action: str):
+    from vibe import runtime
+
+    if _restart_in_flight():
+        code = "restart_in_progress"
+        error = "a restart is already in progress"
+    else:
+        code = "restart_not_scheduled_package_busy"
+        error = t(
+            "lifecycle.cli.packageMutationInProgressAction",
+            _request_ui_language(),
+        )
+    return (
+        jsonify(
+            {
+                "ok": False,
+                "action": action,
+                "error": error,
+                "code": code,
+                "status": runtime.read_status(),
+            }
+        ),
+        409,
+    )
+
+
 def _mark_service_restart_pending(*, trigger: str) -> dict[str, Any]:
     from vibe import runtime
     from vibe.restart_supervisor import mark_pending_restart
@@ -6737,18 +6763,7 @@ def control():
                     _stop_opencode_server()
                     runtime.write_status("stopped", "stopped", None, status.get("ui_pid"))
         except MigrationLockTimeout:
-            return (
-                jsonify(
-                    {
-                        "ok": False,
-                        "action": action,
-                        "error": "a restart is already in progress",
-                        "code": "restart_in_progress",
-                        "status": runtime.read_status(),
-                    }
-                ),
-                409,
-            )
+            return _control_lock_timeout_response(action=action)
     elif action == "restart":
         # Scope defaults to "all" (full restart) so the manual Dashboard /
         # Settings → Service restart buttons keep restarting BOTH processes
@@ -6787,18 +6802,7 @@ def control():
                         scope=scope,
                     )
         except MigrationLockTimeout:
-            return (
-                jsonify(
-                    {
-                        "ok": False,
-                        "action": action,
-                        "error": "a restart is already in progress",
-                        "code": "restart_in_progress",
-                        "status": runtime.read_status(),
-                    }
-                ),
-                409,
-            )
+            return _control_lock_timeout_response(action=action)
         return jsonify({"ok": True, "action": action, "restart": result, "status": runtime.read_status()})
     return jsonify({"ok": True, "action": action, "status": runtime.read_status()})
 
@@ -7436,24 +7440,45 @@ def ui_reload():
         from config import paths as config_paths
         from vibe.memory_ui_access import process_ui_read_secret
 
-        command = f"from vibe.ui_server import run_ui_server; run_ui_server('{bind_host}', {port})"
-        memory_ui_secret = process_ui_read_secret()
-        spawn_kwargs = (
-            {"memory_ui_secret": memory_ui_secret} if memory_ui_secret is not None else {}
-        )
-        pid = runtime.spawn_background(
-            [sys.executable, "-c", command],
-            config_paths.get_runtime_ui_pid_path(),
-            "ui_stdout.log",
-            "ui_stderr.log",
-            **spawn_kwargs,
-        )
-        runtime.write_status(
-            status.get("state", "running"),
-            status.get("detail"),
-            status.get("service_pid"),
-            pid,
-        )
+        def _spawn_replacement() -> None:
+            command = f"from vibe.ui_server import run_ui_server; run_ui_server('{bind_host}', {port})"
+            memory_ui_secret = process_ui_read_secret()
+            spawn_kwargs = (
+                {"memory_ui_secret": memory_ui_secret}
+                if memory_ui_secret is not None
+                else {}
+            )
+            pid = runtime.spawn_background(
+                [sys.executable, "-c", command],
+                config_paths.get_runtime_ui_pid_path(),
+                "ui_stdout.log",
+                "ui_stderr.log",
+                **spawn_kwargs,
+            )
+            runtime.write_status(
+                status.get("state", "running"),
+                status.get("detail"),
+                status.get("service_pid"),
+                pid,
+            )
+
+        spawned = False
+        for attempt in range(2):
+            try:
+                with package_mutation_lock():
+                    _spawn_replacement()
+                spawned = True
+                break
+            except MigrationLockTimeout:
+                if attempt == 0:
+                    time.sleep(1.0)
+        if not spawned:
+            logger.warning(
+                "UI reload proceeding without package mutation lease after retry: %s",
+                "restart_not_scheduled_package_busy",
+            )
+            _spawn_replacement()
+
         time.sleep(0.2)
         # Shutdown the old server to release the port
         if _server:
@@ -7463,6 +7488,14 @@ def ui_reload():
                 shutdown = getattr(_server, "shutdown", None)
                 if callable(shutdown):
                     shutdown()
+
+    # This try-lock is advisory only: the response stays optimistic and the
+    # worker owns the acquire/release pair required by the thread-owned lease.
+    try:
+        with package_mutation_lock(timeout_seconds=0):
+            pass
+    except MigrationLockTimeout:
+        pass
 
     # Schedule restart after response is sent
     threading.Thread(target=_restart).start()

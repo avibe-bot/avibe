@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from contextlib import contextmanager
 
 from config.v2_config import (
     AgentsConfig,
@@ -11,7 +12,8 @@ from config.v2_config import (
     UiConfig,
     V2Config,
 )
-from vibe import runtime
+from storage.lock import MigrationLockTimeout
+from vibe import runtime, ui_server
 from vibe.ui_server import app
 
 from tests.ui_server_test_helpers import csrf_headers
@@ -180,3 +182,109 @@ def test_ui_reload_routes_replacement_output_through_runtime_log_sinks(monkeypat
     assert captured["spawn"][2:4] == ("ui_stdout.log", "ui_stderr.log")
     assert captured["spawn"][5] == memory_ui_secret
     assert captured["status"][-1] == 222
+
+
+def test_ui_reload_holds_package_lease_through_spawn_and_releases_before_shutdown(
+    monkeypatch,
+):
+    events: list[object] = []
+
+    @contextmanager
+    def mutation_lock(*, timeout_seconds=None):
+        events.append(("lock-enter", timeout_seconds))
+        try:
+            yield
+        finally:
+            events.append(("lock-exit", timeout_seconds))
+
+    class _Server:
+        should_exit = False
+
+    server = _Server()
+    monkeypatch.setattr(ui_server, "package_mutation_lock", mutation_lock)
+    monkeypatch.setattr(ui_server, "_server", server)
+    monkeypatch.setattr(threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(runtime, "read_status", lambda: {"state": "running", "service_pid": 111})
+    monkeypatch.setattr(
+        runtime,
+        "spawn_background",
+        lambda *args, **kwargs: events.append("spawn") or 222,
+    )
+    monkeypatch.setattr(
+        runtime,
+        "write_status",
+        lambda *args: events.append("write-status"),
+    )
+    monkeypatch.setattr(
+        "vibe.ui_server.time.sleep",
+        lambda delay: events.append(("sleep", delay, server.should_exit)),
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/api/ui/reload",
+        json={"host": "127.0.0.1", "port": 5123},
+        headers=csrf_headers(client, "http://127.0.0.1:5123"),
+        base_url="http://127.0.0.1:5123",
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["ok"] is True
+    assert events == [
+        ("lock-enter", 0),
+        ("lock-exit", 0),
+        ("lock-enter", None),
+        "spawn",
+        "write-status",
+        ("lock-exit", None),
+        ("sleep", 0.2, False),
+    ]
+    assert server.should_exit is True
+
+
+def test_ui_reload_retries_busy_worker_then_degrades_without_changing_response(
+    monkeypatch,
+    caplog,
+):
+    lock_calls: list[float | None] = []
+    sleeps: list[float] = []
+    spawned: list[bool] = []
+
+    @contextmanager
+    def blocked_mutation_lock(*, timeout_seconds=None):
+        lock_calls.append(timeout_seconds)
+        raise MigrationLockTimeout("package mutation is still running")
+        yield
+
+    class _Server:
+        should_exit = False
+
+    server = _Server()
+    monkeypatch.setattr(ui_server, "package_mutation_lock", blocked_mutation_lock)
+    monkeypatch.setattr(ui_server, "_server", server)
+    monkeypatch.setattr(threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(runtime, "read_status", lambda: {"state": "running", "service_pid": 111})
+    monkeypatch.setattr(
+        runtime,
+        "spawn_background",
+        lambda *args, **kwargs: spawned.append(True) or 222,
+    )
+    monkeypatch.setattr(runtime, "write_status", lambda *args: None)
+    monkeypatch.setattr("vibe.ui_server.time.sleep", lambda delay: sleeps.append(delay))
+
+    client = app.test_client()
+    with caplog.at_level("WARNING"):
+        response = client.post(
+            "/api/ui/reload",
+            json={"host": "127.0.0.1", "port": 5123},
+            headers=csrf_headers(client, "http://127.0.0.1:5123"),
+            base_url="http://127.0.0.1:5123",
+        )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True, "host": "127.0.0.1", "port": 5123}
+    assert lock_calls == [0, None, None]
+    assert sleeps == [1.0, 0.2]
+    assert spawned == [True]
+    assert server.should_exit is True
+    assert "restart_not_scheduled_package_busy" in caplog.text

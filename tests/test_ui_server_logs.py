@@ -382,7 +382,7 @@ def test_control_start_stop_refuse_an_in_flight_restart(monkeypatch, tmp_path, a
 
 
 @pytest.mark.parametrize("action", ["start", "stop"])
-def test_control_start_stop_fail_closed_when_package_lease_is_held(
+def test_control_start_stop_reports_package_busy_when_package_lease_is_held(
     monkeypatch,
     tmp_path,
     action,
@@ -396,11 +396,7 @@ def test_control_start_stop_fail_closed_when_package_lease_is_held(
         yield
 
     monkeypatch.setattr(ui_server, "package_mutation_lock", blocked_mutation_lock)
-    monkeypatch.setattr(
-        ui_server,
-        "_restart_in_flight",
-        lambda: pytest.fail("status must be checked after acquiring the lease"),
-    )
+    monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: False)
     monkeypatch.setattr(
         runtime,
         "start_service",
@@ -416,11 +412,12 @@ def test_control_start_stop_fail_closed_when_package_lease_is_held(
     response = client.post(
         "/api/control",
         json={"action": action},
-        headers=csrf_headers(client),
+        headers={**csrf_headers(client), "Accept-Language": "zh-CN"},
     )
 
     assert response.status_code == 409
-    assert response.get_json()["code"] == "restart_in_progress"
+    assert response.get_json()["code"] == "restart_not_scheduled_package_busy"
+    assert response.get_json()["error"] == "已有软件包操作正在进行，修复未执行。"
 
 
 def test_control_restart_schedules_restart_job(monkeypatch, tmp_path):
@@ -473,7 +470,7 @@ def test_control_restart_schedules_restart_job(monkeypatch, tmp_path):
     assert mutation_lease_held is False
 
 
-def test_control_restart_fails_closed_when_package_lease_is_held(monkeypatch, tmp_path):
+def test_control_restart_reports_package_busy_when_package_lease_is_held(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     runtime.write_status("running", detail="running", service_pid=12345, ui_pid=67890)
@@ -491,11 +488,7 @@ def test_control_restart_fails_closed_when_package_lease_is_held(monkeypatch, tm
         blocked_mutation_lock,
         raising=False,
     )
-    monkeypatch.setattr(
-        ui_server,
-        "_restart_in_flight",
-        lambda: (_ for _ in ()).throw(AssertionError("status must be checked after acquiring the lease")),
-    )
+    monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: False)
     monkeypatch.setattr(
         restart_supervisor,
         "schedule_restart",
@@ -506,6 +499,47 @@ def test_control_restart_fails_closed_when_package_lease_is_held(monkeypatch, tm
     response = client.post(
         "/api/control",
         json={"action": "restart"},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 409
+    assert response.get_json()["code"] == "restart_not_scheduled_package_busy"
+    assert response.get_json()["error"] == (
+        "A package operation is already in progress; the repair was not performed."
+    )
+
+
+@pytest.mark.parametrize("action", ["start", "stop", "restart"])
+def test_control_lease_timeout_preserves_live_restart_diagnosis(
+    monkeypatch,
+    tmp_path,
+    action,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+
+    @contextmanager
+    def blocked_mutation_lock():
+        raise MigrationLockTimeout("restart supervisor owns the package lease")
+        yield
+
+    monkeypatch.setattr(ui_server, "package_mutation_lock", blocked_mutation_lock)
+    monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: True)
+    monkeypatch.setattr(
+        runtime,
+        "start_service",
+        lambda: pytest.fail("start must not run while restart is in flight"),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "stop_service",
+        lambda: pytest.fail("stop must not run while restart is in flight"),
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/api/control",
+        json={"action": action},
         headers=csrf_headers(client),
     )
 

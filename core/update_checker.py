@@ -1098,7 +1098,10 @@ class UpdateChecker:
                 logger.error(f"Upgrade failed: {result['message']}")
                 if result.get("output"):
                     logger.error(f"Output: {result['output']}")
-                self._remove_update_marker()
+                if result.get("code") == "restart_in_progress":
+                    logger.info("Retaining update marker owned by the active restart")
+                else:
+                    self._remove_update_marker()
                 return result
 
     def _write_update_marker(

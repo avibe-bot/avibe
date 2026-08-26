@@ -525,6 +525,53 @@ def test_automatic_update_passes_live_memory_enablement_to_upgrade(monkeypatch, 
     assert calls == [(True, {"memory_enabled": True})]
 
 
+def test_restart_contention_preserves_existing_update_marker(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    SettingsStore.reset_instance()
+    checker = UpdateChecker(_StubController(SettingsStore.get_instance()), UpdateConfig())
+    checker._write_update_marker("1.0.1", channel_id="channel", message_id="message")
+    marker = tmp_path / "state" / "pending_update_notification.json"
+    before = marker.read_text(encoding="utf-8")
+    monkeypatch.setattr(
+        "vibe.api.do_upgrade",
+        lambda restart, **kwargs: {
+            "ok": False,
+            "restarting": False,
+            "message": "restart_in_progress",
+            "output": None,
+            "code": "restart_in_progress",
+        },
+    )
+
+    result = asyncio.run(checker._perform_update("1.0.2"))
+
+    assert result["code"] == "restart_in_progress"
+    assert marker.read_text(encoding="utf-8") == before
+
+
+def test_failed_update_still_removes_existing_update_marker(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    SettingsStore.reset_instance()
+    checker = UpdateChecker(_StubController(SettingsStore.get_instance()), UpdateConfig())
+    checker._write_update_marker("1.0.1")
+    marker = tmp_path / "state" / "pending_update_notification.json"
+    monkeypatch.setattr(
+        "vibe.api.do_upgrade",
+        lambda restart, **kwargs: {
+            "ok": False,
+            "restarting": False,
+            "message": "upgrade_failed",
+            "output": "resolver failed",
+            "code": "upgrade_failed",
+        },
+    )
+
+    result = asyncio.run(checker._perform_update("1.0.2"))
+
+    assert result["code"] == "upgrade_failed"
+    assert not marker.exists()
+
+
 def test_update_marker_records_platform_for_non_slack_callbacks(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()

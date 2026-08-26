@@ -849,6 +849,7 @@ _FLAT_CODED_BODY_EXEMPTIONS = {
     # POST /api/control — StatusContext.control() uses a raw ``apiFetch`` and reads the
     # top-level ``body.code`` itself, exactly like ChatPage's messages POST.
     "control",
+    "_control_lock_timeout_response",
     # Public Show Page document + its annotation overlay: a SEPARATE document with its
     # own fetch and React tree, so no host ``ApiProvider`` ever parses these bodies
     # (round 5's "out of reach" row).
