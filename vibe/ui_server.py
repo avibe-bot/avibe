@@ -245,7 +245,6 @@ VAULT_SANDBOX_PERMISSIONS_POLICY = (
 )
 REMOTE_OAUTH_COOKIE_NAME = "__Host-vibe_remote_oauth"
 REMOTE_OAUTH_RETRY_PARAM = "__vibe_oauth_retry"
-REMOTE_SHOW_PAGE_REAUTH_PARAM = "__vibe_show_page_reauth"
 # Lifetime of the short-lived OAuth handshake (signed state + PKCE cookie). The
 # cookie MUST carry an explicit Max-Age: iOS standalone PWAs drop session-scoped
 # cookies (no Max-Age) across the cross-origin authorize excursion / app
@@ -1821,48 +1820,14 @@ def _add_oauth_retry_param(value: str) -> str:
     return urlunsplit(("", "", parsed.path or "/", urlencode(params), ""))
 
 
-def _strip_show_page_reauth_param(value: str) -> str:
-    target = _safe_remote_redirect_target(value)
-    parsed = urlsplit(target)
-    query = urlencode(
-        [
-            (key, val)
-            for key, val in parse_qsl(parsed.query, keep_blank_values=True)
-            if key != REMOTE_SHOW_PAGE_REAUTH_PARAM
-        ]
-    )
-    return urlunsplit(("", "", parsed.path or "/", query, ""))
-
-
-def _add_show_page_reauth_param(value: str) -> str:
-    target = _strip_show_page_reauth_param(value)
-    parsed = urlsplit(target)
-    params = parse_qsl(parsed.query, keep_blank_values=True)
-    params.append((REMOTE_SHOW_PAGE_REAUTH_PARAM, "1"))
-    return urlunsplit(("", "", parsed.path or "/", urlencode(params), ""))
-
-
 def _oauth_callback_arg(name: str) -> str | None:
     return request.args.get(name) or request.args.get(f"amp;{name}")
-
-
-def _show_page_id_from_private_route(path: str) -> str | None:
-    match = re.match(r"^/show/([^/]+)(?:/|$)", path or "")
-    if match is None:
-        return None
-    try:
-        from core.show_pages import validate_session_id
-
-        return validate_session_id(unquote(match.group(1)))
-    except Exception:
-        return None
 
 
 def _redirect_to_vibe_cloud_login(
     config: V2Config,
     *,
     next_target: Any | None = None,
-    show_page_reauth: bool = False,
 ):
     from vibe import remote_access
 
@@ -1875,10 +1840,7 @@ def _redirect_to_vibe_cloud_login(
         if next_target is not None
         else (request.full_path if request.query_string else request.path)
     )
-    next_target = _strip_show_page_reauth_param(_strip_oauth_retry_param(raw_next))
-    if show_page_reauth:
-        next_target = _add_show_page_reauth_param(next_target)
-    show_page_id = _show_page_id_from_private_route(urlsplit(next_target).path)
+    next_target = _strip_oauth_retry_param(raw_next)
     rid = secrets.token_urlsafe(18)
     state = _make_oauth_state(
         cloud.session_secret,
@@ -1904,7 +1866,6 @@ def _redirect_to_vibe_cloud_login(
         next_target=next_target,
         device_hash=_oauth_device_hash(cloud.session_secret, device_id),
         redirect_uri=redirect_uri,
-        show_page_id=show_page_id,
     )
     oauth_cookie = _make_oauth_cookie(
         cloud.session_secret,
@@ -1914,7 +1875,6 @@ def _redirect_to_vibe_cloud_login(
             "code_verifier": code_verifier,
             "next": next_target,
             "redirect_uri": redirect_uri,
-            "show_page_id": show_page_id,
             "exp": int(datetime.now().timestamp()) + REMOTE_OAUTH_HANDSHAKE_TTL_SECONDS,
         },
     )
@@ -1925,7 +1885,6 @@ def _redirect_to_vibe_cloud_login(
         nonce,
         code_challenge,
         redirect_uri=redirect_uri,
-        show_page_id=show_page_id,
     )
     response.set_cookie(
         REMOTE_OAUTH_COOKIE_NAME,
@@ -2462,27 +2421,6 @@ def enforce_remote_access_cookie():
         payload = None
     if payload is not None:
         context = context_from_session_payload(payload)
-        if request.method == "GET" and context.instance_access_source != "show_page_email":
-            show_page_id = _show_page_id_from_private_route(request.path)
-            if show_page_id is not None:
-                resource_allowed = (
-                    context.can_use_show_page(show_page_id)
-                    or _show_page_resource_access_allowed(context, show_page_id)
-                )
-                reauth_attempted = request.args.get(REMOTE_SHOW_PAGE_REAUTH_PARAM) == "1"
-                wants_html = not markdown_show_request and "text/html" in request.headers.get("Accept", "")
-                raw_next = request.full_path if request.query_string else request.path
-                if reauth_attempted and resource_allowed and wants_html:
-                    return redirect(_strip_show_page_reauth_param(raw_next))
-                if not resource_allowed:
-                    if markdown_show_request:
-                        return _show_page_markdown_error_response("forbidden", 403)
-                    if not wants_html:
-                        return jsonify({"ok": False, "error": "remote_access_login_required"}), 401
-                    if not reauth_attempted:
-                        if _auth_rate_limited():
-                            return _auth_rate_limit_response()
-                        return _redirect_to_vibe_cloud_login(config, show_page_reauth=True)
         g.authorization_context = context
         g.remote_session_identity = identity
         g.remote_session_payload = payload
@@ -2501,49 +2439,6 @@ def enforce_remote_access_cookie():
         target = request.full_path if request.query_string else request.path
         return redirect(f"/auth/login?{urlencode({'next': _safe_remote_redirect_target(target)})}")
     return jsonify({"ok": False, "error": "remote_access_login_required"}), 401
-
-
-@app.before_request
-def enforce_show_page_email_scope():
-    """Keep an email-grant session inside its one signed Show Page subtree."""
-
-    config = _load_remote_access_config()
-    if config is None or not _is_remote_access_request(config):
-        return None
-    context = getattr(g, "authorization_context", None)
-    if context is None:
-        from vibe.authorization import context_from_session_payload
-
-        payload = _resolved_remote_session_payload(config)
-        if payload is not None:
-            context = context_from_session_payload(payload)
-    if context is None or context.instance_access_source != "show_page_email":
-        return None
-
-    path = request.path or ""
-    public_static = (
-        path.startswith("/assets/")
-        or path.startswith(f"{_SHOW_RUNTIME_VENDOR_PREFIX}/")
-        or path.startswith("/p/")
-        or path == "/favicon.ico"
-        or path in _PWA_PUBLIC_ASSETS
-        or path
-        in {
-            _SHOW_RUNTIME_PUBLIC_CLIENT_SHIM_PATH,
-            _SHOW_RUNTIME_PUBLIC_REACT_REFRESH_SHIM_PATH,
-            "/auth/callback",
-            "/auth/show-identity/callback",
-            "/auth/logout",
-            "/health",
-        }
-    )
-    expected_prefix = f"/show/{context.show_page_id}" if context.show_page_id else ""
-    exact_show_page = bool(
-        expected_prefix and (path == expected_prefix or path.startswith(f"{expected_prefix}/"))
-    )
-    if public_static or exact_show_page:
-        return None
-    return jsonify({"ok": False, "error": "show_page_access_forbidden"}), 403
 
 
 def _request_authorization_context(context: Any = None):
@@ -3705,16 +3600,10 @@ def _websocket_context_authorized(
 ) -> bool:
     if not context.has_role(minimum_role):
         return False
-    if context.instance_access_source == "show_page_email":
-        if project_session_id is None or not context.can_use_show_page(project_session_id):
-            return False
-        return True
     if project_session_id is None or _has_runtime_owner_access(context):
         return True
     if minimum_role == "viewer":
-        # §3.2: /show admission is the Instance Viewer role alone, independent of
-        # the Project ACL (which stays an edit/create requirement in ShowPageStore).
-        return context.has_role("viewer") and _show_page_resource_access_allowed(context, project_session_id)
+        return context.has_role("viewer")
     return _project_session_access_allowed(context, project_session_id, minimum_role)
 
 
@@ -3723,14 +3612,10 @@ def _project_session_access_allowed(context: Any, session_id: str, minimum_role:
 
     if context is None:
         return False
-    if context.instance_access_source == "show_page_email":
-        return minimum_role == "viewer" and context.can_use_show_page(session_id)
     if _has_runtime_owner_access(context):
         return True
     if not context.has_role(minimum_role):
         return False
-    if minimum_role == "viewer" and context.can_use_show_page(session_id):
-        return True
     engine = _projects_engine()
     with engine.connect() as conn:
         role = project_access_service.get_effective_session_role(
@@ -3751,11 +3636,7 @@ async def _wait_for_project_session_access_loss(
         event_type, _payload = await queue.get()
         if event_type != "authorization.changed":
             continue
-        if not _project_session_access_allowed(
-            context,
-            session_id,
-            minimum_role,
-        ) or not _show_page_resource_access_allowed(context, session_id):
+        if not _project_session_access_allowed(context, session_id, minimum_role):
             return
 
 
@@ -3775,34 +3656,15 @@ async def _wait_for_show_page_access_loss(
 
 
 def _show_page_resource_access_allowed(context: Any, session_id: str) -> bool:
-    """§3.2 ``/show`` admission: Instance Viewer role alone, never an email grant.
+    """§3.2 ``/show`` admission: the Instance Viewer role alone."""
 
-    The Workbench is reachable by every Instance role (owner/editor/viewer) and
-    independent of the sharing list. A signed ``show_page_email`` session is a
-    ``/p``-only read visitor, so it never enters ``/show``. show_page has no
-    Resource ACL row anymore, so nothing is read from ``resource_access_service``.
-    ``session_id`` is retained for call-site symmetry but the decision does not
-    depend on it.
-    """
-
-    if context is None:
-        return False
-    return context.has_role("viewer") and context.instance_access_source != "show_page_email"
+    return context is not None and context.has_role("viewer")
 
 
 def _show_page_mutation_allowed(context: Any) -> bool:
-    """§3.2 mutation boundary: only an Instance Editor/owner may drive ``/show``.
+    """§3.2 mutation boundary: only an Instance Editor/owner may drive ``/show``."""
 
-    ``/show`` reads admit every Instance Viewer, but the route also forwards
-    POST/PUT/PATCH/DELETE to Show Runtime and exposes a live HMR websocket —
-    both mutation surfaces. Viewers stay read-only: mutations and HMR require
-    ``has_role("editor")``. A ``show_page_email`` session is Viewer-only, so it
-    can never pass an Editor check.
-    """
-
-    if context is None:
-        return False
-    return context.has_role("editor") and context.instance_access_source != "show_page_email"
+    return context is not None and context.has_role("editor")
 
 
 async def _wait_for_remote_session_authorization_loss(
@@ -7028,7 +6890,6 @@ def remote_access_auth_callback():
         handshake_nonce = cookie_state.get("nonce")
         next_target = cookie_state.get("next")
         redirect_uri = str(cookie_state.get("redirect_uri") or cloud.redirect_uri)
-        expected_show_page_id = cookie_state.get("show_page_id")
     elif store_record is not None and _oauth_store_record_device_bound(cloud.session_secret, store_record):
         # Store-fallback for the iOS standalone PWA case, where the handshake cookie's
         # state desyncs (authorize ran in a separate in-app-browser context). Gated on
@@ -7041,7 +6902,6 @@ def remote_access_auth_callback():
         handshake_nonce = store_record.get("nonce")
         next_target = store_record.get("next")
         redirect_uri = str(store_record.get("redirect_uri") or cloud.redirect_uri)
-        expected_show_page_id = store_record.get("show_page_id")
     else:
         # Neither the cookie nor the server-side store yielded the handshake.
         # Rate-limited: this branch is unauthenticated-reachable.
@@ -7071,16 +6931,6 @@ def remote_access_auth_callback():
         session_claims = result.get("session_claims")
         if not isinstance(session_claims, dict):
             raise remote_access.OAuthCodeExchangeError("invalid_session_claims")
-        if "vibe_show_page_id" in session_claims and (
-            not isinstance(expected_show_page_id, str)
-            or session_claims.get("vibe_show_page_id") != expected_show_page_id
-        ):
-            raise remote_access.OAuthCodeExchangeError("invalid_show_page_id")
-        if (
-            isinstance(expected_show_page_id, str)
-            and session_claims.get("vibe_show_page_id") == expected_show_page_id
-        ):
-            next_target = _strip_show_page_reauth_param(next_target)
     except Exception as exc:
         # Unauthenticated-reachable (valid handshake + bad code), so rate-limited.
         _log_oauth_callback_failure("code_exchange", exc)
@@ -13521,14 +13371,11 @@ def _limited_show_access_grant_is_current(access: Any, grant: Any) -> bool:
 def _show_limited_viewer_is_allowed(
     context: Any,
     access: Any,
-    page_id: str,
-    *,
-    allow_page_scoped: bool = True,
 ) -> bool:
     allowlisted = _limited_show_access_admits(
         access, _show_access_visitor_from_context(context)
     )
-    return allowlisted or (allow_page_scoped and context.can_use_show_page(page_id))
+    return allowlisted
 
 
 async def _show_public_request_author() -> dict[str, str] | None:
@@ -15745,16 +15592,11 @@ async def serve_public_show_page(share_id, asset_path):
                         if not _show_limited_viewer_is_allowed(
                             authenticated_context,
                             access,
-                            page.session_id,
-                            allow_page_scoped=False,
                         ):
                             if markdown_requested:
                                 return _show_page_markdown_error_response("forbidden", 403)
                             return _show_page_access_denied_response(
-                                include_back_link=(
-                                    authenticated_context.instance_access_source
-                                    != "show_page_email"
-                                )
+                                include_back_link=True
                             )
                         # The current identity may be allowed again, but the
                         # old lease must not be treated as valid guest access.
@@ -15783,14 +15625,11 @@ async def serve_public_show_page(share_id, asset_path):
                     if not _show_limited_viewer_is_allowed(
                         authenticated_context,
                         access,
-                        page.session_id,
                     ):
                         if markdown_requested:
                             return _show_page_markdown_error_response("forbidden", 403)
                         return _show_page_access_denied_response(
-                            include_back_link=(
-                                authenticated_context.instance_access_source != "show_page_email"
-                            )
+                            include_back_link=True
                         )
                     if markdown_requested:
                         limited_authenticated = True

@@ -65,7 +65,7 @@ _SESSION_BROWSER_ID_RE = re.compile(r"\A[A-Za-z0-9_-]{24,64}\Z")
 OAUTH_ID_TOKEN_CLOCK_LEEWAY_SECONDS = 30
 _INSTANCE_ACCESS_ROLES = frozenset({"owner", "member", "editor", "viewer"})
 _INSTANCE_ACCESS_SOURCES = frozenset(
-    {"owner", "public_instance", "email", "email_domain", "organization_group", "show_page_email"}
+    {"owner", "public_instance", "email", "email_domain", "organization_group"}
 )
 _ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
 _INSTANCE_KINDS = frozenset({"personal", "organization"})
@@ -153,7 +153,7 @@ _RESOURCE_ACL_MAX_REVISION = (1 << 53) - 1
 _RESOURCE_ACL_PENDING_VAULT_RELEASE_PREFIX = "resource_acl_pending_vault_release:"
 _INSTANCE_ACCESS_ROLES = frozenset({"owner", "member", "editor", "viewer"})
 _INSTANCE_ACCESS_SOURCES = frozenset(
-    {"owner", "public_instance", "email", "email_domain", "organization_group", "show_page_email"}
+    {"owner", "public_instance", "email", "email_domain", "organization_group"}
 )
 _ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
 _BLOCKED_PAIRING_BACKEND_HOSTS = {
@@ -1668,50 +1668,13 @@ def _known_kind_requires_runtime_pairing(config: V2Config) -> bool:
     return _normalized_instance_kind(config.remote_access.vibe_cloud.instance_kind) is not None
 
 
-def _is_exact_show_page_grant(
-    identity: Mapping[str, Any],
-    record: Mapping[str, Any] | None = None,
-) -> bool:
-    candidates: list[Mapping[str, Any]] = [identity]
-    if isinstance(record, Mapping):
-        claims = record.get("claims")
-        if isinstance(claims, Mapping):
-            candidates.append(claims)
-    return any(
-        candidate.get("vibe_instance_access_source") == "show_page_email"
-        and isinstance(candidate.get("vibe_show_page_id"), str)
-        and bool(candidate["vibe_show_page_id"].strip())
-        for candidate in candidates
-    )
-
-
 def binding_is_ready(config: V2Config, identity: Mapping[str, Any] | None = None) -> bool:
     """C3: single gate for every authorization consumer.
 
     A missing durable row is the fail-open legacy no-kind path. Once a row
-    exists, only ``ready`` for the current pairing admits kind-specific
-    bypass. Exact show_page_email grants are independent of instance kind.
+    exists, only ``ready`` for the current pairing admits kind-specific bypass.
     """
 
-    if identity is not None:
-        if _is_exact_show_page_grant(identity):
-            return True
-        from storage import remote_access_authorization_service
-
-        instance_id = str(identity.get("instance_id") or config.remote_access.vibe_cloud.instance_id or "")
-        subject = str(identity.get("sub") or "")
-        try:
-            if subject and instance_id:
-                record = remote_access_authorization_service.load_reference_record(
-                    reference=str(identity.get("authorization_ref") or ""),
-                    instance_id=instance_id,
-                    subject=subject,
-                    now=int(time.time()),
-                )
-                if record is not None and _is_exact_show_page_grant(identity, record):
-                    return True
-        except Exception:
-            pass
     try:
         from storage import remote_access_authorization_service
 
@@ -4762,20 +4725,6 @@ def session_claims_from_oidc(config: V2Config, claims: Mapping[str, Any]) -> dic
         "vibe_instance_role": instance_role,
         "vibe_instance_access_source": access_source,
     }
-    show_page_claim_present = "vibe_show_page_id" in claims
-    if show_page_claim_present:
-        show_page_id = _oidc_claim_string(
-            claims.get("vibe_show_page_id"),
-            reason="invalid_show_page_id",
-            limit=200,
-        )
-        if "/" in show_page_id or "\\" in show_page_id:
-            raise OAuthCodeExchangeError("invalid_show_page_id")
-        session_claims["vibe_show_page_id"] = show_page_id
-    elif access_source == "show_page_email":
-        raise OAuthCodeExchangeError("invalid_show_page_id")
-    if access_source == "show_page_email" and instance_role != "viewer":
-        raise OAuthCodeExchangeError("invalid_instance_role")
     raw_authorization_revision = claims.get(_AUTHORIZATION_REVISION_KEY)
     if raw_authorization_revision is None:
         if _authorization_revision_sync_configured(config):
@@ -4875,20 +4824,8 @@ _SESSION_AUTHORIZATION_CLAIM_KEYS = (
     "vibe_instance_role",
     "vibe_instance_access_source",
     "vibe_instance_authorization_revision",
-    "vibe_show_page_id",
     *_ORGANIZATION_SESSION_CLAIM_KEYS,
 )
-
-
-def _authorization_scope(
-    config: V2Config,
-    claims: Mapping[str, Any],
-) -> tuple[str, str]:
-    if claims.get("vibe_instance_access_source") == "show_page_email":
-        show_page_id = claims.get("vibe_show_page_id")
-        if isinstance(show_page_id, str) and show_page_id:
-            return "show_page", show_page_id
-    return "instance", str(config.remote_access.vibe_cloud.instance_id)
 
 
 def _authorization_claims_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -4942,8 +4879,9 @@ def _store_scoped_authorization(
     )
     if persisted_kind is not None:
         stored_claims["vibe_instance_kind"] = persisted_kind
-    scope_kind, scope_ref = _authorization_scope(config, stored_claims)
-    if expected_binding_generation is None and scope_kind != "show_page":
+    scope_kind = "instance"
+    scope_ref = str(config.remote_access.vibe_cloud.instance_id or "")
+    if expected_binding_generation is None:
         # Recapturing live generation here is the TOCTOU: a transition can
         # complete between the caller's persist-kind CAS and this write, and
         # the recaptured gen would let a stale response resurrect a current
@@ -5166,7 +5104,8 @@ def _load_authorization_record(
     if checked_at <= 0:
         return None
     claims = {**validated, "claims_issued_at": checked_at}
-    scope_kind, scope_ref = _authorization_scope(config, claims)
+    scope_kind = "instance"
+    scope_ref = instance_id
     existing = remote_access_authorization_service.load_scoped(
         instance_id=instance_id,
         subject=subject,
@@ -5226,12 +5165,11 @@ def _validated_authorization_payload(
     # Callers that already captured the gate pass it in; this function must
     # not trigger a second live read inside the same evaluation.
     gate = binding_is_ready(config, identity) if binding_gate is None else binding_gate
-    if not gate and not _is_exact_show_page_grant(identity, record):
+    if not gate:
         return None
     if (
         _known_kind_requires_runtime_pairing(config)
         and not _runtime_pairing_available(config)
-        and not _is_exact_show_page_grant(identity, record)
     ):
         return None
     claims = record.get("claims")
@@ -5239,9 +5177,7 @@ def _validated_authorization_payload(
         return None
     from vibe.authorization import instance_kind_is_unsupported
 
-    if instance_kind_is_unsupported(
-        claims.get("vibe_instance_kind")
-    ) and not _is_exact_show_page_grant(identity, record):
+    if instance_kind_is_unsupported(claims.get("vibe_instance_kind")):
         # A present-but-unrecognized persisted kind (corruption or a newer
         # release's artifact) is not a legacy no-kind row. Fail closed so the
         # row revalidates instead of falling through to legacy-current.
@@ -5295,8 +5231,6 @@ def _fetch_authorization_context(
     subject = str(identity.get("sub") or "").strip()
     email = str(identity.get("email") or "").strip()
     request_payload: dict[str, Any] = {"sub": subject, "email": email}
-    if record is not None and record.get("scope_kind") == "show_page":
-        request_payload["show_page_id"] = record.get("scope_ref")
     try:
         response = _device_json_request(
             config,
@@ -5696,7 +5630,6 @@ def resolve_current_authorization(
         and record is not None
         and not _runtime_pairing_available(config)
         and _known_kind_requires_runtime_pairing(config)
-        and not _is_exact_show_page_grant(identity, record)
     ):
         return AuthorizationResolution("unavailable", reason="pairing_unavailable")
     if payload is None:
@@ -5722,30 +5655,25 @@ def resolve_current_authorization(
         stored_claims = record.get("claims")
         if isinstance(stored_claims, Mapping):
             stored_kind = _normalized_instance_kind(stored_claims.get("vibe_instance_kind"))
-    is_exact_show_page = _is_exact_show_page_grant(identity, record)
     kindless_current_needs_refresh = (
-        not is_exact_show_page
-        and instance_kind is not None
+        instance_kind is not None
         and stored_kind is None
         and record is not None
         and record.get("authorization_state") == "current"
     )
     kind_mismatch = (
-        not is_exact_show_page
-        and (
-            (
-                instance_kind is not None
-                and stored_kind is not None
-                and stored_kind != instance_kind
-            )
-            or (
-                instance_kind is not None
-                and stored_kind is None
-                and record is not None
-                and record.get("authorization_state") == "stale"
-            )
-            or kindless_current_needs_refresh
+        (
+            instance_kind is not None
+            and stored_kind is not None
+            and stored_kind != instance_kind
         )
+        or (
+            instance_kind is not None
+            and stored_kind is None
+            and record is not None
+            and record.get("authorization_state") == "stale"
+        )
+        or kindless_current_needs_refresh
     )
     if kind_mismatch:
         # A row tagged with the previous kind (or invalidated by a
@@ -5948,7 +5876,6 @@ def authorization_url(
     nonce: str,
     code_challenge: str,
     redirect_uri: str | None = None,
-    show_page_id: str | None = None,
 ) -> str:
     cloud = config.remote_access.vibe_cloud
     params = {
@@ -5963,8 +5890,6 @@ def authorization_url(
     }
     if cloud.dev_login_hint:
         params["login_hint"] = cloud.dev_login_hint
-    if show_page_id:
-        params["show_page_id"] = show_page_id
     return f"{cloud.authorization_endpoint}?{urllib.parse.urlencode(params)}"
 
 
@@ -6089,7 +6014,6 @@ def store_oauth_handshake(
     next_target: str,
     device_hash: str | None = None,
     redirect_uri: str | None = None,
-    show_page_id: str | None = None,
 ) -> None:
     """Persist a login handshake in memory, keyed by the signed state's random id.
 
@@ -6105,7 +6029,6 @@ def store_oauth_handshake(
         "next": next_target,
         "device_hash": device_hash,
         "redirect_uri": redirect_uri,
-        "show_page_id": show_page_id,
         "exp": now + OAUTH_HANDSHAKE_TTL_SECONDS,
     }
     with _OAUTH_STORE_LOCK:
