@@ -23,7 +23,7 @@ class SupersededCollectionRead extends Error {
  * generation, including reconciliation reads that do not directly render. */
 const createCollectionReadAuthority = <T>(
   readCollection: () => Promise<T>,
-  refreshCollection: () => Promise<T> = readCollection,
+  refreshCollection?: () => Promise<unknown>,
 ): CollectionReadAuthority<T> => {
   let generation = 0;
   const readFrom = async (reader: () => Promise<T>): Promise<CollectionReadResult<T>> => {
@@ -37,10 +37,16 @@ const createCollectionReadAuthority = <T>(
     }
   };
   const read = () => readFrom(readCollection);
+  const refresh = refreshCollection
+    ? async () => {
+      await refreshCollection();
+      return read();
+    }
+    : read;
 
   return {
     read,
-    refresh: () => readFrom(refreshCollection),
+    refresh,
     readValue: async () => {
       const result = await read();
       if (result.kind === 'stale') throw new SupersededCollectionRead();
@@ -56,7 +62,10 @@ export const createSourceCollectionReadAuthority = (
 
 export const createAgentCollectionReadAuthority = (
   api: Pick<ModelsApi, 'listAgents'> & Partial<Pick<ModelsApi, 'refreshAgentPresence'>> = modelsApi,
-): CollectionReadAuthority<AgentSupply[]> => createCollectionReadAuthority(
-  () => api.listAgents(),
-  () => api.refreshAgentPresence?.() ?? api.listAgents(),
-);
+): CollectionReadAuthority<AgentSupply[]> => {
+  const refreshPresence = api.refreshAgentPresence;
+  return createCollectionReadAuthority(
+    () => api.listAgents(),
+    refreshPresence ? () => refreshPresence() : undefined,
+  );
+};

@@ -231,12 +231,15 @@ describe('SettingsModelsPage surface branches', () => {
       { ...directAgent('opencode'), cli_present: false },
     ];
     vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
-    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue(unavailable);
-    vi.mocked(modelsApi.refreshAgentPresence).mockResolvedValue([
+    const available = [
       unavailable[0],
       directAgent('codex'),
       unavailable[2],
-    ]);
+    ];
+    vi.spyOn(modelsApi, 'listAgents')
+      .mockResolvedValueOnce(unavailable)
+      .mockResolvedValue(available);
+    vi.mocked(modelsApi.refreshAgentPresence).mockResolvedValue(available);
     vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
     vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
 

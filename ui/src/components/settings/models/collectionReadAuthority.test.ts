@@ -46,20 +46,23 @@ describe('collection read authority', () => {
     await expect(first).resolves.toEqual({ kind: 'stale' });
   });
 
-  it('publishes deep CLI discovery through the same Agent collection generation', async () => {
+  it('publishes deep CLI discovery after a concurrent fast read', async () => {
     const refresh = deferred<AgentSupply[]>();
     const api = {
-      listAgents: vi.fn().mockResolvedValue([agent('direct')]),
+      listAgents: vi.fn()
+        .mockResolvedValueOnce([agent('direct')])
+        .mockResolvedValueOnce([agent('hub')]),
       refreshAgentPresence: vi.fn().mockReturnValue(refresh.promise),
     };
     const authority = createAgentCollectionReadAuthority(api);
 
-    await expect(authority.read()).resolves.toEqual({ kind: 'current', value: [agent('direct')] });
     const pending = authority.refresh();
+    await expect(authority.read()).resolves.toEqual({ kind: 'current', value: [agent('direct')] });
     refresh.resolve([agent('hub')]);
 
     await expect(pending).resolves.toEqual({ kind: 'current', value: [agent('hub')] });
     expect(api.refreshAgentPresence).toHaveBeenCalledOnce();
+    expect(api.listAgents).toHaveBeenCalledTimes(2);
   });
 
   it('keeps collection endpoints private to the generation authority', () => {

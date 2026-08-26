@@ -1640,6 +1640,53 @@ def test_resolve_cli_paths_queries_npm_prefix_once_for_a_backend_batch(
     assert calls == [[str(npm_path), "config", "get", "prefix"]]
 
 
+def test_resolve_cli_paths_finds_backend_in_inactive_nvm_version_without_npm_query(
+    monkeypatch,
+    tmp_path,
+    only_tmp_binaries,
+):
+    active_npm = (
+        tmp_path
+        / ".nvm"
+        / "versions"
+        / "node"
+        / "v22.18.0"
+        / "bin"
+        / "npm"
+    )
+    active_npm.parent.mkdir(parents=True, exist_ok=True)
+    active_npm.write_text("#!/bin/sh\n")
+    active_npm.chmod(0o755)
+    inactive_codex = (
+        tmp_path
+        / ".nvm"
+        / "versions"
+        / "node"
+        / "v18.20.0"
+        / "bin"
+        / "codex"
+    )
+    inactive_codex.parent.mkdir(parents=True, exist_ok=True)
+    inactive_codex.write_text("#!/bin/sh\n")
+    inactive_codex.chmod(0o755)
+
+    monkeypatch.setattr(api.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(
+        api.shutil,
+        "which",
+        lambda binary: str(active_npm) if binary == "npm" else None,
+    )
+    monkeypatch.setattr(
+        api.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail(
+            "an NVM bin match must not require npm prefix discovery"
+        ),
+    )
+
+    assert api.resolve_cli_paths(["codex"]) == {"codex": str(inactive_codex)}
+
+
 def test_install_agent_returns_resolved_path(monkeypatch):
     class CompletedProcess:
         returncode = 0
