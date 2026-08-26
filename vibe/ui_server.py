@@ -79,7 +79,9 @@ from vibe.model_service import MODEL_SERVICE_REFRESH_PATH
 from vibe.runtime import get_ui_dist_path, get_working_dir
 from vibe.sentry_integration import init_sentry
 from storage.delivery_states import ADMITTED_DELIVERY_STATES
+from storage.lock import MigrationLockTimeout
 from vibe.ui_memory_routes import register_memory_routes
+from vibe.upgrade import package_mutation_lock
 
 if TYPE_CHECKING:
     from core.show_runtime import ShowRuntimeUnavailableError
@@ -6536,35 +6538,43 @@ def _schedule_service_restart_for_config_fallback() -> dict[str, Any]:
         runtime.write_status("restarting", "restarting", status.get("service_pid"), status.get("ui_pid"))
         return schedule_restart(delay_seconds=0.0, trigger="web-ui-config", scope="service")
 
-    with _RESTART_CONTROL_LOCK:
-        if _restart_in_flight():
-            restart_status = runtime.read_json(runtime.get_restart_status_path()) or {}
-            pending = mark_pending_restart(
-                trigger="web-ui-config-pending",
-                scope="service",
-                reason="restart_in_progress",
-                restart_job_id=restart_status.get("job_id"),
-            )
-            if not _restart_in_flight():
-                try:
-                    from vibe.restart_supervisor import _pending_restart_path
+    def _mark_pending() -> dict[str, Any]:
+        restart_status = runtime.read_json(runtime.get_restart_status_path()) or {}
+        pending = mark_pending_restart(
+            trigger="web-ui-config-pending",
+            scope="service",
+            reason="restart_in_progress",
+            restart_job_id=restart_status.get("job_id"),
+        )
+        return {
+            "ok": True,
+            "pending_restart": pending,
+            "restart": restart_status,
+            "code": "restart_pending_after_in_progress",
+        }
 
-                    _pending_restart_path().unlink(missing_ok=True)
-                except OSError:
-                    logger.debug("Failed to remove stale pending restart marker", exc_info=True)
+    try:
+        with package_mutation_lock():
+            with _RESTART_CONTROL_LOCK:
+                if _restart_in_flight():
+                    pending_result = _mark_pending()
+                    if not _restart_in_flight():
+                        try:
+                            from vibe.restart_supervisor import _pending_restart_path
+
+                            _pending_restart_path().unlink(missing_ok=True)
+                        except OSError:
+                            logger.debug("Failed to remove stale pending restart marker", exc_info=True)
+                        restart = _schedule_restart()
+                        return {
+                            "ok": True,
+                            "restart": restart,
+                            "code": "restart_scheduled_after_in_flight_finished",
+                        }
+                    return pending_result
                 restart = _schedule_restart()
-                return {
-                    "ok": True,
-                    "restart": restart,
-                    "code": "restart_scheduled_after_in_flight_finished",
-                }
-            return {
-                "ok": True,
-                "pending_restart": pending,
-                "restart": restart_status,
-                "code": "restart_pending_after_in_progress",
-            }
-        restart = _schedule_restart()
+    except MigrationLockTimeout:
+        return _mark_pending()
     return {"ok": True, "restart": restart}
 
 
@@ -6641,27 +6651,50 @@ def control():
         # (a UI host/port change needs the UI server itself to come back up).
         # Only the platform-config flow opts into "service" (keep the Web UI up).
         scope = payload.get("scope") if payload.get("scope") in ("all", "service") else "all"
-        # Reject overlapping restarts: a service-only restart leaves the Web UI
-        # up, so a user (or another tab) could fire a second restart while the
-        # first supervisor is still bouncing the service — two jobs would race
-        # on the same pid files + lock. The check + schedule are held under one
-        # process lock so two concurrent requests can't both slip through.
-        with _RESTART_CONTROL_LOCK:
-            if _restart_in_flight():
-                return (
-                    jsonify(
-                        {
-                            "ok": False,
-                            "action": action,
-                            "error": "a restart is already in progress",
-                            "code": "restart_in_progress",
-                            "status": runtime.read_status(),
-                        }
-                    ),
-                    409,
-                )
-            runtime.write_status("restarting", "restarting", status.get("service_pid"), status.get("ui_pid"))
-            result = schedule_restart(delay_seconds=0.0, trigger="web-ui", scope=scope)
+
+        # The package lease prevents a supervisor from stopping this process
+        # while another process is replacing the environment. The process lock
+        # remains nested inside it to serialize concurrent Web requests.
+        try:
+            with package_mutation_lock():
+                with _RESTART_CONTROL_LOCK:
+                    if _restart_in_flight():
+                        return (
+                            jsonify(
+                                {
+                                    "ok": False,
+                                    "action": action,
+                                    "error": "a restart is already in progress",
+                                    "code": "restart_in_progress",
+                                    "status": runtime.read_status(),
+                                }
+                            ),
+                            409,
+                        )
+                    runtime.write_status(
+                        "restarting",
+                        "restarting",
+                        status.get("service_pid"),
+                        status.get("ui_pid"),
+                    )
+                    result = schedule_restart(
+                        delay_seconds=0.0,
+                        trigger="web-ui",
+                        scope=scope,
+                    )
+        except MigrationLockTimeout:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "action": action,
+                        "error": "a restart is already in progress",
+                        "code": "restart_in_progress",
+                        "status": runtime.read_status(),
+                    }
+                ),
+                409,
+            )
         return jsonify({"ok": True, "action": action, "restart": result, "status": runtime.read_status()})
     return jsonify({"ok": True, "action": action, "status": runtime.read_status()})
 

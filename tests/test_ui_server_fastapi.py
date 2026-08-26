@@ -2,12 +2,14 @@ import asyncio
 import gzip
 import json
 import threading
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
 
 from fastapi import Request as FastAPIRequest
 from storage.importer import ensure_sqlite_state
+from storage.lock import MigrationLockTimeout
 from vibe.ui_compat import (
     TEST_REMOTE_ADDR_HEADER,
     CompatApp,
@@ -2400,9 +2402,25 @@ def test_config_restart_fallback_schedules_when_in_flight_finishes_after_marker(
     runtime.write_json(runtime.get_restart_status_path(), restart_status)
     in_flight_results = iter([True, False])
     scheduled: list[dict] = []
+    mutation_lease_held = False
 
+    @contextmanager
+    def mutation_lock():
+        nonlocal mutation_lease_held
+        mutation_lease_held = True
+        try:
+            yield
+        finally:
+            mutation_lease_held = False
+
+    def schedule_restart(**kwargs):
+        assert mutation_lease_held is True
+        scheduled.append(kwargs)
+        return {"job_id": "followup"}
+
+    monkeypatch.setattr(ui_server, "package_mutation_lock", mutation_lock, raising=False)
     monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: next(in_flight_results))
-    monkeypatch.setattr(restart_supervisor, "schedule_restart", lambda **kwargs: scheduled.append(kwargs) or {"job_id": "followup"})
+    monkeypatch.setattr(restart_supervisor, "schedule_restart", schedule_restart)
     monkeypatch.setattr(runtime, "read_status", lambda: {"service_pid": 11, "ui_pid": 22})
 
     result = ui_server._schedule_service_restart_for_config_fallback()
@@ -2412,6 +2430,48 @@ def test_config_restart_fallback_schedules_when_in_flight_finishes_after_marker(
     assert result["restart"] == {"job_id": "followup"}
     assert scheduled == [{"delay_seconds": 0.0, "trigger": "web-ui-config", "scope": "service"}]
     assert runtime.read_json(restart_supervisor._pending_restart_path()) is None
+    assert mutation_lease_held is False
+
+
+def test_config_restart_fallback_marks_pending_when_package_lease_is_held(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import restart_supervisor
+    from vibe import runtime
+
+    runtime.get_restart_status_path().parent.mkdir(parents=True, exist_ok=True)
+
+    @contextmanager
+    def blocked_mutation_lock():
+        raise MigrationLockTimeout("package mutation is still running")
+        yield
+
+    monkeypatch.setattr(
+        ui_server,
+        "package_mutation_lock",
+        blocked_mutation_lock,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        ui_server,
+        "_restart_in_flight",
+        lambda: pytest.fail("status must be checked after acquiring the lease"),
+    )
+    monkeypatch.setattr(
+        restart_supervisor,
+        "schedule_restart",
+        lambda **kwargs: pytest.fail("restart must not be scheduled"),
+    )
+
+    result = ui_server._schedule_service_restart_for_config_fallback()
+
+    assert result["ok"] is True
+    assert result["code"] == "restart_pending_after_in_progress"
+    pending = runtime.read_json(restart_supervisor._pending_restart_path())
+    assert pending["reason"] == "restart_in_progress"
+    assert pending["trigger"] == "web-ui-config-pending"
 
 
 def test_static_ui_assets_use_cache_headers(monkeypatch, tmp_path):

@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import contextmanager, nullcontext
 import json
 import os
 import pytest
@@ -14,6 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from config import paths
+from storage.lock import MigrationLockTimeout
 from vibe import runtime
 from vibe import cli
 from vibe import remote_access
@@ -603,6 +605,21 @@ def test_cmd_restart_schedules_delayed_restart(monkeypatch, capsys):
     scheduled = {}
     stop_called = []
     start_called = []
+    mutation_lease_held = False
+
+    @contextmanager
+    def mutation_lock():
+        nonlocal mutation_lease_held
+        mutation_lease_held = True
+        try:
+            yield
+        finally:
+            mutation_lease_held = False
+
+    def schedule_restart(**kwargs):
+        assert mutation_lease_held is True
+        scheduled.update(kwargs)
+        return {"job_id": "job123"}
 
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/usr/local/bin/vibe")
     monkeypatch.setattr(
@@ -611,9 +628,11 @@ def test_cmd_restart_schedules_delayed_restart(monkeypatch, capsys):
         lambda **kwargs: scheduled.update(kwargs) or {"job_id": "job123"},
         raising=False,
     )
-    monkeypatch.setattr(cli, "schedule_restart", lambda **kwargs: scheduled.update(kwargs) or {"job_id": "job123"})
+    monkeypatch.setattr(cli, "schedule_restart", schedule_restart)
     monkeypatch.setattr(cli, "cmd_stop", lambda: stop_called.append(True))
     monkeypatch.setattr(cli, "cmd_vibe", lambda: start_called.append(True))
+    monkeypatch.setattr(cli, "package_mutation_lock", mutation_lock)
+    monkeypatch.setattr(cli, "restart_in_flight", lambda: False)
 
     assert cli._cmd_restart_with_delay(60) == 0
     assert scheduled == {
@@ -623,6 +642,7 @@ def test_cmd_restart_schedules_delayed_restart(monkeypatch, capsys):
     }
     assert stop_called == []
     assert start_called == []
+    assert mutation_lease_held is False
 
     output = capsys.readouterr().out
     assert "Restart scheduled in 1 minute." in output
@@ -635,6 +655,8 @@ def test_cmd_restart_schedules_delayed_restart_without_cached_vibe(monkeypatch):
 
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: None)
     monkeypatch.setattr(cli, "schedule_restart", lambda **kwargs: scheduled.update(kwargs) or {"job_id": "job456"})
+    monkeypatch.setattr(cli, "package_mutation_lock", nullcontext)
+    monkeypatch.setattr(cli, "restart_in_flight", lambda: False)
 
     assert cli._cmd_restart_with_delay(5) == 0
     assert scheduled == {
@@ -646,12 +668,75 @@ def test_cmd_restart_schedules_delayed_restart_without_cached_vibe(monkeypatch):
 
 def test_cmd_restart_schedules_supervisor_by_default(monkeypatch):
     calls = []
+    mutation_lease_held = False
+
+    @contextmanager
+    def mutation_lock():
+        nonlocal mutation_lease_held
+        mutation_lease_held = True
+        try:
+            yield
+        finally:
+            mutation_lease_held = False
+
+    def schedule_restart(**kwargs):
+        assert mutation_lease_held is True
+        calls.append(kwargs)
+        return {"job_id": "job789"}
 
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/usr/local/bin/vibe")
-    monkeypatch.setattr(cli, "schedule_restart", lambda **kwargs: calls.append(kwargs) or {"job_id": "job789"})
+    monkeypatch.setattr(cli, "package_mutation_lock", mutation_lock)
+    monkeypatch.setattr(cli, "restart_in_flight", lambda: False)
+    monkeypatch.setattr(cli, "schedule_restart", schedule_restart)
 
     assert cli._cmd_restart_with_delay(0) == 0
     assert calls == [{"delay_seconds": 0.0, "vibe_path": "/usr/local/bin/vibe", "trigger": "cli"}]
+    assert mutation_lease_held is False
+
+
+@pytest.mark.parametrize("delay_seconds", [0.0, 60.0])
+def test_cmd_restart_refuses_an_in_flight_restart(
+    monkeypatch,
+    capsys,
+    delay_seconds,
+):
+    monkeypatch.setattr(cli, "package_mutation_lock", nullcontext)
+    monkeypatch.setattr(cli, "restart_in_flight", lambda: True)
+    monkeypatch.setattr(
+        cli,
+        "schedule_restart",
+        lambda **kwargs: pytest.fail("restart must not be scheduled"),
+    )
+
+    assert cli._cmd_restart_with_delay(delay_seconds) == 2
+    assert "restart is already in progress" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("delay_seconds", [0.0, 60.0])
+def test_cmd_restart_fails_closed_when_package_lease_is_held(
+    monkeypatch,
+    capsys,
+    delay_seconds,
+):
+    @contextmanager
+    def blocked_mutation_lock():
+        raise MigrationLockTimeout("package mutation is still running")
+        yield
+
+    monkeypatch.setattr(cli, "package_mutation_lock", blocked_mutation_lock)
+    monkeypatch.setattr(
+        cli,
+        "restart_in_flight",
+        lambda: pytest.fail("status must be checked after acquiring the lease"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "schedule_restart",
+        lambda **kwargs: pytest.fail("restart must not be scheduled"),
+    )
+
+    assert cli._cmd_restart_with_delay(delay_seconds) == 2
+    assert "restart is already in progress" in capsys.readouterr().out
 
 
 def test_cmd_stop_ignores_absent_services(monkeypatch):

@@ -877,6 +877,11 @@ def test_restart_job_schedules_pending_followup_after_success(monkeypatch, tmp_p
         "restart_in_flight",
         lambda: pytest.fail("the supervisor follow-up path must bypass ordinary refusal"),
     )
+    monkeypatch.setattr(
+        restart_supervisor,
+        "package_mutation_lock",
+        lambda: pytest.fail("the supervisor follow-up path must bypass human-entry acquire"),
+    )
 
     original_schedule_restart = restart_supervisor.schedule_restart
 

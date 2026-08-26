@@ -96,6 +96,7 @@ from storage.pagination import (
     page_sequence,
     pagination_payload,
 )
+from storage.lock import MigrationLockTimeout
 from storage.read_only_query import ReadOnlyQueryError, run_read_only_query
 from storage.settings_service import make_scope_id
 
@@ -14878,9 +14879,23 @@ def _format_restart_delay(delay_seconds: float) -> str:
     return f"{delay_seconds:g} seconds"
 
 
+def _restart_in_progress_exit() -> int:
+    print("\033[33mA restart is already in progress; restart was not scheduled.\033[0m")
+    return 2
+
+
 def _schedule_delayed_restart(delay_seconds: float) -> int:
-    current_vibe_path = cache_running_vibe_path()
-    result = schedule_restart(delay_seconds=delay_seconds, vibe_path=current_vibe_path, trigger="cli")
+    try:
+        with package_mutation_lock():
+            if restart_in_flight():
+                return _restart_in_progress_exit()
+            result = schedule_restart(
+                delay_seconds=delay_seconds,
+                vibe_path=cache_running_vibe_path(),
+                trigger="cli",
+            )
+    except MigrationLockTimeout:
+        return _restart_in_progress_exit()
     print(f"Restart scheduled in {_format_restart_delay(delay_seconds)}.")
     print(f"Job ID: {result['job_id']}")
     print("This command exits immediately; the restart supervisor will run in the background.")
@@ -14891,7 +14906,17 @@ def _cmd_restart_with_delay(delay_seconds: float) -> int:
     if delay_seconds > 0:
         return _schedule_delayed_restart(delay_seconds)
 
-    result = schedule_restart(delay_seconds=0.0, vibe_path=cache_running_vibe_path(), trigger="cli")
+    try:
+        with package_mutation_lock():
+            if restart_in_flight():
+                return _restart_in_progress_exit()
+            result = schedule_restart(
+                delay_seconds=0.0,
+                vibe_path=cache_running_vibe_path(),
+                trigger="cli",
+            )
+    except MigrationLockTimeout:
+        return _restart_in_progress_exit()
     print("Restart scheduled.")
     print(f"Job ID: {result['job_id']}")
     print("Run `vibe status` to inspect the restart result.")

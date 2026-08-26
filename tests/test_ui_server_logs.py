@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
 from config import paths
+from storage.lock import MigrationLockTimeout
+from vibe import ui_server
 from vibe.ui_server import app
 from vibe import runtime
 from tests.ui_server_test_helpers import csrf_headers
@@ -319,13 +322,29 @@ def test_control_restart_schedules_restart_job(monkeypatch, tmp_path):
     runtime.write_status("running", detail="running", service_pid=12345, ui_pid=67890)
     paths.get_runtime_pid_path().write_text("12345", encoding="utf-8")
     calls = []
+    mutation_lease_held = False
 
     import vibe.restart_supervisor as restart_supervisor
 
+    @contextmanager
+    def mutation_lock():
+        nonlocal mutation_lease_held
+        mutation_lease_held = True
+        try:
+            yield
+        finally:
+            mutation_lease_held = False
+
+    def schedule_restart(**kwargs):
+        assert mutation_lease_held is True
+        calls.append(kwargs)
+        return {"job_id": "job123", "state": "scheduled"}
+
+    monkeypatch.setattr(ui_server, "package_mutation_lock", mutation_lock, raising=False)
     monkeypatch.setattr(
         restart_supervisor,
         "schedule_restart",
-        lambda **kwargs: calls.append(kwargs) or {"job_id": "job123", "state": "scheduled"},
+        schedule_restart,
     )
 
     client = app.test_client()
@@ -344,6 +363,48 @@ def test_control_restart_schedules_restart_job(monkeypatch, tmp_path):
     calls.clear()
     client.post("/api/control", json={"action": "restart", "scope": "service"}, headers=csrf_headers(client))
     assert calls == [{"delay_seconds": 0.0, "trigger": "web-ui", "scope": "service"}]
+    assert mutation_lease_held is False
+
+
+def test_control_restart_fails_closed_when_package_lease_is_held(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    runtime.write_status("running", detail="running", service_pid=12345, ui_pid=67890)
+
+    import vibe.restart_supervisor as restart_supervisor
+
+    @contextmanager
+    def blocked_mutation_lock():
+        raise MigrationLockTimeout("package mutation is still running")
+        yield
+
+    monkeypatch.setattr(
+        ui_server,
+        "package_mutation_lock",
+        blocked_mutation_lock,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        ui_server,
+        "_restart_in_flight",
+        lambda: (_ for _ in ()).throw(AssertionError("status must be checked after acquiring the lease")),
+    )
+    monkeypatch.setattr(
+        restart_supervisor,
+        "schedule_restart",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("restart must not be scheduled")),
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/api/control",
+        json={"action": "restart"},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 409
+    assert response.get_json()["code"] == "restart_in_progress"
+    assert response.get_json()["error"] == "a restart is already in progress"
 
 
 def test_control_restart_rejects_overlapping_restart(monkeypatch, tmp_path):
