@@ -30,54 +30,44 @@ class BackendRestartCoordinator:
     def __init__(
         self,
         controller: Any,
-        refresh: Callable[..., Awaitable[None]],
+        refresh: Callable[[str, bool], Awaitable[None]],
         *,
-        preflight: Callable[[str], Awaitable[object]] | None = None,
         drain_timeout: float | None = None,
         poll_interval: float = _POLL_INTERVAL_SECONDS,
     ) -> None:
         self.controller = controller
         self._refresh = refresh
-        self._preflight = preflight
         self._drain_timeout = _configured_drain_timeout() if drain_timeout is None else max(0.0, drain_timeout)
         self._poll_interval = max(0.001, poll_interval)
         self._tasks: dict[str, asyncio.Task[None]] = {}
-        self._pending_refreshes: dict[str, object] = {}
         self._request_locks: dict[str, asyncio.Lock] = {}
 
     async def request_restart(self, backend: str) -> str:
-        """Begin or join a restart, waiting only when no work is draining."""
+        """Begin or join a restart and return without waiting for a long drain."""
         lock = self._request_locks.setdefault(backend, asyncio.Lock())
         async with lock:
             existing = self._tasks.get(backend)
             if existing is not None and not existing.done():
-                if self._preflight is not None:
-                    prepared = await self._preflight(backend)
-                    self._pending_refreshes[backend] = prepared
-                task = existing
-                had_active_work = await self._has_active_turns(backend)
-            else:
-                agent_service = self.controller.agent_service
-                session_turns = self.controller.session_turns
-                agent_service.begin_backend_drain(backend)
-                session_turns.begin_backend_drain(backend)
-                try:
-                    await agent_service.prepare_backend_restart(backend)
-                    prepared = await self._preflight(backend) if self._preflight is not None else None
-                except Exception:
-                    agent_service.end_backend_drain(backend)
-                    await session_turns.end_backend_drain(backend, resume_deferred=False)
-                    raise
-                had_active_work = await self._has_active_turns(backend)
-                task = asyncio.create_task(
-                    self._run(backend, prepared),
-                    name=f"backend-restart:{backend}",
-                )
-                self._tasks[backend] = task
-                task.add_done_callback(lambda completed, name=backend: self._on_done(name, completed))
+                return "draining"
 
-        # An idle acknowledgement means the requested generation is live. Only
-        # an active drain may return before the cutover itself completes.
+            agent_service = self.controller.agent_service
+            session_turns = self.controller.session_turns
+            agent_service.begin_backend_drain(backend)
+            session_turns.begin_backend_drain(backend)
+            try:
+                await agent_service.prepare_backend_restart(backend)
+            except Exception:
+                agent_service.end_backend_drain(backend)
+                await session_turns.end_backend_drain(backend, resume_deferred=False)
+                raise
+            had_active_work = await self._has_active_turns(backend)
+            task = asyncio.create_task(self._run(backend), name=f"backend-restart:{backend}")
+            self._tasks[backend] = task
+            task.add_done_callback(lambda completed, name=backend: self._on_done(name, completed))
+
+        # Idle refreshes remain synchronous so setup/config errors reach the
+        # runtime-command requester. Only genuinely active work makes the
+        # restart an acknowledged background drain.
         if not had_active_work:
             await task
             return "restarted"
@@ -105,9 +95,9 @@ class BackendRestartCoordinator:
             result = await result
         return bool(result)
 
-    async def _run(self, backend: str, prepared: object) -> None:
+    async def _run(self, backend: str) -> None:
         forced = False
-        finalized = False
+        refreshed = False
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._drain_timeout
         try:
@@ -123,56 +113,13 @@ class BackendRestartCoordinator:
                     self.controller.agent_service.force_end_backend_activities(backend)
                     break
                 await asyncio.sleep(self._poll_interval)
-            while True:
-                try:
-                    if self._preflight is None:
-                        await self._refresh(backend, forced)
-                    else:
-                        await self._refresh(backend, forced, prepared)
-                except Exception:
-                    lock = self._request_locks.setdefault(backend, asyncio.Lock())
-                    async with lock:
-                        next_prepared = self._pending_refreshes.pop(backend, None)
-                        if next_prepared is None:
-                            raise
-                    logger.exception(
-                        "Backend refresh failed for %s; applying the latest joined request",
-                        backend,
-                    )
-                    prepared = next_prepared
-                    continue
-
-                lock = self._request_locks.setdefault(backend, asyncio.Lock())
-                async with lock:
-                    next_prepared = self._pending_refreshes.pop(backend, None)
-                    if next_prepared is not None:
-                        prepared = next_prepared
-                        continue
-                    # Runtime admission opens before durable queues are flushed. A
-                    # flush therefore always enters the latest refreshed generation.
-                    self.controller.agent_service.end_backend_drain(backend)
-                    await self.controller.session_turns.end_backend_drain(
-                        backend,
-                        resume_deferred=True,
-                    )
-                    current = asyncio.current_task()
-                    if self._tasks.get(backend) is current:
-                        self._tasks.pop(backend, None)
-                    finalized = True
-                    return
+            await self._refresh(backend, forced)
+            refreshed = True
         finally:
-            if not finalized:
-                lock = self._request_locks.setdefault(backend, asyncio.Lock())
-                async with lock:
-                    self._pending_refreshes.pop(backend, None)
-                    self.controller.agent_service.end_backend_drain(backend)
-                    await self.controller.session_turns.end_backend_drain(
-                        backend,
-                        resume_deferred=False,
-                    )
-                    current = asyncio.current_task()
-                    if self._tasks.get(backend) is current:
-                        self._tasks.pop(backend, None)
+            # Runtime admission opens before durable queues are flushed. A flush
+            # therefore always enters the refreshed generation.
+            self.controller.agent_service.end_backend_drain(backend)
+            await self.controller.session_turns.end_backend_drain(backend, resume_deferred=refreshed)
 
     async def wait(self, backend: str) -> None:
         """Testing/diagnostic hook: wait for the current restart, if any."""

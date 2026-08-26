@@ -9333,7 +9333,7 @@ def _wait_for_controller_ack(marker: Path, timeout: float) -> tuple[bool, str | 
 
 def _request_controller_restart(
     backend: str,
-    timeout: float | None = None,
+    timeout: float = 4.0,
     *,
     metadata: Optional[dict[str, Any]] = None,
 ) -> tuple[bool, str | None]:
@@ -9355,20 +9355,10 @@ def _request_controller_restart(
     surface a phantom error toast.
 
     Returns ``(handled, error)`` — see ``_wait_for_controller_ack`` for the
-    contract. For Codex, acknowledgement means the controller validated and
-    durably owns a prepared generation; its transport cutover can continue
-    behind the drain. Other backends retain synchronous idle refreshes.
+    contract. ``handled=True`` does *not* imply success; check ``error`` too
+    so the UI toast doesn't claim a restart when the controller's refresh
+    actually raised.
     """
-    if timeout is None:
-        timeout = 4.0
-        if backend == "codex":
-            from vibe.backend_model_catalog import CODEX_HUB_CATALOG_TIMEOUT_SECONDS
-
-            # The watcher coalesces every visible Codex marker into one batch.
-            # A marker arriving during that batch can wait for at most the
-            # current export plus its own batch's export.
-            timeout = (2 * CODEX_HUB_CATALOG_TIMEOUT_SECONDS) + 5.0
-
     reqid = uuid.uuid4().hex[:8]
     marker = _runtime_command_dir() / f"restart-{backend}.{reqid}.cmd"
     try:
@@ -9669,6 +9659,7 @@ def _on_web_auth_success(backend: str) -> None:
     try:
         handled, err = _request_controller_restart(
             backend,
+            timeout=4.0,
             metadata={"reason": "web_auth_success", "source": "oauth_callback"},
         )
         if handled and err:

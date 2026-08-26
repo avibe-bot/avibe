@@ -1532,9 +1532,6 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         controller.agent_service.agents["codex"] = SimpleNamespace(refresh_auth_state=AsyncMock())
         controller.agent_service.agents["claude"] = SimpleNamespace(refresh_auth_state=AsyncMock())
         service = AgentAuthService(controller)
-        service._prepare_codex_hub_catalog = AsyncMock(return_value=b"catalog")
-        runtime_config = SimpleNamespace(binary="codex")
-        service._load_backend_runtime_config = Mock(return_value=runtime_config)
         service._refresh_opencode_server = AsyncMock()
 
         await service._refresh_backend_runtime("codex")
@@ -1544,7 +1541,6 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         controller.agent_service.agents["codex"].refresh_auth_state.assert_awaited_once()
         controller.agent_service.agents["claude"].refresh_auth_state.assert_awaited_once()
         service._refresh_opencode_server.assert_awaited_once()
-        service._prepare_codex_hub_catalog.assert_not_awaited()
 
     async def test_refresh_backend_runtime_prefers_runtime_config_reload(self):
         controller = _StubController()
@@ -1554,28 +1550,14 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         )
         controller.agent_service.agents["codex"] = agent
         service = AgentAuthService(controller)
-        service._prepare_codex_hub_catalog = AsyncMock()
         runtime_config = object()
         service._load_backend_runtime_config = Mock(return_value=runtime_config)
 
         await service._refresh_backend_runtime("codex")
 
         service._load_backend_runtime_config.assert_called_once_with("codex")
-        service._prepare_codex_hub_catalog.assert_not_awaited()
         agent.refresh_runtime_config.assert_awaited_once_with(runtime_config)
         agent.refresh_auth_state.assert_not_awaited()
-
-    async def test_web_refresh_does_not_publish_codex_catalog(self):
-        controller = _StubController()
-        controller.agent_service = None
-        service = AgentAuthService(controller)
-        service._prepare_codex_hub_catalog = AsyncMock()
-        service._load_backend_runtime_config = Mock()
-
-        await service._refresh_backend_runtime("codex")
-
-        service._load_backend_runtime_config.assert_not_called()
-        service._prepare_codex_hub_catalog.assert_not_awaited()
 
     async def test_refresh_backend_runtime_releases_runtime_tokens_after_refresh(self):
         controller = _StubController()
@@ -1585,7 +1567,6 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         controller.agent_service.refresh_runtime_config = AsyncMock(return_value=True)
         controller.agent_service.agents["codex"] = SimpleNamespace()
         service = AgentAuthService(controller)
-        service._prepare_codex_hub_catalog = AsyncMock(return_value=b"catalog")
         runtime_config = object()
         service._load_backend_runtime_config = Mock(return_value=runtime_config)
 
@@ -1593,7 +1574,6 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
 
         controller.agent_service.runtime_turn_tokens_for_backend.assert_called_once_with("codex")
         controller.agent_service.refresh_runtime_config.assert_awaited_once_with("codex", runtime_config)
-        service._prepare_codex_hub_catalog.assert_awaited_once_with(runtime_config)
         controller.agent_service.release_runtime_turn_tokens.assert_called_once_with(runtime_tokens)
 
     async def test_clear_backend_sessions_for_context_routes_through_agent_service(self):
@@ -1645,31 +1625,15 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             extra_args=[],
         )
         service._load_backend_runtime_config = Mock(return_value=runtime_config)
-        prepared = False
-
-        async def prepare_catalog(config):
-            nonlocal prepared
-            self.assertIs(config, runtime_config)
-            prepared = True
-            return b"catalog"
-
-        service._prepare_codex_hub_catalog = AsyncMock(side_effect=prepare_catalog)
-        def register_after_catalog(agent):
-            self.assertTrue(prepared)
-            return register(agent)
-
-        controller.agent_service.register.side_effect = register_after_catalog
 
         await service._refresh_backend_runtime("codex")
 
-        self.assertEqual(service._load_backend_runtime_config.call_count, 1)
-        service._load_backend_runtime_config.assert_called_with("codex")
+        service._load_backend_runtime_config.assert_called_once_with("codex")
         controller.agent_service.register.assert_called_once()
         registered = controller.agent_service.agents["codex"]
         self.assertEqual(registered.name, "codex")
         self.assertIs(registered.codex_config, runtime_config)
         self.assertIs(controller.config.codex, runtime_config)
-        service._prepare_codex_hub_catalog.assert_awaited_once_with(runtime_config)
 
     async def test_refresh_backend_runtime_unregisters_disabled_codex(self):
         from modules.agent_router import AgentRouter
@@ -1711,7 +1675,6 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         service = AgentAuthService(controller)
         runtime_config = CodexCompatConfig(enabled=True, binary="/opt/codex", extra_args=[])
         service._load_backend_runtime_config = Mock(return_value=runtime_config)
-        service._prepare_codex_hub_catalog = AsyncMock(return_value=b"catalog")
         service._load_saved_enabled_backends = Mock(return_value=["codex"])
         service._sync_builtin_default_agents = Mock(wraps=service._sync_builtin_default_agents)
 

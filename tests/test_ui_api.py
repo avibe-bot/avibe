@@ -36,17 +36,6 @@ class _PopenFromRun:
         return self._stdout, self._stderr
 
 
-@pytest.fixture
-def codex_catalog_refresh_calls(monkeypatch):
-    calls = []
-
-    def refresh(binary, env=None):
-        calls.append((binary, env))
-
-    monkeypatch.setattr(backend_model_catalog, "refresh_codex_hub_catalog_now", refresh)
-    return calls
-
-
 def test_opencode_options_closes_server_http_session(monkeypatch):
     import config.v2_compat as v2_compat
     import modules.agents.opencode as opencode_module
@@ -1589,11 +1578,7 @@ def test_install_agent_returns_resolved_path(monkeypatch):
     assert result["path"] == "/Users/test/.opencode/bin/opencode"
 
 
-def test_install_codex_fresh_install_uses_resolved_npm(
-    monkeypatch,
-    tmp_path,
-    codex_catalog_refresh_calls,
-):
+def test_install_codex_fresh_install_uses_resolved_npm(monkeypatch, tmp_path):
     # Fresh-install path: codex is not yet on disk, but npm is resolvable.
     # install_agent must shell out to `npm install -g @openai/codex` and
     # use a user-owned npm prefix so backend lifecycle installs do not write
@@ -1632,14 +1617,9 @@ def test_install_codex_fresh_install_uses_resolved_npm(
     assert calls[0][1]["NPM_CONFIG_PREFIX"] == str(api.Path.home() / ".local")
     assert calls[0][1]["PATH"].split(api.os.pathsep)[0] == str(api.Path.home() / ".local" / "bin")
     assert result["path"] == "/Users/test/.nvm/versions/node/v22.18.0/bin/codex"
-    assert codex_catalog_refresh_calls == []
 
 
-def test_install_codex_npm_install_runs_npm_upgrade(
-    monkeypatch,
-    tmp_path,
-    codex_catalog_refresh_calls,
-):
+def test_install_codex_npm_install_runs_npm_upgrade(monkeypatch, tmp_path):
     # Npm-owned Codex installs should upgrade through npm, not through a
     # different installer and not by blindly invoking the CLI self-updater. The
     # upgrade must stay in the npm prefix that owns the existing package.
@@ -1690,11 +1670,7 @@ def test_install_codex_npm_install_runs_npm_upgrade(
     assert result["path"] == str(codex_path)
 
 
-def test_install_codex_homebrew_install_runs_brew_upgrade(
-    monkeypatch,
-    tmp_path,
-    codex_catalog_refresh_calls,
-):
+def test_install_codex_homebrew_install_runs_brew_upgrade(monkeypatch, tmp_path):
     brew_path = tmp_path / "homebrew" / "bin" / "brew"
     brew_path.parent.mkdir(parents=True)
     brew_path.write_text("#!/bin/sh\n")
@@ -1742,11 +1718,7 @@ def test_install_codex_homebrew_install_runs_brew_upgrade(
     assert [str(brew_path), "upgrade", "--cask", "codex"] in [call[0] for call in calls]
 
 
-def test_install_codex_prefers_homebrew_when_npm_shares_prefix(
-    monkeypatch,
-    tmp_path,
-    codex_catalog_refresh_calls,
-):
+def test_install_codex_prefers_homebrew_when_npm_shares_prefix(monkeypatch, tmp_path):
     prefix = tmp_path / "homebrew"
     brew_path = prefix / "bin" / "brew"
     npm_path = prefix / "bin" / "npm"
@@ -1801,12 +1773,7 @@ def test_install_codex_prefers_homebrew_when_npm_shares_prefix(
     assert [str(npm_path), "install", "-g", "@openai/codex"] not in commands
 
 
-def test_install_codex_unknown_install_falls_back_to_cli_update(
-    monkeypatch,
-    tmp_path,
-    only_tmp_binaries,
-    codex_catalog_refresh_calls,
-):
+def test_install_codex_unknown_install_falls_back_to_cli_update(monkeypatch, tmp_path, only_tmp_binaries):
     codex_path = tmp_path / "bin" / "codex"
     codex_path.parent.mkdir(parents=True)
     codex_path.write_text("#!/bin/sh\n")
@@ -1845,11 +1812,7 @@ def test_install_codex_unknown_install_falls_back_to_cli_update(
     assert result["path"] == str(codex_path)
 
 
-def test_install_codex_unknown_install_without_update_command_fails(
-    monkeypatch,
-    tmp_path,
-    codex_catalog_refresh_calls,
-):
+def test_install_codex_unknown_install_without_update_command_fails(monkeypatch, tmp_path):
     codex_path = tmp_path / "bin" / "codex"
     codex_path.parent.mkdir(parents=True)
     codex_path.write_text("#!/bin/sh\n")
@@ -1882,11 +1845,7 @@ def test_install_codex_unknown_install_without_update_command_fails(
     assert "does not expose an update command" in result["message"]
 
 
-def test_install_codex_npm_install_without_npm_fails(
-    monkeypatch,
-    tmp_path,
-    codex_catalog_refresh_calls,
-):
+def test_install_codex_npm_install_without_npm_fails(monkeypatch, tmp_path):
     codex_path = tmp_path / "lib" / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
     codex_path.parent.mkdir(parents=True)
     codex_path.write_text("#!/usr/bin/env node\n")
@@ -1919,12 +1878,7 @@ def test_discord_list_channels_rejects_empty_guild_id(monkeypatch):
     assert result["error"] == "Discord guild_id is required"
 
 
-def test_install_codex_detects_existing_install_via_npm_prefix_and_upgrades_with_npm(
-    monkeypatch,
-    tmp_path,
-    only_tmp_binaries,
-    codex_catalog_refresh_calls,
-):
+def test_install_codex_detects_existing_install_via_npm_prefix_and_upgrades_with_npm(monkeypatch, tmp_path, only_tmp_binaries):
     # Codex already installed under the npm global prefix; resolve_cli_path
     # must discover it (via `npm config get prefix`) and install_agent must
     # still upgrade by rerunning npm install -g @openai/codex in that same
@@ -1970,12 +1924,7 @@ def test_install_codex_detects_existing_install_via_npm_prefix_and_upgrades_with
     assert update_calls[0][1]["PATH"].split(api.os.pathsep)[0] == str(prefix_path / "bin")
 
 
-def test_install_codex_symlinked_npm_install_upgrades_in_real_prefix(
-    monkeypatch,
-    tmp_path,
-    only_tmp_binaries,
-    codex_catalog_refresh_calls,
-):
+def test_install_codex_symlinked_npm_install_upgrades_in_real_prefix(monkeypatch, tmp_path, only_tmp_binaries):
     # Regression coverage for the Incus layout: ~/.local/bin/codex is a shim to
     # ~/.npm-global/bin/codex. Running npm with prefix ~/.local tries to replace
     # the shim and fails with EEXIST, so upgrades must follow the real package.
@@ -2039,7 +1988,6 @@ def test_install_codex_project_local_node_modules_does_not_become_prefix(
     monkeypatch,
     tmp_path,
     only_tmp_binaries,
-    codex_catalog_refresh_calls,
 ):
     npm_path = tmp_path / "node" / "bin" / "npm"
     npm_path.parent.mkdir(parents=True, exist_ok=True)

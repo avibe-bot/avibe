@@ -75,13 +75,9 @@ def get_cached_catalog_path() -> Path:
     return paths.get_state_dir() / "backend_model_catalog.json"
 
 
-def get_codex_hub_catalog_path() -> Path:
-    return paths.get_runtime_dir() / "model-hub" / "codex" / "standard-responses.json"
-
-
-def ready_codex_hub_catalog_path() -> Path | None:
-    path = get_codex_hub_catalog_path()
-    return path if path.is_file() else None
+def _codex_hub_catalog_path(catalog: bytes) -> Path:
+    digest = hashlib.sha256(catalog).hexdigest()[:16]
+    return paths.get_runtime_dir() / "model-hub" / "codex" / f"standard-responses-{digest}.json"
 
 
 def _codex_hub_catalog_bytes(raw_catalog: bytes) -> bytes:
@@ -117,11 +113,8 @@ def _codex_hub_catalog_bytes(raw_catalog: bytes) -> bytes:
 
 
 def _publish_codex_hub_catalog(raw_catalog: bytes) -> Path:
-    return publish_codex_hub_catalog(_codex_hub_catalog_bytes(raw_catalog))
-
-
-def publish_codex_hub_catalog(catalog: bytes) -> Path:
-    path = get_codex_hub_catalog_path()
+    catalog = _codex_hub_catalog_bytes(raw_catalog)
+    path = _codex_hub_catalog_path(catalog)
     write_atomic(path, catalog)
     return path
 
@@ -168,33 +161,15 @@ def _export_codex_bundled_catalog(
     return result.stdout.encode()
 
 
-def refresh_codex_hub_catalog_now(
-    binary: str,
-    base_env: dict[str, str] | None = None,
-) -> Path:
-    try:
-        return publish_codex_hub_catalog(prepare_codex_hub_catalog_bytes(binary, base_env))
-    except Exception:
-        get_codex_hub_catalog_path().unlink(missing_ok=True)
-        raise
-
-
-def prepare_codex_hub_catalog_bytes(
-    binary: str,
-    base_env: dict[str, str] | None = None,
-) -> bytes:
-    """Validate and project one binary's catalog without publishing it."""
-
-    return _codex_hub_catalog_bytes(_export_codex_bundled_catalog(binary, base_env))
-
-
 def prepare_codex_hub_catalog(
     binary: str,
     base_env: dict[str, str] | None = None,
 ) -> Path:
-    """Make the Hub catalog available before an enabled Codex backend is ready."""
+    """Prepare the exact binary's catalog immediately before a Hub launch."""
 
-    return refresh_codex_hub_catalog_now(binary, base_env)
+    return _publish_codex_hub_catalog(
+        _export_codex_bundled_catalog(binary, base_env)
+    )
 
 
 def load_bundled_catalog(path: Path | None = None) -> dict[str, Any]:

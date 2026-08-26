@@ -89,7 +89,7 @@ def test_codex_hub_catalog_projects_complete_catalog(monkeypatch, tmp_path):
         ).encode()
     )
 
-    assert path == backend_model_catalog.ready_codex_hub_catalog_path()
+    assert path.name.startswith("standard-responses-")
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["client_version"] == "0.149.1"
     assert payload["models"][0] == {
@@ -202,41 +202,33 @@ def test_codex_hub_catalog_export_rejects_supervised_failures(monkeypatch, resul
 
 
 def test_codex_hub_catalog_preparation_exports_current_binary(monkeypatch, tmp_path):
-    exported = tmp_path / "standard-responses.json"
+    runtime_dir = tmp_path / "runtime"
+    monkeypatch.setattr(backend_model_catalog.paths, "get_runtime_dir", lambda: runtime_dir)
     calls = []
     monkeypatch.setattr(
         backend_model_catalog,
-        "refresh_codex_hub_catalog_now",
-        lambda binary, base_env=None: (calls.append((binary, base_env)), exported)[1],
-    )
-
-    assert backend_model_catalog.prepare_codex_hub_catalog("codex") == exported
-    assert calls == [("codex", None)]
-
-
-def test_codex_hub_catalog_bytes_are_not_published_until_committed(monkeypatch, tmp_path):
-    runtime_dir = tmp_path / "runtime"
-    monkeypatch.setattr(backend_model_catalog.paths, "get_runtime_dir", lambda: runtime_dir)
-    monkeypatch.setattr(
-        backend_model_catalog,
         "_export_codex_bundled_catalog",
-        lambda _binary, _base_env=None: b'{"models":[{"slug":"gpt-test"}]}',
+        lambda binary, base_env=None: (
+            calls.append((binary, base_env)),
+            b'{"models":[{"slug":"gpt-test","use_responses_lite":true}]}',
+        )[1],
     )
 
-    catalog = backend_model_catalog.prepare_codex_hub_catalog_bytes("/opt/codex")
+    exported = backend_model_catalog.prepare_codex_hub_catalog("codex")
 
-    assert backend_model_catalog.ready_codex_hub_catalog_path() is None
-    path = backend_model_catalog.publish_codex_hub_catalog(catalog)
-    assert path == backend_model_catalog.ready_codex_hub_catalog_path()
-    assert json.loads(path.read_text(encoding="utf-8"))["models"][0]["slug"] == "gpt-test"
+    assert exported.name.startswith("standard-responses-")
+    assert calls == [("codex", None)]
+    assert json.loads(exported.read_text(encoding="utf-8"))["models"][0][
+        "use_responses_lite"
+    ] is False
 
 
-def test_codex_hub_catalog_refresh_invalidates_stale_artifact_on_failure(monkeypatch, tmp_path):
+def test_codex_hub_catalog_failure_cannot_select_a_previous_generation(monkeypatch, tmp_path):
     runtime_dir = tmp_path / "runtime"
     monkeypatch.setattr(backend_model_catalog.paths, "get_runtime_dir", lambda: runtime_dir)
-    stale = backend_model_catalog.get_codex_hub_catalog_path()
-    stale.parent.mkdir(parents=True)
-    stale.write_text('{"client_version":"old","models":[{"slug":"old"}]}')
+    previous = backend_model_catalog._publish_codex_hub_catalog(
+        b'{"client_version":"old","models":[{"slug":"old"}]}'
+    )
 
     def fail_export(*_args, **_kwargs):
         raise RuntimeError("export failed")
@@ -244,9 +236,26 @@ def test_codex_hub_catalog_refresh_invalidates_stale_artifact_on_failure(monkeyp
     monkeypatch.setattr(backend_model_catalog, "_export_codex_bundled_catalog", fail_export)
 
     with pytest.raises(RuntimeError, match="export failed"):
-        backend_model_catalog.refresh_codex_hub_catalog_now("/opt/codex")
+        backend_model_catalog.prepare_codex_hub_catalog("/opt/codex")
 
-    assert backend_model_catalog.ready_codex_hub_catalog_path() is None
+    assert previous.exists()
+    assert list(previous.parent.glob("standard-responses-*.json")) == [previous]
+
+
+def test_codex_hub_catalog_generations_are_content_addressed(monkeypatch, tmp_path):
+    runtime_dir = tmp_path / "runtime"
+    monkeypatch.setattr(backend_model_catalog.paths, "get_runtime_dir", lambda: runtime_dir)
+
+    first = backend_model_catalog._publish_codex_hub_catalog(
+        b'{"models":[{"slug":"gpt-first"}]}'
+    )
+    second = backend_model_catalog._publish_codex_hub_catalog(
+        b'{"models":[{"slug":"gpt-second"}]}'
+    )
+
+    assert first != second
+    assert json.loads(first.read_text(encoding="utf-8"))["models"][0]["slug"] == "gpt-first"
+    assert json.loads(second.read_text(encoding="utf-8"))["models"][0]["slug"] == "gpt-second"
 
 
 def test_merge_sources_applies_tombstones_and_fills_missing_metadata():

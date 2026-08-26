@@ -1604,13 +1604,15 @@ class CodexAgent(BaseAgent):
                         from modules.agents.model_hub import build_codex_hub_launch
                         from vibe import backend_model_catalog
 
+                        model_catalog_path = await asyncio.to_thread(
+                            backend_model_catalog.prepare_codex_hub_catalog,
+                            self.codex_config.binary,
+                        )
                         runtime_args, runtime_env = build_codex_hub_launch(
                             [],
                             os.environ.copy(),
                             launch,
-                            model_catalog_path=(
-                                backend_model_catalog.ready_codex_hub_catalog_path()
-                            ),
+                            model_catalog_path=model_catalog_path,
                         )
                         runtime_fingerprint = launch.fingerprint
 

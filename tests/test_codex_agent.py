@@ -3996,16 +3996,17 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
             )
 
             with patch(
-                "vibe.backend_model_catalog.ready_codex_hub_catalog_path",
+                "vibe.backend_model_catalog.prepare_codex_hub_catalog",
                 return_value=Path(cwd) / "codex-hub-catalog.json",
-            ):
+            ) as prepare_catalog:
                 with self.assertRaisesRegex(RuntimeError, "durable owner"):
                     await agent._get_or_create_transport(cwd, launch)
 
+            prepare_catalog.assert_called_once_with(agent.codex_config.binary)
             existing.stop.assert_not_awaited()
             self.assertIs(agent._transports[cwd], existing)
 
-    async def test_missing_hub_catalog_preserves_existing_transport_and_threads(self):
+    async def test_failed_hub_catalog_export_preserves_existing_transport_and_threads(self):
         agent = self._agent()
         with tempfile.TemporaryDirectory() as cwd:
             existing = SimpleNamespace(
@@ -4032,10 +4033,10 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
             )
 
             with patch(
-                "vibe.backend_model_catalog.ready_codex_hub_catalog_path",
-                return_value=None,
+                "vibe.backend_model_catalog.prepare_codex_hub_catalog",
+                side_effect=RuntimeError("catalog export failed"),
             ):
-                with self.assertRaisesRegex(ValueError, "provider-safe model catalog"):
+                with self.assertRaisesRegex(RuntimeError, "catalog export failed"):
                     await agent._get_or_create_transport(cwd, launch)
 
             existing.stop.assert_not_awaited()

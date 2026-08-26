@@ -370,7 +370,6 @@ class Controller:
         self.backend_restart_coordinator = BackendRestartCoordinator(
             self,
             self.agent_auth_service._apply_backend_runtime_refresh,
-            preflight=self.agent_auth_service._prepare_backend_runtime_refresh,
         )
 
         self.vibe_agent_store = VibeAgentStore()
@@ -3173,14 +3172,6 @@ class Controller:
         logger.info("Starting Claude Proxy Controller with platforms: %s", ", ".join(self.enabled_platforms))
 
         try:
-            codex_config = getattr(self.config, "codex", None)
-            if codex_config is not None:
-                from vibe import backend_model_catalog
-
-                try:
-                    backend_model_catalog.prepare_codex_hub_catalog(codex_config.binary)
-                except Exception as exc:  # noqa: BLE001 - direct mode remains usable
-                    logger.warning("Codex Hub model catalog preparation failed: %s", exc)
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
             memory_runtime = getattr(self, "memory_runtime", None)

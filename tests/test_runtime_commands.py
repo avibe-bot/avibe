@@ -109,63 +109,6 @@ def test_sweep_accepts_claude_restart_marker(tmp_path: Path) -> None:
     assert not marker.exists()
 
 
-def test_sweep_coalesces_same_backend_markers_into_one_refresh(tmp_path: Path) -> None:
-    calls = []
-
-    async def handler(name: str) -> None:
-        calls.append(name)
-
-    auth_service = SimpleNamespace(_refresh_backend_runtime=handler)
-    controller = SimpleNamespace(agent_auth_service=auth_service)
-    watcher = RuntimeCommandWatcher(controller, directory=tmp_path)  # type: ignore[arg-type]
-    first = tmp_path / "restart-codex.first.cmd"
-    second = tmp_path / "restart-codex.second.cmd"
-    first.write_text("{}", encoding="utf-8")
-    second.write_text("{}", encoding="utf-8")
-
-    asyncio.run(watcher._sweep_once())
-
-    assert calls == ["codex"]
-    assert not first.exists()
-    assert not second.exists()
-
-
-def test_marker_arriving_during_batch_waits_for_one_follow_up_batch(tmp_path: Path) -> None:
-    async def run() -> None:
-        calls = []
-        first_started = asyncio.Event()
-        release_first = asyncio.Event()
-
-        async def handler(name: str) -> None:
-            calls.append(name)
-            if len(calls) == 1:
-                first_started.set()
-                await release_first.wait()
-
-        auth_service = SimpleNamespace(_refresh_backend_runtime=handler)
-        controller = SimpleNamespace(agent_auth_service=auth_service)
-        watcher = RuntimeCommandWatcher(controller, directory=tmp_path)  # type: ignore[arg-type]
-        first = tmp_path / "restart-codex.first.cmd"
-        first.write_text("{}", encoding="utf-8")
-
-        first_sweep = asyncio.create_task(watcher._sweep_once())
-        await first_started.wait()
-        second = tmp_path / "restart-codex.second.cmd"
-        third = tmp_path / "restart-codex.third.cmd"
-        second.write_text("{}", encoding="utf-8")
-        third.write_text("{}", encoding="utf-8")
-        release_first.set()
-        await first_sweep
-
-        await watcher._sweep_once()
-
-        assert calls == ["codex", "codex"]
-        assert not second.exists()
-        assert not third.exists()
-
-    asyncio.run(run())
-
-
 def test_handle_restart_err_message_truncated(tmp_path: Path) -> None:
     """Pathological multi-MB exception messages must not blow up the disk."""
 
