@@ -591,14 +591,16 @@ def test_memory_list_ui_route_stays_host_owned_when_runtime_import_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    """The UI list route must use the host cursor contract, not Memory runtime."""
+    """UI Memory routes stay host-owned when implementation imports are blocked."""
 
     tree = ast.parse(Path(ui_memory_routes.__file__).read_text(encoding="utf-8"))
     implementation_imports = [
         node.module
         for node in ast.walk(tree)
         if isinstance(node, ast.ImportFrom)
-        and node.module == "core.memory.runtime"
+        and node.module
+        and node.module.startswith("core.memory.")
+        and node.module != "core.memory_loader"
     ]
     assert implementation_imports == []
 
@@ -617,14 +619,40 @@ def test_memory_list_ui_route_stays_host_owned_when_runtime_import_fails(
     real_import = builtins.__import__
 
     def guarded_import(name, *args, **kwargs):
-        if name == "core.memory.runtime":
-            raise RuntimeError("optional implementation initializer")
+        if name.startswith("core.memory.") and name != "core.memory_loader":
+            raise RuntimeError(f"optional implementation initializer: {name}")
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", guarded_import)
     from core.memory_loader import MEMORY_LIST_CURSOR_MAX_BYTES
 
     client = app.test_client()
+    settings = client.get(
+        "/api/memory/settings",
+        headers=_local_headers(),
+        **_request_options(),
+    )
+
+    assert settings.status_code == 200
+    assert settings.get_json()["status"] == "ok"
+
+    async def memory_search(query, policy, **kwargs):
+        assert query == "hello"
+        assert policy["mode"] == "keyword"
+        assert kwargs == {"user_key": "avibe:local", "project": None}
+        return {"status_code": 200, "body": {"status": "ok", "items": []}}
+
+    monkeypatch.setattr(internal_client, "memory_search", memory_search)
+    search = client.post(
+        "/api/memory/search",
+        json={"query": "hello", "policy": {"mode": "keyword"}},
+        headers=csrf_headers(client, BASE_URL),
+        **_request_options(),
+    )
+
+    assert search.status_code == 200
+    assert search.get_json() == {"status": "ok", "items": []}
+
     response = client.post(
         "/api/memory/list",
         json={"project": "all", "cursor": "a" * MEMORY_LIST_CURSOR_MAX_BYTES},

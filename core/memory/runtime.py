@@ -35,7 +35,6 @@ from core.memory.artifact import (
     MemoryRuntimeActivationError,
     get_memory_artifact_manager,
 )
-from core.memory.attachments import IM_ATTACHMENT_CAPTURE_PLATFORMS
 from core.blocking import run_blocking
 from core.memory.confined_filesystem import (
     ConfinedFilesystemError,
@@ -59,6 +58,7 @@ from core.memory.supervisor import (
     EverOSSupervisorFactory,
     EverOSSupervisorStatus,
 )
+from vibe.memory_contract import IM_ATTACHMENT_CAPTURE_PLATFORMS
 from core.memory.processing_record import (
     AnomalyProjection,
     FailureLogObservation,

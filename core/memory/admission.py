@@ -33,10 +33,10 @@ from core.memory.admission_metadata import (
 )
 from core.memory.attachments import workbench_capture_attachments
 from core.memory.im_attachments import (
-    IM_ATTACHMENT_CAPTURE_PLATFORMS,
     select_memory_attachments,
 )
 from core.memory.types import CaptureAttachment, CaptureRequest, CaptureSkipped
+from vibe.memory_contract import IM_ATTACHMENT_CAPTURE_PLATFORMS
 
 
 logger = logging.getLogger(__name__)

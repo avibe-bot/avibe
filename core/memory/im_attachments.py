@@ -12,13 +12,13 @@ from core.inbound_attachment_lease import (
     open_leased_attachment_record,
 )
 from core.memory.attachments import (
-    IM_ATTACHMENT_CAPTURE_PLATFORMS,
     MAX_PINNED_ATTACHMENTS,
     MAX_PINNED_ATTACHMENT_BYTES,
     MAX_PINNED_BUNDLE_BYTES,
 )
 from core.memory.modality import classify_pinned_attachment
 from core.memory.types import CaptureAttachment
+from vibe.memory_contract import IM_ATTACHMENT_CAPTURE_PLATFORMS
 
 
 AttachmentSkipReason = Literal[

@@ -146,7 +146,7 @@ def _memory_settings_projection(memory: object) -> dict:
 
 
 def _memory_im_attachment_capture_available(config: V2Config) -> bool:
-    from core.memory.attachments import IM_ATTACHMENT_CAPTURE_PLATFORMS
+    from vibe.memory_contract import IM_ATTACHMENT_CAPTURE_PLATFORMS
 
     return bool(
         IM_ATTACHMENT_CAPTURE_PLATFORMS.intersection(config.enabled_platforms())
@@ -739,7 +739,7 @@ def register_memory_routes(app) -> None:
             query = payload.get("query")
             if not isinstance(query, str):
                 return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
-            from core.memory.types import RecallPolicy
+            from vibe.memory_contract import RecallPolicy
 
             try:
                 policy = RecallPolicy.from_payload(payload.get("policy"))

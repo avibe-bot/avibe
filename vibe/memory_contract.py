@@ -14,6 +14,13 @@ PROCESSING_RECORD_TRANSPORT_TIMEOUT_SECONDS = 45.0
 
 RecallMode = Literal["auto", "keyword", "vector", "hybrid", "agentic"]
 
+# Host-owned capability projection shared by settings and Memory admission.
+# Keep the released platform set in one place so host surfaces do not import
+# optional implementation modules just to render availability.
+IM_ATTACHMENT_CAPTURE_PLATFORMS = frozenset(
+    {"slack", "discord", "telegram", "lark", "wechat"}
+)
+
 
 @dataclass(frozen=True)
 class RecallPolicy:
