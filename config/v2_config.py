@@ -3269,6 +3269,7 @@ class ModelHubAgentSupplyConfig:
 
 @dataclass
 class ModelHubConfig:
+    enabled: bool = False
     sources: list[ModelHubSourceConfig] = field(default_factory=list)
     agents: dict[str, ModelHubAgentSupplyConfig] = field(
         default_factory=lambda: {
@@ -3314,8 +3315,11 @@ class ModelHubConfig:
     def from_payload(cls, payload: dict, *, repairing: bool = False) -> "ModelHubConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub' must be an object")
-        if set(payload) - {"sources", "agents"}:
+        if set(payload) - {"enabled", "sources", "agents"}:
             raise ValueError("Config 'model_hub' contains unknown fields")
+        enabled = payload.get("enabled", False)
+        if not isinstance(enabled, bool):
+            raise ValueError("Config 'model_hub.enabled' must be a boolean")
         sources_payload = payload.get("sources") or []
         agents_payload = payload.get("agents") or {}
         if not isinstance(sources_payload, list):
@@ -3391,6 +3395,7 @@ class ModelHubConfig:
                         f"Config 'model_hub.agents.{backend}.routes' contains non-menu model '{extra_route}'"
                     )
         config = cls(
+            enabled=enabled,
             sources=sources,
             agents=agents,
         )
@@ -3428,6 +3433,7 @@ class ModelHubConfig:
 
     def to_payload(self) -> dict:
         return {
+            "enabled": self.enabled,
             "sources": [source.to_payload() for source in self.sources],
             "agents": {backend: self.agents[backend].to_payload() for backend in MODEL_HUB_BACKENDS},
         }

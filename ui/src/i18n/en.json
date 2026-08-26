@@ -667,6 +667,7 @@
         "title": "Models",
         "running": "Gateway running",
         "stopped": "Gateway off",
+        "unavailable": "Gateway enabled, currently unavailable",
         "degraded": "Gateway running degraded",
         "unread": "Gateway status unavailable",
         "notStarted": "Gateway off",
@@ -690,6 +691,10 @@
           "down": {
             "title": "Model gateway is off",
             "body": "The previous start did not become ready. Turn it on to try again."
+          },
+          "enabledDown": {
+            "title": "Model gateway is enabled but unavailable",
+            "body": "The enabled setting is saved. Turn it off and back on to retry now."
           },
           "notInstalled": {
             "title": "Model gateway is not installed",

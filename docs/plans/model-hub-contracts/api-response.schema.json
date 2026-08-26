@@ -369,7 +369,7 @@
       "allOf": [
         {"$ref": "model-hub/runtime-dependency.schema.json"},
         {
-          "required": ["contract_version", "host_platform", "manifest", "status"],
+          "required": ["contract_version", "enabled", "host_platform", "manifest", "status"],
           "properties": {
             "status": {
               "required": ["installed_version", "verified", "listening", "health", "last_check", "error_key"]

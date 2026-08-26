@@ -54,10 +54,10 @@ compatibility path.
 | POST `/api/models/migration/scan` | → `{scan: MigrationScan}` | Read-only. |
 | POST `/api/models/migration/apply` | `{item_ids: string[]}` → `{applied, sources, added_to}` | Each accepted import runs the same one-time matching and placement as Add Source; original files remain byte-identical. |
 | GET `/api/models/turns/<turn_id>/provenance` | → `{provenance: TurnProvenance}` or documented absence error | Debug read for exactly attributed Hub turns. |
-| GET `/api/models/runtime/status` | → `{runtime: RuntimeDependency}` | Read-only managed engine status. The nested object carries `contract_version` 6; `not_started` is installed lazy-start idleness, not an alarm. |
+| GET `/api/models/runtime/status` | → `{runtime: RuntimeDependency}` | Read-only managed engine status. The nested object carries `contract_version` 6 and persisted user intent in `enabled`; `not_started` is installed lazy-start idleness, not an alarm. |
 | POST `/api/models/runtime/install` | → `{runtime: RuntimeDependency}` | Idempotently starts server-owned installation. It returns and persists `installing`; reload reads the same state. Uses the existing mutation authentication and CSRF guards. |
-| POST `/api/models/runtime/start` | → `{runtime: RuntimeDependency}` | Explicitly starts the managed engine. Uses the existing mutation authentication and CSRF guards; status reads never start it. |
-| POST `/api/models/runtime/stop` | → `{runtime: RuntimeDependency}` | Explicitly stops the managed engine and returns it to `not_started`. The mutation is rejected with `runtime_in_use` while any Agent backend is configured for Hub mode, so disabling the shared runtime cannot strand a configured route. |
+| POST `/api/models/runtime/start` | → `{runtime: RuntimeDependency}` | Persists `enabled: true` and explicitly starts the managed engine. Service startup restores this intent. Uses the existing mutation authentication and CSRF guards; status reads never start it. |
+| POST `/api/models/runtime/stop` | → `{runtime: RuntimeDependency}` | Explicitly stops the managed engine, persists `enabled: false`, and returns it to `not_started`. The mutation is rejected with `runtime_in_use` while any Agent backend is configured for Hub mode, so disabling the shared runtime cannot strand a configured route. |
 
 The removed global route `PUT /api/models/priority` has no replacement. Backend Source
 order is explicit configuration through the sources route; exact per-model order is
@@ -219,6 +219,7 @@ every other existing field and enum meaning remains unchanged.
 | `Source.adopted_by` | Source read assembler | Source cards and Source detail status | Complete unique persisted-reference projection sorted by backend then menu model; clients do not derive it from `hops`. |
 | `AgentSupply.cli_present` | backend CLI detector | zero-installed-backend state | Boolean installation fact only; it does not imply login or process readiness. |
 | `AgentSupply.model_supply[].has_runnable_hop` | exact-chain live annotator | backend-group collapse predicate | Uses the AgentChain runnability axiom rather than inferring liveness from configured membership. `chain_length: 0` forces false; a nonzero length may carry either value. |
+| `RuntimeDependency.enabled` | explicit runtime start/stop mutation | Gateway switch and service-start recovery | Persisted user intent, independent of observed process health. Missing in older config defaults to false; an older response without the field falls back to observed health in the UI. |
 | `RuntimeDependency.host_platform` | server host detector | unsupported-host runtime pill | Names the Avibe host, not the browser; exact membership in `manifest.assets[].platform` decides install support. |
 | `RuntimeDependency.status.error_key` | runtime installer | install-failed runtime state | Closed persisted i18n key: `settings.models.install.fail.detail` after installation fails; null after a new attempt begins and in every non-failure state. |
 | `RouteHopRef.position` | guarded mutation planner | guarded-change hop row | One-based position in the named Route before the attempted mutation. |

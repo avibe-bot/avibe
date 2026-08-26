@@ -153,7 +153,7 @@ revision; the discovering lane does not reinterpret or edit the contract in plac
 | `resolution-event.schema.json` | Pull-feed Source/resolution records and their closed reason/detail vocabulary. |
 | `oauth-flow.schema.json` | Subscription creation and re-auth presentation without secret material. |
 | `migration-scan.schema.json` | Copy-only import of existing native CLI/provider configuration; not an internal contract migration. |
-| `runtime-dependency.schema.json` | Managed local Gateway asset, lifecycle, and health. |
+| `runtime-dependency.schema.json` | Managed local Gateway asset, persisted enablement intent, lifecycle, and health. |
 | `guard-refusal.schema.json` | Shared guarded-mutation refusal whose two arrays are the exact plan echoed by a confirmed retry. |
 | `api.md` | Routes, envelopes, exact Source order and Route-chain writes, guards, OAuth/import results, provenance, usage, and runtime status. |
 | `api-response.schema.json` | Machine-readable response contract and real-response exercise for every route in `api.md`, at exact route-table parity. |

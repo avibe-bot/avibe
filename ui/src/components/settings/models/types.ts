@@ -502,6 +502,8 @@ export type RuntimeManifest = {
 
 export type RuntimeDependency = {
   contract_version: typeof CONTRACT_VERSION;
+  /** Persisted user intent. Older runtime payloads omit it. */
+  enabled?: boolean;
   /** Server host platform, never the browser platform. */
   host_platform?: string;
   manifest: RuntimeManifest;
