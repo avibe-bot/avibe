@@ -77,11 +77,33 @@ export const SettingsServicePage: React.FC = () => {
         setConfigField(['ui', 'setup_host'], uiPayload.setup_host),
         setConfigField(['ui', 'setup_port'], uiPayload.setup_port),
       ]);
-      await apiFetch('/api/ui/reload', {
+      const reloadResponse = await apiFetch('/api/ui/reload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ host: uiPayload.setup_host, port: uiPayload.setup_port }),
       });
+      let reloadBody: { ok?: boolean; code?: string; error?: unknown; message?: string } | null = null;
+      try {
+        reloadBody = await reloadResponse.json();
+      } catch {
+        reloadBody = null;
+      }
+      if (!reloadResponse.ok || reloadBody?.ok === false) {
+        if (reloadBody?.code === 'restart_in_progress') {
+          setUiMessage(t('settings.service.restartInProgress'));
+        } else if (reloadBody?.code === 'restart_not_scheduled_package_busy') {
+          setUiMessage(t('settings.service.packageMutationBusy'));
+        } else {
+          const reloadError =
+            typeof reloadBody?.error === 'string'
+              ? reloadBody.error
+              : typeof reloadBody?.message === 'string'
+                ? reloadBody.message
+                : null;
+          setUiMessage(reloadError || t('common.saveFailed'));
+        }
+        return;
+      }
       // If the UI server's bind host or port changed, the current page is on
       // the old origin and may become unreachable. Redirect (or surface the
       // new origin) so the user is not stranded.

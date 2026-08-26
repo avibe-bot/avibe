@@ -7435,6 +7435,25 @@ def ui_reload():
     except (TypeError, ValueError):
         return jsonify({"error": "invalid_port"}), 400
 
+    def _restart_in_progress_response():
+        return _coded_error_response(
+            "restart_in_progress",
+            "a restart is already in progress",
+            409,
+            restart=runtime.read_json(runtime.get_restart_status_path()) or {},
+        )
+
+    if _restart_in_flight():
+        return _restart_in_progress_response()
+    try:
+        with package_mutation_lock(timeout_seconds=0):
+            if _restart_in_flight():
+                return _restart_in_progress_response()
+    except MigrationLockTimeout:
+        if _restart_in_flight():
+            return _restart_in_progress_response()
+        return jsonify(_restart_not_scheduled_package_busy()), 409
+
     try:
         from core.services import settings as settings_service
 

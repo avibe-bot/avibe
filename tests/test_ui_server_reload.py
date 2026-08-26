@@ -4,7 +4,7 @@ import os
 import sys
 import threading
 import types
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 
 import pytest
 
@@ -106,6 +106,125 @@ def test_ui_reload_overrides_bind_host_when_tunnel_enabled(monkeypatch):
     call = captured_calls[-1]
     assert call["requested_host"] == "100.97.103.112"
     assert call["config"].remote_access.vibe_cloud.enabled is True
+
+
+def test_ui_reload_admission_refuses_when_restart_is_already_in_flight(monkeypatch):
+    monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: True)
+    monkeypatch.setattr(
+        threading,
+        "Thread",
+        lambda *args, **kwargs: pytest.fail("worker must not be constructed"),
+    )
+    monkeypatch.setattr(
+        ui_server,
+        "package_mutation_lock",
+        lambda **kwargs: pytest.fail("already-live restart should refuse before lock"),
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/api/ui/reload",
+        json={"host": "127.0.0.1", "port": 5123},
+        headers=csrf_headers(client, "http://127.0.0.1:5123"),
+        base_url="http://127.0.0.1:5123",
+    )
+
+    assert response.status_code == 409
+    assert response.get_json()["code"] == "restart_in_progress"
+
+
+def test_ui_reload_admission_reports_package_busy_without_constructing_worker(monkeypatch):
+    lock_calls: list[int] = []
+
+    @contextmanager
+    def blocked_lock(*, timeout_seconds=None):
+        lock_calls.append(timeout_seconds)
+        raise MigrationLockTimeout("package mutation is still running")
+        yield
+
+    monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: False)
+    monkeypatch.setattr(ui_server, "package_mutation_lock", blocked_lock)
+    monkeypatch.setattr(
+        threading,
+        "Thread",
+        lambda *args, **kwargs: pytest.fail("busy admission must not construct worker"),
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/api/ui/reload",
+        json={"host": "127.0.0.1", "port": 5123},
+        headers=csrf_headers(client, "http://127.0.0.1:5123"),
+        base_url="http://127.0.0.1:5123",
+    )
+
+    assert response.status_code == 409
+    assert response.get_json() == {
+        "ok": False,
+        "code": "restart_not_scheduled_package_busy",
+        "error": "a package operation is in progress; restart was not scheduled",
+        "restart": {},
+    }
+    assert lock_calls == [0]
+
+
+def test_ui_reload_admission_timeout_distinguishes_restart_that_started(monkeypatch):
+    in_flight = iter([False, True])
+
+    @contextmanager
+    def blocked_lock(*, timeout_seconds=None):
+        raise MigrationLockTimeout("package mutation is still running")
+        yield
+
+    monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: next(in_flight))
+    monkeypatch.setattr(ui_server, "package_mutation_lock", blocked_lock)
+    monkeypatch.setattr(
+        threading,
+        "Thread",
+        lambda *args, **kwargs: pytest.fail("timeout admission must not construct worker"),
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/api/ui/reload",
+        json={"host": "127.0.0.1", "port": 5123},
+        headers=csrf_headers(client, "http://127.0.0.1:5123"),
+        base_url="http://127.0.0.1:5123",
+    )
+
+    assert response.status_code == 409
+    assert response.get_json()["code"] == "restart_in_progress"
+
+
+def test_ui_reload_admission_releases_predicate_lease_before_spawning(monkeypatch):
+    lock_calls: list[int] = []
+    threads: list[object] = []
+
+    @contextmanager
+    def admission_lock(*, timeout_seconds=None):
+        lock_calls.append(timeout_seconds)
+        yield
+
+    class _Thread(_NoopThread):
+        def __init__(self, *args, **kwargs):
+            threads.append(self)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(ui_server, "package_mutation_lock", admission_lock)
+    monkeypatch.setattr(threading, "Thread", _Thread)
+
+    client = app.test_client()
+    response = client.post(
+        "/api/ui/reload",
+        json={"host": "127.0.0.1", "port": 5123},
+        headers=csrf_headers(client, "http://127.0.0.1:5123"),
+        base_url="http://127.0.0.1:5123",
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True, "host": "127.0.0.1", "port": 5123}
+    assert lock_calls == [0]
+    assert len(threads) == 1
 
 
 def test_ui_reload_rejects_non_string_host(monkeypatch):
@@ -276,6 +395,8 @@ def test_ui_reload_stops_old_server_and_waits_for_replacement_inside_package_lea
     assert response.status_code == 200
     assert response.get_json()["ok"] is True
     assert events == [
+        ("lock-enter", 0),
+        ("lock-exit", 0),
         ("lock-enter", None),
         "stop-old",
         ("spawn", True),
@@ -294,7 +415,11 @@ def test_ui_reload_waits_for_child_ready_marker_matching_replacement_pid(monkeyp
     class _Server:
         should_exit = False
 
-    monkeypatch.setattr(ui_server, "package_mutation_lock", nullcontext)
+    @contextmanager
+    def mutation_lock(*, timeout_seconds=None):
+        yield
+
+    monkeypatch.setattr(ui_server, "package_mutation_lock", mutation_lock)
     monkeypatch.setattr(ui_server, "_server", _Server())
     monkeypatch.setattr(threading, "Thread", _ImmediateThread)
     monkeypatch.setattr(runtime, "read_status", lambda: {"state": "running", "service_pid": 111})
@@ -470,6 +595,8 @@ def test_ui_reload_retries_one_spawn_failure_inside_the_same_lease(monkeypatch, 
     assert server.should_exit is True
     assert events == [
         "lock-enter",
+        "lock-exit",
+        "lock-enter",
         ("spawn", 1),
         ("spawn", 2),
         ("status", ("running", None, 111, 222)),
@@ -539,6 +666,8 @@ def test_ui_reload_two_spawn_failures_write_error_without_further_retry(
     assert server.should_exit is True
     assert events == [
         "lock-enter",
+        "lock-exit",
+        "lock-enter",
         "spawn",
         "spawn",
         ("status", ("error", "ui_reload_failed", 333, 444)),
@@ -576,7 +705,11 @@ def test_ui_reload_spawn_retry_and_readiness_share_one_deadline(monkeypatch, tmp
         sleeps.append(delay)
         now[0] += delay
 
-    monkeypatch.setattr(ui_server, "package_mutation_lock", nullcontext)
+    @contextmanager
+    def mutation_lock(*, timeout_seconds=None):
+        yield
+
+    monkeypatch.setattr(ui_server, "package_mutation_lock", mutation_lock)
     monkeypatch.setattr(ui_server, "_server", _Server())
     monkeypatch.setattr(threading, "Thread", _ImmediateThread)
     statuses_to_read = iter(
@@ -634,7 +767,8 @@ def test_ui_reload_refuses_restart_in_flight_before_stopping_current_server(
 
     server = _Server()
     monkeypatch.setattr(ui_server, "package_mutation_lock", mutation_lock)
-    monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: True)
+    in_flight = iter([False, False, True])
+    monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: next(in_flight))
     monkeypatch.setattr(ui_server, "_server", server)
     monkeypatch.setattr(threading, "Thread", _ImmediateThread)
     monkeypatch.setattr(
@@ -659,7 +793,12 @@ def test_ui_reload_refuses_restart_in_flight_before_stopping_current_server(
 
     assert response.status_code == 200
     assert response.get_json() == {"ok": True, "host": "127.0.0.1", "port": 5123}
-    assert events == ["lock-enter", "lock-exit"]
+    assert events == [
+        "lock-enter",
+        "lock-exit",
+        "lock-enter",
+        "lock-exit",
+    ]
     assert server.should_exit is False
     assert "restart_in_progress" in caplog.text
 
@@ -673,10 +812,15 @@ def test_ui_reload_retries_busy_worker_then_leaves_current_server_running(
     spawned: list[bool] = []
     status_writes: list[bool] = []
 
+    lock_attempts = 0
+
     @contextmanager
     def blocked_mutation_lock(*, timeout_seconds=None):
+        nonlocal lock_attempts
+        lock_attempts += 1
         lock_calls.append(timeout_seconds)
-        raise MigrationLockTimeout("package mutation is still running")
+        if lock_attempts > 1:
+            raise MigrationLockTimeout("package mutation is still running")
         yield
 
     class _Server:
@@ -706,7 +850,7 @@ def test_ui_reload_retries_busy_worker_then_leaves_current_server_running(
 
     assert response.status_code == 200
     assert response.get_json() == {"ok": True, "host": "127.0.0.1", "port": 5123}
-    assert lock_calls == [None, None]
+    assert lock_calls == [0, None, None]
     assert sleeps == [1.0]
     assert spawned == []
     assert status_writes == []
