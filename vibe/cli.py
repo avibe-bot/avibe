@@ -14599,6 +14599,11 @@ def cmd_runtime(args) -> int:
             dry_run=dry_run,
         )
         payload.update(managed_runtimes)
+        show_verdict = _runtime_clean_verdict(payload, dry_run=dry_run)
+        managed_verdicts = {
+            runtime_id: _runtime_clean_verdict(result, dry_run=dry_run)
+            for runtime_id, result in managed_runtimes.items()
+        }
         if getattr(args, "json", False):
             print(json.dumps(payload, indent=2))
         else:
@@ -14613,11 +14618,10 @@ def cmd_runtime(args) -> int:
             prefix_key = "runtime.clean.wouldRemove" if dry_run else "runtime.clean.removed"
             removed = payload.get("removed") or []
             print(i18n_t(f"{prefix_key}Items", language, count=len(removed)))
-            show_failed = _runtime_clean_failed(payload)
-            if show_failed:
+            if show_verdict.failed:
                 _print_runtime_clean_failure(
                     consumer="Show Runtime",
-                    result=payload,
+                    reason=show_verdict.reason,
                     dry_run=dry_run,
                     language=language,
                 )
@@ -14655,7 +14659,7 @@ def cmd_runtime(args) -> int:
                         else "runtime.clean.skipped"
                     )
                     print(i18n_t(skip_key, language, reason=skipped_reason), file=sys.stderr)
-            elif archives or not show_failed:
+            elif not show_verdict.archives_failed and (archives or not show_verdict.failed):
                 archive_count = int(archives.get("candidate_count") or 0) if dry_run else int(archives.get("removed_count") or 0)
                 archive_bytes = int(archives.get("candidate_bytes") or 0) if dry_run else int(archives.get("removed_bytes") or 0)
                 print(
@@ -14672,10 +14676,9 @@ def cmd_runtime(args) -> int:
                     result=result,
                     dry_run=dry_run,
                     language=language,
+                    verdict=managed_verdicts[runtime_id],
                 )
-        failed = _runtime_clean_failed(payload) or any(
-            _runtime_clean_failed(result) for result in managed_runtimes.values()
-        )
+        failed = show_verdict.failed or any(verdict.failed for verdict in managed_verdicts.values())
         return 1 if failed else 0
     raise TaskCliError("runtime command is required", code="invalid_arguments", help_command="vibe runtime --help")
 
@@ -14859,9 +14862,38 @@ def _clean_managed_runtime_consumers(*, keep_previous: int, dry_run: bool = Fals
     return results
 
 
-def _runtime_clean_failed(result: Mapping[str, Any]) -> bool:
+@dataclass(frozen=True)
+class _RuntimeCleanVerdict:
+    reason: str | None
+    archives_failed: bool
+
+    @property
+    def failed(self) -> bool:
+        return self.reason is not None
+
+
+def _runtime_clean_verdict(result: Mapping[str, Any], *, dry_run: bool) -> _RuntimeCleanVerdict:
+    archives_value = result.get("archives")
+    archives = archives_value if isinstance(archives_value, Mapping) else {}
+    archive_reason = archives.get("skipped_reason")
+    failed_count = archives.get("failed_count")
+    archives_failed = bool(archive_reason) or (
+        not dry_run
+        and (
+            archives.get("outcome") == "partial"
+            or (isinstance(failed_count, (int, float)) and failed_count > 0)
+        )
+    )
+    nested_reason = archive_reason or ("archive_removal_failed" if archives_failed else None)
     ok = result.get("ok")
-    return ok is False or (ok is not True and bool(result.get("reason")))
+    reason = result.get("reason")
+    top_level_failed = ok is False or (ok is not True and bool(reason))
+    if not top_level_failed and not archives_failed:
+        return _RuntimeCleanVerdict(reason=None, archives_failed=False)
+    return _RuntimeCleanVerdict(
+        reason=str(reason or nested_reason or "unknown"),
+        archives_failed=archives_failed,
+    )
 
 
 def _managed_runtime_label(runtime_id: str) -> str:
@@ -14876,19 +14908,17 @@ def _managed_runtime_label(runtime_id: str) -> str:
 def _print_runtime_clean_failure(
     *,
     consumer: str,
-    result: Mapping[str, Any],
+    reason: str | None,
     dry_run: bool,
     language: str,
 ) -> None:
     key = "runtime.clean.consumerPreviewFailed" if dry_run else "runtime.clean.consumerFailed"
-    archives = result.get("archives")
-    archive_reason = archives.get("skipped_reason") if isinstance(archives, Mapping) else None
     print(
         i18n_t(
             key,
             language,
             consumer=consumer,
-            reason=result.get("reason") or archive_reason or "unknown",
+            reason=reason or "unknown",
         ),
         file=sys.stderr,
     )
@@ -14900,6 +14930,7 @@ def _print_managed_runtime_clean_result(
     result: Mapping[str, Any],
     dry_run: bool,
     language: str,
+    verdict: _RuntimeCleanVerdict,
 ) -> None:
     consumer = _managed_runtime_label(runtime_id)
     prefix_key = "runtime.clean.consumerWouldRemove" if dry_run else "runtime.clean.consumerRemoved"
@@ -14907,10 +14938,10 @@ def _print_managed_runtime_clean_result(
     removed_count = len(removed) if isinstance(removed, list) else 0
     print(i18n_t(f"{prefix_key}Items", language, consumer=consumer, count=removed_count))
 
-    if _runtime_clean_failed(result):
+    if verdict.failed:
         _print_runtime_clean_failure(
             consumer=consumer,
-            result=result,
+            reason=verdict.reason,
             dry_run=dry_run,
             language=language,
         )
@@ -14952,6 +14983,8 @@ def _print_managed_runtime_clean_result(
             ),
             file=sys.stderr,
         )
+        return
+    if verdict.archives_failed:
         return
     count_key = "candidate_count" if dry_run else "removed_count"
     bytes_key = "candidate_bytes" if dry_run else "removed_bytes"
@@ -15233,7 +15266,13 @@ def build_parser():
     runtime_prepare_parser.add_argument("--strict", action="store_true", help="Return a non-zero exit code when preparation fails.")
     runtime_prepare_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
 
-    runtime_clean_parser = runtime_subparsers.add_parser("clean", help="Clean stale managed runtime cache entries")
+    runtime_clean_parser = runtime_subparsers.add_parser(
+        "clean",
+        help=(
+            "Delete stale Show, Git, Memory, and Model Hub runtime cache entries; "
+            "exit non-zero if any cleanup fails"
+        ),
+    )
     runtime_clean_parser.add_argument("--keep-previous", type=int, default=1, help="Number of previous runtime versions to keep.")
     runtime_clean_parser.add_argument(
         "--dry-run",

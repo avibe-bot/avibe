@@ -2929,6 +2929,91 @@ def test_runtime_clean_returns_nonzero_for_show_failure_without_false_archive_su
     assert "downloaded Show Runtime archive" not in captured.out
 
 
+@pytest.mark.parametrize(
+    ("archives", "expected_reason", "prints_partial_summary"),
+    [
+        (
+            {
+                "outcome": "skipped",
+                "skipped_reason": "archive_inspection_failed",
+                "failed_count": 0,
+            },
+            "archive_inspection_failed",
+            False,
+        ),
+        ({"outcome": "skipped", "failed_count": 1}, "archive_removal_failed", False),
+        ({"outcome": "partial", "failed_count": 0}, "archive_removal_failed", True),
+    ],
+)
+def test_runtime_clean_nested_show_archive_failure_controls_output_and_exit(
+    monkeypatch,
+    capsys,
+    archives,
+    expected_reason,
+    prints_partial_summary,
+):
+    class ShowRuntimeManager:
+        def clean(self, *, keep_previous=1, dry_run=False):
+            return {"ok": True, "removed": [], "archives": archives}
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: ShowRuntimeManager())
+    monkeypatch.setattr(cli, "_managed_runtime_cleaners", lambda: ())
+    args = cli.build_parser().parse_args(["runtime", "clean"])
+
+    assert cli.cmd_runtime(args) == 1
+    captured = capsys.readouterr()
+    assert expected_reason in captured.err
+    if prints_partial_summary:
+        assert "archive(s) could not be removed" in captured.err
+    else:
+        assert "downloaded Show Runtime archive(s) (0 B)" not in captured.out
+
+
+def test_runtime_clean_dry_run_partial_archive_preview_is_success(monkeypatch, capsys):
+    class ShowRuntimeManager:
+        def clean(self, *, keep_previous=1, dry_run=False):
+            return {
+                "ok": True,
+                "removed": [],
+                "archives": {
+                    "outcome": "partial",
+                    "candidate_count": 1,
+                    "candidate_bytes": 1024,
+                    "failed_count": 0,
+                },
+            }
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: ShowRuntimeManager())
+    monkeypatch.setattr(cli, "_managed_runtime_cleaners", lambda: ())
+    args = cli.build_parser().parse_args(["runtime", "clean", "--dry-run"])
+
+    assert cli.cmd_runtime(args) == 0
+    captured = capsys.readouterr()
+    assert "Would remove 1 downloaded Show Runtime archive(s) (1.0 KiB)." in captured.out
+    assert captured.err == ""
+
+
+def test_runtime_clean_json_keeps_nested_failure_payload_and_exits_nonzero(monkeypatch, capsys):
+    archives = {
+        "outcome": "skipped",
+        "skipped_reason": "archive_inspection_failed",
+        "failed_count": 0,
+    }
+
+    class ShowRuntimeManager:
+        def clean(self, *, keep_previous=1, dry_run=False):
+            return {"ok": True, "removed": [], "archives": archives}
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: ShowRuntimeManager())
+    monkeypatch.setattr(cli, "_managed_runtime_cleaners", lambda: ())
+    args = cli.build_parser().parse_args(["runtime", "clean", "--json"])
+
+    assert cli.cmd_runtime(args) == 1
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["archives"] == archives
+    assert captured.err == ""
+
+
 def test_runtime_clean_success_reports_every_consumer_and_exits_zero(monkeypatch, capsys):
     class FakeShowRuntimeManager:
         def clean(self, *, keep_previous=1, dry_run=False):
@@ -2993,9 +3078,8 @@ def test_runtime_clean_does_not_render_shared_archive_failure_as_zero_success(mo
 
     def clean_memory(**_kwargs):
         return {
-            "ok": False,
+            "ok": True,
             "removed": [],
-            "reason": "memory-runtime_clean_inspection_failed",
             "archives": {
                 "outcome": "skipped",
                 "skipped_reason": "archive_inspection_failed",
@@ -3012,9 +3096,21 @@ def test_runtime_clean_does_not_render_shared_archive_failure_as_zero_success(mo
 
     assert cli.cmd_runtime(args) == 1
     captured = capsys.readouterr()
-    assert "memory-runtime_clean_inspection_failed" in captured.err
+    assert "Memory Runtime cleanup failed (archive_inspection_failed)" in captured.err
     assert "archive_inspection_failed" in captured.err
     assert "downloaded Memory Runtime archive" not in captured.out
+
+
+def test_runtime_clean_help_names_consumers_and_failure_exit(capsys):
+    parser = cli.build_parser()
+
+    with pytest.raises(SystemExit) as exc_info:
+        parser.parse_args(["runtime", "--help"])
+
+    assert exc_info.value.code == 0
+    output = capsys.readouterr().out
+    assert "Show, Git, Memory, and Model Hub" in output
+    assert "exit non-zero if any cleanup fails" in output
 
 
 @pytest.mark.parametrize("legacy_source", ["github", "github-source", "GitHub-Source"])

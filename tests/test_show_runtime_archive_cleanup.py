@@ -574,7 +574,7 @@ def test_partial_removal_reports_removed_and_failed_counts(monkeypatch, capsys) 
         lambda *, keep_previous, dry_run=False: {"ok": True, "removed": []},
     )
 
-    assert vibe_cli.cmd_runtime(args) == 0
+    assert vibe_cli.cmd_runtime(args) == 1
     captured = capsys.readouterr()
     assert "2" in captured.out  # successful removal total still reported
     assert "1" in captured.err  # failed count reported as a warning
@@ -798,7 +798,7 @@ def test_skipped_archives_do_not_hide_other_cleanup_results(monkeypatch, capsys)
         lambda *, keep_previous, dry_run=False: {"ok": True, "removed": ["git-old"]},
     )
 
-    assert vibe_cli.cmd_runtime(args) == 0
+    assert vibe_cli.cmd_runtime(args) == 1
     captured = capsys.readouterr()
     assert "runtime_install_already_running" in captured.err  # archive skip reason surfaced
     assert "1" in captured.out  # Show Runtime install result still reported
@@ -915,7 +915,7 @@ def test_cli_clean_reports_skipped_archives_without_zero_counts(monkeypatch, cap
         lambda *, keep_previous, dry_run=False: {"ok": True, "removed": []},
     )
 
-    assert vibe_cli.cmd_runtime(args) == 0
+    assert vibe_cli.cmd_runtime(args) == 1
     captured = capsys.readouterr()
     assert "runtime_install_already_running" in captured.err
     # The archive skip is reported as a warning; Show/Git results still render
