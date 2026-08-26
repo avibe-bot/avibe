@@ -1168,7 +1168,7 @@
         "retry": "Retry",
         "empty": "This route chain is empty. Add a hop, or leave it unconfigured.",
         "impact": { "title": "The route chain was saved", "detail": "These are the items this save actually removed or interrupted.", "refreshFail": "The route chain was saved, but the model surface could not be refreshed.", "done": "Done" },
-        "hint": "This chain is stored configuration. Later source-order changes do not change it."
+        "hint": "This chain is stored configuration. Later Source order changes reorder its hops to match."
       },
       "recent": {
         "title": "Recent switches",

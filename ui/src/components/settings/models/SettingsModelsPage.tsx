@@ -785,23 +785,6 @@ export const SettingsModelsPage: React.FC = () => {
           const authoritative = result.value;
           setSupplyRead(readyRegion(authoritative));
           const committed = authoritative.some((row) => row.backend === agent.backend && row.mode === 'direct');
-          if (committed) {
-            const sourceSnapshot = sourceEntityAuthority.beginSnapshot();
-            try {
-              const sourceResult = await sourceCollectionReads.read();
-              if (sourceResult.kind === 'stale') {
-                // A newer inventory read owns the projection. Reconcile again
-                // so an older response cannot downgrade a fresh landing.
-                void refresh();
-              } else {
-                sourceEntityAuthority.settleSnapshot(sourceSnapshot, sourceResult.value);
-              }
-            } catch {
-              // The mode read is authoritative, but the source projection is not.
-              // Keep its last values visible with a retryable stale marker.
-              setSourcesRead((previous) => failRegionRead(previous));
-            }
-          }
           setSwitchFailures((previous) => {
             const next = new Set(previous);
             if (committed) next.delete(agent.backend);

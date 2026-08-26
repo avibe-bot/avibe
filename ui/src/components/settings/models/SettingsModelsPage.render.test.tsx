@@ -662,6 +662,7 @@ describe('SettingsModelsPage surface branches', () => {
     }));
     await waitFor(() => expect(exactRead).toHaveBeenCalledOnce());
     expect(exactRead).toHaveBeenCalledWith('codex', 'gpt-5.6-sol');
+    expect(screen.getByText(/Later Source order changes reorder its hops to match\.|以后调整来源顺序时,其中的来源会按新的顺序重排。/i)).toBeTruthy();
   });
 
   it('keeps a failed event read distinct from an empty history and retries it', async () => {
@@ -997,7 +998,7 @@ describe('SettingsModelsPage surface branches', () => {
     expect(document.activeElement?.closest('[data-agent-backend="codex"]')).toBeNull();
   });
 
-  it('reconciles a lost Direct-mode response before rendering failure', async () => {
+  it('keeps the source projection intact after a lost Direct-mode response', async () => {
     const direct = { ...takeoverAgent, mode: 'direct' as const, sources: null, routes: null, supply_status: null, model_supply: null };
     const staleSource = {
       ...retainedSource,
@@ -1005,13 +1006,10 @@ describe('SettingsModelsPage surface branches', () => {
       display_name: 'Paused source',
       adopted_by: [{ backend: 'codex' as const, menu_model: 'gpt-5.6-sol' }],
     };
-    const freshSource = { ...staleSource, adopted_by: [] };
     const agentRead = vi.spyOn(modelsApi, 'listAgents')
       .mockResolvedValueOnce([takeoverAgent])
       .mockResolvedValueOnce([direct]);
-    const sourceRead = vi.spyOn(modelsApi, 'listSources')
-      .mockResolvedValueOnce([staleSource])
-      .mockResolvedValueOnce([freshSource]);
+    const sourceRead = vi.spyOn(modelsApi, 'listSources').mockResolvedValue([staleSource]);
     vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
     vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
     vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([takeoverChain]);
@@ -1031,49 +1029,15 @@ describe('SettingsModelsPage surface branches', () => {
     expect(screen.queryByText(/did not go through|没切换成功/i)).toBeNull();
     expect(setMode).toHaveBeenCalledOnce();
     expect(agentRead).toHaveBeenCalledTimes(2);
-    await waitFor(() => expect(sourceRead).toHaveBeenCalledTimes(2));
-    expect(screen.getByText(/Available · not currently supplying|可用 · 当前未供给/i)).toBeTruthy();
+    await waitFor(() => expect(sourceRead).toHaveBeenCalledOnce());
+    expect(screen.queryByText(/Could not read the source list · the gateway itself is fine|来源列表没读到 · 网关本身正常/i)).toBeNull();
   });
 
-  it('marks the source inventory stale when Direct-mode recovery cannot reread it', async () => {
-    const direct = { ...takeoverAgent, mode: 'direct' as const, sources: null, routes: null, supply_status: null, model_supply: null };
-    const staleSource = {
-      ...retainedSource,
-      id: 'src_head',
-      display_name: 'Paused source',
-      adopted_by: [{ backend: 'codex' as const, menu_model: 'gpt-5.6-sol' }],
-    };
-    const agentRead = vi.spyOn(modelsApi, 'listAgents')
-      .mockResolvedValueOnce([takeoverAgent])
-      .mockResolvedValueOnce([direct]);
-    const sourceRead = vi.spyOn(modelsApi, 'listSources')
-      .mockResolvedValueOnce([staleSource])
-      .mockRejectedValueOnce(new TypeError('source read lost'));
-    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
-    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
-    vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([takeoverChain]);
-    vi.spyOn(modelsApi, 'setAgentMode').mockRejectedValueOnce(new TypeError('response lost'));
-
-    render(
-      <ToastProvider>
-        <I18nextProvider i18n={i18n}>
-          <SettingsModelsPage />
-        </I18nextProvider>
-      </ToastProvider>,
-    );
-
-    await userEvent.click(await screen.findByRole('button', { name: /^Switch to direct$|^切到直连$/i }));
-
-    expect(await screen.findByRole('button', { name: /^Switch to Gateway$|^切换到网关$/i })).toBeTruthy();
-    await waitFor(() => expect(agentRead).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(sourceRead).toHaveBeenCalledTimes(2));
-    expect(screen.getByText(/Could not read the source list · the gateway itself is fine|来源列表没读到 · 网关本身正常/i)).toBeTruthy();
-  });
-
-  it('reconciles superseded source reads through the latest page refresh', () => {
+  it('does not compete for source inventory during Direct-mode recovery', () => {
     const page = readFileSync(join(process.cwd(), 'src/components/settings/models/SettingsModelsPage.tsx'), 'utf8');
     const recovery = page.slice(page.indexOf('const switchToDirect'), page.indexOf('const loadOlderEvents'));
-    expect(recovery).toMatch(/if \(sourceResult\.kind === 'stale'\) \{[\s\S]*?void refresh\(\)/);
+    expect(recovery).not.toMatch(/sourceCollectionReads\.read\(/);
+    expect(recovery).not.toMatch(/void refresh\(\)/);
   });
 
   it('keeps retained supply rows but clears derived chain claims when a later supply read fails', async () => {
