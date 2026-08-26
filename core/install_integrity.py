@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Iterable
+from typing import Iterable, Sequence
 
 
 @dataclass(frozen=True)
@@ -49,6 +49,21 @@ def isolated_probe_environment() -> dict[str, str]:
     return environment
 
 
+def run_isolated_probe(command: Sequence[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
+    """Run a candidate probe from a private empty working directory."""
+
+    with tempfile.TemporaryDirectory(prefix="avibe-integrity-") as working_directory:
+        return subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            cwd=working_directory,
+            env=isolated_probe_environment(),
+        )
+
+
 def site_packages_for_python(python_executable: str | os.PathLike[str]) -> list[Path]:
     """Return site-packages directories belonging to a Python executable."""
 
@@ -67,15 +82,7 @@ def site_packages_for_python(python_executable: str | os.PathLike[str]) -> list[
         "print('\\n'.join(dict.fromkeys(path for path in paths if path)))"
     )
     try:
-        result = subprocess.run(
-            [str(executable), "-c", probe],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-            cwd=tempfile.gettempdir(),
-            env=isolated_probe_environment(),
-        )
+        result = run_isolated_probe([str(executable), "-c", probe], timeout=10)
     except (OSError, subprocess.SubprocessError):
         result = None
     if result is not None and result.returncode == 0:
@@ -228,17 +235,7 @@ def verify_python_environment(
     if modules:
         code = "; ".join(f"import {module}" for module in modules)
         try:
-            process = subprocess.run(
-                [executable, "-c", code],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-                # Do not let a source checkout on the caller's cwd satisfy the
-                # probe in place of the candidate environment being checked.
-                cwd=tempfile.gettempdir(),
-                env=isolated_probe_environment(),
-            )
+            process = run_isolated_probe([executable, "-c", code], timeout=timeout)
         except (OSError, subprocess.SubprocessError) as exc:
             return IntegrityResult(False, checked_files=checked, failures=(f"import probe failed: {exc}",))
         if process.returncode != 0:

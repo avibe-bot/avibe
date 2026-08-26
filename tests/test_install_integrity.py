@@ -1,6 +1,8 @@
 import base64
 import hashlib
+import stat
 import subprocess
+from pathlib import Path
 
 from core import install_integrity
 from core.install_integrity import verify_site_packages
@@ -45,7 +47,7 @@ def test_verify_site_packages_rejects_a_changed_file(tmp_path):
     assert "hash mismatch demo_pkg/__init__.py" in result.failures
 
 
-def test_verify_python_environment_import_probe_does_not_use_caller_cwd(monkeypatch, tmp_path):
+def test_verify_python_environment_probes_use_private_empty_directories(monkeypatch, tmp_path):
     site_packages = tmp_path / "lib" / "python3.12" / "site-packages"
     _write_record(site_packages, "demo_pkg/__init__.py", b"value = 1\n")
     executable = tmp_path / "bin" / "python3"
@@ -55,7 +57,15 @@ def test_verify_python_environment_import_probe_does_not_use_caller_cwd(monkeypa
     calls = []
 
     def fake_run(*args, **kwargs):
-        calls.append(kwargs)
+        cwd = Path(kwargs["cwd"])
+        calls.append(
+            {
+                **kwargs,
+                "cwd_parent": cwd.parent,
+                "cwd_mode": stat.S_IMODE(cwd.stat().st_mode),
+                "cwd_entries": tuple(cwd.iterdir()),
+            }
+        )
         stdout = f"{site_packages}\n" if len(calls) == 1 else ""
         return subprocess.CompletedProcess(args[0], 0, stdout=stdout, stderr="")
 
@@ -64,8 +74,11 @@ def test_verify_python_environment_import_probe_does_not_use_caller_cwd(monkeypa
     result = install_integrity.verify_python_environment(executable, required_imports=("demo_pkg",))
 
     assert result.ok is True
-    assert calls[0]["cwd"] == install_integrity.tempfile.gettempdir()
-    assert calls[0]["cwd"] != str(tmp_path)
+    assert len(calls) == 2
+    assert all(call["cwd_parent"] == Path(install_integrity.tempfile.gettempdir()) for call in calls)
+    assert all(call["cwd_mode"] & 0o077 == 0 for call in calls)
+    assert all(call["cwd_entries"] == () for call in calls)
+    assert calls[0]["cwd"] != calls[1]["cwd"]
 
 
 def test_candidate_probe_does_not_inherit_pythonpath(monkeypatch, tmp_path):

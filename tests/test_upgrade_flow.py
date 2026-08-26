@@ -273,6 +273,28 @@ def test_activation_compares_source_generation_by_filesystem_identity(monkeypatc
     assert upgrade.atomic_activation_source_is_current(activation)
 
 
+def test_activation_compares_a_conventional_launcher_snapshot(monkeypatch, tmp_path):
+    from vibe import upgrade
+
+    root = tmp_path / "runtime" / "install-generations"
+    old = tmp_path / "legacy" / "old-vibe"
+    new = tmp_path / "legacy" / "new-vibe"
+    launcher = tmp_path / "bin" / "vibe"
+    for path in (old, new):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(path.name, encoding="utf-8")
+        path.chmod(0o755)
+    launcher.parent.mkdir()
+    launcher.symlink_to(old)
+    monkeypatch.setattr(upgrade, "atomic_uv_install_root", lambda: root)
+    activation = upgrade.AtomicActivation(launcher, root / "candidate" / "bin" / "vibe", old)
+
+    assert upgrade.atomic_activation_source_is_current(activation)
+    launcher.unlink()
+    launcher.symlink_to(new)
+    assert not upgrade.atomic_activation_source_is_current(activation)
+
+
 def test_installer_activation_uses_the_shared_locked_boundary(monkeypatch, tmp_path):
     from vibe import upgrade
 
@@ -746,6 +768,15 @@ def test_legacy_restart_record_expires_even_when_its_pid_was_reused(monkeypatch,
     runtime.write_json(status, {"state": "scheduled", "supervisor_pid": 456})
     os.utime(status, (0, 0))
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 456)
+
+    assert not restart_is_pending()
+
+
+def test_restart_state_with_a_non_object_shape_is_not_pending(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    status = runtime.get_restart_status_path()
+    status.parent.mkdir(parents=True)
+    status.write_text("[]", encoding="utf-8")
 
     assert not restart_is_pending()
 

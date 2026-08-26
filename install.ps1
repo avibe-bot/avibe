@@ -75,32 +75,47 @@ function Get-StableBinDirectory {
     return Resolve-InstallPath $directory
 }
 
-function Get-LauncherSourcePath {
+function Get-LauncherState {
     param(
         [string]$Launcher,
         [string]$StableBin
     )
 
+    $state = @{
+        Exists = Test-Path -LiteralPath $Launcher
+        SourcePath = $null
+        ActivationOwner = $null
+    }
     $marker = Join-Path $StableBin ".vibe.exe.avibe-generation"
     if (Test-Path -LiteralPath $marker) {
-        $marked = (Get-Content -LiteralPath $marker -Raw -ErrorAction SilentlyContinue).Trim()
+        $marked = Get-Content -LiteralPath $marker -Raw -ErrorAction SilentlyContinue
         if ($marked) {
-            return $marked
+            $marked = $marked.Trim()
+        }
+        if ($marked) {
+            $state.SourcePath = $marked
+            $owner = Join-Path $marked "bin\vibe.exe"
+            if (Test-Path -LiteralPath $owner) {
+                $state.ActivationOwner = $owner
+            }
+            return $state
         }
     }
     try {
         $item = Get-Item -LiteralPath $Launcher -ErrorAction Stop
         $target = @($item.Target)[0]
         if (-not $target) {
-            return $null
+            return $state
         }
         if (-not [System.IO.Path]::IsPathRooted($target)) {
             $target = Join-Path $item.DirectoryName $target
         }
-        return Resolve-InstallPath $target
+        $state.SourcePath = Resolve-InstallPath $target
+        $state.ActivationOwner = $state.SourcePath
     } catch {
-        return $null
+        return $state
     }
+    return $state
 }
 
 function Invoke-WebScriptWithRetry {
@@ -322,7 +337,9 @@ function Activate-LegacyInstallCandidate {
                 Copy-Item -LiteralPath $Candidate -Destination $replacement -Force -ErrorAction Stop
             }
         }
-        Move-Item -Force -Path $replacement -Destination $StableLauncher
+        # This fallback is fresh-install only. File.Move atomically refuses to
+        # overwrite a launcher that appeared while the candidate was staging.
+        [System.IO.File]::Move($replacement, $StableLauncher)
     } catch {
         Remove-Item -LiteralPath $replacement -Force -ErrorAction SilentlyContinue
         return @{ Success = $false; ExitCode = 1; Output = (($_ | Out-String).Trim()) }
@@ -365,7 +382,8 @@ function Invoke-UvToolInstallAttempt {
     $stableLauncher = Join-Path $stableBin "vibe.exe"
     # The candidate's shared Python activation owner resolves this snapshot to
     # a generation. PowerShell must not duplicate junction/symlink identity.
-    $previousSourcePath = Get-LauncherSourcePath -Launcher $stableLauncher -StableBin $stableBin
+    $launcherState = Get-LauncherState -Launcher $stableLauncher -StableBin $stableBin
+    $previousSourcePath = $launcherState.SourcePath
     New-Item -ItemType Directory -Force -Path $generationTools, $generationBin, $stableBin | Out-Null
 
     $previousToolDir = $env:UV_TOOL_DIR
@@ -391,12 +409,28 @@ function Invoke-UvToolInstallAttempt {
 
         $previousPythonPath = $env:PYTHONPATH
         $previousPythonHome = $env:PYTHONHOME
+        $previousAvibeHome = $env:AVIBE_HOME
         Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
         Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
+        $env:AVIBE_HOME = $runtimeHome
         Push-Location $runtimeHome
         try {
             $protocol = Invoke-NativeCommand -FilePath $candidate -Arguments @("__activate-install", "--protocol-version")
-            if ($protocol.Success -and $protocol.Output.Trim() -eq "1") {
+            $activationOwner = if ($protocol.Success -and $protocol.Output.Trim() -eq "1") {
+                $candidate
+            } elseif ($launcherState.ActivationOwner) {
+                $ownerProtocol = Invoke-NativeCommand `
+                    -FilePath $launcherState.ActivationOwner `
+                    -Arguments @("__activate-install", "--protocol-version")
+                if ($ownerProtocol.Success -and $ownerProtocol.Output.Trim() -eq "1") {
+                    $launcherState.ActivationOwner
+                } else {
+                    $null
+                }
+            } else {
+                $null
+            }
+            if ($activationOwner) {
                 $activationArguments = @(
                     "__activate-install",
                     "--launcher", $stableLauncher,
@@ -405,11 +439,16 @@ function Invoke-UvToolInstallAttempt {
                 if ($previousSourcePath) {
                     $activationArguments += @("--source-generation", $previousSourcePath)
                 }
-                $activation = Invoke-NativeCommand -FilePath $candidate -Arguments $activationArguments
+                $activation = Invoke-NativeCommand -FilePath $activationOwner -Arguments $activationArguments
+            } elseif ($launcherState.Exists) {
+                $activation = @{
+                    Success = $false
+                    ExitCode = 1
+                    Output = "legacy candidate cannot safely replace an existing Avibe installation"
+                }
             } else {
-                # Older released wheels predate the shared activation
-                # protocol. Switch atomically but retain every generation; a
-                # later protocol-aware install owns lifecycle cleanup.
+                # A legacy wheel may bootstrap a fresh machine. Existing
+                # installs must route through a protocol-aware current owner.
                 $activation = Activate-LegacyInstallCandidate `
                     -Candidate $candidate `
                     -StableLauncher $stableLauncher `
@@ -420,6 +459,7 @@ function Invoke-UvToolInstallAttempt {
             Pop-Location
             if ($null -eq $previousPythonPath) { Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue } else { $env:PYTHONPATH = $previousPythonPath }
             if ($null -eq $previousPythonHome) { Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue } else { $env:PYTHONHOME = $previousPythonHome }
+            if ($null -eq $previousAvibeHome) { Remove-Item Env:AVIBE_HOME -ErrorAction SilentlyContinue } else { $env:AVIBE_HOME = $previousAvibeHome }
         }
         if (-not $activation.Success) {
             Remove-Item -LiteralPath $generationRoot -Recurse -Force -ErrorAction SilentlyContinue

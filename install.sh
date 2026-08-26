@@ -441,47 +441,61 @@ uv_tool_install() {
         # snapshot against the generation root. Keep path identity out of the
         # bootstrap script so aliases cannot produce a second interpretation.
         local source_snapshot="$previous_target"
-        local activation_protocol=""
-        activation_protocol="$(
-            cd "$AVIBE_RUNTIME_HOME" || exit 1
-            env -u PYTHONPATH -u PYTHONHOME "$VIBE_CANDIDATE_BIN_PATH" \
-                __activate-install --protocol-version 2>/dev/null || true
-        )"
-        if [ "$activation_protocol" = "1" ]; then
-            local activation_args=(
-                __activate-install
-                --launcher "$stable_bin_dir/vibe"
-                --candidate "$VIBE_CANDIDATE_BIN_PATH"
-            )
-            if [ -n "$source_snapshot" ]; then
-                activation_args+=(--source-generation "$source_snapshot")
+        local activation_args=(
+            __activate-install
+            --launcher "$stable_bin_dir/vibe"
+            --candidate "$VIBE_CANDIDATE_BIN_PATH"
+        )
+        if [ -n "$source_snapshot" ]; then
+            activation_args+=(--source-generation "$source_snapshot")
+        fi
+        local activation_owner=""
+        local owner=""
+        local owner_protocol=""
+        for owner in "$VIBE_CANDIDATE_BIN_PATH" "$source_snapshot"; do
+            if [ -z "$owner" ] || [ ! -x "$owner" ]; then
+                continue
             fi
+            owner_protocol="$(
+                cd "$AVIBE_RUNTIME_HOME" || exit 1
+                env -u PYTHONPATH -u PYTHONHOME AVIBE_HOME="$AVIBE_RUNTIME_HOME" "$owner" \
+                    __activate-install --protocol-version 2>/dev/null || true
+            )"
+            if [ "$owner_protocol" = "1" ]; then
+                activation_owner="$owner"
+                break
+            fi
+        done
+        if [ -n "$activation_owner" ]; then
             if ! (
                 cd "$AVIBE_RUNTIME_HOME" || exit 1
-                env -u PYTHONPATH -u PYTHONHOME "$VIBE_CANDIDATE_BIN_PATH" "${activation_args[@]}"
+                env -u PYTHONPATH -u PYTHONHOME AVIBE_HOME="$AVIBE_RUNTIME_HOME" "$activation_owner" \
+                    "${activation_args[@]}"
             ); then
                 warn "candidate Avibe environment could not be activated"
                 rm -rf -- "$generation_root"
                 return 1
             fi
         else
-            # Older released wheels predate the shared activation protocol.
-            # Probe them, switch the launcher atomically, and deliberately skip
-            # cleanup; the retention grace keeps concurrent new-style upgrades
-            # safe, and a later protocol-aware install owns pruning.
+            # A legacy wheel can bootstrap a fresh machine, but replacing an
+            # existing launcher requires a current wheel to own the shared
+            # lock and source-snapshot checks above.
             if ! (
                 cd "$AVIBE_RUNTIME_HOME" || exit 1
-                env -u PYTHONPATH -u PYTHONHOME "$VIBE_CANDIDATE_BIN_PATH" --help >/dev/null 2>&1
+                env -u PYTHONPATH -u PYTHONHOME AVIBE_HOME="$AVIBE_RUNTIME_HOME" \
+                    "$VIBE_CANDIDATE_BIN_PATH" --help >/dev/null 2>&1
             ); then
                 warn "candidate vibe launcher failed its startup probe"
                 rm -rf -- "$generation_root"
                 return 1
             fi
-            local replacement="$stable_bin_dir/.vibe.avibe-${RANDOM}.new"
-            if ! ln -s "$VIBE_CANDIDATE_BIN_PATH" "$replacement" || \
-                ! mv -f "$replacement" "$stable_bin_dir/vibe"; then
+            if [ -e "$stable_bin_dir/vibe" ] || [ -L "$stable_bin_dir/vibe" ]; then
+                warn "legacy candidate cannot safely replace an existing Avibe installation"
+                rm -rf -- "$generation_root"
+                return 1
+            fi
+            if ! ln -s "$VIBE_CANDIDATE_BIN_PATH" "$stable_bin_dir/vibe"; then
                 warn "legacy candidate Avibe launcher could not be activated"
-                rm -f -- "$replacement"
                 rm -rf -- "$generation_root"
                 return 1
             fi

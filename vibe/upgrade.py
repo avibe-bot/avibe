@@ -19,7 +19,12 @@ from typing import Iterable, NamedTuple, cast
 from uuid import uuid4
 
 from config import paths as config_paths
-from core.install_integrity import IntegrityResult, isolated_probe_environment, verify_python_environment
+from core.install_integrity import (
+    IntegrityResult,
+    isolated_probe_environment,
+    run_isolated_probe,
+    verify_python_environment,
+)
 from storage.lock import MigrationFileLock
 from vibe import runtime as runtime_mod
 
@@ -129,7 +134,9 @@ def restart_is_pending() -> bool:
     """Whether a scheduled restart still owns the next activation boundary."""
 
     path = runtime_mod.get_restart_status_path()
-    payload = runtime_mod.read_json(path) or {}
+    payload = runtime_mod.read_json(path)
+    if not isinstance(payload, Mapping):
+        return False
     return restart_record_is_pending(payload, path)
 
 
@@ -427,7 +434,13 @@ def atomic_activation_source_is_current(activation: AtomicActivation) -> bool:
     if activation.source_generation is None:
         return current is None
     source = _generation_for_path(activation.source_generation, root)
-    return source is not None and current == source
+    if current is not None or source is not None:
+        return current == source
+    try:
+        current_target = activation.launcher.resolve(strict=True)
+        return os.path.samefile(current_target, activation.source_generation)
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 def activation_block_reason(activation: AtomicActivation) -> str | None:
@@ -544,15 +557,7 @@ def verify_upgrade_candidate(activation: AtomicActivation) -> IntegrityResult:
     if not result.ok:
         return result
     try:
-        probe = subprocess.run(
-            [str(candidate), "--help"],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-            cwd=tempfile.gettempdir(),
-            env=isolated_probe_environment(),
-        )
+        probe = run_isolated_probe([str(candidate), "--help"], timeout=60)
     except (OSError, subprocess.SubprocessError) as exc:
         return IntegrityResult(False, failures=(f"candidate launcher probe failed: {exc}",))
     if probe.returncode != 0:

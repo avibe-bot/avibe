@@ -51,9 +51,14 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
         cat > "$bin_dir/vibe" <<'EOF'
         #!/usr/bin/env bash
         set -euo pipefail
+        if [ "${{VIBE_TEST_REQUIRE_CANONICAL_HOME:-}}" = "1" ] && \
+            [ "${{AVIBE_HOME:-}}" != "${{VIBE_TEST_EXPECTED_AVIBE_HOME:-}}" ]; then
+            echo "AVIBE_HOME was not canonicalized" >&2
+            exit 21
+        fi
         if [ "${{1:-}}" = "__activate-install" ]; then
             if [ "${{2:-}}" = "--protocol-version" ]; then
-                if [ "${{VIBE_TEST_LEGACY_ACTIVATION:-}}" = "1" ]; then
+                if [ -f "$(dirname "$0")/.legacy-activation" ]; then
                     exit 2
                 fi
                 echo "1"
@@ -64,6 +69,9 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
                 exit 19
             fi
             shift
+            if [ -n "${{VIBE_TEST_ACTIVATION_OWNER_LOG:-}}" ]; then
+                printf '%s' "$0" > "$VIBE_TEST_ACTIVATION_OWNER_LOG"
+            fi
             launcher=""
             candidate=""
             source_generation=""
@@ -119,6 +127,9 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
         fi
         EOF
         chmod +x "$bin_dir/vibe"
+        if [ "${{VIBE_TEST_LEGACY_ACTIVATION:-}}" = "1" ]; then
+            touch "$bin_dir/.legacy-activation"
+        fi
         cat > "$bin_dir/python3" <<'EOF'
         #!/usr/bin/env bash
         if [ "${1:-}" = "-c" ]; then
@@ -270,6 +281,8 @@ def test_install_script_canonicalizes_relative_avibe_home(tmp_path):
     env["HOME"] = str(home_dir)
     env["AVIBE_HOME"] = "relative-avibe"
     env["PATH"] = os.pathsep.join([str(path_dir), "/usr/bin", "/bin"])
+    env["VIBE_TEST_REQUIRE_CANONICAL_HOME"] = "1"
+    env["VIBE_TEST_EXPECTED_AVIBE_HOME"] = str(tmp_path / "relative-avibe")
 
     install_result = _install(env, cwd=tmp_path)
 
@@ -354,6 +367,31 @@ def test_install_script_activates_a_wheel_without_the_shared_protocol(tmp_path):
     assert install_result.returncode == 0, install_result.stdout + install_result.stderr
     assert version_result.returncode == 0, version_result.stdout + version_result.stderr
     assert "avibe-os 9.9.9" in version_result.stdout
+
+
+def test_install_script_uses_the_current_owner_for_a_legacy_candidate(tmp_path):
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    path_dir = tmp_path / "path-bin"
+    path_dir.mkdir()
+    uv_log = tmp_path / "uv-tool-bin-dir.txt"
+    owner_log = tmp_path / "activation-owner.txt"
+    _write_fake_uv(path_dir / "uv", uv_log)
+
+    env = os.environ.copy()
+    env["HOME"] = str(home_dir)
+    env["PATH"] = os.pathsep.join([str(path_dir), "/usr/bin", "/bin"])
+
+    first = _install(env)
+    first_owner = (path_dir / "vibe").resolve()
+    env["VIBE_TEST_LEGACY_ACTIVATION"] = "1"
+    env["VIBE_TEST_ACTIVATION_OWNER_LOG"] = str(owner_log)
+    second = _install(env)
+
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert Path(owner_log.read_text(encoding="utf-8")).samefile(first_owner)
+    assert (path_dir / "vibe").resolve() != first_owner
 
 
 def test_install_script_keeps_active_launcher_when_uv_install_fails(tmp_path):
@@ -616,7 +654,7 @@ def test_windows_installer_honors_configured_tool_bin_and_cross_volume_copy_fall
 
     assert "function Get-StableBinDirectory" in powershell
     assert "function Resolve-InstallPath" in powershell
-    assert "function Get-LauncherSourcePath" in powershell
+    assert "function Get-LauncherState" in powershell
     assert "function Get-GenerationPath" not in powershell
     assert '$expanded.StartsWith("~\\")' in powershell
     assert "$configured = $env:UV_TOOL_BIN_DIR" in powershell
@@ -625,20 +663,23 @@ def test_windows_installer_honors_configured_tool_bin_and_cross_volume_copy_fall
     assert '$activationArguments += @("--source-generation", $previousSourcePath)' in powershell
     assert "function Remove-StaleInstallGenerations" not in powershell
     assert "function Activate-LegacyInstallCandidate" in powershell
+    assert "[System.IO.File]::Move($replacement, $StableLauncher)" in powershell
     assert "Start-Process -FilePath" not in powershell
     assert "& $FilePath @Arguments" in powershell
 
 
 def test_install_script_candidate_probes_ignore_python_path_overrides():
     script = INSTALL_SCRIPT.read_text(encoding="utf-8")
-    assert 'env -u PYTHONPATH -u PYTHONHOME "$VIBE_CANDIDATE_BIN_PATH" "${activation_args[@]}"' in script
+    assert 'env -u PYTHONPATH -u PYTHONHOME AVIBE_HOME="$AVIBE_RUNTIME_HOME"' in script
     assert "__activate-install --protocol-version" in script
     assert 'activation_args+=(--source-generation "$source_snapshot")' in script
     assert "generation_path_for" not in script
+    assert 'AVIBE_HOME="$AVIBE_RUNTIME_HOME" "$activation_owner"' in script
     assert "verify_uv_candidate" not in script
     powershell = INSTALL_POWERSHELL.read_text(encoding="utf-8")
     assert "$previousPythonPath = $env:PYTHONPATH" in powershell
     assert "Remove-Item Env:PYTHONHOME" in powershell
+    assert "$env:AVIBE_HOME = $runtimeHome" in powershell
     assert "Test-UvCandidate" not in powershell
 
 
