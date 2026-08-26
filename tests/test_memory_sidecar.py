@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from contextlib import asynccontextmanager
@@ -306,51 +307,82 @@ def test_sidecar_installs_canonical_scrubber_without_provider_call_state(
         "everos-stop",
     ]
 
-    class _Request:
-        def __init__(self, path: str, payload: dict[str, object]) -> None:
-            self.method = "POST"
-            self.url = SimpleNamespace(path=path)
-            self._body = json.dumps(payload).encode()
 
-        async def body(self) -> bytes:
-            return self._body
 
-    search_payload = {
-        "user_id": "u-11111111111111111111111111111111",
-        "app_id": "avibe",
-        "project_id": PROJECT,
-        "query": "profile",
-        "method": "keyword",
-        "top_k": 1,
-        "include_profile": False,
-        "enable_llm_rerank": False,
-        "filters": {"session_id": SESSION_ID},
+def test_sidecar_streams_large_request_guard_through_disk_spool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = json.dumps(
+        {
+            "user_id": "u-11111111111111111111111111111111",
+            "app_id": "avibe",
+            "project_id": PROJECT,
+            "query": "q" * (2 * 1024 * 1024 + 1),
+            "method": "keyword",
+            "top_k": 8,
+            "include_profile": True,
+            "enable_llm_rerank": False,
+        }
+    ).encode()
+    expected_digest = hashlib.sha256(body).digest()
+    loaded_json_bytes: list[int] = []
+    real_loads = sidecar.json.loads
+
+    def bounded_loads(value, *args, **kwargs):
+        loaded_json_bytes.append(len(value))
+        return real_loads(value, *args, **kwargs)
+
+    monkeypatch.setattr(sidecar.json, "loads", bounded_loads)
+    source_offset = 0
+    replayed_sizes: list[int] = []
+    replayed_digest = hashlib.sha256()
+    sent: list[dict] = []
+
+    async def receive():
+        nonlocal source_offset
+        if source_offset >= len(body):
+            return {"type": "http.disconnect"}
+        end = min(source_offset + 17_321, len(body))
+        chunk = body[source_offset:end]
+        source_offset = end
+        return {
+            "type": "http.request",
+            "body": chunk,
+            "more_body": source_offset < len(body),
+        }
+
+    async def downstream(_scope, downstream_receive, send):
+        while True:
+            message = await downstream_receive()
+            chunk = message["body"]
+            replayed_sizes.append(len(chunk))
+            replayed_digest.update(chunk)
+            if not message.get("more_body", False):
+                break
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"{}"})
+
+    async def capture(message):
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/api/v2/memory/search",
+        "headers": [],
     }
-    get_payload = {
-        "user_id": "u-11111111111111111111111111111111",
-        "app_id": "avibe",
-        "project_id": "default",
-        "memory_type": "profile",
-        "page": 1,
-        "page_size": 1,
-    }
+    asyncio.run(
+        sidecar._AgenticDeadlineProjection(downstream)(scope, receive, capture)
+    )
 
-    async def exercise_guard() -> None:
-        async def call_next(request):
-            return request.url.path
+    assert len(body) > 2 * 1024 * 1024
+    assert replayed_digest.digest() == expected_digest
+    assert max(replayed_sizes) <= sidecar._REQUEST_REPLAY_CHUNK_BYTES
+    assert max(loaded_json_bytes) < 1024
+    assert sent[0]["status"] == 200
+    assert not hasattr(sidecar, "_buffer_request")
 
-        assert (
-            await app.guard(
-                _Request("/api/v2/memory/search", search_payload), call_next
-            )
-            == "/api/v2/memory/search"
-        )
-        assert (
-            await app.guard(_Request("/api/v2/memory/get", get_payload), call_next)
-            == "/api/v2/memory/get"
-        )
 
-    asyncio.run(exercise_guard())
 def test_sidecar_guard_allows_derived_principals_and_memory_scope() -> None:
     principal = "u-11111111111111111111111111111111"
     payload = json.dumps(

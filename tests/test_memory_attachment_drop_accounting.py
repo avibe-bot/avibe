@@ -71,7 +71,11 @@ async def test_attachment_capture_telemetry_uses_terminal_result(
     )
     context = _attachment_context("reservation-failure", 2)
     assert (
-        controller.reserve_memory_attachment_capture(context, "stable-session")
+        controller.reserve_memory_attachment_capture(
+            context,
+            "stable-session",
+            "keep this caption",
+        )
         is None
     )
     await controller.capture_user_memory(
@@ -126,6 +130,7 @@ async def test_attachment_capture_telemetry_uses_terminal_result(
     reservation = controller.reserve_memory_attachment_capture(
         context,
         "stable-session",
+        "keep this caption",
     )
     assert reservation is not None
     await controller.capture_user_memory(

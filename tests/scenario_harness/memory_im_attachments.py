@@ -219,6 +219,7 @@ class MemoryIMAttachmentScenarioHarness:
             reservation = self.controller.reserve_memory_attachment_capture(
                 context,
                 "stable-session",
+                text,
             )
             config_generation = getattr(reservation, "config_generation", None)
             if config_generation is not None:

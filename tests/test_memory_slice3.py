@@ -244,6 +244,7 @@ def test_slack_memory_lease_retention_is_local_and_ignores_runtime_health(
     reservation = controller.reserve_memory_attachment_capture(
         context,
         "stable-session",
+        "caption",
     )
 
     assert reservation is not None
@@ -271,6 +272,7 @@ def test_slack_memory_reservation_normalizes_invalid_multimodal_generation(
     reservation = controller.reserve_memory_attachment_capture(
         context,
         "stable-session",
+        "caption",
     )
 
     assert reservation is not None
@@ -280,7 +282,13 @@ def test_slack_memory_reservation_normalizes_invalid_multimodal_generation(
 def test_attachment_capacity_is_reserved_before_session_or_lease_work() -> None:
     controller = _controller()
     reserve_admission = Mock()
-    controller.memory_module.reserve_capture_capacity = lambda _text=None: "full"
+    reserved_text: list[object] = []
+
+    def reserve_capacity(text: object) -> str:
+        reserved_text.append(text)
+        return "full"
+
+    controller.memory_module.reserve_capture_capacity = reserve_capacity
     controller.memory_module.reserve_capture_admission = reserve_admission
     context = _context("slack", ordinary=False)
     context.files = [
@@ -295,10 +303,12 @@ def test_attachment_capacity_is_reserved_before_session_or_lease_work() -> None:
     reservation = controller.reserve_memory_attachment_capture(
         context,
         "stable-session",
+        "caption",
     )
 
     assert reservation is not None
     assert reservation.capacity_full is True
+    assert reserved_text == ["caption"]
     reserve_admission.assert_not_called()
     reservation.release()
 
@@ -347,6 +357,7 @@ def test_attachment_reservation_failure_preserves_caption_as_text_only() -> None
     reservation = controller.reserve_memory_attachment_capture(
         context,
         "stable-session",
+        "keep the caption",
     )
     assert reservation is None
 
@@ -381,6 +392,7 @@ def test_retained_lease_failure_preserves_reserved_caption_as_text_only() -> Non
     reservation = controller.reserve_memory_attachment_capture(
         context,
         "stable-session",
+        "keep the caption",
     )
     assert reservation is not None
 
@@ -432,6 +444,7 @@ def test_slack_without_multimodal_opt_in_skips_live_health_read() -> None:
         reservation = controller.reserve_memory_attachment_capture(
             context,
             "stable-session",
+            "keep the caption",
         )
         assert reservation is not None
         assert reservation.config_generation is None
@@ -504,6 +517,7 @@ def test_configured_attachment_capture_skips_live_health_read(
         reservation = controller.reserve_memory_attachment_capture(
             context,
             "stable-session",
+            "remember this",
         )
         assert reservation is not None
         assert reservation.config_generation == 1
@@ -562,6 +576,7 @@ def test_configured_attachment_capture_does_not_block_session_reset(
         reservation = controller.reserve_memory_attachment_capture(
             context,
             "stable-session",
+            "keep the caption",
         )
         assert reservation is not None
         capture = asyncio.create_task(
@@ -637,6 +652,7 @@ def test_attachment_selection_runs_off_event_loop(
         reservation = controller.reserve_memory_attachment_capture(
             context,
             "stable-session",
+            "remember this",
         )
         assert reservation is not None
 
@@ -695,6 +711,7 @@ def test_attachment_capture_fails_closed_when_config_generation_changes(
         reservation = controller.reserve_memory_attachment_capture(
             context,
             "stable-session",
+            "keep the caption",
         )
         assert reservation is not None
 
@@ -759,6 +776,7 @@ def test_downstream_capture_unavailability_does_not_change_ingress_eligibility(
         reservation = controller.reserve_memory_attachment_capture(
             context,
             "stable-session",
+            "keep the caption",
         )
         assert reservation is not None
 

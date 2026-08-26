@@ -2118,6 +2118,7 @@ class Controller:
         self,
         context: MessageContext,
         session_id: str,
+        text: str,
     ) -> object | None:
         """Reserve writer capacity and exact-session order before retaining a lease."""
 
@@ -2170,7 +2171,7 @@ class Controller:
                 ),
             )
         try:
-            capacity_token = reserve_capacity()
+            capacity_token = reserve_capacity(text)
         except Exception:
             return None
         if isinstance(capacity_token, str):

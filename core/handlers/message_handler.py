@@ -1022,7 +1022,11 @@ class MessageHandler(BaseHandler):
                             None,
                         )
                         memory_capture_reservation = (
-                            reserve_attachment(context, memory_session_id)
+                            reserve_attachment(
+                                context,
+                                memory_session_id,
+                                control_message,
+                            )
                             if callable(reserve_attachment)
                             and not stale_attachment_capture
                             else None

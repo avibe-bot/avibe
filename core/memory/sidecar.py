@@ -4,20 +4,24 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import codecs
 import contextvars
 import importlib
 import json
 import logging
 import math
+import mmap
 import os
 import re
 import stat
+import tempfile
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import unquote, urlparse
 
 from core.memory.artifact import EVEROS_VERSION
+from core.memory.blocking import run_blocking
 from core.memory.project_ids import (
     is_new_stored_memory_project_id,
     is_persisted_memory_project_id,
@@ -37,6 +41,16 @@ _AGENTIC_ROUND_STATE: contextvars.ContextVar[dict[str, str] | None] = (
 )
 logger = logging.getLogger(__name__)
 
+_REQUEST_PATHS = frozenset(
+    {
+        "/api/v2/memory/add",
+        "/api/v2/memory/flush",
+        "/api/v2/memory/search",
+        "/api/v2/memory/get",
+    }
+)
+_REQUEST_REPLAY_CHUNK_BYTES = 64 * 1024
+
 
 def serve(uds: Path) -> None:
     if version("everos") != EVEROS_VERSION:
@@ -45,7 +59,6 @@ def serve(uds: Path) -> None:
         raise RuntimeError("invalid sidecar socket path")
     os.umask(0o077)
 
-    from starlette.responses import JSONResponse
     import uvicorn
 
     install_error_scrubbers()
@@ -59,21 +72,8 @@ def serve(uds: Path) -> None:
     round_logger.addHandler(round_handler)
     attachments_root = Path(os.environ["AVIBE_MEMORY_ATTACHMENTS_ROOT"])
 
-    @app.middleware("http")
-    async def guard(request: Any, call_next: Any) -> Any:
-        body = await request.body()
-        rejection = _request_rejection(
-            request.method,
-            request.url.path,
-            body,
-            attachments_root=attachments_root,
-        )
-        if rejection is not None:
-            return JSONResponse({"detail": "memory_request_rejected"}, status_code=403)
-        return await call_next(request)
-
     config = uvicorn.Config(
-        _AgenticDeadlineProjection(app),
+        _AgenticDeadlineProjection(app, attachments_root=attachments_root),
         uds=str(uds),
         access_log=False,
         log_level="warning",
@@ -102,91 +102,150 @@ class _AgenticRoundHandler(logging.Handler):
 
 
 class _AgenticDeadlineProjection:
-    """Own and cancel the downstream ASGI task for bounded agentic search."""
+    """Stream-guard requests and own the bounded agentic downstream task."""
 
-    def __init__(self, app: Any) -> None:
+    def __init__(self, app: Any, *, attachments_root: Path | None = None) -> None:
         self._app = app
+        self._attachments_root = attachments_root
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
-        if not (
-            scope.get("type") == "http"
-            and scope.get("method") == "POST"
-            and scope.get("path") == "/api/v2/memory/search"
-        ):
+        if scope.get("type") != "http":
             await self._app(scope, receive, send)
             return
 
-        request_messages, body = await _buffer_request(receive)
-        message_index = 0
-
-        async def replay_receive() -> dict[str, Any]:
-            nonlocal message_index
-            if message_index < len(request_messages):
-                message = request_messages[message_index]
-                message_index += 1
-                return message
-            return await receive()
-
-        agentic_timeout = _agentic_request_timeout(
-            scope.get("path", ""),
-            body,
-            scope.get("headers", []),
-        )
-        if agentic_timeout is False:
+        method = scope.get("method")
+        path = scope.get("path")
+        if method == "GET" and path == "/health":
+            await self._app(scope, receive, send)
+            return
+        if method != "POST" or path not in _REQUEST_PATHS:
             await _send_json_error(send, status=403, detail="memory_request_rejected")
             return
-        if agentic_timeout is None:
-            await self._app(scope, replay_receive, send)
-            return
 
-        response_messages: list[dict[str, Any]] = []
-
-        async def capture_send(message: dict[str, Any]) -> None:
-            response_messages.append(message)
-
-        round_state: dict[str, str] = {}
-        token = _AGENTIC_ROUND_STATE.set(round_state)
+        spool = tempfile.TemporaryFile(mode="w+b")
         try:
-            await asyncio.wait_for(
-                self._app(scope, replay_receive, capture_send),
-                timeout=agentic_timeout,
+            body_size = await _spool_request(receive, spool)
+            if body_size is None:
+                return
+            payload = await run_blocking(_project_spooled_request, spool, path)
+            if not isinstance(payload, dict) or _request_payload_rejection(
+                path,
+                payload,
+                attachments_root=self._attachments_root,
+            ) is not None:
+                await _send_json_error(
+                    send,
+                    status=403,
+                    detail="memory_request_rejected",
+                )
+                return
+            await run_blocking(spool.seek, 0)
+            replay_receive = _spooled_request_receive(
+                spool,
+                body_size=body_size,
+                fallback_receive=receive,
             )
-        except asyncio.TimeoutError:
-            await _send_json_error(
-                send,
-                status=504,
-                detail="memory_request_timed_out",
-                agentic_round=round_state.get("round"),
+            agentic_timeout = _agentic_timeout_from_payload(
+                path,
+                payload,
+                scope.get("headers", []),
             )
-            return
+            if agentic_timeout is False:
+                await _send_json_error(
+                    send,
+                    status=403,
+                    detail="memory_request_rejected",
+                )
+                return
+            if agentic_timeout is None:
+                await self._app(scope, replay_receive, send)
+                return
+
+            response_messages: list[dict[str, Any]] = []
+
+            async def capture_send(message: dict[str, Any]) -> None:
+                response_messages.append(message)
+
+            round_state: dict[str, str] = {}
+            token = _AGENTIC_ROUND_STATE.set(round_state)
+            try:
+                await asyncio.wait_for(
+                    self._app(scope, replay_receive, capture_send),
+                    timeout=agentic_timeout,
+                )
+            except asyncio.TimeoutError:
+                await _send_json_error(
+                    send,
+                    status=504,
+                    detail="memory_request_timed_out",
+                    agentic_round=round_state.get("round"),
+                )
+                return
+            finally:
+                _AGENTIC_ROUND_STATE.reset(token)
+
+            round_value = round_state.get("round")
+            if round_value in {"round1", "round2"}:
+                _append_response_header(
+                    response_messages,
+                    _AGENTIC_ROUND_HEADER,
+                    round_value,
+                )
+            for message in response_messages:
+                await send(message)
         finally:
-            _AGENTIC_ROUND_STATE.reset(token)
-
-        round_value = round_state.get("round")
-        if round_value in {"round1", "round2"}:
-            _append_response_header(
-                response_messages,
-                _AGENTIC_ROUND_HEADER,
-                round_value,
-            )
-        for message in response_messages:
-            await send(message)
+            spool.close()
 
 
-async def _buffer_request(receive: Any) -> tuple[list[dict[str, Any]], bytes]:
-    messages: list[dict[str, Any]] = []
-    chunks: list[bytes] = []
+async def _spool_request(receive: Any, spool: Any) -> int | None:
+    body_size = 0
     while True:
         message = await receive()
-        messages.append(message)
         if message.get("type") == "http.disconnect":
-            break
+            return None
         if message.get("type") != "http.request":
             continue
-        chunks.append(message.get("body", b""))
+        chunk = message.get("body", b"")
+        if not isinstance(chunk, bytes):
+            return None
+        if chunk:
+            await run_blocking(spool.write, chunk)
+            body_size += len(chunk)
         if not message.get("more_body", False):
-            break
-    return messages, b"".join(chunks)
+            await run_blocking(spool.flush)
+            return body_size
+
+
+def _spooled_request_receive(
+    spool: Any,
+    *,
+    body_size: int,
+    fallback_receive: Any,
+) -> Any:
+    delivered = 0
+    delivered_empty = False
+
+    async def receive() -> dict[str, Any]:
+        nonlocal delivered, delivered_empty
+        if body_size == 0 and not delivered_empty:
+            delivered_empty = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        if delivered < body_size:
+            chunk = await run_blocking(
+                spool.read,
+                min(_REQUEST_REPLAY_CHUNK_BYTES, body_size - delivered),
+            )
+            if not isinstance(chunk, bytes) or not chunk:
+                return {"type": "http.disconnect"}
+            delivered += len(chunk)
+            return {
+                "type": "http.request",
+                "body": chunk,
+                "more_body": delivered < body_size,
+            }
+        return await fallback_receive()
+
+    return receive
 
 
 async def _send_json_error(
@@ -239,6 +298,331 @@ def _append_response_header(
         return
 
 
+_ROOT_KEYS = {
+    "/api/v2/memory/add": frozenset(
+        {"session_id", "app_id", "project_id", "messages"}
+    ),
+    "/api/v2/memory/flush": frozenset({"session_id", "app_id", "project_id"}),
+    "/api/v2/memory/search": frozenset(
+        {
+            "user_id",
+            "app_id",
+            "project_id",
+            "query",
+            "method",
+            "top_k",
+            "include_profile",
+            "enable_llm_rerank",
+            "filters",
+        }
+    ),
+    "/api/v2/memory/get": frozenset(
+        {
+            "user_id",
+            "app_id",
+            "project_id",
+            "memory_type",
+            "page",
+            "page_size",
+            "sort_by",
+            "sort_order",
+        }
+    ),
+}
+_NESTED_KEYS = {
+    "messages.item": frozenset(
+        {"sender_id", "role", "timestamp", "content"}
+    ),
+    "messages.item.content.item": frozenset(
+        {"type", "text", "name", "uri", "ext"}
+    ),
+    "filters": frozenset({"session_id"}),
+}
+_OBJECT_PATHS = frozenset(
+    {"messages.item", "messages.item.content.item", "filters"}
+)
+_ARRAY_PATHS = {
+    "messages": ("messages.item", 1),
+    "messages.item.content": ("messages.item.content.item", 9),
+}
+_UNBOUNDED_TEXT_PATHS = frozenset(
+    {"query", "messages.item.content", "messages.item.content.item.text"}
+)
+_STRING_DECODE_LIMITS = {
+    "messages.item.content.item.name": 512,
+    "messages.item.content.item.uri": 16 * 1024,
+    "messages.item.content.item.ext": 8,
+}
+_DEFAULT_STRING_DECODE_BYTES = 512
+_STRING_SCAN_CHUNK_BYTES = 64 * 1024
+_JSON_NUMBER_BYTES = 4096
+_HEX_BYTES = frozenset(b"0123456789abcdefABCDEF")
+_JSON_WHITESPACE = frozenset(b" \t\r\n")
+_OVERSIZED_SCALAR = object()
+_SCHEMA_REJECTED = object()
+_SHAPE_REJECTED = object()
+
+
+class _RequestParseError(ValueError):
+    pass
+
+
+class _RequestSchemaError(_RequestParseError):
+    pass
+
+
+class _RequestShapeError(_RequestParseError):
+    pass
+
+
+class _MappedRequestParser:
+    """Project only the bounded fields needed by the private request guard."""
+
+    def __init__(self, data: mmap.mmap, path: str) -> None:
+        self._data = data
+        self._path = path
+        self._index = 0
+
+    def parse(self) -> dict[str, Any]:
+        self._skip_whitespace()
+        if self._peek(default=None) != ord("{"):
+            raise _RequestShapeError("root shape")
+        payload = self._parse_object("")
+        self._skip_whitespace()
+        if self._index != len(self._data):
+            raise _RequestParseError("trailing data")
+        return payload
+
+    def _parse_object(self, prefix: str) -> dict[str, Any]:
+        self._expect(ord("{"))
+        allowed_keys = _ROOT_KEYS[self._path] if not prefix else _NESTED_KEYS[prefix]
+        projected: dict[str, Any] = {}
+        seen: set[str] = set()
+        self._skip_whitespace()
+        if self._consume(ord("}")):
+            return projected
+        while True:
+            key = self._parse_string(decode_limit=64)
+            if not isinstance(key, str) or key not in allowed_keys or key in seen:
+                raise _RequestSchemaError("object key")
+            seen.add(key)
+            self._skip_whitespace()
+            self._expect(ord(":"))
+            self._skip_whitespace()
+            child_path = key if not prefix else f"{prefix}.{key}"
+            projected[key] = self._parse_path_value(child_path)
+            self._skip_whitespace()
+            if self._consume(ord("}")):
+                return projected
+            self._expect(ord(","))
+            self._skip_whitespace()
+
+    def _parse_path_value(self, path: str) -> Any:
+        current = self._peek()
+        if path in _OBJECT_PATHS:
+            if current != ord("{"):
+                raise _RequestSchemaError("object shape")
+            return self._parse_object(path)
+        if path in _ARRAY_PATHS:
+            if path == "messages.item.content" and current == ord('"'):
+                return self._parse_string(decode_limit=None)
+            if current != ord("["):
+                raise _RequestSchemaError("array shape")
+            return self._parse_array(path)
+        if current in {ord("{"), ord("[")}:
+            raise _RequestSchemaError("scalar shape")
+        return self._parse_scalar(path)
+
+    def _parse_array(self, path: str) -> list[Any]:
+        item_path, maximum = _ARRAY_PATHS[path]
+        self._expect(ord("["))
+        projected: list[Any] = []
+        self._skip_whitespace()
+        if self._consume(ord("]")):
+            return projected
+        while True:
+            if len(projected) >= maximum:
+                raise _RequestSchemaError("array length")
+            projected.append(self._parse_path_value(item_path))
+            self._skip_whitespace()
+            if self._consume(ord("]")):
+                return projected
+            self._expect(ord(","))
+            self._skip_whitespace()
+
+    def _parse_scalar(self, path: str) -> Any:
+        current = self._peek()
+        if current == ord('"'):
+            limit = (
+                None
+                if path in _UNBOUNDED_TEXT_PATHS
+                else _STRING_DECODE_LIMITS.get(
+                    path,
+                    _DEFAULT_STRING_DECODE_BYTES,
+                )
+            )
+            return self._parse_string(decode_limit=limit)
+        if current == ord("t"):
+            self._expect_literal(b"true")
+            return True
+        if current == ord("f"):
+            self._expect_literal(b"false")
+            return False
+        if current == ord("n"):
+            self._expect_literal(b"null")
+            return None
+        return self._parse_number()
+
+    def _parse_string(self, *, decode_limit: int | None) -> Any:
+        start = self._index
+        self._expect(ord('"'))
+        segment_start = self._index
+        decoder = codecs.getincrementaldecoder("utf-8")("strict")
+        while self._index < len(self._data):
+            current = self._data[self._index]
+            if current == ord('"'):
+                self._decode_segment(decoder, segment_start, self._index, final=True)
+                self._index += 1
+                if decode_limit is None:
+                    return ""
+                raw_length = self._index - start
+                if raw_length > (decode_limit * 6) + 2:
+                    return _OVERSIZED_SCALAR
+                try:
+                    value = json.loads(self._data[start : self._index])
+                    encoded = value.encode("utf-8")
+                except (TypeError, ValueError, UnicodeError):
+                    raise _RequestParseError("string") from None
+                return value if len(encoded) <= decode_limit else _OVERSIZED_SCALAR
+            if current == ord("\\"):
+                self._decode_segment(decoder, segment_start, self._index, final=True)
+                self._index += 1
+                if self._index >= len(self._data):
+                    raise _RequestParseError("escape")
+                escape = self._data[self._index]
+                if escape == ord("u"):
+                    escape_end = self._index + 5
+                    if escape_end > len(self._data) or any(
+                        value not in _HEX_BYTES
+                        for value in self._data[self._index + 1 : escape_end]
+                    ):
+                        raise _RequestParseError("unicode escape")
+                    self._index = escape_end
+                elif escape in b'"\\/bfnrt':
+                    self._index += 1
+                else:
+                    raise _RequestParseError("escape")
+                segment_start = self._index
+                decoder = codecs.getincrementaldecoder("utf-8")("strict")
+                continue
+            if current < 0x20:
+                raise _RequestParseError("control character")
+            self._index += 1
+            if self._index - segment_start >= _STRING_SCAN_CHUNK_BYTES:
+                self._decode_segment(
+                    decoder,
+                    segment_start,
+                    self._index,
+                    final=False,
+                )
+                segment_start = self._index
+        raise _RequestParseError("unterminated string")
+
+    def _decode_segment(
+        self,
+        decoder: Any,
+        start: int,
+        end: int,
+        *,
+        final: bool,
+    ) -> None:
+        try:
+            decoder.decode(self._data[start:end], final=final)
+        except UnicodeDecodeError:
+            raise _RequestParseError("utf-8") from None
+
+    def _parse_number(self) -> Any:
+        start = self._index
+        self._consume(ord("-"))
+        if self._consume(ord("0")):
+            if self._peek(default=None) in range(ord("0"), ord("9") + 1):
+                raise _RequestParseError("leading zero")
+        else:
+            self._expect_digit(nonzero=True)
+            while self._consume_digit():
+                pass
+        if self._consume(ord(".")):
+            self._expect_digit()
+            while self._consume_digit():
+                pass
+        if self._peek(default=None) in {ord("e"), ord("E")}:
+            self._index += 1
+            if self._peek(default=None) in {ord("+"), ord("-")}:
+                self._index += 1
+            self._expect_digit()
+            while self._consume_digit():
+                pass
+        if self._index - start > _JSON_NUMBER_BYTES:
+            return _OVERSIZED_SCALAR
+        try:
+            return json.loads(self._data[start : self._index])
+        except (TypeError, ValueError, OverflowError):
+            raise _RequestParseError("number") from None
+
+    def _expect_digit(self, *, nonzero: bool = False) -> None:
+        current = self._peek(default=None)
+        minimum = ord("1") if nonzero else ord("0")
+        if current is None or not minimum <= current <= ord("9"):
+            raise _RequestParseError("digit")
+        self._index += 1
+
+    def _consume_digit(self) -> bool:
+        current = self._peek(default=None)
+        if current is None or not ord("0") <= current <= ord("9"):
+            return False
+        self._index += 1
+        return True
+
+    def _expect_literal(self, value: bytes) -> None:
+        end = self._index + len(value)
+        if self._data[self._index : end] != value:
+            raise _RequestParseError("literal")
+        self._index = end
+
+    def _skip_whitespace(self) -> None:
+        while self._index < len(self._data) and self._data[self._index] in _JSON_WHITESPACE:
+            self._index += 1
+
+    def _peek(self, *, default: int | None = None) -> int | None:
+        return self._data[self._index] if self._index < len(self._data) else default
+
+    def _expect(self, value: int) -> None:
+        if not self._consume(value):
+            raise _RequestParseError("token")
+
+    def _consume(self, value: int) -> bool:
+        if self._peek(default=None) != value:
+            return False
+        self._index += 1
+        return True
+
+
+def _project_spooled_request(spool: Any, path: str) -> Any:
+    try:
+        spool.flush()
+        size = os.fstat(spool.fileno()).st_size
+        if size <= 0:
+            return None
+        with mmap.mmap(spool.fileno(), 0, access=mmap.ACCESS_READ) as mapped:
+            return _MappedRequestParser(mapped, path).parse()
+    except _RequestShapeError:
+        return _SHAPE_REJECTED
+    except _RequestSchemaError:
+        return _SCHEMA_REJECTED
+    except (OSError, TypeError, ValueError, UnicodeError):
+        return None
+
+
 def _request_rejection(
     method: str,
     path: str,
@@ -248,19 +632,34 @@ def _request_rejection(
 ) -> str | None:
     if method == "GET" and path == "/health":
         return None
-    if method != "POST" or path not in {
-        "/api/v2/memory/add",
-        "/api/v2/memory/flush",
-        "/api/v2/memory/search",
-        "/api/v2/memory/get",
-    }:
+    if method != "POST" or path not in _REQUEST_PATHS:
         return "route"
-    try:
-        payload = json.loads(body)
-    except (TypeError, ValueError):
+    if not isinstance(body, bytes):
         return "json"
+    with tempfile.TemporaryFile(mode="w+b") as spool:
+        spool.write(body)
+        payload = _project_spooled_request(spool, path)
+    if payload is None:
+        return "json"
+    if payload is _SHAPE_REJECTED:
+        return "shape"
+    if payload is _SCHEMA_REJECTED:
+        return path.rsplit("/", 1)[-1]
     if not isinstance(payload, dict):
         return "shape"
+    return _request_payload_rejection(
+        path,
+        payload,
+        attachments_root=attachments_root,
+    )
+
+
+def _request_payload_rejection(
+    path: str,
+    payload: dict[str, Any],
+    *,
+    attachments_root: Path | None,
+) -> str | None:
     if path == "/api/v2/memory/add":
         return _validate_add(payload, attachments_root=attachments_root)
     if path == "/api/v2/memory/flush":
@@ -277,11 +676,22 @@ def _agentic_request_timeout(
 ) -> float | Literal[False] | None:
     if path != "/api/v2/memory/search":
         return None
-    try:
-        payload = json.loads(body)
-    except (TypeError, ValueError):
+    if not isinstance(body, bytes):
         return False
-    if not isinstance(payload, dict) or payload.get("method") != "agentic":
+    with tempfile.TemporaryFile(mode="w+b") as spool:
+        spool.write(body)
+        payload = _project_spooled_request(spool, path)
+    if not isinstance(payload, dict):
+        return False
+    return _agentic_timeout_from_payload(path, payload, headers)
+
+
+def _agentic_timeout_from_payload(
+    path: str,
+    payload: dict[str, Any],
+    headers: Any,
+) -> float | Literal[False] | None:
+    if path != "/api/v2/memory/search" or payload.get("method") != "agentic":
         return None
     try:
         timeout = float(_header_value(headers, _AGENTIC_TIMEOUT_HEADER))

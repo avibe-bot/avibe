@@ -4,18 +4,79 @@ from collections import deque
 import json
 import os
 from pathlib import Path
+import sys
 
 import pytest
 
 from core.memory.confined_filesystem import ConfinedFilesystemError
 from core.memory.process import (
+    _ProcessKind,
     _ProcessIdentity,
+    EverOSProcess,
     EverOSProcessSettings,
     FakeEverOSProcess,
     FakeEverOSProcessFactory,
     ReleasedEverOSOrphanReconciler,
     legacy_sync_record_path,
 )
+
+
+@pytest.mark.asyncio
+async def test_processing_probe_uses_controller_projection_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    managed_python = tmp_path / "managed" / "bin" / "python"
+    managed_python.parent.mkdir(parents=True)
+    managed_python.write_bytes(b"")
+    controller_python = tmp_path / "controller" / "bin" / "python"
+    monkeypatch.setattr(sys, "executable", str(controller_python))
+    spawned: list[tuple[_ProcessKind, Path]] = []
+
+    class Probe:
+        pid = 451
+        returncode = 0
+        stderr = None
+
+        async def wait(self) -> int:
+            return 0
+
+    class Host:
+        async def spawn(self, kind, python, **_kwargs):
+            spawned.append((kind, python))
+            return Probe()
+
+        def process_group(self, pid):
+            return pid
+
+        def snapshot_tree(self, pid, _process_group):
+            return {pid: 1.0}
+
+        def live(self, _identities):
+            return {}
+
+        def signal(self, *_args, **_kwargs):
+            return None
+
+        async def wait_for_exit(self, *_args, **_kwargs):
+            return True
+
+    process = EverOSProcess(
+        managed_python,
+        effective_home=tmp_path,
+        settings=EverOSProcessSettings(
+            llm_base_url="https://llm.test/v1",
+            llm_model="chat",
+            llm_api_key="llm-key",
+            embedding_base_url="https://embed.test/v1",
+            embedding_model="embed",
+            embedding_api_key="embed-key",
+        ),
+        _host=Host(),
+    )
+
+    assert await process.processing_healthy()
+    assert spawned == [(_ProcessKind.PROCESSING_PROBE, controller_python)]
 
 
 class _ReleasedSyncHost:

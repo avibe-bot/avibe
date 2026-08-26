@@ -440,11 +440,13 @@ class EverOSProcess:
 
         if not self._python.is_file() or not _settings_complete(self._settings):
             return False
+        # Projection dependencies belong to Avibe, not the frozen EverOS runtime.
+        probe_python = Path(sys.executable)
         try:
             try:
                 probe = await self._host.spawn(
                     _ProcessKind.PROCESSING_PROBE,
-                    self._python,
+                    probe_python,
                     cwd=self._effective_home,
                     env=self._child_environment(),
                     capture_stderr=True,
@@ -452,7 +454,7 @@ class EverOSProcess:
             except TypeError:
                 probe = await self._host.spawn(
                     _ProcessKind.PROCESSING_PROBE,
-                    self._python,
+                    probe_python,
                     cwd=self._effective_home,
                     env=self._child_environment(),
                 )
