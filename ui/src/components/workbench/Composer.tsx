@@ -17,6 +17,12 @@ import { primeCloudToken } from '../../lib/avibeFetch';
 import { isSoftKeyboardOpen, isTouchCapableDevice } from '../../lib/softKeyboard';
 import { cn, copyTextToClipboard } from '../../lib/utils';
 import {
+  actionShortcutMatches,
+  isPlainEscape,
+  useActionShortcutLabel,
+  useActionShortcuts,
+} from '../../lib/actionShortcuts';
+import {
   applyVoiceInsertionWithSnapshot,
   voiceInsertionSnapshot,
   type VoiceInsertionSnapshot,
@@ -382,6 +388,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   onSearchSessions,
 }, ref) {
   const { t } = useTranslation();
+  const { voiceInput: voiceInputShortcut } = useActionShortcuts();
+  const voiceShortcutLabel = useActionShortcutLabel(voiceInputShortcut);
+  const voiceShortcutHint = t('chat.compose.voiceShortcutHint', { shortcut: voiceShortcutLabel });
   const { showToast } = useToast();
   const [value, setValue] = useState('');
   // The mention editor (Lexical) OWNS its text, so we don't mirror every
@@ -418,6 +427,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const recordingSessionRef = useRef<VoiceRecordingSession | null>(null);
   const recordingStartRef = useRef(false);
   const pendingVoiceInsertionRef = useRef<VoiceInsertionSnapshot | null>(null);
+  const focusNextVoiceControlRef = useRef(false);
+  const finishVoiceControlRef = useRef<HTMLButtonElement | null>(null);
   const recordingTickerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const unmountedRef = useRef(false);
   const disabledRef = useRef(disabled);
@@ -1146,7 +1157,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   useEffect(() => {
     if (!recording) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+      if (isPlainEscape(e)) {
         e.preventDefault();
         abortRecording();
       }
@@ -1202,7 +1213,48 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   );
   const voiceCaptureActive = recording || voiceProcessing;
   const voiceDiscardAvailable = recording || voiceRetainedSession !== null;
+  const voiceShortcutAvailable = (
+    (voiceControlMode === 'record' || voiceControlMode === 'finish')
+    && !isVoiceControlDisabled(
+      disabled,
+      recording,
+      voiceProcessing,
+      Boolean(voiceRetainedSession),
+    )
+  );
   const [stopArmed, setStopArmed] = useState(false);
+
+  useLayoutEffect(() => {
+    if (!focusNextVoiceControlRef.current) return;
+    if (voiceControlMode === 'finish') {
+      finishVoiceControlRef.current?.focus({ preventScroll: true });
+      focusNextVoiceControlRef.current = false;
+    } else if (voiceControlMode !== 'loading') {
+      focusNextVoiceControlRef.current = false;
+    }
+  }, [voiceControlMode]);
+
+  const handleVoiceShortcut = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (
+      !voiceShortcutAvailable
+      || event.defaultPrevented
+      || event.repeat
+      || event.currentTarget.querySelector('[data-mention-picker]') !== null
+      || !actionShortcutMatches(event.nativeEvent, voiceInputShortcut)
+    ) {
+      return;
+    }
+    event.preventDefault();
+    if (voiceControlMode === 'finish') stopRecording();
+    else void startRecording(captureVoiceInsertion());
+  }, [
+    captureVoiceInsertion,
+    startRecording,
+    stopRecording,
+    voiceControlMode,
+    voiceInputShortcut,
+    voiceShortcutAvailable,
+  ]);
 
   useEffect(() => {
     if (!busyControls) {
@@ -1271,7 +1323,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   };
 
   return (
-    <div className={cn('mx-auto flex w-full max-w-[1080px] flex-col gap-2', className)}>
+    <div
+      className={cn('mx-auto flex w-full max-w-[1080px] flex-col gap-2', className)}
+      onKeyDownCapture={handleVoiceShortcut}
+    >
       {mediaEnabled && attachments.length > 0 && (
         <div className="flex flex-wrap gap-2">
           {attachments.map((att) => (
@@ -1376,7 +1431,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 onContextMenu={() => {
                   pendingVoiceInsertionRef.current = null;
                 }}
-                onClick={(event) => toggleRecording(event.detail > 0)}
+                onClick={(event) => {
+                  focusNextVoiceControlRef.current = true;
+                  toggleRecording(event.detail > 0);
+                }}
                 disabled={isVoiceControlDisabled(
                   disabled,
                   recording,
@@ -1384,6 +1442,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                   Boolean(voiceRetainedSession),
                 )}
                 aria-label={t('chat.compose.voice')}
+                title={voiceShortcutAvailable ? voiceShortcutHint : t('chat.compose.voice')}
                 className="size-9 shrink-0"
               >
                 <Mic className="size-4" />
@@ -1391,11 +1450,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             )}
             {voiceControlMode === 'finish' && (
               <Button
+                ref={finishVoiceControlRef}
                 type="button"
                 variant="default"
                 size="icon"
                 onClick={stopRecording}
                 aria-label={t('chat.compose.stopRecording')}
+                title={voiceShortcutAvailable ? voiceShortcutHint : t('chat.compose.stopRecording')}
                 className="h-9 w-12 shrink-0"
               >
                 <Check className="size-[18px]" strokeWidth={2.5} />

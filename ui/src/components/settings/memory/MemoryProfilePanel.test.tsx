@@ -112,4 +112,19 @@ describe('MemoryProfilePanel structured text', () => {
     expect(await screen.findByText('memory.profile.partial')).toBeTruthy();
     expect(screen.getByText('Available user profile')).toBeTruthy();
   });
+
+  it('does not call a partially unread empty profile ungenerated', async () => {
+    getMemoryProfile.mockResolvedValue({
+      status: 'ok',
+      items: [],
+      warnings: ['memory_search_partial'],
+      profile_warning: 'empty',
+    });
+
+    render(<MemoryProfilePanel enabled />);
+
+    expect(await screen.findByText('memory.profile.partial')).toBeTruthy();
+    expect(screen.queryByText('memory.profile.warningEmpty')).toBeNull();
+    expect(screen.queryByText('memory.profile.empty')).toBeNull();
+  });
 });

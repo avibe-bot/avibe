@@ -7,7 +7,7 @@
 // what the document renders decides what is fetched.
 
 import { createInstance } from 'i18next';
-import { cleanup, render } from '@testing-library/react';
+import { act, cleanup, render, screen } from '@testing-library/react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -17,6 +17,16 @@ import type { WindowInstance } from '../../context/WindowManagerContext';
 import { WindowLayer } from './WindowLayer';
 
 const windowsRef = { current: [] as WindowInstance[] };
+const windowManager = vi.hoisted(() => ({
+  close: vi.fn(),
+  focus: vi.fn(),
+  minimize: vi.fn(),
+  openApp: vi.fn(),
+  restore: vi.fn(),
+  setParams: vi.fn(),
+  setTitle: vi.fn(),
+  confirmClose: vi.fn(() => true),
+}));
 
 vi.mock('../../context/DockContext', () => ({
   useDock: () => ({ order: [], pins: [] }),
@@ -25,14 +35,7 @@ vi.mock('../../context/DockContext', () => ({
 vi.mock('../../context/WindowManagerContext', () => ({
   useWindowManager: () => ({
     windows: windowsRef.current,
-    close: vi.fn(),
-    focus: vi.fn(),
-    minimize: vi.fn(),
-    openApp: vi.fn(),
-    restore: vi.fn(),
-    setParams: vi.fn(),
-    setTitle: vi.fn(),
-    confirmClose: () => true,
+    ...windowManager,
   }),
 }));
 
@@ -43,7 +46,7 @@ vi.mock('../../context/StandaloneAppTabContext', () => ({
 // Every window body is an app of its own (iframe, terminal, editor); the layer's
 // own fetch decision is what is under test, so the frame is stubbed out.
 vi.mock('./AppWindow', () => ({
-  AppWindow: () => <div data-testid="app-window" />,
+  AppWindow: () => <button type="button" data-testid="app-window" data-window-id="win_1" />,
 }));
 vi.mock('../workbench/ShowPageAnnotationHost', () => ({
   ShowPageAnnotationHost: ({ children }: { children: React.ReactNode }) => <>{children}</>,
@@ -104,6 +107,7 @@ describe('WindowLayer show-pages inventory', () => {
     api.getSessionResult.mockResolvedValue({ status: null, session: null });
     api.connectWorkbenchEvents.mockReset();
     api.connectWorkbenchEvents.mockReturnValue(vi.fn());
+    Object.values(windowManager).forEach((mock) => mock.mockClear());
   });
 
   afterEach(() => {
@@ -122,5 +126,24 @@ describe('WindowLayer show-pages inventory', () => {
     renderLayer();
 
     await vi.waitFor(() => expect(api.getShowPages).toHaveBeenCalledTimes(1));
+  });
+
+  it('yields window chords already consumed by the focused surface', async () => {
+    windowsRef.current = [appWindow()];
+    renderLayer();
+    const windowRoot = await screen.findByTestId('app-window');
+    windowRoot.focus();
+
+    const consumed = new KeyboardEvent('keydown', {
+      key: 'm',
+      code: 'KeyM',
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    consumed.preventDefault();
+    act(() => window.dispatchEvent(consumed));
+
+    expect(windowManager.minimize).not.toHaveBeenCalled();
   });
 });

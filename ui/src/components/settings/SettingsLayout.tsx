@@ -8,6 +8,7 @@ import {
   Cpu,
   Globe,
   Hash,
+  Keyboard,
   MessageCircle,
   MessageSquare,
   Package,
@@ -89,6 +90,7 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
   {
     labelKey: 'settings.groups.system',
     items: [
+      { path: '/settings/shortcuts', labelKey: 'settings.sections.shortcuts', icon: Keyboard },
       { path: '/settings/service', labelKey: 'settings.sections.service', icon: Server, ownerOnly: true },
       { path: '/settings/dependencies', labelKey: 'settings.sections.dependencies', icon: Package, ownerOnly: true },
       { path: '/settings/diagnostics', labelKey: 'settings.sections.diagnostics', icon: Stethoscope, ownerOnly: true },
