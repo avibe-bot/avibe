@@ -112,7 +112,6 @@ ProcessingEvent = Callable[
 
 ARTIFACT_ACTIVATION_TIMEOUT_SECONDS = 90.0
 _MEMORY_LIST_CURSOR_VERSION = 3
-MEMORY_LIST_CURSOR_MAX_BYTES = 8192
 _MEMORY_LIST_PROVIDER_PAGE_SIZE = 20
 _MEMORY_LIST_PROVIDER_MAX_PAGE = 1_000_000
 _MEMORY_LIST_AGGREGATE_TIMEOUT_SECONDS = 20.0
@@ -2923,8 +2922,6 @@ def _encode_memory_list_cursor(
         sort_keys=True,
     ).encode("ascii")
     token = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
-    if len(token.encode("ascii")) > MEMORY_LIST_CURSOR_MAX_BYTES:
-        raise ValueError("Memory list cursor is too large")
     return token
 
 
@@ -2947,7 +2944,6 @@ def _decode_memory_list_cursor(
     if (
         not isinstance(cursor, str)
         or not cursor
-        or len(cursor.encode("utf-8")) > MEMORY_LIST_CURSOR_MAX_BYTES
     ):
         raise ValueError("invalid Memory list cursor")
     try:
@@ -3008,13 +3004,13 @@ def _encode_memory_list_boundary_id(value: str) -> str:
         raw = value.encode("utf-8")
     except UnicodeEncodeError:
         raise ValueError("invalid Memory list boundary ID") from None
-    if not raw or len(raw) > 128 or "\x00" in value:
+    if not raw or "\x00" in value:
         raise ValueError("invalid Memory list boundary ID")
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
 
 def _decode_memory_list_boundary_id(value: object) -> str:
-    if not isinstance(value, str) or not value or len(value) > 171:
+    if not isinstance(value, str) or not value:
         raise ValueError("invalid Memory list boundary ID")
     try:
         padding = "=" * (-len(value) % 4)

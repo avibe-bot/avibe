@@ -1690,8 +1690,6 @@ def create_app(
             parse_agent_search_project,
             parse_ui_search_project,
         )
-        from core.memory.runtime import MEMORY_LIST_CURSOR_MAX_BYTES
-
         is_ui = bool(str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip())
         limit = payload.get("limit", 20)
         origin = payload.get("origin", "user")
@@ -1722,13 +1720,11 @@ def create_app(
         if project_id == MEMORY_SEARCH_ALL_PROJECTS:
             cursor = payload.get("cursor")
             try:
-                cursor_bytes = (
-                    len(cursor.encode("utf-8"))
-                    if isinstance(cursor, str)
-                    else None
+                cursor_is_utf8 = isinstance(cursor, str) and bool(
+                    cursor.encode("utf-8")
                 )
             except UnicodeEncodeError:
-                cursor_bytes = MEMORY_LIST_CURSOR_MAX_BYTES + 1
+                cursor_is_utf8 = False
             if (
                 "page" in payload
                 or (
@@ -1736,8 +1732,7 @@ def create_app(
                     and (
                         not isinstance(cursor, str)
                         or not cursor
-                        or cursor_bytes is None
-                        or cursor_bytes > MEMORY_LIST_CURSOR_MAX_BYTES
+                        or not cursor_is_utf8
                     )
                 )
             ):

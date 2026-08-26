@@ -977,13 +977,12 @@ def test_memory_list_rejects_surrogate_aggregate_cursor_at_controller_boundary()
     runtime.list_all_episodes_payload.assert_not_awaited()
 
 
-def test_memory_list_accepts_maximum_aggregate_cursor_transport_bound() -> None:
+def test_memory_list_forwards_large_aggregate_cursor_to_runtime() -> None:
     from core.memory.http_headers import MEMORY_USER_KEY_HEADER
-    from core.memory.runtime import MEMORY_LIST_CURSOR_MAX_BYTES
     from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
     secret = "test-memory-ui-secret"
-    cursor = "a" * MEMORY_LIST_CURSOR_MAX_BYTES
+    cursor = "a" * 10_000
     runtime = SimpleNamespace(
         principal_for_user_key=Mock(
             return_value="u-22222222222222222222222222222222"

@@ -582,3 +582,41 @@ def test_memory_list_route_forwards_agent_origin(
         "error": "memory_invalid_input",
     }
     assert len(calls) == 1
+
+
+def test_memory_list_route_forwards_large_aggregate_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config()
+    cursor = "a" * 10_000
+    calls: list[dict[str, object]] = []
+
+    async def memory_list(**kwargs):
+        calls.append(kwargs)
+        return {
+            "status_code": 200,
+            "body": {"status": "ok", "items": [], "next_cursor": None},
+        }
+
+    monkeypatch.setattr(internal_client, "memory_list", memory_list)
+    client = app.test_client()
+    response = client.post(
+        "/api/memory/list",
+        json={"project": "all", "cursor": cursor, "limit": 20},
+        headers=csrf_headers(client, BASE_URL),
+        **_request_options(),
+    )
+
+    assert response.status_code == 200
+    assert calls == [
+        {
+            "user_key": "avibe:local",
+            "project": "all",
+            "page": None,
+            "cursor": cursor,
+            "limit": 20,
+            "origin": None,
+        }
+    ]

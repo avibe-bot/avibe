@@ -795,12 +795,10 @@ def register_memory_routes(app) -> None:
             cursor = payload.get("cursor")
             limit = payload.get("limit", 20)
             origin = payload.get("origin")
-            from core.memory.runtime import MEMORY_LIST_CURSOR_MAX_BYTES
-
-            cursor_bytes: int | None = None
+            cursor_is_utf8 = False
             if isinstance(cursor, str):
                 try:
-                    cursor_bytes = len(cursor.encode("utf-8"))
+                    cursor_is_utf8 = bool(cursor.encode("utf-8"))
                 except UnicodeEncodeError:
                     pass
 
@@ -823,8 +821,7 @@ def register_memory_routes(app) -> None:
                     and (
                         not isinstance(cursor, str)
                         or not cursor
-                        or cursor_bytes is None
-                        or cursor_bytes > MEMORY_LIST_CURSOR_MAX_BYTES
+                        or not cursor_is_utf8
                     )
                 )
                 or (project == "all" and page is not None)

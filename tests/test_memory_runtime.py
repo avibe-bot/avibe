@@ -415,3 +415,32 @@ def test_aggregate_list_cursor_is_bound_to_selected_owner() -> None:
             projects=projects,
             fingerprint=agent_fingerprint,
         )
+
+
+def test_aggregate_list_cursor_round_trips_provider_id_without_size_cap() -> None:
+    projects = ("default",)
+    fingerprint = runtime_module._memory_list_catalog_fingerprint(
+        "u-11111111111111111111111111111111",
+        projects,
+        origin="user",
+    )
+    provider_id = "episode-" + "x" * 10_000
+    cursor = runtime_module._encode_memory_list_cursor(
+        fingerprint,
+        {"default": ("2026-08-26T00:00:00Z", provider_id)},
+        {"default": 1},
+        {"default": 2},
+    )
+
+    boundaries, page_hints, total_hints = runtime_module._decode_memory_list_cursor(
+        cursor,
+        projects=projects,
+        fingerprint=fingerprint,
+    )
+
+    assert len(cursor.encode("ascii")) > 8192
+    assert boundaries == {
+        "default": ("2026-08-26T00:00:00Z", provider_id),
+    }
+    assert page_hints == {"default": 1}
+    assert total_hints == {"default": 2}
