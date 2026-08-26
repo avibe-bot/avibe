@@ -6546,6 +6546,13 @@ def _mark_service_restart_pending(*, trigger: str) -> dict[str, Any]:
     from vibe.restart_supervisor import mark_pending_restart
 
     restart_status = runtime.read_json(runtime.get_restart_status_path()) or {}
+    if restart_status.get("state") in {"succeeded", "failed", "cancelled"}:
+        return {
+            "ok": True,
+            "pending_restart": None,
+            "restart": restart_status,
+            "code": "restart_no_longer_in_flight",
+        }
     pending = mark_pending_restart(
         trigger=trigger,
         scope="service",

@@ -2470,6 +2470,56 @@ def test_config_restart_fallback_marks_pending_restart_when_restart_in_flight(mo
     assert pending["scope"] == "service"
 
 
+@pytest.mark.parametrize("terminal_state", ["succeeded", "failed", "cancelled"])
+def test_config_restart_fallback_does_not_publish_pending_after_terminal_status(
+    monkeypatch,
+    tmp_path,
+    terminal_state,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import restart_supervisor
+    from vibe import runtime
+
+    restart_status = {
+        "ok": terminal_state == "succeeded",
+        "state": terminal_state,
+        "job_id": "job-finished",
+        "supervisor_pid": 4242,
+    }
+    runtime.get_restart_status_path().parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_json(runtime.get_restart_status_path(), restart_status)
+    monkeypatch.setattr(
+        restart_supervisor,
+        "mark_pending_restart",
+        lambda **kwargs: pytest.fail("terminal restart status must not publish a pending marker"),
+    )
+
+    assert ui_server._mark_service_restart_pending(trigger="web-ui-config-pending") == {
+        "ok": True,
+        "pending_restart": None,
+        "restart": restart_status,
+        "code": "restart_no_longer_in_flight",
+    }
+    assert runtime.read_json(restart_supervisor._pending_restart_path()) is None
+
+
+def test_config_restart_fallback_preserves_died_job_pending_marker(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import restart_supervisor
+    from vibe import runtime
+
+    runtime.get_restart_status_path().parent.mkdir(parents=True, exist_ok=True)
+
+    result = ui_server._mark_service_restart_pending(trigger="web-ui-config-pending")
+
+    assert result["ok"] is True
+    assert result["code"] == "restart_pending_after_in_progress"
+    assert result["restart"] == {}
+    pending = runtime.read_json(restart_supervisor._pending_restart_path())
+    assert pending["restart_job_id"] is None
+    assert result["pending_restart"] == pending
+
+
 def test_ui_restart_in_flight_uses_the_shared_supervisor_predicate(monkeypatch):
     from vibe import restart_supervisor
 
