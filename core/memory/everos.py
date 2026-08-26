@@ -5,18 +5,22 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import math
+import re
+import tempfile
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
+from decimal import Decimal
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Deque, Literal, Protocol, runtime_checkable
+from typing import Any, BinaryIO, Deque, Literal, Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
 import httpx
+import ijson
+from ijson.backends import python as ijson_python
 
 from core.memory.types import (
     CaptureAttachment,
@@ -63,6 +67,7 @@ PROCESSING_PROBE_MAX_DEADLINE_SECONDS = (
 )
 _PROCESSING_TIMEOUT_SECONDS = PROCESSING_PROBE_REQUEST_TIMEOUT_SECONDS
 _PREFLIGHT_TIMEOUT_SECONDS = 30.0
+_RESPONSE_STREAM_CHUNK_BYTES = 64 * 1024
 _CHAT_PROBE_MAX_TOKENS = 8
 _CHAT_PROBE_TERMINAL_FINISH_REASONS = frozenset(
     {"stop", "length", "content_filter", "tool_calls", "function_call"}
@@ -320,7 +325,7 @@ class EverOSPort:
                 for attachment in capture.attachments
             )
 
-        status_code, raw = await self._sidecar_write(
+        status_code, value = await self._sidecar_write(
             "POST",
             "/api/v2/memory/add",
             {
@@ -338,7 +343,7 @@ class EverOSPort:
             },
             timeout_seconds=self._add_timeout_seconds,
         )
-        envelope = _optional_json_object(raw)
+        envelope = _optional_json_object(value)
         if not 200 <= status_code < 300:
             logger.warning("EverOS add rejected status=%s", status_code)
             error = envelope.get("error") if envelope is not None else None
@@ -365,7 +370,7 @@ class EverOSPort:
         """Trigger distillation and return a total provider outcome."""
 
         try:
-            status_code, raw = await self._sidecar_write(
+            status_code, value = await self._sidecar_write(
                 "POST",
                 "/api/v2/memory/flush",
                 {
@@ -391,7 +396,7 @@ class EverOSPort:
                 else FlushRetryable()
             )
 
-        envelope = _optional_json_object(raw)
+        envelope = _optional_json_object(value)
         raw_request_id = envelope.get("request_id") if envelope else None
         if 200 <= status_code < 300:
             request_id = _strict_receipt_id(raw_request_id)
@@ -422,7 +427,7 @@ class EverOSPort:
         payload: dict[str, Any],
         *,
         timeout_seconds: float | None = None,
-    ) -> tuple[int, bytes | None]:
+    ) -> tuple[int, Any | None]:
         """Return the HTTP verdict even when its response body is unusable."""
 
         started = time.monotonic()
@@ -437,10 +442,18 @@ class EverOSPort:
                 async with client.stream(method, route, json=payload) as response:
                     status_code = response.status_code
                     try:
-                        raw = await _read_response(
+                        value = await _read_json_response(
                             response,
                             timeout_seconds=timeout_seconds or self._sidecar_timeout_seconds,
                         )
+                    except (
+                        ijson.JSONError,
+                        OverflowError,
+                        TypeError,
+                        UnicodeError,
+                        ValueError,
+                    ):
+                        value = None
                     except (asyncio.TimeoutError, httpx.TransportError, OSError):
                         if 200 <= status_code < 300:
                             raise
@@ -449,7 +462,7 @@ class EverOSPort:
                             route,
                             status_code,
                         )
-                        raw = None
+                        value = None
         except (httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
             logger.warning("EverOS sidecar connection timeout route=%s latency_ms=%s", route, _elapsed_ms(started))
             raise MemoryProviderSystemFailure() from exc
@@ -483,7 +496,7 @@ class EverOSPort:
             status_code,
             _elapsed_ms(started),
         )
-        return status_code, raw
+        return status_code, value
 
     async def search(
         self,
@@ -892,7 +905,7 @@ class EverOSPort:
                             )
                         )
                     if not require_json:
-                        await _read_response(
+                        await _discard_response(
                             response,
                             timeout_seconds=request_timeout,
                         )
@@ -903,7 +916,7 @@ class EverOSPort:
                             _elapsed_ms(started),
                         )
                         return None
-                    raw = await _read_response(
+                    value = await _read_json_response(
                         response,
                         timeout_seconds=request_timeout,
                     )
@@ -912,14 +925,18 @@ class EverOSPort:
         except (asyncio.TimeoutError, httpx.TimeoutException) as exc:
             logger.warning("EverOS sidecar timeout route=%s latency_ms=%s", route, _elapsed_ms(started))
             raise MemoryProviderFailure("memory_provider_timeout") from exc
+        except (
+            ijson.JSONError,
+            OverflowError,
+            TypeError,
+            UnicodeError,
+            ValueError,
+        ) as exc:
+            raise MemoryProviderFailure("memory_provider_response_invalid") from exc
         except (httpx.HTTPError, OSError) as exc:
             logger.warning("EverOS sidecar unavailable route=%s latency_ms=%s", route, _elapsed_ms(started))
             raise MemoryProviderSystemFailure() from exc
 
-        try:
-            value = json.loads(raw)
-        except (TypeError, ValueError) as exc:
-            raise MemoryProviderFailure("memory_provider_response_invalid") from exc
         if not isinstance(value, dict):
             raise MemoryProviderFailure("memory_provider_response_invalid")
         logger.debug("EverOS sidecar request complete route=%s latency_ms=%s", route, _elapsed_ms(started))
@@ -954,12 +971,21 @@ class EverOSPort:
                             response.status_code,
                         )
                         return False
-                    raw = await _read_response(
+                    value = await _read_json_response(
                         response,
                         timeout_seconds=self._processing_timeout_seconds,
                     )
-            value = json.loads(raw)
-        except (asyncio.TimeoutError, httpx.HTTPError, OSError, TypeError, ValueError, MemoryProviderFailure):
+        except (
+            asyncio.TimeoutError,
+            httpx.HTTPError,
+            ijson.JSONError,
+            MemoryProviderFailure,
+            OSError,
+            OverflowError,
+            TypeError,
+            UnicodeError,
+            ValueError,
+        ):
             logger.info("Memory processing probe unavailable endpoint=%s", path)
             return False
         return bool(validator(value))
@@ -1005,15 +1031,20 @@ class EverOSPort:
                     json=payload,
                     headers={"Authorization": f"Bearer {api_key}"},
                 ) as response:
-                    raw = await _read_response(
-                        response,
-                        timeout_seconds=_PREFLIGHT_TIMEOUT_SECONDS,
-                    )
+                    try:
+                        value = await _read_json_response(
+                            response,
+                            timeout_seconds=_PREFLIGHT_TIMEOUT_SECONDS,
+                        )
+                    except (
+                        ijson.JSONError,
+                        OverflowError,
+                        TypeError,
+                        UnicodeError,
+                        ValueError,
+                    ):
+                        value = None
                     status_code = response.status_code
-            try:
-                value = json.loads(raw) if raw else None
-            except (TypeError, ValueError):
-                value = None
             if 200 <= status_code < 300 and validator(value):
                 return None
             code = None
@@ -1059,15 +1090,74 @@ def _bounded_preflight_message(
     return message[:512]
 
 
-async def _read_response(
+async def _read_json_response(
     response: httpx.Response,
     *,
     timeout_seconds: float,
-) -> bytes:
-    return await asyncio.wait_for(
-        response.aread(),
+) -> Any:
+    with tempfile.TemporaryFile(mode="w+b") as spool:
+        await asyncio.wait_for(
+            _spool_response(response, spool),
+            timeout=_positive_timeout(timeout_seconds, _SIDECAR_TIMEOUT_SECONDS),
+        )
+        return await asyncio.to_thread(_parse_spooled_json, spool)
+
+
+async def _discard_response(
+    response: httpx.Response,
+    *,
+    timeout_seconds: float,
+) -> None:
+    await asyncio.wait_for(
+        _consume_response(response),
         timeout=_positive_timeout(timeout_seconds, _SIDECAR_TIMEOUT_SECONDS),
     )
+
+
+async def _spool_response(response: httpx.Response, spool: BinaryIO) -> None:
+    async for chunk in response.aiter_bytes(chunk_size=_RESPONSE_STREAM_CHUNK_BYTES):
+        spool.write(chunk)
+    spool.flush()
+
+
+async def _consume_response(response: httpx.Response) -> None:
+    async for _chunk in response.aiter_bytes(chunk_size=_RESPONSE_STREAM_CHUNK_BYTES):
+        pass
+
+
+def _parse_spooled_json(spool: BinaryIO) -> Any:
+    spool.seek(0)
+    # The C backend replaces isolated Unicode surrogates with "?". The Python
+    # backend preserves them so the existing UTF-8 response validation can
+    # reject malformed provider strings instead of silently changing data.
+    values = ijson_python.items(spool, "")
+    try:
+        value = next(values)
+    except StopIteration as exc:
+        raise ValueError("empty JSON response") from exc
+    try:
+        next(values)
+    except StopIteration:
+        return _normalize_streamed_numbers(value)
+    raise ValueError("multiple JSON values in response")
+
+
+def _normalize_streamed_numbers(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return float(value)
+    if not isinstance(value, (dict, list)):
+        return value
+
+    pending = [value]
+    while pending:
+        container = pending.pop()
+        items = container.items() if isinstance(container, dict) else enumerate(container)
+        for key, child in items:
+            if isinstance(child, Decimal):
+                container[key] = float(child)
+            elif isinstance(child, (dict, list)):
+                pending.append(child)
+    return value
 
 
 def _map_search_items(
@@ -1735,12 +1825,8 @@ def _utf8_bytes(value: str) -> bytes | None:
         return None
 
 
-def _optional_json_object(raw: bytes | None) -> dict[str, Any] | None:
-    if raw is None:
-        return None
-    try:
-        value = json.loads(raw)
-    except (TypeError, ValueError):
+def _optional_json_object(value: Any | None) -> dict[str, Any] | None:
+    if value is None:
         return None
     return value if isinstance(value, dict) and _is_json_value(value) else None
 

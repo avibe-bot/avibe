@@ -61,6 +61,7 @@ dependencies = [
     "python-socks[asyncio]>=2.0.0",
     "aiohttp-socks>=0.8.0",
     "httpx[socks]>=0.27",
+    "ijson>=3.4.0",
     "python-multipart>=0.0.9",
     "PyJWT[crypto]>=2.9.0",
     "SQLAlchemy>=2.0.0",

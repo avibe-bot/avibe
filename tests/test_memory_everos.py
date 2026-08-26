@@ -5,8 +5,9 @@ import base64
 import hashlib
 import json
 import struct
+import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -92,6 +93,16 @@ class _DripResponseStream(httpx.AsyncByteStream):
         while True:
             await asyncio.sleep(0.01)
             yield b" "
+
+
+class _ChunkedResponseStream(httpx.AsyncByteStream):
+    def __init__(self, payload: bytes, *, chunk_size: int = 4096) -> None:
+        self._payload = payload
+        self._chunk_size = chunk_size
+
+    async def __aiter__(self):
+        for offset in range(0, len(self._payload), self._chunk_size):
+            yield self._payload[offset : offset + self._chunk_size]
 
 
 def _thinking_chat_completion(*, role: str = "assistant", finish_reason: str | None = "length") -> dict:
@@ -1383,6 +1394,47 @@ def test_profile_preserves_provider_valid_payloads_without_avibe_size_caps(
     for _ in range(12):
         rendered_extension = rendered_extension["nested"]
     assert rendered_extension == {"value": "preserved"}
+
+
+def test_profile_spools_large_streamed_response_without_aread() -> None:
+    summary = "s" * (2 * 1024 * 1024)
+    payload = json.dumps(
+        {
+            "data": {
+                "profiles": [
+                    {
+                        "user_id": "owner-1",
+                        "profile_data": {"summary": summary},
+                    }
+                ]
+            }
+        }
+    ).encode("utf-8")
+    response = httpx.Response(
+        200,
+        headers={"content-type": "application/json"},
+        stream=_ChunkedResponseStream(payload),
+    )
+    response.aread = AsyncMock(side_effect=AssertionError("unbounded response read"))
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return response
+
+    with (
+        _sidecar_transport(handler),
+        patch(
+            "core.memory.everos.tempfile.TemporaryFile",
+            wraps=tempfile.TemporaryFile,
+        ) as temporary_file,
+    ):
+        items = asyncio.run(
+            EverOSPort(Path("/tmp/everos.sock")).profile("owner-1", PROJECT)
+        )
+
+    response.aread.assert_not_awaited()
+    temporary_file.assert_called_once_with(mode="w+b")
+    assert items[0].profile is not None
+    assert items[0].profile.summary == summary
 
 
 def test_profile_maps_known_fields_without_collapsing_basis_and_evidence() -> None:
