@@ -1019,7 +1019,11 @@
       "failed": "{count} failed"
     },
     "value": {
-      "notConfigured": "not configured"
+      "notConfigured": "not configured",
+      "unknown": "unknown",
+      "unknownError": "unknown error",
+      "currentPlatform": "this platform",
+      "selectedDependencyUrl": "the selected dependency URL"
     },
     "group": {
       "runtimeHome": "Runtime Home",
@@ -1261,8 +1265,11 @@
       "staleInstallStoppedStartFailed": "Stopped legacy vibe-remote service process, but failed to start the current Avibe service: {reason}",
       "dependencyFailed": "{target} repair failed: {reason}",
       "dependencyReady": "{target} repair completed: {detail}",
+      "dependencyVersion": "Installed version {version}.",
       "dependencyReadyDefault": "Dependency is ready.",
       "dependencyResultFailed": "{target} repair failed: {detail}",
+      "dependencyDownloadFailed": "Dependency download failed ({kind}) after {attempts} attempts.",
+      "dependencyReason": "Installer reported: {reason}.",
       "dependencyFailedDefault": "repair failed",
       "showRuntimeVerificationFailed": "Show Runtime startability could not be verified, so no reinstall was attempted: {detail}",
       "showRuntimeHealthy": "Show Runtime starts successfully; no repair is needed.",

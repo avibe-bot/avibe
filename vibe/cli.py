@@ -999,9 +999,10 @@ def _architecture_token(text: str | None) -> str | None:
 def _runtime_architecture_items() -> list[dict[str, str]]:
     items: list[dict[str, str]] = []
     language = _configured_cli_language()
+    unknown_value = i18n_t("doctor.value.unknown", language)
     is_apple_silicon = _is_apple_silicon_host()
-    host_arch = "Apple Silicon" if is_apple_silicon else platform.machine() or "unknown"
-    python_arch = platform.machine() or "unknown"
+    host_arch = "Apple Silicon" if is_apple_silicon else platform.machine() or unknown_value
+    python_arch = platform.machine() or unknown_value
     python_status = "warn" if is_apple_silicon and _architecture_token(python_arch) == "x86_64" else "pass"
 
     _add_doctor_item(
@@ -1016,11 +1017,12 @@ def _runtime_architecture_items() -> list[dict[str, str]]:
     if uv_path:
         uv_arch_output = _binary_architecture(uv_path)
         uv_arch = _architecture_token(uv_arch_output) or "unknown"
+        uv_display_arch = unknown_value if uv_arch == "unknown" else uv_arch
         uv_status = "warn" if is_apple_silicon and uv_arch in {"x86_64", "unknown"} else "pass"
         _add_doctor_item(
             items,
             uv_status,
-            i18n_t("doctor.item.uvArchitecture", language, architecture=uv_arch, path=uv_path),
+            i18n_t("doctor.item.uvArchitecture", language, architecture=uv_display_arch, path=uv_path),
         )
         if is_apple_silicon and uv_arch == "x86_64":
             items[-1]["action"] = i18n_t("doctor.action.nativeArmUv", language)
@@ -10842,7 +10844,7 @@ def _add_dependency_download_failure(
     language = _configured_cli_language()
     error = error or {}
     kind = str(error.get("kind") or "unknown")
-    url = str(error.get("url") or "the selected dependency URL")
+    url = str(error.get("url") or i18n_t("doctor.value.selectedDependencyUrl", language))
     attempts = int(error.get("attempts") or 1)
     retry_action = retry_action or (
         i18n_t("doctor.action.repairCommand", _configured_cli_language(), target=repair_target)
@@ -11071,7 +11073,7 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
                     "doctor.item.dependencyArchiveUrlUnsupported",
                     language,
                     label=label,
-                    url=probe.get("url") or "unknown",
+                    url=probe.get("url") or i18n_t("doctor.value.unknown", language),
                 ),
                 i18n_t("doctor.action.dependencyArchiveUrlUnsupported", language),
                 code=f"dependencies.{dependency_id}.archive_url_unsupported",
@@ -11139,7 +11141,7 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
                     "doctor.item.dependencyProbeUnavailable",
                     language,
                     label=label,
-                    reason=probe.get("reason") or "unknown",
+                    reason=probe.get("reason") or i18n_t("doctor.value.unknownError", language),
                 ),
                 i18n_t("doctor.action.dependencyProbeUnavailable", language),
                 code=f"dependencies.{dependency_id}.probe_unavailable",
@@ -11214,7 +11216,8 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
 
     install = _show_runtime_install(status)
     installed = install.get("state") == "installed"
-    provider = str(status.get("provider") or "unknown")
+    provider = str(status.get("provider") or i18n_t("doctor.value.unknown", doctor_language))
+    current_platform = status.get("platform") or i18n_t("doctor.value.currentPlatform", doctor_language)
     explicit_command = status.get("explicit_command")
     if explicit_command:
         if installed:
@@ -11262,7 +11265,7 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
                 i18n_t(
                     "doctor.item.manifestPlatformUnsupported",
                     doctor_language,
-                    platform=status.get("platform") or "this platform",
+                    platform=current_platform,
                 ),
                 i18n_t("doctor.action.manifestPlatformUnsupported", doctor_language),
                 code="show_runtime.platform_unsupported",
@@ -11322,7 +11325,7 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
             i18n_t(
                 "doctor.item.showRuntimeInstalled",
                 doctor_language,
-                platform=status.get("platform") or "this platform",
+                platform=current_platform,
             ),
             code="show_runtime.installed",
         )
@@ -11340,7 +11343,7 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
         i18n_t(
             "doctor.item.showRuntimeNotReady",
             doctor_language,
-            platform=status.get("platform") or "this platform",
+            platform=current_platform,
         ),
         (
             i18n_t("doctor.action.showRuntimeRepair", doctor_language)
@@ -11419,7 +11422,7 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
             i18n_t(
                 "doctor.item.manifestPlatformUnsupported",
                 doctor_language,
-                platform=status.get("platform") or "this platform",
+                platform=current_platform,
             ),
             i18n_t("doctor.action.showRuntimePlatformUnsupported", doctor_language),
             code="show_runtime.platform_unsupported",
@@ -11431,7 +11434,7 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
             i18n_t(
                 "doctor.item.archiveCheckFailed",
                 doctor_language,
-                reason=probe_reason or "unknown error",
+                reason=probe_reason or i18n_t("doctor.value.unknownError", doctor_language),
             ),
             i18n_t(
                 "doctor.action.archiveCheckFailed",
@@ -12511,6 +12514,12 @@ def _repair_managed_dependency(target: str, installer, *, dry_run: bool = False)
             i18n_t("doctor.repair.dependencyFailed", language, target=target, reason=exc),
         )
     if result.get("ok"):
+        version = result.get("version")
+        detail = (
+            i18n_t("doctor.repair.dependencyVersion", language, version=version)
+            if version
+            else i18n_t("doctor.repair.dependencyReadyDefault", language)
+        )
         return _doctor_repair_result(
             target,
             "repaired" if result.get("changed", True) else "skipped",
@@ -12518,11 +12527,23 @@ def _repair_managed_dependency(target: str, installer, *, dry_run: bool = False)
                 "doctor.repair.dependencyReady",
                 language,
                 target=target,
-                detail=result.get("message") or i18n_t("doctor.repair.dependencyReadyDefault", language),
+                detail=detail,
             ),
             path=result.get("path"),
-            version=result.get("version"),
+            version=version,
         )
+    download_error = result.get("download_error") if isinstance(result.get("download_error"), dict) else None
+    if download_error:
+        detail = i18n_t(
+            "doctor.repair.dependencyDownloadFailed",
+            language,
+            kind=download_error.get("kind") or i18n_t("doctor.value.unknown", language),
+            attempts=int(download_error.get("attempts") or 1),
+        )
+    elif result.get("reason"):
+        detail = i18n_t("doctor.repair.dependencyReason", language, reason=result["reason"])
+    else:
+        detail = i18n_t("doctor.repair.dependencyFailedDefault", language)
     return _doctor_repair_result(
         target,
         "failed",
@@ -12530,10 +12551,10 @@ def _repair_managed_dependency(target: str, installer, *, dry_run: bool = False)
             "doctor.repair.dependencyResultFailed",
             language,
             target=target,
-            detail=result.get("message") or result.get("reason") or i18n_t("doctor.repair.dependencyFailedDefault", language),
+            detail=detail,
         ),
         reason=result.get("reason"),
-        download_error=result.get("download_error"),
+        download_error=download_error,
         output=result.get("output"),
     )
 

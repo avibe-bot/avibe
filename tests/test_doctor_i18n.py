@@ -110,3 +110,52 @@ def test_doctor_uses_real_chinese_path_and_stable_code(monkeypatch: pytest.Monke
     assert "已显式设置" in items[0]["message"]
     assert "runtime.explicit_home" not in items[0]["message"]
     assert [item["code"] for item in rendered["en"]] == [item["code"] for item in rendered["zh"]]
+
+
+def test_doctor_localizes_nested_repair_details_and_missing_payload_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
+
+    repaired = cli._repair_managed_dependency(
+        "avault",
+        lambda force: {
+            "ok": True,
+            "changed": True,
+            "version": "0.1.6",
+            "message": "English installer completed",
+        },
+    )
+    assert "English installer completed" not in repaired["message"]
+    assert "0.1.6" in repaired["message"]
+    assert "修复完成" in repaired["message"]
+
+    items: list[dict] = []
+    cli._add_dependency_download_failure(
+        items,
+        {"kind": "timeout", "attempts": 2},
+        label="avault",
+        code_prefix="dependencies.avault.download",
+        repair_target=None,
+    )
+    assert "the selected dependency URL" not in items[0]["message"]
+    assert "所选依赖 URL" in items[0]["message"]
+
+    from types import SimpleNamespace
+
+    manager = SimpleNamespace(
+        status=lambda: {
+            "provider": "manifest-cache",
+            "platform": None,
+            "manifest": {"runtime_version": "test"},
+            "archive": None,
+            "explicit_command": None,
+            "node_available": False,
+        },
+        archive_cache_status=lambda: None,
+    )
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda **kwargs: manager)
+    runtime_items = cli._show_runtime_doctor_items()
+    messages = "\n".join(item["message"] for item in runtime_items)
+    assert "this platform" not in messages
+    assert "当前平台" in messages

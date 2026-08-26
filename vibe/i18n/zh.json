@@ -1019,7 +1019,11 @@
       "failed": "{count} 项失败"
     },
     "value": {
-      "notConfigured": "未配置"
+      "notConfigured": "未配置",
+      "unknown": "未知",
+      "unknownError": "未知错误",
+      "currentPlatform": "当前平台",
+      "selectedDependencyUrl": "所选依赖 URL"
     },
     "group": {
       "runtimeHome": "运行时目录",
@@ -1261,8 +1265,11 @@
       "staleInstallStoppedStartFailed": "已停止旧版 vibe-remote 服务进程，但启动当前 Avibe 服务失败：{reason}",
       "dependencyFailed": "{target} 修复失败：{reason}",
       "dependencyReady": "{target} 修复完成：{detail}",
+      "dependencyVersion": "已安装版本 {version}。",
       "dependencyReadyDefault": "依赖已就绪。",
       "dependencyResultFailed": "{target} 修复失败：{detail}",
+      "dependencyDownloadFailed": "依赖下载失败（{kind}），已重试 {attempts} 次。",
+      "dependencyReason": "安装器报告：{reason}。",
       "dependencyFailedDefault": "修复失败",
       "showRuntimeVerificationFailed": "无法验证 Show Runtime 是否可启动，因此未尝试重新安装：{detail}",
       "showRuntimeHealthy": "Show Runtime 可以正常启动，无需修复。",
