@@ -377,6 +377,61 @@ def test_write_response_stream_has_total_wall_clock_deadline(operation: str) -> 
             assert asyncio.run(run()) == FlushUnknown(reason="timeout")
 
 
+@pytest.mark.parametrize("operation", ["add", "flush"])
+def test_write_response_headers_share_total_wall_clock_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    class SlowResponseHeaders:
+        async def __aenter__(self) -> httpx.Response:
+            for _ in range(5):
+                await asyncio.sleep(0.005)
+            return httpx.Response(
+                200,
+                json={
+                    "request_id": "request-1",
+                    "data": {"status": "extracted"},
+                },
+            )
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+    class SlowHeadersClient:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+        def stream(self, *_args, **_kwargs) -> SlowResponseHeaders:
+            return SlowResponseHeaders()
+
+    monkeypatch.setattr(memory_everos.httpx, "AsyncClient", SlowHeadersClient)
+    monkeypatch.setattr(memory_everos.httpx, "AsyncHTTPTransport", lambda **_kwargs: object())
+
+    async def run():
+        provider = EverOSPort(
+            Path("/tmp/everos.sock"),
+            add_timeout_seconds=0.01,
+            flush_timeout_seconds=0.01,
+        )
+        if operation == "add":
+            return await provider.add(ProviderCapture(SESSION_REF, "capture", 1))
+        return await provider.flush(SESSION_REF)
+
+    if operation == "add":
+        with pytest.raises(MemoryProviderFailure) as raised:
+            asyncio.run(run())
+        assert raised.value.error == "memory_provider_timeout"
+        assert raised.value.ambiguous is True
+    else:
+        assert asyncio.run(run()) == FlushUnknown(reason="timeout")
+
+
 @pytest.mark.parametrize("failure_type", [httpx.WriteError, httpx.CloseError])
 def test_add_marks_post_submission_transport_failures_as_ambiguous(
     failure_type: type[httpx.TransportError],
@@ -886,6 +941,45 @@ def test_search_fact_projection_counts_only_valid_text() -> None:
         )
 
     assert [item.item.text for item in items] == ["retained after blank fact"]
+
+
+def test_search_projection_counts_only_items_that_can_be_mapped() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "episodes": [
+                        {
+                            "user_id": "someone-else",
+                            "summary": "wrong owner",
+                        },
+                        {
+                            "user_id": PRINCIPAL,
+                            "summary": "   ",
+                            "atomic_facts": [{"content": "\t"}],
+                        },
+                        {
+                            "user_id": PRINCIPAL,
+                            "atomic_facts": [{"content": "first usable result"}],
+                        },
+                    ]
+                }
+            },
+        )
+
+    with _sidecar_transport(handler):
+        items = asyncio.run(
+            EverOSPort(Path("/tmp/everos.sock")).search(
+                PRINCIPAL,
+                PROJECT,
+                "usable",
+                1,
+                session_ref=SESSION_REF,
+            )
+        )
+
+    assert [item.item.text for item in items] == ["first usable result"]
 
 
 def test_assistant_owner_crosses_add_search_and_profile_provider_contract() -> None:
@@ -1733,6 +1827,55 @@ def test_stale_parser_pool_termination_preserves_replacement(
     assert old.shutdown_called
     assert not replacement.shutdown_called
     assert memory_everos._JSON_PARSE_POOL is replacement
+
+
+def test_queued_json_parse_timeout_does_not_terminate_active_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class HangingExecutor:
+        def __init__(self) -> None:
+            self._processes = {}
+            self.futures: list[concurrent.futures.Future[object]] = []
+            self.shutdown_called = False
+
+        def submit(self, _operation, *_args):
+            future: concurrent.futures.Future[object] = concurrent.futures.Future()
+            self.futures.append(future)
+            return future
+
+        def shutdown(self, *, wait: bool, cancel_futures: bool) -> None:
+            assert wait is True
+            assert cancel_futures is True
+            self.shutdown_called = True
+
+    memory_everos._terminate_json_parse_pool()
+    executor = HangingExecutor()
+    monkeypatch.setattr(memory_everos, "_JSON_PARSE_POOL", executor)
+
+    async def run() -> None:
+        active = asyncio.create_task(
+            memory_everos._parse_spooled_json_async(
+                "/unused/active-provider-response.json",
+                memory_everos._PROFILE_RESPONSE_SCHEMA,
+                60.0,
+            )
+        )
+        await asyncio.sleep(0)
+        try:
+            with pytest.raises(asyncio.TimeoutError):
+                await memory_everos._parse_spooled_json_async(
+                    "/unused/queued-provider-response.json",
+                    memory_everos._PROFILE_RESPONSE_SCHEMA,
+                    0.01,
+                )
+            assert len(executor.futures) == 1
+            assert not executor.shutdown_called
+        finally:
+            active.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await active
+
+    asyncio.run(run())
 
 
 def test_search_projects_content_only_episode() -> None:

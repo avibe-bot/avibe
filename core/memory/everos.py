@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 from concurrent.futures.process import BrokenProcessPool
+from contextlib import asynccontextmanager
 import errno
 import json
 import logging
@@ -18,7 +19,7 @@ import tempfile
 import threading
 import time
 from collections import deque
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -106,7 +107,9 @@ ProviderAttachment = CaptureAttachment
 
 _JSON_PARSE_POOL: concurrent.futures.ProcessPoolExecutor | None = None
 _JSON_PARSE_POOL_LOCK = threading.Lock()
+_JSON_PARSE_SLOT_LOCK = threading.Lock()
 _RESPONSE_SPOOL_LOCK = threading.Lock()
+_JSON_PARSE_SLOT_POLL_SECONDS = 0.001
 
 
 class _JSONSchema:
@@ -137,10 +140,18 @@ class _JSONNullableSchema(_JSONSchema):
 class _JSONArraySchema(_JSONSchema):
     item: _JSONSchema
     max_items: int | None = None
-    retention: Literal["all", "first", "none", "presence", "valid_text"] = "all"
+    retention: Literal[
+        "all",
+        "first",
+        "none",
+        "presence",
+        "search_items",
+        "valid_text",
+    ] = "all"
     retain_items: int | None = None
     validate_discarded_items: bool = False
     retention_field: str | None = None
+    retention_owner: str | None = None
 
 
 @dataclass(frozen=True)
@@ -285,7 +296,7 @@ _DASHSCOPE_RERANK_RESPONSE_SCHEMA = _JSONMapSchema(
 )
 
 
-def _search_response_schema(limit: int) -> _JSONMapSchema:
+def _search_response_schema(limit: int, principal_id: str) -> _JSONMapSchema:
     timestamps = {
         "timestamp": _JSON_SCALAR,
         "created_at": _JSON_SCALAR,
@@ -322,7 +333,14 @@ def _search_response_schema(limit: int) -> _JSONMapSchema:
     return _JSONMapSchema(
         {
             "data": _JSONMapSchema(
-                {"episodes": _JSONArraySchema(episode, retain_items=limit)}
+                {
+                    "episodes": _JSONArraySchema(
+                        episode,
+                        retention="search_items",
+                        retain_items=limit,
+                        retention_owner=principal_id,
+                    )
+                }
             )
         }
     )
@@ -702,21 +720,33 @@ class EverOSPort:
         """Return the HTTP verdict even when its response body is unusable."""
 
         started = time.monotonic()
+        request_timeout = _positive_timeout(
+            timeout_seconds,
+            self._sidecar_timeout_seconds,
+        )
+        deadline = started + request_timeout
         transport = httpx.AsyncHTTPTransport(uds=str(self._socket_path))
         try:
             async with httpx.AsyncClient(
                 transport=transport,
                 base_url="http://memory-sidecar",
-                timeout=httpx.Timeout(timeout_seconds or self._sidecar_timeout_seconds, connect=3.0),
+                timeout=httpx.Timeout(request_timeout, connect=min(3.0, request_timeout)),
                 trust_env=False,
             ) as client:
-                async with client.stream(method, route, json=payload) as response:
+                async with _stream_response_before_deadline(
+                    client,
+                    method,
+                    route,
+                    deadline=deadline,
+                    json=payload,
+                ) as response:
                     status_code = response.status_code
                     try:
                         value = await _read_json_response(
                             response,
-                            timeout_seconds=timeout_seconds or self._sidecar_timeout_seconds,
+                            timeout_seconds=request_timeout,
                             schema=_WRITE_RESPONSE_SCHEMA,
+                            deadline=deadline,
                         )
                     except (
                         OverflowError,
@@ -1108,7 +1138,7 @@ class EverOSPort:
                         capability_rejection=True,
                         timeout_seconds=request_timeout,
                         response_metadata=telemetry,
-                        response_schema=_search_response_schema(limit),
+                        response_schema=_search_response_schema(limit, principal_id),
                     ),
                     timeout=request_timeout,
                 )
@@ -1119,7 +1149,7 @@ class EverOSPort:
                     request,
                     require_json=True,
                     capability_rejection=True,
-                    response_schema=_search_response_schema(limit),
+                    response_schema=_search_response_schema(limit, principal_id),
                 )
             if not isinstance(body, dict):
                 raise MemoryProviderFailure("memory_provider_response_invalid")
@@ -1147,6 +1177,7 @@ class EverOSPort:
             timeout_seconds,
             self._sidecar_timeout_seconds,
         )
+        deadline = started + request_timeout
         headers = None
         if timeout_seconds is not None:
             sidecar_timeout = max(
@@ -1165,9 +1196,11 @@ class EverOSPort:
                 ),
                 trust_env=False,
             ) as client:
-                async with client.stream(
+                async with _stream_response_before_deadline(
+                    client,
                     method,
                     route,
+                    deadline=deadline,
                     json=payload,
                     headers=headers,
                 ) as response:
@@ -1197,6 +1230,7 @@ class EverOSPort:
                         await _discard_response(
                             response,
                             timeout_seconds=request_timeout,
+                            deadline=deadline,
                         )
                         logger.debug(
                             "EverOS sidecar request complete route=%s status=%s latency_ms=%s",
@@ -1209,6 +1243,7 @@ class EverOSPort:
                         response,
                         timeout_seconds=request_timeout,
                         schema=response_schema or _JSON_ANY,
+                        deadline=deadline,
                     )
         except MemoryProviderFailure:
             raise
@@ -1243,14 +1278,17 @@ class EverOSPort:
     ) -> bool:
         if not base_url or not api_key:
             return False
+        deadline = time.monotonic() + self._processing_timeout_seconds
         try:
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(self._processing_timeout_seconds, connect=3.0),
                 trust_env=False,
             ) as client:
-                async with client.stream(
+                async with _stream_response_before_deadline(
+                    client,
                     "POST",
                     f"{base_url}/{path}",
+                    deadline=deadline,
                     json=payload,
                     headers={"Authorization": f"Bearer {api_key}"},
                 ) as response:
@@ -1265,6 +1303,7 @@ class EverOSPort:
                         response,
                         timeout_seconds=self._processing_timeout_seconds,
                         schema=response_schema,
+                        deadline=deadline,
                     )
         except (
             asyncio.TimeoutError,
@@ -1315,11 +1354,14 @@ class EverOSPort:
         if not base_url or not api_key or not path:
             failure = MemoryPreflightFailure(error_name, replace(diagnostic, message="endpoint_not_configured"))
             return failure
+        deadline = time.monotonic() + _PREFLIGHT_TIMEOUT_SECONDS
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(_PREFLIGHT_TIMEOUT_SECONDS, connect=2.0), trust_env=False) as client:
-                async with client.stream(
+                async with _stream_response_before_deadline(
+                    client,
                     "POST",
                     f"{base_url}/{path}",
+                    deadline=deadline,
                     json=payload,
                     headers={"Authorization": f"Bearer {api_key}"},
                 ) as response:
@@ -1328,6 +1370,7 @@ class EverOSPort:
                             response,
                             timeout_seconds=_PREFLIGHT_TIMEOUT_SECONDS,
                             schema=response_schema,
+                            deadline=deadline,
                         )
                     except (
                         OverflowError,
@@ -1387,20 +1430,20 @@ async def _read_json_response(
     *,
     timeout_seconds: float,
     schema: _JSONSchema,
+    deadline: float | None = None,
 ) -> Any:
     timeout = _positive_timeout(timeout_seconds, _SIDECAR_TIMEOUT_SECONDS)
-    deadline = time.monotonic() + timeout
+    if deadline is None:
+        deadline = time.monotonic() + timeout
     path = ""
     try:
         with tempfile.NamedTemporaryFile(mode="w+b", delete=False) as spool:
             path = spool.name
             await asyncio.wait_for(
                 _spool_response(response, spool),
-                timeout=timeout,
+                timeout=_remaining_before_deadline(deadline),
             )
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise asyncio.TimeoutError
+        remaining = _remaining_before_deadline(deadline)
         return await asyncio.wait_for(
             _parse_spooled_json_async(path, schema, remaining),
             timeout=remaining,
@@ -1433,11 +1476,46 @@ async def _discard_response(
     response: httpx.Response,
     *,
     timeout_seconds: float,
+    deadline: float | None = None,
 ) -> None:
+    timeout = _positive_timeout(timeout_seconds, _SIDECAR_TIMEOUT_SECONDS)
+    if deadline is None:
+        deadline = time.monotonic() + timeout
     await asyncio.wait_for(
         _consume_response(response),
-        timeout=_positive_timeout(timeout_seconds, _SIDECAR_TIMEOUT_SECONDS),
+        timeout=_remaining_before_deadline(deadline),
     )
+
+
+@asynccontextmanager
+async def _stream_response_before_deadline(
+    client: httpx.AsyncClient,
+    method: str,
+    route: str,
+    *,
+    deadline: float,
+    **kwargs: Any,
+) -> AsyncIterator[httpx.Response]:
+    stream = client.stream(method, route, **kwargs)
+    response = await asyncio.wait_for(
+        stream.__aenter__(),
+        timeout=_remaining_before_deadline(deadline),
+    )
+    try:
+        yield response
+    except BaseException as exc:
+        suppressed = await stream.__aexit__(type(exc), exc, exc.__traceback__)
+        if not suppressed:
+            raise
+    else:
+        await stream.__aexit__(None, None, None)
+
+
+def _remaining_before_deadline(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise asyncio.TimeoutError
+    return remaining
 
 
 async def _spool_response(response: httpx.Response, spool: BinaryIO) -> None:
@@ -1469,34 +1547,58 @@ async def _parse_spooled_json_async(
     timeout_seconds: float,
 ) -> Any:
     global _JSON_PARSE_POOL
-    with _JSON_PARSE_POOL_LOCK:
-        if _JSON_PARSE_POOL is None:
-            try:
-                context = multiprocessing.get_context("fork")
-            except ValueError:
-                context = multiprocessing.get_context("spawn")
-            _JSON_PARSE_POOL = concurrent.futures.ProcessPoolExecutor(
-                max_workers=1,
-                mp_context=context,
-            )
-        pool = _JSON_PARSE_POOL
-    future = asyncio.get_running_loop().run_in_executor(
-        pool,
-        _parse_spooled_json_path,
-        path,
-        schema,
+    deadline = time.monotonic() + _positive_timeout(
+        timeout_seconds,
+        _SIDECAR_TIMEOUT_SECONDS,
     )
+    slot_acquired = False
+    future: asyncio.Future[tuple[bool, Any]] | None = None
+    pool: concurrent.futures.ProcessPoolExecutor | None = None
     try:
-        ok, value = await asyncio.wait_for(future, timeout=timeout_seconds)
+        await _acquire_json_parse_slot(deadline)
+        slot_acquired = True
+        with _JSON_PARSE_POOL_LOCK:
+            if _JSON_PARSE_POOL is None:
+                try:
+                    context = multiprocessing.get_context("fork")
+                except ValueError:
+                    context = multiprocessing.get_context("spawn")
+                _JSON_PARSE_POOL = concurrent.futures.ProcessPoolExecutor(
+                    max_workers=1,
+                    mp_context=context,
+                )
+            pool = _JSON_PARSE_POOL
+        future = asyncio.get_running_loop().run_in_executor(
+            pool,
+            _parse_spooled_json_path,
+            path,
+            schema,
+        )
+        ok, value = await asyncio.wait_for(
+            future,
+            timeout=_remaining_before_deadline(deadline),
+        )
         if not ok:
             raise ValueError(value)
         return value
     except (asyncio.TimeoutError, asyncio.CancelledError):
-        await asyncio.to_thread(_terminate_json_parse_pool, pool)
+        if future is not None:
+            await asyncio.to_thread(_terminate_json_parse_pool, pool)
         raise
     except BrokenProcessPool:
         await asyncio.to_thread(_terminate_json_parse_pool, pool)
         raise
+    finally:
+        if slot_acquired:
+            _JSON_PARSE_SLOT_LOCK.release()
+
+
+async def _acquire_json_parse_slot(deadline: float) -> None:
+    while True:
+        remaining = _remaining_before_deadline(deadline)
+        if _JSON_PARSE_SLOT_LOCK.acquire(blocking=False):
+            return
+        await asyncio.sleep(min(_JSON_PARSE_SLOT_POLL_SECONDS, remaining))
 
 
 def _terminate_json_parse_pool(
@@ -1566,6 +1668,7 @@ class _ProjectedFrame:
     value: dict[str, Any] | list[Any] | None
     pending_key: str | None = None
     count: int = 0
+    retained_items: int = 0
     deferred_attach: bool = False
 
 
@@ -1684,10 +1787,10 @@ class _ProjectedJSONParser:
                 return _JSON_ANY
             if schema.max_items is not None and frame.count > schema.max_items:
                 raise ValueError("array exceeds response contract")
-            if schema.retention == "valid_text":
+            if schema.retention in {"search_items", "valid_text"}:
                 if (
                     schema.retain_items is not None
-                    and len(frame.value) >= schema.retain_items
+                    and frame.retained_items >= schema.retain_items
                 ):
                     return _JSON_SKIP
                 return schema.item
@@ -1706,7 +1809,10 @@ class _ProjectedJSONParser:
         schema = self._frames[-1].schema
         if isinstance(schema, _JSONNullableSchema):
             schema = schema.value
-        return isinstance(schema, _JSONArraySchema) and schema.retention == "valid_text"
+        return isinstance(schema, _JSONArraySchema) and schema.retention in {
+            "search_items",
+            "valid_text",
+        }
 
     def _attach(self, value: Any) -> None:
         if not self._frames:
@@ -1744,10 +1850,23 @@ class _ProjectedJSONParser:
                         or _safe_text(value.get(field)) is None
                         or (
                             schema.retain_items is not None
-                            and len(frame.value) >= schema.retain_items
+                            and frame.retained_items >= schema.retain_items
                         )
                     ):
                         return
+                    frame.retained_items += 1
+                elif schema.retention == "search_items":
+                    if schema.retain_items is None or schema.retention_owner is None:
+                        raise ValueError("search projection is missing its retention contract")
+                    remaining = schema.retain_items - frame.retained_items
+                    contribution = _trim_search_episode_projection(
+                        value,
+                        principal_id=schema.retention_owner,
+                        limit=remaining,
+                    )
+                    if contribution <= 0:
+                        return
+                    frame.retained_items += contribution
                 elif schema.retention in {"none", "presence"} or (
                     schema.retain_items is not None
                     and frame.count > schema.retain_items
@@ -1759,6 +1878,30 @@ class _ProjectedJSONParser:
         if self._frames or not self._root_seen:
             raise ValueError("incomplete JSON response")
         return self._root
+
+
+def _trim_search_episode_projection(
+    value: Any,
+    *,
+    principal_id: str,
+    limit: int,
+) -> int:
+    if limit <= 0 or not isinstance(value, dict):
+        return 0
+    if value.get("user_id") != principal_id:
+        return 0
+    contribution = 1 if _episode_text(value) is not None else 0
+    facts = value.get("atomic_facts", [])
+    if facts is None:
+        facts = []
+    if not isinstance(facts, list):
+        raise ValueError("unexpected atomic facts")
+    fact_slots = max(0, limit - contribution)
+    if len(facts) > fact_slots:
+        facts = facts[:fact_slots]
+        value["atomic_facts"] = facts
+    contribution += len(facts)
+    return contribution
 
 
 def _map_search_items(
