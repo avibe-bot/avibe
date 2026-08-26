@@ -41,11 +41,17 @@ def load_memory_runtime(
         raise MemoryPluginUnavailableError(
             "Memory implementation is unavailable"
         ) from exc
-    if getattr(implementation, _PROTOCOL_ATTR, None) != MEMORY_RUNTIME_PROTOCOL_VERSION:
+    try:
+        protocol_version = getattr(implementation, _PROTOCOL_ATTR, None)
+        factory = getattr(implementation, "create_memory_runtime", None)
+    except Exception as exc:
+        raise MemoryPluginUnavailableError(
+            "Memory implementation is unavailable"
+        ) from exc
+    if protocol_version != MEMORY_RUNTIME_PROTOCOL_VERSION:
         raise MemoryPluginIncompatibleError(
             "Memory implementation protocol is incompatible"
         )
-    factory = getattr(implementation, "create_memory_runtime", None)
     if not callable(factory):
         raise MemoryPluginUnavailableError(
             "Memory implementation constructor is unavailable"

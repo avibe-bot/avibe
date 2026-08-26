@@ -299,6 +299,78 @@ assert not BLOCKED.intersection(sys.modules)
     assert _memory_state_entries(tmp_path / "home") == []
 
 
+def test_enabled_controller_degrades_when_runtime_attribute_probe_fails(
+    tmp_path: Path,
+) -> None:
+    script = r'''
+import sys
+import types
+
+from config.v2_compat import to_app_config
+from config.v2_config import V2Config
+from core.controller import Controller
+from core.memory_adapter import DisabledMemoryAdapter
+from vibe.memory_contract import MemoryPluginUnavailableError
+
+
+class BrokenRuntime(types.ModuleType):
+    def __getattr__(self, name):
+        if name in {"MEMORY_RUNTIME_PROTOCOL_VERSION", "create_memory_runtime"}:
+            raise RuntimeError("broken optional runtime attribute")
+        raise AttributeError(name)
+
+
+sys.modules["core.memory.runtime"] = BrokenRuntime("core.memory.runtime")
+config = to_app_config(V2Config.from_payload({
+    "platform": "avibe",
+    "platforms": {"enabled": [], "primary": "avibe"},
+    "mode": "self_host",
+    "version": "v2",
+    "runtime": {"default_cwd": "_tmp", "log_level": "INFO"},
+    "agents": {
+        "default_backend": "opencode",
+        "opencode": {"enabled": True, "cli_path": "opencode"},
+    },
+    "memory": {
+        "enabled": True,
+        "processing": {
+            "llm": {
+                "base_url": "https://llm.example.test/v1",
+                "model": "chat",
+                "api_key": "llm-key",
+            },
+            "embedding": {
+                "base_url": "https://embed.example.test/v1",
+                "model": "embed",
+                "api_key": "embed-key",
+            },
+        },
+    },
+    "setup_completed": True,
+}))
+controller = Controller(config)
+assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
+assert controller.memory_runtime is None
+assert isinstance(controller._memory_plugin_error, MemoryPluginUnavailableError)
+'''
+    environment = os.environ.copy()
+    environment["AVIBE_HOME"] = str(tmp_path / "home")
+    environment["HOME"] = str(tmp_path)
+    environment["PYTHONPATH"] = str(ROOT)
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
 def test_host_surfaces_import_with_evacuated_memory_leaves_blocked(
     tmp_path: Path,
 ) -> None:

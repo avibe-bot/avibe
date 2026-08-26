@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import ast
+import builtins
 import contextlib
 import inspect
 import socket
@@ -39,7 +40,11 @@ from core import internal_server, session_turns
 from core.controller import Controller
 from core.message_context import build_context_turn_sink_key
 from core.vibe_agents import VibeAgentStore
-from vibe.memory_contract import MemoryStoreUnavailableError
+from vibe.memory_contract import (
+    MemoryPluginIncompatibleError,
+    MemoryPluginUnavailableError,
+    MemoryStoreUnavailableError,
+)
 from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
 from core.services.agent_steering import SteerOutcome, result as steer_result
 from core.services.dispatch import (
@@ -639,17 +644,38 @@ def test_memory_projects_plugin_failure_preserves_admitted_cli_session_boundary(
     assert response.json() == {"status": "failed", "error": "memory_plugin_unavailable"}
 
 
-def test_memory_remember_plugin_failure_uses_stable_plugin_envelope() -> None:
+@pytest.mark.parametrize(
+    ("plugin_error", "expected_error"),
+    [
+        (MemoryPluginUnavailableError("injected"), "memory_plugin_unavailable"),
+        (MemoryPluginIncompatibleError("injected"), "memory_plugin_incompatible"),
+    ],
+)
+def test_memory_remember_plugin_failure_uses_stable_plugin_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+    plugin_error: BaseException,
+    expected_error: str,
+) -> None:
     from vibe.memory_http_headers import CALLER_SESSION_HEADER
-    from vibe.memory_contract import MemoryPluginUnavailableError
 
     controller = Controller.__new__(Controller)
     controller.config = SimpleNamespace(memory=SimpleNamespace(enabled=True))
-    controller._memory_plugin_error = MemoryPluginUnavailableError("injected")
+    controller._memory_plugin_error = plugin_error
     controller.memory_scope_for_cli_session = lambda _session_id: (
         "u-11111111111111111111111111111111",
         "default",
     )
+    controller.capture_memory = Mock(
+        side_effect=AssertionError("plugin failure must short-circuit before capture")
+    )
+    real_import = builtins.__import__
+
+    def fail_memory_type_import(name, *args, **kwargs):
+        if name == "core.memory" or name.startswith("core.memory."):
+            raise RuntimeError("optional implementation import failed")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fail_memory_type_import)
     app = internal_server.create_app(controller)
 
     async def _exercise() -> httpx.Response:
@@ -664,7 +690,7 @@ def test_memory_remember_plugin_failure_uses_stable_plugin_envelope() -> None:
     response = asyncio.run(_exercise())
 
     assert response.status_code == 503
-    assert response.json() == {"status": "failed", "error": "memory_plugin_unavailable"}
+    assert response.json() == {"status": "failed", "error": expected_error}
 
 
 def test_memory_install_route_delegates_to_controller_lifecycle() -> None:

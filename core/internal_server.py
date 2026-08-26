@@ -1820,6 +1820,12 @@ def create_app(
         source_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
 
         try:
+            plugin_error = getattr(controller, "_memory_plugin_error", None)
+            if isinstance(
+                plugin_error,
+                (MemoryPluginUnavailableError, MemoryPluginIncompatibleError),
+            ):
+                raise plugin_error
             from core.memory import CaptureRequest
 
             capture = getattr(controller, "capture_memory", None)
@@ -1848,12 +1854,36 @@ def create_app(
                 content={"status": "failed", "error": _memory_plugin_error_code(exc)},
             )
         except ImportError:
+            plugin_error = getattr(controller, "_memory_plugin_error", None)
+            if isinstance(
+                plugin_error,
+                (MemoryPluginUnavailableError, MemoryPluginIncompatibleError),
+            ):
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "status": "failed",
+                        "error": _memory_plugin_error_code(plugin_error),
+                    },
+                )
             logger.warning("internal memory remember implementation unavailable")
             return JSONResponse(
                 status_code=503,
                 content={"status": "failed", "error": "memory_plugin_unavailable"},
             )
         except Exception:
+            plugin_error = getattr(controller, "_memory_plugin_error", None)
+            if isinstance(
+                plugin_error,
+                (MemoryPluginUnavailableError, MemoryPluginIncompatibleError),
+            ):
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "status": "failed",
+                        "error": _memory_plugin_error_code(plugin_error),
+                    },
+                )
             logger.warning("internal memory remember failed")
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_store_unavailable"})
         response: dict[str, Any] = {"status": receipt.status}

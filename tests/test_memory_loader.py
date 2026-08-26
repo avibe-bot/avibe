@@ -52,6 +52,31 @@ def test_loader_rejects_protocol_mismatch(monkeypatch: pytest.MonkeyPatch) -> No
         load_memory_runtime(_config())
 
 
+@pytest.mark.parametrize(
+    "attribute", ("MEMORY_RUNTIME_PROTOCOL_VERSION", "create_memory_runtime")
+)
+def test_loader_translates_implementation_attribute_probe_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    attribute: str,
+) -> None:
+    import core.memory_loader
+
+    class _BrokenImplementation:
+        def __getattr__(self, name: str) -> object:
+            if name == attribute:
+                raise RuntimeError("broken implementation attribute")
+            return None
+
+    monkeypatch.setattr(
+        core.memory_loader.importlib,
+        "import_module",
+        Mock(return_value=_BrokenImplementation()),
+    )
+
+    with pytest.raises(MemoryPluginUnavailableError):
+        load_memory_runtime(_config())
+
+
 def test_loader_maps_constructor_failure_to_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     import core.memory_loader
 
