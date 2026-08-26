@@ -314,7 +314,11 @@ def _windows_executable_candidates(candidates: list[Path]) -> list[Path]:
     return result
 
 
-def _candidate_cli_paths(binary: str) -> list[Path]:
+def _candidate_cli_paths(
+    binary: str,
+    *,
+    include_npm_global: bool = True,
+) -> list[Path]:
     if not binary:
         return []
 
@@ -343,19 +347,46 @@ def _candidate_cli_paths(binary: str) -> list[Path]:
     ]
     if os.name == "nt":
         common_candidates = _windows_executable_candidates(common_candidates)
-    for candidate in common_candidates + _nvm_binary_candidates(binary) + _npm_global_binary_candidates(binary):
+    for candidate in common_candidates + _nvm_binary_candidates(binary):
         if candidate not in candidates:
             candidates.append(candidate)
+    if include_npm_global:
+        for candidate in _npm_global_binary_candidates(binary):
+            if candidate not in candidates:
+                candidates.append(candidate)
 
     return candidates
 
 
-def resolve_cli_path(binary: str) -> str | None:
-    for candidate in _candidate_cli_paths(binary):
+def _resolve_cli_path_once(
+    binary: str,
+    *,
+    include_npm_global: bool,
+) -> str | None:
+    for candidate in _candidate_cli_paths(binary, include_npm_global=False):
         if _is_executable_file(candidate):
             return str(candidate)
 
     path = shutil.which(os.path.expanduser(binary)) if binary else None
+    if path:
+        return path
+
+    if include_npm_global:
+        for candidate in _npm_global_binary_candidates(binary):
+            if _is_executable_file(candidate):
+                return str(candidate)
+    return None
+
+
+def resolve_cli_path(
+    binary: str,
+    *,
+    include_npm_global: bool = True,
+) -> str | None:
+    path = _resolve_cli_path_once(
+        binary,
+        include_npm_global=include_npm_global,
+    )
     if path:
         return path
 
@@ -380,14 +411,17 @@ def resolve_cli_path(binary: str) -> str | None:
     if expanded.is_absolute() or has_path_separator:
         basename = expanded.name
         if basename and basename != binary:
-            for candidate in _candidate_cli_paths(basename):
-                if _is_executable_file(candidate):
-                    logger.info(
-                        "resolve_cli_path: stored path %s missing; falling back to %s",
-                        binary,
-                        candidate,
-                    )
-                    return str(candidate)
+            fallback = _resolve_cli_path_once(
+                basename,
+                include_npm_global=include_npm_global,
+            )
+            if fallback:
+                logger.info(
+                    "resolve_cli_path: stored path %s missing; falling back to %s",
+                    binary,
+                    fallback,
+                )
+                return fallback
     return None
 
 

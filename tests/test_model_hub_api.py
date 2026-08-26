@@ -1875,6 +1875,20 @@ def test_agents_endpoint_projects_cli_presence_from_runtime(tmp_path):
     }
 
 
+def test_agents_collection_reads_cli_presence_without_running_discovery(tmp_path):
+    service, _store, _adapter = _service(tmp_path)
+    calls = []
+    service.cli_presence_refresh = lambda include_npm_global: calls.append(
+        include_npm_global
+    )
+    service.cli_present_override = lambda backend: backend == "codex"
+
+    agents = {agent["backend"]: agent for agent in service.list_agents()}
+
+    assert agents["codex"]["cli_present"] is True
+    assert calls == []
+
+
 def test_agents_endpoint_projects_exact_chain_runnability(tmp_path):
     service, store, _adapter = _service(tmp_path)
     model_id = "claude-opus-4-6"
@@ -1972,24 +1986,92 @@ def test_agents_endpoint_cli_presence_probe_errors_fail_closed(tmp_path):
     assert all(agent["cli_present"] is False for agent in agents.values())
 
 
-def test_agent_supply_rpc_refreshes_cli_presence_before_first_response(tmp_path):
+def test_agent_supply_mutation_rpc_refreshes_cli_presence_before_writing(tmp_path):
     from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
 
-    service, _store, _adapter = _service(tmp_path)
+    service, store, _adapter = _service(tmp_path)
     calls = []
-    service.cli_presence_refresh = lambda: calls.append("refresh")
+    service.cli_presence_refresh = lambda include_npm_global: calls.append(
+        include_npm_global
+    )
     service.cli_present_override = lambda backend: backend == "claude"
 
     payload = asyncio.run(
         dispatch_model_hub_rpc(
             service,
-            "get_agent_sources",
-            {"backend": "claude"},
+            "set_agent_sources",
+            {
+                "backend": "claude",
+                "sources": {
+                    "order": list(store.config.agents["claude"].sources.order),
+                },
+            },
         )
     )
 
     assert payload["cli_present"] is True
-    assert calls == ["refresh"]
+    assert calls == [True]
+
+
+def test_agent_supply_rpc_keeps_deep_cli_discovery_off_collection_reads(tmp_path):
+    from core.handlers.model_hub import rpc as model_hub_rpc
+
+    service, _store, _adapter = _service(tmp_path)
+    calls: list[bool] = []
+    deep_started = threading.Event()
+    deep_release = threading.Event()
+    deep_finished = threading.Event()
+
+    def refresh(include_npm_global: bool) -> None:
+        calls.append(include_npm_global)
+        if include_npm_global:
+            deep_started.set()
+            deep_release.wait(timeout=2)
+            deep_finished.set()
+
+    service.cli_presence_refresh = refresh
+    service.cli_present_override = lambda backend: backend == "codex"
+
+    async def exercise() -> tuple[list[dict], dict, list[dict]]:
+        first = await asyncio.wait_for(
+            model_hub_rpc.dispatch_model_hub_rpc(service, "list_agents", {}),
+            timeout=0.5,
+        )
+        assert await asyncio.to_thread(deep_started.wait, 0.5)
+
+        second = await asyncio.wait_for(
+            model_hub_rpc.dispatch_model_hub_rpc(
+                service,
+                "get_agent_sources",
+                {"backend": "codex"},
+            ),
+            timeout=0.5,
+        )
+        deep_release.set()
+        assert await asyncio.to_thread(deep_finished.wait, 0.5)
+        await asyncio.sleep(0)
+
+        third = await asyncio.wait_for(
+            model_hub_rpc.dispatch_model_hub_rpc(service, "list_agents", {}),
+            timeout=0.5,
+        )
+        await asyncio.sleep(0)
+        return [first, second, third]
+
+    try:
+        payloads = asyncio.run(exercise())
+    finally:
+        deep_release.set()
+
+    first, second, third = payloads
+    assert next(agent for agent in first if agent["backend"] == "codex")[
+        "cli_present"
+    ]
+    assert second["cli_present"] is True
+    assert next(agent for agent in third if agent["backend"] == "codex")[
+        "cli_present"
+    ]
+    assert calls == [True]
 
 
 def test_usage_summary_rpc_reads_the_ledger_off_the_controller_loop(tmp_path):

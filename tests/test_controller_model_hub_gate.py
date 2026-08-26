@@ -37,6 +37,7 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
     import core.handlers.model_hub as model_hub
     import core.handlers.model_hub.turn_gateway as turn_gateway
     import modules.agents.model_hub as agent_model_hub
+    from vibe import api
 
     service = object()
     calls = []
@@ -63,6 +64,13 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
     monkeypatch.setattr(model_hub, "create_default_service", create_service)
     monkeypatch.setattr(turn_gateway, "ModelHubTurnGateway", Gateway)
     monkeypatch.setattr(agent_model_hub, "ModelHubRuntimeRouter", Router)
+    presence_probes = []
+
+    def resolve_cli_path(binary, *, include_npm_global=True):
+        presence_probes.append((binary, include_npm_global))
+        return f"/usr/bin/{binary}" if binary == "codex" else None
+
+    monkeypatch.setattr(api, "resolve_cli_path", resolve_cli_path)
     controller = Controller.__new__(Controller)
     controller.config = SimpleNamespace(language="zh")
     controller.vibe_agent_store = SimpleNamespace(
@@ -80,6 +88,13 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
     assert controller.model_hub_runtime.turn_gateway is controller.model_hub_turn_gateway
     assert captured["requested_model_override"]("codex") == "agent-model"
     assert captured["requested_model_override"]("claude") is None
+    assert captured["cli_present_override"]("codex") is True
+    assert captured["cli_present_override"]("claude") is False
+    assert presence_probes == [
+        ("claude", False),
+        ("codex", False),
+        ("opencode", False),
+    ]
     assert controller.model_hub_turn_gateway.language_provider() == "zh"
     assert calls == [
         ("gateway", service, controller.model_hub_turn_gateway.language_provider),

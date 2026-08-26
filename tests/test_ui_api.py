@@ -1423,6 +1423,35 @@ def test_detect_cli_supports_explicit_path(monkeypatch, tmp_path):
     assert result["path"] == str(binary_path)
 
 
+def test_resolve_cli_path_stops_before_npm_after_common_path_match(monkeypatch, tmp_path):
+    codex_path = tmp_path / ".local" / "bin" / "codex"
+    codex_path.parent.mkdir(parents=True)
+    codex_path.write_text("#!/bin/sh\n")
+    codex_path.chmod(0o755)
+
+    monkeypatch.setattr(api.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(api.shutil, "which", lambda _binary: None)
+    monkeypatch.setattr(
+        api,
+        "_npm_global_binary_candidates",
+        lambda _binary: pytest.fail("npm discovery must not run after a direct match"),
+    )
+
+    assert api.resolve_cli_path("codex") == str(codex_path)
+
+
+def test_resolve_cli_path_fast_probe_never_queries_npm(monkeypatch, tmp_path):
+    monkeypatch.setattr(api.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(api.shutil, "which", lambda _binary: None)
+    monkeypatch.setattr(
+        api,
+        "_npm_global_binary_candidates",
+        lambda _binary: pytest.fail("fast presence probes must not query npm"),
+    )
+
+    assert api.resolve_cli_path("missing-cli", include_npm_global=False) is None
+
+
 @pytest.fixture
 def only_tmp_binaries(monkeypatch, tmp_path):
     """Make CLI discovery hermetic: only executables under ``tmp_path`` count as

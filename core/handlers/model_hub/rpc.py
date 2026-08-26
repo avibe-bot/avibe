@@ -4,15 +4,66 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
+from weakref import WeakKeyDictionary
 
 from .service import ModelHubError, ModelHubService
 from .usage import USAGE_DEFAULT_WINDOW_DAYS
+
+CLI_PRESENCE_REFRESH_INTERVAL_SECONDS = 30.0
+_cli_presence_refresh_tasks: WeakKeyDictionary[
+    ModelHubService,
+    asyncio.Task[None],
+] = WeakKeyDictionary()
+_cli_presence_refreshed_at: WeakKeyDictionary[ModelHubService, float] = WeakKeyDictionary()
 
 
 async def _refresh_agent_presence(service: ModelHubService) -> None:
     """Refresh host CLI facts without blocking the controller event loop."""
 
-    await asyncio.to_thread(service.refresh_cli_presence)
+    current = _cli_presence_refresh_tasks.get(service)
+    if current is not None and not current.done():
+        await asyncio.shield(current)
+        return
+
+    task = _start_agent_presence_refresh(service)
+    await asyncio.shield(task)
+
+
+async def _run_agent_presence_refresh(service: ModelHubService) -> None:
+    try:
+        await asyncio.to_thread(
+            service.refresh_cli_presence,
+            include_npm_global=True,
+        )
+    finally:
+        loop = asyncio.get_running_loop()
+        _cli_presence_refreshed_at[service] = loop.time()
+        current = asyncio.current_task()
+        if _cli_presence_refresh_tasks.get(service) is current:
+            _cli_presence_refresh_tasks.pop(service, None)
+
+
+def _start_agent_presence_refresh(service: ModelHubService) -> asyncio.Task[None]:
+    task = asyncio.create_task(
+        _run_agent_presence_refresh(service),
+        name="model-hub-cli-presence-refresh",
+    )
+    _cli_presence_refresh_tasks[service] = task
+    return task
+
+
+def _schedule_agent_presence_refresh(service: ModelHubService) -> None:
+    current = _cli_presence_refresh_tasks.get(service)
+    if current is not None and not current.done():
+        return
+    loop = asyncio.get_running_loop()
+    refreshed_at = _cli_presence_refreshed_at.get(service)
+    if (
+        refreshed_at is not None
+        and loop.time() - refreshed_at < CLI_PRESENCE_REFRESH_INTERVAL_SECONDS
+    ):
+        return
+    _start_agent_presence_refresh(service)
 
 
 async def dispatch_model_hub_rpc(
@@ -53,10 +104,16 @@ async def dispatch_model_hub_rpc(
             confirmed_interruptions=payload.get("would_interrupt"),
         )
     if operation == "list_agents":
-        return await asyncio.to_thread(service.list_agents)
+        agents = await asyncio.to_thread(service.list_agents)
+        _schedule_agent_presence_refresh(service)
+        return agents
     if operation == "get_agent_sources":
-        await _refresh_agent_presence(service)
-        return service.get_agent_sources(payload.get("backend"))
+        agent = await asyncio.to_thread(
+            service.get_agent_sources,
+            payload.get("backend"),
+        )
+        _schedule_agent_presence_refresh(service)
+        return agent
     if operation == "set_agent_sources":
         await _refresh_agent_presence(service)
         return await service.set_agent_sources(
