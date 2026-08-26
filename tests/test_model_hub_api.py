@@ -2391,6 +2391,36 @@ def test_reorder_agent_chains_commits_source_order_with_route_reorder(tmp_path):
     ]
 
 
+def test_new_source_is_placed_before_held_out_route_hops(tmp_path):
+    service, store, _ = _service(tmp_path)
+    model_id = "claude-opus-4-6"
+    _set_claude_route_fixture(store, ("src_listed01", "src_heldout1"), model_id)
+    store.config.agents["claude"].sources.order = ["src_listed01"]
+    new_source = ModelHubSourceConfig(
+        id="src_new0001",
+        kind="api_key",
+        vendor="anthropic",
+        display_name="src_new0001",
+        protocol="anthropic",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id=model_id, provenance="discovered")],
+        credential_ref="cred_src_new0001",
+    )
+    config = service._clone_config(store.config)
+
+    service._apply_source_placement(config, new_source)
+
+    agent = config.agents["claude"]
+    assert agent.sources.order == ["src_listed01", "src_new0001"]
+    assert [hop.source_id for hop in agent.routes[model_id].hops] == [
+        "src_listed01",
+        "src_new0001",
+        "src_heldout1",
+    ]
+
+
 def test_reorder_route_accepts_source_order_atomically(monkeypatch, tmp_path):
     service, store, _ = _service(tmp_path)
     model_id = "claude-opus-4-6"

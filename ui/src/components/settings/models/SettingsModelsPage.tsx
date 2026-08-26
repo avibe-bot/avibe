@@ -790,9 +790,9 @@ export const SettingsModelsPage: React.FC = () => {
             try {
               const sourceResult = await sourceCollectionReads.read();
               if (sourceResult.kind === 'stale') {
-                // A newer inventory read owns the projection; until it lands,
-                // keep the old values visibly retryable instead of ready.
-                setSourcesRead((previous) => failRegionRead(previous));
+                // A newer inventory read owns the projection. Reconcile again
+                // so an older response cannot downgrade a fresh landing.
+                void refresh();
               } else {
                 sourceEntityAuthority.settleSnapshot(sourceSnapshot, sourceResult.value);
               }
