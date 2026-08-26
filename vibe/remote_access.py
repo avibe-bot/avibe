@@ -5839,25 +5839,13 @@ def validate_session_cookie(config: V2Config, cookie_value: str | None) -> bool:
     return parse_session_cookie(config, cookie_value) is not None
 
 
-def session_needs_renewal(
-    payload: Mapping[str, Any],
-    now: int | None = None,
-    *,
-    current_reference: str | None = None,
-) -> bool:
-    """Return True when the lifetime or durable authorization reference changed.
+def session_needs_renewal(payload: dict[str, Any], now: int | None = None) -> bool:
+    """Return True when the session has spent more than half of SESSION_TTL_SECONDS.
 
     Mirrors the avibe-bot-backend control-plane sliding-session policy
     (middleware.ts): re-sign the cookie once the remaining lifetime drops
     below half so users don't get bounced through OAuth on every visit.
     """
-    refreshed_reference = payload.get(_SESSION_AUTHORIZATION_REFERENCE_KEY)
-    if (
-        current_reference is not None
-        and isinstance(refreshed_reference, str)
-        and refreshed_reference != current_reference
-    ):
-        return True
     current = now if now is not None else int(time.time())
     return int(payload.get("exp", 0)) - current < SESSION_TTL_SECONDS // 2
 

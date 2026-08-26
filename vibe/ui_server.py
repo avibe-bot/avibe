@@ -1416,22 +1416,7 @@ def _resolved_remote_session_payload(config: V2Config) -> dict[str, Any] | None:
     if identity is None:
         return None
     resolution = remote_access.resolve_current_authorization(config, identity)
-    _arm_remote_session_renewal(identity, resolution)
     return resolution.payload if resolution.current else None
-
-
-def _arm_remote_session_renewal(
-    identity: Mapping[str, Any],
-    resolution: Any,
-) -> None:
-    from vibe import remote_access
-
-    payload = resolution.payload if resolution.current else None
-    if payload is not None and remote_access.session_needs_renewal(
-        payload,
-        current_reference=str(identity.get("authorization_ref") or "") or None,
-    ):
-        g.remote_session_renew = payload
 
 
 def _normalized_host(value: str | None) -> str:
@@ -2440,7 +2425,8 @@ def enforce_remote_access_cookie():
         g.remote_session_identity = identity
         g.remote_session_payload = payload
         g.remote_authorization_resolution = resolution
-        _arm_remote_session_renewal(identity, resolution)
+        if remote_access.session_needs_renewal(payload):
+            g.remote_session_renew = payload
         return None
     # The SPA shell is non-sensitive and its APIs remain protected. Serving it
     # lets AuthGuard keep an iOS Home-Screen cold launch on the installed app's
@@ -6868,7 +6854,6 @@ def remote_access_login():
     else:
         resolution = None
     if resolution is not None and resolution.current:
-        _arm_remote_session_renewal(identity, resolution)
         return redirect(next_target)
     if _auth_rate_limited():
         return _auth_rate_limit_response()
@@ -7009,7 +6994,6 @@ def api_session():
             response = jsonify({"remote": True, "authenticated": False})
         else:
             resolution = remote_access.resolve_current_authorization(config, identity)
-            _arm_remote_session_renewal(identity, resolution)
             if resolution.policy in {"personal", "organization"}:
                 instance_kind = resolution.policy
             if resolution.state == "unavailable":
@@ -7106,7 +7090,6 @@ def api_cloud_token():
             return jsonify({"error": "cloud_unavailable"}), 503
         return jsonify({"ok": False, "error": "remote_access_login_required"}), 401
     resolution = remote_access.resolve_current_authorization(config, identity)
-    _arm_remote_session_renewal(identity, resolution)
     if resolution.state == "revoked":
         return jsonify({"ok": False, "error": "remote_access_revoked"}), 403
     if resolution.state == "unavailable":

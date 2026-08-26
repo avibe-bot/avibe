@@ -225,21 +225,6 @@ def upsert_scoped(
                     updated_at=updated_at,
                 )
             )
-            if authorization_state == "revoked" and reference != existing_scope_reference:
-                # A released cookie can still reference a retired scope. Keep
-                # that exact reference revoked so it cannot trigger the same
-                # backchannel check on every request before the cookie rotates.
-                conn.execute(
-                    update(remote_access_authorizations)
-                    .where(remote_access_authorizations.c.id == reference)
-                    .where(remote_access_authorizations.c.instance_id == instance_id)
-                    .where(remote_access_authorizations.c.subject == subject)
-                    .values(
-                        authorization_state="revoked",
-                        last_checked_at=last_checked_at,
-                        updated_at=updated_at,
-                    )
-                )
             return str(existing_scope_reference)
 
         # A released cookie may still point at a random-reference row. Promote
