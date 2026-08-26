@@ -345,6 +345,9 @@ function Invoke-UvToolInstallAttempt {
             Set-Content -LiteralPath $markerReplacement -Value $generationRoot -Encoding UTF8
             Move-Item -Force -Path $markerReplacement -Destination $marker
         } catch {
+            if ($markerReplacement) {
+                Remove-Item -LiteralPath $markerReplacement -Force -ErrorAction SilentlyContinue
+            }
             Write-Warning "Activated the launcher, but could not record its generation for offline rollback."
         }
         return $result
