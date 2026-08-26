@@ -99,12 +99,12 @@ function Get-LauncherState {
     Push-Location $RuntimeHome
     try {
         $protocol = Invoke-NativeCommand -FilePath $Launcher -Arguments @("__activate-install", "--protocol-version")
-        if ($protocol.Success -and [int]$protocol.Output.Trim() -ge 2) {
+        if ((Get-InstallProtocolVersion $protocol) -ge 2) {
             $snapshot = Invoke-NativeCommand `
                 -FilePath $Launcher `
                 -Arguments @("__activate-install", "--snapshot", "--launcher", $Launcher)
-            if ($snapshot.Success -and $snapshot.Output.Trim()) {
-                $state.SourcePath = $snapshot.Output.Trim()
+            if ($snapshot.Success -and $snapshot.Stdout.Trim()) {
+                $state.SourcePath = $snapshot.Stdout.Trim()
                 $owner = Join-Path $state.SourcePath "bin\vibe.exe"
                 if (Test-Path -LiteralPath $owner) {
                     $state.ActivationOwner = $owner
@@ -295,28 +295,35 @@ function Invoke-NativeCommand {
         return @{
             Success = ($exitCode -eq 0)
             ExitCode = $exitCode
+            Stdout = $stdout.Trim()
+            Stderr = $stderr.Trim()
             Output = ($capturedOutput -join [System.Environment]::NewLine).Trim()
         }
     } catch {
         $capturedOutput = @()
+        $stdout = ""
+        $stderr = ""
 
-        foreach ($path in @($stdoutPath, $stderrPath)) {
-            if (Test-Path $path) {
-                $streamOutput = [System.IO.File]::ReadAllText($path).Trim()
-                if ($streamOutput) {
-                    $capturedOutput += $streamOutput
-                }
-            }
+        if (Test-Path $stdoutPath) {
+            $stdout = [System.IO.File]::ReadAllText($stdoutPath).Trim()
+            if ($stdout) { $capturedOutput += $stdout }
+        }
+        if (Test-Path $stderrPath) {
+            $stderr = [System.IO.File]::ReadAllText($stderrPath).Trim()
+            if ($stderr) { $capturedOutput += $stderr }
         }
 
         $errorText = ($_ | Out-String).Trim()
         if ($errorText) {
             $capturedOutput += $errorText
         }
+        $capturedStderr = (($stderr, $errorText) | Where-Object { $_ }) -join [System.Environment]::NewLine
 
         return @{
             Success = $false
             ExitCode = 1
+            Stdout = $stdout
+            Stderr = $capturedStderr
             Output = ($capturedOutput -join [System.Environment]::NewLine).Trim()
         }
     } finally {
@@ -326,6 +333,19 @@ function Invoke-NativeCommand {
             }
         }
     }
+}
+
+function Get-InstallProtocolVersion {
+    param([object]$Result)
+
+    if (-not $Result.Success) {
+        return 0
+    }
+    [int]$version = 0
+    if (-not [int]::TryParse($Result.Stdout.Trim(), [ref]$version)) {
+        return 0
+    }
+    return $version
 }
 
 function Activate-LegacyInstallCandidate {
@@ -435,13 +455,13 @@ function Invoke-UvToolInstallAttempt {
         Push-Location $runtimeHome
         try {
             $protocol = Invoke-NativeCommand -FilePath $candidate -Arguments @("__activate-install", "--protocol-version")
-            $activationOwner = if ($protocol.Success -and [int]$protocol.Output.Trim() -ge 1) {
+            $activationOwner = if ((Get-InstallProtocolVersion $protocol) -ge 1) {
                 $candidate
             } elseif ($launcherState.ActivationOwner) {
                 $ownerProtocol = Invoke-NativeCommand `
                     -FilePath $launcherState.ActivationOwner `
                     -Arguments @("__activate-install", "--protocol-version")
-                if ($ownerProtocol.Success -and [int]$ownerProtocol.Output.Trim() -ge 1) {
+                if ((Get-InstallProtocolVersion $ownerProtocol) -ge 1) {
                     $launcherState.ActivationOwner
                 } else {
                     $null

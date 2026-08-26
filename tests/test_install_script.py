@@ -687,6 +687,12 @@ def test_windows_installer_honors_configured_tool_bin_and_cross_volume_copy_fall
     assert "[System.IO.File]::Move($replacement, $StableLauncher)" in powershell
     assert "Start-Process -FilePath" not in powershell
     assert "& $FilePath @Arguments" in powershell
+    assert "Stdout = $stdout.Trim()" in powershell
+    assert "Stderr = $stderr.Trim()" in powershell
+    assert "function Get-InstallProtocolVersion" in powershell
+    assert "[int]::TryParse($Result.Stdout.Trim(), [ref]$version)" in powershell
+    assert "[int]$protocol.Output.Trim()" not in powershell
+    assert "$snapshot.Stdout.Trim()" in powershell
     assert '$env:Path = "$stableBin;$persistedPath"' in powershell
     assert "& $stableLauncher --help" in powershell
     assert 'Invoke-NativeCommand -FilePath $stableLauncher -Arguments @("runtime", "prepare", "--strict")' in powershell
