@@ -1239,6 +1239,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       !voiceShortcutAvailable
       || event.defaultPrevented
       || event.repeat
+      || event.currentTarget.querySelector('[data-mention-picker]') !== null
       || !actionShortcutMatches(event.nativeEvent, voiceInputShortcut)
     ) {
       return;
@@ -1324,7 +1325,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   return (
     <div
       className={cn('mx-auto flex w-full max-w-[1080px] flex-col gap-2', className)}
-      onKeyDown={handleVoiceShortcut}
+      onKeyDownCapture={handleVoiceShortcut}
     >
       {mediaEnabled && attachments.length > 0 && (
         <div className="flex flex-wrap gap-2">

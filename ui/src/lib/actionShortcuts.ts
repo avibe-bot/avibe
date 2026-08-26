@@ -177,7 +177,11 @@ export function actionShortcutMatches(event: ShortcutEvent, shortcut: ActionShor
   );
 }
 
-/** Chords already owned by the action's own surface cannot be assigned. */
+/**
+ * Chords already owned by the action's own surface cannot be assigned.
+ * Browser/OS reservations are intentionally not mirrored here: Settings can
+ * persist only keydown events the current browser actually delivers.
+ */
 export function isReservedActionShortcut(
   id: ActionShortcutId,
   shortcut: ActionShortcut,

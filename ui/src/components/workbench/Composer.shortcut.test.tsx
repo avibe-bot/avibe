@@ -61,11 +61,18 @@ void i18n.use(initReactI18next).init({
 
 const renderComposer = (
   sessionId = 'shortcut-session',
-  state: { disabled?: boolean } = {},
+  state: { disabled?: boolean; initialDraft?: string; mentions?: boolean } = {},
 ) => render(
   <I18nextProvider i18n={i18n}>
     <ToastProvider>
-      <Composer sessionId={sessionId} onSend={() => undefined} {...state} />
+      <Composer
+        sessionId={sessionId}
+        onSend={() => undefined}
+        disabled={state.disabled}
+        initialDraft={state.initialDraft}
+        onSearchAgents={state.mentions ? async () => [] : undefined}
+        onSearchSessions={state.mentions ? async () => [] : undefined}
+      />
     </ToastProvider>
   </I18nextProvider>,
 );
@@ -130,6 +137,40 @@ describe('Composer voice shortcut', () => {
 
     fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
     await waitFor(() => expect(voiceMocks.getUserMedia).toHaveBeenCalledOnce());
+  });
+
+  it('owns a configured editor chord before Lexical handles it', async () => {
+    const shortcuts = defaultActionShortcuts();
+    shortcuts.voiceInput = {
+      code: 'KeyZ',
+      altKey: false,
+      ctrlKey: true,
+      metaKey: false,
+      shiftKey: false,
+    };
+    writeActionShortcuts(shortcuts);
+    renderComposer('editor-shortcut-session', { mentions: true, initialDraft: 'Keep this draft' });
+    await screen.findByRole('button', { name: en.chat.compose.voice });
+    const textbox = screen.getByRole('textbox');
+    await waitFor(() => expect(textbox.textContent).toBe('Keep this draft'));
+    await act(async () => undefined);
+
+    fireEvent.keyDown(textbox, { code: 'KeyZ', key: 'z', ctrlKey: true });
+    await waitFor(() => expect(voiceMocks.getUserMedia).toHaveBeenCalledOnce());
+    expect(textbox.textContent).toBe('Keep this draft');
+  });
+
+  it('yields the voice shortcut while the mention picker is open', async () => {
+    renderComposer('mention-picker-shortcut-session', { mentions: true });
+    await screen.findByRole('button', { name: en.chat.compose.voice });
+    const textbox = screen.getByRole('textbox');
+    const picker = document.createElement('ul');
+    picker.dataset.mentionPicker = '';
+    textbox.parentElement?.append(picker);
+    await act(async () => undefined);
+
+    fireEvent.keyDown(textbox, { code: 'KeyZ', key: 'z', altKey: true });
+    expect(voiceMocks.getUserMedia).not.toHaveBeenCalled();
   });
 
   it('keeps shortcut ownership after the microphone control changes to finish', async () => {
