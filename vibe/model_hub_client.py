@@ -140,8 +140,11 @@ class ModelHubRemoteService:
             },
         )
 
-    def list_agents(self) -> list[dict]:
-        return _rpc_sync("list_agents")
+    def list_agents(self, *, refresh_cli_presence: bool = False) -> list[dict]:
+        return _rpc_sync(
+            "list_agents",
+            {"refresh_cli_presence": True} if refresh_cli_presence else None,
+        )
 
     def get_agent_sources(self, backend: str) -> dict:
         return _rpc_sync("get_agent_sources", {"backend": backend})

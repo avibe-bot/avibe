@@ -247,24 +247,25 @@ def _npm_global_binary_candidates(binary: str) -> list[Path]:
 
 
 def _npm_global_prefixes() -> list[Path]:
-    npm_paths: list[Path] = []
-    for candidate in _candidate_cli_paths("npm"):
-        if _is_executable_file(candidate) and candidate not in npm_paths:
-            npm_paths.append(candidate)
-
+    # Global packages belong to the npm selected by the current environment.
+    # Querying every historical NVM installation makes one missing CLI cost up
+    # to five seconds per Node version without improving that answer.
     which_npm = shutil.which("npm")
-    if which_npm:
-        npm_candidate = Path(which_npm)
-        if npm_candidate not in npm_paths:
-            npm_paths.append(npm_candidate)
-
-    prefixes: list[Path] = []
-    for npm_path in npm_paths:
-        prefix_path = _npm_prefix_for(npm_path)
-        if prefix_path is not None and prefix_path not in prefixes:
-            prefixes.append(prefix_path)
-
-    return prefixes
+    npm_path = Path(which_npm) if which_npm else next(
+        (
+            candidate
+            for candidate in _candidate_cli_paths(
+                "npm",
+                include_npm_global=False,
+            )
+            if _is_executable_file(candidate)
+        ),
+        None,
+    )
+    if npm_path is None:
+        return []
+    prefix_path = _npm_prefix_for(npm_path)
+    return [prefix_path] if prefix_path is not None else []
 
 
 def _npm_prefix_for(npm_path: str | Path) -> Path | None:

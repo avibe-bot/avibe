@@ -4557,7 +4557,15 @@ def model_hub_agents_get():
     from core.handlers.model_hub import ModelHubError
 
     try:
-        return _model_hub_success(agents=_model_hub_service().list_agents())
+        service = _model_hub_service()
+        refresh_cli_presence = request.args.get("refresh_cli_presence") == "1"
+        return _model_hub_success(
+            agents=(
+                service.list_agents(refresh_cli_presence=True)
+                if refresh_cli_presence
+                else service.list_agents()
+            )
+        )
     except ModelHubError as exc:
         return _model_hub_error(exc)
 

@@ -93,7 +93,7 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
     assert captured["requested_model_override"]("claude") is None
     assert captured["cli_present_override"]("codex") is True
     assert captured["cli_present_override"]("claude") is False
-    assert presence_probes == [(["claude", "codex", "opencode"], True)]
+    assert presence_probes == [(["claude", "codex", "opencode"], False)]
     assert controller.model_hub_turn_gateway.language_provider() == "zh"
     assert calls == [
         ("gateway", service, controller.model_hub_turn_gateway.language_provider),

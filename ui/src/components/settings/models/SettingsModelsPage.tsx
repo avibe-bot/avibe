@@ -730,8 +730,18 @@ export const SettingsModelsPage: React.FC = () => {
   }, [refresh, sourceCollectionReads, sourceEntityAuthority, sourceWriteRegistry]);
 
   React.useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    let current = true;
+    void refresh().then(async () => {
+      try {
+        const result = await agentCollectionReads.refresh();
+        if (!current || !aliveRef.current || result.kind === 'stale') return;
+        setSupplyRead(readyRegion(result.value));
+      } catch {
+        // The fast snapshot remains authoritative if optional deep discovery fails.
+      }
+    });
+    return () => { current = false; };
+  }, [agentCollectionReads, refresh]);
 
   const retrySources = React.useCallback(async () => {
     setSourcesRead(beginRegionRead);

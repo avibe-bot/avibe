@@ -7,6 +7,7 @@ export type CollectionReadResult<T> =
 
 export type CollectionReadAuthority<T> = {
   read: () => Promise<CollectionReadResult<T>>;
+  refresh: () => Promise<CollectionReadResult<T>>;
   readValue: () => Promise<T>;
   invalidate: () => void;
 };
@@ -20,21 +21,26 @@ class SupersededCollectionRead extends Error {
 
 /** The only owner allowed to call a collection endpoint. Every read carries a
  * generation, including reconciliation reads that do not directly render. */
-const createCollectionReadAuthority = <T>(readCollection: () => Promise<T>): CollectionReadAuthority<T> => {
+const createCollectionReadAuthority = <T>(
+  readCollection: () => Promise<T>,
+  refreshCollection: () => Promise<T> = readCollection,
+): CollectionReadAuthority<T> => {
   let generation = 0;
-  const read = async (): Promise<CollectionReadResult<T>> => {
+  const readFrom = async (reader: () => Promise<T>): Promise<CollectionReadResult<T>> => {
     const mine = ++generation;
     try {
-      const value = await readCollection();
+      const value = await reader();
       return mine === generation ? { kind: 'current', value } : { kind: 'stale' };
     } catch (error) {
       if (mine !== generation) return { kind: 'stale' };
       throw error;
     }
   };
+  const read = () => readFrom(readCollection);
 
   return {
     read,
+    refresh: () => readFrom(refreshCollection),
     readValue: async () => {
       const result = await read();
       if (result.kind === 'stale') throw new SupersededCollectionRead();
@@ -49,5 +55,8 @@ export const createSourceCollectionReadAuthority = (
 ): CollectionReadAuthority<Source[]> => createCollectionReadAuthority(() => api.listSources());
 
 export const createAgentCollectionReadAuthority = (
-  api: Pick<ModelsApi, 'listAgents'> = modelsApi,
-): CollectionReadAuthority<AgentSupply[]> => createCollectionReadAuthority(() => api.listAgents());
+  api: Pick<ModelsApi, 'listAgents'> & Partial<Pick<ModelsApi, 'refreshAgentPresence'>> = modelsApi,
+): CollectionReadAuthority<AgentSupply[]> => createCollectionReadAuthority(
+  () => api.listAgents(),
+  () => api.refreshAgentPresence?.() ?? api.listAgents(),
+);

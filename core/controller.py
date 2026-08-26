@@ -487,10 +487,10 @@ class Controller:
             }
             cli_presence = refreshed
 
-        # Seed the complete snapshot before the internal RPC surface exists.
-        # Batch resolution shares npm prefix discovery across all backends, so
-        # the first UI read is both accurate and free of subprocess work.
-        refresh_cli_presence(True)
+        # Seed only filesystem and PATH facts before the internal RPC surface
+        # exists. The page publishes npm-only installs through an explicit
+        # post-paint refresh, so controller readiness never waits on npm.
+        refresh_cli_presence(False)
 
         self.model_hub_service = create_default_service(
             requested_model_override=default_vibe_agent_model,

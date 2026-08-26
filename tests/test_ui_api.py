@@ -1595,6 +1595,18 @@ def test_resolve_cli_paths_queries_npm_prefix_once_for_a_backend_batch(
     npm_path.parent.mkdir(parents=True, exist_ok=True)
     npm_path.write_text("#!/bin/sh\n")
     npm_path.chmod(0o755)
+    inactive_npm = (
+        tmp_path
+        / ".nvm"
+        / "versions"
+        / "node"
+        / "v18.20.0"
+        / "bin"
+        / "npm"
+    )
+    inactive_npm.parent.mkdir(parents=True, exist_ok=True)
+    inactive_npm.write_text("#!/bin/sh\n")
+    inactive_npm.chmod(0o755)
 
     prefix_path = tmp_path / ".npm-global"
     expected = {}

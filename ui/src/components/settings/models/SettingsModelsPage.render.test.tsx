@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ToastProvider } from '@/context/ToastProvider';
 import i18n from '@/i18n';
@@ -131,6 +131,10 @@ const renderPage = (sources: Source[]) => {
   );
 };
 
+beforeEach(() => {
+  vi.spyOn(modelsApi, 'refreshAgentPresence').mockReturnValue(new Promise(() => {}));
+});
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
@@ -218,6 +222,35 @@ describe('SettingsModelsPage surface branches', () => {
     expect(await screen.findByText(/No agent backend was found|没有找到 Agent 后端/i)).toBeTruthy();
     expect(screen.queryByRole('button', { name: /^Switch to Gateway$|^切换到网关$/i })).toBeNull();
     expect(screen.queryByText(/backends are direct|个后端均为直连/i)).toBeNull();
+  });
+
+  it('publishes a newly discovered backend into the already-open page', async () => {
+    const unavailable = [
+      { ...directAgent('claude'), cli_present: false },
+      { ...directAgent('codex'), cli_present: false },
+      { ...directAgent('opencode'), cli_present: false },
+    ];
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue(unavailable);
+    vi.mocked(modelsApi.refreshAgentPresence).mockResolvedValue([
+      unavailable[0],
+      directAgent('codex'),
+      unavailable[2],
+    ]);
+    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
+    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+
+    render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <SettingsModelsPage />
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    expect(await screen.findByRole('button', { name: /^Switch to Gateway$|^切换到网关$/i })).toBeTruthy();
+    expect(screen.queryByText(/No agent backend was found|没有找到 Agent 后端/i)).toBeNull();
+    expect(modelsApi.refreshAgentPresence).toHaveBeenCalledOnce();
   });
 
   it('keeps an unread runtime visible on the direct-only surface', async () => {
