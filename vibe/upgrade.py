@@ -99,15 +99,17 @@ def execute_upgrade_plan(
     run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     **run_kwargs: object,
 ) -> subprocess.CompletedProcess[str]:
-    """Resolve, install, and normalize one package shape in that order.
+    """Resolve, remove an overlapping optional package, then install.
 
     The optional preflight exists for plans that require the Memory extra. Its
     installer performs dependency resolution without writing the environment,
     so an unavailable or incompatible ``avibe-memory`` release returns before
     the command that replaces the running Avibe install. A core-only pip
-    rollback needs the final cleanup because pip installs are additive: pinning
-    only ``avibe-os`` does not remove an optional distribution left by the
-    failed generation.
+    rollback needs cleanup because pip installs are additive: pinning only
+    ``avibe-os`` does not remove an optional distribution left by the failed
+    generation. That cleanup runs before the pinned host reinstall because the
+    split distribution and a pre-split host own the same implementation paths;
+    uninstalling it afterward would delete files the restored host just wrote.
     """
 
     with package_mutation_lock():
@@ -116,12 +118,12 @@ def execute_upgrade_plan(
             if preflight.returncode != 0:
                 return preflight
 
-        installed = run(plan.command, env=plan.env, **run_kwargs)
-        if installed.returncode != 0 or plan.cleanup_command is None:
-            return installed
+        if plan.cleanup_command is not None:
+            cleaned = run(plan.cleanup_command, env=plan.env, **run_kwargs)
+            if cleaned.returncode != 0:
+                return cleaned
 
-        cleaned = run(plan.cleanup_command, env=plan.env, **run_kwargs)
-        return installed if cleaned.returncode == 0 else cleaned
+        return run(plan.command, env=plan.env, **run_kwargs)
 
 
 @contextmanager

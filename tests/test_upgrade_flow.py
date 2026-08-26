@@ -279,7 +279,7 @@ def test_memory_add_plan_never_force_reinstalls_the_running_core(
         assert plan.command[:4] == [python_executable, "-m", "pip", "install"]
 
 
-def test_core_only_rollback_removes_memory_only_after_the_pinned_install_succeeds():
+def test_core_only_rollback_removes_memory_before_the_pinned_install():
     plan = UpgradePlan(
         command=["installer", "pinned-core"],
         env=None,
@@ -295,7 +295,52 @@ def test_core_only_rollback_removes_memory_only_after_the_pinned_install_succeed
     result = execute_upgrade_plan(plan, run=fake_run, capture_output=True, text=True)
 
     assert result.returncode == 0
-    assert calls == [["installer", "pinned-core"], ["installer", "remove-memory"]]
+    assert calls == [["installer", "remove-memory"], ["installer", "pinned-core"]]
+
+
+def test_core_only_rollback_cleanup_order_preserves_bundled_record_overlap(tmp_path):
+    implementation = tmp_path / "avibe_memory" / "runtime.py"
+    implementation.parent.mkdir()
+    implementation.write_text("split distribution\n", encoding="utf-8")
+    plan = UpgradePlan(
+        command=["installer", "pinned-bundled-core"],
+        env=None,
+        method="test",
+        cleanup_command=["installer", "remove-split-memory"],
+    )
+
+    def fake_run(command, **kwargs):
+        if command == plan.cleanup_command:
+            # pip uninstall follows avibe-memory's RECORD, including paths that
+            # the pre-split host also owns after it is restored.
+            implementation.unlink()
+        else:
+            implementation.write_text("bundled host\n", encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+    result = execute_upgrade_plan(plan, run=fake_run, capture_output=True, text=True)
+
+    assert result.returncode == 0
+    assert implementation.read_text(encoding="utf-8") == "bundled host\n"
+
+
+def test_core_only_rollback_cleanup_failure_never_mutates_the_host():
+    plan = UpgradePlan(
+        command=["installer", "pinned-core"],
+        env=None,
+        method="test",
+        cleanup_command=["installer", "remove-memory"],
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 17, stdout="", stderr="cleanup failed")
+
+    result = execute_upgrade_plan(plan, run=fake_run, capture_output=True, text=True)
+
+    assert result.returncode == 17
+    assert calls == [["installer", "remove-memory"]]
 
 
 def test_controller_startup_has_no_python_package_install_path():

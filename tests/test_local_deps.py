@@ -1383,6 +1383,95 @@ def test_memory_runtime_dependency_job_installs_missing_package_then_retries_con
     assert installs == [True]
 
 
+def test_memory_runtime_dependency_job_restarts_after_repairing_incompatible_package(
+    monkeypatch,
+):
+    from vibe import internal_client
+
+    controller_calls: list[bool] = []
+    package_installs: list[bool] = []
+    restarts: list[dict] = []
+
+    def install_runtime() -> dict:
+        controller_calls.append(True)
+        return {
+            "status_code": 503,
+            "body": {"ok": False, "reason": "memory_plugin_incompatible"},
+        }
+
+    monkeypatch.setattr(internal_client, "memory_install_runtime_sync", install_runtime)
+    monkeypatch.setattr(
+        api,
+        "_install_memory_package_for_current_release",
+        lambda: package_installs.append(True) or {"ok": True, "output": "installed"},
+    )
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/bin/vibe")
+    monkeypatch.setattr(
+        api,
+        "schedule_restart",
+        lambda **kwargs: restarts.append(kwargs) or {"ok": True, "job_id": "memory-repair"},
+    )
+
+    assert api._prepare_memory_runtime_job() == {
+        "ok": True,
+        "message": "memory_runtime_restart_scheduled",
+        "output": "installed",
+        "reason": None,
+        "download_error": None,
+        "restarting": True,
+    }
+    assert controller_calls == [True]
+    assert package_installs == [True]
+    assert restarts == [
+        {
+            "delay_seconds": 2.0,
+            "vibe_path": "/bin/vibe",
+            "trigger": "memory-package-repair",
+        }
+    ]
+
+
+def test_memory_runtime_dependency_job_requires_restart_when_scheduling_fails(
+    monkeypatch,
+):
+    from vibe import internal_client
+
+    controller_calls: list[bool] = []
+
+    def install_runtime() -> dict:
+        controller_calls.append(True)
+        return {
+            "status_code": 503,
+            "body": {"ok": False, "reason": "memory_plugin_incompatible"},
+        }
+
+    monkeypatch.setattr(internal_client, "memory_install_runtime_sync", install_runtime)
+    monkeypatch.setattr(
+        api,
+        "_install_memory_package_for_current_release",
+        lambda: {"ok": True, "output": "installed"},
+    )
+
+    def fail_schedule(**kwargs):
+        raise RuntimeError("scheduler unavailable")
+
+    monkeypatch.setattr(
+        api,
+        "schedule_restart",
+        fail_schedule,
+    )
+
+    assert api._prepare_memory_runtime_job() == {
+        "ok": False,
+        "message": "memory_runtime_restart_required",
+        "output": "scheduler unavailable",
+        "reason": "memory_runtime_restart_required",
+        "download_error": None,
+        "restarting": False,
+    }
+    assert controller_calls == [True]
+
+
 def test_memory_runtime_dependency_job_stops_when_package_resolution_fails(monkeypatch):
     from vibe import internal_client
 
