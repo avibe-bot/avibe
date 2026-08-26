@@ -833,9 +833,9 @@
       },
       "gateway": {
         "heading": "网关",
-        "sourceOrder": "来源顺序",
+        "sourceOrder": "调整优先级",
         "switchToGateway": "切换到网关",
-        "switchToDirect": "切换到直连",
+        "switchToDirect": "切到直连",
         "fail": {
           "switchToDirect": "没能切回直连"
         },
@@ -850,8 +850,8 @@
           "unread": "后端供给情况没读到 · 网关本身正常"
         },
         "row": {
-          "current": "当前 {{source}}",
-          "currentTakeover": "当前 {{source}}（接管）"
+          "current": "来自 {{source}}",
+          "currentTakeover": "来自 {{source}}（接管）"
         },
         "group": {
           "subtitle": {
@@ -906,7 +906,7 @@
         "andMore_other": "另有 {{count}} 个来源"
       },
       "upstream": {
-        "heading": "来源",
+        "heading": "上游来源",
         "count_one": "{{count}} 个",
         "count_other": "{{count}} 个",
         "group": {

@@ -51,8 +51,8 @@ export const SourceRow: React.FC<{ source: Source; onOpen: (source: Source) => v
         <Icon className={cn('size-[17px]', ACCENT_ICON[accent])} />
       </span>
       <span className="min-w-0 flex-1">
-        <span className="flex min-w-0 items-center gap-1.5">
-          <span className="truncate text-[12.5px] font-bold leading-[18px] text-foreground" title={source.display_name}>{source.display_name}</span>
+        <span className="block min-w-0 truncate text-[12.5px] font-bold leading-[18px] text-foreground" title={source.display_name}>{source.display_name}</span>
+        <span className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5">
           <span
             className="model-hub-pill model-hub-source-interface-pill border"
             title={interfaceLabel}

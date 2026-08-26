@@ -32,9 +32,21 @@ describe('SourcesCard footer', () => {
       </I18nextProvider>,
     );
 
-    const panel = screen.getByRole('heading', { name: /Sources|来源/i }).closest('section');
+    const panel = screen.getByRole('heading', { name: /Upstream sources|上游来源/i }).closest('section');
     expect(panel?.className).toContain('w-full');
     expect(panel?.className).toContain('min-w-0');
+  });
+
+  it('keeps the source title on its own line above the interface and kind tags', () => {
+    render(
+      <I18nextProvider i18n={i18n}>
+        <SourcesCard read={readyRegion([retained])} onRetry={vi.fn()} onOpenSource={vi.fn()} onAddApiKey={vi.fn()} onAddSubscription={vi.fn()} />
+      </I18nextProvider>,
+    );
+
+    const title = screen.getByText('Retained source');
+    expect(title.className).toContain('block');
+    expect(title.nextElementSibling?.className).toContain('flex');
   });
 
   it('exposes the upstream info note to keyboard activation and Escape dismissal', async () => {

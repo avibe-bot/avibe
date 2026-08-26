@@ -110,10 +110,52 @@ describe('AgentCard', () => {
   it('offers only gateway enablement and ignores stale chain data in direct mode', () => {
     const key = modelChainKey('claude', 'claude-opus-4-6');
     render(<I18nextProvider i18n={i18n}><AgentCard agents={[{ ...hubAgent, mode: 'direct', sources: null, routes: null, supply_status: null, model_supply: null }]} sources={[source('src_a', 'Primary'), source('src_b', 'Backup')]} chains={{ [key]: readyRegion({ contract_version: 6, backend: 'claude', model_id: 'claude-opus-4-6', current: { source_id: 'src_b', model_id: 'claude-opus-4-6' }, chain: [{ source_id: 'src_a', model_id: 'claude-opus-4-6', channel: 'hub', health: 'cooldown', runnable: false, reason: null, retry_at: '2099-01-01T00:00:00Z' }, { source_id: 'src_b', model_id: 'claude-opus-4-6', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }], supply_state: 'ok' }) }} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
-    expect(screen.queryByText(/Source order/i)).toBeNull();
+    expect(screen.queryByText(/Adjust priority/i)).toBeNull();
     expect(screen.queryByRole('button', { name: /route chain/i })).toBeNull();
     expect(screen.queryByText(/Backup/)).toBeNull();
     expect(screen.queryByText(/takeover/i)).toBeNull();
+  });
+
+  it.each([
+    ['en', 'Adjust priority', 'Switch to direct', 'Switch to gateway'],
+    ['zh', '调整优先级', '切到直连', '切换到网关'],
+  ] as const)('uses explicit gateway action labels and icons in %s', (lng, orderCopy, directCopy, gatewayCopy) => {
+    const directAgent: AgentSupply = {
+      ...hubAgent,
+      backend: 'codex',
+      mode: 'direct',
+      sources: null,
+      routes: null,
+      supply_status: null,
+      model_supply: null,
+      named_agents: [],
+    };
+    render(
+      <I18nextProvider i18n={localeInstance(lng)}>
+        <AgentCard
+          agents={[hubAgent, directAgent]}
+          sources={[]}
+          chains={{}}
+          pendingBackends={new Set()}
+          switchFailures={new Set()}
+          connectingBackend={null}
+          onConnectHub={vi.fn()}
+          onSwitchDirect={vi.fn()}
+          onOpenOrder={vi.fn()}
+          onOpenRoute={vi.fn()}
+          onProbeSettled={vi.fn()}
+        />
+      </I18nextProvider>,
+    );
+
+    const order = screen.getByRole('button', { name: orderCopy });
+    const direct = screen.getByRole('button', { name: directCopy });
+    const gateway = screen.getByRole('button', { name: gatewayCopy });
+    expect(order.querySelector('svg')).toBeTruthy();
+    expect(direct.querySelector('svg')).toBeTruthy();
+    expect(gateway.querySelector('svg')).toBeTruthy();
+    expect(order.parentElement?.className).toContain('items-center');
+    expect(gateway.className).toContain('bg-primary');
   });
 
   it('renders the AgentSupply collapse projection and rereads chains on expand and collapse', async () => {

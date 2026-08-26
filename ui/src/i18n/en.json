@@ -833,7 +833,7 @@
       },
       "gateway": {
         "heading": "Gateway",
-        "sourceOrder": "Source order",
+        "sourceOrder": "Adjust priority",
         "switchToGateway": "Switch to gateway",
         "switchToDirect": "Switch to direct",
         "fail": {
@@ -850,8 +850,8 @@
           "unread": "Could not read this backend's supply · the gateway itself is fine"
         },
         "row": {
-          "current": "Now: {{source}}",
-          "currentTakeover": "Now: {{source}} (takeover)"
+          "current": "From: {{source}}",
+          "currentTakeover": "From: {{source}} (takeover)"
         },
         "group": {
           "subtitle": {
@@ -906,7 +906,7 @@
         "andMore_other": "{{count}} more"
       },
       "upstream": {
-        "heading": "Sources",
+        "heading": "Upstream sources",
         "count_one": "{{count}} source",
         "count_other": "{{count}} sources",
         "group": {

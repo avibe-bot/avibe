@@ -297,7 +297,7 @@ describe('SettingsModelsPage surface branches', () => {
     expect(toggle.getAttribute('aria-checked')).toBe('true');
     expect((toggle as HTMLButtonElement).disabled).toBe(true);
     expect(await screen.findByText('Retained source')).toBeTruthy();
-    expect(screen.getByRole('button', { name: /^Switch to direct$|^切换到直连$/i })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^Switch to direct$|^切到直连$/i })).toBeTruthy();
     expect(screen.queryAllByRole('tab')).toHaveLength(3);
   });
 
@@ -616,7 +616,7 @@ describe('SettingsModelsPage surface branches', () => {
 
     expect(await screen.findByText(/^1 takeover active$|^1 处接管中$/i)).toBeTruthy();
     expect(screen.getByText(/^Taken over$|^接管中$/i)).toBeTruthy();
-    expect(screen.getByText(/Now: Replacement source \(takeover\)|当前 Replacement source（接管）/i)).toBeTruthy();
+    expect(screen.getByText(/From: Replacement source \(takeover\)|来自 Replacement source（接管）/i)).toBeTruthy();
   });
 
   it('[MH-OVERVIEW-001] reads overview chains once per backend and keeps exact reads for the route dialog', async () => {
@@ -891,7 +891,7 @@ describe('SettingsModelsPage surface branches', () => {
     );
 
     await waitFor(() => expect(chainRead).toHaveBeenCalledOnce());
-    await userEvent.click(screen.getByRole('button', { name: /^Switch to direct$|^切换到直连$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^Switch to direct$|^切到直连$/i }));
     await waitFor(() => expect(agentRead).toHaveBeenCalledTimes(2));
     expect(await screen.findByRole('button', { name: /^Switch to Gateway$|^切换到网关$/i })).toBeTruthy();
 
@@ -902,7 +902,7 @@ describe('SettingsModelsPage surface branches', () => {
 
     expect(screen.queryByRole('button', { name: /route chain|路由链/i })).toBeNull();
     expect(screen.queryByText(/^Taken over$|^接管中$/i)).toBeNull();
-    expect(screen.queryByText(/Now: Replacement source \(takeover\)|当前 Replacement source（接管）/i)).toBeNull();
+    expect(screen.queryByText(/From: Replacement source \(takeover\)|来自 Replacement source（接管）/i)).toBeNull();
   });
 
   it('cannot let a pre-save chain read overwrite the committed route echo', async () => {
@@ -942,15 +942,15 @@ describe('SettingsModelsPage surface branches', () => {
     await userEvent.click(removeButtons[1]);
     await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
     await userEvent.click((await screen.findByText(/^Done$|^完成$/i)).closest('button') as HTMLButtonElement);
-    expect(await screen.findByText(/^Now: Paused source$|^当前 Paused source$/i)).toBeTruthy();
+    expect(await screen.findByText(/^From: Paused source$|^来自 Paused source$/i)).toBeTruthy();
 
     await act(async () => {
       pendingOldChain.resolve(takeoverChain);
       await pendingOldChain.promise;
     });
 
-    expect(screen.getByText(/^Now: Paused source$|^当前 Paused source$/i)).toBeTruthy();
-    expect(screen.queryByText(/Now: Replacement source \(takeover\)|当前 Replacement source（接管）/i)).toBeNull();
+    expect(screen.getByText(/^From: Paused source$|^来自 Paused source$/i)).toBeTruthy();
+    expect(screen.queryByText(/From: Replacement source \(takeover\)|来自 Replacement source（接管）/i)).toBeNull();
   });
 
   it('installs a removed backend before the committed route closes and applies PF-1', async () => {
@@ -1016,7 +1016,7 @@ describe('SettingsModelsPage surface branches', () => {
       </ToastProvider>,
     );
 
-    await userEvent.click(await screen.findByRole('button', { name: /^Switch to direct$|^切换到直连$/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^Switch to direct$|^切到直连$/i }));
 
     expect(await screen.findByRole('button', { name: /^Switch to Gateway$|^切换到网关$/i })).toBeTruthy();
     expect(screen.queryByText(/did not go through|没切换成功/i)).toBeNull();
@@ -1044,14 +1044,14 @@ describe('SettingsModelsPage surface branches', () => {
       </ToastProvider>,
     );
 
-    expect(await screen.findByText(/Now: Replacement source \(takeover\)|当前 Replacement source（接管）/i)).toBeTruthy();
+    expect(await screen.findByText(/From: Replacement source \(takeover\)|来自 Replacement source（接管）/i)).toBeTruthy();
     await userEvent.click(screen.getByText('Paused source').closest('button') as HTMLButtonElement);
     await userEvent.click(await screen.findByRole('button', { name: /^Refetch$|^重新拉取$/i }));
 
     await waitFor(() => expect(agentRead).toHaveBeenCalledTimes(2));
     await userEvent.click(screen.getByRole('button', { name: /^Back to sources$|^返回来源$/i }));
     expect(await screen.findByText(/Could not read this backend's supply|没有读到后端列表/i)).toBeTruthy();
-    expect(screen.queryByText(/Now: Replacement source \(takeover\)|当前 Replacement source（接管）/i)).toBeNull();
+    expect(screen.queryByText(/From: Replacement source \(takeover\)|来自 Replacement source（接管）/i)).toBeNull();
     expect(screen.getAllByText('—').length).toBeGreaterThan(0);
   });
 
@@ -1075,14 +1075,14 @@ describe('SettingsModelsPage surface branches', () => {
       </ToastProvider>,
     );
 
-    expect(await screen.findByText(/Now: Replacement source \(takeover\)|当前 Replacement source（接管）/i)).toBeTruthy();
+    expect(await screen.findByText(/From: Replacement source \(takeover\)|来自 Replacement source（接管）/i)).toBeTruthy();
     await userEvent.click(screen.getByText('Paused source').closest('button') as HTMLButtonElement);
     await userEvent.click(await screen.findByRole('button', { name: /^Refetch$|^重新拉取$/i }));
 
     await waitFor(() => expect(runtimeRead).toHaveBeenCalledTimes(2));
     await userEvent.click(screen.getByRole('button', { name: /^Back to sources$|^返回来源$/i }));
     expect(await screen.findByText(/^Gateway status unavailable$|^网关状态未读到$/i)).toBeTruthy();
-    expect(screen.queryByText(/Now: Replacement source \(takeover\)|当前 Replacement source（接管）/i)).toBeNull();
+    expect(screen.queryByText(/From: Replacement source \(takeover\)|来自 Replacement source（接管）/i)).toBeNull();
     expect(screen.queryByText(/^Taken over$|^接管中$/i)).toBeNull();
     expect(screen.getAllByText('—').length).toBeGreaterThan(0);
   });

@@ -31,7 +31,7 @@ export const GatewayModule: React.FC<GatewayModuleProps> = ({ runtime, runtimeSn
         <h2 className="text-[16px] font-bold leading-[23px] text-foreground">{t('settings.models.gateway.heading')}</h2>
         {listening && <span className="model-hub-pill model-hub-fill-0a border border-border text-muted">{listening.host}:{listening.port}</span>}
       </header>
-      <div className="min-h-0 flex-1 overflow-y-auto p-2">
+      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2 pt-3">
         {supply.kind === 'loading' && agents === undefined
           ? <div className="flex h-full min-h-36 items-center justify-center"><LoaderCircle className="size-4 animate-spin text-muted" /></div>
           : supply.kind === 'unread'

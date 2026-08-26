@@ -804,7 +804,7 @@ state exit; held intent never bypasses the evidence column.
 | §1.0 | Status unread | Status request fails with no retained live snapshot | F2; H1 retains any initiating sequence | `shell.unread`, `shell.closed.unread.*` | Internal configuration remains hidden until a live `ok` / `degraded` snapshot is available. A retained live snapshot may remain visible under F2, but the switch is disabled because the read is not authoritative |
 | §1.0 | Partial | Sources load, per-backend supply does not | F1 on a first paint, in the region the group rollups would have filled; F2 on any later read, which keeps the rollups already drawn | `gateway.supply.unread`, `gateway.retry` on a first paint; `—` on a later one, which states nothing new because nothing it was showing changed `[derived]` | 重试 → the supply read runs again and what comes back decides, read against the source list this page is already holding (D-33): a reading with at least one source → Ready, or whichever rollup §1.1 names for it; a reading while `sources == []` → Empty (no sources), which a first-paint retry reaches whenever the list that succeeded beside it was the empty one; another failure → back here |
 | §1.0 | Sources unread | The mirror: `GET /api/models/sources` fails while `health` and per-backend supply both answer `[derived]` | F1, in the region the list would have filled | `upstream.unread`, `upstream.retry` | The list decides, not the fact that one arrived: 重试 answers with at least one source → Ready, and with `sources == []` → Empty (no sources); a later payload carrying the list is read the same two ways |
-| §1.1 | Ready | Sources + per-backend supply both loaded — the two page-level payloads every group-level element is drawn from. The 当前 lines are members of one third, per-backend chain-collection read, owned by Chain unresolved below, and this state neither waits on it nor fails with it | F5 | `gateway.group.subtitle.direct`, `gateway.group.subtitle.gateway`, `gateway.group.mode.direct`, `gateway.group.mode.gateway`, `gateway.group.status.ok` | Card → 06; 来源顺序 → 03; model row → 02; 切换到网关 → 10; 切换到直连 → Leaving the gateway; collapse row → Group expanded |
+| §1.1 | Ready | Sources + per-backend supply both loaded — the two page-level payloads every group-level element is drawn from. The 当前 lines are members of one third, per-backend chain-collection read, owned by Chain unresolved below, and this state neither waits on it nor fails with it | F5 | `gateway.group.subtitle.direct`, `gateway.group.subtitle.gateway`, `gateway.group.mode.direct`, `gateway.group.mode.gateway`, `gateway.group.status.ok` | Card → 06; 来源顺序 → 03; model row → 02; 切换到网关 → 10; 切到直连 → Leaving the gateway; collapse row → Group expanded |
 | §1.1 | Empty | `sources == []` | F5 | `upstream.empty` | 添加订阅 → 13, then a vendor row → 04; 添加 API Key → 05 |
 | §1.1 | Loading | First paint | → §1.0 Unreachable / §1.0 Sources unread / §1.0 Partial — the same three §1.0 disperses first paint into, because this row is that same first paint seen from the module | — | The payload decides where it lands, not the fact that it arrived — the same reading §1.0 makes one module up: `sources == []` → Empty; anything else → Ready, whose per-source and per-group rows below are drawn from that same payload |
 | §1.1 | Per-source `cooldown` | Source reports cooling `[spec §4.5]` | F5 — a rendered report, not a request | `upstream.state.unavailableRetry` while `retry_at` is still ahead, `upstream.state.unavailableDue` once it has passed `[derived]`, `legend.unavailable` | A later payload reports the source in a different state → that state. `retry_at` is when it becomes worth asking again, not evidence that asking worked, so nothing here promotes the source on a clock — and the two keys are that same fact said in copy: the clock running out changes the sentence and not the state |
@@ -825,7 +825,7 @@ state exit; held intent never bypasses the evidence column.
 | §1.1 | Serving past a blocked head | The serving hop is not the head, and the head is blocked by something waiting does not clear — **stated as the negation of the row above, not as a list of causes.** `runnable = health-permits AND process-available` `[contract]`, so a head is here whenever it is not runnable and its block is not a recoverable quota/cooldown or live connection-backoff reason: the head's source reading `needs_action` or `error`, a source that is `healthy` while the native CLI it needs is unavailable in this process (`reason: native_cli_unavailable` `[contract]`), and a head the chain reports as `source_missing` or `model_unsupported` `[contract]`. Defined by negation because the set of non-self-healing blockers is the contract's to extend, and a row enumerated by cause has to be reopened every time it does | F5 | `gateway.group.status.degraded` | The head becomes runnable again → Ready; the head enters a recoverable quota/cooldown or live connection-backoff while a later hop serves → Takeover active. Both are readings of a later payload and neither is a clock (D-16) — including the user-cleared blocks, which are reported by the same read as the rest |
 | §1.1 | Chain unresolved | Row grain, not group. The backend chain collection is outstanding, failed or refused, or omitted this row, while the two page payloads are in hand | F2 read at row grain — the group keeps everything those two payloads drew. A page-grain `chain_length: 0` row keeps `models.launch.route_unconfigured`; otherwise a row whose `has_runnable_hop` is true renders `—` in its three derived columns and a false row keeps `legend.unavailable` in the current-text slot. Every case renders `—` only in the other unresolved columns. The engine is not implicated and nothing on the head changes | `models.launch.route_unconfigured` for the empty Route; `legend.unavailable` only for a nonempty false row | Its collection member answers → Ready, Takeover active, Per-model route unconfigured or Per-model supply paused. What re-issues it is the collapse row (D-35): collapsing and re-expanding the group re-reads the backend collection once, and it is the drawn control this row's repair uses, there being no per-row 重试 on the frame. The two triggers beside it are the page's own — any mutation that re-renders the group (*Ready* above) and the next load — so a row that failed is never waiting on a request nobody will send |
 | §1.1 | Group expanded | Collapse row activated | F5 | `gateway.collapse` | Collapse toggled back → Ready |
-| §1.1 | Leaving the gateway | 切换到直连 pressed on a gateway group `[frame]` D-30 — `PATCH /api/models/agents/<backend>/mode` | F1, in place on the group head | `gateway.switchToDirect`, `gateway.fail.switchToDirect`, `gateway.retry` | Success → the group re-renders in its 直连 form; when it was the last gateway backend the page is decided by the sources that are still there, not by the switch — no source left → 09, at least one source retained → **01**, which is §1.8's own *Retained sources* branch and not this frame; a failure keeps the group on the gateway and puts the line and 重试 on the group head, which is the slot the re-rendered form would have used |
+| §1.1 | Leaving the gateway | 切到直连 pressed on a gateway group `[frame]` D-30 — `PATCH /api/models/agents/<backend>/mode` | F1, in place on the group head | `gateway.switchToDirect`, `gateway.fail.switchToDirect`, `gateway.retry` | Success → the group re-renders in its 直连 form; when it was the last gateway backend the page is decided by the sources that are still there, not by the switch — no source left → 09, at least one source retained → **01**, which is §1.8's own *Retained sources* branch and not this frame; a failure keeps the group on the gateway and puts the line and 重试 on the group head, which is the slot the re-rendered form would have used |
 | §1.2 | Loading route | A model row opens 02 with the exact `(backend, menu_model)` held; `GET /api/models/agents/<backend>/chain?model=<id>` owns the dialog body | F1 → Route unread | `route.title`, `route.loading`, `route.cancel` | ET-1–ET-4, ET-8a and ET-18a own opening, response dispatch, focus, retry and the non-mutating exit; an unlisted answer cannot leave this state |
 | §1.2 | Route unread `[derived]` | The dialog-owned opening chain read failed while the containing page remains mounted | F1, in place | `route.fail.read`, `route.retry`, `route.cancel` | ET-3/ET-4/ET-8a own entry, Retry and the non-mutating exit; the independent dialog read never rewrites the held page row |
 | §1.2 | Ready | The exact AgentChain is held and the local pair projection is byte-identical to its opening `chain` | F5 | `route.title`, `route.section`, `route.addHop`, `route.reorder`, `route.hint`, `route.cancel`, `route.save`; `route.removeHop` / `route.grip` when `hops` is nonempty; `route.empty` only when it is empty; `route.add.none` when no candidate remains; `route.add.source`, `route.add.model`, `route.add.search`, `route.add.confirm` while the Add selector is open, and `route.add.noMatch` only while a typed filter excludes every candidate; `route.sourceMissing` only on a hop whose authoritative chain annotation reads `reason: source_missing`; `route.reorder.grabbed`, `route.reorder.position`, `route.reorder.dropped`, `route.reorder.cancelled`, `route.reorder.sorted`, `route.reorder.unchanged` only for their registered live-region event | ET-5a–ET-7f, ET-8a and ET-9a own every selector, local edit, grab, exit and submission edge |
@@ -1067,7 +1067,7 @@ sections. §1.8 states the direct-only body condition.
 | Tabs ×3 | Section switch | — | yes | 来源与网关 / 用量 / 日志; the active one gets the mint underline |
 | Upstream module | Source inventory | `GET /api/models/sources` `[spec]` | rows: yes | Open 06 for that source |
 | Dispatch rail | That upstream feeds gateway | derived, decorative | no | — |
-| Gateway module | One group per backend, each with model rows | per-backend supply + chains `[spec]` | rows, collapse, 「来源顺序」, mode switch | Open 02 / expand / open 03 for **that backend** / open 10's confirm |
+| Gateway module | One group per backend, each with model rows | per-backend supply + chains `[spec]` | rows, collapse, 「调整优先级」, mode switch | Open 02 / expand / open 03 for **that backend** / open 10's confirm |
 | Legend | Colour → meaning | static; kept in bijection with the inks the page draws | no | — |
 
 **The Logs tab owns the switch-history feed** `[derived]`. It is absent from the
@@ -1409,7 +1409,7 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | `recent.yesterday` | 昨天 | Yesterday |
 | `recent.empty` | 暂无切换记录 | No switches yet |
 | `recent.deletedSource` | 已删除 | deleted |
-| `upstream.heading` | 来源 | Sources |
+| `upstream.heading` | 上游来源 | Upstream sources |
 | `upstream.count_one` | {{count}} 个 | {{count}} source |
 | `upstream.count_other` | {{count}} 个 | {{count}} sources |
 | `upstream.group.native` | 本机原生 | Native · on this machine |
@@ -1448,9 +1448,9 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | `upstream.repair.unresolved` `[derived]` | 仍然不可用 | Still not working |
 | `upstream.repair.fail` `[derived]` | 没能完成这次凭据修复 | The credential repair did not finish |
 | `gateway.heading` | 网关 | Gateway |
-| `gateway.sourceOrder` | 来源顺序 | Source order |
+| `gateway.sourceOrder` | 调整优先级 | Adjust priority |
 | `gateway.switchToGateway` | 切换到网关 | Switch to gateway |
-| `gateway.switchToDirect` | 切换到直连 | Switch to direct |
+| `gateway.switchToDirect` | 切到直连 | Switch to direct |
 | `gateway.modelCount_one` | {{count}} 个型号 | {{count}} model |
 | `gateway.modelCount_other` | {{count}} 个型号 | {{count}} models |
 | `gateway.group.subtitle.direct` `[frame]` | {{mode}} | {{mode}} |
@@ -1468,8 +1468,8 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | `gateway.fail.switchToDirect` `[derived]` | 没能切回直连 | The switch back to direct did not go through |
 | `gateway.retry` `[derived]` | 重试 | Retry |
 | `gateway.group.emptyModels` `[derived]` | 这个后端没有可用型号 | This backend has no models |
-| `gateway.row.current` | 当前 {{source}} | Now: {{source}} |
-| `gateway.row.currentTakeover` | 当前 {{source}}(接管) | Now: {{source}} (takeover) |
+| `gateway.row.current` | 来自 {{source}} | From: {{source}} |
+| `gateway.row.currentTakeover` | 来自 {{source}}(接管) | From: {{source}} (takeover) |
 | `models.launch.route_unconfigured` `[contract]` | 模型 {{model}} 尚未配置路由。请前往 Models 配置。 | Model {{model}} has no configured route. Open Models to configure one. |
 | `gateway.moreModels_one` | 还有 {{count}} 个型号 | {{count}} more model |
 | `gateway.moreModels_other` | 还有 {{count}} 个型号 | {{count}} more models |
@@ -1712,15 +1712,15 @@ dispatch arbitrates → each backend's models resolve to these sources today.
 
 | Element | Displays | Data source | Interactive | On activate |
 | --- | --- | --- | --- | --- |
-| `heujA` upstream card | tile icon by kind, name, kind pill, mono detail line, one status line | one source | yes (whole card) | Open 06 for that source |
+| `heujA` upstream card | tile icon by kind, name on its own line, interface and kind pills on the next line, mono detail line, one status line | one source | yes (whole card) | Open 06 for that source |
 | `uf3re` detail | account label, or `host/path · masked key` — **and every field it can draw is nullable, so the line is specified by omission, exactly as §0.9 and §1.6 rule the same hole** `[contract]`. `account_label`, `base_url` and `masked_credential` are each `["string","null"]` in `source.schema.json`, so a segment with no value is dropped, never rendered empty and never left behind a dangling `·`; `base_url: null` is the vendor's official endpoint (§0.9's `{{host}}`) and is not synthesized into a hostname (§1.6). When nothing is left the whole line is omitted rather than filled — a subscription that reports no account label is the common case, and the card still identifies itself from four required fields (icon and pill by `kind`, name by `display_name`, state by `state`). Repeating the kind pill or the card's own name here would be the only alternative, and it would say nothing the card has not already said | source | no | — |
 | `YcOFo` status | which backends have this source configured into a route — `adopted_by` (§1.0) | the complete server-derived Source projection, never a computation over chains (D-28) | no | — |
 | `wmROQ` / `Xitl7` footer buttons | Add subscription / Add API key | — | yes | 添加订阅 opens frame 13; its selected vendor opens 04. 添加 API Key opens 05 |
 | `f8w6Xp` + `pnYa0` rail | dispatch happens between the columns | decorative | no | — |
 | `GLylJ` backend group | backend tile, name, model count, head buttons, and one `{{mode}} · {{health}}` line | per-backend mode + supply health | head: buttons only | — |
-| `ehGRK` / `bGsC7` 「来源顺序」 | — | — | yes | Open 03 **for that backend** |
+| `ehGRK` / `bGsC7` 「调整优先级」 | — | — | yes | Open 03 **for that backend** |
 | `IyKyp` 「切换到网关」 | — | backend in 直连 | yes | Open the 10 confirm for that backend |
-| `z02Ep` / `gbrq2` 「切换到直连」 | — | backend on the gateway | yes | That backend leaves the gateway immediately — **no confirm** (D-30) |
+| `z02Ep` / `gbrq2` 「切到直连」 | — | backend on the gateway | yes | That backend leaves the gateway immediately — **no confirm** (D-30) |
 | `Exx0a` model row | model id (mono 12), a chain chip, current-source text; `legend.unavailable` occupies that text slot when the page-grain row has no runnable hop | `AgentSupply.model_supply[].has_runnable_hop`; per-model AgentChain and its `current` member | yes | Open 02 for `(backend, model)` |
 | `ZM1pm` collapse row | `还有 N 个型号` | count of hidden rows | yes | Expand in place |
 | `FZUYI` wire layer | one path per supply relation + endpoint dots | derived supply set | no | — |
@@ -1782,7 +1782,7 @@ exit keys on elapsed time」 is the rule the two source rows above are written t
 
 **The three head buttons are mutually constrained** `[frame]`, and the constraint is
 the whole model in one line: a backend is either on the gateway or not. On the gateway
-it carries 来源顺序 + 切换到直连; in 直连 it carries 切换到网关 and **nothing else** —
+it carries 调整优先级 + 切到直连; in 直连 it carries 切换到网关 and **nothing else** —
 Claude Code's head has no order button, because a direct backend consults no source
 order and an editor there would edit a list nothing reads. D-9a states the rule, and it
 is a set equality over the three groups.
@@ -2574,7 +2574,7 @@ eligible for **one backend** and never product-global. The owner ruled for the
 behaviour spec and the frame was rebuilt. See §0.6 E-1 — kept as a closed conflict
 rather than deleted, because the resolution went against the drawing.
 
-**Entry point.** The 来源顺序 button on a backend's group head in the gateway module
+**Entry point.** The 调整优先级 button on a backend's group head in the gateway module
 — `ehGRK` on Codex, `bGsC7` on OpenCode in frame 01, redrawn as `N50iJ7` / `nzwR3` in
 03's own dimmed background `[frame]`. **A backend in 直连 mode has no
 such button** — Claude Code's head carries only 切换到网关 `[frame]`. This is not an
@@ -4709,7 +4709,7 @@ way 08's is.
 | Failure strip `[derived]` | `fail.title` over `fail.detail`, in the Failed state only | no | — |
 
 **The dialog names the exit by location, not by promise** `[frame]`. The second
-可以撤回 bullet reads 「回退入口:这一页的 Claude Code 卡片 → 切换到直连」. "You can
+可以撤回 bullet reads 「回退入口:这一页的 Claude Code 卡片 → 切到直连」. "You can
 change this later" is the standard phrasing and it is nearly useless: it is exactly what
 a user hears before spending twenty minutes failing to find the control. Naming the
 control and the surface it lives on costs one line and converts a reassurance into an
@@ -4741,7 +4741,7 @@ difference is not an inconsistency: that frame's entry condition is *every backe
 | `effects.4` | 正在进行的对话不受影响,下一次请求开始生效 | Conversations in progress are unaffected; the change applies from the next request |
 | `section.undo` | 可以撤回 | You can undo this |
 | `undo.1` | 随时可以切换回直连 | You can switch back to direct at any time |
-| `undo.2` | 回退入口:这一页的 {{backend}} 卡片 → 切换到直连 | Where to undo: the {{backend}} card on this page → Switch to direct |
+| `undo.2` | 回退入口:这一页的 {{backend}} 卡片 → 切到直连 | Where to undo: the {{backend}} card on this page → Switch to direct |
 | `undo.3` | 切回后,你添加的来源会留着,只是不再供给 {{backend}} | If you switch back, the sources you added stay; they just stop supplying {{backend}} |
 | `effects.install` `[derived]` D-26 | 先安装网关组件({{component}},约 {{duration}}),再切换 | The gateway component ({{component}}, about {{duration}}) is installed first, then the switch happens |
 | `cancel` | 取消 | Cancel |
@@ -5390,7 +5390,7 @@ change of unknown blast radius. Per-backend rather than global because eligibili
 already differs per backend: a global list would have to render entries that cannot
 apply, and a user cannot form an opinion about an ordering whose members are conditional.
 
-**D-9a — A backend in 直连 mode exposes no order surface at all.** No 来源顺序 button
+**D-9a — A backend in 直连 mode exposes no order surface at all.** No 调整优先级 button
 on its group head, and the drawer is unreachable for it.
 *Why:* a direct backend consults no source order, so the editor would edit a list
 nothing reads — the most expensive kind of dead control, because it looks like it
@@ -5465,8 +5465,8 @@ is caught by users.
 
 **D-18 — Placement is the mode surface; there is no mode switch widget.** A backend's
 mode is expressed by *where its configuration lives* — a 直连 backend has a
-切换到网关 action and nothing else, a 网关 backend has 来源顺序, model rows and
-切换到直连.
+切换到网关 action and nothing else, a 网关 backend has 调整优先级, model rows and
+切到直连.
 *Why:* a mode toggle would make the two modes look like two settings of one thing,
 inviting the user to flip it and see. They are two different configuration models with
 different surfaces; making the surfaces differ is what teaches that, and it costs no
@@ -5651,7 +5651,7 @@ files does not "fix" the page title to match them. Note that the design file's f
 names do contain 模型网关: they are canvas labels for the author, and D-17 already says
 a frame's shell is not the shipped shell.
 
-**D-30 — 切换到直连 commits on the press; only 切换到网关 gets a confirm.** Adopting the
+**D-30 — 切到直连 commits on the press; only 切换到网关 gets a confirm.** Adopting the
 gateway opens frame 10 (§1.9); leaving it sends `PATCH /api/models/agents/<backend>/mode`
 straight from the group head with no intermediate surface, and F1 in place is the whole
 of its failure handling.
