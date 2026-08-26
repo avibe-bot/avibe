@@ -32,6 +32,7 @@ from vibe.upgrade import (
     LEGACY_PACKAGE_NAME,
     PACKAGE_NAME,
     RollbackTarget,
+    _MEMORY_SPLIT_MIN_VERSION,
     _names_a_published_release,
     build_memory_add_plan,
     build_upgrade_plan,
@@ -62,9 +63,6 @@ _ROLLBACK_INSTALL_TIMEOUT_SECONDS = 600.0
 # next to an already-warm CLI -- is not the right bound here. This one is only
 # ever paid in full when the UI is genuinely not coming.
 _ROLLBACK_UI_READY_TIMEOUT_SECONDS = 60.0
-_MEMORY_SPLIT_MIN_VERSION = Version("3.0.14.dev0")
-
-
 class StartedRuntime(NamedTuple):
     """What a start actually launched, and where its UI can be checked.
 

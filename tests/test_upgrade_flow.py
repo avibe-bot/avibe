@@ -202,9 +202,11 @@ def test_memory_indep_018_upgrade_and_rollback_preserve_optional_package_shape(
             "--yes",
             "avibe-memory",
         ]
+        assert rollback_core_only.cleanup_after_command is True
     else:
         assert rollback_core_only.preflight_command is None
         assert rollback_core_only.cleanup_command is None
+        assert rollback_core_only.cleanup_after_command is False
 
 
 def test_enabled_upgrade_selects_memory_extra_when_package_is_missing(monkeypatch):
@@ -343,6 +345,105 @@ def test_core_only_pip_rollback_download_failure_preserves_the_current_install(
     assert "--no-deps" in calls[0]
     assert calls[0][-1] == "avibe-os==3.0.13"
     assert not any("avibe-memory" in argument for argument in calls[0])
+
+
+@pytest.mark.parametrize(
+    ("version", "expected_order"),
+    [
+        ("3.0.13", ["cleanup", "install"]),
+        ("not-a-version", ["cleanup", "install"]),
+        ("3.0.14.dev0", ["install", "cleanup"]),
+    ],
+)
+def test_core_only_pip_rollback_orders_cleanup_from_the_pinned_target(
+    monkeypatch,
+    version,
+    expected_order,
+):
+    monkeypatch.setattr("vibe.upgrade.memory_package_installed", lambda: True)
+    plan = build_upgrade_plan(
+        python_executable="/usr/bin/python3",
+        uv_path=None,
+        base_env={"PATH": "/usr/bin"},
+        version=version,
+        package_name="avibe-os",
+        memory_package=False,
+    )
+    actions: list[str] = []
+
+    def fake_run(command, **kwargs):
+        if "download" in command:
+            actions.append("preflight")
+        elif command == plan.cleanup_command:
+            actions.append("cleanup")
+        else:
+            assert command == plan.command
+            actions.append("install")
+        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+    result = execute_upgrade_plan(plan, run=fake_run, capture_output=True, text=True)
+
+    assert result.returncode == 0
+    assert actions == ["preflight", *expected_order]
+
+
+def test_split_core_only_rollback_install_failure_skips_memory_cleanup(monkeypatch):
+    monkeypatch.setattr("vibe.upgrade.memory_package_installed", lambda: True)
+    plan = build_upgrade_plan(
+        python_executable="/usr/bin/python3",
+        uv_path=None,
+        base_env={"PATH": "/usr/bin"},
+        version="3.0.14",
+        package_name="avibe-os",
+        memory_package=False,
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if "download" in command:
+            return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+        if command == plan.cleanup_command:
+            raise AssertionError("Memory must remain installed when the host install fails")
+        return subprocess.CompletedProcess(
+            command,
+            42,
+            stdout="",
+            stderr="host dependencies unavailable",
+        )
+
+    result = execute_upgrade_plan(plan, run=fake_run, capture_output=True, text=True)
+
+    assert result.returncode == 42
+    assert len(calls) == 2
+    assert "download" in calls[0]
+    assert calls[1] == plan.command
+
+
+def test_split_core_only_rollback_reports_cleanup_failure_after_install():
+    plan = UpgradePlan(
+        command=["installer", "pinned-split-core"],
+        env=None,
+        method="test",
+        cleanup_command=["installer", "remove-memory"],
+        cleanup_after_command=True,
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        returncode = 17 if command == plan.cleanup_command else 0
+        return subprocess.CompletedProcess(
+            command,
+            returncode,
+            stdout="",
+            stderr="cleanup failed" if returncode else "",
+        )
+
+    result = execute_upgrade_plan(plan, run=fake_run, capture_output=True, text=True)
+
+    assert result.returncode == 17
+    assert calls == [plan.command, plan.cleanup_command]
 
 
 @pytest.mark.parametrize("preflight_returncode", [0, 42])
@@ -625,7 +726,7 @@ def test_pip_preflight_checks_only_target_artifacts_for_offline_local_wheel(
     assert [path.name for path in scratch.iterdir()] == [host.name]
 
 
-def test_core_only_rollback_removes_memory_before_the_pinned_install():
+def test_bundled_core_only_rollback_removes_memory_before_the_pinned_install():
     plan = UpgradePlan(
         command=["installer", "pinned-core"],
         env=None,

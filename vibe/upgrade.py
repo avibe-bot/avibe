@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple, cast
 
+from packaging.version import InvalidVersion, Version
+
 from vibe import runtime as runtime_mod
 
 
@@ -29,6 +31,7 @@ MEMORY_PACKAGE_COMPATIBILITY = ">=3.0.14.dev0,<3.1"
 MEMORY_PACKAGE_REQUIREMENT = (
     f"{MEMORY_PACKAGE_NAME}{MEMORY_PACKAGE_COMPATIBILITY}"
 )
+_MEMORY_SPLIT_MIN_VERSION = Version("3.0.14.dev0")
 PIP_DOWNLOAD_DEST_PLACEHOLDER = "{avibe-pip-download-destination}"
 PACKAGE_MUTATION_LOCK_TIMEOUT_SECONDS = 30.0
 DEFAULT_UPDATE_METADATA_URL = f"https://pypi.org/pypi/{PACKAGE_NAME}/json"
@@ -96,6 +99,7 @@ class UpgradePlan:
     rollback_to: RollbackTarget | None = None
     preflight_command: list[str] | None = None
     cleanup_command: list[str] | None = None
+    cleanup_after_command: bool = False
 
 
 def execute_upgrade_plan(
@@ -104,17 +108,17 @@ def execute_upgrade_plan(
     run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     **run_kwargs: object,
 ) -> subprocess.CompletedProcess[str]:
-    """Resolve, remove an overlapping optional package, then install.
+    """Resolve, then install and clean up in the plan's recorded order.
 
     The optional preflight resolves required distributions without writing the
     environment. It protects both Memory-preserving plans and destructive pip
     rollbacks, so an unavailable optional package or pinned host returns before
     the current install is changed. A core-only pip rollback needs cleanup
     because pip installs are additive: pinning only ``avibe-os`` does not remove
-    an optional distribution left by the failed generation. That cleanup runs
-    before the pinned host reinstall because the split distribution and a
-    pre-split host own the same implementation paths; uninstalling it afterward
-    would delete files the restored host just wrote.
+    an optional distribution left by the failed generation. A bundled target
+    cleans up first because both distributions own the same implementation
+    paths. A split target installs first so dependency failure cannot strip
+    Memory from the still-running generation.
     """
 
     with package_mutation_lock():
@@ -137,12 +141,21 @@ def execute_upgrade_plan(
             if preflight.returncode != 0:
                 return preflight
 
-        if plan.cleanup_command is not None:
+        if plan.cleanup_command is not None and not plan.cleanup_after_command:
             cleaned = run(plan.cleanup_command, env=plan.env, **run_kwargs)
             if cleaned.returncode != 0:
                 return cleaned
 
-        return run(plan.command, env=plan.env, **run_kwargs)
+        installed = run(plan.command, env=plan.env, **run_kwargs)
+        if installed.returncode != 0:
+            return installed
+
+        if plan.cleanup_command is not None and plan.cleanup_after_command:
+            cleaned = run(plan.cleanup_command, env=plan.env, **run_kwargs)
+            if cleaned.returncode != 0:
+                return cleaned
+
+        return installed
 
 
 @contextmanager
@@ -1050,6 +1063,7 @@ def build_upgrade_plan(
     if pinned_memory_spec:
         command.append(pinned_memory_spec)
     cleanup_command = None
+    cleanup_after_command = False
     if version and not include_memory and memory_package_installed():
         cleanup_command = [
             executable,
@@ -1059,6 +1073,10 @@ def build_upgrade_plan(
             "--yes",
             MEMORY_PACKAGE_NAME,
         ]
+        try:
+            cleanup_after_command = Version(version) >= _MEMORY_SPLIT_MIN_VERSION
+        except InvalidVersion:
+            pass
     preflight_command = None
     if include_memory or cleanup_command is not None:
         # Preflight checks that the target artifacts resolve before mutating the
@@ -1084,6 +1102,7 @@ def build_upgrade_plan(
         rollback_to=rollback_to,
         preflight_command=preflight_command,
         cleanup_command=cleanup_command,
+        cleanup_after_command=cleanup_after_command,
     )
 
 
