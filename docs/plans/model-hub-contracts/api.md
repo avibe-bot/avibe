@@ -25,7 +25,7 @@ compatibility path.
 | Method and path | Request → response | Normative notes |
 | --- | --- | --- |
 | GET `/api/models/sources` | → `{sources: Source[]}` | Unordered asset inventory. Every Source carries server-derived `adopted_by` and any persisted `client_nonce`; array order is never a spend order. |
-| POST `/api/models/sources/observe` | `{vendor, base_url?, key, protocol_order?}` → `{observation: SourceObservation}` | Non-persisting connectivity/authentication/protocol/inventory observation. `protocol_order` only orders the three probes; it never supplies a conclusion. No credential reference is returned. |
+| POST `/api/models/sources/observe` | `{vendor, base_url?, key, protocol?}` → `{observation: SourceObservation}` | Non-persisting connectivity/authentication/protocol/inventory observation. Omitted `protocol` auto-detects; a supplied value restricts observation to that one interface and still requires matching response proof. No credential reference is returned. |
 | POST `/api/models/sources` | `source-create.schema.json` → `{source: Source, added_to: AddedTo[], adopted_by: AdoptedBy[]}` | The server assigns `id` and `created_at`; plaintext keys are transient. Add-time matching and placement are materialized before response. Optional `accept_unavailable_inventory` is the sole explicit consent for a repeated, protocol-proven observation whose inventory discovery fails. An optional `client_nonce` is reserved only in process before work and persisted only on the committed Source for list-based lost-response reconciliation. |
 | PATCH `/api/models/sources/<id>` | `{display_name?, base_url?, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded Source-mutation envelope | Metadata/Base-URL mutation from the authoritative matrix in `model-hub.md` §4.5. A forced retry confirms only an exact echo of the refusal plan. |
 | PUT `/api/models/sources/<id>/credential` | `{key, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded Source-mutation envelope | API-key replacement. Confirmation fields are JSON body fields. Success is exactly `{source, removed_hops, interrupted}`; the OAuth-only repair tail never appears here. |
@@ -72,22 +72,26 @@ create request:
   "vendor": "custom",
   "base_url": "https://relay.example/v1",
   "key": "<transient plaintext key>",
-  "protocol_order": ["openai_chat", "openai_responses", "anthropic"]
+  "protocol": "openai_chat"
 }
 ```
 
-`base_url` may be null for an official vendor endpoint. `protocol_order`, when
-present, contains each protocol exactly once and is only probe ordering; omitting it
-uses the authoritative three-value order. The endpoint provisions an unbound engine
-credential only for this operation, returns `observation-result.schema.json`, then
-revokes the transient reference before settling. A revoke failure remains in the
-existing pending-revocation journal. The response never contains that reference or
-any persisted Source.
+`base_url` may be null for an official vendor endpoint. `protocol`, when present,
+restricts observation to exactly that interface; omitting it probes the authoritative
+three-value order. The selected value is a constraint, not evidence: the endpoint still
+requires a matching protocol-shaped upstream response. The protocol probe is deliberately
+schema-invalid and names no synthetic model, so a relay can authenticate and classify it
+without selecting or invoking an upstream model. A bare-origin Base URL uses the
+standard `/v1` endpoint paths, while a URL with a path is treated as the complete API
+root. The endpoint provisions an unbound engine credential only for this operation,
+returns `observation-result.schema.json`, then revokes the transient reference before
+settling. A revoke failure remains in the existing pending-revocation journal. The
+response never contains that reference or any persisted Source.
 
 For an API-key `POST /api/models/sources`, the server performs the same
 response-backed observation internally before its independent committed credential
-provisioning. It accepts the create fields and optional `protocol_order`, but never
-accepts a protocol conclusion or inventory result from the caller. A null protocol
+provisioning. It accepts the create fields and optional protocol constraint, but never
+accepts protocol proof or inventory results from the caller. A null protocol
 produces no Source. A proven protocol with failed inventory discovery produces no Source
 unless this request explicitly carries `accept_unavailable_inventory: true`; the accepted
 Source has `models: []` and the existing uncertain health projection. Subscription OAuth
@@ -103,11 +107,11 @@ authoritative; no Source response field may be inferred backwards into the reque
 | `display_name` | no | Add Source client → Source metadata | Omission uses the server's canonical vendor label; it never carries credential material. |
 | `base_url` | no | Add Source client → observation adapter | null or omission selects the official endpoint; a custom URL is validated before provisioning. |
 | `key` | yes | Add Source client → transient and committed credential provisioning | Plaintext is write-only and never appears in a response, Source record, event, or log. |
-| `protocol_order` | no | Add Source client → observation adapter | Contains all three protocols exactly once and only orders probes. |
+| `protocol` | no | Add Source client → observation adapter | One supported interface. It restricts the probe to that type; omission auto-detects. Persistence still requires matching response proof. |
 | `client_nonce` | no | Add Source client → process-local create reservation and persisted Source read projection | Client-generated before send and atomically reserved in the live process before observation or credential work; only the successful commit persists and echoes it unchanged so an ordinary list read can reconcile a lost response. |
 | `accept_unavailable_inventory` | no | Add Source state ⑤ client → Source-create commit gate | Boolean; omission is `false`. It consents only to the server's repeated observation returning a proven protocol with `discovery: failed`; it never supplies or overrides observation evidence. |
 
-The request has no `id`, `created_at`, `state`, `usage`, `protocol`, discovered-model,
+The request has no `id`, `created_at`, `state`, `usage`, protocol evidence, discovered-model,
 credential-ref, billing, or supply-channel field. The server assigns or observes all of
 them. A successfully observed empty inventory is represented by the returned
 `source.models: []`; the client never submits a discovered inventory as authority.
@@ -178,8 +182,8 @@ failure may use the same outcome with `reachable: null`. A bare HTTP status prov
 reachability, but proves neither protocol nor authentication. Consequently,
 `ambiguous` always has `reachable: true` and `protocol: null`.
 `authentication_failed` also has `protocol: null`, because a rejected credential
-does not establish a persistable protocol. `ambiguous` is the sole outcome that asks
-for the one-time probe-order hint. Only `observed` attempts inventory discovery and
+does not establish a persistable protocol. After ambiguous Auto detection, the client
+must select one concrete protocol before retrying. Only `observed` attempts inventory discovery and
 therefore reports `succeeded` or `failed`; every other terminal reports
 `not_attempted` with an empty model list.
 

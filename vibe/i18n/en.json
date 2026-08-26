@@ -882,6 +882,7 @@
       "flow_expired": "Authorization flow expired.",
       "discovery_failed": "Could not validate or discover this source.",
       "ambiguous_source": "Connected, but we could not identify the model interface.",
+      "inventory_unavailable": "The interface was confirmed, but its model list is unavailable.",
       "source_unreachable": "Could not reach this address. Check the address and retry.",
       "authentication_failed": "Authentication failed. Check whether the API key is valid.",
       "observation_failed": "Connected, but the response did not prove a valid model interface.",

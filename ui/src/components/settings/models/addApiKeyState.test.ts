@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { classifyObservation, protocolOrderWithHint } from './addApiKeyState';
-import { CONTRACT_VERSION, SOURCE_PROTOCOLS, type SourceObservation } from './types';
+import { classifyObservation } from './addApiKeyState';
+import { CONTRACT_VERSION, type SourceObservation } from './types';
 
 const observation = (patch: Partial<SourceObservation>): SourceObservation => ({
   contract_version: CONTRACT_VERSION,
@@ -15,13 +15,6 @@ const observation = (patch: Partial<SourceObservation>): SourceObservation => ({
 });
 
 describe('Add API key observation state', () => {
-  it('turns a one-time hint into a complete probe order without duplicating the protocol table', () => {
-    const order = protocolOrderWithHint('openai_responses');
-    expect(order?.[0]).toBe('openai_responses');
-    expect(new Set(order)).toEqual(new Set(SOURCE_PROTOCOLS));
-    expect(order).toHaveLength(SOURCE_PROTOCOLS.length);
-  });
-
   it('separates proven inventory failure from unknown protocol and connectivity failures', () => {
     const inventory = observation({ discovery: 'failed', models: [] });
     expect(classifyObservation(inventory)).toEqual({ kind: 'inventory', observation: inventory });

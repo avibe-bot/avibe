@@ -1082,19 +1082,13 @@ class ModelHubService:
         )
 
     @staticmethod
-    def _observation_protocol_order(payload: Mapping[str, Any]) -> tuple[str, ...]:
-        requested = payload.get("protocol_order")
-        if requested is None:
+    def _observation_protocols(payload: Mapping[str, Any]) -> tuple[str, ...]:
+        if "protocol" not in payload:
             return SOURCE_PROTOCOLS
-        if (
-            not isinstance(requested, list)
-            or not all(isinstance(item, str) for item in requested)
-        ):
+        requested = payload.get("protocol")
+        if not isinstance(requested, str) or requested not in SOURCE_PROTOCOLS:
             raise ModelHubError("discovery_failed")
-        requested_order = tuple(requested)
-        if len(set(requested_order)) != len(SOURCE_PROTOCOLS) or set(requested_order) != set(SOURCE_PROTOCOLS):
-            raise ModelHubError("discovery_failed")
-        return requested_order
+        return (requested,)
 
     @staticmethod
     def _observation_payload(observation: SourceObservation) -> dict:
@@ -1160,7 +1154,14 @@ class ModelHubService:
                 discovery=ObservationDiscovery.NOT_ATTEMPTED,
                 model_ids=(),
             )
-        return self._validate_observation(observation)
+        validated = self._validate_observation(observation)
+        if (
+            len(protocol_order) == 1
+            and validated.protocol is not None
+            and validated.protocol != protocol_order[0]
+        ):
+            raise ModelHubError("discovery_failed", status=502)
+        return validated
 
     async def _require_proven_observation(
         self,
@@ -1212,7 +1213,7 @@ class ModelHubService:
         *,
         require_proven: bool = False,
     ) -> SourceObservation:
-        if set(payload) - {"vendor", "base_url", "key", "protocol_order"}:
+        if set(payload) - {"vendor", "base_url", "key", "protocol"}:
             raise ModelHubError("discovery_failed")
         vendor = payload.get("vendor")
         try:
@@ -1223,7 +1224,7 @@ class ModelHubService:
         key = payload.get("key")
         if not isinstance(key, str) or not key.strip():
             raise ModelHubError("discovery_failed")
-        protocol_order = self._observation_protocol_order(payload)
+        protocol_order = self._observation_protocols(payload)
         transient_ref = await _provision_transient_credential_with_cancellation_ownership(
             self,
             vendor,
@@ -2306,8 +2307,9 @@ class ModelHubService:
             "models",
             "key",
             "oauth_flow_ref",
-            "protocol_order",
+            "protocol",
             "client_nonce",
+            "accept_unavailable_inventory",
         }:
             raise ModelHubError("discovery_failed")
         forbidden = {
@@ -2320,7 +2322,7 @@ class ModelHubService:
             "created_at",
             "last_discovered_at",
         } & set(payload)
-        if forbidden or "protocol" in payload:
+        if forbidden:
             raise ModelHubError("discovery_failed")
         kind = payload.get("kind")
         vendor = payload.get("vendor")
@@ -2392,9 +2394,21 @@ class ModelHubService:
             raise ModelHubError("discovery_failed")
         if kind != "api_key" and client_nonce is not None:
             raise ModelHubError("discovery_failed")
+        accept_unavailable_inventory = payload.get("accept_unavailable_inventory", False)
+        if (
+            not isinstance(accept_unavailable_inventory, bool)
+            or (
+                kind != "api_key"
+                and (
+                    "protocol" in payload
+                    or "accept_unavailable_inventory" in payload
+                )
+            )
+        ):
+            raise ModelHubError("discovery_failed")
         protocol_order: tuple[str, ...] | None = None
         if kind == "api_key":
-            protocol_order = self._observation_protocol_order(payload)
+            protocol_order = self._observation_protocols(payload)
 
         if oauth_ref:
             return self._source_creation_result(
@@ -2449,14 +2463,24 @@ class ModelHubService:
                     nonce_claimed = True
             if self.revocations.list():
                 await self._ensure_engine_synced()
-            observation = await self._require_proven_source_payload(
-                {
-                    "vendor": vendor,
-                    "base_url": base_url,
-                    "key": credential_value,
-                    "protocol_order": payload.get("protocol_order"),
-                }
-            )
+            observation_payload: dict[str, Any] = {
+                "vendor": vendor,
+                "base_url": base_url,
+                "key": credential_value,
+            }
+            if "protocol" in payload:
+                observation_payload["protocol"] = payload["protocol"]
+            observation = await self._require_proven_source_payload(observation_payload)
+            if (
+                observation.discovery is ObservationDiscovery.FAILED
+                and not accept_unavailable_inventory
+            ):
+                raise ModelHubError(
+                    "discovery_failed",
+                    status=422,
+                    detail="modelHub.errors.inventory_unavailable",
+                    data={"observation": self._observation_payload(observation)},
+                )
             source.protocol = cast(
                 Literal["anthropic", "openai_responses", "openai_chat"],
                 observation.protocol,

@@ -97,7 +97,7 @@ export function backendVisual(backend: AgentBackend): BackendVisual {
   return BACKEND_VISUAL[backend] ?? { Icon: Bot, accent: 'muted' };
 }
 
-// Official endpoints are used only to classify an existing Source as custom.
+// Official endpoints classify existing Sources and provide their display identity.
 // Add API key accepts a Base URL directly and intentionally has no vendor picker.
 const OFFICIAL_BASE_URLS: Record<string, string> = {
   anthropic: 'https://api.anthropic.com/v1',
@@ -106,6 +106,17 @@ const OFFICIAL_BASE_URLS: Record<string, string> = {
   kimi: 'https://api.moonshot.cn/v1',
   xai: 'https://api.x.ai/v1',
 };
+
+export function officialVendorForEndpoint(baseUrl: string): string | null {
+  try {
+    const hostname = new URL(baseUrl).hostname;
+    return Object.entries(OFFICIAL_BASE_URLS).find(([, official]) => (
+      new URL(official).hostname === hostname
+    ))?.[0] ?? null;
+  } catch {
+    return null;
+  }
+}
 
 // An api_key points at a custom endpoint when its base URL is set and differs
 // from the vendor's official one — covers both vendor='custom' (official = null)

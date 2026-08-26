@@ -1475,18 +1475,12 @@ def test_create_source_persists_only_the_response_proven_protocol(tmp_path):
                 "vendor": "openai",
                 "display_name": "Observed key",
                 "key": "sk-test-response-proof",
-                "protocol_order": [
-                    "openai_responses",
-                    "anthropic",
-                    "openai_chat",
-                ],
+                "protocol": "openai_responses",
             }
         )
     )
 
-    assert adapter.observed_protocol_orders == [
-        ("openai_responses", "anthropic", "openai_chat")
-    ]
+    assert adapter.observed_protocol_orders == [("openai_responses",)]
     assert result["source"]["protocol"] == "openai_responses"
     assert store.load().sources[0].protocol == "openai_responses"
     assert adapter.revoked == ["cred_00000001"]
@@ -1509,11 +1503,7 @@ def test_create_source_normalizes_vendor_before_matching_v1_placement(tmp_path):
                 "vendor": "OpenAI",
                 "display_name": "Observed key",
                 "key": "sk-test-vendor-normalization",
-                "protocol_order": [
-                    "openai_responses",
-                    "openai_chat",
-                    "anthropic",
-                ],
+                "protocol": "openai_responses",
             }
         )
     )
