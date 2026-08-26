@@ -54,6 +54,15 @@ CREDENTIALS_STORE_KEY = "cli_auth_credentials_store"
 CREDENTIALS_STORE_FILE = "file"
 
 
+def format_toml_basic_string(value: str) -> str:
+    """Encode one TOML basic string without losing Unicode scalar values."""
+
+    # JSON and TOML share the same escapes for quotes, backslashes, and C0
+    # controls. JSON permits DEL literally while TOML does not, so close that
+    # one gap without turning non-BMP scalars into invalid surrogate escapes.
+    return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
+
+
 def get_codex_home(home: Path | None = None) -> Path:
     """Resolve the directory Codex actually reads ``config.toml`` from.
 
@@ -113,7 +122,7 @@ def _format_toml_key(key: str) -> str:
     """
     if _BARE_KEY_RE.match(key):
         return key
-    return '"' + key.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return format_toml_basic_string(key)
 
 
 def _format_toml_header(path: Tuple[str, ...]) -> str:
@@ -154,7 +163,7 @@ def _dump_toml_value(value: Any) -> str:
     if isinstance(value, float):
         return repr(value)
     if isinstance(value, str):
-        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+        return format_toml_basic_string(value)
     # TOML temporal scalars: ``tomllib`` parses ``2024-01-15T09:30:00`` as a
     # ``datetime``, dates as ``date``, times as ``time``. Their ``isoformat``
     # output is exactly the RFC3339-ish form TOML expects, and they are

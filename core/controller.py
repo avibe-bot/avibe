@@ -1656,6 +1656,15 @@ class Controller:
             self.request_shutdown("runtime owner recovery failed")
             raise
 
+        agent_service = getattr(self, "agent_service", None)
+        codex_agent = getattr(agent_service, "agents", {}).get("codex")
+        prepare_codex_hub = getattr(codex_agent, "prepare_model_hub_runtime", None)
+        if callable(prepare_codex_hub):
+            try:
+                await prepare_codex_hub()
+            except Exception as exc:  # noqa: BLE001 - direct Codex remains usable
+                logger.warning("Codex Hub model catalog preparation failed: %s", exc)
+
         # --- everything above must have succeeded for the service to be up ---
         # A no-op in any process that does not hold the service lock, so the
         # embedded and test paths that run a controller are unaffected.

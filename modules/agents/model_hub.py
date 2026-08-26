@@ -43,6 +43,7 @@ from core.handlers.model_hub.service import (
 )
 from core.services.settings import load_config_or_default
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
+from vibe.codex_config import format_toml_basic_string
 
 
 LaunchChannel = Literal["direct", "native_cli", "hub"]
@@ -294,11 +295,15 @@ def build_codex_hub_launch(
     base_args: list[str],
     base_env: dict[str, str],
     launch: ModelHubLaunch,
+    *,
+    model_catalog_path: Path | None = None,
 ) -> tuple[list[str], dict[str, str] | None]:
     """Return app-server global overrides and environment for a Hub turn."""
 
     if launch.channel != "hub" or not launch.gateway_base_url or not launch.gateway_token:
         return list(base_args), None
+    if model_catalog_path is None:
+        raise ValueError("Codex Model Hub launches require a provider-safe model catalog")
     env = dict(base_env)
     for key in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE", "CODEX_API_KEY"):
         env.pop(key, None)
@@ -320,6 +325,8 @@ def build_codex_hub_launch(
         f"model_providers.{provider}.supports_websockets=false",
         "-c",
         f"model_providers.{provider}.requires_openai_auth=false",
+        "-c",
+        f"model_catalog_json={format_toml_basic_string(str(model_catalog_path))}",
     ]
     return overrides + list(base_args), env
 

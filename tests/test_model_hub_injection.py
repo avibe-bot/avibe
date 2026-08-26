@@ -6,6 +6,11 @@ from types import SimpleNamespace
 
 import pytest
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - py<3.11
+    import tomli as tomllib  # type: ignore[no-redef]
+
 from core.handlers.model_hub.service import (
     PRE_ATTEMPT_SETTLEMENT_GENERATION,
     ModelHubError,
@@ -130,13 +135,48 @@ def test_hub_launch_masks_inherited_claude_auth_and_injects_gateway():
     assert claude_setting_sources_for_launch(launch) == ["project", "local"]
 
 
-def test_codex_hub_launch_uses_responses_wire_api_and_ephemeral_token():
+def test_codex_hub_launch_uses_responses_wire_api_and_ephemeral_token(tmp_path):
+    """MH-PROTOCOL-004: Hub launches consume a prepared standard Responses catalog."""
+
     launch = hub_launch(backend="codex")
-    args, env = build_codex_hub_launch(["--model", launch.runtime_model], {"OPENAI_API_KEY": "user-key"}, launch)
+    catalog_path = tmp_path / "codex-hub-models.json"
+    args, env = build_codex_hub_launch(
+        ["--model", launch.runtime_model],
+        {"OPENAI_API_KEY": "user-key"},
+        launch,
+        model_catalog_path=catalog_path,
+    )
     rendered = " ".join(args)
     assert 'wire_api="responses"' in rendered
     assert "model_provider=\"avibe_model_hub\"" in rendered
+    assert f'model_catalog_json="{catalog_path}"' in rendered
     assert env == {"AVIBE_MODEL_HUB_TOKEN": "local-test-token"}
+
+
+def test_codex_hub_launch_requires_provider_safe_catalog():
+    launch = hub_launch(backend="codex")
+    with pytest.raises(ValueError, match="provider-safe model catalog"):
+        build_codex_hub_launch([], {}, launch)
+
+
+def test_codex_hub_launch_uses_toml_safe_catalog_path(tmp_path):
+    launch = hub_launch(backend="codex")
+    catalog_path = tmp_path / ("models-\x7f-" + chr(0x1F680) + ".json")
+
+    args, _env = build_codex_hub_launch(
+        [],
+        {},
+        launch,
+        model_catalog_path=catalog_path,
+    )
+
+    override = next(arg for arg in args if arg.startswith("model_catalog_json="))
+    encoded_path = override.split("=", 1)[1]
+    assert "\x7f" not in encoded_path
+    assert "\\u007f" in encoded_path
+    assert chr(0x1F680) in encoded_path
+    assert "\\ud83d" not in override
+    assert tomllib.loads(f"path = {encoded_path}\n")["path"] == str(catalog_path)
 
 
 def test_opencode_overlay_requires_exact_checked_identifier():

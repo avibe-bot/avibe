@@ -12,7 +12,10 @@ from core.controller import Controller
 def test_runtime_services_start_when_post_update_notification_fails() -> None:
     controller = Controller.__new__(Controller)
     opencode_agent = SimpleNamespace(restore_active_polls=AsyncMock(return_value=0))
-    controller.agent_service = SimpleNamespace(agents={"opencode": opencode_agent})
+    codex_agent = SimpleNamespace(prepare_model_hub_runtime=AsyncMock())
+    controller.agent_service = SimpleNamespace(
+        agents={"opencode": opencode_agent, "codex": codex_agent}
+    )
     controller.primary_platform = "discord"
     controller.update_checker = SimpleNamespace(
         check_and_send_post_update_notification=AsyncMock(side_effect=ConnectionError("transport unavailable")),
@@ -46,6 +49,7 @@ def test_runtime_services_start_when_post_update_notification_fails() -> None:
     asyncio.run(controller._on_runtime_ready())
 
     opencode_agent.restore_active_polls.assert_awaited_once_with({"avibe"})
+    codex_agent.prepare_model_hub_runtime.assert_awaited_once_with()
     controller.update_checker.check_and_send_post_update_notification.assert_awaited_once_with(
         ready_platform="avibe"
     )

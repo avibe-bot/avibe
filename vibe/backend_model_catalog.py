@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -12,6 +13,7 @@ from typing import Any, Iterable, Sequence
 
 from config import paths
 from config.atomic_io import write_atomic
+from core.command_runner import run_supervised_command
 from vibe.claude_model_catalog import DEFAULT_CLAUDE_MODEL_ALIASES, load_catalog_models
 from vibe.codex_config import get_codex_home
 
@@ -24,6 +26,8 @@ REMOTE_CATALOG_REVALIDATE_SECONDS = 5 * 60
 REMOTE_CATALOG_FAILURE_TTL_SECONDS = 10 * 60
 REMOTE_CATALOG_TIMEOUT_SECONDS = 3.0
 REMOTE_CATALOG_USER_AGENT = "avibe/backend-model-catalog"
+CODEX_HUB_CATALOG_TIMEOUT_SECONDS = 15.0
+CODEX_HUB_CATALOG_MAX_BYTES = 8 * 1024 * 1024
 
 _HIDDEN_VISIBILITIES = {"hide", "hidden"}
 _SUPPORTED_BACKENDS = {"claude", "codex"}
@@ -69,6 +73,103 @@ def get_bundled_catalog_path(repo_root: Path | None = None) -> Path:
 
 def get_cached_catalog_path() -> Path:
     return paths.get_state_dir() / "backend_model_catalog.json"
+
+
+def _codex_hub_catalog_path(catalog: bytes) -> Path:
+    digest = hashlib.sha256(catalog).hexdigest()[:16]
+    return paths.get_runtime_dir() / "model-hub" / "codex" / f"standard-responses-{digest}.json"
+
+
+def _codex_hub_catalog_bytes(raw_catalog: bytes) -> bytes:
+    """Project a complete Codex catalog onto generic Responses semantics."""
+
+    try:
+        payload = json.loads(raw_catalog)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError("Codex returned an invalid bundled model catalog") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
+        raise ValueError("Codex bundled model catalog has no models list")
+    models = payload["models"]
+    if not models:
+        raise ValueError("Codex bundled model catalog is empty")
+
+    provider_private_defaults: dict[str, object] = {
+        "use_responses_lite": False,
+        "multi_agent_version": None,
+        "tool_mode": None,
+        "prefer_websockets": False,
+    }
+    projected: list[dict[str, Any]] = []
+    for model in models:
+        if not isinstance(model, dict) or not isinstance(model.get("slug"), str):
+            raise ValueError("Codex bundled model catalog contains an invalid model")
+        row = dict(model)
+        for key, value in provider_private_defaults.items():
+            if key in row:
+                row[key] = value
+        projected.append(row)
+    payload["models"] = projected
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode()
+
+
+def _publish_codex_hub_catalog(raw_catalog: bytes) -> Path:
+    catalog = _codex_hub_catalog_bytes(raw_catalog)
+    path = _codex_hub_catalog_path(catalog)
+    write_atomic(path, catalog)
+    return path
+
+
+def _export_codex_bundled_catalog(
+    binary: str,
+    base_env: dict[str, str] | None = None,
+) -> bytes:
+    from vibe.upgrade import get_safe_cwd
+
+    env = dict(base_env or {})
+    removed_env = (
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "OPENAI_API_BASE",
+        "CODEX_API_KEY",
+        "AVIBE_MODEL_HUB_TOKEN",
+    )
+    result = asyncio.run(
+        run_supervised_command(
+            command=[
+                binary,
+                "debug",
+                "models",
+                "--bundled",
+                "-c",
+                "model_catalog_json=null",
+            ],
+            cwd=get_safe_cwd(),
+            timeout_seconds=CODEX_HUB_CATALOG_TIMEOUT_SECONDS,
+            label="Codex model catalog export",
+            max_output_bytes=CODEX_HUB_CATALOG_MAX_BYTES,
+            extra_env=env,
+            remove_env=removed_env,
+            discard_stderr=True,
+        )
+    )
+    if result.timed_out:
+        raise RuntimeError("Codex bundled model catalog timed out")
+    if result.stdout_truncated:
+        raise RuntimeError("Codex bundled model catalog exceeded the safety limit")
+    if result.exit_code != 0:
+        raise RuntimeError("Codex could not export its bundled model catalog")
+    return result.stdout.encode()
+
+
+def prepare_codex_hub_catalog(
+    binary: str,
+    base_env: dict[str, str] | None = None,
+) -> Path:
+    """Prepare the exact binary's catalog immediately before a Hub launch."""
+
+    return _publish_codex_hub_catalog(
+        _export_codex_bundled_catalog(binary, base_env)
+    )
 
 
 def load_bundled_catalog(path: Path | None = None) -> dict[str, Any]:

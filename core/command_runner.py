@@ -18,7 +18,7 @@ import sys
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Mapping, Optional
+from typing import Callable, Collection, Mapping, Optional
 
 from core import watch_worker
 from core.process_isolation import (
@@ -276,6 +276,8 @@ async def run_supervised_command(
     on_spawn: Optional[Callable[[int, Optional[PersistedProcessIdentity]], None]] = None,
     max_output_bytes: Optional[int] = None,
     extra_env: Optional[Mapping[str, str]] = None,
+    remove_env: Collection[str] = (),
+    discard_stderr: bool = False,
 ) -> SupervisedCommandResult:
     """Run one command under the stable supervisor and return its outcome.
 
@@ -283,13 +285,19 @@ async def run_supervised_command(
     keeps exact ``communicate()`` semantics; a value caps the retained bytes per
     stream while still draining the child to EOF. ``extra_env`` is added to the
     environment the supervisor hands the command, for context the command can only
-    learn from its caller.
+    learn from its caller; ``remove_env`` then deletes inherited keys. The runner's
+    process-identity marker is restored after both operations. ``discard_stderr``
+    routes the supervisor's stderr directly to the null device when a caller must not
+    retain child diagnostics.
     """
 
     worker_marker = new_process_identity_marker()
     spawn_env = process_identity_subprocess_env(worker_marker)
     if extra_env:
         spawn_env.update(extra_env)
+    for key in remove_env:
+        spawn_env.pop(key, None)
+    spawn_env[watch_worker.PROCESS_IDENTITY_ENV] = worker_marker
     process = await asyncio.create_subprocess_exec(
         os.path.abspath(sys.executable),
         os.fspath(Path(watch_worker.__file__).resolve()),
@@ -297,7 +305,7 @@ async def run_supervised_command(
         env=spawn_env,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+        stderr=(asyncio.subprocess.DEVNULL if discard_stderr else asyncio.subprocess.PIPE),
         **isolated_subprocess_kwargs(),
     )
     identity = capture_spawned_process_identity(process.pid, worker_marker)
@@ -326,7 +334,7 @@ async def run_supervised_command(
         except (BrokenPipeError, ConnectionResetError):
             _startup_stdout, startup_stderr = await process.communicate()
             raise SupervisedCommandStartupError(
-                startup_stderr.decode("utf-8", errors="replace").strip()
+                (startup_stderr or b"").decode("utf-8", errors="replace").strip()
             ) from None
         finally:
             process.stdin.close()
@@ -376,7 +384,7 @@ async def run_supervised_command(
         return SupervisedCommandResult(
             exit_code=TIMEOUT_EXIT_CODE,
             stdout="",
-            stderr=stderr.decode("utf-8", errors="replace"),
+            stderr=(stderr or b"").decode("utf-8", errors="replace"),
             timed_out=True,
         )
     except BaseException:
@@ -408,8 +416,8 @@ async def run_supervised_command(
 
     return SupervisedCommandResult(
         exit_code=process.returncode if process.returncode is not None else 0,
-        stdout=stdout.decode("utf-8", errors="replace"),
-        stderr=stderr.decode("utf-8", errors="replace"),
+        stdout=(stdout or b"").decode("utf-8", errors="replace"),
+        stderr=(stderr or b"").decode("utf-8", errors="replace"),
         timed_out=False,
         stdout_truncated=stdout_truncated,
         stderr_truncated=stderr_truncated,

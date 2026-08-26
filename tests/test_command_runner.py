@@ -395,6 +395,39 @@ async def test_spawn_uses_the_stable_supervisor_entrypoint(tmp_path: Path, monke
     assert kwargs["stderr"] == asyncio.subprocess.PIPE
 
 
+async def test_spawn_can_discard_supervisor_stderr(tmp_path: Path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_create_subprocess_exec(*_args, **kwargs):
+        captured.update(kwargs)
+        process = _FakeProcess(stderr=None)
+        stdout = asyncio.StreamReader()
+        stdout.feed_data(b"ok\n")
+        stdout.feed_eof()
+        process.stdout = stdout
+
+        async def wait() -> int:
+            return 0
+
+        process.wait = wait
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    result = await run_supervised_command(
+        command=["python3", "-c", "print('ok')"],
+        cwd=str(tmp_path),
+        timeout_seconds=5,
+        label="test discarded stderr",
+        max_output_bytes=1024,
+        discard_stderr=True,
+    )
+
+    assert result.exit_code == 0
+    assert result.stderr == ""
+    assert captured["stderr"] == asyncio.subprocess.DEVNULL
+
+
 _LARGE_OUTPUT_COMMAND = (
     "import sys; sys.stdout.write('x' * 300000); sys.stdout.flush(); sys.exit(0)"
 )
@@ -518,3 +551,21 @@ async def test_extra_env_reaches_the_child_without_replacing_its_environment(tmp
     assert result.exit_code == 0
     assert "wat_123" in result.stdout
     assert "True" in result.stdout
+
+
+async def test_remove_env_deletes_inherited_and_extra_keys(tmp_path: Path) -> None:
+    result = await run_supervised_command(
+        command=[
+            sys.executable,
+            "-c",
+            "import os; print('DROP_ME' in os.environ); print(os.environ.get('KEEP_ME'))",
+        ],
+        cwd=str(tmp_path),
+        timeout_seconds=10,
+        label="test removed env",
+        extra_env={"DROP_ME": "secret", "KEEP_ME": "present"},
+        remove_env={"DROP_ME"},
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout.splitlines() == ["False", "present"]

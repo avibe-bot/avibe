@@ -892,6 +892,7 @@
       "source_timeout": "The connection timed out. Check the network and retry.",
       "invalid_source_order": "The source order contains an unavailable, ineligible, or duplicate source.",
       "mode_switch_blocked": "This operation is blocked by the current supply mode or selection.",
+      "codex_catalog_unavailable": "Codex could not prepare the local Model Hub catalog. Retry this turn.",
       "engine_down": "The local model gateway is unavailable.",
       "engine_down_streamed": "The local model gateway is unavailable. This turn's output may be incomplete.",
       "migration_item_conflict": "This migration item conflicts with the current model gateway state.",

@@ -5157,40 +5157,35 @@ class ModelHubService:
         return ResolutionDecision("fallback", reason="credential_revoked")
 
     @staticmethod
-    def _request_reasoning_effort(request: Mapping[str, Any]) -> str | None:
-        direct = request.get("reasoning_effort")
-        if isinstance(direct, str) and direct:
-            return direct
-        reasoning = request.get("reasoning")
-        if isinstance(reasoning, Mapping):
-            nested = reasoning.get("effort")
-            if isinstance(nested, str) and nested:
-                return nested
-        return None
-
-    @staticmethod
     def _request_for_exact_reasoning_effort(
         request: Mapping[str, Any],
         source: ModelHubSourceConfig,
         model_id: str,
     ) -> Mapping[str, Any]:
-        requested = ModelHubService._request_reasoning_effort(request)
         model = next((item for item in source.models if item.id == model_id), None)
-        exact = (
-            requested
-            if requested is not None
-            and model is not None
-            and requested in model.reasoning_efforts
-            else None
-        )
+        supported = set(model.reasoning_efforts) if model is not None else set()
+
         payload = dict(request)
         changed = False
-        if "reasoning_effort" in payload:
-            payload["reasoning_effort"] = exact
+        direct = payload.get("reasoning_effort")
+        if "reasoning_effort" in payload and not (
+            isinstance(direct, str) and direct in supported
+        ):
+            payload.pop("reasoning_effort")
             changed = True
         reasoning = payload.get("reasoning")
-        if isinstance(reasoning, Mapping) and "effort" in reasoning:
-            payload["reasoning"] = {**reasoning, "effort": exact}
+        nested = reasoning.get("effort") if isinstance(reasoning, Mapping) else None
+        if (
+            isinstance(reasoning, Mapping)
+            and "effort" in reasoning
+            and not (isinstance(nested, str) and nested in supported)
+        ):
+            filtered_reasoning = dict(reasoning)
+            filtered_reasoning.pop("effort")
+            if filtered_reasoning:
+                payload["reasoning"] = filtered_reasoning
+            else:
+                payload.pop("reasoning")
             changed = True
         if not changed:
             return request

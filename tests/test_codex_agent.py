@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -3757,7 +3758,10 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
         agent._session_locks = {}
         agent._session_mgr = SimpleNamespace(sessions_for_cwd=lambda cwd: [])
         agent.codex_config = SimpleNamespace(binary="codex", extra_args=[])
-        agent.controller = SimpleNamespace()
+        agent._model_hub_catalog_path = None
+        agent._model_hub_catalog_lock = asyncio.Lock()
+        agent._model_hub_catalog_generation = 0
+        agent.controller = SimpleNamespace(config=SimpleNamespace(codex=agent.codex_config))
         agent._runtime_ownership_snapshot_for_cwd = Mock(
             return_value=SimpleNamespace(blocks_transport_replacement=False)
         )
@@ -3988,13 +3992,156 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
             agent._runtime_ownership_snapshot_for_cwd = Mock(
                 return_value=SimpleNamespace(blocks_transport_replacement=True)
             )
-            launch = SimpleNamespace(fingerprint="hub:replacement")
+            launch = SimpleNamespace(
+                channel="hub",
+                fingerprint="hub:replacement",
+                gateway_base_url="http://127.0.0.1:8317",
+                gateway_token="ephemeral-token",
+            )
+            agent._model_hub_catalog_path = Path(cwd) / "codex-hub-catalog.json"
 
-            with self.assertRaisesRegex(RuntimeError, "durable owner"):
-                await agent._get_or_create_transport(cwd, launch)
+            with patch(
+                "vibe.backend_model_catalog.prepare_codex_hub_catalog",
+            ) as prepare_catalog:
+                with self.assertRaisesRegex(RuntimeError, "durable owner"):
+                    await agent._get_or_create_transport(cwd, launch)
 
+            prepare_catalog.assert_not_called()
             existing.stop.assert_not_awaited()
             self.assertIs(agent._transports[cwd], existing)
+
+    async def test_runtime_config_switches_binary_without_catalog_export(self):
+        agent = self._agent()
+        previous_catalog = Path("/runtime/codex-old.json")
+        agent._model_hub_catalog_path = previous_catalog
+        next_config = SimpleNamespace(binary="/opt/codex-next", extra_args=[])
+        agent.refresh_auth_state = AsyncMock()
+
+        with patch(
+            "vibe.backend_model_catalog.prepare_codex_hub_catalog",
+            side_effect=RuntimeError("catalog export must not run"),
+        ) as prepare_catalog:
+            await agent.refresh_runtime_config(next_config)
+
+        prepare_catalog.assert_not_called()
+        self.assertIs(agent.codex_config, next_config)
+        self.assertIs(agent.controller.config.codex, next_config)
+        self.assertIsNone(agent._model_hub_catalog_path)
+        self.assertEqual(agent._model_hub_catalog_generation, 1)
+        agent.refresh_auth_state.assert_awaited_once_with()
+
+    async def test_runtime_config_same_binary_invalidates_prepared_catalog(self):
+        agent = self._agent()
+        previous_catalog = Path("/runtime/codex-old.json")
+        agent._model_hub_catalog_path = previous_catalog
+        agent.refresh_auth_state = AsyncMock()
+        next_config = SimpleNamespace(binary=agent.codex_config.binary, extra_args=["--next"])
+
+        with patch(
+            "vibe.backend_model_catalog.prepare_codex_hub_catalog",
+            side_effect=RuntimeError("catalog export must not run"),
+        ) as prepare_catalog:
+            await agent.refresh_runtime_config(next_config)
+
+        prepare_catalog.assert_not_called()
+        self.assertIs(agent.codex_config, next_config)
+        self.assertIsNone(agent._model_hub_catalog_path)
+        self.assertEqual(agent._model_hub_catalog_generation, 1)
+        agent.refresh_auth_state.assert_awaited_once_with()
+
+    async def test_startup_catalog_preparation_cannot_overwrite_new_runtime_generation(self):
+        agent = self._agent()
+        previous_config = agent.codex_config
+        previous_catalog = Path("/runtime/codex-old.json")
+        next_catalog = Path("/runtime/codex-new.json")
+        next_config = SimpleNamespace(binary="/opt/codex-next", extra_args=[])
+        agent.refresh_auth_state = AsyncMock()
+        previous_started = threading.Event()
+        release_previous = threading.Event()
+        calls = []
+
+        def prepare(binary):
+            calls.append(binary)
+            if binary == previous_config.binary:
+                previous_started.set()
+                release_previous.wait(timeout=2)
+                return previous_catalog
+            return next_catalog
+
+        with patch(
+            "vibe.backend_model_catalog.prepare_codex_hub_catalog",
+            side_effect=prepare,
+        ):
+            startup = asyncio.create_task(agent.prepare_model_hub_runtime())
+            self.assertTrue(await asyncio.to_thread(previous_started.wait, 1))
+            await agent.refresh_runtime_config(next_config)
+            self.assertIs(agent.codex_config, next_config)
+            self.assertIsNone(agent._model_hub_catalog_path)
+            release_previous.set()
+            with self.assertRaises(_MODULE.CodexModelHubCatalogUnavailableError):
+                await startup
+            recovered = await agent.prepare_model_hub_runtime()
+
+        self.assertEqual(calls, [previous_config.binary, next_config.binary])
+        self.assertIs(agent.codex_config, next_config)
+        self.assertEqual(agent._model_hub_catalog_path, next_catalog)
+        self.assertEqual(recovered, next_catalog)
+
+    async def test_model_hub_catalog_preparation_retries_after_transient_failure(self):
+        agent = self._agent()
+        catalog = Path("/runtime/codex-recovered.json")
+
+        with patch(
+            "vibe.backend_model_catalog.prepare_codex_hub_catalog",
+            side_effect=[RuntimeError("transient export failure"), catalog],
+        ) as prepare_catalog:
+            with self.assertRaises(_MODULE.CodexModelHubCatalogUnavailableError):
+                await agent.prepare_model_hub_runtime()
+            self.assertIsNone(agent._model_hub_catalog_path)
+            recovered = await agent.prepare_model_hub_runtime()
+
+        self.assertEqual(recovered, catalog)
+        self.assertEqual(agent._model_hub_catalog_path, catalog)
+        self.assertEqual(prepare_catalog.call_count, 2)
+
+    async def test_missing_prepared_hub_catalog_preserves_existing_transport_and_threads(self):
+        agent = self._agent()
+        with tempfile.TemporaryDirectory() as cwd:
+            existing = SimpleNamespace(
+                is_initialized=True,
+                runtime_fingerprint="direct",
+                stop=AsyncMock(),
+            )
+            agent._transports[cwd] = existing
+            agent._transport_cwd_inodes[cwd] = os.stat(cwd).st_ino
+            agent._session_mgr = SimpleNamespace(
+                sessions_for_cwd=Mock(return_value=["session-1"]),
+                invalidate_thread=Mock(),
+            )
+            agent._turn_registry = SimpleNamespace(
+                clear_session=Mock(),
+                get_active_turn=Mock(return_value=None),
+            )
+            agent._clear_thread_developer_instructions = Mock()
+            launch = SimpleNamespace(
+                channel="hub",
+                fingerprint="hub:replacement",
+                gateway_base_url="http://127.0.0.1:8317",
+                gateway_token="ephemeral-token",
+            )
+
+            with patch(
+                "vibe.backend_model_catalog.prepare_codex_hub_catalog",
+                side_effect=RuntimeError("transient export failure"),
+            ) as prepare_catalog:
+                with self.assertRaises(_MODULE.CodexModelHubCatalogUnavailableError):
+                    await agent._get_or_create_transport(cwd, launch)
+
+            prepare_catalog.assert_called_once_with(agent.codex_config.binary)
+            existing.stop.assert_not_awaited()
+            self.assertIs(agent._transports[cwd], existing)
+            agent._session_mgr.invalidate_thread.assert_not_called()
+            agent._turn_registry.clear_session.assert_not_called()
 
     async def test_stale_transport_stop_failure_retains_exact_generation(self):
         import tempfile

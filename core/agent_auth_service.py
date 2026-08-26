@@ -1994,7 +1994,10 @@ class AgentAuthService:
                 if runtime_config is None:
                     await self._unregister_disabled_backend_agent(backend)
                     return
-                if runtime_config is not None and self._register_missing_backend_agent(backend, runtime_config):
+                if runtime_config is not None and self._register_missing_backend_agent(
+                    backend,
+                    runtime_config,
+                ):
                     return
                 if force and backend == "opencode":
                     agent = getattr(agent_service, "agents", {}).get(backend)
