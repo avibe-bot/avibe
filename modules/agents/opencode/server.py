@@ -33,7 +33,6 @@ from modules.agents.opencode.config_reconciler import OpenCodeConfigReconciler
 from vibe import runtime
 from vibe.opencode_config import (
     get_opencode_custom_provider_adapter,
-    is_model_hub_runtime_provider_id,
     load_first_opencode_user_config,
     read_opencode_provider_auth_entries,
 )
@@ -61,12 +60,50 @@ def _percent_encode_path(path: str) -> str:
     return _url_quote(path, safe="/")
 
 
-def _public_opencode_catalog(payload: Any) -> Any:
-    """Remove runtime-only Model Hub providers at the user catalog boundary."""
+def _project_model_hub_models(
+    providers: list[Any],
+    runtime_models: dict[str, Any],
+) -> list[Any]:
+    """Expose runtime models under their public provider/model identities."""
 
-    if not isinstance(payload, dict):
+    projected = [dict(entry) if isinstance(entry, dict) else entry for entry in providers]
+    provider_index = {
+        entry.get("id"): entry
+        for entry in projected
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+    }
+    for public_identifier, model_config in runtime_models.items():
+        if not isinstance(public_identifier, str) or "/" not in public_identifier:
+            continue
+        provider_id, model_id = public_identifier.split("/", 1)
+        if not provider_id or not model_id:
+            continue
+        provider = provider_index.get(provider_id)
+        if provider is None:
+            provider = {"id": provider_id, "name": provider_id, "models": {}}
+            projected.append(provider)
+            provider_index[provider_id] = provider
+        raw_models = provider.get("models")
+        models = dict(raw_models) if isinstance(raw_models, dict) else {}
+        public_model = dict(model_config) if isinstance(model_config, dict) else {}
+        public_model["id"] = model_id
+        models[model_id] = public_model
+        provider["models"] = models
+    return projected
+
+
+def _public_opencode_catalog(
+    payload: Any,
+    *,
+    runtime_provider_id: str | None,
+    project_runtime_models: bool = False,
+) -> Any:
+    """Remove the active runtime provider while retaining its public models."""
+
+    if not isinstance(payload, dict) or not runtime_provider_id:
         return payload
     projected = dict(payload)
+    runtime_models: dict[str, Any] = {}
 
     def _provider_id(entry: object) -> object:
         if isinstance(entry, dict):
@@ -76,24 +113,35 @@ def _public_opencode_catalog(payload: Any) -> Any:
     for key in ("providers", "all"):
         value = projected.get(key)
         if isinstance(value, list):
+            if key == "providers" and project_runtime_models:
+                runtime_entry = next(
+                    (entry for entry in value if _provider_id(entry) == runtime_provider_id),
+                    None,
+                )
+                if isinstance(runtime_entry, dict) and isinstance(runtime_entry.get("models"), dict):
+                    runtime_models = runtime_entry["models"]
             projected[key] = [
                 entry
                 for entry in value
-                if not is_model_hub_runtime_provider_id(_provider_id(entry))
+                if _provider_id(entry) != runtime_provider_id
             ]
         elif isinstance(value, dict):
             projected[key] = {
                 provider_id: entry
                 for provider_id, entry in value.items()
-                if not is_model_hub_runtime_provider_id(provider_id)
+                if provider_id != runtime_provider_id
             }
+
+    providers = projected.get("providers")
+    if project_runtime_models and runtime_models and isinstance(providers, list):
+        projected["providers"] = _project_model_hub_models(providers, runtime_models)
 
     connected = projected.get("connected")
     if isinstance(connected, list):
         projected["connected"] = [
             provider_id
             for provider_id in connected
-            if not is_model_hub_runtime_provider_id(provider_id)
+            if provider_id != runtime_provider_id
         ]
 
     for key in ("default", "provider"):
@@ -102,13 +150,11 @@ def _public_opencode_catalog(payload: Any) -> Any:
             projected[key] = {
                 provider_id: entry
                 for provider_id, entry in value.items()
-                if not is_model_hub_runtime_provider_id(provider_id)
+                if provider_id != runtime_provider_id
             }
 
     model = projected.get("model")
-    if isinstance(model, str) and is_model_hub_runtime_provider_id(
-        model.split("/", 1)[0]
-    ):
+    if isinstance(model, str) and model.split("/", 1)[0] == runtime_provider_id:
         projected.pop("model", None)
     return projected
 
@@ -181,6 +227,7 @@ class OpenCodeServerManager:
         self._model_hub_overlay_path: Optional[str] = None
         self._model_hub_overlay_hash: Optional[str] = None
         self._model_hub_overlay_content: Optional[str] = None
+        self._model_hub_overlay_provider_id: Optional[str] = None
         self._model_hub_overlay_transition: tuple[
             Optional[str], Optional[str], object
         ] | None = None
@@ -510,11 +557,27 @@ class OpenCodeServerManager:
         active = info.get("active_run_sessions") if isinstance(info, dict) else None
         return isinstance(active, list) and bool(active)
 
+    def _active_model_hub_provider_id(self) -> str | None:
+        if self._model_hub_overlay_provider_id:
+            return self._model_hub_overlay_provider_id
+        info = self._read_pid_file()
+        if not self._pid_file_references_current_server(info):
+            return None
+        provider_id = (
+            info.get("model_hub_overlay_provider_id")
+            if isinstance(info, dict)
+            else None
+        )
+        return provider_id if isinstance(provider_id, str) and provider_id else None
+
     async def configure_model_hub_overlay(self, overlay: Any | None) -> object:
         """Select an overlay and reserve it until the caller registers its run."""
 
         desired_path = str(overlay.path) if overlay is not None else None
         desired_hash = str(overlay.content_hash) if overlay is not None else None
+        desired_provider_id = getattr(overlay, "provider_id", None)
+        if overlay is not None and not isinstance(desired_provider_id, str):
+            raise RuntimeError("Model Hub OpenCode overlay provider is unavailable")
         desired_content = None
         if overlay is not None:
             content = getattr(overlay, "content", None)
@@ -558,6 +621,7 @@ class OpenCodeServerManager:
                             self._model_hub_overlay_path = desired_path
                             self._model_hub_overlay_hash = desired_hash
                             self._model_hub_overlay_content = desired_content
+                            self._model_hub_overlay_provider_id = desired_provider_id
                             self._model_hub_overlay_reservations[transition_owner] = (
                                 desired_path,
                                 desired_hash,
@@ -593,6 +657,7 @@ class OpenCodeServerManager:
                                 self._model_hub_overlay_path = desired_path
                                 self._model_hub_overlay_hash = desired_hash
                                 self._model_hub_overlay_content = desired_content
+                                self._model_hub_overlay_provider_id = desired_provider_id
                                 if await self._is_healthy():
                                     logger.info(
                                         "Restarting OpenCode server after Model Hub overlay change"
@@ -711,6 +776,8 @@ class OpenCodeServerManager:
             if self._model_hub_overlay_path and self._model_hub_overlay_hash:
                 payload["model_hub_overlay_path"] = self._model_hub_overlay_path
                 payload["model_hub_overlay_hash"] = self._model_hub_overlay_hash
+            if self._model_hub_overlay_provider_id:
+                payload["model_hub_overlay_provider_id"] = self._model_hub_overlay_provider_id
             self._pid_file.write_text(json.dumps(payload))
         except Exception as e:
             logger.debug(f"Failed to write OpenCode pid file: {e}")
@@ -1919,7 +1986,11 @@ class OpenCodeServerManager:
                     headers={"x-opencode-directory": _percent_encode_path(directory)},
                 ) as resp:
                     if resp.status == 200:
-                        return _public_opencode_catalog(await resp.json())
+                        return _public_opencode_catalog(
+                            await resp.json(),
+                            runtime_provider_id=self._active_model_hub_provider_id(),
+                            project_runtime_models=True,
+                        )
                     return {"providers": [], "default": {}}
             except Exception as e:
                 logger.warning(f"Failed to get available models: {e}")
@@ -1940,7 +2011,10 @@ class OpenCodeServerManager:
                     headers={"x-opencode-directory": _percent_encode_path(directory)},
                 ) as resp:
                     if resp.status == 200:
-                        return _public_opencode_catalog(await resp.json())
+                        return _public_opencode_catalog(
+                            await resp.json(),
+                            runtime_provider_id=self._active_model_hub_provider_id(),
+                        )
                     return {}
             except Exception as e:
                 logger.warning(f"Failed to get default config: {e}")
@@ -2000,7 +2074,10 @@ class OpenCodeServerManager:
             try:
                 async with session.get(f"{self.base_url}/provider") as resp:
                     if resp.status == 200:
-                        return _public_opencode_catalog(await resp.json())
+                        return _public_opencode_catalog(
+                            await resp.json(),
+                            runtime_provider_id=self._active_model_hub_provider_id(),
+                        )
                     return {}
             except Exception as e:
                 logger.warning(f"Failed to get OpenCode providers: {e}")

@@ -180,7 +180,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_user_catalog_boundary_excludes_model_hub_runtime_provider(self):
         private_id = "avibe-model-hub-0123456789abcdef01234567"
-        legacy_custom_id = "avibe-model-hub-relay"
+        legacy_custom_id = "avibe-model-hub-fedcba9876543210fedcba98"
 
         class _CatalogSession(_FakeSession):
             def get(self, url, headers=None, timeout=None):
@@ -188,9 +188,20 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
                 if url.endswith("/config/providers"):
                     payload = {
                         "providers": [
-                            {"id": private_id, "models": {"openai/gpt-5": {}}},
+                            {
+                                "id": private_id,
+                                "models": {
+                                    "openai/gpt-5": {
+                                        "id": "openai/gpt-5",
+                                        "variants": {"high": {}},
+                                    },
+                                    "custom/first-model": {
+                                        "id": "custom/first-model",
+                                    },
+                                },
+                            },
                             {"id": legacy_custom_id, "models": {"relay-model": {}}},
-                            {"id": "openai", "models": {"gpt-5": {}}},
+                            {"id": "openai", "models": {"gpt-5": {"id": "gpt-5"}}},
                         ],
                         "default": {
                             private_id: "openai/gpt-5",
@@ -219,6 +230,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
                 return _FakeResponse(status=200, json_data=payload)
 
         manager = OpenCodeServerManager(binary="opencode", port=4096)
+        manager._model_hub_overlay_provider_id = private_id
         session = _CatalogSession()
         manager._get_http_session = AsyncMock(return_value=session)  # type: ignore[method-assign]
         manager.ensure_running = AsyncMock()  # type: ignore[method-assign]
@@ -229,7 +241,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             [row["id"] for row in models["providers"]],
-            [legacy_custom_id, "openai"],
+            [legacy_custom_id, "openai", "custom"],
         )
         self.assertEqual(
             models["default"],
@@ -239,6 +251,17 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(providers["connected"], [legacy_custom_id, "openai"])
         self.assertNotIn("model", config)
         self.assertEqual(set(config["provider"]), {legacy_custom_id, "openai"})
+        public_models = {
+            row["id"]: row["models"] for row in models["providers"]
+        }
+        self.assertEqual(
+            public_models["openai"]["gpt-5"],
+            {"id": "gpt-5", "variants": {"high": {}}},
+        )
+        self.assertEqual(
+            public_models["custom"]["first-model"],
+            {"id": "first-model"},
+        )
 
     async def test_ensure_running_restarts_healthy_server_when_caller_context_plugin_changes(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
@@ -2471,6 +2494,7 @@ def test_changed_overlay_still_waits_for_active_run_before_restart():
         path=Path("/tmp/new-overlay.json"),
         content_hash="new-hash",
         content='{"provider": {}}',
+        provider_id="avibe-model-hub-new",
     )
 
     async def exercise():
@@ -2503,11 +2527,13 @@ def test_mh_runtime_003_pending_overlay_transition_blocks_new_turns_on_the_old_o
         path=Path("/tmp/old-overlay.json"),
         content_hash="old-hash",
         content='{"provider": {}}',
+        provider_id="avibe-model-hub-old",
     )
     new_overlay = types.SimpleNamespace(
         path=Path("/tmp/new-overlay.json"),
         content_hash="new-hash",
         content='{"provider": {}}',
+        provider_id="avibe-model-hub-new",
     )
 
     async def exercise():
@@ -2548,11 +2574,13 @@ def test_mh_runtime_004_overlay_reservation_promotes_atomically_to_active_run():
         path=Path("/tmp/old-overlay.json"),
         content_hash="old-hash",
         content='{"provider": {}}',
+        provider_id="avibe-model-hub-old",
     )
     new_overlay = types.SimpleNamespace(
         path=Path("/tmp/new-overlay.json"),
         content_hash="new-hash",
         content='{"provider": {}}',
+        provider_id="avibe-model-hub-new",
     )
 
     async def exercise():

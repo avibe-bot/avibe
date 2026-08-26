@@ -23,9 +23,6 @@ _CUSTOM_PROVIDER_LABELS = {
     "anthropic-compatible": "Anthropic compatible",
 }
 MODEL_HUB_RUNTIME_PROVIDER_PREFIX = "avibe-model-hub-"
-_MODEL_HUB_RUNTIME_PROVIDER_ID_RE = re.compile(
-    rf"^{re.escape(MODEL_HUB_RUNTIME_PROVIDER_PREFIX)}[0-9a-f]{{24}}$"
-)
 _RESERVED_PROVIDER_IDS = {
     "alibaba-cn",
     "anthropic",
@@ -513,11 +510,7 @@ def _normalize_custom_provider_id(provider_id: str, *, reject_reserved: bool = F
 def is_reserved_opencode_provider_id(provider_id: str) -> bool:
     if not isinstance(provider_id, str):
         return False
-    candidate = provider_id.strip().lower()
-    return (
-        candidate in _RESERVED_PROVIDER_IDS
-        or is_model_hub_runtime_provider_id(candidate)
-    )
+    return provider_id.strip().lower() in _RESERVED_PROVIDER_IDS
 
 
 def model_hub_runtime_provider_id(gateway_token: str) -> str:
@@ -525,16 +518,6 @@ def model_hub_runtime_provider_id(gateway_token: str) -> str:
 
     digest = hashlib.sha256(gateway_token.encode()).hexdigest()[:24]
     return f"{MODEL_HUB_RUNTIME_PROVIDER_PREFIX}{digest}"
-
-
-def is_model_hub_runtime_provider_id(provider_id: object) -> bool:
-    """Return whether an identifier belongs to Avibe's runtime-only namespace."""
-
-    return (
-        isinstance(provider_id, str)
-        and _MODEL_HUB_RUNTIME_PROVIDER_ID_RE.fullmatch(provider_id.lower())
-        is not None
-    )
 
 
 def get_opencode_custom_provider_adapter(

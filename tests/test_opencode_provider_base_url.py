@@ -429,17 +429,20 @@ def test_upsert_custom_provider_refuses_existing_builtin_block(tmp_path: Path) -
         )
 
 
-def test_upsert_custom_provider_refuses_model_hub_runtime_namespace(
+def test_upsert_custom_provider_keeps_exact_pattern_legacy_id(
     tmp_path: Path,
 ) -> None:
-    with pytest.raises(ValueError, match="provider_id already exists"):
-        upsert_opencode_custom_provider(
-            "avibe-model-hub-0123456789abcdef01234567",
-            "Runtime Shadow",
-            "openai-compatible",
-            "https://relay.example/v1",
-            home=tmp_path,
-        )
+    provider_id = "avibe-model-hub-0123456789abcdef01234567"
+    upsert_opencode_custom_provider(
+        provider_id,
+        "Legacy Exact Relay",
+        "openai-compatible",
+        "https://relay.example/v1",
+        home=tmp_path,
+    )
+
+    config = _read_config(get_opencode_config_paths(tmp_path)[0])
+    assert config["provider"][provider_id]["name"] == "Legacy Exact Relay"
 
 
 def test_upsert_custom_provider_keeps_legacy_model_hub_prefix_id(
