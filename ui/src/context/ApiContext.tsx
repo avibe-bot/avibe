@@ -510,6 +510,7 @@ export type ApiContextType = {
   getConfig: () => Promise<any>;
   getPlatformCatalog: () => Promise<any>;
   mutateConfig: (mutations: readonly ConfigMutation[]) => Promise<any>;
+  waitForAgentActivityConfigMutations: () => Promise<void>;
   onConfigChanged: (handler: (config: unknown) => void) => () => void;
   getSettings: (platform?: string) => Promise<any>;
   saveSettings: (payload: any, platform?: string) => Promise<any>;
@@ -2586,6 +2587,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const { t } = useTranslation();
   const readCacheRef = useRef(new Map<string, { expiresAt: number; promise: Promise<any> }>());
   const configChangedHandlersRef = useRef(new Set<(config: unknown) => void>());
+  // Agent Activity is global across chat routes. Keep its writes ordered for the
+  // provider lifetime without making unrelated runtime-backed config saves block chat.
+  const agentActivityConfigMutationTailRef = useRef<Promise<unknown>>(Promise.resolve());
   const eventSourceRef = useRef<EventSource | null>(null);
   const eventHandlersRef = useRef(new Set<WorkbenchEventHandlers>());
   const eventConnectionRef = useRef<{ sub_id: number; source?: 'browser' | 'controller' } | null>(null);
@@ -3550,10 +3554,32 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const value: ApiContextType = useMemo(() => ({
     getConfig: () => getCachedJson('/api/config', CONFIG_CACHE_TTL_MS),
     getPlatformCatalog: () => getJson('/api/platforms'),
-    mutateConfig: async (mutations) => {
-      const config = await postJson('/api/config', configMutationsToPayload(mutations));
-      convergeConfig(config);
-      return config;
+    mutateConfig: (mutations) => {
+      const save = async () => {
+        const config = await postJson('/api/config', configMutationsToPayload(mutations));
+        convergeConfig(config);
+        return config;
+      };
+      const touchesAgentActivity = mutations.some((mutation) => (
+        mutation.kind === 'set'
+        && mutation.path.length <= 2
+        && mutation.path.every((part, index) => part === ['ui', 'show_agent_activity'][index])
+      ));
+      if (!touchesAgentActivity) return save();
+      const mutation = agentActivityConfigMutationTailRef.current
+        .catch(() => undefined)
+        .then(save);
+      agentActivityConfigMutationTailRef.current = mutation;
+      return mutation;
+    },
+    waitForAgentActivityConfigMutations: async () => {
+      // Include writes appended while the current tail is settling; return only
+      // when the provider's Agent Activity queue is actually idle.
+      while (true) {
+        const pending = agentActivityConfigMutationTailRef.current;
+        await pending.catch(() => undefined);
+        if (pending === agentActivityConfigMutationTailRef.current) return;
+      }
     },
     onConfigChanged,
     getSettings: (platform) => getJson(platform ? `/api/settings?platform=${encodeURIComponent(platform)}` : '/api/settings'),

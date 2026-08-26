@@ -200,23 +200,6 @@ def test_context_from_session_payload_only_recognizes_known_instance_kinds() -> 
     assert not unknown.is_personal_instance
 
 
-def test_show_page_email_context_is_exactly_page_scoped() -> None:
-    context = context_from_session_payload(
-        {
-            "sub": "guest-1",
-            "vibe_instance_role": "viewer",
-            "vibe_instance_access_source": "show_page_email",
-            "vibe_show_page_id": "session-one",
-        }
-    )
-    assert not context.can_read_instance
-    assert context.capability_projection()["can_read_instance"] is False
-    assert context.capability_projection()["can_use_show_pages"] is False
-    assert context.can_use_show_page("session-one")
-    assert not context.can_use_show_page("session-two")
-    assert not context.can_chat
-
-
 def test_http_policy_is_role_only_and_unknown_api_routes_fail_closed() -> None:
     editor_routes = (
         ("GET", "/api/agents"),

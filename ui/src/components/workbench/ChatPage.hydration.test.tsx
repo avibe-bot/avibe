@@ -16,14 +16,26 @@ const mocks = vi.hoisted(() => ({
     getWorkbenchPrefs: vi.fn(),
     listSessionMessages: vi.fn(),
     listSessionQueue: vi.fn(),
+    mutateConfig: vi.fn(),
+    waitForAgentActivityConfigMutations: vi.fn(),
     onSessionArchived: vi.fn(),
   },
   events: null as null | {
     onConnected: () => void;
-    onAuthorizationChanged: (data: { resource_kinds?: string[] }) => void;
+    onAuthorizationChanged: (data: {
+      resource_kinds?: string[];
+      instance_authorization_revision?: number;
+    }) => void;
     onMessageNew: (message: ReturnType<typeof projectedMessage>) => void;
     onTurnStart: (data: { session_id: string }) => void;
     onTurnEnd: (data: { session_id: string }) => void;
+  },
+  authorizationCapabilities: {
+    can_chat: true,
+    can_manage_instance: false,
+    can_use_show_pages: false,
+    can_use_system: false,
+    can_use_vault_secrets: false,
   },
 }));
 
@@ -45,12 +57,7 @@ vi.mock('../../context/WorkbenchInboxContext', () => ({
 
 vi.mock('../../context/InstanceAuthorizationContext', () => ({
   useInstanceAuthorization: () => ({
-    capabilities: {
-      can_chat: true,
-      can_manage_instance: false,
-      can_use_show_pages: false,
-      can_use_vault_secrets: false,
-    },
+    capabilities: mocks.authorizationCapabilities,
   }),
 }));
 
@@ -192,6 +199,13 @@ describe('ChatPage transcript hydration', () => {
     bootstrap = deferred();
     mocks.events = null;
     vi.clearAllMocks();
+    Object.assign(mocks.authorizationCapabilities, {
+      can_chat: true,
+      can_manage_instance: false,
+      can_use_show_pages: false,
+      can_use_system: false,
+      can_use_vault_secrets: false,
+    });
 
     mocks.api.connectWorkbenchEvents.mockImplementation((events) => {
       mocks.events = events;
@@ -206,6 +220,8 @@ describe('ChatPage transcript hydration', () => {
     mocks.api.getWorkbenchPrefs.mockResolvedValue({});
     mocks.api.listSessionMessages.mockResolvedValue({ messages: [] });
     mocks.api.listSessionQueue.mockResolvedValue([]);
+    mocks.api.mutateConfig.mockResolvedValue({ ui: {} });
+    mocks.api.waitForAgentActivityConfigMutations.mockResolvedValue(undefined);
     mocks.api.onSessionArchived.mockReturnValue(() => {});
   });
 
@@ -490,5 +506,270 @@ describe('ChatPage transcript hydration', () => {
 
     await waitFor(() => expect(screen.getByText('chat.agentActivity.running')).toBeTruthy());
     expect(screen.queryByText('chat.agentActivity.interrupted')).toBeNull();
+  });
+
+  it('uses the thinking dots and the Activity header as shortcuts for the global display setting', async () => {
+    const openGroup = {
+      id: 'current-turn',
+      anchor_message_id: null,
+      anchor_position: 'after' as const,
+      open: true,
+      status: 'running' as const,
+      steps: 1,
+      duration_ms: null,
+    };
+    mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+    mocks.api.getSessionBootstrap.mockResolvedValue({
+      ...bootstrapPayload('session-new'),
+      turn_state: { ...idleTurnState, foreground: 'running', in_flight: true },
+    });
+    mocks.api.getSessionActivity.mockResolvedValue({ groups: [openGroup] });
+    mocks.api.getSessionActivityGroup.mockResolvedValue({
+      ...openGroup,
+      rows: [{
+        id: 'current-step',
+        kind: 'assistant',
+        text: 'current work step',
+        created_at: '2026-08-25T00:00:00Z',
+      }],
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-new']}>
+        <Routes>
+          <Route path="/chat/:sessionId" element={<ChatPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const enable = await screen.findByRole('button', { name: 'chat.agentActivity.enable' });
+    expect(enable.className).toContain('cursor-pointer');
+    act(() => enable.click());
+
+    await waitFor(() => expect(mocks.api.mutateConfig).toHaveBeenCalledWith([
+      { kind: 'set', path: ['ui', 'show_agent_activity'], value: true },
+    ]));
+    await waitFor(() => expect(screen.getByText('current work step')).toBeTruthy());
+
+    const disable = screen.getByRole('button', { name: 'chat.agentActivity.disable' });
+    expect(disable.className).toContain('size-6');
+    expect(disable.className).toContain('border-border');
+    act(() => disable.click());
+
+    await waitFor(() => expect(mocks.api.mutateConfig).toHaveBeenCalledWith([
+      { kind: 'set', path: ['ui', 'show_agent_activity'], value: false },
+    ]));
+    await waitFor(() => expect(screen.queryByText('current work step')).toBeNull());
+    expect(screen.getByRole('button', { name: 'chat.agentActivity.enable' })).toBeTruthy();
+  });
+
+  it('waits for a visibility write before bootstrapping a switched chat', async () => {
+    const activityWrite = deferred<{ ui: { show_agent_activity: boolean } }>();
+    mocks.api.getSession.mockImplementation((id: string) => Promise.resolve({ id }));
+    mocks.api.getSessionBootstrap
+      .mockResolvedValueOnce({
+        ...bootstrapPayload('session-new'),
+        turn_state: { ...idleTurnState, foreground: 'running', in_flight: true },
+      })
+      .mockResolvedValueOnce({
+        ...bootstrapPayload('session-running'),
+        config: { ui: { show_agent_activity: true } },
+        turn_state: { ...idleTurnState, foreground: 'running', in_flight: true },
+      });
+    mocks.api.mutateConfig.mockImplementationOnce(() => activityWrite.promise);
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-new']}>
+        <SessionSwitcher />
+        <Routes>
+          <Route path="/chat/:sessionId" element={<ChatPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const enable = await screen.findByRole('button', { name: 'chat.agentActivity.enable' });
+    mocks.api.waitForAgentActivityConfigMutations.mockImplementationOnce(
+      () => activityWrite.promise.then(() => undefined),
+    );
+    act(() => enable.click());
+    await waitFor(() => expect(mocks.api.mutateConfig).toHaveBeenCalledTimes(1));
+    act(() => screen.getByRole('button', { name: 'switch chat' }).click());
+    await act(async () => Promise.resolve());
+    expect(mocks.api.getSessionBootstrap).toHaveBeenCalledTimes(1);
+
+    await act(async () => activityWrite.resolve({ ui: { show_agent_activity: true } }));
+    await waitFor(() => expect(mocks.api.getSessionBootstrap).toHaveBeenCalledTimes(2));
+    expect(mocks.api.getSessionBootstrap).toHaveBeenLastCalledWith('session-running');
+    await waitFor(() => expect(screen.queryByRole('button', {
+      name: 'chat.agentActivity.enable',
+    })).toBeNull());
+  });
+
+  it('does not let an in-flight authorization bootstrap overwrite a newer visibility click', async () => {
+    const authorizationBootstrap = deferred<ReturnType<typeof bootstrapPayload>>();
+    mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+    mocks.api.getSessionBootstrap
+      .mockResolvedValueOnce({
+        ...bootstrapPayload('session-new'),
+        turn_state: { ...idleTurnState, foreground: 'running', in_flight: true },
+      })
+      .mockImplementationOnce(() => authorizationBootstrap.promise);
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-new']}>
+        <Routes>
+          <Route path="/chat/:sessionId" element={<ChatPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const enable = await screen.findByRole('button', { name: 'chat.agentActivity.enable' });
+    act(() => mocks.events?.onAuthorizationChanged({ instance_authorization_revision: 2 }));
+    await waitFor(() => expect(mocks.api.getSessionBootstrap).toHaveBeenCalledTimes(2));
+    act(() => enable.click());
+    await waitFor(() => expect(mocks.api.mutateConfig).toHaveBeenCalledTimes(1));
+
+    await act(async () => authorizationBootstrap.resolve({
+      ...bootstrapPayload('session-new'),
+      turn_state: { ...idleTurnState, foreground: 'running', in_flight: true },
+    }));
+    await waitFor(() => expect(screen.queryByRole('button', {
+      name: 'chat.agentActivity.enable',
+    })).toBeNull());
+  });
+
+  it('restores the enable shortcut when the visibility write fails', async () => {
+    mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+    mocks.api.getSessionBootstrap.mockResolvedValue({
+      ...bootstrapPayload('session-new'),
+      turn_state: { ...idleTurnState, foreground: 'running', in_flight: true },
+    });
+    mocks.api.mutateConfig.mockRejectedValueOnce(new Error('save failed'));
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-new']}>
+        <Routes>
+          <Route path="/chat/:sessionId" element={<ChatPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const enable = await screen.findByRole('button', { name: 'chat.agentActivity.enable' });
+    act(() => enable.click());
+    await waitFor(() => expect(mocks.api.mutateConfig).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByRole('button', {
+      name: 'chat.agentActivity.enable',
+    })).toBeTruthy());
+  });
+
+  it('restores the last confirmed visibility when the latest write fails', async () => {
+    const openGroup = {
+      id: 'current-turn',
+      anchor_message_id: null,
+      anchor_position: 'after' as const,
+      open: true,
+      status: 'running' as const,
+      steps: 1,
+      duration_ms: null,
+    };
+    mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+    mocks.api.getSessionBootstrap.mockResolvedValue({
+      ...bootstrapPayload('session-new'),
+      turn_state: { ...idleTurnState, foreground: 'running', in_flight: true },
+    });
+    mocks.api.getSessionActivity.mockResolvedValue({ groups: [openGroup] });
+    mocks.api.getSessionActivityGroup.mockResolvedValue({
+      ...openGroup,
+      rows: [{
+        id: 'current-step',
+        kind: 'assistant',
+        text: 'current work step',
+        created_at: '2026-08-25T00:00:00Z',
+      }],
+    });
+    mocks.api.mutateConfig
+      .mockResolvedValueOnce({ ui: { show_agent_activity: true } })
+      .mockRejectedValueOnce(new Error('save failed'));
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-new']}>
+        <Routes>
+          <Route path="/chat/:sessionId" element={<ChatPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const enable = await screen.findByRole('button', { name: 'chat.agentActivity.enable' });
+    act(() => enable.click());
+    await screen.findByText('current work step');
+    const disable = screen.getByRole('button', { name: 'chat.agentActivity.disable' });
+    act(() => disable.click());
+    await waitFor(() => expect(mocks.api.mutateConfig).toHaveBeenCalledTimes(2));
+    await screen.findByText('current work step');
+    await waitFor(() => expect(screen.getByRole('button', {
+      name: 'chat.agentActivity.disable',
+    })).toBeTruthy());
+  });
+
+  it('does not offer the global enable shortcut to a Viewer', async () => {
+    mocks.authorizationCapabilities.can_chat = false;
+    mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+    mocks.api.getSessionBootstrap.mockResolvedValue({
+      ...bootstrapPayload('session-new'),
+      turn_state: { ...idleTurnState, foreground: 'running', in_flight: true },
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-new']}>
+        <Routes>
+          <Route path="/chat/:sessionId" element={<ChatPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await screen.findByText('chat.thinking');
+    expect(screen.queryByRole('button', { name: 'chat.agentActivity.enable' })).toBeNull();
+    expect(mocks.api.mutateConfig).not.toHaveBeenCalled();
+  });
+
+  it('does not offer the global disable shortcut to a Viewer', async () => {
+    mocks.authorizationCapabilities.can_chat = false;
+    const openGroup = {
+      id: 'current-turn',
+      anchor_message_id: null,
+      anchor_position: 'after' as const,
+      open: true,
+      status: 'running' as const,
+      steps: 1,
+      duration_ms: null,
+    };
+    mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+    mocks.api.getSessionBootstrap.mockResolvedValue({
+      ...bootstrapPayload('session-new'),
+      config: { ui: { show_agent_activity: true } },
+      turn_state: { ...idleTurnState, foreground: 'running', in_flight: true },
+    });
+    mocks.api.getSessionActivity.mockResolvedValue({ groups: [openGroup] });
+    mocks.api.getSessionActivityGroup.mockResolvedValue({
+      ...openGroup,
+      rows: [{
+        id: 'current-step',
+        kind: 'assistant',
+        text: 'viewer-visible work step',
+        created_at: '2026-08-25T00:00:00Z',
+      }],
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-new']}>
+        <Routes>
+          <Route path="/chat/:sessionId" element={<ChatPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await screen.findByText('viewer-visible work step');
+    expect(screen.queryByRole('button', { name: 'chat.agentActivity.disable' })).toBeNull();
+    expect(mocks.api.mutateConfig).not.toHaveBeenCalled();
   });
 });

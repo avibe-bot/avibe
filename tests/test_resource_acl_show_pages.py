@@ -116,24 +116,6 @@ def test_show_require_access_follows_instance_role_alone(
         store.close()
 
 
-def test_show_require_access_denies_show_page_email_source(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    store = _seed_show_pages()
-    context = resource_access_service.ResourceUserContext(
-        subject="guest-1",
-        email="guest@example.com",
-        instance_role="viewer",
-        instance_access_source="show_page_email",
-        show_page_id="ses-private",
-        is_remote=True,
-    )
-    try:
-        with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
-            store.require_access("ses-private", user_context=context)
-    finally:
-        store.close()
-
-
 @pytest.mark.parametrize(
     ("subject", "instance_role", "organization_role"),
     [
@@ -204,7 +186,7 @@ def test_remote_show_page_surfaces_follow_instance_role(
         assert all(not item["can_manage"] for item in pages)
         assert all(not item["can_publish_public"] for item in pages)
     assert mutation.status_code == (200 if instance_role == "owner" else 403)
-    # §3.2: every Instance Viewer enters /show; only show_page_email is barred.
+    # §3.2: every Instance Viewer enters /show.
     assert page.status_code == 200
 
 
@@ -494,7 +476,7 @@ def test_existing_show_page_is_adopted_idempotently_without_changing_link_access
         store.close()
 
 
-def test_show_page_access_api_follows_instance_role_and_bars_email_guests(
+def test_show_page_access_api_follows_instance_role(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -508,19 +490,6 @@ def test_show_page_access_api_follows_instance_role_and_bars_email_guests(
             "resolve_current_instance_ownership",
             lambda: _ownership("organization", organization_id="org-1"),
         )
-
-        page_guest = resource_access_service.ResourceUserContext(
-            subject="guest-1",
-            email="guest@example.com",
-            instance_role="viewer",
-            instance_access_source="show_page_email",
-            show_page_id="ses-access-meta",
-            is_remote=True,
-        )
-        # §3.2: a signed show_page_email guest is a /p-only visitor — it never
-        # reads access metadata.
-        with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
-            api.get_show_page_access("ses-access-meta", user_context=page_guest)
 
         instance_editor = _organization_context("editor-1", instance_role="editor")
         response = api.get_show_page_access(

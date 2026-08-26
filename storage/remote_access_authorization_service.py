@@ -562,7 +562,6 @@ def _invalidate_instance_binding_authorizations_locked(
     *,
     instance_id: str,
     previous_instance_id: str | None = None,
-    preserve_show_page: bool = True,
     keep_reference_for_revalidation: bool = True,
 ) -> int:
     ids = {
@@ -573,14 +572,6 @@ def _invalidate_instance_binding_authorizations_locked(
     if not ids:
         return 0
     predicate = remote_access_authorizations.c.instance_id.in_(ids)
-    if preserve_show_page:
-        predicate = and_(
-            predicate,
-            or_(
-                remote_access_authorizations.c.scope_kind.is_(None),
-                remote_access_authorizations.c.scope_kind != "show_page",
-            ),
-        )
     if keep_reference_for_revalidation:
         result = conn.execute(
             update(remote_access_authorizations)
@@ -596,10 +587,9 @@ def invalidate_instance_binding_authorizations(
     *,
     instance_id: str,
     previous_instance_id: str | None = None,
-    preserve_show_page: bool = True,
     keep_reference_for_revalidation: bool = True,
 ) -> int:
-    """Invalidate derived instance claims without touching exact Show Page grants."""
+    """Invalidate every cached authorization derived from an Instance binding."""
 
     _ensure_sqlite_state()
     with _binding_file_lock():
@@ -609,7 +599,6 @@ def invalidate_instance_binding_authorizations(
                 conn,
                 instance_id=instance_id,
                 previous_instance_id=previous_instance_id,
-                preserve_show_page=preserve_show_page,
                 keep_reference_for_revalidation=keep_reference_for_revalidation,
             )
 
@@ -671,7 +660,6 @@ def reconcile_instance_binding(
     instance_kind: str | None,
     reconcile: Callable[[], Any] | None = None,
     previous_instance_id: str | None = None,
-    preserve_show_page: bool = True,
     hold_config_lock: bool = True,
 ) -> dict[str, Any]:
     """Run one serialized identity transition and publish ``ready`` last.
@@ -699,7 +687,6 @@ def reconcile_instance_binding(
                 instance_kind=instance_kind,
                 reconcile=reconcile,
                 previous_instance_id=previous_instance_id,
-                preserve_show_page=preserve_show_page,
             )
 
     if not hold_config_lock:
@@ -717,7 +704,6 @@ def _reconcile_instance_binding_locked(
     instance_kind: str | None,
     reconcile: Callable[[], Any] | None,
     previous_instance_id: str | None,
-    preserve_show_page: bool,
 ) -> dict[str, Any]:
     with engine.begin() as conn:
         transition = _begin_instance_binding_transition_locked(
@@ -729,13 +715,11 @@ def _reconcile_instance_binding_locked(
         previous_id = previous.get("instance_id") if isinstance(previous, Mapping) else None
         if previous_instance_id and previous_instance_id != instance_id:
             previous_id = previous_instance_id
-        preserve = preserve_show_page and previous_id in {None, instance_id}
         invalidated = (
             _invalidate_instance_binding_authorizations_locked(
                 conn,
                 instance_id=instance_id,
                 previous_instance_id=previous_id,
-                preserve_show_page=preserve,
             )
             if transition["changed"]
             else 0
