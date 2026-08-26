@@ -46,6 +46,7 @@ export const APPLICATION_ROUTE_PATHS = [
   '/settings',
   '/settings/appearance',
   '/settings/account',
+  '/settings/shortcuts',
   '/settings/service',
   '/settings/platforms',
   '/settings/platforms/groups',

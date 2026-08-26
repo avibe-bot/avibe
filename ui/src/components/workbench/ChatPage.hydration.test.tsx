@@ -100,6 +100,7 @@ vi.mock('./useShowPageAnnotation', () => ({
     state: { enabled: false, mode: 'smart' },
     setIframe: vi.fn(),
     handleIframeLoad: vi.fn(),
+    handleShortcutKeyDown: vi.fn(),
     enable: vi.fn(),
     disable: vi.fn(),
     setMode: vi.fn(),

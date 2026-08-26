@@ -19,6 +19,7 @@ const RESTORABLE_EXACT_PATHS = new Set([
   '/settings',
   '/settings/appearance',
   '/settings/account',
+  '/settings/shortcuts',
   '/settings/service',
   '/settings/platforms',
   '/settings/platforms/groups',

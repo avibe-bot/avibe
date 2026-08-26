@@ -128,6 +128,7 @@ export const WindowLayer: React.FC = () => {
   // so its Ctrl control-chars (^W/^M) reach the shell (see inTerminalSurface).
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
       const active = document.activeElement;
       if (e.ctrlKey && !e.metaKey && inTerminalSurface(active)) return;
@@ -153,6 +154,7 @@ export const WindowLayer: React.FC = () => {
   // keep Option+W for character entry — consistent with the Alt+1-9 chord.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       if (e.code !== 'KeyW' || !e.altKey || e.metaKey || e.ctrlKey || e.shiftKey) return;
       const active = document.activeElement;
       if (inTextEntrySurface(active)) return;
@@ -191,6 +193,7 @@ export const WindowLayer: React.FC = () => {
   // for character entry; the Windows layer is desktop-only.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       if (!isDesktopViewport()) return;
       const index = dockIndexFromShortcut(e);
       const target = e.target instanceof Element ? e.target : document.activeElement;
