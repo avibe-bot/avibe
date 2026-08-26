@@ -8690,31 +8690,29 @@ def _prepare_memory_runtime_job() -> dict:
         package_result = _install_memory_package_for_current_release()
         if not package_result.get("ok"):
             return package_result
-        if first_reason == "memory_plugin_incompatible":
-            try:
-                schedule_restart(
-                    delay_seconds=2.0,
-                    vibe_path=get_running_vibe_path(),
-                    trigger="memory-package-repair",
-                )
-            except Exception as exc:  # noqa: BLE001
-                return {
-                    "ok": False,
-                    "message": "memory_runtime_restart_required",
-                    "output": str(exc),
-                    "reason": "memory_runtime_restart_required",
-                    "download_error": None,
-                    "restarting": False,
-                }
+        try:
+            schedule_restart(
+                delay_seconds=2.0,
+                vibe_path=get_running_vibe_path(),
+                trigger="memory-package-repair",
+            )
+        except Exception as exc:  # noqa: BLE001
             return {
-                "ok": True,
-                "message": "memory_runtime_restart_scheduled",
-                "output": package_result.get("output"),
-                "reason": None,
+                "ok": False,
+                "message": "memory_runtime_restart_required",
+                "output": str(exc),
+                "reason": "memory_runtime_restart_required",
                 "download_error": None,
-                "restarting": True,
+                "restarting": False,
             }
-        response = install_runtime()
+        return {
+            "ok": True,
+            "message": "memory_runtime_restart_scheduled",
+            "output": package_result.get("output"),
+            "reason": None,
+            "download_error": None,
+            "restarting": True,
+        }
 
     payload = response.get("body") if isinstance(response.get("body"), dict) else {}
     if response.get("status_code") != 200:

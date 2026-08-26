@@ -15,6 +15,8 @@ from packaging.version import Version
 import pytest
 import yaml
 
+from vibe.upgrade import MEMORY_PACKAGE_COMPATIBILITY
+
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
@@ -23,7 +25,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
 
 ROOT = Path(__file__).resolve().parents[1]
 MEMORY_PROJECT = ROOT / "packaging" / "avibe-memory"
-COMPATIBILITY = SpecifierSet(">=3.0.14.dev0,<3.1")
+COMPATIBILITY = SpecifierSet(MEMORY_PACKAGE_COMPATIBILITY)
 RELEASE_GATE = "Block Memory Wave 3a release until Waves 3b and 3c"
 
 

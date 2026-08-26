@@ -651,6 +651,7 @@ def test_first_split_upgrade_adds_memory_after_stop_and_before_start(monkeypatch
         lambda **kwargs: target,
     )
     monkeypatch.setattr(restart_supervisor, "configured_memory_enabled", lambda: True)
+    monkeypatch.setattr(restart_supervisor, "memory_package_installed", lambda: False)
     monkeypatch.setattr(
         restart_supervisor,
         "build_memory_add_plan",
@@ -687,6 +688,56 @@ def test_first_split_upgrade_adds_memory_after_stop_and_before_start(monkeypatch
     assert rc == 0
     assert calls == ["stop_runtime", "add-memory", "start_runtime"]
     status = runtime.read_json(runtime.get_restart_status_path())
+    assert status["memory_package_prepare"] == {"method": "pip", "ok": True}
+
+
+def test_explicit_pre_split_upgrade_adds_missing_memory_between_stop_and_start(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    calls: list[str] = []
+    target = _rollback_target(version="3.0.13")
+    plan = SimpleNamespace(method="pip")
+
+    monkeypatch.setattr(restart_supervisor, "get_build_identity", lambda: SimpleNamespace(kind="package"))
+    monkeypatch.setattr(restart_supervisor, "configured_memory_enabled", lambda: True)
+    monkeypatch.setattr(restart_supervisor, "memory_package_installed", lambda: False)
+    monkeypatch.setattr(restart_supervisor, "build_memory_add_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(
+        restart_supervisor,
+        "execute_upgrade_plan",
+        lambda selected, **kwargs: calls.append("add-memory")
+        or SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(
+        restart_supervisor,
+        "_stop_runtime_for_restart",
+        lambda stop_ui=True: _fake_stop_runtime(calls),
+    )
+    monkeypatch.setattr(
+        restart_supervisor,
+        "_start_runtime_processes",
+        lambda start_ui=True: _fake_start_runtime(calls),
+    )
+    monkeypatch.setattr(restart_supervisor, "_wait_for_service_lock_release", lambda: True)
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 222)
+    monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: pid == 222)
+    monkeypatch.setattr(runtime, "service_instance_started", lambda pid: pid == 222)
+
+    rc = restart_supervisor._run_restart_job(
+        job_id="job-explicit-first-split",
+        delay_seconds=0,
+        vibe_path="/bin/vibe",
+        trigger="upgrade",
+        rollback_to=target,
+    )
+
+    assert rc == 0
+    assert calls == ["stop_runtime", "add-memory", "start_runtime"]
+    status = runtime.read_json(runtime.get_restart_status_path())
+    assert status["rollback_target_source"] == "explicit"
     assert status["memory_package_prepare"] == {"method": "pip", "ok": True}
 
 

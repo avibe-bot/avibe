@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from vibe import api, cli
 from vibe.runtime import ServiceLauncher
 from vibe.upgrade import (
+    MEMORY_PACKAGE_COMPATIBILITY,
     UpgradePlan,
     build_memory_add_plan,
     build_upgrade_plan,
@@ -249,7 +250,7 @@ def test_package_plan_holds_the_shared_mutation_lease_for_resolution_and_install
         ("/usr/bin/python3", None, "pip"),
     ],
 )
-def test_memory_add_plan_never_force_reinstalls_the_running_core(
+def test_memory_add_plan_force_reinstalls_only_the_compatible_memory_distribution(
     monkeypatch,
     python_executable,
     uv_path,
@@ -267,14 +268,19 @@ def test_memory_add_plan_never_force_reinstalls_the_running_core(
     )
 
     assert plan.method == method
-    assert "avibe-os[memory]==3.0.14" in plan.command
+    memory_requirement = f"avibe-memory{MEMORY_PACKAGE_COMPATIBILITY}"
+    assert memory_requirement in plan.command
     assert plan.preflight_command is not None
     assert "--dry-run" in plan.preflight_command
-    assert "--force" not in plan.command
-    assert "--force-reinstall" not in plan.command
+    assert "--force-reinstall" in plan.command
+    assert "--no-deps" in plan.command
+    assert memory_requirement in plan.preflight_command
+    assert not any(argument.startswith("avibe-os") for argument in plan.command)
+    assert plan.cleanup_command is None
     if method == "uv":
         assert plan.command[:3] == ["/usr/local/bin/uv", "pip", "install"]
         assert "tool" not in plan.command
+        assert plan.command[plan.command.index("--python") + 1] == python_executable
     else:
         assert plan.command[:4] == [python_executable, "-m", "pip", "install"]
 

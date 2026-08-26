@@ -976,8 +976,9 @@ def _run_restart_job(
         mark_duration("wait_service_lock_release_seconds", wait_lock_release_started_at)
 
         if (
-            rollback_target_source == "running_service"
+            trigger == "upgrade"
             and configured_memory_enabled()
+            and not memory_package_installed()
         ):
             try:
                 from vibe import __version__

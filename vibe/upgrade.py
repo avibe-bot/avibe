@@ -25,6 +25,10 @@ PACKAGE_NAME = "avibe-os"
 LEGACY_PACKAGE_NAME = "vibe-remote"
 MEMORY_PACKAGE_NAME = "avibe-memory"
 MEMORY_EXTRA_NAME = "memory"
+MEMORY_PACKAGE_COMPATIBILITY = ">=3.0.14.dev0,<3.1"
+MEMORY_PACKAGE_REQUIREMENT = (
+    f"{MEMORY_PACKAGE_NAME}{MEMORY_PACKAGE_COMPATIBILITY}"
+)
 PACKAGE_MUTATION_LOCK_TIMEOUT_SECONDS = 30.0
 DEFAULT_UPDATE_METADATA_URL = f"https://pypi.org/pypi/{PACKAGE_NAME}/json"
 CURRENT_VIBE_EXECUTABLE_ENV = "VIBE_CURRENT_EXECUTABLE"
@@ -1060,15 +1064,9 @@ def build_memory_add_plan(
     uv_path: str | None = None,
     base_env: dict[str, str] | None = None,
 ) -> UpgradePlan:
-    """Add the current host's Memory extra without replacing the host itself."""
+    """Replace the compatible Memory distribution without replacing its host."""
 
     executable = python_executable or sys.executable
-    package_spec = pinned_package_spec(
-        version,
-        python_executable=executable,
-        package_name=package_name,
-        memory_package=True,
-    )
     uv_binary = find_uv_binary(uv_path=uv_path, base_env=base_env)
     env = dict(base_env or os.environ)
     if is_uv_tool_install(executable) and uv_binary:
@@ -1077,9 +1075,11 @@ def build_memory_add_plan(
             "pip",
             "install",
             "--upgrade",
+            "--force-reinstall",
+            "--no-deps",
             "--python",
             executable,
-            package_spec,
+            MEMORY_PACKAGE_REQUIREMENT,
         ]
         preflight = [
             uv_binary,
@@ -1087,9 +1087,11 @@ def build_memory_add_plan(
             "install",
             "--dry-run",
             "--upgrade",
+            "--force-reinstall",
+            "--no-deps",
             "--python",
             executable,
-            package_spec,
+            MEMORY_PACKAGE_REQUIREMENT,
         ]
         return UpgradePlan(
             command=command,
@@ -1104,7 +1106,9 @@ def build_memory_add_plan(
         "pip",
         "install",
         "--upgrade",
-        package_spec,
+        "--force-reinstall",
+        "--no-deps",
+        MEMORY_PACKAGE_REQUIREMENT,
     ]
     preflight = [
         executable,
@@ -1113,7 +1117,9 @@ def build_memory_add_plan(
         "install",
         "--dry-run",
         "--upgrade",
-        package_spec,
+        "--force-reinstall",
+        "--no-deps",
+        MEMORY_PACKAGE_REQUIREMENT,
     ]
     return UpgradePlan(
         command=command,
