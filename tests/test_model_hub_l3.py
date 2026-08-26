@@ -4865,11 +4865,29 @@ def test_shared_openai_authentication_rejection_does_not_prove_a_protocol() -> N
         )
 
 
+def test_top_level_authentication_rejection_is_classified_without_forging_protocol() -> None:
+    body = json.dumps({"code": "INVALID_API_KEY", "message": "Invalid API key"})
+
+    for protocol in SOURCE_PROTOCOLS:
+        assert _parse_protocol_authenticated_evidence(
+            protocol,
+            401,
+            body,
+        ) == _ProtocolEvidence(
+            protocol=_ProtocolProof.UNPROVEN,
+            authentication=_AuthenticationEvidence.REJECTED,
+        )
+
+
 def test_protocol_observation_consumers_cannot_classify_from_status_codes() -> None:
     module_path = Path(__file__).parents[1] / "vibe/model_hub_runtime/adapter.py"
     module_source = module_path.read_text(encoding="utf-8")
     tree = ast.parse(module_source)
     assert _PROTOCOL_OBSERVATION_TAXONOMY.keys() == set(SOURCE_PROTOCOLS)
+    assert _PROTOCOL_OBSERVATION_TAXONOMY["anthropic"].request_body == {
+        "max_tokens": 0,
+        "messages": [],
+    }
     assert _PROTOCOL_OBSERVATION_TAXONOMY["openai_responses"].request_path != _PROTOCOL_OBSERVATION_TAXONOMY[
         "openai_chat"
     ].request_path
@@ -4970,6 +4988,40 @@ def test_protocol_observation_preserves_query_on_each_distinct_upstream_path() -
     ]
 
 
+def test_protocol_observation_adds_standard_v1_paths_to_a_bare_origin() -> None:
+    async def scenario() -> list[str]:
+        requests: list[str] = []
+
+        async def capture_probe(request: web.Request) -> web.Response:
+            requests.append(request.path)
+            return web.json_response({"error": {"type": "invalid_request"}}, status=400)
+
+        app = web.Application()
+        app.router.add_post("/{tail:.*}", capture_probe)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        assert site._server is not None
+        port = site._server.sockets[0].getsockname()[1]
+        try:
+            for protocol in SOURCE_PROTOCOLS:
+                await _probe_protocol_response(
+                    vendor="custom",
+                    protocol=protocol,
+                    base_url=f"http://127.0.0.1:{port}",
+                    secret="test-observation-key",
+                )
+        finally:
+            await runner.cleanup()
+        return requests
+
+    assert asyncio.run(scenario()) == [
+        _PROTOCOL_OBSERVATION_TAXONOMY[protocol].request_path
+        for protocol in SOURCE_PROTOCOLS
+    ]
+
+
 def test_openai_probe_requests_are_mutually_distinguishable() -> None:
     responses = _PROTOCOL_OBSERVATION_TAXONOMY["openai_responses"]
     chat = _PROTOCOL_OBSERVATION_TAXONOMY["openai_chat"]
@@ -5031,6 +5083,37 @@ def test_model_discovery_preserves_query_when_appending_models_path() -> None:
     assert path == "/v1/models"
     assert request_query == query
     assert models == ("upstream-model",)
+
+
+def test_model_discovery_adds_standard_v1_path_to_a_bare_origin() -> None:
+    async def scenario() -> str:
+        request_path = ""
+
+        async def list_models(request: web.Request) -> web.Response:
+            nonlocal request_path
+            request_path = request.path
+            return web.json_response({"data": [{"id": "upstream-model"}]})
+
+        app = web.Application()
+        app.router.add_get("/{tail:.*}", list_models)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        assert site._server is not None
+        port = site._server.sockets[0].getsockname()[1]
+        try:
+            await probe_models(
+                vendor="custom",
+                protocol="anthropic",
+                base_url=f"http://127.0.0.1:{port}",
+                secret="test-observation-key",
+            )
+        finally:
+            await runner.cleanup()
+        return request_path
+
+    assert asyncio.run(scenario()) == "/v1/models"
 
 
 def test_blocked_exact_hop_emits_one_supply_interruption(tmp_path: Path) -> None:

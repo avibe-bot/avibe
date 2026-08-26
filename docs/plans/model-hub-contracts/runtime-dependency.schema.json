@@ -2,12 +2,16 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/runtime-dependency.schema.json",
   "title": "RuntimeDependency",
-  "description": "v5 managed engine dependency manifest + server-owned installation and runtime status. not_installed -> installing -> not_started is the installation path; not_started is installed lazy-start idleness, and down means a demanded runtime failed or stopped. Pinned manifest values remain normative until the next explicit re-pin.",
+  "description": "v5 managed engine dependency manifest + persisted user intent + server-owned installation and runtime status. not_installed -> installing -> not_started is the installation path; not_started is installed lazy-start idleness, and down means a demanded runtime failed or stopped. Pinned manifest values remain normative until the next explicit re-pin.",
   "type": "object",
   "required": ["contract_version", "manifest", "status"],
   "additionalProperties": false,
   "properties": {
     "contract_version": { "const": 6 },
+    "enabled": {
+      "type": "boolean",
+      "description": "Persisted user intent for the managed gateway. Missing on older payloads means clients must fall back to observed health."
+    },
     "host_platform": {
       "type": "string",
       "pattern": "^[a-z0-9]+(?:-[a-z0-9_]+)+$",

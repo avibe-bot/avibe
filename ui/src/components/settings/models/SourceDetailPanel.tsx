@@ -32,6 +32,10 @@ import type {
 } from './manage';
 import { apiFailure, modelsApi, type GuardConfirmation } from './modelsApi';
 import {
+  SOURCE_PROVIDER_COPY_KEYS,
+  sourceProviderIdentity,
+} from './sourcePresentation';
+import {
   sourceMutationReadScope,
   type PresentSourceMutationCommit,
   type SourceMutationLanding,
@@ -753,6 +757,10 @@ export const SourceDetailPanel: React.FC<{
     && manageStage.retryRead;
   const managePlan = 'plan' in manageStage ? manageStage.plan : null;
   const manageCopyKind = manageStage.kind.includes('edit') ? 'editSource' : 'deleteSource';
+  const providerIdentity = sourceProviderIdentity(source);
+  const providerCopyKey = SOURCE_PROVIDER_COPY_KEYS[providerIdentity];
+  const providerLabel = providerCopyKey ? t(providerCopyKey) : providerIdentity;
+  const interfaceLabel = `${providerLabel} · ${t(PROTOCOL_COPY_KEYS[source.protocol])}`;
 
   return (
     <div className="model-hub-source-detail">
@@ -766,6 +774,9 @@ export const SourceDetailPanel: React.FC<{
         <div className="model-hub-source-copy flex min-w-0 flex-1 flex-col">
           <div className={cn('model-hub-source-line flex min-w-0 flex-wrap items-center gap-x-[7px]', state.textClass)}>
             <h2 ref={headingRef} tabIndex={-1} className="model-hub-source-title truncate font-bold text-foreground">{source.display_name}</h2>
+            <span className="model-hub-pill model-hub-source-interface-pill border" title={interfaceLabel}>
+              <span className="truncate">{interfaceLabel}</span>
+            </span>
             {state.key && <span className="model-hub-source-state flex items-center gap-1.5"><span className={cn('size-[5px] shrink-0 rounded-full', state.dotClass)} />{t(state.key, state.values)}</span>}
             {source.last_discovered_at && <span className="model-hub-source-age text-muted">{t('settings.models.sourceDetail.status.listUpdated', { time: formatRelativeTime(source.last_discovered_at, t) })}</span>}
           </div>

@@ -40,7 +40,6 @@ from core.show_pages import ShowPageStore
 from modules.agents.codex.agent import CodexAgent
 from tests.scenario_harness.auth_setup import AuthSetupScenarioHarness, FakeProcess
 from tests.scenario_harness.core import ScenarioExpect, ScenarioRunner, ScenarioStep
-from tests.scenario_harness.show_page_email_access import ShowPageEmailAccessScenarioHarness
 from tests.ui_server_test_helpers import _save_config, remote_session_cookie
 from storage import remote_access_authorization_service
 from tests.scenario_harness.model_hub_native_oauth import (
@@ -68,41 +67,6 @@ def test_auth_setup_catalog_priorities_reference_live_scenarios():
     assert set(catalog.get("next_priority", [])) <= live_ids
 
 
-class ShowPageEmailAccessScenarioTests(unittest.TestCase):
-    def setUp(self):
-        self.harness = ShowPageEmailAccessScenarioHarness()
-        self.addCleanup(self.harness.close)
-
-    def test_exact_email_login_is_confined_to_its_signed_show_page(self):
-        """Scenario: AUTH-SETUP-401"""
-        handshake = self.harness.begin_login("session-one")
-        self.assertEqual(handshake["show_page_id"], "session-one")
-
-        callback = self.harness.complete_login(handshake)
-        self.assertEqual(callback.status_code, 302)
-        self.assertEqual(callback.headers["Location"], handshake["next_path"])
-
-        exact = self.harness.get(handshake["next_path"])
-        other = self.harness.get("/show/session-two/__show/me")
-        api = self.harness.get("/api/show-pages")
-        # §3.2: a show_page_email grant is a /p-only read visitor — it never
-        # enters the /show surface, even for its own signed page.
-        self.assertEqual(exact.status_code, 403)
-        self.assertEqual(other.status_code, 403)
-        self.assertEqual(other.get_json()["error"], "show_page_access_forbidden")
-        self.assertEqual(api.status_code, 403)
-
-        self.harness.seed_broader_session()
-        # §3.2: a real Instance Editor session (email-sourced, not a show_page
-        # grant) enters /show directly, with no login handshake and independent
-        # of any show_page entitlement.
-        self.assertEqual(
-            self.harness.get("/show/session-one/__show/me").status_code,
-            200,
-        )
-        self.assertTrue(self.harness.get("/show/session-one/__show/me").get_json()["authenticated"])
-
-
 def test_limited_show_identity_closed_loop_installs_guest_lease(monkeypatch, tmp_path):
     """Scenario: AUTH-SETUP-404"""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -112,6 +76,11 @@ def test_limited_show_identity_closed_loop_installs_guest_lease(monkeypatch, tmp
     cloud.issuer = "https://backend.test"
     cloud.jwks_uri = "https://backend.test/oauth/jwks.json"
     config.save()
+    monkeypatch.setattr(
+        ShowPageStore,
+        "_resolve_instance_ownership",
+        staticmethod(lambda: {"mode": "organization", "organization_id": "组织-甲"}),
+    )
 
     store = ShowPageStore()
     try:
@@ -123,7 +92,13 @@ def test_limited_show_identity_closed_loop_installs_guest_lease(monkeypatch, tmp
             expected_revision=access.revision,
             target_access_mode="limited",
             target_share_id=page.share_id,
-            target_emails=["viewer@example.com"],
+            target_entries=[
+                {
+                    "kind": "group",
+                    "value": "研发组",
+                    "organization_id": "组织-甲",
+                }
+            ],
         )
         assert applied.status == "applied"
     finally:
@@ -153,13 +128,17 @@ def test_limited_show_identity_closed_loop_installs_guest_lease(monkeypatch, tmp
         {
             "iss": cloud.issuer,
             "aud": f"avibe-show-identity:{cloud.client_id}",
-            "sub": "viewer-1",
+            "sub": "访客-甲",
             "iat": issued_at,
             "exp": issued_at + 300,
             "jti": f"scenario-{time.time_ns()}",
             "nonce": nonce,
             "instance_id": cloud.instance_id,
             "verified_email": "viewer@example.com",
+            "organization_id": "组织-甲",
+            "organization_member_id": "成员-甲",
+            "organization_role": "member",
+            "group_ids": ["研发组"],
         },
         private_key,
         algorithm="RS256",
@@ -227,13 +206,8 @@ def test_limited_show_identity_closed_loop_installs_guest_lease(monkeypatch, tmp
         remote_session_cookie(
             config,
             "viewer@example.com",
-            "viewer-1",
-            session_claims={
-                "vibe_instance_id": cloud.instance_id,
-                "vibe_instance_role": "viewer",
-                "vibe_instance_access_source": "show_page_email",
-                "vibe_show_page_id": page.session_id,
-            },
+            "访客-甲",
+            role="viewer",
         ),
         domain="alex.avibe.bot",
     )

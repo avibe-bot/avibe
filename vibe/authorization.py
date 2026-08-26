@@ -21,7 +21,6 @@ INSTANCE_ACCESS_SOURCES = frozenset(
         "email",
         "email_domain",
         "organization_group",
-        "show_page_email",
     }
 )
 ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
@@ -103,7 +102,6 @@ class AuthorizationContext:
     membership_version: str | None = None
     claims_issued_at: int | None = None
     authorization_revision: int | None = None
-    show_page_id: str | None = None
     is_remote: bool = False
     instance_kind: str | None = None
 
@@ -134,7 +132,7 @@ class AuthorizationContext:
 
     @property
     def can_read_instance(self) -> bool:
-        return self.has_role("viewer") and self.instance_access_source != "show_page_email"
+        return self.has_role("viewer")
 
     @property
     def can_chat(self) -> bool:
@@ -170,11 +168,6 @@ class AuthorizationContext:
 
         minimum_role = _RESOURCE_USE_MINIMUM_ROLES.get(resource_kind)
         return minimum_role is not None and self.has_role(minimum_role)
-
-    def can_use_show_page(self, show_page_id: str) -> bool:
-        """Return whether the signed session carries this exact page entitlement."""
-
-        return bool(self.show_page_id and self.show_page_id == show_page_id)
 
     @property
     def can_use_terminal_files(self) -> bool:
@@ -252,11 +245,6 @@ def context_from_session_payload(payload: Mapping[str, Any]) -> AuthorizationCon
     )
     if access_source not in INSTANCE_ACCESS_SOURCES:
         return AuthorizationContext(is_remote=True)
-    show_page_id = _optional_string(payload.get("vibe_show_page_id"), limit=200)
-    if access_source == "show_page_email" and show_page_id is None:
-        return AuthorizationContext(is_remote=True)
-    if access_source == "show_page_email" and role != "viewer":
-        return AuthorizationContext(is_remote=True)
     raw_groups = payload.get("vibe_group_ids", payload.get("group_ids", []))
     group_ids = (
         frozenset(value for item in raw_groups if (value := _optional_string(item)) is not None)
@@ -299,7 +287,6 @@ def context_from_session_payload(payload: Mapping[str, Any]) -> AuthorizationCon
                 payload.get("authorization_revision"),
             )
         ),
-        show_page_id=show_page_id,
         is_remote=True,
         instance_kind=instance_kind,
     )
@@ -358,15 +345,6 @@ def can_receive_workbench_event(
 ) -> bool:
     """Return whether an SSE subscriber may receive a workbench event."""
 
-    # A signed Show Page email grant is still a viewer session, but its exact
-    # page subtree is enforced by the payload/resource visibility filters below.
-    if (
-        event_type == "show.event"
-        and isinstance(context, AuthorizationContext)
-        and context.instance_access_source == "show_page_email"
-        and context.can_use_show_page(context.show_page_id or "")
-    ):
-        return True
     try:
         require_instance_role(context, required_workbench_event_role(event_type))
     except InstanceAuthorizationError:
@@ -492,6 +470,7 @@ _MEMBER_HTTP_RULES = tuple(
         # can_manage_agents: selecting among already-authenticated model sources.
         # Adding or re-authenticating a source is credential work and stays Owner.
         ("GET", r"^/api/models/agents$"),
+        ("GET", r"^/api/models/agents/[^/]+/chains$"),
         ("GET", r"^/api/models/agents/[^/]+/chain$"),
         ("PUT", r"^/api/models/agents/[^/]+/chain$"),
         ("GET", r"^/api/models/agents/[^/]+/sources$"),

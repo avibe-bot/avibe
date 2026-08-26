@@ -2363,54 +2363,6 @@ def test_permissions_projection_get_is_private_and_not_cached(monkeypatch) -> No
     assert response.get_json()["projection"]["instance"]["id"] == "inst-123"
 
 
-def test_permissions_projection_rejects_page_scoped_guest_before_backend(
-    monkeypatch,
-    tmp_path,
-) -> None:
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = save_config(tmp_path)
-    backend_called = False
-
-    def get_current_permissions():
-        nonlocal backend_called
-        backend_called = True
-        return permissions.PermissionsProjectionResult(
-            projection=_projection(),
-            source="live",
-        )
-
-    monkeypatch.setattr(permissions, "get_current_permissions", get_current_permissions)
-    client = app.test_client()
-    client.set_cookie(
-        remote_access.SESSION_COOKIE_NAME,
-        remote_session_cookie(
-            config,
-            "guest@example.com",
-            "guest-1",
-            session_claims={
-                "vibe_instance_id": config.remote_access.vibe_cloud.instance_id,
-                "vibe_instance_role": "viewer",
-                "vibe_instance_access_source": "show_page_email",
-                "vibe_show_page_id": "session-one",
-            },
-        ),
-        domain="alex.avibe.bot",
-    )
-
-    response = client.get(
-        "/api/permissions",
-        base_url="https://alex.avibe.bot",
-        environ_base=remote_peer(),
-    )
-
-    assert response.status_code == 403
-    assert response.get_json() == {
-        "ok": False,
-        "error": "show_page_access_forbidden",
-    }
-    assert backend_called is False
-
-
 def test_permissions_same_origin_routes_reject_non_contract_entry_fields(monkeypatch) -> None:
     client = app.test_client()
     headers = csrf_headers(client)
@@ -2774,51 +2726,6 @@ def test_resource_access_same_origin_route_rejects_invalid_payload_before_backen
     assert response.status_code == 422
     assert response.get_json() == {"ok": False, "error": "invalid_request"}
     assert called is False
-
-
-def test_resource_access_route_rejects_page_scoped_guest_before_backend(
-    monkeypatch,
-    tmp_path,
-) -> None:
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = save_config(tmp_path)
-    backend_called = False
-
-    def get_resource(*_args):
-        nonlocal backend_called
-        backend_called = True
-        return {"resource": _resource()}
-
-    monkeypatch.setattr(permissions, "get_resource_access", get_resource)
-    client = app.test_client()
-    client.set_cookie(
-        remote_access.SESSION_COOKIE_NAME,
-        remote_session_cookie(
-            config,
-            "guest@example.com",
-            "guest-1",
-            session_claims={
-                "vibe_instance_id": config.remote_access.vibe_cloud.instance_id,
-                "vibe_instance_role": "viewer",
-                "vibe_instance_access_source": "show_page_email",
-                "vibe_show_page_id": "agent-1",
-            },
-        ),
-        domain="alex.avibe.bot",
-    )
-
-    response = client.get(
-        "/api/permissions/resources/agent/agent-1/access",
-        base_url="https://alex.avibe.bot",
-        environ_base=remote_peer(),
-    )
-
-    assert response.status_code == 403
-    assert response.get_json() == {
-        "ok": False,
-        "error": "show_page_access_forbidden",
-    }
-    assert backend_called is False
 
 
 def test_resource_access_route_surfaces_cloud_authority_failure(monkeypatch) -> None:

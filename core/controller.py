@@ -1710,14 +1710,14 @@ class Controller:
         """Restore durable execution owners before any producer can admit work."""
 
         model_hub_service = getattr(self, "model_hub_service", None)
-        reconcile_model_hub = getattr(
+        recover_model_hub = getattr(
             model_hub_service,
-            "reconcile_runtime_installation",
+            "recover_runtime_intent",
             None,
         )
-        if callable(reconcile_model_hub):
+        if callable(recover_model_hub):
             try:
-                await reconcile_model_hub()
+                await recover_model_hub()
             except Exception:
                 logger.exception(
                     "Model Hub runtime recovery failed; continuing without it"

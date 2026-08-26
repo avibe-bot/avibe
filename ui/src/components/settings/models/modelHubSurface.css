@@ -158,6 +158,15 @@
   white-space: nowrap;
 }
 
+.model-hub-source-interface-pill {
+  min-width: 0;
+  max-width: 52%;
+  flex: 0 1 auto;
+  border-color: var(--model-hub-cyan-4d);
+  background: var(--model-hub-cyan-1a);
+  color: var(--cyan-ink);
+}
+
 .model-hub-ink-mint { color: var(--mint-ink); }
 .model-hub-ink-gold { color: var(--gold-ink); }
 .model-hub-ink-violet { color: var(--violet-ink); }
@@ -663,10 +672,6 @@
 }
 .model-hub-add-key-outcome-wrap {
   padding: var(--model-hub-add-key-outcome-padding-y) var(--model-hub-add-key-outcome-padding-x);
-}
-.model-hub-add-key-protocol-field {
-  gap: var(--model-hub-add-key-field-gap);
-  padding: 4px var(--model-hub-add-key-outcome-padding-x) 16px;
 }
 .model-hub-add-key-segments {
   width: fit-content;

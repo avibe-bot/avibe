@@ -131,7 +131,7 @@ def test_hub_launch_masks_inherited_claude_auth_and_injects_gateway():
 
 
 def test_codex_hub_launch_uses_responses_wire_api_and_ephemeral_token(tmp_path):
-    """MH-PROTOCOL-003: Hub launches consume a prepared standard Responses catalog."""
+    """MH-PROTOCOL-004: Hub launches consume a prepared standard Responses catalog."""
 
     launch = hub_launch(backend="codex")
     catalog_path = tmp_path / "codex-hub-models.json"

@@ -169,13 +169,6 @@ scenarios:
     layer: scenario
     backend: web
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_remote_web_oauth_cold_launch_retry_is_single_owner
-  - id: AUTH-SETUP-401
-    name: Exact-email Show Page login stays a /p-only reader and never enters /show
-    status: covered
-    kind: authorization
-    layer: scenario
-    backend: show_page_email
-    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::ShowPageEmailAccessScenarioTests::test_exact_email_login_is_confined_to_its_signed_show_page
   - id: AUTH-SETUP-402
     name: Personal remote activity slides past the original identity deadline without another authorization prompt
     status: covered

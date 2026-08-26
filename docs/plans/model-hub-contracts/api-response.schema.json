@@ -6,8 +6,8 @@
   "type": "object",
   "x-model-hub-routes": [
     {"method": "GET", "path": "/api/models/sources", "response_schema": "SourceListResponse", "exercise": {"path": "/api/models/sources", "status": 200}},
-    {"method": "POST", "path": "/api/models/sources/observe", "response_schema": "ObservationResponse", "exercise": {"path": "/api/models/sources/observe", "status": 200, "json": {"vendor": "anthropic", "key": "sk-contract-test", "protocol_order": ["anthropic", "openai_responses", "openai_chat"]}}},
-    {"method": "POST", "path": "/api/models/sources", "response_schema": "SourceCreateResponse", "exercise": {"path": "/api/models/sources", "status": 201, "json": {"kind": "api_key", "vendor": "anthropic", "display_name": "Contract source", "key": "sk-contract-test", "protocol_order": ["anthropic", "openai_responses", "openai_chat"]}}},
+    {"method": "POST", "path": "/api/models/sources/observe", "response_schema": "ObservationResponse", "exercise": {"path": "/api/models/sources/observe", "status": 200, "json": {"vendor": "anthropic", "key": "sk-contract-test", "protocol": "anthropic"}}},
+    {"method": "POST", "path": "/api/models/sources", "response_schema": "SourceCreateResponse", "exercise": {"path": "/api/models/sources", "status": 201, "json": {"kind": "api_key", "vendor": "anthropic", "display_name": "Contract source", "key": "sk-contract-test", "protocol": "anthropic"}}},
     {"method": "PATCH", "path": "/api/models/sources/<id>", "response_schema": "SourceMutationResponse", "exercise": {"path": "/api/models/sources/src_conform001", "status": 200, "json": {"display_name": "Renamed contract source"}}},
     {"method": "PUT", "path": "/api/models/sources/<id>/credential", "response_schema": "SourceMutationResponse", "exercise": {"path": "/api/models/sources/src_conform001/credential", "status": 200, "json": {"key": "sk-replacement-contract-test"}}},
     {"method": "POST", "path": "/api/models/sources/<id>/reauth", "response_schema": "OAuthFlowResponse", "exercise": {"path": "/api/models/sources/src_subscribe01/reauth", "status": 200, "json": {"acknowledge_irreversible": true}}},
@@ -22,6 +22,7 @@
     {"method": "POST", "path": "/api/models/agents/<backend>/chains/reorder", "response_schema": "AgentResponse", "exercise": {"path": "/api/models/agents/claude/chains/reorder", "status": 200}},
     {"method": "PATCH", "path": "/api/models/agents/<backend>/mode", "response_schema": "AgentResponse", "exercise": {"path": "/api/models/agents/claude/mode", "status": 200, "json": {"mode": "hub"}}},
     {"method": "PUT", "path": "/api/models/agents/opencode/menu", "response_schema": "AgentResponse", "exercise": {"path": "/api/models/agents/opencode/menu", "status": 200, "json": {"menu": {"view": "featured", "checked": []}}}},
+    {"method": "GET", "path": "/api/models/agents/<backend>/chains", "response_schema": "ChainListResponse", "exercise": {"path": "/api/models/agents/claude/chains", "status": 200}},
     {"method": "GET", "path": "/api/models/agents/<backend>/chain?model=<id>", "response_schema": "ChainResponse", "exercise": {"path": "/api/models/agents/claude/chain?model=claude-opus-4-6", "status": 200}},
     {"method": "PUT", "path": "/api/models/agents/<backend>/chain?model=<id>", "response_schema": "ChainMutationResponse", "exercise": {"path": "/api/models/agents/claude/chain?model=claude-opus-4-6", "status": 200, "json": {"hops": [{"source_id": "src_conform001", "model_id": "claude-opus-4-6"}]}}},
     {"method": "POST", "path": "/api/models/agents/<backend>/probe", "response_schema": "ProbeResponse", "exercise": {"path": "/api/models/agents/claude/probe", "status": 200, "json": {"model": "claude-opus-4-6"}}},
@@ -233,6 +234,16 @@
         "chain": {"$ref": "model-hub/agent-chain.schema.json"}
       }
     },
+    "ChainListResponse": {
+      "type": "object",
+      "required": ["ok", "contract_version", "chains"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"const": true},
+        "contract_version": {"const": 6},
+        "chains": {"type": "array", "items": {"$ref": "model-hub/agent-chain.schema.json"}}
+      }
+    },
     "ChainMutationResponse": {
       "type": "object",
       "required": ["ok", "contract_version", "chain", "removed_hops", "interrupted"],
@@ -358,7 +369,7 @@
       "allOf": [
         {"$ref": "model-hub/runtime-dependency.schema.json"},
         {
-          "required": ["contract_version", "host_platform", "manifest", "status"],
+          "required": ["contract_version", "enabled", "host_platform", "manifest", "status"],
           "properties": {
             "status": {
               "required": ["installed_version", "verified", "listening", "health", "last_check", "error_key"]

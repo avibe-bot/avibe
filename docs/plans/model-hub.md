@@ -173,12 +173,15 @@ card data, not persisted Source state, and clients never reconstruct it from liv
 
 The Source workflow is complete at both entry points:
 
-- **Connectivity and protocol observation.** The normal Add Source form asks only for
-  optional name, Base URL, and API key. Its user-triggered Add action reuses one
-  connectivity interaction to classify reachability/authentication and observe the
-  protocol before Save can commit; it adds no separate step and presents no protocol
-  selector. This unsaved operation does not save a Source, consume routing order, or
-  run an Agent turn. For an API key it may provision an engine credential only
+- **Connectivity and protocol observation.** The normal Add Source form asks for an
+  optional name, an interface selection (Auto detect by default), Base URL, and API key.
+  A concrete interface restricts the preflight to one candidate; Auto detect tries the
+  supported candidates in the adapter's authoritative order. The user-triggered Add
+  action reuses one connectivity interaction to classify reachability/authentication
+  and prove the protocol before Save can commit. Its schema-invalid probe settles before
+  a relay selects or invokes a model, so observation never depends on a synthetic model
+  being routable. This unsaved operation does not save a Source, consume routing order,
+  or run an Agent turn. For an API key it may provision an engine credential only
   transiently:
   every success, failure, timeout, and cancellation path revokes that ref before the
   operation settles. A revoke failure enters the existing durable pending-revocation
@@ -187,6 +190,12 @@ The Source workflow is complete at both entry points:
   independently from protocol observation: Save may proceed only when that interaction
   still produced response evidence for the protocol, and it provisions the committed
   Source independently.
+- **CPA ownership after Save.** CPA requires a concrete upstream provider configuration,
+  so it cannot identify an unsaved Source without first being told the interface this
+  preflight exists to prove. Once the Source is saved, Avibe maps its proven protocol to
+  CPA's existing `claude-api-key`, `codex-api-key`, or `openai-compatibility` provider
+  section and every Agent invocation runs through CPA. Avibe owns only the bounded
+  pre-save evidence step; CPA owns compatible request translation and upstream dispatch.
 - **Saved Source refresh and recovery.** Source details exposes the distinct
   `POST /api/models/sources/<id>/refresh` operation. It is intentionally mutating: it
   tests the stored protocol, rediscovers inventory, updates Source health, and clears a
@@ -244,10 +253,12 @@ The Source workflow is complete at both entry points:
 
 **Source-create boundary.** `source-create.schema.json` is the complete API-key create
 request: `vendor` and transient `key`, plus optional `display_name`, `base_url`, probe-
-only `protocol_order`, client-generated `client_nonce`, and boolean
+constraining `protocol`, client-generated `client_nonce`, and boolean
 `accept_unavailable_inventory`; omission is `false`, and the boolean consents only when
 the server's repeated response-backed observation proves a protocol but returns
-`discovery: failed`. Source identity, protocol
+`discovery: failed`. Omitted `protocol` auto-detects across the supported interfaces;
+a supplied value probes exactly that interface but is not evidence and is persisted only
+after a matching response. Source identity, protocol
 evidence, discovered inventory, health, usage, custody metadata, and timestamps remain
 server-owned. When supplied, `client_nonce` is unique among live Sources and live-process
 create reservations. The server reserves it atomically in process before observation or
@@ -327,21 +338,21 @@ nonempty. Create materialization and re-auth failures with no stranded sibling e
 plain-error row. No later Source read can reconstruct the historical report, so the
 error envelope carries it exactly once.
 
-**Protocol observation (owner ruling 2026-08-09, superseding AC-27's 2026-08-07
-manual-choice ruling).** Every stored `protocol` is traceable to a real response from
-that upstream before Save. Avibe never infers the value from vendor name or Base URL;
-known-vendor metadata may order the three probes but cannot produce a conclusion or a
-save-time default. When observation cannot distinguish a protocol, the failure state
-honestly asks the user for a one-time manual hint among the same three values. The hint
-changes probe order only: its selected adapter must still receive a successful upstream
-response before Save. A failed observation therefore stores nothing rather than guessing.
+**Protocol observation (owner ruling 2026-08-26, superseding the 2026-08-09
+ambiguity-only selector ruling).** Every stored `protocol` is traceable to a real response
+from that upstream before Save. Avibe never infers the value from vendor name or Base URL.
+The form exposes Auto detect plus the three supported protocols before the first request.
+Auto detect tries the authoritative sequence; a concrete selection restricts the attempt
+to exactly that protocol. Neither is a save-time conclusion: the selected adapter must
+still receive matching upstream response evidence before Save. A failed observation
+therefore stores nothing rather than guessing.
 
 Once saved, `protocol` is immutable for that Source. Connectivity retest, model
 discovery, refresh, credential replacement, Base URL replacement, and restart all use
 the stored adapter and never rewrite it. Changing protocol means creating a new Source,
 so a later operation cannot silently reinterpret existing inventory or configured hops.
 The stored shape carries no manual/automatic provenance marker and no unverified
-protocol state: manual and automatic probe ordering become indistinguishable after the
+protocol state: manual and automatic preflight become indistinguishable after the
 same response-backed conclusion. “Add anyway” is available only after protocol has been
 proved and some other information, such as model inventory, remains unavailable; that
 uncertainty belongs to Source health, not protocol identity. Every saved Source therefore
@@ -477,7 +488,8 @@ The `matching-v1` decision is normative and exhaustive:
 
 ```text
 for each configuration-eligible Source added in this transaction:
-    observed = response_backed_observation(Source, protocol_order)
+    candidates = [request.protocol] if selected else SOURCE_PROTOCOLS
+    observed = response_backed_observation(Source, candidates)
     if observed.protocol is null:
         persist no Source and no Route hop
         return the classified observation failure
@@ -806,7 +818,10 @@ dead-end error string.
 2026-08-11).** `host_platform` is detected on the Avibe server, never from the browser,
 and installation is supported exactly when it equals one
 `manifest.assets[].platform`. The install route and status reads mirror this closed
-state set; prose cannot add another runtime health value.
+state set; prose cannot add another runtime health value. `RuntimeDependency.enabled`
+is orthogonal persisted user intent: it defaults to false when absent, explicit Start
+sets it true, explicit Stop sets it false, and service startup starts the runtime only
+when it is true. A transient process loss changes health, never this switch state.
 
 | Decision | Meaning | Entry and exit rule | `status.error_key` |
 | --- | --- | --- | --- |
@@ -1443,7 +1458,7 @@ Required interaction rules:
   a consent flow. When a backend already has its singleton native Source, its native
   choice is disabled rather than creating an alias for the same CLI login.
 - Add Source exposes §4.1's combined connectivity/protocol observation and compatible
-  model discovery without a normal protocol control. Source details exposes only the
+  model discovery with Auto detect plus a manual three-protocol selector. Source details exposes only the
   separately named mutating “Refresh models” / 「重新拉取」 action against the stored
   protocol; it has no “Test connectivity” button or second discovery mutation. Results
   stay in the current flow and use compact status plus an
@@ -1451,8 +1466,8 @@ Required interaction rules:
   paragraphs. Every inventory model exposes an editable per-model `reasoning_efforts`
   list beside the exact id. The list has no default item or selected state; the control
   form follows the owner-approved `design.pen` baseline and is not prescribed here. A
-  protocol selector appears only inside an observation-failure state and its hint still
-  requires a successful response before Save. Source freshness may say only “Model list
+  selection constrains the first observation and every retry but still requires a
+  successful response before Save. Source freshness may say only “Model list
   updated at …” / 「型号列表更新于…」 from `last_discovered_at`; latency and “last
   checked” copy are absent.
 - Compatibility detail for converted or cross-vendor supply stays behind a compact
@@ -1605,10 +1620,10 @@ one pinned hop it receives.
   executed exactly; that hop may use an API key or a hub-held subscription and requires
   no additional warning.
 - **No protocol guessing or post-save backfill.** A stored protocol comes from a real
-  pre-save upstream response, never a vendor/Base-URL string heuristic. If observation
-  fails, the product may ask once for a manual probe-order hint, but the hinted adapter
-  must still return a successful response before anything is saved. No later operation
-  changes the stored value.
+  pre-save upstream response, never a vendor/Base-URL string heuristic. Auto detect and
+  manual selection only choose which adapters to verify; the selected adapter must still
+  return matching response evidence before anything is saved. No later operation changes
+  the stored value.
 - No billing-grade accounting, multi-tenant pools, or operator consoles.
 - No third source category ("relay" merged into API Key).
 - No v3 Configure Agents module (§5), runtime plugin UI, or GA scope beyond the
@@ -1664,7 +1679,8 @@ directions into questions that later lanes must answer before writing mechanical
       every saved protocol is response-proven before Save and immutable afterward,
       with no persistent provenance marker or protocol-level unverified value.
 - [ ] §4.1 exposes exactly `anthropic | openai_responses | openai_chat`, retains Chat
-      Completions, and shows protocol choices only after observation cannot decide.
+      Completions, and shows Auto detect plus those three protocol choices before
+      observation; an ambiguous Auto result requires one concrete choice to retry.
 - [ ] §4.2 alone owns Add Source placement: every accepted match is persisted at one
       deterministic policy-chosen position that is visible and adjustable; no later
       path reruns placement, and no UI test infers newness from position.

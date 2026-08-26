@@ -667,6 +667,7 @@
         "title": "模型",
         "running": "网关运行中",
         "stopped": "网关已关闭",
+        "unavailable": "网关已开启，当前不可用",
         "degraded": "网关降级运行",
         "unread": "网关状态未读到",
         "notStarted": "网关已关闭",
@@ -690,6 +691,10 @@
           "down": {
             "title": "模型网关已关闭",
             "body": "上一次启动没有就绪。开启网关即可重试。"
+          },
+          "enabledDown": {
+            "title": "模型网关已开启，但当前不可用",
+            "body": "开启状态已经保存。关闭后重新开启即可立即重试。"
           },
           "notInstalled": {
             "title": "模型网关尚未安装",
@@ -912,6 +917,10 @@
           "nativeCredential": "原生 · 本机凭据",
           "subscription": "订阅",
           "apiKey": "API Key"
+        },
+        "vendor": {
+          "anthropic": "Anthropic",
+          "openai": "OpenAI"
         },
         "empty": "还没有来源。先添加一个订阅或 API Key。",
         "unread": "来源列表没读到 · 网关本身正常",
@@ -1171,8 +1180,10 @@
         "subtitle": "「添加」时自动连一次:认出接口 + 拉取型号列表",
         "field": {
           "name": "名称(可选)",
+          "protocol": "接口类型",
+          "protocol.hint": "不确定时用自动探测；已知类型时只验证所选接口",
           "baseUrl": "Base URL",
-          "baseUrl.hint": "粘贴任何中转 / 聚合 / 自建服务的地址即可,Avibe 会自己认出接口",
+          "baseUrl.hint": "填写 API 根地址，例如 https://api.example.com/v1；只填域名时使用标准 /v1 路径",
           "apiKey": "API Key",
           "apiKey.reveal": "显示 API Key",
           "apiKey.conceal": "隐藏 API Key"
@@ -1186,11 +1197,11 @@
         },
         "submit": "添加",
         "adding": "连接中…",
-        "adding.detail": "连上 + 认出接口 + 首次拉取型号列表 · 通常 1–3 秒",
+        "adding.detail": "连上 + 验证接口 + 首次拉取型号列表 · 通常 1–3 秒",
         "fail": {
           "subtitle": "认出接口是「添加」的前置条件 · 先按下面这条修,再重试",
-          "auth": "鉴权失败:401 Unauthorized",
-          "auth.detail": "检查 API Key 是否有效",
+          "auth": "上游拒绝了这个凭据",
+          "auth.detail": "检查 API Key、接口类型和 Base URL 的 API 根路径",
           "address": "地址不对:404 Not Found",
           "network": "无法连接到该地址(不可达或超时)",
           "undetermined": "已连接，但无法确认这是哪种模型接口",
@@ -1202,11 +1213,10 @@
         "retry": "重试",
         "undetermined": {
           "title": "连上了、也通过了鉴权 —— 但认不出它说哪种接口",
-          "detail": "返回结构对不上任何一种已知接口",
-          "label": "接口类型 · 这一次由你提示",
-          "hint": "提示只改探测顺序 · 仍要真的连上才会保存;保存后不可更改"
+          "detail": "返回结构对不上任何一种已知接口，请选择一个明确类型后重试"
         },
         "protocol": {
+          "auto": "自动探测",
           "anthropicMessages": "Anthropic Messages",
           "openaiResponses": "OpenAI Responses",
           "openaiChatCompletions": "OpenAI Chat Completions"
@@ -1479,7 +1489,7 @@
         },
         "empty": "这个来源没有返回型号。可以手动添加，或重新拉取。",
         "emptyNeverFetched": "还没有成功拉取过这个来源的型号列表。先处理上面的状态，再拉一次，或者手动添加一个型号。",
-        "footnote": "这里只管「这个来源有哪些型号」。型号走哪条路由链，在网关模块里改。档位自己填，两种录入方式都一样。接口类型在添加时认出并固定，页面上不显示、也不能改。"
+        "footnote": "这里只管「这个来源有哪些型号」。型号走哪条路由链，在网关模块里改。档位自己填，两种录入方式都一样。接口类型在添加时确认并固定，页面会显示、但不能修改。"
       },
       "guard": {
         "label": "会被移除的跳",
@@ -3869,6 +3879,8 @@
       "interrupted": "已中断 · 第 {{count}} 步停止",
       "expand": "展开执行过程",
       "collapse": "收起执行过程",
+      "enable": "开启 Agent 执行过程显示",
+      "disable": "关闭 Agent 执行过程显示",
       "showCall": "展开详情",
       "hideCall": "收起详情",
       "jumpToLatest": "跳到最新",
@@ -3876,6 +3888,7 @@
       "retry": "重试",
       "durationMin": "{{minutes}} 分 {{seconds}} 秒",
       "durationSec": "{{seconds}} 秒",
+      "dayShort": "d",
       "empty": "本轮没有执行过程记录。",
       "tools": "工具",
       "showTools": "显示工具调用",

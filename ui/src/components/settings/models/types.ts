@@ -502,6 +502,8 @@ export type RuntimeManifest = {
 
 export type RuntimeDependency = {
   contract_version: typeof CONTRACT_VERSION;
+  /** Persisted user intent. Older runtime payloads omit it. */
+  enabled?: boolean;
   /** Server host platform, never the browser platform. */
   host_platform?: string;
   manifest: RuntimeManifest;
@@ -636,8 +638,8 @@ export type ApiKeySourceObservation = {
   vendor: string;
   base_url?: string | null;
   key: string;
-  /** Probe order only. Every member occurs exactly once. */
-  protocol_order?: SourceProtocol[];
+  /** Omission auto-detects; a value restricts observation to this protocol. */
+  protocol?: SourceProtocol;
 };
 
 /** POST /api/models/sources — api_key create observes again before persisting. */
@@ -649,8 +651,10 @@ export type ApiKeySourceCreate = {
   key: string;
   /** Stable across a create retry; persisted only when the Source commits. */
   client_nonce?: string;
-  /** Probe order only; the client never sends a protocol conclusion. */
-  protocol_order?: SourceProtocol[];
+  /** Omission auto-detects; a value is persisted only after response proof. */
+  protocol?: SourceProtocol;
+  /** Explicit consent for a repeated, protocol-proven inventory failure. */
+  accept_unavailable_inventory?: boolean;
 };
 
 /**

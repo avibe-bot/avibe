@@ -88,8 +88,26 @@ const readChainRequests = async (requests: readonly ModelChainRequest[]): Promis
   ),
 );
 
-const readAgentChains = async (agent: AgentSupply): Promise<ModelChainIndex> =>
-  readChainRequests(modelChainRequests([agent]));
+const readAgentChains = async (agent: AgentSupply): Promise<ModelChainIndex> => {
+  const requests = modelChainRequests([agent]);
+  try {
+    const chains = new Map(
+      (await modelsApi.getAgentChains(agent.backend)).map((chain) => [chain.model_id, chain]),
+    );
+    return Object.fromEntries(requests.map(({ backend, modelId }) => {
+      const chain = chains.get(modelId);
+      return [
+        modelChainKey(backend, modelId),
+        chain?.backend === backend ? readyRegion(chain) : unreadRegion(),
+      ];
+    }));
+  } catch {
+    return Object.fromEntries(requests.map(({ backend, modelId }) => [
+      modelChainKey(backend, modelId),
+      unreadRegion(),
+    ]));
+  }
+};
 
 const readExactAgentChain = async (
   agent: AgentSupply,
@@ -176,10 +194,12 @@ export const RuntimePill: React.FC<{
     ? 'starting'
     : health === 'installing'
       ? 'starting'
+    : runtime.enabled && !runtimeIsRunning(runtime)
+      ? 'unavailable'
     : health === 'ok'
       ? allDirect ? 'allDirect' : 'running'
-      : health === 'degraded'
-        ? 'degraded'
+        : health === 'degraded'
+          ? 'degraded'
         : health === 'down'
           ? 'stopped'
           : health === 'not_started'
@@ -211,6 +231,8 @@ const RuntimeClosedState: React.FC<{
         ? 'unread'
         : health === 'installing'
           ? 'installing'
+          : runtime?.enabled && health !== null && !runtimeIsRunning(runtime)
+            ? 'enabledDown'
           : health === 'not_installed' && runtime?.manifest.resolution === 'unsupported'
             ? 'unsupported'
             : health === 'not_installed'
@@ -425,10 +447,15 @@ export const SettingsModelsPage: React.FC = () => {
     degraded: (staleData) => staleData,
   });
   const runtimeHealth = retainedRuntime?.status.health ?? null;
-  const runtimeSurfaceEnabled = retainedRuntime !== null
+  const runtimeRunning = retainedRuntime !== null
     && runtimeIsRunning(retainedRuntime)
     && runtimeRead.kind !== 'unread';
-  const runtimeConfigurationVisible = runtimeSurfaceEnabled && !stoppingRuntime;
+  const runtimeEnabled = retainedRuntime !== null
+    && (retainedRuntime.enabled ?? runtimeIsRunning(retainedRuntime))
+    && runtimeRead.kind !== 'unread';
+  const runtimeConfigurationVisible = (
+    runtimeRunning || (runtimeEnabled && runtimeHealth !== 'installing')
+  ) && !stoppingRuntime;
   React.useEffect(() => {
     const runtimeCanRecover = runtimeRead.kind === 'unread'
       || (runtimeRead.kind === 'degraded' && runtimeRead.cause === 'read_failed')
@@ -827,8 +854,9 @@ export const SettingsModelsPage: React.FC = () => {
   const directEmpty = modelsSurfaceKindFromReads(supplyRead, sourcesRead) === 'direct_empty';
   const installedAgents = agents.filter((agent) => agent.cli_present);
   const hubBackends = agents.filter((agent) => agent.mode === 'hub').map((agent) => agent.backend);
-  const stopBlocked = runtimeSurfaceEnabled && (supplyRead.kind !== 'ready' || hubBackends.length > 0);
-  const runtimeSwitchUnsupported = runtimeHealth === 'not_installed'
+  const stopBlocked = runtimeEnabled && (supplyRead.kind !== 'ready' || hubBackends.length > 0);
+  const runtimeSwitchUnsupported = !runtimeEnabled
+    && runtimeHealth === 'not_installed'
     && retainedRuntime?.manifest.resolution === 'unsupported';
   const runtimeSwitchDisabled = startingRuntime
     || stoppingRuntime
@@ -840,12 +868,12 @@ export const SettingsModelsPage: React.FC = () => {
     ? supplyRead.kind === 'ready'
       ? t('settings.models.shell.toggle.stopBlocked', { names: hubBackends.join(', ') })
       : t('settings.models.shell.toggle.stopUnavailable')
-    : runtimeSurfaceEnabled
+    : runtimeEnabled
       ? t('settings.models.shell.toggle.turnOff')
       : t('settings.models.shell.toggle.turnOn');
   const toggleRuntime = () => {
     if (runtimeSwitchDisabled) return;
-    if (runtimeSurfaceEnabled) {
+    if (runtimeEnabled) {
       void stopRuntime();
     } else if (runtimeHealth === 'not_installed') {
       setInstallOpen(true);
@@ -1126,7 +1154,7 @@ export const SettingsModelsPage: React.FC = () => {
               {runtimeConfigurationVisible && !directEmpty && <TakeoverPill count={takeoverCount} />}
               <span title={runtimeSwitchLabel}>
                 <ToggleSwitch
-                  enabled={runtimeSurfaceEnabled}
+                  enabled={runtimeEnabled}
                   disabled={runtimeSwitchDisabled}
                   label={runtimeSwitchLabel}
                   onClick={toggleRuntime}

@@ -826,6 +826,7 @@ def test_runtime_status_observes_engine_without_starting_it(tmp_path):
 
     assert adapter.start_calls == 0
     assert adapter.status_calls == 1
+    assert runtime["enabled"] is False
     assert runtime["status"]["health"] == "ok"
     assert runtime["status"]["verified"] is True
 
@@ -847,11 +848,13 @@ def test_runtime_status_reports_packaged_engine_manifest(tmp_path):
 
 
 def test_runtime_start_is_explicit_and_returns_v4_status(tmp_path):
-    service, _store, adapter = _service(tmp_path)
+    service, store, adapter = _service(tmp_path)
 
     runtime = asyncio.run(service.runtime_start())
 
     assert adapter.start_calls == 1
+    assert store.config.enabled is True
+    assert runtime["enabled"] is True
     assert runtime["contract_version"] == 6
     assert runtime["status"]["health"] == "ok"
     _assert_valid("runtime-dependency.schema.json", runtime)
@@ -871,14 +874,38 @@ def test_runtime_stop_requires_every_backend_to_be_direct(tmp_path):
 
 def test_runtime_stop_returns_explicit_not_started_state(tmp_path):
     service, store, adapter = _service(tmp_path)
+    store.config.enabled = True
     for agent in store.config.agents.values():
         agent.mode = "direct"
 
     runtime = asyncio.run(service.runtime_stop())
 
     assert adapter.stop_runtime_calls == 1
+    assert store.config.enabled is False
+    assert runtime["enabled"] is False
     assert runtime["status"]["health"] == "not_started"
     _assert_valid("runtime-dependency.schema.json", runtime)
+
+
+def test_runtime_recovery_starts_only_for_persisted_user_intent(tmp_path):
+    service, store, adapter = _service(tmp_path)
+
+    asyncio.run(service.recover_runtime_intent())
+
+    assert adapter.start_calls == 0
+
+    store.config.enabled = True
+    restarted = ModelHubService(
+        store=store,
+        adapter=adapter,
+        events=BoundedEventLog(tmp_path / "restarted-events.json"),
+        oauth_flows=OAuthFlowRegistry(tmp_path / "restarted-oauth-flows.json"),
+        revocations=CredentialRevocationJournal(tmp_path / "restarted-revocations.json"),
+    )
+
+    asyncio.run(restarted.recover_runtime_intent())
+
+    assert adapter.start_calls == 1
 
 
 def test_runtime_start_syncs_sources_before_starting_once(tmp_path):
@@ -1500,7 +1527,13 @@ def test_source_create_nonce_covers_in_flight_committed_and_deleted_states(tmp_p
 @pytest.mark.parametrize(
     "malformed_fields",
     [
-        pytest.param({"protocol_order": ["anthropic"]}, id="protocol-order"),
+        pytest.param({"protocol_order": ["anthropic"]}, id="retired-protocol-order"),
+        pytest.param({"protocol": None}, id="null-protocol"),
+        pytest.param({"protocol": "unknown"}, id="unknown-protocol"),
+        pytest.param(
+            {"accept_unavailable_inventory": "yes"},
+            id="non-boolean-unavailable-inventory-consent",
+        ),
         pytest.param({"billing": "credits"}, id="billing"),
         pytest.param(
             {
@@ -1887,6 +1920,44 @@ def test_agents_endpoint_projects_exact_chain_runnability(tmp_path):
     }
     assert blocked[model_id]["chain_length"] == 1
     assert blocked[model_id]["has_runnable_hop"] is False
+
+
+def test_agent_chains_returns_the_complete_overview_from_one_snapshot(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    agent = store.config.agents["claude"]
+    routed_extra = "claude-route-only"
+    selected_extra = "claude-selected-only"
+    agent.routes[routed_extra] = ModelHubRouteConfig()
+    store.requested_models["claude"] = selected_extra
+    expected_model_ids = list(
+        dict.fromkeys(
+            [
+                *service.get_agent_sources("claude")["builtin_models"],
+                selected_extra,
+                *agent.routes,
+            ]
+        )
+    )
+
+    load_count = 0
+    original_load = store.load
+
+    def counted_load():
+        nonlocal load_count
+        load_count += 1
+        return original_load()
+
+    store.load = counted_load
+    chains = service.agent_chains("claude")
+
+    assert load_count == 1
+    model_ids = [chain["model_id"] for chain in chains]
+    assert model_ids == expected_model_ids
+    assert selected_extra in model_ids
+    assert routed_extra in model_ids
+    assert len(model_ids) == len(set(model_ids))
+    for chain in chains:
+        _assert_valid("agent-chain.schema.json", chain)
 
 
 def test_agents_endpoint_cli_presence_probe_errors_fail_closed(tmp_path):
@@ -2467,6 +2538,87 @@ def test_unsaved_observation_route_returns_valid_result_and_revokes_transient_re
     assert store.config.sources == []
     assert adapter.revoked == ["cred_test001"]
     assert "credential_ref" not in json.dumps(body)
+
+
+def test_unsaved_observation_route_restricts_a_manual_protocol_to_one_probe(
+    monkeypatch,
+    tmp_path,
+):
+    service, store, adapter = _service(tmp_path)
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+
+    response = client.post(
+        "/api/models/sources/observe",
+        json={
+            "vendor": "custom",
+            "base_url": "https://relay.example/v1",
+            "key": "sk-test-observation-manual",
+            "protocol": "openai_responses",
+        },
+        headers=csrf_headers(client, base_url),
+        base_url=base_url,
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["observation"]["protocol"] == "openai_responses"
+    assert adapter.observed_protocol_orders == [("openai_responses",)]
+    assert store.config.sources == []
+    assert adapter.revoked == ["cred_test001"]
+
+
+def test_source_create_requires_explicit_consent_for_proven_inventory_failure(
+    tmp_path,
+):
+    store = MemoryStore()
+    adapter = FakeAdapter()
+    adapter.observation = SourceObservation(
+        outcome=ObservationOutcome.OBSERVED,
+        reachable=True,
+        authenticated=True,
+        protocol="anthropic",
+        discovery=ObservationDiscovery.FAILED,
+        model_ids=(),
+    )
+    service = ModelHubService(
+        store=store,
+        adapter=adapter,
+        events=BoundedEventLog(tmp_path / "events.json"),
+        oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+    )
+    payload = {
+        "kind": "api_key",
+        "vendor": "custom",
+        "base_url": "https://relay.example/v1",
+        "key": "sk-test-inventory-consent",
+        "protocol": "anthropic",
+    }
+
+    with pytest.raises(ModelHubError) as rejected:
+        asyncio.run(service.create_source(payload))
+
+    assert rejected.value.status == 422
+    assert rejected.value.data["observation"]["discovery"] == "failed"
+    assert store.config.sources == []
+    assert adapter.revoked == ["cred_test001"]
+
+    created = asyncio.run(
+        service.create_source(
+            {**payload, "accept_unavailable_inventory": True}
+        )
+    )["source"]
+
+    assert created["protocol"] == "anthropic"
+    assert created["models"] == []
+    assert created["state"] == {
+        "status": "error",
+        "retry_at": None,
+        "detail_key": "models.source.error.unclassified",
+    }
+    assert len(store.config.sources) == 1
+    assert adapter.revoked == ["cred_test001", "cred_test002"]
 
 
 def test_source_order_route_rejects_retired_policy_payload(monkeypatch, tmp_path):

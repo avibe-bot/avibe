@@ -38,6 +38,7 @@ from vibe.model_hub_runtime.client import (
     EngineInvokeHandle,
     completed_handle,
     probe_models,
+    upstream_api_url,
 )
 from vibe.model_hub_runtime.installer import InstallClaimTransition
 from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore
@@ -231,9 +232,11 @@ _PROTOCOL_OBSERVATION_TAXONOMY = {
     "anthropic": _ProtocolObservationTaxonomy(
         request_path="/v1/messages",
         request_body={
-            "model": "__avibe_model_hub_probe__",
-            "max_tokens": 1,
-            "messages": [{"role": "user", "content": "ping"}],
+            # Fail schema validation before a relay selects a model. A synthetic
+            # model can otherwise surface as an availability failure even when
+            # the credential and interface are valid.
+            "max_tokens": 0,
+            "messages": [],
         },
         oauth_path="/v1/messages?beta=true",
         evidence_rules=(
@@ -331,6 +334,20 @@ def _parse_protocol_authenticated_evidence(
             authentication=_AuthenticationEvidence.UNKNOWN,
         )
 
+    top_level_identifiers = {
+        value.strip().lower()
+        for value in (payload.get("type"), payload.get("code"))
+        if isinstance(value, str)
+    }
+    if (
+        status in _AUTHENTICATION_ERROR_STATUSES
+        and not _AUTHENTICATION_ERROR_IDENTIFIERS.isdisjoint(top_level_identifiers)
+    ):
+        return _ProtocolEvidence(
+            protocol=_ProtocolProof.UNPROVEN,
+            authentication=_AuthenticationEvidence.REJECTED,
+        )
+
     taxonomy = _PROTOCOL_OBSERVATION_TAXONOMY.get(protocol)
     for rule in taxonomy.evidence_rules if taxonomy is not None else ():
         if rule.matches(status, payload):
@@ -362,9 +379,8 @@ async def _probe_protocol_response(
     taxonomy = _PROTOCOL_OBSERVATION_TAXONOMY.get(protocol)
     if taxonomy is None:
         raise EngineClientError("unsupported source protocol")
-    endpoint = taxonomy.request_path.removeprefix("/v1")
     try:
-        url = normalize_model_hub_base_url(root, append_path=endpoint)
+        url = upstream_api_url(root, taxonomy.request_path)
     except (TypeError, ValueError):
         raise EngineClientError("source base URL is invalid")
     assert url is not None
@@ -554,6 +570,7 @@ class CLIProxyEngineAdapter:
         self._install_task: asyncio.Task[None] | None = None
         self._install_admission: asyncio.Future[EngineStatus] | None = None
         self._install_owner_active = False
+        self._start_after_install_task: asyncio.Task[None] | None = None
         self._installation_stopping = False
         self._oauth_flows: dict[str, _OAuthFlow] = {}
         self._active_oauth_providers: set[str] = set()
@@ -657,6 +674,29 @@ class CLIProxyEngineAdapter:
             return
         except Exception:  # noqa: BLE001
             logger.exception("Model Hub runtime install task failed")
+
+    def _start_after_install_done(self, task: asyncio.Task[None]) -> None:
+        if self._start_after_install_task is task:
+            self._start_after_install_task = None
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:  # noqa: BLE001
+            logger.exception("Model Hub runtime start after installation failed")
+
+    async def _start_after_install(self, install_task: asyncio.Task[None]) -> None:
+        await asyncio.shield(install_task)
+        async with self._installation_lock:
+            if self._installation_stopping:
+                return
+            status = await self.status()
+            if status.health in {
+                EngineHealth.INSTALLING,
+                EngineHealth.NOT_INSTALLED,
+            }:
+                return
+            await asyncio.to_thread(self.supervisor.ensure_running)
 
     async def _run_installation(
         self,
@@ -857,6 +897,16 @@ class CLIProxyEngineAdapter:
         async with self._installation_lock:
             status = await self.status()
             if status.health is EngineHealth.INSTALLING:
+                install_task = self._install_task
+                if install_task is not None and not install_task.done():
+                    start_task = self._start_after_install_task
+                    if start_task is None or start_task.done():
+                        start_task = asyncio.create_task(
+                            self._start_after_install(install_task),
+                            name="model-hub-runtime-start-after-install",
+                        )
+                        self._start_after_install_task = start_task
+                        start_task.add_done_callback(self._start_after_install_done)
                 return status
             await asyncio.to_thread(self.supervisor.ensure_running)
             return await self.status()
@@ -866,6 +916,12 @@ class CLIProxyEngineAdapter:
             status = await self.status()
             if status.health is EngineHealth.INSTALLING:
                 return status
+            start_after_install_task = self._start_after_install_task
+            if (
+                start_after_install_task is not None
+                and not start_after_install_task.done()
+            ):
+                start_after_install_task.cancel()
             await asyncio.to_thread(self.supervisor.disable)
             return await self.status()
 
@@ -873,11 +929,20 @@ class CLIProxyEngineAdapter:
         async with self._installation_lock:
             self._installation_stopping = True
             install_task = self._install_task
+            start_after_install_task = self._start_after_install_task
         if install_task is not None:
             try:
                 await asyncio.shield(install_task)
             except asyncio.CancelledError:
                 if not install_task.cancelled():
+                    raise
+            except Exception:  # noqa: BLE001
+                pass
+        if start_after_install_task is not None:
+            try:
+                await asyncio.shield(start_after_install_task)
+            except asyncio.CancelledError:
+                if not start_after_install_task.cancelled():
                     raise
             except Exception:  # noqa: BLE001
                 pass

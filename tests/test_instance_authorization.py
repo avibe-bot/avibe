@@ -200,23 +200,6 @@ def test_context_from_session_payload_only_recognizes_known_instance_kinds() -> 
     assert not unknown.is_personal_instance
 
 
-def test_show_page_email_context_is_exactly_page_scoped() -> None:
-    context = context_from_session_payload(
-        {
-            "sub": "guest-1",
-            "vibe_instance_role": "viewer",
-            "vibe_instance_access_source": "show_page_email",
-            "vibe_show_page_id": "session-one",
-        }
-    )
-    assert not context.can_read_instance
-    assert context.capability_projection()["can_read_instance"] is False
-    assert context.capability_projection()["can_use_show_pages"] is False
-    assert context.can_use_show_page("session-one")
-    assert not context.can_use_show_page("session-two")
-    assert not context.can_chat
-
-
 def test_http_policy_is_role_only_and_unknown_api_routes_fail_closed() -> None:
     editor_routes = (
         ("GET", "/api/agents"),
@@ -342,6 +325,7 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         ("POST", "/api/agents/default"),
         ("PATCH", "/api/agents/demo"),
         ("DELETE", "/api/agents/demo"),
+        ("GET", "/api/models/agents/codex/chains"),
         ("PUT", "/api/models/agents/codex/chain"),
         ("PUT", "/api/global-prompts"),
         ("POST", "/api/projects"),
@@ -491,6 +475,7 @@ def test_agents_page_load_reads_are_admitted_for_every_rank_that_sees_the_page()
         ("GET", "/api/agents/demo"),
         ("GET", "/api/running-agents"),
         ("GET", "/api/models/agents"),
+        ("GET", "/api/models/agents/claude/chains"),
     )
     catalog_reads = (
         ("GET", "/api/claude/models"),
