@@ -1915,6 +1915,27 @@ def test_reconcile_platforms_endpoint_reports_controller_failure(monkeypatch):
     assert resp.json() == {"ok": False, "error": "IM thread for discord did not stop within timeout"}
 
 
+def test_invalidate_activity_streaming_endpoint_clears_controller_cache(monkeypatch):
+    controller = _build_controller_double()
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        "core.message_mirror.reset_activity_flag_cache",
+        lambda: calls.append(True),
+    )
+    app = internal_server.create_app(controller)
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.post("/internal/invalidate-activity-streaming")
+
+    resp = asyncio.run(_go())
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    assert calls == [True]
+
+
 def test_reconcile_agent_backends_endpoint_calls_controller():
     controller = _build_controller_double()
     calls = []

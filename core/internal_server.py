@@ -946,6 +946,18 @@ def create_app(
             logger.exception("internal platform reconcile failed")
             return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
 
+    @app.post("/internal/invalidate-activity-streaming")
+    async def _invalidate_activity_streaming() -> Any:
+        """Drop the controller process's cached Agent Activity display flag."""
+        try:
+            from core.message_mirror import reset_activity_flag_cache
+
+            reset_activity_flag_cache()
+            return JSONResponse(status_code=200, content={"ok": True})
+        except Exception as exc:
+            logger.exception("internal Agent Activity cache invalidation failed")
+            return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+
     @app.post("/internal/reconcile-agent-backends")
     async def _reconcile_agent_backends(request: Request) -> Any:
         """Hot-apply persisted Agent backend config on the controller loop."""

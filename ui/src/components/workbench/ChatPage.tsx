@@ -303,6 +303,9 @@ export const ChatPage: React.FC = () => {
   const readOnly = isSessionReadOnly(session);
   const writable = canChat && !readOnly;
   const metadataWritable = sessionCanChat && !readOnly;
+  // The shared Messaging settings use this same capability boundary: Editors
+  // can persist display preferences, while Viewers can only observe them.
+  const canEditAgentActivityVisibility = capabilities.can_chat || capabilities.can_use_system;
 
   // Chat-page-wide drag-and-drop: dropping files anywhere over the chat surface
   // (not just the input row) stages them on the composer via its imperative
@@ -627,6 +630,8 @@ export const ChatPage: React.FC = () => {
   const [showAgentActivity, setShowAgentActivity] = useState(false);
   const showAgentActivityRef = useRef(false);
   showAgentActivityRef.current = showAgentActivity;
+  const confirmedAgentActivityVisibilityRef = useRef(false);
+  const agentActivityVisibilityRequestRef = useRef(0);
   const [activityGroups, setActivityGroups] = useState<ActivityGroup[]>([]);
   const liveStateRef = useRef<LiveActivityState>(initialLiveActivity());
   const [liveRows, setLiveRows] = useState<ActivityRow[]>([]);
@@ -721,7 +726,7 @@ export const ChatPage: React.FC = () => {
       } catch {
         return false; // transient failure → caller retries; a stale card is hidden by the working gate
       }
-      if (sid !== sessionIdRef.current) return true;
+      if (sid !== sessionIdRef.current || !showAgentActivityRef.current) return true;
       const fetched = (res.groups ?? []).map(groupFromWire);
       // Interpret an open group against the LATEST controller state, not the state
       // from when this request started. A chat switch can hydrate ``running`` while
@@ -741,7 +746,7 @@ export const ChatPage: React.FC = () => {
         if (liveStateRef.current.rows.length === 0) {
           try {
             const wire = await api.getSessionActivityGroup(sid, inflight.id);
-            if (sid !== sessionIdRef.current) return true;
+            if (sid !== sessionIdRef.current || !showAgentActivityRef.current) return true;
             if (activityForegroundRef.current !== 'running') return true;
             const rows = groupFromWire(wire).rows ?? [];
             if (rows.length > 0) {
@@ -795,6 +800,59 @@ export const ChatPage: React.FC = () => {
     [refreshActivity],
   );
   scheduleActivityRefreshRef.current = scheduleActivityRefresh;
+  const applyAgentActivityVisibility = useCallback(
+    (enabled: boolean) => {
+      showAgentActivityRef.current = enabled;
+      setShowAgentActivity(enabled);
+
+      if (enabled) {
+        // The shortcut means "show me this execution now", not merely "remember
+        // the preference for the next turn". Expand first, then hydrate the open
+        // durable group while the config write enables subsequent live events.
+        setActivityCardExpanded(true);
+        scheduleActivityRefresh();
+      } else {
+        // Bump the generation so detail reads already in flight cannot repopulate
+        // the card after it was globally hidden. The next enable hydrates afresh.
+        dispatchLive({ type: 'reset' });
+        setActivityGroups([]);
+        setActivityCardExpanded(false);
+        setExpandedActivity({});
+        setLoadingActivity({});
+        setActivityError({});
+        activityRefreshPendingRef.current = false;
+        if (activityRetryTimerRef.current !== null) {
+          window.clearTimeout(activityRetryTimerRef.current);
+          activityRetryTimerRef.current = null;
+        }
+      }
+    },
+    [dispatchLive, scheduleActivityRefresh],
+  );
+  const setAgentActivityVisibility = useCallback(
+    (enabled: boolean) => {
+      if (!canEditAgentActivityVisibility) return;
+      applyAgentActivityVisibility(enabled);
+      const request = ++agentActivityVisibilityRequestRef.current;
+
+      const pendingWrite = api.mutateConfig([
+        setConfigField(['ui', 'show_agent_activity'], enabled),
+      ]);
+      void pendingWrite
+        .then(() => {
+          confirmedAgentActivityVisibilityRef.current = enabled;
+          if (request !== agentActivityVisibilityRequestRef.current) return;
+          // Close the small save/streaming gap: rows persisted while the config
+          // mutation was in flight are recovered from the durable group.
+          if (enabled && showAgentActivityRef.current) scheduleActivityRefresh();
+        })
+        .catch(() => {
+          if (request !== agentActivityVisibilityRequestRef.current) return;
+          applyAgentActivityVisibility(confirmedAgentActivityVisibilityRef.current);
+        });
+    },
+    [api, applyAgentActivityVisibility, canEditAgentActivityVisibility, scheduleActivityRefresh],
+  );
   // Send-while-busy queue (messages sent while a turn runs, shown above the
   // composer) + the loaded draft to seed the composer with.
   const [queue, setQueue] = useState<WorkbenchMessage[]>([]);
@@ -1358,6 +1416,12 @@ export const ChatPage: React.FC = () => {
     setError(null);
     setFailedBootstrapSessionId((current) => current === sessionId ? null : current);
     try {
+      // This component is reused across chat routes. A visibility click from the
+      // previous route must settle before the next bootstrap reads global config,
+      // otherwise the new chat can reinstall the pre-click value.
+      await api.waitForAgentActivityConfigMutations();
+      if (!requestIsCurrent()) return;
+      const activityVisibilityRequest = agentActivityVisibilityRequestRef.current;
       // Initial chat open needs the same recent tail window, queue, draft,
       // route/config state, and current turn state. Fetch them as one bootstrap
       // payload so remote links don't pay a tunnel round-trip per widget.
@@ -1390,9 +1454,18 @@ export const ChatPage: React.FC = () => {
       setAgents(bootstrap.agents);
       setDefaultAgentName(bootstrap.default_agent_name);
       setMessageFontSize(normalizeChatMessageFontSize(bootstrap.config?.ui?.chat_message_font_size));
-      const activityEnabled = Boolean(bootstrap.config?.ui?.show_agent_activity);
-      setShowAgentActivity(activityEnabled);
-      showAgentActivityRef.current = activityEnabled;
+      const bootstrapActivityEnabled = Boolean(bootstrap.config?.ui?.show_agent_activity);
+      const activityPreferenceIsCurrent = (
+        activityVisibilityRequest === agentActivityVisibilityRequestRef.current
+      );
+      if (activityPreferenceIsCurrent) {
+        setShowAgentActivity(bootstrapActivityEnabled);
+        showAgentActivityRef.current = bootstrapActivityEnabled;
+        confirmedAgentActivityVisibilityRef.current = bootstrapActivityEnabled;
+      }
+      const activityEnabled = activityPreferenceIsCurrent
+        ? bootstrapActivityEnabled
+        : showAgentActivityRef.current;
       // Default on: only an explicit ``false`` hides tool rows.
       setShowToolCalls(bootstrap.config?.ui?.show_tool_calls !== false);
       // Merge (not replace) so a row that arrived over the stream during the
@@ -2719,6 +2792,12 @@ export const ChatPage: React.FC = () => {
             liveStartedAt,
             cardExpanded: activityCardExpanded,
             onToggleCard: () => setActivityCardExpanded((v) => !v),
+            onEnable: canEditAgentActivityVisibility
+              ? () => setAgentActivityVisibility(true)
+              : undefined,
+            onDisable: canEditAgentActivityVisibility
+              ? () => setAgentActivityVisibility(false)
+              : undefined,
             expanded: expandedActivity,
             loading: loadingActivity,
             error: activityError,
@@ -3552,6 +3631,8 @@ interface TranscriptProps {
     liveStartedAt: number | null;
     cardExpanded: boolean;
     onToggleCard: () => void;
+    onEnable?: () => void;
+    onDisable?: () => void;
     expanded: Record<string, boolean>;
     loading: Record<string, boolean>;
     error: Record<string, boolean>;
@@ -4180,9 +4261,14 @@ export const Transcript: React.FC<TranscriptProps> = ({
               onToggleExpanded={activity.onToggleCard}
               showToolCalls={activity.showToolCalls}
               onToggleTools={activity.onToggleTools}
+              onDisableActivity={activity.onDisable}
             />
           ) : showThinking ? (
-            <ThinkingBubble session={session} agentDisplayName={agentDisplayName} />
+            <ThinkingBubble
+              session={session}
+              agentDisplayName={agentDisplayName}
+              onShowActivity={!activity?.enabled ? activity?.onEnable : undefined}
+            />
           ) : null}
           {footer}
         </div>
@@ -4238,8 +4324,16 @@ const ForkSourceBanner: React.FC<{ sourceSessionId: string; sourceTitle: string 
 export const ThinkingBubble: React.FC<{
   session: WorkbenchSession;
   agentDisplayName: string | null;
-}> = ({ session, agentDisplayName }) => {
+  onShowActivity?: () => void;
+}> = ({ session, agentDisplayName, onShowActivity }) => {
   const { t } = useTranslation();
+  const dots = (
+    <div className="flex items-center gap-1 py-0.5">
+      <span className="vr-typing-dot size-1.5 rounded-full bg-mint" />
+      <span className="vr-typing-dot size-1.5 rounded-full bg-mint [animation-delay:0.2s]" />
+      <span className="vr-typing-dot size-1.5 rounded-full bg-mint [animation-delay:0.4s]" />
+    </div>
+  );
   return (
     <div className="flex w-full justify-start">
       <div className="group/message flex max-w-[min(92%,860px)] flex-col items-start gap-1">
@@ -4249,13 +4343,21 @@ export const ThinkingBubble: React.FC<{
             {agentDisplayName || session.agent_name || t('chat.thinking')}
           </span>
         </div>
-        <div className="w-fit rounded-2xl rounded-tl-md border border-mint/25 bg-mint/[0.09] px-3.5 py-2.5">
-          <div className="flex items-center gap-1 py-0.5">
-            <span className="vr-typing-dot size-1.5 rounded-full bg-mint" />
-            <span className="vr-typing-dot size-1.5 rounded-full bg-mint [animation-delay:0.2s]" />
-            <span className="vr-typing-dot size-1.5 rounded-full bg-mint [animation-delay:0.4s]" />
+        {onShowActivity ? (
+          <button
+            type="button"
+            onClick={onShowActivity}
+            aria-label={t('chat.agentActivity.enable')}
+            title={t('chat.agentActivity.enable')}
+            className="w-fit cursor-pointer rounded-2xl rounded-tl-md border border-mint/25 bg-mint/[0.09] px-3.5 py-2.5 transition-colors hover:border-mint/45 hover:bg-mint/[0.14]"
+          >
+            {dots}
+          </button>
+        ) : (
+          <div className="w-fit rounded-2xl rounded-tl-md border border-mint/25 bg-mint/[0.09] px-3.5 py-2.5">
+            {dots}
           </div>
-        </div>
+        )}
       </div>
     </div>
   );

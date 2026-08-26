@@ -3874,6 +3874,8 @@
       "interrupted": "Interrupted · stopped at step {{count}}",
       "expand": "Show activity",
       "collapse": "Hide activity",
+      "enable": "Turn on Agent activity",
+      "disable": "Turn off Agent activity",
       "showCall": "Show details",
       "hideCall": "Hide details",
       "jumpToLatest": "Jump to latest",
