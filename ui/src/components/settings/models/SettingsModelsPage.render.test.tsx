@@ -274,18 +274,14 @@ describe('SettingsModelsPage surface branches', () => {
     expect(await screen.findAllByRole('tab')).toHaveLength(3);
   });
 
-  it('keeps the persisted gateway switch on while its process is unavailable', async () => {
+  it('keeps routing controls available while an enabled gateway process is unavailable', async () => {
     const unavailable = {
       ...runtime,
       enabled: true,
       status: { ...runtime.status, health: 'down' as const },
     };
-    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
-    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([
-      directAgent('claude'),
-      directAgent('codex'),
-      directAgent('opencode'),
-    ]);
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([retainedSource]);
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([takeoverAgent]);
     vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(unavailable);
     vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
 
@@ -297,10 +293,12 @@ describe('SettingsModelsPage surface branches', () => {
       </ToastProvider>,
     );
 
-    const toggle = await screen.findByRole('switch', { name: /Turn model gateway off|关闭模型网关/i });
+    const toggle = await screen.findByRole('switch', { name: /Switch codex to Direct|请先将 codex 切换为直连/i });
     expect(toggle.getAttribute('aria-checked')).toBe('true');
-    expect(await screen.findByText(/^Model gateway is enabled but unavailable$|^模型网关已开启，但当前不可用$/i)).toBeTruthy();
-    expect(screen.queryAllByRole('tab')).toHaveLength(0);
+    expect((toggle as HTMLButtonElement).disabled).toBe(true);
+    expect(await screen.findByText('Retained source')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^Switch to direct$|^切换到直连$/i })).toBeTruthy();
+    expect(screen.queryAllByRole('tab')).toHaveLength(3);
   });
 
   it('still allows persisted enablement to be turned off on an unsupported host', async () => {

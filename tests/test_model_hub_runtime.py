@@ -3172,6 +3172,115 @@ def test_runtime_start_consults_install_owner_before_starting(
     asyncio.run(run())
 
 
+def test_runtime_start_continues_after_server_owned_installation(
+    tmp_path: Path,
+) -> None:
+    class BlockingInstaller(EngineRuntimeManager):
+        def __init__(self, runtime_dir: Path) -> None:
+            super().__init__(runtime_dir=runtime_dir, offline=True)
+            self.release = threading.Event()
+            self.started = threading.Event()
+            self.binary = runtime_dir / "installed-engine"
+
+        def ensure(
+            self,
+            *,
+            force: bool = False,
+            expected_target=None,
+            on_resolved=None,
+        ):
+            del force
+            assert expected_target is None
+            assert on_resolved is not None
+            on_resolved(RUNTIME_INSTALL_TARGET)
+            self.started.set()
+            assert self.release.wait(timeout=2)
+            self.binary.parent.mkdir(parents=True, exist_ok=True)
+            self.binary.write_bytes(b"verified fixture")
+            return {
+                "ok": True,
+                "changed": True,
+                "path": str(self.binary),
+                "install_dir": str(self.binary.parent),
+                "version": "v7.2.95",
+            }
+
+        def resolve_engine_path(self):
+            return self.binary if self.binary.is_file() else None
+
+        def status(self):
+            installed = self.resolve_engine_path() is not None
+            return {
+                "installed": installed,
+                "version": "v7.2.95" if installed else None,
+                "install_dir": str(self.binary.parent),
+                "platform": self.host_platform(),
+                "reason": None,
+            }
+
+    class Supervisor:
+        def __init__(self, installer: BlockingInstaller) -> None:
+            self.installer = installer
+            self.state_store = EngineStateStore(tmp_path / "state")
+            self.start_calls = 0
+
+        def status(self):
+            installed = self.installer.resolve_engine_path() is not None
+            return {
+                "host_platform": self.installer.host_platform(),
+                "status": {
+                    "health": "ok" if self.start_calls else (
+                        "not_started" if installed else "not_installed"
+                    ),
+                    "installed_version": "v7.2.95" if installed else None,
+                    "verified": installed,
+                    "listening": {"host": "127.0.0.1", "port": 15220}
+                    if self.start_calls
+                    else None,
+                    "last_check": None,
+                    "error_key": None,
+                },
+            }
+
+        def restart_if_running(self) -> None:
+            return None
+
+        def note_installation_settled(self) -> None:
+            return None
+
+        def ensure_running(self) -> None:
+            self.start_calls += 1
+
+    async def run() -> None:
+        installer = BlockingInstaller(tmp_path / "runtime")
+        supervisor = Supervisor(installer)
+        adapter = CLIProxyEngineAdapter(
+            supervisor=supervisor,  # type: ignore[arg-type]
+            state_store=supervisor.state_store,
+        )
+
+        installing = await adapter.install()
+        assert installing.health is EngineHealth.INSTALLING
+        assert await asyncio.to_thread(installer.started.wait, 2)
+
+        deferred = await adapter.start()
+        assert deferred.health is EngineHealth.INSTALLING
+        assert supervisor.start_calls == 0
+
+        installer.release.set()
+        for _ in range(100):
+            settled = await adapter.status()
+            if settled.health is EngineHealth.OK:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("runtime did not start after installation")
+
+        assert supervisor.start_calls == 1
+
+    asyncio.run(run())
+
+
 def test_runtime_install_failure_persists_closed_error_key(tmp_path: Path) -> None:
     class FailedInstaller(EngineRuntimeManager):
         def __init__(self, runtime_dir: Path) -> None:

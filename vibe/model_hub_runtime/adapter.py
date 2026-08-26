@@ -570,6 +570,7 @@ class CLIProxyEngineAdapter:
         self._install_task: asyncio.Task[None] | None = None
         self._install_admission: asyncio.Future[EngineStatus] | None = None
         self._install_owner_active = False
+        self._start_after_install_task: asyncio.Task[None] | None = None
         self._installation_stopping = False
         self._oauth_flows: dict[str, _OAuthFlow] = {}
         self._active_oauth_providers: set[str] = set()
@@ -673,6 +674,29 @@ class CLIProxyEngineAdapter:
             return
         except Exception:  # noqa: BLE001
             logger.exception("Model Hub runtime install task failed")
+
+    def _start_after_install_done(self, task: asyncio.Task[None]) -> None:
+        if self._start_after_install_task is task:
+            self._start_after_install_task = None
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:  # noqa: BLE001
+            logger.exception("Model Hub runtime start after installation failed")
+
+    async def _start_after_install(self, install_task: asyncio.Task[None]) -> None:
+        await asyncio.shield(install_task)
+        async with self._installation_lock:
+            if self._installation_stopping:
+                return
+            status = await self.status()
+            if status.health in {
+                EngineHealth.INSTALLING,
+                EngineHealth.NOT_INSTALLED,
+            }:
+                return
+            await asyncio.to_thread(self.supervisor.ensure_running)
 
     async def _run_installation(
         self,
@@ -873,6 +897,16 @@ class CLIProxyEngineAdapter:
         async with self._installation_lock:
             status = await self.status()
             if status.health is EngineHealth.INSTALLING:
+                install_task = self._install_task
+                if install_task is not None and not install_task.done():
+                    start_task = self._start_after_install_task
+                    if start_task is None or start_task.done():
+                        start_task = asyncio.create_task(
+                            self._start_after_install(install_task),
+                            name="model-hub-runtime-start-after-install",
+                        )
+                        self._start_after_install_task = start_task
+                        start_task.add_done_callback(self._start_after_install_done)
                 return status
             await asyncio.to_thread(self.supervisor.ensure_running)
             return await self.status()
@@ -889,11 +923,20 @@ class CLIProxyEngineAdapter:
         async with self._installation_lock:
             self._installation_stopping = True
             install_task = self._install_task
+            start_after_install_task = self._start_after_install_task
         if install_task is not None:
             try:
                 await asyncio.shield(install_task)
             except asyncio.CancelledError:
                 if not install_task.cancelled():
+                    raise
+            except Exception:  # noqa: BLE001
+                pass
+        if start_after_install_task is not None:
+            try:
+                await asyncio.shield(start_after_install_task)
+            except asyncio.CancelledError:
+                if not start_after_install_task.cancelled():
                     raise
             except Exception:  # noqa: BLE001
                 pass

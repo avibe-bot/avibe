@@ -453,7 +453,9 @@ export const SettingsModelsPage: React.FC = () => {
   const runtimeEnabled = retainedRuntime !== null
     && (retainedRuntime.enabled ?? runtimeIsRunning(retainedRuntime))
     && runtimeRead.kind !== 'unread';
-  const runtimeConfigurationVisible = runtimeRunning && !stoppingRuntime;
+  const runtimeConfigurationVisible = (
+    runtimeRunning || (runtimeEnabled && runtimeHealth !== 'installing')
+  ) && !stoppingRuntime;
   React.useEffect(() => {
     const runtimeCanRecover = runtimeRead.kind === 'unread'
       || (runtimeRead.kind === 'degraded' && runtimeRead.cause === 'read_failed')
