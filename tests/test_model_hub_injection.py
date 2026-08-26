@@ -154,6 +154,22 @@ def test_codex_hub_launch_requires_provider_safe_catalog():
         build_codex_hub_launch([], {}, launch)
 
 
+def test_codex_hub_launch_preserves_non_bmp_catalog_path(tmp_path):
+    launch = hub_launch(backend="codex")
+    catalog_path = tmp_path / ("models-" + chr(0x1F680) + ".json")
+
+    args, _env = build_codex_hub_launch(
+        [],
+        {},
+        launch,
+        model_catalog_path=catalog_path,
+    )
+
+    override = next(arg for arg in args if arg.startswith("model_catalog_json="))
+    assert str(catalog_path) in override
+    assert "\\ud83d" not in override
+
+
 def test_opencode_overlay_requires_exact_checked_identifier():
     overlay = SimpleNamespace(
         checked_identifiers=("openai/gpt-5", "custom/gpt-5"),

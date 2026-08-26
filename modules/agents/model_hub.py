@@ -325,7 +325,7 @@ def build_codex_hub_launch(
         "-c",
         f"model_providers.{provider}.requires_openai_auth=false",
         "-c",
-        f"model_catalog_json={json.dumps(str(model_catalog_path))}",
+        f"model_catalog_json={json.dumps(str(model_catalog_path), ensure_ascii=False)}",
     ]
     return overrides + list(base_args), env
 
