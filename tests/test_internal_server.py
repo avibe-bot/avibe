@@ -595,16 +595,34 @@ def test_memory_projects_plugin_failure_preserves_admitted_cli_session_boundary(
     from vibe.memory_http_headers import CALLER_SESSION_HEADER
     from vibe.memory_contract import MemoryPluginUnavailableError
 
-    controller = _build_controller_double()
+    controller = Controller.__new__(Controller)
+    controller.config = SimpleNamespace(memory=SimpleNamespace(enabled=True))
     controller._memory_plugin_error = MemoryPluginUnavailableError("injected")
-    controller._memory_plugin_cli_sessions = {"session-1"}
-    controller.memory_scope_for_cli_session.return_value = (
-        "__memory_plugin_error__",
-        "default",
+    controller._memory_scopes_by_session = {}
+    controller._memory_cli_facts_by_session = {}
+    controller._memory_plugin_cli_sessions = set()
+    controller._memory_admission = lambda: pytest.fail(
+        "plugin failure must be projected before admission imports"
+    )
+    controller._memory_turn_facts = lambda _context: pytest.fail(
+        "plugin failure must be projected before facts imports"
     )
     controller.memory_projects_payload = AsyncMock(
         side_effect=MemoryPluginUnavailableError("injected")
     )
+
+    context = SimpleNamespace(
+        platform_specific={
+            "agent_session_target": {"id": "session-1"},
+        },
+        platform="avibe",
+    )
+    assert Controller.configure_memory_cli_session(
+        controller,
+        context,
+        admitted=True,
+    )
+    assert controller._memory_plugin_cli_sessions == {"session-1"}
     app = server.create_app(controller)
 
     async def _exercise() -> httpx.Response:
