@@ -134,7 +134,7 @@ const AgentModelCard: React.FC<{
       <div
         tabIndex={-1}
         data-agent-group-head={agent.backend}
-        className="flex min-h-[66px] flex-col justify-center gap-[7px] border-b border-border px-3.5 py-3 sm:h-[66px] sm:py-0"
+        className="flex min-h-[66px] flex-col justify-center gap-[7px] border-b border-border px-3.5 py-3 sm:min-h-[66px] sm:py-1"
       >
         <div className="flex min-w-0 flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
           <div className="flex min-w-0 items-center gap-[9px]">

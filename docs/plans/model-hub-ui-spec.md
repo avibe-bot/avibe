@@ -1793,11 +1793,12 @@ rail 72, gateway module takes the rest. Everything inside those tracks is
 and never a derived row width — a literal there is a number that goes stale the first
 time a track moves.
 
-**Card and row metrics** `[frame]`: upstream card `fill_container`×80, `padding [0,12]`,
-`gap 10`, `radius 10`; tile 34×34 `radius 9`; name 12.5/700 Inter; detail 10.5
-JetBrains Mono `#9BA3B8CC`; status dot 5px + text 10.5/600. Backend group
-`$--background` fill, `radius 12`, `$--border`; head 66 tall, `padding [0,14]`,
-`gap 7`, bottom border, backend name 14/700 Inter, tile 30×30 `radius 9`, count pill
+**Card and row metrics** `[frame]`: upstream card `fill_container`×96 minimum, auto height,
+`padding [8,12]`, `gap 10`, `radius 10`; tile 34×34 `radius 9`; name 12.5/700 Inter
+on its own line, interface and kind pills on the next line; detail 10.5 JetBrains Mono
+`#9BA3B8CC`; status dot 5px + text 10.5/600. Backend group `$--background` fill,
+`radius 12`, `$--border`; head 66 minimum with auto growth when its action row wraps,
+desktop `padding [4,14]` and mobile `padding [12,14]`, `gap 7`, bottom border, backend name 14/700 Inter, tile 30×30 `radius 9`, count pill
 `padding [3,8]` `radius 999`; head button `padding [9,12]` `radius 8` fill
 `#FFFFFF0A` stroke `$--border-strong`, label 11.5/700; head status line dot 5px +
 11/600 + 13px info `#FFFFFF40`. `rows` container `padding 8`, `gap 8`; model row 36
