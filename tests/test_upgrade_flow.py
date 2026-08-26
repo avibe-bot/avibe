@@ -258,6 +258,63 @@ def test_enabled_pip_upgrade_renders_url_extra_as_named_requirement(monkeypatch)
     assert f"{package_url}[memory]" not in plan.preflight_command
 
 
+@pytest.mark.parametrize(
+    "package_spec",
+    [
+        "git+https://git.example.test/avibe.git",
+        "git+https://git.example.test/avibe.git@abc123#subdirectory=python",
+    ],
+)
+def test_enabled_pip_upgrade_renders_bare_vcs_extra_as_named_requirement(
+    monkeypatch,
+    package_spec,
+):
+    monkeypatch.setenv("AVIBE_UPGRADE_PACKAGE_SPEC", package_spec)
+    monkeypatch.setattr("vibe.upgrade.memory_package_installed", lambda: False)
+    monkeypatch.setattr(
+        "vibe.upgrade.installed_metadata_describes_running_code",
+        lambda: True,
+    )
+
+    plan = build_upgrade_plan(
+        python_executable="/usr/bin/python3",
+        uv_path=None,
+        base_env={"PATH": "/usr/bin"},
+        memory_enabled=True,
+    )
+
+    named_requirement = f"avibe-os[memory] @ {package_spec}"
+    assert plan.command[-1] == named_requirement
+    assert plan.preflight_command is not None
+    assert plan.preflight_command[-1] == named_requirement
+    assert f"{package_spec}[memory]" not in plan.command
+    assert f"{package_spec}[memory]" not in plan.preflight_command
+
+
+def test_enabled_pip_upgrade_preserves_named_requirement_when_adding_extra(
+    monkeypatch,
+):
+    package_spec = "avibe-os[cloud]>=3.0"
+    monkeypatch.setenv("AVIBE_UPGRADE_PACKAGE_SPEC", package_spec)
+    monkeypatch.setattr("vibe.upgrade.memory_package_installed", lambda: False)
+    monkeypatch.setattr(
+        "vibe.upgrade.installed_metadata_describes_running_code",
+        lambda: True,
+    )
+
+    plan = build_upgrade_plan(
+        python_executable="/usr/bin/python3",
+        uv_path=None,
+        base_env={"PATH": "/usr/bin"},
+        memory_enabled=True,
+    )
+
+    named_requirement = "avibe-os[cloud,memory]>=3.0"
+    assert plan.command[-1] == named_requirement
+    assert plan.preflight_command is not None
+    assert plan.preflight_command[-1] == named_requirement
+
+
 def test_enabled_pip_upgrade_retains_local_path_extra_syntax(monkeypatch):
     package_path = "/tmp/avibe_os-3.0.14-py3-none-any.whl"
     monkeypatch.setenv("AVIBE_UPGRADE_PACKAGE_SPEC", package_path)

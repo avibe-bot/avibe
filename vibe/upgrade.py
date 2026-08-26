@@ -892,13 +892,16 @@ def rollback_target() -> RollbackTarget | None:
 def _with_memory_extra(package_spec: str) -> str:
     """Select the host's Memory extra without rewriting non-name specs by hand."""
 
+    if package_spec.startswith(
+        ("git+", "hg+", "svn+", "bz+", "http://", "https://")
+    ):
+        return f"{PACKAGE_NAME}[{MEMORY_EXTRA_NAME}] @ {package_spec}"
+
     try:
         from packaging.requirements import InvalidRequirement, Requirement
 
         requirement = Requirement(package_spec)
     except InvalidRequirement:
-        if package_spec.startswith(("http://", "https://")):
-            return f"{PACKAGE_NAME}[{MEMORY_EXTRA_NAME}] @ {package_spec}"
         # pip and uv accept extras on local wheel paths in this form. Those paths
         # are deliberately not parsed as named PEP 508 requirements.
         return f"{package_spec}[{MEMORY_EXTRA_NAME}]"
