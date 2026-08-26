@@ -6,6 +6,11 @@ from types import SimpleNamespace
 
 import pytest
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - py<3.11
+    import tomli as tomllib  # type: ignore[no-redef]
+
 from core.handlers.model_hub.service import (
     PRE_ATTEMPT_SETTLEMENT_GENERATION,
     ModelHubError,
@@ -154,9 +159,9 @@ def test_codex_hub_launch_requires_provider_safe_catalog():
         build_codex_hub_launch([], {}, launch)
 
 
-def test_codex_hub_launch_preserves_non_bmp_catalog_path(tmp_path):
+def test_codex_hub_launch_uses_toml_safe_catalog_path(tmp_path):
     launch = hub_launch(backend="codex")
-    catalog_path = tmp_path / ("models-" + chr(0x1F680) + ".json")
+    catalog_path = tmp_path / ("models-\x7f-" + chr(0x1F680) + ".json")
 
     args, _env = build_codex_hub_launch(
         [],
@@ -166,8 +171,12 @@ def test_codex_hub_launch_preserves_non_bmp_catalog_path(tmp_path):
     )
 
     override = next(arg for arg in args if arg.startswith("model_catalog_json="))
-    assert str(catalog_path) in override
+    encoded_path = override.split("=", 1)[1]
+    assert "\x7f" not in encoded_path
+    assert "\\u007f" in encoded_path
+    assert chr(0x1F680) in encoded_path
     assert "\\ud83d" not in override
+    assert tomllib.loads(f"path = {encoded_path}\n")["path"] == str(catalog_path)
 
 
 def test_opencode_overlay_requires_exact_checked_identifier():

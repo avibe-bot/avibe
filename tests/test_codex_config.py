@@ -43,6 +43,17 @@ def test_round_trip_quoted_keys() -> None:
     assert _round_trip(data) == data
 
 
+def test_toml_basic_string_escapes_del_without_losing_non_bmp() -> None:
+    value = "models-\x7f-" + chr(0x1F680) + ".json"
+
+    encoded = codex_config.format_toml_basic_string(value)
+
+    assert "\x7f" not in encoded
+    assert "\\u007f" in encoded
+    assert chr(0x1F680) in encoded
+    assert tomllib.loads(f"value = {encoded}\n")["value"] == value
+
+
 def test_round_trip_deep_nesting() -> None:
     """Nesting deeper than two levels must survive the rewrite."""
     data = {

@@ -927,6 +927,48 @@ def test_runtime_omits_unsupported_direct_reasoning_effort(tmp_path):
     assert adapter.invocation_requests[0].headers == {"x-test": "preserved"}
 
 
+def test_runtime_filters_reasoning_effort_forms_independently(tmp_path):
+    source = _source("src_effort004", ("upstream-model",))
+    source.models[0].reasoning_efforts = ["high"]
+    config = _config([source])
+    config.agents["claude"].routes["claude-opus-4-6"] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, "upstream-model"),)
+    )
+    adapter = FakeAdapter()
+    adapter.outcomes.append(
+        RawCallOutcome(
+            kind=RawOutcomeKind.SUCCESS,
+            http_status=200,
+            error_code=None,
+            redacted_message=None,
+            stream_started=False,
+            model_id="upstream-model",
+            source_id=source.id,
+        )
+    )
+    service, _store, _ = _service(tmp_path, config, adapter)
+    request = ModelHubRequest(
+        {
+            "reasoning_effort": "high",
+            "reasoning": {"effort": "ultra", "summary": "auto"},
+        },
+        protocol="openai_responses",
+        headers={},
+    )
+
+    resolved = asyncio.run(
+        service.resolve(
+            backend="claude",
+            model_id="claude-opus-4-6",
+            request=request,
+        )
+    )
+
+    assert resolved.source_id == source.id
+    assert adapter.invocation_requests[0]["reasoning_effort"] == "high"
+    assert adapter.invocation_requests[0]["reasoning"] == {"summary": "auto"}
+
+
 def test_runtime_does_not_alias_unpersisted_claude_request():
     source = _source("src_route003", ("claude-opus-4-6-20260115",))
     config = _config([source], model="claude-opus-4-6-20260115")

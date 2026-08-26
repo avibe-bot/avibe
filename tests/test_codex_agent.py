@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -3758,6 +3759,7 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
         agent._session_mgr = SimpleNamespace(sessions_for_cwd=lambda cwd: [])
         agent.codex_config = SimpleNamespace(binary="codex", extra_args=[])
         agent._model_hub_catalog_path = None
+        agent._model_hub_catalog_lock = asyncio.Lock()
         agent.controller = SimpleNamespace(config=SimpleNamespace(codex=agent.codex_config))
         agent._runtime_ownership_snapshot_for_cwd = Mock(
             return_value=SimpleNamespace(blocks_transport_replacement=False)
@@ -4052,6 +4054,57 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent._model_hub_catalog_path, previous_catalog)
         agent.refresh_auth_state.assert_not_awaited()
 
+    async def test_startup_catalog_preparation_cannot_overwrite_new_runtime_generation(self):
+        agent = self._agent()
+        previous_config = agent.codex_config
+        previous_catalog = Path("/runtime/codex-old.json")
+        next_catalog = Path("/runtime/codex-new.json")
+        next_config = SimpleNamespace(binary="/opt/codex-next", extra_args=[])
+        agent.refresh_auth_state = AsyncMock()
+        previous_started = threading.Event()
+        release_previous = threading.Event()
+        calls = []
+
+        def prepare(binary):
+            calls.append(binary)
+            if binary == previous_config.binary:
+                previous_started.set()
+                release_previous.wait(timeout=2)
+                return previous_catalog
+            return next_catalog
+
+        with patch(
+            "vibe.backend_model_catalog.prepare_codex_hub_catalog",
+            side_effect=prepare,
+        ):
+            startup = asyncio.create_task(agent.prepare_model_hub_runtime())
+            self.assertTrue(await asyncio.to_thread(previous_started.wait, 1))
+            refresh = asyncio.create_task(agent.refresh_runtime_config(next_config))
+            await asyncio.sleep(0)
+            release_previous.set()
+            await asyncio.gather(startup, refresh)
+
+        self.assertEqual(calls, [previous_config.binary, next_config.binary])
+        self.assertIs(agent.codex_config, next_config)
+        self.assertEqual(agent._model_hub_catalog_path, next_catalog)
+
+    async def test_model_hub_catalog_preparation_retries_after_transient_failure(self):
+        agent = self._agent()
+        catalog = Path("/runtime/codex-recovered.json")
+
+        with patch(
+            "vibe.backend_model_catalog.prepare_codex_hub_catalog",
+            side_effect=[RuntimeError("transient export failure"), catalog],
+        ) as prepare_catalog:
+            with self.assertRaises(_MODULE.CodexModelHubCatalogUnavailableError):
+                await agent.prepare_model_hub_runtime()
+            self.assertIsNone(agent._model_hub_catalog_path)
+            recovered = await agent.prepare_model_hub_runtime()
+
+        self.assertEqual(recovered, catalog)
+        self.assertEqual(agent._model_hub_catalog_path, catalog)
+        self.assertEqual(prepare_catalog.call_count, 2)
+
     async def test_missing_prepared_hub_catalog_preserves_existing_transport_and_threads(self):
         agent = self._agent()
         with tempfile.TemporaryDirectory() as cwd:
@@ -4080,11 +4133,12 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
 
             with patch(
                 "vibe.backend_model_catalog.prepare_codex_hub_catalog",
+                side_effect=RuntimeError("transient export failure"),
             ) as prepare_catalog:
-                with self.assertRaisesRegex(ValueError, "provider-safe model catalog"):
+                with self.assertRaises(_MODULE.CodexModelHubCatalogUnavailableError):
                     await agent._get_or_create_transport(cwd, launch)
 
-            prepare_catalog.assert_not_called()
+            prepare_catalog.assert_called_once_with(agent.codex_config.binary)
             existing.stop.assert_not_awaited()
             self.assertIs(agent._transports[cwd], existing)
             agent._session_mgr.invalidate_thread.assert_not_called()

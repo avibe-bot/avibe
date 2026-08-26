@@ -2151,6 +2151,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         agent = CodexAgent.__new__(CodexAgent)
         agent.codex_config = old_config
         agent._model_hub_catalog_path = Path("/runtime/codex-old.json")
+        agent._model_hub_catalog_lock = asyncio.Lock()
         agent.controller = SimpleNamespace(config=SimpleNamespace(codex=old_config))
         agent.refresh_auth_state = AsyncMock()
 

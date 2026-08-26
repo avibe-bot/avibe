@@ -43,6 +43,7 @@ from core.handlers.model_hub.service import (
 )
 from core.services.settings import load_config_or_default
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
+from vibe.codex_config import format_toml_basic_string
 
 
 LaunchChannel = Literal["direct", "native_cli", "hub"]
@@ -325,7 +326,7 @@ def build_codex_hub_launch(
         "-c",
         f"model_providers.{provider}.requires_openai_auth=false",
         "-c",
-        f"model_catalog_json={json.dumps(str(model_catalog_path), ensure_ascii=False)}",
+        f"model_catalog_json={format_toml_basic_string(str(model_catalog_path))}",
     ]
     return overrides + list(base_args), env
 

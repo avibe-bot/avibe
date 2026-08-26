@@ -892,6 +892,7 @@
       "source_timeout": "连接超时，请检查网络后重试。",
       "invalid_source_order": "来源顺序包含不可用、不适用或重复的来源。",
       "mode_switch_blocked": "当前供给模式或选择阻止了此操作。",
+      "codex_catalog_unavailable": "Codex 无法准备本地 Model Hub 型号目录，请重试本回合。",
       "engine_down": "本地模型网关不可用。",
       "engine_down_streamed": "本地模型网关不可用。本回合输出可能不完整。",
       "migration_item_conflict": "此迁移项与当前模型网关状态冲突。",
