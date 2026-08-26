@@ -12,7 +12,6 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
-from decimal import Decimal
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Deque, Literal, Protocol, runtime_checkable
@@ -97,6 +96,254 @@ _ATTACHMENT_ADD_REJECTION_CODES_WITHOUT_WRITE = frozenset(
 ProviderAttachment = CaptureAttachment
 
 
+class _JSONSchema:
+    pass
+
+
+@dataclass(frozen=True)
+class _JSONScalarSchema(_JSONSchema):
+    number_only: bool = False
+
+
+@dataclass(frozen=True)
+class _JSONAnySchema(_JSONSchema):
+    pass
+
+
+@dataclass(frozen=True)
+class _JSONSkipSchema(_JSONSchema):
+    pass
+
+
+@dataclass(frozen=True)
+class _JSONNullableSchema(_JSONSchema):
+    value: _JSONSchema
+
+
+@dataclass(frozen=True)
+class _JSONArraySchema(_JSONSchema):
+    item: _JSONSchema
+    max_items: int | None = None
+    retention: Literal["all", "first", "none", "presence"] = "all"
+    retain_items: int | None = None
+
+
+@dataclass(frozen=True)
+class _JSONMapSchema(_JSONSchema):
+    fields: dict[str, _JSONSchema]
+    additional_values: _JSONSchema | None = None
+    max_items: int | None = None
+    reject_unknown: bool = False
+
+
+_JSON_SCALAR = _JSONScalarSchema()
+_JSON_NUMBER = _JSONScalarSchema(number_only=True)
+_JSON_ANY = _JSONAnySchema()
+_JSON_SKIP = _JSONSkipSchema()
+_JSON_PRESENCE = _JSONArraySchema(_JSON_SKIP, max_items=0, retention="presence")
+
+_WRITE_RESPONSE_SCHEMA = _JSONMapSchema(
+    {
+        "request_id": _JSON_SCALAR,
+        "data": _JSONMapSchema({"status": _JSON_SCALAR}),
+        "error": _JSONMapSchema({"code": _JSON_SCALAR}),
+    }
+)
+_PROFILE_RESPONSE_SCHEMA = _JSONMapSchema(
+    {
+        "data": _JSONMapSchema(
+            {
+                "profiles": _JSONArraySchema(
+                    _JSONMapSchema(
+                        {
+                            "user_id": _JSON_SCALAR,
+                            "profile_data": _JSON_ANY,
+                            "timestamp": _JSON_SCALAR,
+                            "created_at": _JSON_SCALAR,
+                            "createdAt": _JSON_SCALAR,
+                            "date": _JSON_SCALAR,
+                        }
+                    )
+                )
+            }
+        )
+    }
+)
+_HEALTH_RESPONSE_SCHEMA = _JSONMapSchema(
+    {
+        "status": _JSON_SCALAR,
+        "version": _JSON_SCALAR,
+        "capabilities": _JSONMapSchema(
+            {},
+            additional_values=_JSON_SCALAR,
+            max_items=33,
+        ),
+        "disabled_features": _JSONArraySchema(_JSON_SCALAR, max_items=33),
+        "cascade": _JSONNullableSchema(
+            _JSONMapSchema(
+                {
+                    "healthy": _JSON_SCALAR,
+                    "reasons": _JSONArraySchema(_JSON_SCALAR, max_items=9),
+                    "pending": _JSON_SCALAR,
+                    "failed_permanent": _JSON_SCALAR,
+                    "failed_retryable": _JSON_SCALAR,
+                    "drain_consecutive_failures": _JSON_SCALAR,
+                    "unrecoverable_total": _JSON_SCALAR,
+                    "optimize_failure_streak": _JSON_SCALAR,
+                    "prune_stale_seconds": _JSON_SCALAR,
+                },
+                reject_unknown=True,
+            )
+        ),
+    }
+)
+_CHAT_RESPONSE_SCHEMA = _JSONMapSchema(
+    {
+        "choices": _JSONArraySchema(
+            _JSONMapSchema(
+                {
+                    "finish_reason": _JSON_SCALAR,
+                    "message": _JSONMapSchema(
+                        {
+                            "content": _JSON_SCALAR,
+                            "role": _JSON_SCALAR,
+                        }
+                    ),
+                }
+            ),
+            max_items=1,
+        ),
+        "error": _JSONMapSchema(
+            {"code": _JSON_SCALAR, "message": _JSON_SCALAR}
+        ),
+    }
+)
+_EMBEDDING_RESPONSE_SCHEMA = _JSONMapSchema(
+    {
+        "data": _JSONArraySchema(
+            _JSONMapSchema(
+                {
+                    "embedding": _JSONArraySchema(
+                        _JSON_NUMBER,
+                        retain_items=1,
+                    )
+                }
+            ),
+            max_items=1,
+        ),
+        "error": _JSONMapSchema(
+            {"code": _JSON_SCALAR, "message": _JSON_SCALAR}
+        ),
+    }
+)
+_DEEPINFRA_RERANK_RESPONSE_SCHEMA = _JSONMapSchema(
+    {
+        "scores": _JSONArraySchema(
+            _JSONArraySchema(_JSON_NUMBER, max_items=2),
+            max_items=2,
+        ),
+        "error": _JSONMapSchema(
+            {"code": _JSON_SCALAR, "message": _JSON_SCALAR}
+        ),
+    }
+)
+_RANKED_RESULTS_RESPONSE_SCHEMA = _JSONMapSchema(
+    {
+        "results": _JSONArraySchema(
+            _JSONMapSchema({"relevance_score": _JSON_NUMBER}),
+            max_items=2,
+        ),
+        "error": _JSONMapSchema(
+            {"code": _JSON_SCALAR, "message": _JSON_SCALAR}
+        ),
+    }
+)
+_DASHSCOPE_RERANK_RESPONSE_SCHEMA = _JSONMapSchema(
+    {
+        "output": _RANKED_RESULTS_RESPONSE_SCHEMA,
+        "error": _JSONMapSchema(
+            {"code": _JSON_SCALAR, "message": _JSON_SCALAR}
+        ),
+    }
+)
+
+
+def _search_response_schema(limit: int) -> _JSONMapSchema:
+    timestamps = {
+        "timestamp": _JSON_SCALAR,
+        "created_at": _JSON_SCALAR,
+        "createdAt": _JSON_SCALAR,
+        "date": _JSON_SCALAR,
+    }
+    fact = _JSONMapSchema(
+        {
+            "content": _JSON_SCALAR,
+            "score": _JSON_SCALAR,
+            "relevance_score": _JSON_SCALAR,
+            **timestamps,
+        }
+    )
+    episode = _JSONMapSchema(
+        {
+            "id": _JSON_SCALAR,
+            "user_id": _JSON_SCALAR,
+            "score": _JSON_SCALAR,
+            "relevance_score": _JSON_SCALAR,
+            "summary": _JSON_SCALAR,
+            "subject": _JSON_SCALAR,
+            "episode": _JSON_SCALAR,
+            "atomic_facts": _JSONArraySchema(fact, retain_items=limit),
+            **timestamps,
+        }
+    )
+    return _JSONMapSchema(
+        {
+            "data": _JSONMapSchema(
+                {"episodes": _JSONArraySchema(episode, retain_items=limit)}
+            )
+        }
+    )
+
+
+def _list_response_schema(page_size: int) -> _JSONMapSchema:
+    episode = _JSONMapSchema(
+        {
+            "id": _JSON_SCALAR,
+            "user_id": _JSON_SCALAR,
+            "app_id": _JSON_SCALAR,
+            "project_id": _JSON_SCALAR,
+            "session_id": _JSON_SCALAR,
+            "timestamp": _JSON_SCALAR,
+            "sender_ids": _JSONArraySchema(_JSON_SCALAR, retention="none"),
+            "summary": _JSON_SCALAR,
+            "subject": _JSON_SCALAR,
+            "episode": _JSON_SCALAR,
+            "type": _JSON_SCALAR,
+        },
+        reject_unknown=True,
+    )
+    return _JSONMapSchema(
+        {
+            "request_id": _JSON_SCALAR,
+            "data": _JSONMapSchema(
+                {
+                    "episodes": _JSONArraySchema(
+                        episode,
+                        max_items=page_size + 1,
+                    ),
+                    "profiles": _JSON_PRESENCE,
+                    "agent_cases": _JSON_PRESENCE,
+                    "agent_skills": _JSON_PRESENCE,
+                    "total_count": _JSON_SCALAR,
+                    "count": _JSON_SCALAR,
+                },
+                reject_unknown=True,
+            ),
+        },
+        reject_unknown=True,
+    )
+
+
 @dataclass(frozen=True)
 class ProviderHealthSnapshot:
     """Allowlisted public EverOS health facts, with no Avibe readiness verdict."""
@@ -153,6 +400,7 @@ class _ProcessingProbeSpec:
     path: str
     payload: dict[str, Any]
     validator: Callable[[Any], bool]
+    response_schema: _JSONSchema
 
 
 def processing_probe_deadline_seconds(
@@ -445,6 +693,7 @@ class EverOSPort:
                         value = await _read_json_response(
                             response,
                             timeout_seconds=timeout_seconds or self._sidecar_timeout_seconds,
+                            schema=_WRITE_RESPONSE_SCHEMA,
                         )
                     except (
                         ijson.JSONError,
@@ -545,6 +794,7 @@ class EverOSPort:
                 "page_size": 1,
             },
             require_json=True,
+            response_schema=_PROFILE_RESPONSE_SCHEMA,
         )
         data = body.get("data") if isinstance(body, dict) else None
         if not isinstance(data, dict) or not _is_json_value(data):
@@ -587,6 +837,7 @@ class EverOSPort:
                 "sort_order": "desc",
             },
             require_json=True,
+            response_schema=_list_response_schema(page_size),
         )
         return _map_episode_page(
             body,
@@ -606,7 +857,13 @@ class EverOSPort:
     async def health_snapshot(self) -> ProviderHealthSnapshot:
         """Read and strictly project the public sidecar health response once."""
 
-        payload = await self._sidecar_request("GET", "/health", None, require_json=True)
+        payload = await self._sidecar_request(
+            "GET",
+            "/health",
+            None,
+            require_json=True,
+            response_schema=_HEALTH_RESPONSE_SCHEMA,
+        )
         snapshot = _provider_health_snapshot(payload)
         if snapshot is None:
             raise MemoryProviderFailure("memory_provider_response_invalid", retryable=False)
@@ -640,6 +897,7 @@ class EverOSPort:
                         "temperature": 0,
                     },
                     validator=_valid_chat_probe_response,
+                    response_schema=_CHAT_RESPONSE_SCHEMA,
                 ),
                 _ProcessingProbeSpec(
                     base_url=self._embedding_base_url,
@@ -647,6 +905,7 @@ class EverOSPort:
                     path="embeddings",
                     payload={"model": self._embedding_model, "input": "memory health check"},
                     validator=_valid_embedding_probe_response,
+                    response_schema=_EMBEDDING_RESPONSE_SCHEMA,
                 ),
             ]
             if self._rerank_configured():
@@ -659,6 +918,7 @@ class EverOSPort:
                         path="chat/completions",
                         payload=_multimodal_preflight_payload(self._multimodal_model),
                         validator=_valid_chat_probe_response,
+                        response_schema=_CHAT_RESPONSE_SCHEMA,
                     )
                 )
             groups: dict[tuple[str, str], list[_ProcessingProbeSpec]] = {}
@@ -688,10 +948,11 @@ class EverOSPort:
                     "temperature": 0,
                 },
                 _valid_chat_probe_response,
+                _CHAT_RESPONSE_SCHEMA,
             ),
             ("embedding", self._embedding_base_url, self._embedding_api_key, "embeddings", {
                 "model": self._embedding_model, "input": "OK",
-            }, _valid_embedding_probe_response),
+            }, _valid_embedding_probe_response, _EMBEDDING_RESPONSE_SCHEMA),
         ]
         if self._rerank_configured():
             probe = self._rerank_probe_spec()
@@ -703,6 +964,7 @@ class EverOSPort:
                     probe.path,
                     probe.payload,
                     probe.validator,
+                    probe.response_schema,
                 )
             )
         if self._multimodal_configured():
@@ -714,10 +976,11 @@ class EverOSPort:
                     "chat/completions",
                     _multimodal_preflight_payload(self._multimodal_model),
                     _valid_chat_probe_response,
+                    _CHAT_RESPONSE_SCHEMA,
                 )
             )
         first_failure = None
-        for side, base_url, api_key, path, payload, validator in checks:
+        for side, base_url, api_key, path, payload, validator, response_schema in checks:
             try:
                 failure = await asyncio.wait_for(
                     self._preflight_endpoint(
@@ -727,6 +990,7 @@ class EverOSPort:
                         path,
                         payload,
                         validator,
+                        response_schema,
                     ),
                     timeout=_PREFLIGHT_TIMEOUT_SECONDS,
                 )
@@ -822,6 +1086,7 @@ class EverOSPort:
                         capability_rejection=True,
                         timeout_seconds=request_timeout,
                         response_metadata=telemetry,
+                        response_schema=_search_response_schema(limit),
                     ),
                     timeout=request_timeout,
                 )
@@ -832,6 +1097,7 @@ class EverOSPort:
                     request,
                     require_json=True,
                     capability_rejection=True,
+                    response_schema=_search_response_schema(limit),
                 )
             if not isinstance(body, dict):
                 raise MemoryProviderFailure("memory_provider_response_invalid")
@@ -852,6 +1118,7 @@ class EverOSPort:
         capability_rejection: bool = False,
         timeout_seconds: float | None = None,
         response_metadata: dict[str, str] | None = None,
+        response_schema: _JSONSchema | None = None,
     ) -> dict[str, Any] | None:
         started = time.monotonic()
         request_timeout = _positive_timeout(
@@ -919,6 +1186,7 @@ class EverOSPort:
                     value = await _read_json_response(
                         response,
                         timeout_seconds=request_timeout,
+                        schema=response_schema or _JSON_ANY,
                     )
         except MemoryProviderFailure:
             raise
@@ -950,6 +1218,7 @@ class EverOSPort:
         path: str,
         payload: dict[str, Any],
         validator: Callable[[Any], bool],
+        response_schema: _JSONSchema,
     ) -> bool:
         if not base_url or not api_key:
             return False
@@ -974,6 +1243,7 @@ class EverOSPort:
                     value = await _read_json_response(
                         response,
                         timeout_seconds=self._processing_timeout_seconds,
+                        schema=response_schema,
                     )
         except (
             asyncio.TimeoutError,
@@ -1003,6 +1273,7 @@ class EverOSPort:
                     path=probe.path,
                     payload=probe.payload,
                     validator=probe.validator,
+                    response_schema=probe.response_schema,
                 )
             except Exception:
                 result = False
@@ -1017,6 +1288,7 @@ class EverOSPort:
         path,
         payload,
         validator,
+        response_schema,
     ):
         error_name = _preflight_error_name(side)
         diagnostic = MemoryPreflightDiagnostic(side)
@@ -1035,6 +1307,7 @@ class EverOSPort:
                         value = await _read_json_response(
                             response,
                             timeout_seconds=_PREFLIGHT_TIMEOUT_SECONDS,
+                            schema=response_schema,
                         )
                     except (
                         ijson.JSONError,
@@ -1094,13 +1367,13 @@ async def _read_json_response(
     response: httpx.Response,
     *,
     timeout_seconds: float,
+    schema: _JSONSchema,
 ) -> Any:
     with tempfile.TemporaryFile(mode="w+b") as spool:
-        await asyncio.wait_for(
-            _spool_response(response, spool),
+        return await asyncio.wait_for(
+            _spool_and_parse_response(response, spool, schema),
             timeout=_positive_timeout(timeout_seconds, _SIDECAR_TIMEOUT_SECONDS),
         )
-        return await asyncio.to_thread(_parse_spooled_json, spool)
 
 
 async def _discard_response(
@@ -1114,10 +1387,15 @@ async def _discard_response(
     )
 
 
-async def _spool_response(response: httpx.Response, spool: BinaryIO) -> None:
+async def _spool_and_parse_response(
+    response: httpx.Response,
+    spool: BinaryIO,
+    schema: _JSONSchema,
+) -> Any:
     async for chunk in response.aiter_bytes(chunk_size=_RESPONSE_STREAM_CHUNK_BYTES):
         spool.write(chunk)
     spool.flush()
+    return await asyncio.to_thread(_parse_spooled_json, spool, schema)
 
 
 async def _consume_response(response: httpx.Response) -> None:
@@ -1125,39 +1403,166 @@ async def _consume_response(response: httpx.Response) -> None:
         pass
 
 
-def _parse_spooled_json(spool: BinaryIO) -> Any:
+def _parse_spooled_json(spool: BinaryIO, schema: _JSONSchema) -> Any:
     spool.seek(0)
-    # The C backend replaces isolated Unicode surrogates with "?". The Python
-    # backend preserves them so the existing UTF-8 response validation can
-    # reject malformed provider strings instead of silently changing data.
-    values = ijson_python.items(spool, "")
-    try:
-        value = next(values)
-    except StopIteration as exc:
-        raise ValueError("empty JSON response") from exc
-    try:
-        next(values)
-    except StopIteration:
-        return _normalize_streamed_numbers(value)
-    raise ValueError("multiple JSON values in response")
+    parser = _ProjectedJSONParser(schema)
+    for event, value in ijson_python.basic_parse(spool, use_float=True):
+        parser.event(event, value)
+    return parser.finish()
 
 
-def _normalize_streamed_numbers(value: Any) -> Any:
-    if isinstance(value, Decimal):
-        return float(value)
-    if not isinstance(value, (dict, list)):
-        return value
+@dataclass
+class _ProjectedFrame:
+    schema: _JSONSchema
+    value: dict[str, Any] | list[Any] | None
+    pending_key: str | None = None
+    count: int = 0
 
-    pending = [value]
-    while pending:
-        container = pending.pop()
-        items = container.items() if isinstance(container, dict) else enumerate(container)
-        for key, child in items:
-            if isinstance(child, Decimal):
-                container[key] = float(child)
-            elif isinstance(child, (dict, list)):
-                pending.append(child)
-    return value
+
+class _ProjectedJSONParser:
+    """Build only schema-selected JSON subtrees while scanning every token."""
+
+    def __init__(self, schema: _JSONSchema) -> None:
+        self._schema = schema
+        self._frames: list[_ProjectedFrame] = []
+        self._root: Any = None
+        self._root_seen = False
+
+    def event(self, event: str, value: Any) -> None:
+        if event == "map_key":
+            if not self._frames or (
+                self._frames[-1].value is not None
+                and not isinstance(self._frames[-1].value, dict)
+            ):
+                raise ValueError("unexpected map key")
+            self._frames[-1].pending_key = value
+            return
+        if event in {"start_map", "start_array"}:
+            if self._frames and self._frames[-1].value is None:
+                self._frames.append(_ProjectedFrame(_JSON_SKIP, None))
+                return
+            schema = self._next_schema()
+            if isinstance(schema, _JSONSkipSchema):
+                self._frames.append(_ProjectedFrame(schema, None))
+                return
+            if isinstance(schema, _JSONNullableSchema):
+                schema = schema.value
+            if isinstance(schema, _JSONScalarSchema):
+                # Keep an incorrectly shaped value for endpoint validators to
+                # report the specific contract error instead of collapsing it
+                # into a generic non-object response.
+                schema = _JSON_ANY
+            if event == "start_map":
+                if not isinstance(schema, (_JSONMapSchema, _JSONAnySchema)):
+                    raise ValueError("unexpected object")
+                value = {}
+            else:
+                if not isinstance(schema, (_JSONArraySchema, _JSONAnySchema)):
+                    raise ValueError("unexpected array")
+                value = []
+            self._attach(value)
+            self._frames.append(_ProjectedFrame(schema, value))
+            return
+        if event in {"end_map", "end_array"}:
+            if not self._frames:
+                raise ValueError("unexpected container end")
+            frame = self._frames.pop()
+            if frame.value is None:
+                return
+            if event == "end_map" and not isinstance(frame.value, dict):
+                raise ValueError("mismatched container")
+            if event == "end_array" and not isinstance(frame.value, list):
+                raise ValueError("mismatched container")
+            return
+        if self._frames and self._frames[-1].value is None:
+            return
+        schema = self._next_schema()
+        if isinstance(schema, _JSONSkipSchema):
+            return
+        if isinstance(schema, _JSONNullableSchema):
+            schema = schema.value
+        if isinstance(schema, _JSONScalarSchema):
+            if schema.number_only and (
+                isinstance(value, bool) or not isinstance(value, (int, float))
+            ):
+                raise ValueError("unexpected scalar type")
+        self._attach(value)
+
+    def _next_schema(self) -> _JSONSchema:
+        if not self._frames:
+            if self._root_seen:
+                raise ValueError("multiple JSON values")
+            self._root_seen = True
+            return self._schema
+        frame = self._frames[-1]
+        schema = frame.schema
+        if isinstance(schema, _JSONNullableSchema):
+            schema = schema.value
+        if isinstance(frame.value, dict):
+            if not isinstance(schema, (_JSONMapSchema, _JSONAnySchema)):
+                raise ValueError("unexpected map member")
+            key = frame.pending_key
+            if isinstance(schema, _JSONAnySchema):
+                return _JSON_ANY
+            if key in schema.fields:
+                return schema.fields[key]
+            if schema.reject_unknown:
+                raise ValueError("unknown map member")
+            return schema.additional_values or _JSON_SKIP
+        if isinstance(frame.value, list):
+            if not isinstance(schema, (_JSONArraySchema, _JSONAnySchema)):
+                raise ValueError("unexpected array member")
+            frame.count += 1
+            if isinstance(schema, _JSONAnySchema):
+                return _JSON_ANY
+            if schema.max_items is not None and frame.count > schema.max_items:
+                raise ValueError("array exceeds response contract")
+            if schema.retention in {"none", "presence"} or (
+                schema.retain_items is not None and frame.count > schema.retain_items
+            ):
+                return _JSON_SKIP
+            return schema.item
+        raise ValueError("unexpected value")
+
+    def _attach(self, value: Any) -> None:
+        if not self._frames:
+            if self._root_seen and self._root is not None:
+                raise ValueError("multiple JSON values")
+            self._root = value
+            return
+        frame = self._frames[-1]
+        if frame.value is None:
+            return
+        if isinstance(frame.value, dict):
+            key = frame.pending_key
+            if key is None:
+                raise ValueError("missing map key")
+            frame.pending_key = None
+            if not isinstance(frame.schema, (_JSONMapSchema, _JSONAnySchema)):
+                raise ValueError("unexpected map value")
+            child_schema = (
+                _JSON_ANY
+                if isinstance(frame.schema, _JSONAnySchema)
+                else frame.schema.fields.get(key, frame.schema.additional_values or _JSON_SKIP)
+            )
+            if not isinstance(child_schema, _JSONSkipSchema):
+                frame.value[key] = value
+        else:
+            schema = frame.schema
+            if isinstance(schema, _JSONNullableSchema):
+                schema = schema.value
+            if isinstance(schema, _JSONArraySchema):
+                if schema.retention in {"none", "presence"} or (
+                    schema.retain_items is not None
+                    and frame.count > schema.retain_items
+                ):
+                    return
+            frame.value.append(value)
+
+    def finish(self) -> Any:
+        if self._frames or not self._root_seen:
+            raise ValueError("incomplete JSON response")
+        return self._root
 
 
 def _map_search_items(
@@ -1720,6 +2125,7 @@ def _rerank_probe_spec(
             path="rerank",
             payload={"model": model, "query": "OK", "documents": ["OK"]},
             validator=_valid_ranked_results_probe_response,
+            response_schema=_RANKED_RESULTS_RESPONSE_SCHEMA,
         )
     if provider == "dashscope":
         return _ProcessingProbeSpec(
@@ -1735,6 +2141,7 @@ def _rerank_probe_spec(
                 value,
                 results_key=("output", "results"),
             ),
+            response_schema=_DASHSCOPE_RERANK_RESPONSE_SCHEMA,
         )
     return _ProcessingProbeSpec(
         base_url=base_url,
@@ -1742,6 +2149,7 @@ def _rerank_probe_spec(
         path=model or "",
         payload={"queries": ["OK"], "documents": ["OK"]},
         validator=_valid_deepinfra_rerank_probe_response,
+        response_schema=_DEEPINFRA_RERANK_RESPONSE_SCHEMA,
     )
 
 

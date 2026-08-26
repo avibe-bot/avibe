@@ -6,6 +6,7 @@ import hashlib
 import json
 import struct
 import tempfile
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -1435,6 +1436,56 @@ def test_profile_spools_large_streamed_response_without_aread() -> None:
     temporary_file.assert_called_once_with(mode="w+b")
     assert items[0].profile is not None
     assert items[0].profile.summary == summary
+
+
+def test_profile_skips_large_irrelevant_root_field_during_projection() -> None:
+    payload = json.dumps(
+        {
+            "data": {
+                "profiles": [
+                    {"user_id": "owner-1", "profile_data": {"summary": "kept"}}
+                ]
+            },
+            "irrelevant_provider_dump": ["x" * 4096 for _ in range(1024)],
+        }
+    ).encode("utf-8")
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            stream=_ChunkedResponseStream(payload),
+        )
+
+    with _sidecar_transport(handler):
+        items = asyncio.run(
+            EverOSPort(Path("/tmp/everos.sock")).profile("owner-1", PROJECT)
+        )
+
+    assert items[0].profile is not None
+    assert items[0].profile.summary == "kept"
+
+
+def test_profile_parse_is_inside_total_response_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"profiles": []}})
+
+    def slow_parse(*_args, **_kwargs):
+        time.sleep(0.1)
+        return {"data": {"profiles": []}}
+
+    monkeypatch.setattr("core.memory.everos._parse_spooled_json", slow_parse)
+
+    async def run() -> None:
+        with pytest.raises(MemoryProviderFailure) as raised:
+            await EverOSPort(
+                Path("/tmp/everos.sock"),
+                sidecar_timeout_seconds=0.01,
+            ).profile("owner-1", PROJECT)
+        assert raised.value.error == "memory_provider_timeout"
+
+    with _sidecar_transport(handler):
+        asyncio.run(run())
 
 
 def test_profile_maps_known_fields_without_collapsing_basis_and_evidence() -> None:
