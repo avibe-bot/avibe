@@ -11,8 +11,8 @@ from unittest.mock import patch
 import httpx
 import pytest
 
-from core.memory import artifact as memory_artifact
-from core.memory.everos import (
+from avibe_memory import artifact as memory_artifact
+from avibe_memory.everos import (
     PROCESSING_PROBE_REQUEST_TIMEOUT_SECONDS,
     _AGENTIC_ROUND_HEADER,
     _AGENTIC_TIMEOUT_HEADER,
@@ -33,12 +33,12 @@ from core.memory.everos import (
     ProviderCapture,
     attachment_add_rejection_proves_no_write,
 )
-from core.memory.store import (
+from avibe_memory.store import (
     MemoryStore,
     _provider_session_ref,
     derive_assistant_memory_owner_id,
 )
-from core.memory.types import (
+from avibe_memory.types import (
     MemoryListItem,
     MemoryListPage,
     MemoryProfile,
@@ -70,7 +70,7 @@ def test_attachment_rejection_no_write_proof_matches_pinned_everos_version() -> 
 
 
 def _sidecar_transport(handler):
-    return patch("core.memory.everos.httpx.AsyncHTTPTransport", return_value=httpx.MockTransport(handler))
+    return patch("avibe_memory.everos.httpx.AsyncHTTPTransport", return_value=httpx.MockTransport(handler))
 
 
 class _FailingResponseStream(httpx.AsyncByteStream):
@@ -1505,7 +1505,7 @@ def test_processing_health_probes_both_authenticated_endpoints() -> None:
         ).processing_healthy()
 
     real_async_client = httpx.AsyncClient
-    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+    with patch("avibe_memory.everos.httpx.AsyncClient", autospec=True) as client_type:
         # The production adapter uses two client constructions: sidecar is not
         # used for processing probes, so return a normal mock transport client
         # through a small real-client factory instead of inspecting secrets.
@@ -1594,7 +1594,7 @@ def test_processing_preflight_projects_sanitized_provider_error() -> None:
         ).preflight()
 
     real_async_client = httpx.AsyncClient
-    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+    with patch("avibe_memory.everos.httpx.AsyncClient", autospec=True) as client_type:
         client_type.side_effect = lambda **kwargs: real_async_client(transport=httpx.MockTransport(handler), **kwargs)
         result = asyncio.run(run())
     assert result.ok is False
@@ -1645,7 +1645,7 @@ def test_processing_preflight_accepts_truncated_chat_completion_from_resolved_sl
         ).preflight()
 
     real_async_client = httpx.AsyncClient
-    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+    with patch("avibe_memory.everos.httpx.AsyncClient", autospec=True) as client_type:
         client_type.side_effect = lambda **kwargs: real_async_client(
             transport=httpx.MockTransport(handler), **kwargs
         )
@@ -1745,7 +1745,7 @@ def test_processing_preflight_accepts_thinking_model_chat_completions() -> None:
         ).preflight()
 
     real_async_client = httpx.AsyncClient
-    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+    with patch("avibe_memory.everos.httpx.AsyncClient", autospec=True) as client_type:
         client_type.side_effect = lambda **kwargs: real_async_client(
             transport=httpx.MockTransport(handler), **kwargs
         )
@@ -1780,7 +1780,7 @@ def test_processing_health_accepts_thinking_model_chat_completions() -> None:
         ).processing_healthy()
 
     real_async_client = httpx.AsyncClient
-    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+    with patch("avibe_memory.everos.httpx.AsyncClient", autospec=True) as client_type:
         client_type.side_effect = lambda **kwargs: real_async_client(
             transport=httpx.MockTransport(handler), **kwargs
         )
@@ -1805,7 +1805,7 @@ def test_processing_preflight_reports_the_rejected_2xx_shape() -> None:
         ).preflight()
 
     real_async_client = httpx.AsyncClient
-    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+    with patch("avibe_memory.everos.httpx.AsyncClient", autospec=True) as client_type:
         client_type.side_effect = lambda **kwargs: real_async_client(
             transport=httpx.MockTransport(handler), **kwargs
         )
@@ -1846,7 +1846,7 @@ def test_processing_preflight_requires_completion_metadata_for_empty_chat_conten
         ).preflight()
 
     real_async_client = httpx.AsyncClient
-    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+    with patch("avibe_memory.everos.httpx.AsyncClient", autospec=True) as client_type:
         client_type.side_effect = lambda **kwargs: real_async_client(
             transport=httpx.MockTransport(handler), **kwargs
         )
@@ -1885,7 +1885,7 @@ def test_processing_preflight_rejects_unhashable_finish_reason() -> None:
         ).preflight()
 
     real_async_client = httpx.AsyncClient
-    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+    with patch("avibe_memory.everos.httpx.AsyncClient", autospec=True) as client_type:
         client_type.side_effect = lambda **kwargs: real_async_client(
             transport=httpx.MockTransport(handler), **kwargs
         )
@@ -1923,7 +1923,7 @@ def test_processing_preflight_probes_configured_rerank_endpoint() -> None:
         ).preflight()
 
     real_async_client = httpx.AsyncClient
-    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+    with patch("avibe_memory.everos.httpx.AsyncClient", autospec=True) as client_type:
         client_type.side_effect = lambda **kwargs: real_async_client(
             transport=httpx.MockTransport(handler), **kwargs
         )
@@ -1969,7 +1969,7 @@ def test_processing_preflight_probes_vllm_rerank_endpoint() -> None:
         ).preflight()
 
     real_async_client = httpx.AsyncClient
-    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+    with patch("avibe_memory.everos.httpx.AsyncClient", autospec=True) as client_type:
         client_type.side_effect = lambda **kwargs: real_async_client(
             transport=httpx.MockTransport(handler), **kwargs
         )
@@ -2014,7 +2014,7 @@ def test_processing_preflight_probes_dashscope_rerank_endpoint() -> None:
         ).preflight()
 
     real_async_client = httpx.AsyncClient
-    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+    with patch("avibe_memory.everos.httpx.AsyncClient", autospec=True) as client_type:
         client_type.side_effect = lambda **kwargs: real_async_client(
             transport=httpx.MockTransport(handler), **kwargs
         )
@@ -2060,7 +2060,7 @@ def test_processing_preflight_infers_dashscope_from_maas_url_without_provider() 
         ).preflight()
 
     real_async_client = httpx.AsyncClient
-    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+    with patch("avibe_memory.everos.httpx.AsyncClient", autospec=True) as client_type:
         client_type.side_effect = lambda **kwargs: real_async_client(
             transport=httpx.MockTransport(handler), **kwargs
         )
@@ -2102,7 +2102,7 @@ def test_processing_preflight_probes_configured_multimodal_endpoint() -> None:
         ).preflight()
 
     real_async_client = httpx.AsyncClient
-    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+    with patch("avibe_memory.everos.httpx.AsyncClient", autospec=True) as client_type:
         client_type.side_effect = lambda **kwargs: real_async_client(
             transport=httpx.MockTransport(handler), **kwargs
         )
@@ -2165,7 +2165,7 @@ def test_processing_preflight_returns_typed_multimodal_failure() -> None:
         ).preflight()
 
     real_async_client = httpx.AsyncClient
-    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+    with patch("avibe_memory.everos.httpx.AsyncClient", autospec=True) as client_type:
         client_type.side_effect = lambda **kwargs: real_async_client(
             transport=httpx.MockTransport(handler), **kwargs
         )
@@ -2202,7 +2202,7 @@ def test_processing_preflight_returns_typed_rerank_failure() -> None:
         ).preflight()
 
     real_async_client = httpx.AsyncClient
-    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+    with patch("avibe_memory.everos.httpx.AsyncClient", autospec=True) as client_type:
         client_type.side_effect = lambda **kwargs: real_async_client(
             transport=httpx.MockTransport(handler), **kwargs
         )
@@ -2235,7 +2235,7 @@ def test_processing_preflight_scrubs_provider_error_code() -> None:
         ).preflight()
 
     real_async_client = httpx.AsyncClient
-    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+    with patch("avibe_memory.everos.httpx.AsyncClient", autospec=True) as client_type:
         client_type.side_effect = lambda **kwargs: real_async_client(
             transport=httpx.MockTransport(handler), **kwargs
         )
@@ -2261,7 +2261,7 @@ def test_processing_preflight_preserves_http_status_for_non_json_errors() -> Non
         ).preflight()
 
     real_async_client = httpx.AsyncClient
-    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+    with patch("avibe_memory.everos.httpx.AsyncClient", autospec=True) as client_type:
         client_type.side_effect = lambda **kwargs: real_async_client(
             transport=httpx.MockTransport(handler), **kwargs
         )
@@ -2293,7 +2293,7 @@ def test_processing_preflight_accepts_large_bounded_embedding_vectors() -> None:
         ).preflight()
 
     real_async_client = httpx.AsyncClient
-    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+    with patch("avibe_memory.everos.httpx.AsyncClient", autospec=True) as client_type:
         client_type.side_effect = lambda **kwargs: real_async_client(
             transport=httpx.MockTransport(handler), **kwargs
         )
@@ -2319,7 +2319,7 @@ def test_processing_health_rejects_llm_probe_without_completion_content() -> Non
         ).processing_healthy()
 
     real_async_client = httpx.AsyncClient
-    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+    with patch("avibe_memory.everos.httpx.AsyncClient", autospec=True) as client_type:
         client_type.side_effect = lambda **kwargs: real_async_client(transport=httpx.MockTransport(handler), **kwargs)
         assert asyncio.run(run()) is False
 

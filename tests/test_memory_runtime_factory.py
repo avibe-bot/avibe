@@ -8,8 +8,8 @@ from typing import AsyncIterator
 import pytest
 
 from config.v2_config import MemoryConfig, MemoryEndpointConfig, MemoryProcessingConfig
-from core.memory.artifact import FakeMemoryArtifactManager
-from core.memory.process import FakeEverOSProcessFactory
+from avibe_memory.artifact import FakeMemoryArtifactManager
+from avibe_memory.process import FakeEverOSProcessFactory
 from tests.memory_runtime_factory import (
     MemoryRuntimeFactory,
     finalizing_memory_runtimes,
@@ -353,7 +353,7 @@ sys.path.insert(0, {str(project_root)!r})
 import pytest
 
 from config.v2_config import MemoryConfig
-from core.memory.artifact import FakeMemoryArtifactManager
+from avibe_memory.artifact import FakeMemoryArtifactManager
 
 
 @pytest.mark.asyncio

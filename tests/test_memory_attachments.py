@@ -14,9 +14,9 @@ from urllib.parse import quote
 
 import pytest
 
-import core.memory.attachments as attachment_module
-import core.memory.confined_filesystem as confined_filesystem_module
-from core.memory.attachments import (
+import avibe_memory.attachments as attachment_module
+import avibe_memory.confined_filesystem as confined_filesystem_module
+from avibe_memory.attachments import (
     AttachmentBundleInvalidError,
     AttachmentCleanupUnprovenError,
     AttachmentPinError,
@@ -25,7 +25,7 @@ from core.memory.attachments import (
     PinnedBundle,
     workbench_capture_attachments,
 )
-from core.memory.types import CaptureAttachment
+from avibe_memory.types import CaptureAttachment
 
 
 @pytest.fixture
@@ -176,7 +176,7 @@ def test_pin_revalidates_workbench_office_copy_without_losing_siblings(
 ) -> None:
     home, source_root = attachment_roots
     monkeypatch.setattr(
-        "core.memory.modality.office_conversion_available",
+        "avibe_memory.modality.office_conversion_available",
         lambda: True,
     )
     office = _source_file(source_root, "report.xlsx", _xlsx_bytes())
@@ -223,11 +223,11 @@ def test_workbench_long_office_display_name_keeps_suffix_through_pin(
 ) -> None:
     _home, source_root = attachment_roots
     monkeypatch.setattr(
-        "core.memory.modality.office_conversion_available",
+        "avibe_memory.modality.office_conversion_available",
         lambda: True,
     )
     monkeypatch.setattr(
-        "core.memory.modality.office_document_conversion_succeeds",
+        "avibe_memory.modality.office_document_conversion_succeeds",
         lambda _path, **_kwargs: True,
     )
     office = _source_file(source_root, "upload.xlsx", _xlsx_bytes())
@@ -255,11 +255,11 @@ def test_pin_requires_office_conversion_proof_without_losing_siblings(
 ) -> None:
     _home, source_root = attachment_roots
     monkeypatch.setattr(
-        "core.memory.modality.office_conversion_available",
+        "avibe_memory.modality.office_conversion_available",
         lambda: True,
     )
     monkeypatch.setattr(
-        "core.memory.modality.office_document_conversion_succeeds",
+        "avibe_memory.modality.office_document_conversion_succeeds",
         lambda _path, **_kwargs: False,
     )
     office = _source_file(source_root, "report.xlsx", _xlsx_bytes())
@@ -291,7 +291,7 @@ def test_office_conversion_uses_one_bounded_budget_per_pin(
 ) -> None:
     _home, source_root = attachment_roots
     monkeypatch.setattr(
-        "core.memory.modality.office_conversion_available",
+        "avibe_memory.modality.office_conversion_available",
         lambda: True,
     )
     observed_timeouts: list[float] = []
@@ -301,7 +301,7 @@ def test_office_conversion_uses_one_bounded_budget_per_pin(
         return True
 
     monkeypatch.setattr(
-        "core.memory.modality.office_document_conversion_succeeds",
+        "avibe_memory.modality.office_document_conversion_succeeds",
         conversion_succeeds,
     )
     clock = iter([100.0, 105.0, 131.0])

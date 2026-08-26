@@ -44,6 +44,7 @@ write to ``~/.avibe/`` or legacy ``~/.vibe_remote/``).
 from __future__ import annotations
 
 import ast
+import os
 import shutil
 import sqlite3
 import sys
@@ -306,8 +307,11 @@ def hold_migration_lock_elsewhere():
 @pytest.fixture(autouse=True)
 def _reset_memory_artifact_manager():
     """Keep the managed Memory runtime bound to the current test home."""
+    if os.environ.get("AVIBE_TEST_BLOCK_MEMORY_IMPORTS") == "1":
+        yield
+        return
     try:
-        from core.memory.artifact import set_memory_artifact_manager_for_tests
+        from avibe_memory.artifact import set_memory_artifact_manager_for_tests
     except Exception:
         yield
         return

@@ -22,8 +22,8 @@ from core.inbound_attachment_lease import (
     leased_attachment_records,
     open_leased_attachment_record,
 )
-from core.memory import modality as memory_modality
-from core.memory.confined_filesystem import (
+from avibe_memory import modality as memory_modality
+from avibe_memory.confined_filesystem import (
     ConfinedFilesystemError,
     ConfinedRoot,
     SpilledDirectoryOrder,
@@ -31,7 +31,7 @@ from core.memory.confined_filesystem import (
     open_confined_directory,
     required_no_follow_flag,
 )
-from core.memory.types import (
+from avibe_memory.types import (
     CaptureAttachment,
     MemoryContentKind,
     MemoryErrorCode,

@@ -27,7 +27,7 @@ from config import paths
 from config.v2_config import (
     MemoryConfig,
 )
-from core.memory.artifact import (
+from avibe_memory.artifact import (
     EVEROS_VERSION,
     MemoryArtifactCandidate,
     MemoryArtifactPort,
@@ -36,30 +36,30 @@ from core.memory.artifact import (
     get_memory_artifact_manager,
 )
 from core.blocking import run_blocking
-from core.memory.confined_filesystem import (
+from avibe_memory.confined_filesystem import (
     ConfinedFilesystemError,
     ConfinedRoot,
     PrivateSqliteDatabase,
     remove_confined_path,
     required_no_follow_flag,
 )
-from core.memory.data_reset import MemoryDataResetResult, reset_memory_data_roots
-from core.memory.everos import (
+from avibe_memory.data_reset import MemoryDataResetResult, reset_memory_data_roots
+from avibe_memory.everos import (
     EverOSPort,
     MemoryProviderFailure,
     ProviderHealthSnapshot,
 )
-from core.memory.everos_insight import MemoryInsightPaths, MemoryInsightReader
-from core.memory.module import MemoryModule, MemorySessionLifecycleBusyError
+from avibe_memory.everos_insight import MemoryInsightPaths, MemoryInsightReader
+from avibe_memory.module import MemoryModule, MemorySessionLifecycleBusyError
 from config.memory_operation_lock import MemoryOperationBusy, MemoryOperationLease
-from core.memory.process import EverOSProcessSettings
-from core.memory.supervisor import (
+from avibe_memory.process import EverOSProcessSettings
+from avibe_memory.supervisor import (
     EverOSSupervisor,
     EverOSSupervisorFactory,
     EverOSSupervisorStatus,
 )
 from vibe.memory_contract import IM_ATTACHMENT_CAPTURE_PLATFORMS
-from core.memory.processing_record import (
+from avibe_memory.processing_record import (
     AnomalyProjection,
     FailureLogObservation,
     MaintenanceProjection,
@@ -73,7 +73,7 @@ from core.memory.processing_record import (
     RuntimeHealthProjection,
     SourceObservation,
 )
-from core.memory.provider_root import (
+from avibe_memory.provider_root import (
     ProviderRoot,
     ProviderRootError,
     ProviderRootMetadata,
@@ -83,9 +83,9 @@ from vibe.memory_project_ids import (
     DEFAULT_MEMORY_PROJECT_ID,
     MEMORY_SEARCH_ALL_PROJECTS,
 )
-from core.memory.store import MemoryStore, is_principal_id
+from avibe_memory.store import MemoryStore, is_principal_id
 from core.memory_loader import MEMORY_LIST_CURSOR_MAX_BYTES
-from core.memory.types import (
+from avibe_memory.types import (
     MemoryFailureLogEntry,
     MemoryItem,
     MemoryItems,

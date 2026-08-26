@@ -8,8 +8,8 @@ from unittest.mock import Mock
 
 import pytest
 
-from core.memory.attachments import AttachmentPinError
-from core.memory.types import CaptureAttachment
+from avibe_memory.attachments import AttachmentPinError
+from avibe_memory.types import CaptureAttachment
 from modules.im.base import FileAttachment
 
 
@@ -61,7 +61,7 @@ async def test_attachment_capture_telemetry_uses_terminal_result(
     from tests.test_memory_module import _module
     from tests.test_memory_slice3 import _Runtime, _controller
 
-    caplog.set_level("INFO", logger="core.memory.admission")
+    caplog.set_level("INFO", logger="avibe_memory.admission")
 
     # A partial download followed by reservation failure reaches the terminal
     # text-only result with no captured attachments.
@@ -111,7 +111,7 @@ async def test_attachment_capture_telemetry_uses_terminal_result(
         ext="pdf",
     )
     monkeypatch.setattr(
-        "core.memory.admission.select_memory_attachments",
+        "avibe_memory.admission.select_memory_attachments",
         lambda _lease: SimpleNamespace(attachments=(survivor,), skipped=()),
     )
 

@@ -107,7 +107,7 @@ artifacts = [
 [tool.hatch.build.hooks.custom]
 
 [tool.hatch.build.targets.wheel]
-packages = ["vibe", "config", "core", "modules", "storage"]
+packages = ["vibe", "config", "core", "modules", "storage", "avibe_memory"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "main.py" = "vibe/service_main.py"
@@ -121,6 +121,7 @@ include = [
     "core/**",
     "modules/**",
     "storage/**",
+    "avibe_memory/**",
     "hatch_build.py",
     "main.py",
     "scripts/prepare_local_show_runtime_manifest.py",

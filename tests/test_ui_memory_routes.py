@@ -599,7 +599,7 @@ def test_memory_list_ui_route_stays_host_owned_when_runtime_import_fails(
         for node in ast.walk(tree)
         if isinstance(node, ast.ImportFrom)
         and node.module
-        and node.module.startswith("core.memory.")
+        and node.module.startswith("avibe_memory.")
         and node.module != "core.memory_loader"
     ]
     assert implementation_imports == []
@@ -619,7 +619,7 @@ def test_memory_list_ui_route_stays_host_owned_when_runtime_import_fails(
     real_import = builtins.__import__
 
     def guarded_import(name, *args, **kwargs):
-        if name.startswith("core.memory.") and name != "core.memory_loader":
+        if name.startswith("avibe_memory.") and name != "core.memory_loader":
             raise RuntimeError(f"optional implementation initializer: {name}")
         return real_import(name, *args, **kwargs)
 

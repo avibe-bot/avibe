@@ -9,10 +9,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal, TypeVar
 
-from core.memory.everos import ProviderHealthSnapshot
-from core.memory.confined_filesystem import PRIVATE_SQLITE_BUSY_TIMEOUT_SECONDS
-from core.memory.module import PROVIDER_READ_TIMEOUT_SECONDS
-from core.memory.types import MemoryFailureLogEntry
+from avibe_memory.everos import ProviderHealthSnapshot
+from avibe_memory.confined_filesystem import PRIVATE_SQLITE_BUSY_TIMEOUT_SECONDS
+from avibe_memory.module import PROVIDER_READ_TIMEOUT_SECONDS
+from avibe_memory.types import MemoryFailureLogEntry
 
 
 SourceStatus = Literal["available", "partial", "stale", "unknown", "unavailable"]

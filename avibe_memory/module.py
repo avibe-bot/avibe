@@ -20,14 +20,14 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Literal, TypeVar
 
 from config import paths
 from core.blocking import run_blocking
-from core.memory.attachments import (
+from avibe_memory.attachments import (
     AttachmentCleanupUnprovenError,
     AttachmentPinError,
     AttachmentPinStore,
     PinnedBundle,
 )
-from core.memory.provider_root import ProviderRoot
-from core.memory.everos import (
+from avibe_memory.provider_root import ProviderRoot
+from avibe_memory.everos import (
     AgenticRecallTelemetry,
     MemoryProviderFailure,
     MemoryProviderPort,
@@ -37,14 +37,14 @@ from vibe.memory_project_ids import (
     is_persisted_memory_project_id,
     is_writable_memory_project_id,
 )
-from core.memory.store import (
+from avibe_memory.store import (
     MemoryStore,
     VolatileAdmission,
     derive_assistant_memory_owner_id,
     is_memory_owner_id,
     is_principal_id,
 )
-from core.memory.types import (
+from avibe_memory.types import (
     CaptureAccepted,
     CaptureAttachment,
     CaptureDuplicate,
@@ -69,7 +69,7 @@ from core.memory.types import (
     RecallResult,
     is_memory_error_code,
 )
-from core.memory.writer import (
+from avibe_memory.writer import (
     BestEffortMemoryWriter,
     CaptureOfferOutcome,
     WriterReservation,

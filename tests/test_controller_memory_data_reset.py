@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
+from contextlib import asynccontextmanager
 from copy import deepcopy
 import os
 import stat
@@ -17,8 +19,9 @@ from config.v2_config import (
     MemoryProcessingConfig,
 )
 from core.controller import Controller
-from core.memory.data_reset import reset_memory_data_roots
+from avibe_memory.data_reset import reset_memory_data_roots
 from core.memory_adapter import DisabledMemoryAdapter
+from vibe.memory_contract import MemoryPluginUnavailableError
 
 
 class _Runtime:
@@ -103,6 +106,31 @@ def _persist(monkeypatch: pytest.MonkeyPatch, controller: Controller) -> None:
         return SimpleNamespace(memory=transform(controller.config.memory))
 
     monkeypatch.setattr("core.controller.atomic_update_memory", update)
+
+
+@pytest.mark.asyncio
+async def test_reset_reaches_plugin_boundary_before_importing_reset_helpers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = Controller.__new__(Controller)
+
+    @asynccontextmanager
+    async def unavailable_runtime():
+        raise MemoryPluginUnavailableError("implementation missing")
+        yield
+
+    controller._destructive_memory_runtime = unavailable_runtime
+    real_import = builtins.__import__
+
+    def block_reset_helper(name, *args, **kwargs):
+        if name == "avibe_memory.data_reset":
+            raise ModuleNotFoundError(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", block_reset_helper)
+
+    with pytest.raises(MemoryPluginUnavailableError, match="implementation missing"):
+        await controller._reset_memory_data_transaction(operation="delete_data")
 
 
 def test_reset_memory_data_roots_deletes_only_exact_confined_roots(tmp_path: Path) -> None:

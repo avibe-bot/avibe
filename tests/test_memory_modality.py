@@ -8,8 +8,8 @@ from types import ModuleType
 
 import pytest
 
-import core.memory.modality as modality_module
-from core.memory.modality import (
+import avibe_memory.modality as modality_module
+from avibe_memory.modality import (
     OFFICE_ATTACHMENT_EXTENSIONS,
     PINNED_UPSTREAM_EXCLUDED_EXTENSIONS,
     SUPPORTED_ATTACHMENT_EXTENSIONS,
@@ -241,16 +241,16 @@ def test_office_probe_uses_sidecar_path_and_macos_fallback(
         seen["path"] = path
         return None
 
-    monkeypatch.setattr("core.memory.modality.shutil.which", fake_which)
+    monkeypatch.setattr("avibe_memory.modality.shutil.which", fake_which)
     monkeypatch.setattr(
-        "core.memory.modality._MACOS_SOFFICE",
+        "avibe_memory.modality._MACOS_SOFFICE",
         tmp_path / "missing-soffice",
     )
     assert office_conversion_available() is False
     assert seen == {"name": "soffice", "path": "/usr/bin:/bin"}
 
     fallback = _write_private(tmp_path / "soffice", b"")
-    monkeypatch.setattr("core.memory.modality._MACOS_SOFFICE", fallback)
+    monkeypatch.setattr("avibe_memory.modality._MACOS_SOFFICE", fallback)
     assert office_conversion_available() is False
 
     fallback.chmod(0o700)
@@ -290,7 +290,7 @@ def test_classifier_skips_office_without_soffice(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: False)
+    monkeypatch.setattr("avibe_memory.modality.office_conversion_available", lambda: False)
     path = _write_private(
         tmp_path / "report.docx",
         _office_zip("[Content_Types].xml", "word/document.xml"),
@@ -307,7 +307,7 @@ def test_classifier_accepts_office_when_soffice_is_present(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
+    monkeypatch.setattr("avibe_memory.modality.office_conversion_available", lambda: True)
     path = _write_private(
         tmp_path / "report.xlsx",
         _office_zip("[Content_Types].xml", "xl/workbook.xml"),
@@ -324,7 +324,7 @@ def test_classifier_rejects_office_bytes_that_are_not_convertible(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
+    monkeypatch.setattr("avibe_memory.modality.office_conversion_available", lambda: True)
     path = _write_private(tmp_path / "report.docx", b"not an office container")
 
     assert classify_pinned_attachment(
@@ -338,7 +338,7 @@ def test_classifier_rejects_an_ordinary_zip_renamed_as_office(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
+    monkeypatch.setattr("avibe_memory.modality.office_conversion_available", lambda: True)
     path = _write_private(tmp_path / "report.docx", _office_zip("notes.txt"))
 
     assert classify_pinned_attachment(
@@ -362,7 +362,7 @@ def test_classifier_rejects_office_zip_entry_amplification_before_opening(
     assert eocd_offset >= 0
     struct.pack_into("<HH", payload, eocd_offset + 8, 1, 1)
     path = _write_private(tmp_path / "report.docx", bytes(payload))
-    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
+    monkeypatch.setattr("avibe_memory.modality.office_conversion_available", lambda: True)
 
     def refuse_zipfile(*_args, **_kwargs):
         raise AssertionError("entry-count rejection must precede ZipFile construction")
@@ -411,7 +411,7 @@ def test_classifier_rejects_office_zip_uncompressed_size_amplification(
         struct.pack_into("<L", payload, central_offset + 24, uncompressed_size)
 
     path = _write_private(tmp_path / "report.docx", bytes(payload))
-    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
+    monkeypatch.setattr("avibe_memory.modality.office_conversion_available", lambda: True)
 
     assert classify_pinned_attachment(
         "report.docx",
@@ -434,7 +434,7 @@ def test_classifier_accepts_registered_iwork_mime_types(
     filename: str,
     mimetype: str,
 ) -> None:
-    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
+    monkeypatch.setattr("avibe_memory.modality.office_conversion_available", lambda: True)
     path = _write_private(tmp_path / filename, _office_zip("Index/Document.iwa"))
 
     assert classify_pinned_attachment(filename, mimetype, path) == (
@@ -447,7 +447,7 @@ def test_classifier_requires_the_mime_for_the_same_office_extension(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
+    monkeypatch.setattr("avibe_memory.modality.office_conversion_available", lambda: True)
     path = _write_private(
         tmp_path / "report.docx",
         _office_zip("[Content_Types].xml", "word/document.xml"),
@@ -464,7 +464,7 @@ def test_classifier_requires_the_registered_odf_package_mimetype(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
+    monkeypatch.setattr("avibe_memory.modality.office_conversion_available", lambda: True)
     valid = _write_private(
         tmp_path / "notes.odt",
         _office_zip(
@@ -521,7 +521,7 @@ def test_classifier_accepts_structurally_valid_legacy_office_documents(
     mimetype: str,
     streams: tuple[str, ...],
 ) -> None:
-    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
+    monkeypatch.setattr("avibe_memory.modality.office_conversion_available", lambda: True)
     path = _write_private(tmp_path / filename, _ole_document(*streams))
 
     assert classify_pinned_attachment(filename, mimetype, path) == (
@@ -562,7 +562,7 @@ def test_classifier_rejects_invalid_or_wrong_application_ole_containers(
     mimetype: str,
     payload: bytes,
 ) -> None:
-    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
+    monkeypatch.setattr("avibe_memory.modality.office_conversion_available", lambda: True)
     path = _write_private(tmp_path / filename, payload)
 
     assert classify_pinned_attachment(filename, mimetype, path) is None
@@ -572,7 +572,7 @@ def test_classifier_accepts_rtf_container(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
+    monkeypatch.setattr("avibe_memory.modality.office_conversion_available", lambda: True)
     path = _write_private(tmp_path / "notes.rtf", _RTF_MAGIC)
 
     assert classify_pinned_attachment(

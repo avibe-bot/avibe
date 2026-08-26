@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from config import paths
-from core.memory.confined_filesystem import (
+from avibe_memory.confined_filesystem import (
     ConfinedRemovalProgress,
     remove_confined_path,
 )

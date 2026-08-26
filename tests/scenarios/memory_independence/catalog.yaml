@@ -68,7 +68,7 @@ scenarios:
     status: covered
     kind: guardrail
     layer: contract
-    test: tests/test_memory_slice3.py::test_archive_memory_cli_session_commits_without_waiting_on_memory
+    test: tests/test_memory_slice3.py::test_archive_session_commits_then_offers_session_archived
   - id: MEMORY-INDEP-008
     name: Shutdown drops queued and tracked Memory work before closing the runtime
     status: covered
@@ -123,3 +123,9 @@ scenarios:
     kind: guardrail
     layer: scenario
     test: tests/test_session_delivery_fsm.py::test_memory_indep_016_new_queue_uses_core_identity_without_memory_metadata
+  - id: MEMORY-INDEP-017
+    name: Core workflows run without importing the optional Memory implementation package
+    status: covered
+    kind: guardrail
+    layer: scenario
+    test: tests/test_memory_disabled_isolation.py::test_memory_indep_017_core_workflows_run_without_avibe_memory

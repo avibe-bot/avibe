@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pytest
 
-import core.memory.runtime as runtime_module
+import avibe_memory.runtime as runtime_module
 from config.v2_config import MemoryEndpointConfig, MemoryProcessingConfig
-from core.memory.everos import ProviderHealthSnapshot
-from core.memory.processing_record import RuntimeHealthProjection, SourceObservation
-from core.memory.runtime import MemoryConfig, MemoryRuntime
-from core.memory.store import MemoryStore
+from avibe_memory.everos import ProviderHealthSnapshot
+from avibe_memory.processing_record import RuntimeHealthProjection, SourceObservation
+from avibe_memory.runtime import MemoryConfig, MemoryRuntime
+from avibe_memory.store import MemoryStore
 
 
 def _runtime(tmp_path: Path) -> MemoryRuntime:

@@ -5,12 +5,12 @@ from collections import deque
 from pathlib import Path
 import sys
 
-from core.memory.process import (
+from avibe_memory.process import (
     EverOSProcessSettings,
     FakeEverOSProcess,
     FakeEverOSProcessFactory,
 )
-from core.memory.supervisor import EverOSSupervisor
+from avibe_memory.supervisor import EverOSSupervisor
 
 
 def _settings() -> EverOSProcessSettings:

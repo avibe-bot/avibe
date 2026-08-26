@@ -8,11 +8,11 @@ from collections import deque
 from datetime import datetime, timezone
 
 from core.caller_context import AVIBE_SESSION_ID_ENV
-from core.memory.everos import AddAck, FakeMemoryProvider
-from core.memory.module import MIN_FREE_DISK_BYTES, MemoryModule
-from core.memory.runtime import MemoryRuntime
-from core.memory.store import MemoryStore
-from core.memory.types import CaptureAccepted, CaptureRequest, MemoryListItem, MemoryListPage
+from avibe_memory.everos import AddAck, FakeMemoryProvider
+from avibe_memory.module import MIN_FREE_DISK_BYTES, MemoryModule
+from avibe_memory.runtime import MemoryRuntime
+from avibe_memory.store import MemoryStore
+from avibe_memory.types import CaptureAccepted, CaptureRequest, MemoryListItem, MemoryListPage
 from vibe import cli, internal_client
 
 

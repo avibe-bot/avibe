@@ -14,13 +14,13 @@ from typing import Any, TypeAlias
 
 import yaml
 
-from core.memory.processing_record import (
+from avibe_memory.processing_record import (
     ProcessingSourceObservations,
     SourceObservation,
 )
 from vibe.memory_project_ids import is_persisted_memory_project_id
-from core.memory.secret_scrubber import scrub_text
-from core.memory.store import (
+from avibe_memory.secret_scrubber import scrub_text
+from avibe_memory.store import (
     derive_assistant_memory_owner_id,
     is_memory_owner_id,
     is_principal_id,

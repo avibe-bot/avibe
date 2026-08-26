@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from core.memory.confined_filesystem import (
+from avibe_memory.confined_filesystem import (
     ConfinedFilesystemError,
     ConfinedRoot,
     SpilledDirectoryOrder,

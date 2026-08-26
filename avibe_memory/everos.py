@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from core.memory.types import (
+from avibe_memory.types import (
     CaptureAttachment,
     MemoryErrorCode,
     MemoryItem,
@@ -33,7 +33,7 @@ from core.memory.types import (
     MemoryPreflightDiagnostic,
     MAX_AGENTIC_TIMEOUT_SECONDS,
 )
-from core.memory.observations import (
+from avibe_memory.observations import (
     AddAck,
     AddRejected,
     AddResult,

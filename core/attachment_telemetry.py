@@ -7,7 +7,7 @@ import logging
 
 # Preserve the existing observability channel while keeping this helper free of
 # admission and IM dependencies.
-logger = logging.getLogger("core.memory.admission")
+logger = logging.getLogger("avibe_memory.admission")
 
 
 def log_attachment_capture(

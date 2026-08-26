@@ -454,17 +454,17 @@ def test_memory_internal_server_keeps_implementation_imports_out_of_host_boundar
     implementation_imports: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module:
-            if node.module == "core.memory" and [alias.name for alias in node.names] != [
+            if node.module == "avibe_memory" and [alias.name for alias in node.names] != [
                 "CaptureRequest"
             ]:
                 implementation_imports.append(node.module)
-            elif node.module.startswith("core.memory.") and node.module != "core.memory_loader":
+            elif node.module.startswith("avibe_memory.") and node.module != "core.memory_loader":
                 implementation_imports.append(node.module)
         elif isinstance(node, ast.Import):
             implementation_imports.extend(
                 alias.name
                 for alias in node.names
-                if alias.name == "core.memory" or alias.name.startswith("core.memory.")
+                if alias.name == "avibe_memory" or alias.name.startswith("avibe_memory.")
             )
 
     assert implementation_imports == []
@@ -671,7 +671,7 @@ def test_memory_remember_plugin_failure_uses_stable_plugin_envelope(
     real_import = builtins.__import__
 
     def fail_memory_type_import(name, *args, **kwargs):
-        if name == "core.memory" or name.startswith("core.memory."):
+        if name == "avibe_memory" or name.startswith("avibe_memory."):
             raise RuntimeError("optional implementation import failed")
         return real_import(name, *args, **kwargs)
 
@@ -1051,7 +1051,7 @@ def test_memory_search_route_does_not_import_memory_types_on_request(monkeypatch
     real_import = builtins.__import__
 
     def guarded_import(name, *args, **kwargs):
-        if name == "core.memory.types":
+        if name == "avibe_memory.types":
             raise RuntimeError("optional implementation initializer")
         return real_import(name, *args, **kwargs)
 
@@ -1399,7 +1399,7 @@ def test_memory_list_accepts_maximum_aggregate_cursor_transport_bound(monkeypatc
     real_import = builtins.__import__
 
     def guarded_import(name, *args, **kwargs):
-        if name == "core.memory.runtime":
+        if name == "avibe_memory.runtime":
             raise RuntimeError("optional implementation initializer")
         return real_import(name, *args, **kwargs)
 
@@ -2004,7 +2004,7 @@ def test_memory_remember_route_rejects_capture_queued_across_runtime_replacement
     """The production CLI route cannot repopulate the fresh reset aggregate."""
 
     from core.controller import Controller
-    from core.memory import CaptureAccepted
+    from avibe_memory import CaptureAccepted
     from vibe.memory_http_headers import CALLER_SESSION_HEADER
 
     class Module:

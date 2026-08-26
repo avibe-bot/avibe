@@ -9,10 +9,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from core.memory import everos
-from core.memory.everos import MULTIMODAL_EXPLICIT_ENV
-from core.memory import sidecar
-from core.memory.sidecar import (
+from avibe_memory import everos
+from avibe_memory.everos import MULTIMODAL_EXPLICIT_ENV
+from avibe_memory import sidecar
+from avibe_memory.sidecar import (
     _processing_healthy_from_child_environment,
     _request_rejection,
 )

@@ -8467,7 +8467,7 @@ def dependencies_status(*, offline: bool = False) -> dict:
     )
 
     try:
-        from core.memory.artifact import MemoryArtifactManager, get_memory_artifact_manager
+        from avibe_memory.artifact import MemoryArtifactManager, get_memory_artifact_manager
 
         memory_manager = MemoryArtifactManager(offline=True) if offline else get_memory_artifact_manager()
         memory_runtime = memory_manager.status()

@@ -31,8 +31,8 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10
 import psutil
 
 from config import paths
-from core.memory.attachments import attachment_pin_root
-from core.memory.confined_filesystem import (
+from avibe_memory.attachments import attachment_pin_root
+from avibe_memory.confined_filesystem import (
     ConfinedFilesystemError,
     ConfinedRoot,
     create_confined_file,
@@ -42,13 +42,13 @@ from core.memory.confined_filesystem import (
     remove_anchored_entry,
     required_no_follow_flag,
 )
-from core.memory.everos import (
+from avibe_memory.everos import (
     EverOSPort,
     MULTIMODAL_EXPLICIT_ENV,
     PROCESSING_PROBE_MAX_DEADLINE_SECONDS,
     processing_probe_deadline_seconds,
 )
-from core.memory.secret_scrubber import scrub_text
+from avibe_memory.secret_scrubber import scrub_text
 
 
 logger = logging.getLogger(__name__)
@@ -116,7 +116,11 @@ _SAFETY_MONITOR_INTERVAL_SECONDS = 0.2
 _TREE_INSPECTION_INTERVAL_SECONDS = 1.0
 _SIDECAR_RECORD_FILENAME = "everos.sidecar.json"
 _SIDECAR_RECORD_MAX_BYTES = 4 * 1024
-_SIDECAR_ENTRYPOINT_MODULE = "core.memory.sidecar"
+_SIDECAR_ENTRYPOINT_MODULE = "avibe_memory.sidecar"
+_RELEASED_SIDECAR_ENTRYPOINT_MODULE = "core.memory.sidecar"
+_SIDECAR_ENTRYPOINT_MODULES = frozenset(
+    {_SIDECAR_ENTRYPOINT_MODULE, _RELEASED_SIDECAR_ENTRYPOINT_MODULE}
+)
 _PROVIDER_LOCK_PREFIX = "cascade-rebuild-"
 _SYNC_RECORD_PREFIX = "cascade-sync-"
 _SYNC_RECORD_MAX_BYTES = 16 * 1024
@@ -2193,7 +2197,7 @@ def _memory_child_environment(
         "PATH": f"{python.parent}:/usr/bin:/bin",
         "PYTHONNOUSERSITE": "1",
         "PYTHONUNBUFFERED": "1",
-        "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
+        "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
         "XDG_CACHE_HOME": str(child_home / ".cache"),
         "XDG_CONFIG_HOME": str(child_home / ".config"),
         "XDG_DATA_HOME": str(child_home / ".local" / "share"),
@@ -2727,17 +2731,18 @@ def _disclosed_process_environment(process: psutil.Process) -> Mapping[str, str]
 
 
 def _cmdline_serves_socket(cmdline: tuple[str, ...], socket_path: Path) -> bool:
-    if _SIDECAR_ENTRYPOINT_MODULE not in cmdline or "--uds" not in cmdline:
+    if not _SIDECAR_ENTRYPOINT_MODULES.intersection(cmdline) or "--uds" not in cmdline:
         return False
     index = cmdline.index("--uds")
     return index + 1 < len(cmdline) and _paths_match(cmdline[index + 1], socket_path)
 
 
 def _cmdline_is_sidecar(cmdline: tuple[str, ...]) -> bool:
-    return len(cmdline) == 5 and cmdline[1:4] == (
-        "-m",
-        _SIDECAR_ENTRYPOINT_MODULE,
-        "--uds",
+    return (
+        len(cmdline) == 5
+        and cmdline[1] == "-m"
+        and cmdline[2] in _SIDECAR_ENTRYPOINT_MODULES
+        and cmdline[3] == "--uds"
     )
 
 
@@ -2754,13 +2759,10 @@ def _cmdline_matches_role(
         return False
     if role == _SIDECAR_ROLE:
         return (
-            cmdline[1:4]
-            == (
-                "-m",
-                _SIDECAR_ENTRYPOINT_MODULE,
-                "--uds",
-            )
-            and len(cmdline) == 5
+            len(cmdline) == 5
+            and cmdline[1] == "-m"
+            and cmdline[2] in _SIDECAR_ENTRYPOINT_MODULES
+            and cmdline[3] == "--uds"
             and _paths_match(cmdline[4], socket_path)
         )
     if role == _RELEASED_SYNC_ROLE:

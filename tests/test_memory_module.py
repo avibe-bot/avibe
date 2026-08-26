@@ -8,15 +8,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from core.memory.attachments import (
+from avibe_memory.attachments import (
     AttachmentCleanupUnprovenError,
     AttachmentPinError,
     AttachmentPinStore,
 )
-from core.memory.everos import FakeMemoryProvider
-from core.memory.module import MIN_FREE_DISK_BYTES, MemoryModule
-from core.memory.store import MemoryStore, VolatileAdmission
-from core.memory.types import (
+from avibe_memory.everos import FakeMemoryProvider
+from avibe_memory.module import MIN_FREE_DISK_BYTES, MemoryModule
+from avibe_memory.store import MemoryStore, VolatileAdmission
+from avibe_memory.types import (
     CaptureAccepted,
     CaptureAttachment,
     CaptureDuplicate,
@@ -27,7 +27,7 @@ from core.memory.types import (
     OperationFailed,
     ProviderSearchItem,
 )
-from core.memory.writer import MAX_WRITER_PERMITS
+from avibe_memory.writer import MAX_WRITER_PERMITS
 
 PRINCIPAL = "u-" + "1" * 32
 

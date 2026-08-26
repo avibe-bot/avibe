@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from core.memory.confined_filesystem import (
+from avibe_memory.confined_filesystem import (
     ConfinedFilesystemError,
     ConfinedRoot,
     PrivateSqliteDatabase,
@@ -62,12 +62,12 @@ delattr(os, "O_NOFOLLOW")
 # Importing ordinary application wiring must remain usable when only Memory
 # persistence is unsupported on the host.
 import core.controller  # noqa: F401
-from core.memory.attachments import AttachmentPinError, AttachmentPinStore
-from core.memory.confined_filesystem import ConfinedFilesystemError, PrivateSqliteDatabase
+from avibe_memory.attachments import AttachmentPinError, AttachmentPinStore
+from avibe_memory.confined_filesystem import ConfinedFilesystemError, PrivateSqliteDatabase
 from config.v2_config import MemoryConfig
-from core.memory.artifact import MemoryArtifactManager
-from core.memory.runtime import create_memory_runtime
-from core.memory.provider_root import ProviderRoot, ProviderRootError, ProviderRootMetadata
+from avibe_memory.artifact import MemoryArtifactManager
+from avibe_memory.runtime import create_memory_runtime
+from avibe_memory.provider_root import ProviderRoot, ProviderRootError, ProviderRootMetadata
 home = Path(sys.argv[1])
 try:
     AttachmentPinStore(effective_home=home, source_root=home / "source")
@@ -134,7 +134,7 @@ assert not home.exists()
 
 
 def test_supported_host_exposes_strict_no_follow_capability() -> None:
-    from core.memory import confined_filesystem
+    from avibe_memory import confined_filesystem
 
     assert confined_filesystem.required_no_follow_flag() == os.O_NOFOLLOW
 
@@ -142,7 +142,7 @@ def test_supported_host_exposes_strict_no_follow_capability() -> None:
 def test_spilled_directory_order_preserves_raw_filename_order_across_batches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from core.memory import confined_filesystem
+    from avibe_memory import confined_filesystem
 
     names = ["z", "a", "\udcff", "\udc80", "middle"]
 
@@ -170,7 +170,7 @@ def test_spilled_directory_order_preserves_raw_filename_order_across_batches(
 def test_spilled_directory_order_translates_connect_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from core.memory import confined_filesystem
+    from avibe_memory import confined_filesystem
 
     failure = sqlite3.OperationalError("temporary database unavailable")
 
@@ -188,7 +188,7 @@ def test_spilled_directory_order_translates_connect_failure(
 def test_spilled_directory_order_closes_and_translates_schema_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from core.memory import confined_filesystem
+    from avibe_memory import confined_filesystem
 
     real_connection = sqlite3.connect("")
     failure = sqlite3.OperationalError("temporary schema unavailable")
@@ -226,7 +226,7 @@ def test_spilled_directory_order_closes_after_operation_database_failure(
     monkeypatch: pytest.MonkeyPatch,
     failure_stage: str,
 ) -> None:
-    from core.memory import confined_filesystem
+    from avibe_memory import confined_filesystem
 
     class Entry:
         name = "entry"
@@ -279,7 +279,7 @@ def test_spilled_directory_order_closes_after_operation_database_failure(
 
 
 def test_spilled_directory_order_closes_temporary_database_on_base_exception() -> None:
-    from core.memory import confined_filesystem
+    from avibe_memory import confined_filesystem
 
     class InjectedCancellation(BaseException):
         pass
@@ -303,7 +303,7 @@ def test_spilled_directory_order_closes_on_scan_failure_and_cancellation(
     monkeypatch: pytest.MonkeyPatch,
     failure: BaseException,
 ) -> None:
-    from core.memory import confined_filesystem
+    from avibe_memory import confined_filesystem
 
     class FailingScandir:
         def __enter__(self):
@@ -351,7 +351,7 @@ def test_remove_confined_path_refuses_to_follow_a_swapped_directory(
     victim.write_text("outside must survive", encoding="utf-8")
     moved = home / "held-managed"
 
-    from core.memory import confined_filesystem
+    from avibe_memory import confined_filesystem
 
     real_scandir = confined_filesystem.os.scandir
     swapped = False
@@ -383,7 +383,7 @@ def test_remove_confined_path_rejects_root_swap_before_directory_open(
     target.mkdir(mode=0o700)
     held = home / "held-managed"
 
-    from core.memory import confined_filesystem
+    from avibe_memory import confined_filesystem
 
     real_connect = confined_filesystem.sqlite3.connect
     swapped = False
@@ -417,7 +417,7 @@ def test_remove_confined_regular_file_does_not_initialize_directory_ordering(
     target.chmod(0o600)
     connect_calls = 0
 
-    from core.memory import confined_filesystem
+    from avibe_memory import confined_filesystem
 
     def fail_connect(*_args, **_kwargs):
         nonlocal connect_calls
@@ -476,7 +476,7 @@ def test_confined_atomic_replace_stays_on_pinned_parent_during_directory_swap(
     sentinel.write_text("outside survives", encoding="utf-8")
     held = home / "held-managed"
 
-    from core.memory import confined_filesystem
+    from avibe_memory import confined_filesystem
 
     real_replace = confined_filesystem.os.replace
     swapped = False
@@ -513,7 +513,7 @@ def test_confined_atomic_replace_cleans_a_source_replaced_during_rename(
     outside = tmp_path / "outside.txt"
     outside.write_text("outside survives", encoding="utf-8")
 
-    from core.memory import confined_filesystem
+    from avibe_memory import confined_filesystem
 
     real_replace = confined_filesystem.os.replace
 
@@ -552,7 +552,7 @@ def test_confined_atomic_replace_removes_a_source_made_public_during_rename(
     outside = tmp_path / "outside.txt"
     outside.write_text("outside survives", encoding="utf-8")
 
-    from core.memory import confined_filesystem
+    from avibe_memory import confined_filesystem
 
     real_replace = confined_filesystem.os.replace
 
@@ -581,7 +581,7 @@ def test_confined_atomic_replace_removes_a_source_hardlinked_during_rename(
     target = home / "target"
     outside_link = tmp_path / "outside-link.txt"
 
-    from core.memory import confined_filesystem
+    from avibe_memory import confined_filesystem
 
     real_replace = confined_filesystem.os.replace
 
@@ -665,7 +665,7 @@ def test_remove_confined_path_never_chmods_a_swapped_entry_without_an_anchor(
     locked.chmod(0o000)
     held = target / "held-locked"
 
-    from core.memory import confined_filesystem
+    from avibe_memory import confined_filesystem
 
     real_open = confined_filesystem.os.open
     real_chmod = confined_filesystem.os.chmod
@@ -713,7 +713,7 @@ def test_remove_confined_path_does_not_require_procfs_for_openable_directories(
     nested.mkdir(mode=0o700)
     nested.chmod(mode)
 
-    from core.memory import confined_filesystem
+    from avibe_memory import confined_filesystem
 
     fake_o_path = 1 << 30
     real_open = confined_filesystem.os.open
@@ -751,7 +751,7 @@ def test_remove_confined_path_rejects_a_mount_boundary_before_scanning(
     victim = mounted / "victim.txt"
     victim.write_text("must survive", encoding="utf-8")
 
-    from core.memory import confined_filesystem
+    from avibe_memory import confined_filesystem
 
     real_open = confined_filesystem.os.open
     real_scandir = confined_filesystem.os.scandir
@@ -803,7 +803,7 @@ def test_remove_confined_path_rejects_directory_swap_during_permission_hardening
     locked.chmod(0o000)
     held = target / "held-locked"
 
-    from core.memory import confined_filesystem
+    from avibe_memory import confined_filesystem
 
     real_chmod = confined_filesystem.os.chmod
     swapped = False
@@ -854,7 +854,7 @@ def test_remove_confined_path_does_not_follow_symlink_swapped_in_during_hardenin
     victim = outside / "victim.txt"
     victim.write_text("outside survives", encoding="utf-8")
 
-    from core.memory import confined_filesystem
+    from avibe_memory import confined_filesystem
 
     real_chmod = confined_filesystem.os.chmod
     swapped = False
@@ -896,7 +896,7 @@ def test_remove_confined_path_rechecks_device_after_permission_hardening(
     target.mkdir(mode=0o700)
     target.chmod(0o000)
 
-    from core.memory import confined_filesystem
+    from avibe_memory import confined_filesystem
 
     real_chmod = confined_filesystem.os.chmod
     real_stat = confined_filesystem.os.stat
@@ -941,7 +941,7 @@ def test_remove_confined_path_fails_closed_without_anchored_hardening(
     target.mkdir(mode=0o700)
     target.chmod(0o000)
 
-    from core.memory import confined_filesystem
+    from avibe_memory import confined_filesystem
 
     real_chmod = confined_filesystem.os.chmod
 
@@ -973,7 +973,7 @@ def test_remove_anchored_entry_rejects_foreign_owned_directory(
     descriptor = os.open(home, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     real_uid = os.getuid()
 
-    from core.memory import confined_filesystem
+    from avibe_memory import confined_filesystem
 
     monkeypatch.setattr(confined_filesystem.os, "getuid", lambda: real_uid + 1)
     try:
@@ -997,7 +997,7 @@ def test_remove_anchored_entry_rejects_cross_device_directory(
     target.chmod(0o777)
     descriptor = os.open(home, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
 
-    from core.memory import confined_filesystem
+    from avibe_memory import confined_filesystem
 
     real_stat = confined_filesystem.os.stat
 
@@ -1070,7 +1070,7 @@ def test_private_sqlite_transaction_commits_before_hardening(
     def connect(*args, **kwargs):
         return real_connect(*args, **kwargs, factory=TrackingConnection)
 
-    from core.memory import confined_filesystem
+    from avibe_memory import confined_filesystem
 
     real_chmod = confined_filesystem.os.chmod
 
@@ -1125,7 +1125,7 @@ def test_private_sqlite_transaction_body_failure_remains_primary_during_cleanup(
     def connect(*args, **kwargs):
         return real_connect(*args, **kwargs, factory=FailingCleanupConnection)
 
-    from core.memory import confined_filesystem
+    from avibe_memory import confined_filesystem
 
     real_chmod = confined_filesystem.os.chmod
 
@@ -1186,7 +1186,7 @@ def test_private_sqlite_transaction_commit_failure_remains_primary_during_cleanu
     def connect(*args, **kwargs):
         return real_connect(*args, **kwargs, factory=FailingCommitConnection)
 
-    from core.memory import confined_filesystem
+    from avibe_memory import confined_filesystem
 
     real_chmod = confined_filesystem.os.chmod
 
@@ -1245,7 +1245,7 @@ def test_private_sqlite_transaction_rolls_back_cancellation(
     def connect(*args, **kwargs):
         return real_connect(*args, **kwargs, factory=TrackingConnection)
 
-    from core.memory import confined_filesystem
+    from avibe_memory import confined_filesystem
 
     real_chmod = confined_filesystem.os.chmod
 
@@ -1301,7 +1301,7 @@ def test_private_sqlite_transaction_translates_hardening_failure_after_commit(
     def connect(*args, **kwargs):
         return real_connect(*args, **kwargs, factory=TrackingConnection)
 
-    from core.memory import confined_filesystem
+    from avibe_memory import confined_filesystem
 
     real_chmod = confined_filesystem.os.chmod
     harden_error = ConfinedFilesystemError("unsafe SQLite sidecar")
@@ -1354,7 +1354,7 @@ def test_private_sqlite_transaction_closes_setup_failure_without_translation(
     def connect(*args, **kwargs):
         return real_connect(*args, **kwargs, factory=FailingSetupConnection)
 
-    from core.memory import confined_filesystem
+    from avibe_memory import confined_filesystem
 
     monkeypatch.setattr(confined_filesystem.sqlite3, "connect", connect)
 
@@ -1410,7 +1410,7 @@ def test_private_sqlite_database_rejects_unowned_database(
     database.prepare()
     real_uid = os.getuid()
 
-    from core.memory import confined_filesystem
+    from avibe_memory import confined_filesystem
 
     monkeypatch.setattr(confined_filesystem.os, "getuid", lambda: real_uid + 1)
     with pytest.raises(ConfinedFilesystemError):

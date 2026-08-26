@@ -35,7 +35,6 @@ from core.message_context import (
     SCHEDULED_DISPATCH_METADATA_APPLIED_KEY,
     resolve_turn_sink_key,
 )
-from core.memory.admission_metadata import admitted_user_id, is_cli_admitted
 from core.native_dispatch_phase import (
     backend_dispatch_attempted,
     mark_prewrite_user_stop,
@@ -2335,7 +2334,7 @@ class SessionTurnManager:
         )
         author_id = payload.get("author_id")
         if legacy_workbench:
-            author_id = admitted_user_id(metadata)
+            author_id = delivery_store.legacy_admitted_user_id(metadata)
         if author_id:
             context.user_id = str(author_id)
         context.message_kind = normalize_message_kind(payload.get("message_kind"))
@@ -2351,7 +2350,10 @@ class SessionTurnManager:
             context.platform == "avibe"
             and memory_enabled
             and author_id
-            and (not legacy_workbench or is_cli_admitted(metadata))
+            and (
+                not legacy_workbench
+                or delivery_store.legacy_is_cli_admitted(metadata)
+            )
         )
         if memory_cli_admitted:
             context.platform_specific["memory_cli_admitted"] = True

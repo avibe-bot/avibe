@@ -1180,7 +1180,7 @@ def test_dependencies_status_shape(monkeypatch):
             }
 
     monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
-    import core.memory.artifact as memory_artifact
+    import avibe_memory.artifact as memory_artifact
 
     class _MemoryMgr:
         def status(self):
@@ -1269,7 +1269,7 @@ def test_dependencies_status_projects_show_runtime_identity_without_pairing(monk
         classmethod(lambda _cls: SimpleNamespace(memory=SimpleNamespace(enabled=False))),
     )
 
-    import core.memory.artifact as memory_artifact
+    import avibe_memory.artifact as memory_artifact
     import core.show_runtime as show_runtime
     import core.tmux_runtime as tmux_runtime
 

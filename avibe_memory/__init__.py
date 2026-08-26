@@ -62,8 +62,8 @@ __all__ = [
 ]
 
 if TYPE_CHECKING:
-    from core.memory.module import MemoryModule as MemoryModule
-    from core.memory.types import (
+    from avibe_memory.module import MemoryModule as MemoryModule
+    from avibe_memory.types import (
         CaptureAccepted as CaptureAccepted,
         CaptureAttachment as CaptureAttachment,
         CaptureDuplicate as CaptureDuplicate,
@@ -94,9 +94,9 @@ def __getattr__(name: str) -> Any:
     """Load public compatibility exports without penalizing leaf imports."""
 
     if name == "MemoryModule":
-        value = getattr(import_module("core.memory.module"), name)
+        value = getattr(import_module("avibe_memory.module"), name)
     elif name in _TYPE_EXPORTS:
-        value = getattr(import_module("core.memory.types"), name)
+        value = getattr(import_module("avibe_memory.types"), name)
     else:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     globals()[name] = value

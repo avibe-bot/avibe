@@ -47,7 +47,7 @@ _CHECK_POSIX_SOCKET_MODE = os.name != "nt"
 # the sources below rather than trusting these numbers to stay in step.
 #
 # Most Memory reads wait on one provider operation bounded by
-# ``core.memory.module.PROVIDER_READ_TIMEOUT_SECONDS`` (20s). Search can first
+# ``avibe_memory.module.PROVIDER_READ_TIMEOUT_SECONDS`` (20s). Search can first
 # probe capabilities and then issue an agentic provider read bounded at 30s,
 # so it needs a separate transport bound outside both sequential steps.
 MEMORY_READ_TIMEOUT_SECONDS = 25.0
