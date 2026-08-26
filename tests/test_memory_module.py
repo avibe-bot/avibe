@@ -24,6 +24,8 @@ from core.memory.types import (
     CaptureSkipped,
     MemoryItem,
     MemoryItems,
+    MemoryProfile,
+    MemoryProfileExplicitInfo,
     OperationFailed,
     ProviderSearchItem,
 )
@@ -147,6 +149,46 @@ async def test_agent_remember_round_trips_through_dual_owner_search(
     assert result == MemoryItems(
         items=(MemoryItem(kind="episode", text=remembered, origin="agent"),)
     )
+
+
+@pytest.mark.asyncio
+async def test_large_provider_payloads_cross_capture_search_and_profile_boundaries(
+    tmp_path: Path,
+) -> None:
+    large_text = "x" * (2 * 1024 * 1024)
+    profile = MemoryProfile(
+        summary="s" * 70_000,
+        explicit_info=tuple(
+            MemoryProfileExplicitInfo(description=f"profile item {index}")
+            for index in range(201)
+        ),
+        implicit_traits=(),
+        updated_at=None,
+    )
+    profile_item = MemoryItem(kind="profile", text=large_text, profile=profile)
+    provider = FakeMemoryProvider(
+        profile_items_by_owner={
+            PRINCIPAL: (profile_item,),
+            f"{PRINCIPAL}-agent": (profile_item,),
+        }
+    )
+    module, _store, _provider = _module(tmp_path, provider=provider)
+
+    capture_text = "记" * 70_000
+    assert await module.capture(_request(text=capture_text)) == CaptureAccepted()
+    await module.wait_writer_idle_for_tests()
+    search = await module.search(
+        "q" * 70_000,
+        principal_id=PRINCIPAL,
+        project_id="default",
+    )
+    result = await module.profile(principal_id=PRINCIPAL, project_id="default")
+
+    assert provider.captures[0].text == capture_text
+    assert search == MemoryItems(items=())
+    assert isinstance(result, MemoryItems)
+    assert [item.origin for item in result.items] == ["user", "agent"]
+    assert all(item.profile == profile for item in result.items)
 
 
 @pytest.mark.asyncio

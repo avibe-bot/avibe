@@ -79,18 +79,14 @@ if TYPE_CHECKING:
     from core.inbound_attachment_lease import InboundAttachmentLease
 
 
-MAX_CAPTURE_TEXT_BYTES = 32 * 1024
 MAX_CAPTURE_IDENTIFIER_BYTES = 1024
 MAX_CAPTURE_ATTACHMENTS = 8
 MAX_CAPTURE_ATTACHMENT_METADATA_BYTES = 16 * 1024
 MIN_FREE_DISK_BYTES = 512 * 1024 * 1024
 MAX_PROVIDER_TIMESTAMP_MS = 4_102_444_800_000
-MAX_QUERY_BYTES = 8 * 1024
 MAX_SEARCH_LIMIT = 20
 MAX_LIST_PAGE_SIZE = 20
 DEFAULT_SEARCH_LIMIT = 8
-MAX_PROVIDER_ITEM_BYTES = 64 * 1024
-MAX_PROVIDER_RESULT_BYTES = 256 * 1024
 MAX_PROVIDER_RESULT_ITEMS = 20
 PROVIDER_READ_TIMEOUT_SECONDS = 20.0
 
@@ -834,9 +830,6 @@ class MemoryModule:
             return OperationFailed(error="memory_access_denied")
         if not is_new_stored_memory_project_id(project_id):
             return OperationFailed(error="memory_access_denied")
-        if len(query_bytes) > MAX_QUERY_BYTES:
-            return OperationFailed(error="memory_input_too_large")
-
         if self._retired:
             return OperationFailed(error="memory_operation_in_progress")
 
@@ -1441,7 +1434,6 @@ class MemoryModule:
             or any(warning != "memory_list_truncated" for warning in result.warnings)
         ):
             return OperationFailed(error="memory_provider_response_invalid")
-        total_bytes = 0
         seen_ids: set[str] = set()
         previous_instant: datetime | None = None
         for item in result.items:
@@ -1473,27 +1465,17 @@ class MemoryModule:
                 encoded = _list_text_bytes(value, allow_empty=allow_empty)
                 if encoded is None:
                     return OperationFailed(error="memory_provider_response_invalid")
-                total_bytes += len(encoded)
-            total_bytes += len(item.id.encode("utf-8"))
-            total_bytes += len(item.timestamp.encode("utf-8"))
-            total_bytes += len(item.project.encode("utf-8"))
-            if total_bytes > MAX_PROVIDER_RESULT_BYTES:
-                return OperationFailed(error="memory_provider_response_invalid")
         return result
 
     def _bounded_items(self, items: tuple[MemoryItem, ...], *, limit: int) -> MemoryResult:
         if not isinstance(items, tuple) or len(items) > limit:
             return OperationFailed(error="memory_provider_response_invalid")
-        total_bytes = 0
         for item in items:
             if not isinstance(item, MemoryItem) or item.kind not in {"profile", "episode", "fact"}:
                 return OperationFailed(error="memory_provider_response_invalid")
             item_text = _utf8_bytes(item.text) if isinstance(item.text, str) else None
             if item_text is None or not item.text or "\x00" in item.text:
                 return OperationFailed(error="memory_provider_response_invalid")
-            if len(item_text) > MAX_PROVIDER_ITEM_BYTES:
-                return OperationFailed(error="memory_provider_response_invalid")
-            total_bytes += len(item_text) + len(item.kind.encode("utf-8"))
             if item.date is not None:
                 date_bytes = _utf8_bytes(item.date) if isinstance(item.date, str) else None
                 if date_bytes is None or len(date_bytes) > 64:
@@ -1502,17 +1484,13 @@ class MemoryModule:
                     date.fromisoformat(item.date)
                 except ValueError:
                     return OperationFailed(error="memory_provider_response_invalid")
-                total_bytes += len(date_bytes)
             if item.profile is not None:
                 if item.kind != "profile":
                     return OperationFailed(error="memory_provider_response_invalid")
                 profile_bytes = _profile_bytes(item.profile)
                 if profile_bytes is None:
                     return OperationFailed(error="memory_provider_response_invalid")
-                total_bytes += profile_bytes
             if item.origin not in {None, "user", "agent", "both"}:
-                return OperationFailed(error="memory_provider_response_invalid")
-            if total_bytes > MAX_PROVIDER_RESULT_BYTES:
                 return OperationFailed(error="memory_provider_response_invalid")
         return MemoryItems(items=items)
 
@@ -1555,8 +1533,6 @@ class MemoryModule:
             return "memory_invalid_input"
         if not normalized_text.strip() and not request.attachments:
             return "memory_invalid_input"
-        if len(text_bytes) > MAX_CAPTURE_TEXT_BYTES:
-            return "memory_input_too_large"
         return None
 
     @staticmethod
@@ -1719,7 +1695,7 @@ def _profile_text_bytes(value: object) -> bytes | None:
     if not isinstance(value, str) or not value.strip() or "\x00" in value:
         return None
     encoded = _utf8_bytes(value)
-    if encoded is None or len(encoded) > MAX_PROVIDER_ITEM_BYTES:
+    if encoded is None:
         return None
     if any(ord(character) < 32 and character not in {"\n", "\t", "\r"} for character in value):
         return None
@@ -1735,7 +1711,7 @@ def _list_text_bytes(value: object, *, allow_empty: bool) -> bytes | None:
     ):
         return None
     encoded = _utf8_bytes(value)
-    if encoded is None or len(encoded) > MAX_PROVIDER_ITEM_BYTES:
+    if encoded is None:
         return None
     if any(ord(character) < 32 and character not in {"\n", "\t", "\r"} for character in value):
         return None
@@ -1782,7 +1758,7 @@ def _profile_bytes(profile: object) -> int | None:
         return None
     total += summary_bytes
 
-    if not isinstance(profile.explicit_info, tuple) or len(profile.explicit_info) > MAX_PROVIDER_RESULT_ITEMS * 10:
+    if not isinstance(profile.explicit_info, tuple):
         return None
     for info in profile.explicit_info:
         if not isinstance(info, MemoryProfileExplicitInfo):
@@ -1797,7 +1773,7 @@ def _profile_bytes(profile: object) -> int | None:
                 return None
             total += value_bytes
 
-    if not isinstance(profile.implicit_traits, tuple) or len(profile.implicit_traits) > MAX_PROVIDER_RESULT_ITEMS * 10:
+    if not isinstance(profile.implicit_traits, tuple):
         return None
     for trait in profile.implicit_traits:
         if not isinstance(trait, MemoryProfileTrait):

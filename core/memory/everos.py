@@ -48,10 +48,6 @@ from core.memory.observations import (
 logger = logging.getLogger(__name__)
 
 _APP_ID = "avibe"
-_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
-_MAX_ITEM_BYTES = 64 * 1024
-_MAX_RESPONSE_DEPTH = 8
-_MAX_RESPONSE_COLLECTION = 200
 _SIDECAR_TIMEOUT_SECONDS = 20.0
 _AGENTIC_TIMEOUT_HEADER = "X-Avibe-Memory-Agentic-Timeout-Seconds"
 _AGENTIC_ROUND_HEADER = "X-Avibe-Memory-Agentic-Round"
@@ -67,7 +63,6 @@ PROCESSING_PROBE_MAX_DEADLINE_SECONDS = (
 )
 _PROCESSING_TIMEOUT_SECONDS = PROCESSING_PROBE_REQUEST_TIMEOUT_SECONDS
 _PREFLIGHT_TIMEOUT_SECONDS = 30.0
-_PREFLIGHT_RESPONSE_BYTES = _MAX_RESPONSE_BYTES
 _CHAT_PROBE_MAX_TOKENS = 8
 _CHAT_PROBE_TERMINAL_FINISH_REASONS = frozenset(
     {"stop", "length", "content_filter", "tool_calls", "function_call"}
@@ -86,7 +81,6 @@ DASHSCOPE_RERANK_PATH = "api/v1/services/rerank/text-rerank/text-rerank"
 
 _MAX_LIST_PAGE_SIZE = 20
 _EVEROS_EXACT_SORT_WINDOW = 20_000
-_MAX_PROFILE_TIMESTAMP_MS = 4_102_444_800_000
 # The pinned EverOS 1.2.3 `/add` route emits these only while ingesting attachment
 # content, before boundary preparation or any durable provider write. Unknown
 # codes stay out: destructive text-only replay requires positive no-write proof.
@@ -429,7 +423,7 @@ class EverOSPort:
         *,
         timeout_seconds: float | None = None,
     ) -> tuple[int, bytes | None]:
-        """Return the HTTP verdict even when its bounded body is unusable."""
+        """Return the HTTP verdict even when its response body is unusable."""
 
         started = time.monotonic()
         transport = httpx.AsyncHTTPTransport(uds=str(self._socket_path))
@@ -443,9 +437,7 @@ class EverOSPort:
                 async with client.stream(method, route, json=payload) as response:
                     status_code = response.status_code
                     try:
-                        raw = await _read_bounded_response(response)
-                    except MemoryProviderFailure:
-                        raw = None
+                        raw = await _read_response(response)
                     except (httpx.TransportError, OSError):
                         if 200 <= status_code < 300:
                             raise
@@ -539,7 +531,7 @@ class EverOSPort:
             require_json=True,
         )
         data = body.get("data") if isinstance(body, dict) else None
-        if not isinstance(data, dict) or not _is_bounded_json_value(data):
+        if not isinstance(data, dict) or not _is_json_value(data):
             raise MemoryProviderFailure("memory_provider_response_invalid")
         profile = _map_profile_item(data, principal_id=principal_id)
         # "Valid response, no profile payload" is exactly "zero items returned",
@@ -828,7 +820,7 @@ class EverOSPort:
             if not isinstance(body, dict):
                 raise MemoryProviderFailure("memory_provider_response_invalid")
             data = body.get("data")
-            if not isinstance(data, dict) or not _is_bounded_json_value(data):
+            if not isinstance(data, dict) or not _is_json_value(data):
                 raise MemoryProviderFailure("memory_provider_response_invalid")
         except asyncio.TimeoutError as exc:
             raise MemoryProviderFailure("memory_provider_timeout") from exc
@@ -897,7 +889,7 @@ class EverOSPort:
                             )
                         )
                     if not require_json:
-                        await _read_bounded_response(response)
+                        await _read_response(response)
                         logger.debug(
                             "EverOS sidecar request complete route=%s status=%s latency_ms=%s",
                             route,
@@ -905,7 +897,7 @@ class EverOSPort:
                             _elapsed_ms(started),
                         )
                         return None
-                    raw = await _read_bounded_response(response)
+                    raw = await _read_response(response)
         except MemoryProviderFailure:
             raise
         except httpx.TimeoutException as exc:
@@ -953,7 +945,7 @@ class EverOSPort:
                             response.status_code,
                         )
                         return False
-                    raw = await _read_bounded_response(response)
+                    raw = await _read_response(response)
             value = json.loads(raw)
         except (httpx.HTTPError, OSError, TypeError, ValueError, MemoryProviderFailure):
             logger.info("Memory processing probe unavailable endpoint=%s", path)
@@ -1001,7 +993,7 @@ class EverOSPort:
                     json=payload,
                     headers={"Authorization": f"Bearer {api_key}"},
                 ) as response:
-                    raw = await _read_bounded_response(response, max_bytes=_PREFLIGHT_RESPONSE_BYTES)
+                    raw = await _read_response(response)
                     status_code = response.status_code
             try:
                 value = json.loads(raw) if raw else None
@@ -1029,12 +1021,6 @@ class EverOSPort:
         except httpx.TimeoutException:
             failure = MemoryPreflightFailure(error_name, MemoryPreflightDiagnostic(side, message="provider_request_timed_out"))
             return failure
-        except MemoryProviderFailure:
-            failure = MemoryPreflightFailure(
-                error_name,
-                MemoryPreflightDiagnostic(side, message="provider_response_too_large"),
-            )
-            return failure
         except (httpx.HTTPError, OSError, TypeError, ValueError):
             failure = MemoryPreflightFailure(error_name, MemoryPreflightDiagnostic(side, message="provider_unavailable"))
             return failure
@@ -1058,19 +1044,8 @@ def _bounded_preflight_message(
     return message[:512]
 
 
-async def _read_bounded_response(
-    response: httpx.Response,
-    *,
-    max_bytes: int = _MAX_RESPONSE_BYTES,
-) -> bytes:
-    chunks: list[bytes] = []
-    size = 0
-    async for chunk in response.aiter_bytes():
-        size += len(chunk)
-        if size > max_bytes:
-            raise MemoryProviderFailure("memory_provider_response_invalid")
-        chunks.append(chunk)
-    return b"".join(chunks)
+async def _read_response(response: httpx.Response) -> bytes:
+    return await response.aread()
 
 
 def _map_search_items(
@@ -1082,9 +1057,6 @@ def _map_search_items(
     episodes = data.get("episodes", [])
     if not isinstance(episodes, list):
         raise MemoryProviderFailure("memory_provider_response_invalid")
-    if len(episodes) > _MAX_RESPONSE_COLLECTION:
-        raise MemoryProviderFailure("memory_provider_response_invalid")
-
     items: list[ProviderSearchItem] = []
     for episode in episodes:
         if len(items) >= limit:
@@ -1113,7 +1085,7 @@ def _map_search_items(
         facts = episode.get("atomic_facts", [])
         if facts is None:
             facts = []
-        if not isinstance(facts, list) or len(facts) > _MAX_RESPONSE_COLLECTION:
+        if not isinstance(facts, list):
             raise MemoryProviderFailure("memory_provider_response_invalid")
         for fact in facts:
             if len(items) >= limit:
@@ -1179,7 +1151,7 @@ def _map_episode_page(
         not request_id
         or not isinstance(data, dict)
         or set(data) != data_keys
-        or not _is_bounded_json_value(data)
+        or not _is_json_value(data)
     ):
         raise MemoryProviderFailure("memory_provider_response_invalid")
     episodes = data.get("episodes")
@@ -1273,7 +1245,6 @@ def _map_list_episode(
         or value.get("project_id") != project_id
         or value.get("type") != "Conversation"
         or not isinstance(sender_ids, list)
-        or len(sender_ids) > _MAX_RESPONSE_COLLECTION
         or any(not _strict_receipt_id(sender_id) for sender_id in sender_ids)
         or subject is None
         or summary is None
@@ -1293,7 +1264,7 @@ def _map_list_episode(
 
 def _map_profile_item(data: dict[str, Any], *, principal_id: str) -> MemoryItem | None:
     profiles = data.get("profiles", [])
-    if not isinstance(profiles, list) or len(profiles) > _MAX_RESPONSE_COLLECTION:
+    if not isinstance(profiles, list):
         raise MemoryProviderFailure("memory_provider_response_invalid")
     for profile in profiles:
         if not isinstance(profile, dict) or profile.get("user_id") != principal_id:
@@ -1366,7 +1337,7 @@ def _structured_explicit_info(value: dict[str, Any]) -> tuple[MemoryProfileExpli
     if "explicit_info" not in value:
         return ()
     entries = value["explicit_info"]
-    if not isinstance(entries, list) or len(entries) > _MAX_RESPONSE_COLLECTION:
+    if not isinstance(entries, list):
         raise MemoryProviderFailure("memory_provider_response_invalid")
     mapped: list[MemoryProfileExplicitInfo] = []
     for entry in entries:
@@ -1389,7 +1360,7 @@ def _structured_implicit_traits(value: dict[str, Any]) -> tuple[MemoryProfileTra
     if "implicit_traits" not in value:
         return ()
     entries = value["implicit_traits"]
-    if not isinstance(entries, list) or len(entries) > _MAX_RESPONSE_COLLECTION:
+    if not isinstance(entries, list):
         raise MemoryProviderFailure("memory_provider_response_invalid")
     mapped: list[MemoryProfileTrait] = []
     for entry in entries:
@@ -1410,7 +1381,7 @@ def _structured_implicit_traits(value: dict[str, Any]) -> tuple[MemoryProfileTra
 
 
 def _normalized_profile_timestamp(value: Any) -> str | None:
-    if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= _MAX_PROFILE_TIMESTAMP_MS:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         return None
     try:
         instant = datetime.fromtimestamp(value / 1000, tz=timezone.utc)
@@ -1433,7 +1404,7 @@ def _episode_text(episode: dict[str, Any]) -> str | None:
 def _canonical_profile_text(value: Any) -> str | None:
     if isinstance(value, str):
         return _safe_text(value)
-    if not isinstance(value, (dict, list)) or not _is_bounded_json_value(value):
+    if not isinstance(value, (dict, list)) or not _is_json_value(value):
         return None
     try:
         rendered = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -1447,7 +1418,7 @@ def _safe_text(value: Any) -> str | None:
         return None
     text = value.strip()
     raw = _utf8_bytes(text)
-    if not text or raw is None or len(raw) > _MAX_ITEM_BYTES:
+    if not text or raw is None:
         return None
     if any(ord(character) < 32 and character not in {"\n", "\t", "\r"} for character in text):
         return None
@@ -1462,7 +1433,6 @@ def _safe_list_text(value: Any, *, allow_empty: bool) -> str | None:
     if (
         (not allow_empty and not text)
         or raw is None
-        or len(raw) > _MAX_ITEM_BYTES
     ):
         return None
     if any(ord(character) < 32 and character not in {"\n", "\t", "\r"} for character in text):
@@ -1511,29 +1481,30 @@ def _record_timestamp(value: Any) -> str | None:
     return instant.isoformat().replace("+00:00", "Z")
 
 
-def _is_bounded_json_value(value: Any, *, depth: int = 0) -> bool:
-    if depth > _MAX_RESPONSE_DEPTH:
+def _is_json_value(value: Any) -> bool:
+    pending = [value]
+    while pending:
+        current = pending.pop()
+        if current is None or isinstance(current, bool):
+            continue
+        if isinstance(current, str):
+            if _utf8_bytes(current) is None:
+                return False
+            continue
+        if isinstance(current, (int, float)):
+            if isinstance(current, float) and not math.isfinite(current):
+                return False
+            continue
+        if isinstance(current, list):
+            pending.extend(current)
+            continue
+        if isinstance(current, dict):
+            if any(not isinstance(key, str) or _utf8_bytes(key) is None for key in current):
+                return False
+            pending.extend(current.values())
+            continue
         return False
-    if value is None or isinstance(value, bool):
-        return True
-    if isinstance(value, str):
-        raw = _utf8_bytes(value)
-        return raw is not None and len(raw) <= _MAX_ITEM_BYTES
-    if isinstance(value, (int, float)):
-        return not isinstance(value, float) or math.isfinite(value)
-    if isinstance(value, list):
-        return len(value) <= _MAX_RESPONSE_COLLECTION and all(
-            _is_bounded_json_value(item, depth=depth + 1) for item in value
-        )
-    if isinstance(value, dict):
-        return len(value) <= _MAX_RESPONSE_COLLECTION and all(
-            isinstance(key, str)
-            and (raw := _utf8_bytes(key)) is not None
-            and len(raw) <= 128
-            and _is_bounded_json_value(item, depth=depth + 1)
-            for key, item in value.items()
-        )
-    return False
+    return True
 
 
 def _valid_chat_probe_response(value: Any) -> bool:
@@ -1584,7 +1555,6 @@ def _valid_embedding_probe_response(value: Any) -> bool:
     return (
         isinstance(vector, list)
         and bool(vector)
-        and len(vector) <= _MAX_RESPONSE_COLLECTION * 1000
         and all(isinstance(item, (int, float)) and not isinstance(item, bool) and math.isfinite(item) for item in vector)
     )
 
@@ -1729,11 +1699,11 @@ def _bounded_opaque_string(value: object, *, max_bytes: int = 128) -> str | None
     return raw[:max_bytes].decode("utf-8", errors="ignore")
 
 
-def _strict_receipt_id(value: object, *, max_bytes: int = 128) -> str | None:
+def _strict_receipt_id(value: object) -> str | None:
     if not isinstance(value, str):
         return None
     raw = _utf8_bytes(value)
-    return value if value and raw is not None and len(raw) <= max_bytes else None
+    return value if value and raw is not None else None
 
 
 def _utf8_bytes(value: str) -> bytes | None:
@@ -1750,7 +1720,7 @@ def _optional_json_object(raw: bytes | None) -> dict[str, Any] | None:
         value = json.loads(raw)
     except (TypeError, ValueError):
         return None
-    return value if isinstance(value, dict) and _is_bounded_json_value(value) else None
+    return value if isinstance(value, dict) and _is_json_value(value) else None
 
 
 def _provider_health_snapshot(payload: dict[str, Any] | None) -> ProviderHealthSnapshot | None:

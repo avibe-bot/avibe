@@ -466,6 +466,39 @@ def test_sidecar_guard_accepts_agentic_but_rejects_untrusted_search_scope() -> N
         )
 
 
+def test_sidecar_guard_accepts_provider_valid_large_request_bodies() -> None:
+    search_payload = {
+        "user_id": "u-11111111111111111111111111111111",
+        "app_id": "avibe",
+        "project_id": PROJECT,
+        "query": "q" * 70_000,
+        "method": "keyword",
+        "top_k": 8,
+        "include_profile": True,
+        "enable_llm_rerank": False,
+    }
+    add_payload = {
+        "session_id": SESSION_ID,
+        "app_id": "avibe",
+        "project_id": PROJECT,
+        "messages": [
+            {
+                "sender_id": "u-11111111111111111111111111111111",
+                "role": "user",
+                "timestamp": 1,
+                "content": "c" * 70_000,
+            }
+        ],
+    }
+    search_body = json.dumps(search_payload).encode()
+    add_body = json.dumps(add_payload).encode()
+
+    assert len(search_body) > 64 * 1024
+    assert len(add_body) > 64 * 1024
+    assert _request_rejection("POST", "/api/v2/memory/search", search_body) is None
+    assert _request_rejection("POST", "/api/v2/memory/add", add_body) is None
+
+
 def test_sidecar_guard_keeps_profile_exact_and_allows_only_bounded_episode_lists() -> None:
     principal = "u-11111111111111111111111111111111"
     profile = {

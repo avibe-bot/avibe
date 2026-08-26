@@ -322,11 +322,13 @@ def test_add_marks_post_submission_transport_failures_as_ambiguous(
     assert raised.value.ambiguous is True
 
 
-def test_add_rejects_overlong_receipt_without_truncating() -> None:
+def test_add_preserves_provider_receipt_without_avibe_size_cap() -> None:
+    request_id = "x" * 129
+
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
-            json={"request_id": "x" * 129, "data": {"status": "accumulated"}},
+            json={"request_id": request_id, "data": {"status": "accumulated"}},
         )
 
     async def run() -> AddAck:
@@ -337,7 +339,7 @@ def test_add_rejects_overlong_receipt_without_truncating() -> None:
     with _sidecar_transport(handler):
         ack = asyncio.run(run())
 
-    assert ack == AddAck(request_id=None, status="accumulated")
+    assert ack == AddAck(request_id=request_id, status="accumulated")
 
 
 @pytest.mark.parametrize(
@@ -552,8 +554,22 @@ def test_flush_treats_unsupported_2xx_status_as_unknown(caplog) -> None:
     assert "flush returned an unsupported status value" in caplog.text
 
 
-@pytest.mark.parametrize("request_id", ["", "x" * 129])
-def test_flush_rejects_invalid_success_receipt(request_id: str) -> None:
+def test_flush_rejects_empty_success_receipt() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"request_id": "", "data": {"status": "extracted"}},
+        )
+
+    with _sidecar_transport(handler):
+        result = asyncio.run(EverOSPort(Path("/tmp/everos.sock")).flush(SESSION_REF))
+
+    assert result == FlushUnknown(reason="transport")
+
+
+def test_flush_preserves_provider_receipt_without_avibe_size_cap() -> None:
+    request_id = "x" * 129
+
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -563,7 +579,7 @@ def test_flush_rejects_invalid_success_receipt(request_id: str) -> None:
     with _sidecar_transport(handler):
         result = asyncio.run(EverOSPort(Path("/tmp/everos.sock")).flush(SESSION_REF))
 
-    assert result == FlushUnknown(reason="transport")
+    assert result == FlushSucceeded(request_id=request_id, status="extracted")
 
 
 @pytest.mark.parametrize(
@@ -1283,6 +1299,58 @@ def test_profile_canonicalizes_structured_profile() -> None:
     assert items[0].kind == "profile"
     assert items[0].text == '{"language":"Python","timezone":"UTC"}'
     assert items[0].profile is None
+
+
+@pytest.mark.parametrize(
+    "owner_id",
+    (
+        "u-11111111111111111111111111111111",
+        "u-11111111111111111111111111111111-agent",
+    ),
+)
+def test_profile_preserves_provider_valid_payloads_without_avibe_size_caps(
+    owner_id: str,
+) -> None:
+    provider_extension: dict[str, object] = {"value": "preserved"}
+    for _ in range(12):
+        provider_extension = {"nested": provider_extension}
+    profile_data = {
+        "summary": "s" * 70_000,
+        "explicit_info": [
+            {"description": f"profile item {index}"}
+            for index in range(201)
+        ],
+        "implicit_traits": [],
+        "provider_extension": provider_extension,
+        "large_provider_field": "x" * (2 * 1024 * 1024),
+    }
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "profiles": [
+                        {"user_id": owner_id, "profile_data": profile_data}
+                    ]
+                }
+            },
+        )
+
+    with _sidecar_transport(handler):
+        items = asyncio.run(
+            EverOSPort(Path("/tmp/everos.sock")).profile(owner_id, PROJECT)
+        )
+
+    assert len(items) == 1
+    assert len(items[0].text.encode("utf-8")) > 2 * 1024 * 1024
+    assert items[0].profile is not None
+    assert items[0].profile.summary == profile_data["summary"]
+    assert len(items[0].profile.explicit_info) == 201
+    rendered_extension = json.loads(items[0].text)["provider_extension"]
+    for _ in range(12):
+        rendered_extension = rendered_extension["nested"]
+    assert rendered_extension == {"value": "preserved"}
 
 
 def test_profile_maps_known_fields_without_collapsing_basis_and_evidence() -> None:
@@ -2272,9 +2340,9 @@ def test_processing_preflight_preserves_http_status_for_non_json_errors() -> Non
     assert result.failure.diagnostic.message == "HTTP 502"
 
 
-def test_processing_preflight_accepts_large_bounded_embedding_vectors() -> None:
-    vector = [0.123456789] * 16_384
-    assert len(json.dumps({"data": [{"embedding": vector}]}).encode()) > 64 * 1024
+def test_processing_preflight_accepts_provider_valid_large_embedding_vectors_without_avibe_caps() -> None:
+    vector = [0.123456789] * 250_000
+    assert len(json.dumps({"data": [{"embedding": vector}]}).encode()) > 2 * 1024 * 1024
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/chat/completions"):

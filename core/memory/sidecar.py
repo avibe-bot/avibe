@@ -28,7 +28,6 @@ from core.memory.store import is_memory_owner_id
 from core.memory.types import MAX_AGENTIC_TIMEOUT_SECONDS
 
 
-_MAX_BODY_BYTES = 64 * 1024
 _APP_ID = "avibe"
 _AGENTIC_TIMEOUT_HEADER = "X-Avibe-Memory-Agentic-Timeout-Seconds"
 _AGENTIC_ROUND_HEADER = "X-Avibe-Memory-Agentic-Round"
@@ -256,8 +255,6 @@ def _request_rejection(
         "/api/v2/memory/get",
     }:
         return "route"
-    if len(body) > _MAX_BODY_BYTES:
-        return "body"
     try:
         payload = json.loads(body)
     except (TypeError, ValueError):
