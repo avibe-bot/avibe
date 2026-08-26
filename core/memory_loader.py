@@ -13,6 +13,10 @@ from vibe.memory_contract import (
 
 MEMORY_RUNTIME_ENTRYPOINT = "core.memory.runtime"
 MEMORY_RUNTIME_PROTOCOL_VERSION = 1
+# Host-owned transport bound used by the list route. Keeping this here lets
+# disabled/failing plugin paths validate cursors without importing the optional
+# implementation module.
+MEMORY_LIST_CURSOR_MAX_BYTES = 8192
 _PROTOCOL_ATTR = "MEMORY_RUNTIME_PROTOCOL_VERSION"
 
 

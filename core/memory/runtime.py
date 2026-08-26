@@ -84,6 +84,7 @@ from vibe.memory_project_ids import (
     MEMORY_SEARCH_ALL_PROJECTS,
 )
 from core.memory.store import MemoryStore, is_principal_id
+from core.memory_loader import MEMORY_LIST_CURSOR_MAX_BYTES
 from core.memory.types import (
     MemoryFailureLogEntry,
     MemoryItem,
@@ -116,7 +117,6 @@ ProcessingEvent = Callable[
 
 ARTIFACT_ACTIVATION_TIMEOUT_SECONDS = 90.0
 _MEMORY_LIST_CURSOR_VERSION = 3
-MEMORY_LIST_CURSOR_MAX_BYTES = 8192
 _MEMORY_LIST_PROVIDER_PAGE_SIZE = 20
 _MEMORY_LIST_PROVIDER_MAX_PAGE = 1_000_000
 _MEMORY_LIST_AGGREGATE_TIMEOUT_SECONDS = 20.0

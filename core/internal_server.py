@@ -49,6 +49,7 @@ from sqlalchemy.exc import IntegrityError
 from config import paths
 from config.atomic_io import write_atomic
 from core.delivery_target import normalize_message_kind
+from core.memory_loader import MEMORY_LIST_CURSOR_MAX_BYTES
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED
 from modules.im.base import MessageContext
 from storage.db import get_cached_sqlite_engine
@@ -1236,6 +1237,15 @@ def create_app(
         scope = resolve(session_id) if callable(resolve) else None
         if not bool(getattr(getattr(getattr(controller, "config", None), "memory", None), "enabled", False)):
             return None
+        plugin_sessions = getattr(controller, "_memory_plugin_cli_sessions", None)
+        if (
+            getattr(controller, "_memory_plugin_error", None) is not None
+            and isinstance(plugin_sessions, set)
+            and session_id in plugin_sessions
+            and isinstance(scope, tuple)
+            and len(scope) == 2
+        ):
+            return scope
         from core.memory.store import is_principal_id, is_project_id
 
         if (
@@ -1671,10 +1681,6 @@ def create_app(
         is_ui = bool(str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip())
         limit = payload.get("limit", 20)
         origin = payload.get("origin", "user")
-        try:
-            from core.memory.runtime import MEMORY_LIST_CURSOR_MAX_BYTES
-        except ImportError:
-            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_plugin_unavailable"})
         try:
             raw_project = omitted_project_to_default(payload.get("project"))
             project_id = (

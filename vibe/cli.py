@@ -474,7 +474,16 @@ def _print_memory_cli_error(operation: str, code: str, *, as_json: bool, languag
     if as_json:
         print(json.dumps(payload, indent=2))
     else:
-        print(i18n_t("memory.cli.error", language, operation=operation, code=code), file=sys.stderr)
+        display_code = _memory_cli_label(
+            code,
+            keys=_MEMORY_CLI_REASON_I18N_KEYS,
+            fallback_key="memory.cli.reason.unknown",
+            language=language,
+        )
+        print(
+            i18n_t("memory.cli.error", language, operation=operation, code=display_code),
+            file=sys.stderr,
+        )
     return 1
 
 

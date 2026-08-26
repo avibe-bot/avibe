@@ -19,6 +19,7 @@ from core.controller import Controller
 from core.memory import CaptureRequest, CaptureSkipped
 from core.memory_adapter import DisabledMemoryAdapter, EnabledMemoryAdapter, TurnAccepted
 from vibe.memory_contract import (
+    MemoryPluginUnavailableError,
     MemoryRuntimeCloseUnprovedError,
     MemoryStoreUnavailableError,
 )
@@ -58,6 +59,44 @@ def _memory_state_entries(home: Path) -> list[Path]:
             for part in path.relative_to(home).parts
         )
     ]
+
+
+def test_memory_cli_session_keeps_authenticated_boundary_when_plugin_is_unavailable() -> None:
+    controller = Controller.__new__(Controller)
+    controller.config = types.SimpleNamespace(
+        memory=types.SimpleNamespace(enabled=True),
+    )
+    controller._memory_plugin_error = MemoryPluginUnavailableError("injected")
+    controller._memory_scopes_by_session = {}
+    controller._memory_cli_facts_by_session = {}
+    controller._memory_plugin_cli_sessions = set()
+    facts = object()
+
+    class _Admission:
+        def principal_for(self, _facts):
+            return None
+
+        def project_for(self, _facts):
+            return "default"
+
+    controller._memory_admission = lambda: _Admission()
+    controller._memory_turn_facts = lambda _context: facts
+    context = types.SimpleNamespace(
+        platform_specific={
+            "agent_session_target": {"id": "session-plugin"},
+        },
+        platform="avibe",
+    )
+
+    assert Controller.configure_memory_cli_session(
+        controller,
+        context,
+        admitted=True,
+    )
+    assert Controller.memory_scope_for_cli_session(controller, "session-plugin") == (
+        "__memory_plugin_error__",
+        "default",
+    )
 
 
 async def _start_disabled_cleanup(

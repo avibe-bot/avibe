@@ -337,6 +337,7 @@ class Controller:
         self._removed_im_clients: Dict[str, BaseIMClient] = {}
         self._memory_scopes_by_session: Dict[str, tuple[str, str]] = {}
         self._memory_cli_facts_by_session: Dict[str, InboundTurnFacts] = {}
+        self._memory_plugin_cli_sessions: set[str] = set()
 
         # Session tracking (must be initialized before handlers)
         self.claude_sessions: Dict[str, Any] = {}
@@ -3258,9 +3259,23 @@ class Controller:
         principal_id = admission.principal_for(facts) if admitted else None
         project_id = admission.project_for(facts) if admitted else None
         if principal_id is None or project_id is None:
+            plugin_error = getattr(self, "_memory_plugin_error", None)
+            plugin_sessions = getattr(self, "_memory_plugin_cli_sessions", None)
+            if admitted and plugin_error is not None:
+                if not isinstance(plugin_sessions, set):
+                    plugin_sessions = set()
+                    self._memory_plugin_cli_sessions = plugin_sessions
+                plugin_sessions.add(caller.session_id)
+                facts_by_session[caller.session_id] = facts
+                return True
+            if isinstance(plugin_sessions, set):
+                plugin_sessions.discard(caller.session_id)
             self._memory_scopes_by_session.pop(caller.session_id, None)
             facts_by_session.pop(caller.session_id, None)
             return False
+        plugin_sessions = getattr(self, "_memory_plugin_cli_sessions", None)
+        if isinstance(plugin_sessions, set):
+            plugin_sessions.discard(caller.session_id)
         self._memory_scopes_by_session[caller.session_id] = (principal_id, project_id)
         facts_by_session[caller.session_id] = facts
         return True
@@ -3270,10 +3285,17 @@ class Controller:
 
         if not bool(getattr(getattr(self.config, "memory", None), "enabled", False)):
             return None
+        session_key = str(session_id or "").strip()
+        plugin_sessions = getattr(self, "_memory_plugin_cli_sessions", None)
+        if (
+            getattr(self, "_memory_plugin_error", None) is not None
+            and isinstance(plugin_sessions, set)
+            and session_key in plugin_sessions
+        ):
+            return ("__memory_plugin_error__", "default")
         from vibe.memory_project_ids import DEFAULT_MEMORY_PROJECT_ID
         from core.memory.store import is_principal_id, is_project_id
 
-        session_key = str(session_id or "").strip()
         scope = self._memory_scopes_by_session.get(session_key)
         if (
             isinstance(scope, tuple)
@@ -3311,6 +3333,9 @@ class Controller:
         facts = getattr(self, "_memory_cli_facts_by_session", None)
         if isinstance(facts, dict):
             facts.pop(session_id, None)
+        plugin_sessions = getattr(self, "_memory_plugin_cli_sessions", None)
+        if isinstance(plugin_sessions, set):
+            plugin_sessions.discard(session_id)
 
     def memory_principal_for_cli_session(self, session_id: str) -> Optional[str]:
         """Return the principal associated with an admitted Agent session."""

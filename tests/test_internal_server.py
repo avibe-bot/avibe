@@ -569,6 +569,37 @@ def test_memory_projects_plugin_failure_uses_stable_plugin_envelope(
     assert response.json() == {"status": "failed", "error": expected_code}
 
 
+def test_memory_projects_plugin_failure_preserves_admitted_cli_session_boundary() -> None:
+    from core import internal_server as server
+    from vibe.memory_http_headers import CALLER_SESSION_HEADER
+    from vibe.memory_contract import MemoryPluginUnavailableError
+
+    controller = _build_controller_double()
+    controller._memory_plugin_error = MemoryPluginUnavailableError("injected")
+    controller._memory_plugin_cli_sessions = {"session-1"}
+    controller.memory_scope_for_cli_session.return_value = (
+        "__memory_plugin_error__",
+        "default",
+    )
+    controller.memory_projects_payload = AsyncMock(
+        side_effect=MemoryPluginUnavailableError("injected")
+    )
+    app = server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.get(
+                "/internal/memory/projects",
+                headers={CALLER_SESSION_HEADER: "session-1"},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 503
+    assert response.json() == {"status": "failed", "error": "memory_plugin_unavailable"}
+
+
 def test_memory_install_route_delegates_to_controller_lifecycle() -> None:
     controller = _build_controller_double()
     controller.memory_runtime = None
@@ -1211,9 +1242,11 @@ def test_memory_list_rejects_surrogate_aggregate_cursor_at_controller_boundary()
     runtime.list_all_episodes_payload.assert_not_awaited()
 
 
-def test_memory_list_accepts_maximum_aggregate_cursor_transport_bound() -> None:
+def test_memory_list_accepts_maximum_aggregate_cursor_transport_bound(monkeypatch) -> None:
+    import builtins
+
     from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
-    from core.memory.runtime import MEMORY_LIST_CURSOR_MAX_BYTES
+    from core.memory_loader import MEMORY_LIST_CURSOR_MAX_BYTES
     from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
     secret = "test-memory-ui-secret"
@@ -1232,6 +1265,14 @@ def test_memory_list_accepts_maximum_aggregate_cursor_transport_bound() -> None:
     app = internal_server.create_app(controller, memory_ui_secret=secret)
     path = "/internal/memory/list"
     user_key = "avibe:local"
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "core.memory.runtime":
+            raise RuntimeError("optional implementation initializer")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
 
     async def _exercise() -> httpx.Response:
         transport = httpx.ASGITransport(app=app)
