@@ -793,8 +793,9 @@ export const SettingsModelsPage: React.FC = () => {
                 sourceEntityAuthority.settleSnapshot(sourceSnapshot, sourceResult.value);
               }
             } catch {
-              // The mode read is still authoritative; keep the source projection
-              // stale and let the page's normal refresh/retry path recover it.
+              // The mode read is authoritative, but the source projection is not.
+              // Keep its last values visible with a retryable stale marker.
+              setSourcesRead((previous) => failRegionRead(previous));
             }
           }
           setSwitchFailures((previous) => {

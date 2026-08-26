@@ -75,7 +75,7 @@ describe('SourceOrderDrawer keyboard ordering', () => {
     renderDrawer();
     const handles = await screen.findAllByRole('button', { name: 'Reorder source' });
     expect(screen.getByRole('heading', { name: 'Claude Code · Global route priority' })).toBeTruthy();
-    expect(screen.getByText('Upstream sources at the top are used first. When quota, rate-limit, server, authentication, or network failures prevent a request, the next priority is used automatically.')).toBeTruthy();
+    expect(screen.getByText("Among sources already configured in each model's route, those at the top are used first. When quota, rate-limit, server, authentication, or network failures prevent a request, the next priority is used automatically.")).toBeTruthy();
     expect(screen.getByText("These sources remain in existing routes after the ordered sources. To remove one from a route, edit that model's gateway route.")).toBeTruthy();
     expect(handles[0].className).toContain('cursor-grab');
 

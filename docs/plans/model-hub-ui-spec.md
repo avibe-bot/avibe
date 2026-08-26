@@ -277,7 +277,7 @@ half named in its Missing cell has an owner.
 | G-23 | `Qp6FI`, the shared guarded-change confirm — both callers, §1.6's *Refetch refused* and *Guard refused* | a body block that lists `would_interrupt` | **The refusal carries a list and the dialog draws a sentence.** `would_interrupt` is `SupplyGap[]`, each entry `{backend, model_id, agents}` with `model_id` the protected **menu** model and `agents` the enabled named Vibe Agents that pinned it `[contract]`, and `model-hub.md` requires that 「the confirm copy names affected Agents when any exist」. `Qp6FI` as measured has exactly one label, one count pill, one row list and one hint line, and all four are the `would_remove_hops` side; the only rendering of the gap array is `guard.hint.interrupt`, one sentence that reports the array is non-empty. The strings are specified — `guard.gap.label`, `guard.gap.subject`, `guard.gap.agents`, with `gateway.modelCount` as the pill — because copy is this document's register and an authority requires these; the block that holds them is drawing, so it is a gap rather than an invention. The same absence makes `source_last_supplier` unrenderable: its `api.md` example carries `would_remove_hops: []` beside a populated `would_interrupt`, which this dialog would draw as an empty list under a bare sentence |
 | G-24 | 01 run pill, *Unsupported host* — **registered against RuntimeDependency** | ~~a host-platform or installability discriminator in the runtime payload~~ nothing | Every runtime response now carries server-authoritative `host_platform`; an exact match in `manifest.assets[].platform` is the support predicate. §1.0 never substitutes the browser platform. |
 | G-25 | 01 gateway group, the unavailable marker — **registered against AgentSupply model supply; collapse ownership retired 2026-08-23** | ~~a per-model fact that separates a chain with a live hop from one whose hops are all stale~~ nothing | `model_supply[].has_runnable_hop` now carries that server-derived fact under the same runnability axiom as AgentChain. §1.1 uses it only to choose the row marker: a nonempty chain with no runnable hop renders `legend.unavailable`; the forced-false `chain_length: 0` subset branches first to the existing `models.launch.route_unconfigured` treatment instead of borrowing paused-supply copy. The six-row prefix owns collapse independently of this field. |
-| G-26 | 03 order drawer, a reorder — **registered against the same explicit reorder contract as G-13** | ~~a policy value that reads the stored Source order~~ nothing | `POST /api/models/agents/<backend>/chains/reorder` consumes the current Source-order sequence with a stable total sort over every stored Route. The order PUT remains chain-byte-identical; the drawer invokes the explicit reorder operation immediately after it succeeds. |
+| G-26 | 03 order drawer, a reorder — **registered against the same explicit reorder contract as G-13** | ~~a policy value that reads the stored Source order~~ nothing | `POST /api/models/agents/<backend>/chains/reorder` stores the supplied Source-order sequence and applies a stable total sort over every stored Route in the same mutation. A source outside the order remains a later Route hop when it is already configured there. |
 | G-27 | 05 add-by-key, the persisting `POST /api/models/sources` — **registered against `source-create.schema.json`** | ~~the request shape that route accepts~~ nothing | The schema is the complete request: required `vendor` and write-only `key`; optional `display_name`, `base_url`, `protocol`, `client_nonce` and `accept_unavailable_inventory` `[contract]`. The client-selected protocol is a one-interface probe constraint, never response proof or discovered inventory. §1.5 sends the consent boolean true only from ⑤, where a repeated observation still has to prove the protocol before a failed inventory may commit. |
 | G-28 | `Qp6FI` guarded-change hop rows — **registered against `RouteHopRef.position`** | ~~the hop's position, on the reference the refusal returns~~ nothing | `guard-refusal.schema.json` carries one-based pre-mutation `position` on every `RouteHopRef`. §1.6 and §1.10 render it directly and issue no per-chain lookup. |
 | G-29 | 05 add-by-key, ⑦'s lost-response reconciliation — **registered against Source-create nonce totality** | ~~anything the client holds *before* the send that the committed Source can afterwards be recognized by~~ nothing | The client generates `SourceCreate.client_nonce` before send. A list read finds exact `Source.client_nonce` after commit; in-flight and committed retries return distinct `409` conflicts, released/list-miss retries are fresh. A committed retry never replays an old response; it returns `source_nonce_conflict` and the client rereads the list to claim the Source. |
@@ -1455,7 +1455,7 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | `upstream.repair.fail` `[derived]` | 没能完成这次凭据修复 | The credential repair did not finish |
 | `gateway.heading` | 网关路由 | Gateway routes |
 | `gateway.infoLabel` `[derived]` | 什么是网关路由 | What gateway routes are |
-| `gateway.info` `[derived]` | 网关路由决定每个 Agent 的型号先使用哪个上游来源;当额度不足、触发限流、服务端、认证或网络出错导致请求无法完成时，自动切换下一优先级。 | Gateway routes decide which upstream source each Agent's model uses first. When quota, rate-limit, server, authentication, or network failures prevent a request, the next priority is used automatically. |
+| `gateway.info` `[derived]` | 网关路由决定每个 Agent 的型号在已有路由中的来源里先使用哪个上游来源;当额度不足、触发限流、服务端、认证或网络出错导致请求无法完成时，自动切换下一优先级。 | Gateway routes decide which upstream source each Agent's model uses first among the sources already configured in its route. When quota, rate-limit, server, authentication, or network failures prevent a request, the next priority is used automatically. |
 | `gateway.sourceOrder` | 调整优先级 | Adjust priority |
 | `gateway.switchToGateway` | 切换到网关 | Switch to gateway |
 | `gateway.switchToDirect` | 切到直连 | Switch to direct |
@@ -2753,7 +2753,7 @@ the drawer keeps the same draft and retries it; no partial priority state is vis
 | Key | 中文 | English |
 | --- | --- | --- |
 | `title` | {{backend}} · 全局路由优先级 | {{backend}} · Global route priority |
-| `subtitle` | 排在前面的上游将优先被使用。当额度不足、触发限流、服务端、认证或网络出错导致请求无法完成时，自动切换下一优先级。 | Upstream sources at the top are used first. When quota, rate-limit, server, authentication, or network failures prevent a request, the next priority is used automatically. |
+| `subtitle` | 在每个型号已有路由中的来源里，排在前面的上游将优先被使用。当额度不足、触发限流、服务端、认证或网络出错导致请求无法完成时，自动切换下一优先级。 | Among sources already configured in each model's route, those at the top are used first. When quota, rate-limit, server, authentication, or network failures prevent a request, the next priority is used automatically. |
 | `infoLabel` `[derived]` | 什么是全局路由优先级 | What global route priority is |
 | `section.ordered` | 排在这条顺序里 | In this order |
 | `section.ordered.note` | 拖动排序 | Drag to reorder |
@@ -5368,11 +5368,11 @@ never a decision the user can revisit, so making it findable buys nothing and te
 everyone else that protocols are their problem.
 
 **D-9 — The source order is a backend-scoped priority, persisted separately and applied
-explicitly to existing Routes.** One order per gateway-mode backend. The PUT stores the
-complete order; the following `chains/reorder` operation stably places listed Sources
+explicitly to existing Routes.** One order per gateway-mode backend. The atomic
+`chains/reorder` operation stores the complete order and stably places listed Sources
 first in every existing Route while preserving each exact hop pair. Runtime then reads
-the stored chain and chooses its first runnable hop. No later state of the list changes a
-chain until the user saves the drawer again.
+the stored chain and chooses its first runnable hop among the sources already configured
+there. No later state of the list changes a chain until the user saves the drawer again.
 *Why:* N sources × M models of hand-wiring is a configuration surface nobody can hold in
 their head, so a backend-level priority gives one clear way to update all existing
 chains without inventing a second per-model policy. The operation changes order only,
@@ -5574,8 +5574,8 @@ nobody has drawn yet: any future add path inherits the same test.
 
 **D-28 — A backend-order surface reads `AgentSupply.sources`, that backend's stored Source
 order; a source card reads `adopted_by`. Neither substitutes for the other.** §1.3 owns
-the first reading — it is the list `PUT /api/models/agents/<backend>/sources` writes and
-re-echoes `{agent: AgentSupply}`, then passes to the explicit chains/reorder operation —
+the first reading — it is the list the atomic `POST /api/models/agents/<backend>/chains/reorder`
+stores and re-echoes in `{agent: AgentSupply}` —
 and §1.0 owns the second; this decision is only about the prohibition on deriving either
 from the other.
 *Why:* the two diverge on an ordinary page, not only in edge cases, and they diverge in

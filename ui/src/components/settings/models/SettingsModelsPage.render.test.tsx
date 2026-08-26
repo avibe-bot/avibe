@@ -1035,6 +1035,41 @@ describe('SettingsModelsPage surface branches', () => {
     expect(screen.getByText(/Available · not currently supplying|可用 · 当前未供给/i)).toBeTruthy();
   });
 
+  it('marks the source inventory stale when Direct-mode recovery cannot reread it', async () => {
+    const direct = { ...takeoverAgent, mode: 'direct' as const, sources: null, routes: null, supply_status: null, model_supply: null };
+    const staleSource = {
+      ...retainedSource,
+      id: 'src_head',
+      display_name: 'Paused source',
+      adopted_by: [{ backend: 'codex' as const, menu_model: 'gpt-5.6-sol' }],
+    };
+    const agentRead = vi.spyOn(modelsApi, 'listAgents')
+      .mockResolvedValueOnce([takeoverAgent])
+      .mockResolvedValueOnce([direct]);
+    const sourceRead = vi.spyOn(modelsApi, 'listSources')
+      .mockResolvedValueOnce([staleSource])
+      .mockRejectedValueOnce(new TypeError('source read lost'));
+    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
+    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([takeoverChain]);
+    vi.spyOn(modelsApi, 'setAgentMode').mockRejectedValueOnce(new TypeError('response lost'));
+
+    render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <SettingsModelsPage />
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    await userEvent.click(await screen.findByRole('button', { name: /^Switch to direct$|^切到直连$/i }));
+
+    expect(await screen.findByRole('button', { name: /^Switch to Gateway$|^切换到网关$/i })).toBeTruthy();
+    await waitFor(() => expect(agentRead).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(sourceRead).toHaveBeenCalledTimes(2));
+    expect(screen.getByText(/Could not read the source list · the gateway itself is fine|来源列表没读到 · 网关本身正常/i)).toBeTruthy();
+  });
+
   it('keeps retained supply rows but clears derived chain claims when a later supply read fails', async () => {
     const head = { ...retainedSource, id: 'src_head', display_name: 'Paused source', state: { status: 'cooldown' as const, retry_at: '2099-01-01T00:00:00Z', detail_key: null } };
     const relay = { ...retainedSource, id: 'src_relay', display_name: 'Replacement source', state: { status: 'active' as const, retry_at: null, detail_key: null } };
