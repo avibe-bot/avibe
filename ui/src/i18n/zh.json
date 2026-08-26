@@ -322,6 +322,9 @@
     "platformsSubtitle": "配置启用哪些消息平台，以及每个平台的接入状态。",
     "backendsTitle": "后端",
     "backendsSubtitle": "管理 agent 后端、默认路由和本地 CLI 可用性。",
+    "agentBackend": {
+      "packageMutationBusy": "已有软件包操作正在进行，未安排重启。"
+    },
     "dependenciesTitle": "依赖",
     "dependenciesSubtitle": "Avibe 自动安装并保持最新的本地运行时。",
     "dependencies": {

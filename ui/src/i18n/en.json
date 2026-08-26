@@ -322,6 +322,9 @@
     "platformsSubtitle": "Configure which messaging platforms are connected and how each one is enabled.",
     "backendsTitle": "Backends",
     "backendsSubtitle": "Manage agent backends, default routing, and local CLI availability.",
+    "agentBackend": {
+      "packageMutationBusy": "A package operation is in progress; restart was not scheduled."
+    },
     "dependenciesTitle": "Dependencies",
     "dependenciesSubtitle": "Local runtimes that Avibe installs and keeps up to date automatically.",
     "dependencies": {

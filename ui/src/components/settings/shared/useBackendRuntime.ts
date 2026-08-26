@@ -67,11 +67,16 @@ type BackendRuntimeApplyResult = {
   hot_reconciled?: boolean;
   restart_scheduled?: boolean;
   apply_on_next_start?: boolean;
+  restart_code?: string;
   restart_error?: string;
   error?: string;
 };
 
-const assertBackendRuntimeApplied = (savedConfig: unknown, fallbackMessage: string) => {
+export const backendRuntimeApplyError = (
+  savedConfig: unknown,
+  fallbackMessage: string,
+  packageMutationBusyMessage: string,
+): string | null => {
   const runtime = (
     savedConfig as { agent_backend_runtime?: BackendRuntimeApplyResult } | null
   )?.agent_backend_runtime;
@@ -81,9 +86,25 @@ const assertBackendRuntimeApplied = (savedConfig: unknown, fallbackMessage: stri
     runtime.restart_scheduled === true ||
     runtime.apply_on_next_start === true
   ) {
-    return;
+    return null;
   }
-  throw new Error(runtime.restart_error || runtime.error || fallbackMessage);
+  if (runtime.restart_code === 'restart_not_scheduled_package_busy') {
+    return packageMutationBusyMessage;
+  }
+  return runtime.restart_error || runtime.error || fallbackMessage;
+};
+
+const assertBackendRuntimeApplied = (
+  savedConfig: unknown,
+  fallbackMessage: string,
+  packageMutationBusyMessage: string,
+) => {
+  const message = backendRuntimeApplyError(
+    savedConfig,
+    fallbackMessage,
+    packageMutationBusyMessage,
+  );
+  if (message) throw new Error(message);
 };
 
 /**
@@ -210,7 +231,11 @@ export function useBackendRuntime({
       // The config boundary owns both persistence and live runtime
       // reconciliation. A second route-level restart would refresh the backend
       // twice and could interrupt a transport that was just rebuilt.
-      assertBackendRuntimeApplied(saved, t('common.saveFailed'));
+      assertBackendRuntimeApplied(
+        saved,
+        t('common.saveFailed'),
+        t('settings.agentBackend.packageMutationBusy'),
+      );
       setSavedCliPath(cliPath);
       showToast(t('common.saved'), 'success');
     } catch (e) {
@@ -235,7 +260,11 @@ export function useBackendRuntime({
           setConfigField(['agents', backend, 'enabled'], next),
         ]);
         saved = true;
-        assertBackendRuntimeApplied(savedConfig, t('common.saveFailed'));
+        assertBackendRuntimeApplied(
+          savedConfig,
+          t('common.saveFailed'),
+          t('settings.agentBackend.packageMutationBusy'),
+        );
       } catch (e) {
         showToast(errorMessage(e) || t('common.saveFailed'), 'error');
         if (!saved) setEnabled(!next);
