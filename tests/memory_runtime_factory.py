@@ -9,13 +9,13 @@ from pathlib import Path
 from typing import AsyncIterator, Callable
 
 from config.v2_config import MemoryConfig
-from core.memory.artifact import MemoryArtifactPort
-from core.memory.everos_insight.reader import MemoryInsightReader
-from core.memory.process import EverOSProcessFactory
-from core.memory.runtime import MemoryRuntime
-from core.memory.supervisor import EverOSSupervisor
-from core.memory.store import MemoryStore
-from core.memory.runtime import ProcessingEvent
+from avibe_memory.artifact import MemoryArtifactPort
+from avibe_memory.everos_insight.reader import MemoryInsightReader
+from avibe_memory.process import EverOSProcessFactory
+from avibe_memory.runtime import MemoryRuntime
+from avibe_memory.supervisor import EverOSSupervisor
+from avibe_memory.store import MemoryStore
+from avibe_memory.runtime import ProcessingEvent
 
 
 @dataclass

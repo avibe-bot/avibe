@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Literal
 
 from config import paths
-from core.memory.confined_filesystem import (
+from avibe_memory.confined_filesystem import (
     ConfinedFilesystemError,
     ConfinedRoot,
     create_confined_file,
@@ -32,7 +32,7 @@ from vibe.memory_project_ids import (
     is_persisted_memory_project_id,
     is_writable_memory_project_id,
 )
-from core.memory.types import MemoryErrorCode, ProviderSessionRef
+from avibe_memory.types import MemoryErrorCode, ProviderSessionRef
 
 MEMORY_STORE_FILENAME = "memory.sqlite"
 MEMORY_STORE_DIRNAME = "memory"

@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import time
+import tomllib
 import types
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
@@ -16,7 +17,7 @@ from config import paths
 from config.v2_compat import to_app_config
 from config.v2_config import V2Config
 from core.controller import Controller
-from core.memory import CaptureRequest, CaptureSkipped
+from avibe_memory import CaptureRequest, CaptureSkipped
 from core.memory_adapter import DisabledMemoryAdapter, EnabledMemoryAdapter, TurnAccepted
 from vibe.memory_contract import (
     MemoryPluginIncompatibleError,
@@ -111,9 +112,9 @@ async def _start_disabled_cleanup(
         async def reconcile_orphans(self) -> None:
             await reconcile_orphans()
 
-    process_module = types.ModuleType("core.memory.process")
+    process_module = types.ModuleType("avibe_memory.process")
     process_module.ReleasedEverOSOrphanReconciler = _Reconciler
-    monkeypatch.setitem(sys.modules, "core.memory.process", process_module)
+    monkeypatch.setitem(sys.modules, "avibe_memory.process", process_module)
 
     controller = Controller.__new__(Controller)
     controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)
@@ -160,8 +161,8 @@ home = paths.get_vibe_remote_dir()
 assert isinstance(controller.memory_adapter, DisabledMemoryAdapter)
 assert controller.memory_runtime is None
 assert controller.memory_module is None
-assert "core.memory.runtime" not in sys.modules
-assert "core.memory.process" not in sys.modules
+assert "avibe_memory.runtime" not in sys.modules
+assert "avibe_memory.process" not in sys.modules
 assert not [
     path for path in home.rglob("*")
     if any("memory" in part.casefold() or "everos" in part.casefold()
@@ -169,7 +170,7 @@ assert not [
 ]
 asyncio.run(controller._schedule_disabled_memory_cleanup())
 assert controller._memory_disabled_cleanup_task is None
-assert "core.memory.process" not in sys.modules
+assert "avibe_memory.process" not in sys.modules
 
 
 async def offer_capture() -> None:
@@ -229,11 +230,11 @@ import importlib.abc
 import sys
 
 BLOCKED = {
-    "core.memory.blocking",
-    "core.memory.operation_lock",
-    "core.memory.process",
-    "core.memory.runtime",
-    "core.memory.ui_access",
+    "avibe_memory.blocking",
+    "avibe_memory.operation_lock",
+    "avibe_memory.process",
+    "avibe_memory.runtime",
+    "avibe_memory.ui_access",
 }
 
 
@@ -321,7 +322,7 @@ class BrokenRuntime(types.ModuleType):
         raise AttributeError(name)
 
 
-sys.modules["core.memory.runtime"] = BrokenRuntime("core.memory.runtime")
+sys.modules["avibe_memory.runtime"] = BrokenRuntime("avibe_memory.runtime")
 config = to_app_config(V2Config.from_payload({
     "platform": "avibe",
     "platforms": {"enabled": [], "primary": "avibe"},
@@ -372,23 +373,17 @@ assert isinstance(controller._memory_plugin_error, MemoryPluginUnavailableError)
     assert completed.returncode == 0, completed.stderr
 
 
-def test_host_surfaces_import_with_evacuated_memory_leaves_blocked(
+def test_host_surfaces_import_with_avibe_memory_blocked(
     tmp_path: Path,
 ) -> None:
     script = r'''
 import importlib.abc
 import sys
 
-ALLOWED_HOST_LEAVES = {"core.memory.admission_metadata"}
-
-
 class BlockMemoryImplementation(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path, target=None):
         del path, target
-        if (
-            fullname.startswith("core.memory.")
-            and fullname not in ALLOWED_HOST_LEAVES
-        ):
+        if fullname == "avibe_memory" or fullname.startswith("avibe_memory."):
             raise ImportError(f"blocked optional Memory implementation: {fullname}")
         return None
 
@@ -406,9 +401,11 @@ assert cli is not None
 assert internal_client is not None
 assert ui_memory_routes is not None
 loaded_memory_children = {
-    name for name in sys.modules if name.startswith("core.memory.")
+    name
+    for name in sys.modules
+    if name == "avibe_memory" or name.startswith("avibe_memory.")
 }
-assert loaded_memory_children == ALLOWED_HOST_LEAVES
+assert loaded_memory_children == set()
 '''
     environment = os.environ.copy()
     environment["AVIBE_HOME"] = str(tmp_path / "home")
@@ -426,6 +423,73 @@ assert loaded_memory_children == ALLOWED_HOST_LEAVES
     )
 
     assert completed.returncode == 0, completed.stderr
+
+
+def test_memory_indep_017_core_workflows_run_without_avibe_memory(
+    tmp_path: Path,
+) -> None:
+    """Run representative core workflows with the implementation unavailable."""
+
+    scenarios = (
+        "tests/test_message_handler_typing.py::MessageHandlerTypingTests::test_im_human_input_enters_delivery_owner_before_backend",
+        "tests/test_command_handler_user_names.py::CommandHandlerUserNameTests::test_new_command_sends_fresh_session_confirmation",
+        "tests/test_session_archive.py::test_archive_reclaims_bound_resources",
+        "tests/test_ui_server_fastapi.py::test_websocket_echo_smoke_when_enabled",
+        "tests/test_internal_server.py::test_disabled_memory_status_route_uses_host_projection_without_runtime",
+        "tests/test_vibe_cli.py::test_retention_help_reads_raw_config_without_loading_or_migrating",
+        "tests/test_controller_dispatch_loop.py::test_cleanup_sync_stops_watch_service_on_stopped_loop",
+    )
+    environment = os.environ.copy()
+    isolated_home = tmp_path / "core-only-home"
+    environment.update(
+        {
+            "AVIBE_HOME": str(isolated_home / ".avibe"),
+            "CLAUDE_CONFIG_DIR": str(isolated_home / ".claude"),
+            "CODEX_HOME": str(isolated_home / ".codex"),
+            "HOME": str(isolated_home),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONPATH": str(ROOT),
+            "XDG_CACHE_HOME": str(isolated_home / ".cache"),
+            "XDG_CONFIG_HOME": str(isolated_home / ".config"),
+            "XDG_DATA_HOME": str(isolated_home / ".local" / "share"),
+            "XDG_STATE_HOME": str(isolated_home / ".local" / "state"),
+        }
+    )
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "tests.memory_import_blocker",
+            *scenarios,
+        ],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "7 passed" in completed.stdout
+    assert (
+        "MEMORY-INDEP-017 import tracking: attempted=[] loaded=[]"
+        in completed.stdout
+    )
+
+
+def test_wave_2c_package_metadata_bundles_avibe_memory() -> None:
+    """Wave 2 keeps Memory in the avibe-os wheel and source distribution."""
+
+    metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    targets = metadata["tool"]["hatch"]["build"]["targets"]
+
+    assert "avibe_memory" in targets["wheel"]["packages"]
+    assert "avibe_memory/**" in targets["sdist"]["include"]
 
 
 @pytest.mark.asyncio
@@ -453,9 +517,9 @@ async def test_disabled_cleanup_reaps_only_preexisting_everos_ownership(
         async def reconcile_orphans(self) -> None:
             calls.append(self._paths)
 
-    process_module = types.ModuleType("core.memory.process")
+    process_module = types.ModuleType("avibe_memory.process")
     process_module.ReleasedEverOSOrphanReconciler = _Reconciler
-    monkeypatch.setitem(sys.modules, "core.memory.process", process_module)
+    monkeypatch.setitem(sys.modules, "avibe_memory.process", process_module)
 
     controller = Controller.__new__(Controller)
     controller.memory_adapter = DisabledMemoryAdapter()
@@ -582,10 +646,10 @@ async def test_memory_reconcile_lazily_enters_and_leaves_enabled_runtime(
         created.append(config)
         return runtime
 
-    runtime_module = types.ModuleType("core.memory.runtime")
+    runtime_module = types.ModuleType("avibe_memory.runtime")
     runtime_module.MEMORY_RUNTIME_PROTOCOL_VERSION = 1
     runtime_module.create_memory_runtime = create_memory_runtime
-    monkeypatch.setitem(sys.modules, "core.memory.runtime", runtime_module)
+    monkeypatch.setitem(sys.modules, "avibe_memory.runtime", runtime_module)
 
     controller = Controller.__new__(Controller)
     controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)

@@ -22,20 +22,11 @@ import logging
 import time
 from typing import Protocol
 
-from core.memory.admission_metadata import (
-    MEMORY_CLI_ADMITTED_METADATA as MEMORY_CLI_ADMITTED_METADATA,
-    MEMORY_ORDINARY_TEXT_METADATA as MEMORY_ORDINARY_TEXT_METADATA,
-    MEMORY_USER_ID_METADATA as MEMORY_USER_ID_METADATA,
-    admitted_user_id as admitted_user_id,
-    is_cli_admitted as is_cli_admitted,
-    is_ordinary_text as is_ordinary_text,
-    merge_identity as merge_identity,
-)
-from core.memory.attachments import workbench_capture_attachments
-from core.memory.im_attachments import (
+from avibe_memory.attachments import workbench_capture_attachments
+from avibe_memory.im_attachments import (
     select_memory_attachments,
 )
-from core.memory.types import CaptureAttachment, CaptureRequest, CaptureSkipped
+from avibe_memory.types import CaptureAttachment, CaptureRequest, CaptureSkipped
 from vibe.memory_contract import IM_ATTACHMENT_CAPTURE_PLATFORMS
 
 

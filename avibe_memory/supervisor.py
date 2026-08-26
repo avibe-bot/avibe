@@ -11,7 +11,7 @@ from pathlib import Path
 import time
 from typing import Literal, Protocol
 
-from core.memory.process import (
+from avibe_memory.process import (
     EverOSProcess,
     EverOSProcessFactory,
     EverOSProcessPort,

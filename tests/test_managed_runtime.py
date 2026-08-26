@@ -21,9 +21,9 @@ from core.managed_runtime import (
     ManagedRuntimeManifest,
     ManagedRuntimeSpec,
 )
-from core.memory import artifact as memory_artifact
-from core.memory.artifact import MemoryArtifactManager, MemoryRuntimeActivationError
-from core.memory.provider_root import ProviderRootError
+from avibe_memory import artifact as memory_artifact
+from avibe_memory.artifact import MemoryArtifactManager, MemoryRuntimeActivationError
+from avibe_memory.provider_root import ProviderRootError
 from vibe.model_hub_runtime.installer import EngineRuntimeManager
 
 

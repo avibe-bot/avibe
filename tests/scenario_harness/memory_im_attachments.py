@@ -10,10 +10,10 @@ from types import SimpleNamespace
 
 from core.controller import Controller
 from core.handlers.inbound_attachments import InboundAttachmentMaterializer
-from core.memory.everos import FakeMemoryProvider, ProviderCapture
-from core.memory.module import MIN_FREE_DISK_BYTES, MemoryModule
-from core.memory.store import MemoryStore
-from core.memory.types import MemoryItem
+from avibe_memory.everos import FakeMemoryProvider, ProviderCapture
+from avibe_memory.module import MIN_FREE_DISK_BYTES, MemoryModule
+from avibe_memory.store import MemoryStore
+from avibe_memory.types import MemoryItem
 from modules.im.base import FileAttachment, FileDownloadResult, MessageContext
 from modules.im.message_facts import is_original_human_slack_attachment, is_original_human_slack_text
 

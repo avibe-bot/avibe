@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from core.memory.processing_record import (
+from avibe_memory.processing_record import (
     AnomalyProjection,
     MaintenanceProjection,
     ProcessingRecordSummary,

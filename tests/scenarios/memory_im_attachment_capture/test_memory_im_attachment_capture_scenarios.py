@@ -12,10 +12,10 @@ from types import SimpleNamespace
 import pytest
 
 from core.caller_context import AVIBE_SESSION_ID_ENV
-from core.memory.admission import CaptureAdmission, InboundTurnFacts
-from core.memory.attachments import AttachmentCleanupUnprovenError, AttachmentPinError
-from core.memory.observations import AddAck, AddRejected
-from core.memory.types import RecallItems, RecallPolicy, memory_item_payload
+from avibe_memory.admission import CaptureAdmission, InboundTurnFacts
+from avibe_memory.attachments import AttachmentCleanupUnprovenError, AttachmentPinError
+from avibe_memory.observations import AddAck, AddRejected
+from avibe_memory.types import RecallItems, RecallPolicy, memory_item_payload
 from modules.im.base import FileAttachment
 from modules.im.message_facts import (
     is_original_human_discord_attachment,
@@ -369,10 +369,10 @@ def test_office_attachment_requires_soffice_and_preserves_valid_siblings(
     """Scenario: MEMORY-IM-ATTACH-012."""
 
     monkeypatch.setattr(
-        "core.memory.modality.office_document_conversion_succeeds",
+        "avibe_memory.modality.office_document_conversion_succeeds",
         lambda _path, **_kwargs: True,
     )
-    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: False)
+    monkeypatch.setattr("avibe_memory.modality.office_conversion_available", lambda: False)
     without_home = tmp_path / "without-soffice"
     monkeypatch.setenv("AVIBE_HOME", str(without_home / "avibe-home"))
     without_soffice = MemoryIMAttachmentScenarioHarness(without_home)
@@ -393,7 +393,7 @@ def test_office_attachment_requires_soffice_and_preserves_valid_siblings(
         "valid.png"
     ]
 
-    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
+    monkeypatch.setattr("avibe_memory.modality.office_conversion_available", lambda: True)
     with_home = tmp_path / "with-soffice"
     monkeypatch.setenv("AVIBE_HOME", str(with_home / "avibe-home"))
     with_soffice = MemoryIMAttachmentScenarioHarness(with_home)
@@ -422,7 +422,7 @@ def test_office_attachment_requires_soffice_and_preserves_valid_siblings(
 
     availability = [True, False]
     monkeypatch.setattr(
-        "core.memory.modality.office_conversion_available",
+        "avibe_memory.modality.office_conversion_available",
         lambda: availability.pop(0),
     )
     stale_home = tmp_path / "soffice-removed-before-delivery"

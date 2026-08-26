@@ -1826,7 +1826,7 @@ def create_app(
                 (MemoryPluginUnavailableError, MemoryPluginIncompatibleError),
             ):
                 raise plugin_error
-            from core.memory import CaptureRequest
+            from avibe_memory import CaptureRequest
 
             capture = getattr(controller, "capture_memory", None)
             if not callable(capture):

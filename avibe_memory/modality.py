@@ -18,7 +18,7 @@ LibreOffice's ``soffice`` binary. EverOS converts those files to PDF before
 the multimodal LLM sees them; sending one without ``soffice`` aborts the
 whole ``/add`` batch with ``CAPABILITY_UNAVAILABLE``.
 
-Kept dependency-light on purpose: ``core.memory.sidecar`` imports this from the
+Kept dependency-light on purpose: ``avibe_memory.sidecar`` imports this from the
 runtime child process, which runs with a minimal environment.
 """
 
@@ -34,7 +34,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from core.memory.types import MemoryContentKind
+from avibe_memory.types import MemoryContentKind
 
 
 # EverOS's macOS fallback; keep this identical so Avibe and the parser agree.

@@ -76,9 +76,9 @@ from vibe.memory_contract import (
 from vibe.runtime import mark_service_instance_started
 
 if TYPE_CHECKING:
-    from core.memory.admission import CaptureAdmission, InboundTurnFacts
-    from core.memory.runtime import MemoryRuntime
-    from core.memory.types import CaptureReceipt, CaptureRequest
+    from avibe_memory.admission import CaptureAdmission, InboundTurnFacts
+    from avibe_memory.runtime import MemoryRuntime
+    from avibe_memory.types import CaptureReceipt, CaptureRequest
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +89,7 @@ _MEMORY_SHUTDOWN_BUDGET_SECONDS = 15.0
 def _load_memory_admission_module() -> Any:
     """Import Memory admission only after the enabled loader has succeeded."""
 
-    from core.memory import admission
+    from avibe_memory import admission
 
     return admission
 
@@ -97,7 +97,7 @@ def _load_memory_admission_module() -> Any:
 def _load_memory_capture_types() -> tuple[type, type, type]:
     """Resolve implementation receipt types only on an enabled capture path."""
 
-    from core.memory import CaptureAccepted, CaptureRequest, CaptureSkipped
+    from avibe_memory import CaptureAccepted, CaptureRequest, CaptureSkipped
 
     return CaptureAccepted, CaptureRequest, CaptureSkipped
 @dataclass(frozen=True, slots=True)
@@ -1276,7 +1276,7 @@ class Controller:
         verified_user_key: str | None,
         cli_scope: tuple[str, str] | None,
     ) -> tuple[str, str]:
-        from core.memory.store import is_principal_id, is_project_id
+        from avibe_memory.store import is_principal_id, is_project_id
 
         try:
             if verified_user_key is not None:
@@ -1796,7 +1796,7 @@ class Controller:
         target_config: MemoryConfig | None = None,
         expected_config: MemoryConfig | None = None,
     ) -> dict[str, Any]:
-        from core.memory.data_reset import (
+        from avibe_memory.data_reset import (
             unchanged_memory_data_result,
         )
         async with self._destructive_memory_runtime() as runtime:
@@ -2518,7 +2518,7 @@ class Controller:
             self._memory_disabled_cleanup_unproved = True
 
         try:
-            from core.memory.process import ReleasedEverOSOrphanReconciler
+            from avibe_memory.process import ReleasedEverOSOrphanReconciler
 
             reconciler = ReleasedEverOSOrphanReconciler(
                 provider_root=memory_dir / "everos-root",
@@ -3028,13 +3028,13 @@ class Controller:
 
     # ----- Direct Memory entry admission ---------------------------------
     #
-    # The policy lives in ``core.memory.admission``. The controller only
+    # The policy lives in ``avibe_memory.admission``. The controller only
     # collects the facts one turn carries and acts on the verdict.
 
     def _memory_admission(self) -> CaptureAdmission:
         # ``getattr`` keeps a controller assembled without a Memory runtime
         # failing closed inside the admission module rather than raising here.
-        from core.memory.admission import CaptureAdmission
+        from avibe_memory.admission import CaptureAdmission
 
         return CaptureAdmission(
             principals=getattr(self, "memory_runtime", None),
@@ -3052,7 +3052,7 @@ class Controller:
         attachment_config_generation: object = None,
         include_workdir: bool = True,
     ) -> InboundTurnFacts:
-        from core.memory.admission import InboundTurnFacts
+        from avibe_memory.admission import InboundTurnFacts
 
         payload = context.platform_specific if isinstance(context.platform_specific, dict) else {}
         metadata = payload.get("message_metadata")
@@ -3321,7 +3321,7 @@ class Controller:
         ):
             return ("__memory_plugin_error__", "default")
         from vibe.memory_project_ids import DEFAULT_MEMORY_PROJECT_ID
-        from core.memory.store import is_principal_id, is_project_id
+        from avibe_memory.store import is_principal_id, is_project_id
 
         scope = self._memory_scopes_by_session.get(session_key)
         if (
@@ -3640,7 +3640,7 @@ class Controller:
         held_admission: object = None,
         capacity_reservation: object = None,
     ) -> None:
-        from core.memory.admission import CaptureAdmission, WORKBENCH_PLATFORM
+        from avibe_memory.admission import CaptureAdmission, WORKBENCH_PLATFORM
 
         memory_admission = _load_memory_admission_module()
         CaptureAccepted, CaptureRequest, _CaptureSkipped = (

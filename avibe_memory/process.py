@@ -31,8 +31,8 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10
 import psutil
 
 from config import paths
-from core.memory.attachments import attachment_pin_root
-from core.memory.confined_filesystem import (
+from avibe_memory.attachments import attachment_pin_root
+from avibe_memory.confined_filesystem import (
     ConfinedFilesystemError,
     ConfinedRoot,
     create_confined_file,
@@ -42,13 +42,13 @@ from core.memory.confined_filesystem import (
     remove_anchored_entry,
     required_no_follow_flag,
 )
-from core.memory.everos import (
+from avibe_memory.everos import (
     EverOSPort,
     MULTIMODAL_EXPLICIT_ENV,
     PROCESSING_PROBE_MAX_DEADLINE_SECONDS,
     processing_probe_deadline_seconds,
 )
-from core.memory.secret_scrubber import scrub_text
+from avibe_memory.secret_scrubber import scrub_text
 
 
 logger = logging.getLogger(__name__)
@@ -116,7 +116,7 @@ _SAFETY_MONITOR_INTERVAL_SECONDS = 0.2
 _TREE_INSPECTION_INTERVAL_SECONDS = 1.0
 _SIDECAR_RECORD_FILENAME = "everos.sidecar.json"
 _SIDECAR_RECORD_MAX_BYTES = 4 * 1024
-_SIDECAR_ENTRYPOINT_MODULE = "core.memory.sidecar"
+_SIDECAR_ENTRYPOINT_MODULE = "avibe_memory.sidecar"
 _PROVIDER_LOCK_PREFIX = "cascade-rebuild-"
 _SYNC_RECORD_PREFIX = "cascade-sync-"
 _SYNC_RECORD_MAX_BYTES = 16 * 1024
@@ -130,7 +130,7 @@ _PROVIDER_LOCK_RETRY_INTERVAL_SECONDS = 0.05
 _SIDECAR_ROLE = "sidecar"
 _RELEASED_REBUILD_ROLE = "cascade_rebuild"
 _RELEASED_SYNC_ROLE = "cascade_sync"
-_RELEASED_REBUILD_ENTRYPOINT_MODULE = "core.memory.rebuild_child"
+_RELEASED_REBUILD_ENTRYPOINT_MODULE = "avibe_memory.rebuild_child"
 
 _IdentityFieldT = TypeVar("_IdentityFieldT")
 

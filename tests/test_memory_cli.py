@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from core.caller_context import AVIBE_SESSION_ID_ENV
-from core.memory.types import MAX_AGENTIC_TIMEOUT_SECONDS, RecallPolicy
+from avibe_memory.types import MAX_AGENTIC_TIMEOUT_SECONDS, RecallPolicy
 from core.system_prompt_injection import _MEMORY_CLI_PROMPT
 from vibe import cli, internal_client
 

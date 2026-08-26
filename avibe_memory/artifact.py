@@ -32,7 +32,7 @@ from core.managed_runtime import (
     write_json_atomic,
 )
 from core.process_isolation import isolated_subprocess_kwargs
-from core.memory.confined_filesystem import (
+from avibe_memory.confined_filesystem import (
     ConfinedFilesystemError,
     create_confined_file,
     ensure_private_directory,
@@ -42,7 +42,7 @@ from core.memory.confined_filesystem import (
     remove_confined_path,
     replace_confined,
 )
-from core.memory.provider_root import (
+from avibe_memory.provider_root import (
     PROVIDER_ROOT_CONTROL_FILES,
     ROOT_SENTINEL_FILENAME,
     ProviderRoot,
@@ -50,7 +50,7 @@ from core.memory.provider_root import (
     ProviderRootMetadata,
     ProviderRootState,
 )
-from core.memory.modality import pinned_modality_contract_script
+from avibe_memory.modality import pinned_modality_contract_script
 
 
 EVEROS_VERSION = "1.2.3"
@@ -88,7 +88,7 @@ _SMOKE_SCRIPT = (
     "print(platform.python_version())\n"
 )
 _SCRUBBER_ADMISSION_SCRIPT = (
-    "from core.memory.secret_scrubber import install_error_scrubbers\n"
+    "from avibe_memory.secret_scrubber import install_error_scrubbers\n"
     "install_error_scrubbers()\n"
 )
 _PROVIDER_ROOT_REPAIR_MARKERS = (

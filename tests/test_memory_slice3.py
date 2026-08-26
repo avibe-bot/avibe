@@ -17,7 +17,7 @@ import pytest
 
 from config.v2_config import MemoryConfig, MemoryEndpointConfig, MemoryProcessingConfig
 from core.controller import Controller
-from core.memory import (
+from avibe_memory import (
     CaptureAccepted,
     CaptureAttachment,
     CaptureDuplicate,
@@ -25,9 +25,9 @@ from core.memory import (
     CaptureSkipped,
     MemoryModule,
 )
-from core.memory.admission import InboundTurnFacts
-from core.memory.everos import FakeMemoryProvider
-from core.memory.store import MemoryStore
+from avibe_memory.admission import InboundTurnFacts
+from avibe_memory.everos import FakeMemoryProvider
+from avibe_memory.store import MemoryStore
 from core.memory_adapter import EnabledMemoryAdapter, TurnAccepted
 from modules.im.base import FileAttachment, MessageContext
 from modules.im.message_facts import (
@@ -499,7 +499,7 @@ def test_configured_attachment_capture_skips_live_health_read(
             ext="pdf",
         )
         monkeypatch.setattr(
-            "core.memory.admission.select_memory_attachments",
+            "avibe_memory.admission.select_memory_attachments",
             lambda _lease: SimpleNamespace(attachments=(attachment,), skipped=()),
         )
         context = _context("slack", ordinary=False)
@@ -557,7 +557,7 @@ def test_configured_attachment_capture_does_not_block_session_reset(
 
         controller.memory_runtime.attachment_capture_status = attachment_capture_status
         monkeypatch.setattr(
-            "core.memory.admission.select_memory_attachments",
+            "avibe_memory.admission.select_memory_attachments",
             lambda _lease: SimpleNamespace(attachments=(), skipped=()),
         )
         context = _context("slack", ordinary=False)
@@ -632,7 +632,7 @@ def test_attachment_selection_runs_off_event_loop(
             return SimpleNamespace(attachments=(attachment,), skipped=())
 
         monkeypatch.setattr(
-            "core.memory.admission.select_memory_attachments",
+            "avibe_memory.admission.select_memory_attachments",
             select_attachments,
         )
         context = _context("slack", ordinary=False)
@@ -675,7 +675,7 @@ def test_attachment_capture_fails_closed_when_config_generation_changes(
 ) -> None:
     """Scenario: MEMORY-IM-ATTACH-003."""
 
-    caplog.set_level("INFO", logger="core.memory.admission")
+    caplog.set_level("INFO", logger="avibe_memory.admission")
 
     async def run() -> None:
         controller = _controller()
@@ -690,7 +690,7 @@ def test_attachment_capture_fails_closed_when_config_generation_changes(
             return SimpleNamespace(attachments=(attachment,), skipped=())
 
         monkeypatch.setattr(
-            "core.memory.admission.select_memory_attachments",
+            "avibe_memory.admission.select_memory_attachments",
             select_attachments,
         )
         context = _context("slack", ordinary=False)
@@ -746,7 +746,7 @@ def test_downstream_capture_unavailability_does_not_change_ingress_eligibility(
             ext="pdf",
         )
         monkeypatch.setattr(
-            "core.memory.admission.select_memory_attachments",
+            "avibe_memory.admission.select_memory_attachments",
             lambda _lease: SimpleNamespace(attachments=(attachment,), skipped=()),
         )
         captured_requests: list[CaptureRequest] = []

@@ -17,7 +17,7 @@ from config.v2_config import (
     MemoryProcessingConfig,
 )
 from core.controller import Controller
-from core.memory.data_reset import reset_memory_data_roots
+from avibe_memory.data_reset import reset_memory_data_roots
 from core.memory_adapter import DisabledMemoryAdapter
 
 

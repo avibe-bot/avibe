@@ -7,11 +7,11 @@ from pathlib import Path
 
 import pytest
 
-import core.memory.im_attachments as im_attachment_module
+import avibe_memory.im_attachments as im_attachment_module
 from core.handlers.inbound_attachments import InboundAttachmentMaterializer
-from core.memory.attachments import AttachmentPinStore
-from core.memory.im_attachments import select_memory_attachments
-from core.memory.types import CaptureAttachment
+from avibe_memory.attachments import AttachmentPinStore
+from avibe_memory.im_attachments import select_memory_attachments
+from avibe_memory.types import CaptureAttachment
 from modules.im.base import FileAttachment, FileDownloadResult, MessageContext
 
 
@@ -164,7 +164,7 @@ async def test_memory_selection_skips_office_without_soffice(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: False)
+    monkeypatch.setattr("avibe_memory.modality.office_conversion_available", lambda: False)
     batch = await _materialize(
         tmp_path / "avibe-home",
         [
@@ -190,7 +190,7 @@ async def test_memory_selection_admits_office_when_soffice_is_present(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
+    monkeypatch.setattr("avibe_memory.modality.office_conversion_available", lambda: True)
     batch = await _materialize(
         tmp_path / "avibe-home",
         [

@@ -11,19 +11,19 @@ from pathlib import Path
 
 import pytest
 
-import core.memory.runtime as runtime_module
+import avibe_memory.runtime as runtime_module
 from config.v2_config import MemoryConfig, MemoryEndpointConfig, MemoryProcessingConfig
-from core.memory.artifact import (
+from avibe_memory.artifact import (
     EVEROS_VERSION,
     FakeMemoryArtifactManager,
     MemoryArtifactCandidate,
     MemoryArtifactManager,
     MemoryProviderRootState,
 )
-from core.memory.confined_filesystem import ConfinedFilesystemError
-from core.memory.everos import FakeMemoryProvider, ProviderHealthSnapshot
+from avibe_memory.confined_filesystem import ConfinedFilesystemError
+from avibe_memory.everos import FakeMemoryProvider, ProviderHealthSnapshot
 from config.memory_operation_lock import MemoryOperationBusy
-from core.memory.process import FakeEverOSProcessFactory
+from avibe_memory.process import FakeEverOSProcessFactory
 
 
 def _config(*, legacy_needs_repair: bool = False) -> MemoryConfig:

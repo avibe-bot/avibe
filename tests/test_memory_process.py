@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from core.memory.confined_filesystem import ConfinedFilesystemError
-from core.memory.process import (
+from avibe_memory.confined_filesystem import ConfinedFilesystemError
+from avibe_memory.process import (
     _ProcessIdentity,
     EverOSProcessSettings,
     FakeEverOSProcess,
@@ -155,7 +155,7 @@ def _sidecar_identity(home: Path, record: dict[str, object]) -> _ProcessIdentity
         cmdline=(
             str(record["python"]),
             "-m",
-            "core.memory.sidecar",
+            "avibe_memory.sidecar",
             "--uds",
             str(record["socket_path"]),
         ),
@@ -185,7 +185,7 @@ def _released_rebuild_identity(
         cmdline=(
             str(record["python"]),
             "-m",
-            "core.memory.rebuild_child",
+            "avibe_memory.rebuild_child",
             "cascade",
             "rebuild",
             "--yes",

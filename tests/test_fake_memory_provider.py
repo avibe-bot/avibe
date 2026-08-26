@@ -5,14 +5,14 @@ from collections import deque
 
 import pytest
 
-from core.memory.everos import (
+from avibe_memory.everos import (
     AddAck,
     FakeMemoryProvider,
     FlushSucceeded,
     MemoryProviderPort,
     ProviderCapture,
 )
-from core.memory.types import MemoryListItem, MemoryListPage, ProviderSessionRef
+from avibe_memory.types import MemoryListItem, MemoryListPage, ProviderSessionRef
 
 
 SESSION_REF = ProviderSessionRef(

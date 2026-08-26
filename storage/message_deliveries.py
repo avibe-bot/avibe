@@ -17,10 +17,6 @@ from storage.delivery_states import (
     RUN_CANCEL_RETIRE_STATES,
     policy_for,
 )
-from core.memory.admission_metadata import (
-    admitted_user_id as legacy_admitted_user_id,
-    legacy_message_kind,
-)
 from storage.models import (
     agent_runs,
     agent_sessions,
@@ -35,6 +31,72 @@ TURN_OWNER_STATES = ("starting", "active")
 WEB_PUSH_USER_KEY_METADATA = "_web_push_user_key"
 WEB_PUSH_USER_KEYS_METADATA = "_web_push_user_keys"
 WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA = "_web_push_authorization_contexts"
+LEGACY_MEMORY_USER_ID_METADATA = "_memory_user_id"
+LEGACY_MEMORY_ORDINARY_TEXT_METADATA = "_memory_ordinary_text"
+LEGACY_MEMORY_CLI_ADMITTED_METADATA = "_memory_cli_admitted"
+
+
+def _legacy_memory_metadata(metadata: object) -> dict[str, Any]:
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def legacy_admitted_user_id(metadata: object) -> str | None:
+    """Read the principal from a released pre-author_id Message row."""
+
+    memory_user_id = _legacy_memory_metadata(metadata).get(
+        LEGACY_MEMORY_USER_ID_METADATA
+    )
+    if not isinstance(memory_user_id, str) or not memory_user_id.strip():
+        return None
+    return memory_user_id.strip()
+
+
+def legacy_is_ordinary_text(metadata: object) -> bool:
+    """Read the literal ordinary-text flag from a released Message row."""
+
+    return (
+        _legacy_memory_metadata(metadata).get(LEGACY_MEMORY_ORDINARY_TEXT_METADATA)
+        is True
+    )
+
+
+def legacy_is_cli_admitted(metadata: object) -> bool:
+    """Read the literal CLI-admission flag from a released Message row."""
+
+    return (
+        _legacy_memory_metadata(metadata).get(LEGACY_MEMORY_CLI_ADMITTED_METADATA)
+        is True
+    )
+
+
+def legacy_memory_merge_identity(
+    metadata: object,
+) -> tuple[str | None, bool, bool]:
+    """Return the released Memory facts that one dispatch kept singular."""
+
+    return (
+        legacy_admitted_user_id(metadata),
+        legacy_is_ordinary_text(metadata),
+        legacy_is_cli_admitted(metadata),
+    )
+
+
+def legacy_message_kind(metadata: object) -> str:
+    """Translate released `_memory_*` rows into the core message vocabulary."""
+
+    metadata = _legacy_memory_metadata(metadata)
+    if metadata.get("quick_reply_for"):
+        return "quick_reply"
+    if any(
+        metadata.get(key)
+        for key in ("forwarded", "is_forwarded", "forward_origin", "forwarded_from")
+    ):
+        return "forwarded"
+    if metadata.get("edited"):
+        return "edited"
+    if metadata.get("is_system") or metadata.get("system"):
+        return "system"
+    return "original" if legacy_is_ordinary_text(metadata) else "unknown"
 
 
 def utc_now_iso() -> str:

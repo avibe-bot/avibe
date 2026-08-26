@@ -11,9 +11,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Literal
 
-from core.memory.attachments import AttachmentPinError, AttachmentPinStore, PinnedBundle
+from avibe_memory.attachments import AttachmentPinError, AttachmentPinStore, PinnedBundle
 from core.blocking import run_blocking
-from core.memory.everos import (
+from avibe_memory.everos import (
     AddAck,
     AddRejected,
     FlushRejected,
@@ -26,9 +26,9 @@ from core.memory.everos import (
     ProviderCapture,
     attachment_add_rejection_proves_no_write,
 )
-from core.memory.observations import AddResult, FlushResult
-from core.memory.store import MemoryStore, VolatileAdmission
-from core.memory.types import CaptureAttachment, ProviderSessionRef
+from avibe_memory.observations import AddResult, FlushResult
+from avibe_memory.store import MemoryStore, VolatileAdmission
+from avibe_memory.types import CaptureAttachment, ProviderSessionRef
 
 
 logger = logging.getLogger(__name__)

@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeAlias
 
-from core.memory.native_processing_record import NativeProcessingRecordReader
-from core.memory.processing_record import ProcessingSourceObservations
+from avibe_memory.native_processing_record import NativeProcessingRecordReader
+from avibe_memory.processing_record import ProcessingSourceObservations
 
 MemoryReadScope: TypeAlias = tuple[str, str]
 

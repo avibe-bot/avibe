@@ -17,15 +17,15 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import unquote, urlparse
 
-from core.memory.artifact import EVEROS_VERSION
+from avibe_memory.artifact import EVEROS_VERSION
 from vibe.memory_project_ids import (
     is_new_stored_memory_project_id,
     is_persisted_memory_project_id,
 )
-from core.memory.secret_scrubber import install_error_scrubbers
-from core.memory.modality import SUPPORTED_ATTACHMENT_EXTENSIONS
-from core.memory.store import is_memory_owner_id
-from core.memory.types import MAX_AGENTIC_TIMEOUT_SECONDS
+from avibe_memory.secret_scrubber import install_error_scrubbers
+from avibe_memory.modality import SUPPORTED_ATTACHMENT_EXTENSIONS
+from avibe_memory.store import is_memory_owner_id
+from avibe_memory.types import MAX_AGENTIC_TIMEOUT_SECONDS
 
 
 _MAX_BODY_BYTES = 64 * 1024
@@ -496,7 +496,7 @@ def _valid_session(value: object) -> bool:
 def _processing_healthy_from_child_environment() -> bool:
     """Run fixed authenticated probes only inside the scrubbed owned child."""
 
-    from core.memory.everos import EverOSPort, MULTIMODAL_EXPLICIT_ENV
+    from avibe_memory.everos import EverOSPort, MULTIMODAL_EXPLICIT_ENV
 
     multimodal_kwargs: dict[str, str | None] = {}
     if os.environ.get(MULTIMODAL_EXPLICIT_ENV) == "1":

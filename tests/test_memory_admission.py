@@ -13,21 +13,23 @@ from types import SimpleNamespace
 
 import pytest
 
-from core.memory.admission import (
-    MEMORY_CLI_ADMITTED_METADATA,
-    MEMORY_ORDINARY_TEXT_METADATA,
-    MEMORY_USER_ID_METADATA,
+from avibe_memory.admission import (
     CaptureAdmission,
     InboundTurnFacts,
-    is_cli_admitted,
-    is_ordinary_text,
-    merge_identity,
 )
-from core.memory.attachments import workbench_capture_attachments
-from core.memory.types import CaptureAttachment, CaptureRequest, CaptureSkipped
+from avibe_memory.attachments import workbench_capture_attachments
+from avibe_memory.types import CaptureAttachment, CaptureRequest, CaptureSkipped
 from core.handlers.inbound_attachments import InboundAttachmentMaterializer
 from modules.im.base import FileAttachment, FileDownloadResult, MessageContext
 from modules.im.message_facts import is_original_human_workbench_text
+from storage.message_deliveries import (
+    LEGACY_MEMORY_CLI_ADMITTED_METADATA as MEMORY_CLI_ADMITTED_METADATA,
+    LEGACY_MEMORY_ORDINARY_TEXT_METADATA as MEMORY_ORDINARY_TEXT_METADATA,
+    LEGACY_MEMORY_USER_ID_METADATA as MEMORY_USER_ID_METADATA,
+    legacy_is_cli_admitted as is_cli_admitted,
+    legacy_is_ordinary_text as is_ordinary_text,
+    legacy_memory_merge_identity as merge_identity,
+)
 
 
 PRINCIPAL = "u-" + ("1" * 32)
@@ -362,7 +364,7 @@ def test_denied_attachment_turn_never_reads_the_lease(
     """Scenario: MEMORY-IM-ATTACH-002."""
 
     monkeypatch.setattr(
-        "core.memory.admission.select_memory_attachments",
+        "avibe_memory.admission.select_memory_attachments",
         lambda _lease: pytest.fail("denied turn reached Memory attachment selection"),
     )
     facts = _facts(
@@ -402,7 +404,7 @@ def test_mixed_attachment_rejections_keep_caption(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "core.memory.admission.select_memory_attachments",
+        "avibe_memory.admission.select_memory_attachments",
         lambda _lease: SimpleNamespace(
             attachments=(),
             skipped=("file_too_large", "unsupported_type"),
@@ -432,12 +434,12 @@ def test_unexpected_attachment_selection_failure_keeps_text(
     """Scenario: MEMORY-IM-ATTACH-004."""
 
     monkeypatch.setattr(
-        "core.memory.admission.select_memory_attachments",
+        "avibe_memory.admission.select_memory_attachments",
         lambda _lease: (_ for _ in ()).throw(
             RuntimeError("secret attachment name must not be logged")
         ),
     )
-    caplog.set_level("INFO", logger="core.memory.admission")
+    caplog.set_level("INFO", logger="avibe_memory.admission")
 
     request = _admission().decide(
         _facts(
@@ -562,7 +564,7 @@ def test_workbench_office_uploads_require_soffice_and_convertible_bytes(
 ) -> None:
     uploads = _uploads_dir(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        "core.memory.modality.office_conversion_available",
+        "avibe_memory.modality.office_conversion_available",
         lambda: True,
     )
     valid = uploads / "report.xlsx"
@@ -687,14 +689,13 @@ def test_delivery_store_uses_only_legacy_translation_without_capture_admission()
     script = """
 import sys
 from storage import message_deliveries
-from core.memory.admission_metadata import legacy_message_kind
-assert message_deliveries.legacy_message_kind is legacy_message_kind
-assert not hasattr(message_deliveries, "MEMORY_USER_ID_METADATA")
-assert "core.memory.admission" not in sys.modules
-assert "core.memory.im_attachments" not in sys.modules
-assert "core.memory.module" not in sys.modules
-assert "core.memory.store" not in sys.modules
-assert "core.memory.types" not in sys.modules
+assert message_deliveries.legacy_message_kind({"_memory_ordinary_text": True}) == "original"
+assert not any(name == "avibe_memory" or name.startswith("avibe_memory.") for name in sys.modules)
+assert "avibe_memory.admission" not in sys.modules
+assert "avibe_memory.im_attachments" not in sys.modules
+assert "avibe_memory.module" not in sys.modules
+assert "avibe_memory.store" not in sys.modules
+assert "avibe_memory.types" not in sys.modules
 assert "core.handlers" not in sys.modules
 assert "httpx" not in sys.modules
 """
@@ -717,12 +718,12 @@ def test_session_turns_import_keeps_memory_and_handlers_behind_their_boundaries(
     script = """
 import sys
 import core.session_turns
-assert "core.memory.admission" not in sys.modules
-assert "core.memory.attachments" not in sys.modules
-assert "core.memory.im_attachments" not in sys.modules
-assert "core.memory.module" not in sys.modules
-assert "core.memory.runtime" not in sys.modules
-assert "core.memory.types" not in sys.modules
+assert "avibe_memory.admission" not in sys.modules
+assert "avibe_memory.attachments" not in sys.modules
+assert "avibe_memory.im_attachments" not in sys.modules
+assert "avibe_memory.module" not in sys.modules
+assert "avibe_memory.runtime" not in sys.modules
+assert "avibe_memory.types" not in sys.modules
 assert "core.handlers" not in sys.modules
 assert "core.handlers.message_handler" not in sys.modules
 assert "aiohttp" not in sys.modules
