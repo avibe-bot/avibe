@@ -89,7 +89,6 @@ MAX_QUERY_BYTES = 8 * 1024
 MAX_SEARCH_LIMIT = 20
 MAX_LIST_PAGE_SIZE = 20
 DEFAULT_SEARCH_LIMIT = 8
-MAX_PROVIDER_ITEM_BYTES = 64 * 1024
 MAX_PROVIDER_RESULT_BYTES = 256 * 1024
 MAX_PROVIDER_RESULT_ITEMS = 20
 PROVIDER_READ_TIMEOUT_SECONDS = 20.0
@@ -1491,8 +1490,6 @@ class MemoryModule:
             item_text = _utf8_bytes(item.text) if isinstance(item.text, str) else None
             if item_text is None or not item.text or "\x00" in item.text:
                 return OperationFailed(error="memory_provider_response_invalid")
-            if len(item_text) > MAX_PROVIDER_ITEM_BYTES:
-                return OperationFailed(error="memory_provider_response_invalid")
             total_bytes += len(item_text) + len(item.kind.encode("utf-8"))
             if item.date is not None:
                 date_bytes = _utf8_bytes(item.date) if isinstance(item.date, str) else None
@@ -1719,7 +1716,7 @@ def _profile_text_bytes(value: object) -> bytes | None:
     if not isinstance(value, str) or not value.strip() or "\x00" in value:
         return None
     encoded = _utf8_bytes(value)
-    if encoded is None or len(encoded) > MAX_PROVIDER_ITEM_BYTES:
+    if encoded is None:
         return None
     if any(ord(character) < 32 and character not in {"\n", "\t", "\r"} for character in value):
         return None
@@ -1735,7 +1732,7 @@ def _list_text_bytes(value: object, *, allow_empty: bool) -> bytes | None:
     ):
         return None
     encoded = _utf8_bytes(value)
-    if encoded is None or len(encoded) > MAX_PROVIDER_ITEM_BYTES:
+    if encoded is None:
         return None
     if any(ord(character) < 32 and character not in {"\n", "\t", "\r"} for character in value):
         return None

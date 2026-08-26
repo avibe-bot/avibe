@@ -24,6 +24,7 @@ from core.memory.types import (
     CaptureSkipped,
     MemoryItem,
     MemoryItems,
+    MemoryProfile,
     OperationFailed,
     ProviderSearchItem,
 )
@@ -146,6 +147,45 @@ async def test_agent_remember_round_trips_through_dual_owner_search(
     ]
     assert result == MemoryItems(
         items=(MemoryItem(kind="episode", text=remembered, origin="agent"),)
+    )
+
+
+@pytest.mark.asyncio
+async def test_profile_accepts_large_items_from_both_everos_owners(
+    tmp_path: Path,
+) -> None:
+    summary = "profile " * 10_000
+    item = MemoryItem(
+        kind="profile",
+        text=summary,
+        profile=MemoryProfile(summary=summary),
+    )
+    provider = FakeMemoryProvider(
+        profile_items_by_owner={
+            PRINCIPAL: (item,),
+            f"{PRINCIPAL}-agent": (item,),
+        }
+    )
+    module, _store, _provider = _module(tmp_path, provider=provider)
+
+    result = await module.profile(principal_id=PRINCIPAL, project_id="default")
+
+    assert len(summary.encode()) > 64 * 1024
+    assert result == MemoryItems(
+        items=(
+            MemoryItem(
+                kind="profile",
+                text=summary,
+                profile=MemoryProfile(summary=summary),
+                origin="user",
+            ),
+            MemoryItem(
+                kind="profile",
+                text=summary,
+                profile=MemoryProfile(summary=summary),
+                origin="agent",
+            ),
+        )
     )
 
 

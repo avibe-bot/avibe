@@ -420,6 +420,26 @@ def test_sidecar_guard_allows_derived_principals_and_memory_scope() -> None:
     assert _request_rejection("POST", "/unrelated", b"{}") == "route"
 
 
+def test_sidecar_guard_accepts_large_everos_request_body() -> None:
+    payload = {
+        "session_id": SESSION_ID,
+        "app_id": "avibe",
+        "project_id": PROJECT,
+        "messages": [
+            {
+                "sender_id": "u-11111111111111111111111111111111",
+                "role": "user",
+                "timestamp": 1_725_000_001_234,
+                "content": "remember " * 10_000,
+            }
+        ],
+    }
+    body = json.dumps(payload).encode()
+
+    assert len(body) > 64 * 1024
+    assert _request_rejection("POST", "/api/v2/memory/add", body) is None
+
+
 def test_sidecar_guard_accepts_agentic_but_rejects_untrusted_search_scope() -> None:
     search = {
         "user_id": "u-11111111111111111111111111111111",

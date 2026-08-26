@@ -1285,6 +1285,36 @@ def test_profile_canonicalizes_structured_profile() -> None:
     assert items[0].profile is None
 
 
+@pytest.mark.parametrize(
+    "owner_id",
+    ["u-11111111111111111111111111111111", "u-11111111111111111111111111111111-agent"],
+)
+def test_profile_accepts_large_everos_payloads(owner_id: str) -> None:
+    summary = "profile " * 10_000
+    padding = "x" * (2 * 1024 * 1024)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        response = {
+            "data": {
+                "profiles": [
+                    {"user_id": owner_id, "profile_data": {"summary": summary}}
+                ],
+                "provider_metadata": padding,
+            }
+        }
+        assert len(json.dumps(response).encode()) > 2 * 1024 * 1024
+        return httpx.Response(200, json=response)
+
+    with _sidecar_transport(handler):
+        items = asyncio.run(
+            EverOSPort(Path("/tmp/everos.sock")).profile(owner_id, PROJECT)
+        )
+
+    assert len(summary.encode()) > 64 * 1024
+    assert items[0].profile is not None
+    assert items[0].profile.summary == summary.strip()
+
+
 def test_profile_maps_known_fields_without_collapsing_basis_and_evidence() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
