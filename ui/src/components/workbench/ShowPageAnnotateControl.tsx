@@ -160,7 +160,7 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
                 size={null}
                 onClick={onDisable}
                 aria-label={offLabel}
-                title={shortcutHint}
+                title={offLabel}
                 aria-pressed
                 className="size-6 shrink-0 rounded-[5px]"
               >
@@ -224,7 +224,7 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
                   : 'size-7 shrink-0',
               )}
               aria-label={toggleLabel}
-              title={shortcutHint}
+              title={enabled ? toggleLabel : shortcutHint}
             >
               <MessageSquarePlus className="size-3.5" />
             </Button>

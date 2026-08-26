@@ -18,7 +18,7 @@ import {
 } from './showPageWindowState';
 import { inTerminalSurface, inTextEntrySurface, windowIdForKeyboardTarget } from './windowChords';
 import { shouldGuardUnload } from './windowUnload';
-import { isDesktopViewport } from '../../lib/useIsDesktop';
+import { isDesktopViewport, useIsDesktop } from '../../lib/useIsDesktop';
 
 const ShowPageWindow: React.FC<{
   archived: boolean;
@@ -27,8 +27,9 @@ const ShowPageWindow: React.FC<{
   layerWidth: number;
   revalidateVersion: number;
   sessionId: string;
+  shortcutActive: boolean;
   win: WindowInstance;
-}> = ({ archived, iconVersion, layerHeight, layerWidth, revalidateVersion, sessionId, win }) => {
+}> = ({ archived, iconVersion, layerHeight, layerWidth, revalidateVersion, sessionId, shortcutActive, win }) => {
   const api = useApi();
   const { focusedId, setTitle } = useWindowManager();
   const [status, setStatus] = useState<ShowPageWindowStatus>(sessionId ? 'loading' : 'missing');
@@ -60,7 +61,7 @@ const ShowPageWindow: React.FC<{
   return (
     <ShowPageAnnotationHost
       src={src}
-      shortcutActive={src !== null && !win.minimized && focusedId === win.id}
+      shortcutActive={shortcutActive && src !== null && !win.minimized && focusedId === win.id}
     >
       <AppWindow win={win} layerWidth={layerWidth} layerHeight={layerHeight} iconVersion={iconVersion} />
     </ShowPageAnnotationHost>
@@ -76,6 +77,7 @@ const ShowPageWindow: React.FC<{
 export const WindowLayer: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
+  const isDesktop = useIsDesktop();
   const { order, pins } = useDock();
   const { windows, close, focus, minimize, openApp, restore, setParams, setTitle, confirmClose } =
     useWindowManager();
@@ -308,6 +310,7 @@ export const WindowLayer: React.FC = () => {
             layerWidth={size.w}
             revalidateVersion={showPageRevalidateVersion}
             sessionId={sid ?? ''}
+            shortcutActive={isDesktop}
             win={w}
           />
         );

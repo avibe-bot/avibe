@@ -51,6 +51,10 @@ describe('action shortcuts', () => {
     expect(isReservedActionShortcut(shortcutFromKeyboardEvent(chord({ code: 'KeyW', altKey: true }))!)).toBe(true);
     expect(isReservedActionShortcut(shortcutFromKeyboardEvent(chord({ code: 'KeyK', metaKey: true }))!)).toBe(true);
     expect(isReservedActionShortcut(shortcutFromKeyboardEvent(chord({ code: 'KeyD', ctrlKey: true, shiftKey: true }))!)).toBe(true);
+    expect(isReservedActionShortcut(shortcutFromKeyboardEvent(chord({ code: 'KeyL', ctrlKey: true }))!)).toBe(true);
+    expect(isReservedActionShortcut(shortcutFromKeyboardEvent(chord({ code: 'KeyT', metaKey: true }))!)).toBe(true);
+    expect(isReservedActionShortcut(shortcutFromKeyboardEvent(chord({ code: 'KeyQ', metaKey: true }))!)).toBe(true);
+    expect(isReservedActionShortcut(shortcutFromKeyboardEvent(chord({ code: 'Tab', ctrlKey: true }))!)).toBe(true);
     expect(isReservedActionShortcut(shortcutFromKeyboardEvent(chord({ code: 'KeyV', altKey: true }))!)).toBe(false);
   });
 

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { actionShortcutMatches, useActionShortcuts } from '../../lib/actionShortcuts';
 import { useLatestRef } from '../../lib/useLatestRef';
 import { bindFrameChord } from '../apps/windowChords';
+import { inShortcutBlockingOverlay } from './chatShortcuts';
 
 // postMessage bridge between the chat host and the annotation overlay running
 // inside the chat's Show Page iframe (plan show-page-annotation-phase1 §3).
@@ -40,9 +41,7 @@ type ControlMessage =
   | { type: 'avibe:annotation:query' };
 
 const PARENT_ESCAPE_CLAIM_SELECTOR =
-  'input, textarea, [contenteditable]:not([contenteditable="false"]), [data-state="open"], [role="menu"], [aria-expanded="true"][aria-haspopup], [role="dialog"]:not([data-window-id]), dialog[open]';
-const PARENT_SHORTCUT_CLAIM_SELECTOR =
-  '[data-shortcut-capture], [data-state="open"], [role="menu"], [aria-expanded="true"][aria-haspopup], [role="dialog"]:not([data-window-id]), dialog[open]';
+  'input, textarea, [contenteditable]:not([contenteditable="false"])';
 
 /**
  * `src` is the current iframe URL; changing it (first open, or a private↔public
@@ -112,9 +111,7 @@ export function useShowPageAnnotation(src: string | null, shortcutActive = true)
     if (event.key !== 'Escape' || event.defaultPrevented) return;
     const target = event.target;
     if (target instanceof Element && target.closest(PARENT_ESCAPE_CLAIM_SELECTOR)) return;
-    // Custom menus render role=menu only while open, so its presence is an
-    // open-state fact even when focus remains on the invoking element.
-    if (document.querySelector('[role="menu"]')) return;
+    if (inShortcutBlockingOverlay(target as Element | null, document)) return;
 
     try {
       const frameDocument = iframeRef.current?.contentDocument;
@@ -219,8 +216,7 @@ export function useShowPageAnnotation(src: string | null, shortcutActive = true)
         return;
       }
       const target = event.target;
-      if (target instanceof Element && target.closest(PARENT_SHORTCUT_CLAIM_SELECTOR)) return;
-      if (document.querySelector('[role="menu"]')) return;
+      if (inShortcutBlockingOverlay(target as Element | null, document)) return;
       event.preventDefault();
       enableFromShortcut();
     };

@@ -53,6 +53,13 @@ const MODIFIER_CODES = new Set([
   'ShiftRight',
 ]);
 
+const BROWSER_RESERVED_PRIMARY_CODES = new Set([
+  'KeyL', // focus location bar
+  'KeyN', // new window
+  'KeyQ', // quit browser
+  'KeyT', // new/reopen tab
+]);
+
 const cloneShortcut = (shortcut: ActionShortcut): ActionShortcut => ({ ...shortcut });
 
 export const defaultActionShortcuts = (): ActionShortcuts => ({
@@ -160,6 +167,16 @@ export function isReservedActionShortcut(shortcut: ActionShortcut): boolean {
   }
   // AppShell owns search even when an extra modifier is present.
   if (shortcut.code === 'KeyK' && (shortcut.ctrlKey || shortcut.metaKey)) return true;
+  // Browsers and the OS consume these before page content can reliably cancel
+  // them, so accepting them would save a shortcut that never fires.
+  if (!shortcut.altKey && (shortcut.ctrlKey || shortcut.metaKey) && (
+    BROWSER_RESERVED_PRIMARY_CODES.has(shortcut.code)
+    || /^Digit[0-9]$/.test(shortcut.code)
+    || shortcut.code === 'Tab'
+  )) {
+    return true;
+  }
+  if (shortcut.code === 'Tab' && (shortcut.altKey || shortcut.metaKey)) return true;
   // Window close/minimize accepts Shift but yields when Alt is held.
   if (
     (shortcut.code === 'KeyW' || shortcut.code === 'KeyM')

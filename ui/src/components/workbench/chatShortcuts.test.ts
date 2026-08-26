@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   archiveSessionShortcutLabel,
   inForegroundSurface,
+  inShortcutBlockingOverlay,
   isArchiveSessionChord,
   isArchiveSessionKeydown,
 } from './chatShortcuts';
@@ -69,6 +70,28 @@ describe('inForegroundSurface', () => {
     expect(inForegroundSurface(null)).toBe(false);
     // `window` / `document` as event.target: no closest() at all, not foreign.
     expect(inForegroundSurface({} as Element)).toBe(false);
+  });
+});
+
+describe('inShortcutBlockingOverlay', () => {
+  it('claims a shortcut inside an open overlay', () => {
+    expect(inShortcutBlockingOverlay(
+      elWithClosest((selector) => selector.includes('[data-state="open"]')),
+    )).toBe(true);
+  });
+
+  it('claims a shortcut while a menu is open even if focus stayed on its trigger', () => {
+    expect(inShortcutBlockingOverlay(
+      elWithClosest(() => false),
+      { querySelector: vi.fn().mockReturnValue({}) } as unknown as Pick<Document, 'querySelector'>,
+    )).toBe(true);
+  });
+
+  it('leaves the unobstructed chat surface to the active shortcut owner', () => {
+    expect(inShortcutBlockingOverlay(
+      elWithClosest(() => false),
+      { querySelector: vi.fn().mockReturnValue(null) } as unknown as Pick<Document, 'querySelector'>,
+    )).toBe(false);
   });
 });
 

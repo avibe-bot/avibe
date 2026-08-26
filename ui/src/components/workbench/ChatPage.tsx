@@ -272,6 +272,7 @@ export const ChatPage: React.FC = () => {
   const { unreadBySession, markRead: markInboxRead } = useWorkbenchInbox({ feed: false });
   const { focusedId: foregroundAppWindowId, focusCanvas } = useWindowManager();
   const isDesktop = useIsDesktop();
+  const foregroundShortcutOwnerId = isDesktop ? foregroundAppWindowId : null;
   const pageActive = usePageActive();
   // The mobile chat surface is a fixed full-screen flex column; this keeps the
   // composer glued to the iOS keyboard (settle-then-correct; see the hook).
@@ -376,7 +377,7 @@ export const ChatPage: React.FC = () => {
   // remounted overlay before it rebroadcasts. Re-points reset via the URL change.
   const annotation = useShowPageAnnotation(
     showPageActive ? showPageUrl : null,
-    showPageActive && foregroundAppWindowId === null,
+    showPageActive && foregroundShortcutOwnerId === null,
   );
   useEffect(() => {
     const sid = sessionId;
@@ -2853,7 +2854,7 @@ export const ChatPage: React.FC = () => {
           onDraftChange={onDraftChange}
           onSearchAgents={searchAgents}
           onSearchSessions={searchSessions}
-          voiceShortcutActive={!showPageActive && foregroundAppWindowId === null}
+          voiceShortcutActive={!showPageActive && foregroundShortcutOwnerId === null}
           readOnlyReason={readOnlyReason}
         />}
       </div>

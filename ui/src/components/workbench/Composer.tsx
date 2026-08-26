@@ -62,7 +62,7 @@ import {
   type SessionSearchResult,
 } from './MentionEditor';
 import type { MentionReference } from '../../lib/mentions';
-import { inForegroundSurface } from './chatShortcuts';
+import { inForegroundSurface, inShortcutBlockingOverlay } from './chatShortcuts';
 
 export type ComposerAttachment = {
   localId: string;
@@ -1235,6 +1235,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         || event.repeat
         || !actionShortcutMatches(event, voiceInputShortcut)
         || inForegroundSurface(event.target as Element | null)
+        || inShortcutBlockingOverlay(event.target as Element | null, document)
       ) {
         return;
       }

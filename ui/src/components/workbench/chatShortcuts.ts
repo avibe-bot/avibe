@@ -6,6 +6,9 @@ import { isApplePlatform } from '../../lib/platform';
 
 type ChordEvent = Pick<KeyboardEvent, 'altKey' | 'ctrlKey' | 'metaKey' | 'shiftKey' | 'code'>;
 
+const SHORTCUT_BLOCKING_OVERLAY_SELECTOR =
+  '[data-shortcut-capture], [data-state="open"], [role="menu"], [aria-expanded="true"][aria-haspopup], [role="dialog"]:not([data-window-id]), dialog[open]';
+
 /**
  * ⌘⇧D / Ctrl+Shift+D — archive the session the user is reading.
  *
@@ -35,6 +38,20 @@ export function isArchiveSessionChord(event: ChordEvent): boolean {
  */
 export function inForegroundSurface(el: Element | null): boolean {
   return !!el?.closest?.('[data-window-id], [data-window-owner-id], [role="dialog"], [role="alertdialog"]');
+}
+
+/**
+ * True when a temporary overlay owns keyboard input. The document-level menu
+ * check covers custom menus that keep focus on their trigger while open.
+ */
+export function inShortcutBlockingOverlay(
+  el: Element | null,
+  root?: Pick<Document, 'querySelector'>,
+): boolean {
+  return (
+    !!el?.closest?.(SHORTCUT_BLOCKING_OVERLAY_SELECTOR)
+    || !!root?.querySelector('[role="menu"]')
+  );
 }
 
 /**

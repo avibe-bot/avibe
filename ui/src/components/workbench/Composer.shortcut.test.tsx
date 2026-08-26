@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { createInstance } from 'i18next';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -55,10 +55,10 @@ void i18n.use(initReactI18next).init({
   interpolation: { escapeValue: false },
 });
 
-const renderComposer = () => render(
+const renderComposer = (sessionId = 'shortcut-session') => render(
   <I18nextProvider i18n={i18n}>
     <ToastProvider>
-      <Composer sessionId="shortcut-session" onSend={() => undefined} />
+      <Composer sessionId={sessionId} onSend={() => undefined} />
     </ToastProvider>
   </I18nextProvider>,
 );
@@ -102,6 +102,7 @@ describe('Composer voice shortcut', () => {
       'Press Alt+Z for voice input, press it again to finish, or press Esc to cancel',
     );
 
+    await act(async () => undefined);
     fireEvent.keyDown(window, { code: 'KeyZ', altKey: true });
     await waitFor(() => expect(voiceMocks.getUserMedia).toHaveBeenCalledOnce());
     const finish = await screen.findByRole('button', { name: en.chat.compose.stopRecording });
@@ -109,5 +110,18 @@ describe('Composer voice shortcut', () => {
 
     fireEvent.keyDown(window, { code: 'KeyZ', altKey: true });
     expect(voiceMocks.finish).toHaveBeenCalledOnce();
+  });
+
+  it('leaves the shortcut with an open menu', async () => {
+    renderComposer('menu-shortcut-session');
+    await screen.findByRole('button', { name: en.chat.compose.voice });
+    await act(async () => undefined);
+
+    const menu = document.createElement('div');
+    menu.setAttribute('role', 'menu');
+    document.body.append(menu);
+    fireEvent.keyDown(window, { code: 'KeyZ', altKey: true });
+
+    expect(voiceMocks.getUserMedia).not.toHaveBeenCalled();
   });
 });

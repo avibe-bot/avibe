@@ -35,7 +35,9 @@ describe('ShowPageAnnotateControl compact presentation', () => {
 
     expect(html.match(/<button/g)).toHaveLength(1);
     expect(html).toContain('aria-label="Annotate"');
-    expect(html).toContain(`title="Press ${shortcut} to enter annotation mode; press Esc to exit"`);
+    expect(html).toContain(enabled
+      ? 'title="Annotate"'
+      : `title="Press ${shortcut} to enter annotation mode; press Esc to exit"`);
     expect(html).toContain('text-muted');
     expect(html).toContain('hover:text-foreground');
   });
