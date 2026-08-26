@@ -83,6 +83,8 @@ _RESPONSE_STREAM_CHUNK_BYTES = 64 * 1024
 _MIN_RESPONSE_SPOOL_FREE_BYTES = 512 * 1024 * 1024
 _RESPONSE_SPOOL_UNLINK_ATTEMPTS = 20
 _RESPONSE_SPOOL_UNLINK_DELAY_SECONDS = 0.05
+_CONTROL_RECEIPT_MAX_BYTES = 128
+_VALIDATED_RECEIPT_MARKER = "validated-provider-receipt"
 _CHAT_PROBE_MAX_TOKENS = 8
 _CHAT_PROBE_TERMINAL_FINISH_REASONS = frozenset(
     {"stop", "length", "content_filter", "tool_calls", "function_call"}
@@ -128,6 +130,16 @@ class _JSONScalarSchema(_JSONSchema):
 
 
 @dataclass(frozen=True)
+class _JSONReceiptSchema(_JSONSchema):
+    required: bool = False
+
+
+@dataclass(frozen=True)
+class _JSONBoundedScalarSchema(_JSONSchema):
+    max_string_bytes: int
+
+
+@dataclass(frozen=True)
 class _JSONAnySchema(_JSONSchema):
     pass
 
@@ -166,6 +178,15 @@ class _JSONMapSchema(_JSONSchema):
     additional_values: _JSONSchema | None = None
     max_items: int | None = None
     reject_unknown: bool = False
+    list_projection: _ListProjection | None = None
+
+
+@dataclass(frozen=True)
+class _ListProjection:
+    principal_id: str
+    project_id: str
+    page: int
+    page_size: int
 
 
 @dataclass(frozen=True)
@@ -180,17 +201,25 @@ class _PreparedSearchData:
     items: tuple[ProviderSearchItem, ...]
 
 
+@dataclass(frozen=True)
+class _PreparedListData:
+    page: MemoryListPage
+
+
 _JSON_SCALAR = _JSONScalarSchema()
 _JSON_NUMBER = _JSONScalarSchema(number_only=True)
+_JSON_RECEIPT = _JSONReceiptSchema()
+_JSON_REQUIRED_RECEIPT = _JSONReceiptSchema(required=True)
+_JSON_CONTROL = _JSONBoundedScalarSchema(max_string_bytes=128)
 _JSON_ANY = _JSONAnySchema()
 _JSON_SKIP = _JSONSkipSchema()
 _JSON_PRESENCE = _JSONArraySchema(_JSON_SKIP, max_items=0, retention="presence")
 
 _WRITE_RESPONSE_SCHEMA = _JSONMapSchema(
     {
-        "request_id": _JSON_SCALAR,
-        "data": _JSONMapSchema({"status": _JSON_SCALAR}),
-        "error": _JSONMapSchema({"code": _JSON_SCALAR}),
+        "request_id": _JSON_RECEIPT,
+        "data": _JSONMapSchema({"status": _JSON_CONTROL}),
+        "error": _JSONMapSchema({"code": _JSON_CONTROL}),
     }
 )
 _PROFILE_RESPONSE_SCHEMA = _JSONMapSchema(
@@ -216,26 +245,26 @@ _PROFILE_RESPONSE_SCHEMA = _JSONMapSchema(
 )
 _HEALTH_RESPONSE_SCHEMA = _JSONMapSchema(
     {
-        "status": _JSON_SCALAR,
-        "version": _JSON_SCALAR,
+        "status": _JSON_CONTROL,
+        "version": _JSON_CONTROL,
         "capabilities": _JSONMapSchema(
             {},
-            additional_values=_JSON_SCALAR,
+            additional_values=_JSON_CONTROL,
             max_items=33,
         ),
-        "disabled_features": _JSONArraySchema(_JSON_SCALAR, max_items=32),
+        "disabled_features": _JSONArraySchema(_JSON_CONTROL, max_items=32),
         "cascade": _JSONNullableSchema(
             _JSONMapSchema(
                 {
-                    "healthy": _JSON_SCALAR,
-                    "reasons": _JSONArraySchema(_JSON_SCALAR, max_items=8),
-                    "pending": _JSON_SCALAR,
-                    "failed_permanent": _JSON_SCALAR,
-                    "failed_retryable": _JSON_SCALAR,
-                    "drain_consecutive_failures": _JSON_SCALAR,
-                    "unrecoverable_total": _JSON_SCALAR,
-                    "optimize_failure_streak": _JSON_SCALAR,
-                    "prune_stale_seconds": _JSON_SCALAR,
+                    "healthy": _JSON_CONTROL,
+                    "reasons": _JSONArraySchema(_JSON_CONTROL, max_items=8),
+                    "pending": _JSON_CONTROL,
+                    "failed_permanent": _JSON_CONTROL,
+                    "failed_retryable": _JSON_CONTROL,
+                    "drain_consecutive_failures": _JSON_CONTROL,
+                    "unrecoverable_total": _JSON_CONTROL,
+                    "optimize_failure_streak": _JSON_CONTROL,
+                    "prune_stale_seconds": _JSON_CONTROL,
                 },
                 reject_unknown=True,
             )
@@ -364,7 +393,13 @@ def _search_response_schema(limit: int, principal_id: str) -> _JSONMapSchema:
     )
 
 
-def _list_response_schema(page_size: int) -> _JSONMapSchema:
+def _list_response_schema(
+    page_size: int,
+    *,
+    principal_id: str,
+    project_id: str,
+    page: int,
+) -> _JSONMapSchema:
     episode = _JSONMapSchema(
         {
             "id": _JSON_SCALAR,
@@ -373,7 +408,11 @@ def _list_response_schema(page_size: int) -> _JSONMapSchema:
             "project_id": _JSON_SCALAR,
             "session_id": _JSON_SCALAR,
             "timestamp": _JSON_SCALAR,
-            "sender_ids": _JSONArraySchema(_JSON_SCALAR, retention="none"),
+            "sender_ids": _JSONArraySchema(
+                _JSON_REQUIRED_RECEIPT,
+                retention="none",
+                validate_discarded_items=True,
+            ),
             "summary": _JSON_SCALAR,
             "subject": _JSON_SCALAR,
             "episode": _JSON_SCALAR,
@@ -383,7 +422,7 @@ def _list_response_schema(page_size: int) -> _JSONMapSchema:
     )
     return _JSONMapSchema(
         {
-            "request_id": _JSON_SCALAR,
+            "request_id": _JSON_RECEIPT,
             "data": _JSONMapSchema(
                 {
                     "episodes": _JSONArraySchema(
@@ -400,6 +439,12 @@ def _list_response_schema(page_size: int) -> _JSONMapSchema:
             ),
         },
         reject_unknown=True,
+        list_projection=_ListProjection(
+            principal_id=principal_id,
+            project_id=project_id,
+            page=page,
+            page_size=page_size,
+        ),
     )
 
 
@@ -908,15 +953,17 @@ class EverOSPort:
                 "sort_order": "desc",
             },
             require_json=True,
-            response_schema=_list_response_schema(page_size),
+            response_schema=_list_response_schema(
+                page_size,
+                principal_id=principal_id,
+                project_id=project_id,
+                page=page,
+            ),
         )
-        return _map_episode_page(
-            body,
-            principal_id=principal_id,
-            project_id=project_id,
-            page=page,
-            page_size=page_size,
-        )
+        data = body.get("data") if isinstance(body, dict) else None
+        if not isinstance(data, _PreparedListData):
+            raise MemoryProviderFailure("memory_provider_response_invalid")
+        return data.page
 
     async def health(self) -> bool:
         try:
@@ -1716,6 +1763,8 @@ def _parse_spooled_json_path(path: str, schema: _JSONSchema) -> tuple[bool, Any]
         search_parameters = _search_response_parameters(schema)
         if search_parameters is not None:
             value = _prepare_search_response(value, *search_parameters)
+        if isinstance(schema, _JSONMapSchema) and schema.list_projection is not None:
+            value = _prepare_list_response(value, schema.list_projection)
         # The process boundary must be able to return the projection without
         # recursively walking an adversarially deep profile object.
         pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
@@ -1811,6 +1860,20 @@ def _prepare_profile_response(value: Any) -> Any:
     return value
 
 
+def _prepare_list_response(value: Any, projection: _ListProjection) -> Any:
+    """Map and validate a list page before it leaves the parser worker."""
+
+    page = _map_episode_page(
+        value,
+        principal_id=projection.principal_id,
+        project_id=projection.project_id,
+        page=projection.page,
+        page_size=projection.page_size,
+        provider_validated=True,
+    )
+    return {"data": _PreparedListData(page=page)}
+
+
 def _parse_spooled_json(spool: BinaryIO, schema: _JSONSchema) -> Any:
     # The managed EverOS child imports this module from the Avibe source tree,
     # but response projection runs only in the main Avibe environment.
@@ -1875,7 +1938,14 @@ class _ProjectedJSONParser:
                 return
             if isinstance(schema, _JSONNullableSchema):
                 schema = schema.value
-            if isinstance(schema, _JSONScalarSchema):
+            if isinstance(
+                schema,
+                (
+                    _JSONScalarSchema,
+                    _JSONReceiptSchema,
+                    _JSONBoundedScalarSchema,
+                ),
+            ):
                 raise ValueError("unexpected scalar value shape")
             if event == "start_map":
                 if not isinstance(schema, (_JSONMapSchema, _JSONAnySchema)):
@@ -1921,6 +1991,12 @@ class _ProjectedJSONParser:
                 isinstance(value, bool) or not isinstance(value, (int, float))
             ):
                 raise ValueError("unexpected scalar type")
+        elif isinstance(schema, _JSONReceiptSchema):
+            value = _project_receipt(value)
+            if value is None and schema.required:
+                raise ValueError("invalid provider receipt")
+        elif isinstance(schema, _JSONBoundedScalarSchema) and isinstance(value, str):
+            value = _bounded_control_string(value, schema.max_string_bytes)
         self._attach(value)
 
     def _next_schema(self) -> _JSONSchema:
@@ -2194,6 +2270,7 @@ def _map_episode_page(
     project_id: str,
     page: int,
     page_size: int,
+    provider_validated: bool = False,
 ) -> MemoryListPage:
     """Validate the pinned EverOS `/get` envelope before projection."""
 
@@ -2242,6 +2319,7 @@ def _map_episode_page(
             episode,
             principal_id=principal_id,
             project_id=project_id,
+            provider_validated=provider_validated,
         )
         for episode in episodes
     )
@@ -2268,6 +2346,7 @@ def _map_episode_page(
         count=count,
         total_count=total_count,
         warnings=warnings,
+        provider_validated=provider_validated,
     )
 
 
@@ -2276,6 +2355,7 @@ def _map_list_episode(
     *,
     principal_id: str,
     project_id: str,
+    provider_validated: bool = False,
 ) -> MemoryListItem:
     item_keys = {
         "id",
@@ -2321,6 +2401,7 @@ def _map_list_episode(
         body=episode,
         timestamp=timestamp,
         project=project_id,
+        provider_validated=provider_validated,
     )
 
 
@@ -2768,6 +2849,33 @@ def _bounded_opaque_string(value: object, *, max_bytes: int = 128) -> str | None
 
 def _strict_receipt_id(value: object) -> str | None:
     return value if isinstance(value, str) and is_opaque_provider_id(value) else None
+
+
+def _project_receipt(value: object) -> str | None:
+    """Return exact small receipts or bounded validity metadata for large ones."""
+
+    if not isinstance(value, str) or not value:
+        return None
+    if any(0xD800 <= ord(character) <= 0xDFFF for character in value):
+        return None
+    if len(value) <= _CONTROL_RECEIPT_MAX_BYTES:
+        encoded = value.encode("utf-8")
+        if len(encoded) <= _CONTROL_RECEIPT_MAX_BYTES:
+            return value
+    return _VALIDATED_RECEIPT_MARKER
+
+
+def _bounded_control_string(value: str, max_bytes: int) -> str:
+    """Bound provider control text in the worker without encoding the full value."""
+
+    if any(0xD800 <= ord(character) <= 0xDFFF for character in value):
+        return ""
+    candidate = value[:max_bytes]
+    encoded = candidate.encode("utf-8")
+    while len(encoded) > max_bytes:
+        candidate = candidate[:-1]
+        encoded = candidate.encode("utf-8")
+    return candidate
 
 
 def _utf8_bytes(value: str) -> bytes | None:

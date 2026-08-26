@@ -426,6 +426,7 @@ class MemoryListItem:
     project: str
     kind: Literal["episode"] = "episode"
     origin: MemoryOrigin | None = None
+    provider_validated: bool = field(default=False, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -439,6 +440,7 @@ class MemoryListPage:
     total_count: int
     warnings: tuple[MemoryListWarningCode, ...] = ()
     status: Literal["ok"] = "ok"
+    provider_validated: bool = field(default=False, repr=False, compare=False)
 
 
 MemoryListResult: TypeAlias = MemoryListPage | OperationFailed

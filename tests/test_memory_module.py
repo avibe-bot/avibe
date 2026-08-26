@@ -375,6 +375,82 @@ async def test_worker_validated_results_skip_controller_text_reencoding(
 
 
 @pytest.mark.asyncio
+async def test_worker_validated_list_skips_controller_text_reencoding(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    large_text = "x" * (2 * 1024 * 1024 + 1)
+    page = MemoryListPage(
+        items=(
+            MemoryListItem(
+                id="episode-1",
+                subject="Subject",
+                summary=large_text,
+                body=large_text,
+                timestamp="2026-08-26T00:00:00Z",
+                project="default",
+                provider_validated=True,
+            ),
+        ),
+        page=1,
+        page_size=1,
+        count=1,
+        total_count=1,
+        provider_validated=True,
+    )
+    module, _store, _provider = _module(
+        tmp_path,
+        provider=FakeMemoryProvider(list_page=page),
+    )
+    monkeypatch.setattr(
+        memory_module,
+        "_list_text_bytes",
+        lambda *_args, **_kwargs: pytest.fail(
+            "controller re-encoded worker-validated list text"
+        ),
+    )
+
+    result = await module.list_episodes(
+        principal_id=PRINCIPAL,
+        project_id="default",
+        page_size=1,
+    )
+
+    assert isinstance(result, MemoryListPage)
+    assert result.items[0].summary == large_text
+    assert result.items[0].body == large_text
+    assert result.items[0].origin == "user"
+    assert result.items[0].provider_validated is True
+    assert result.provider_validated is True
+
+
+def test_worker_validated_rank_preserves_episode_id_lexical_order() -> None:
+    def item(episode_id: str, rank_fingerprint: str) -> ProviderSearchItem:
+        return ProviderSearchItem(
+            item=MemoryItem(
+                kind="episode",
+                text="same text",
+                provider_validated=True,
+            ),
+            score=1.0,
+            episode_id=episode_id,
+            timestamp="2026-08-26T00:00:00Z",
+            provider_rank=0,
+            queried_owner=PRINCIPAL,
+            provider_validated=True,
+            text_fingerprint="same-text-fingerprint",
+            rank_fingerprint=rank_fingerprint,
+        )
+
+    ordered = sorted(
+        (item("episode-z", "0000"), item("episode-a", "ffff")),
+        key=memory_module._same_method_rank_key,
+    )
+
+    assert [entry.episode_id for entry in ordered] == ["episode-a", "episode-z"]
+
+
+@pytest.mark.asyncio
 async def test_shutdown_drops_volatile_work(tmp_path: Path) -> None:
     module, _store, provider = _module(tmp_path)
     module._writer._ensure_worker = lambda: None

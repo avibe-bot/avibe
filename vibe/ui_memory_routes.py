@@ -22,11 +22,17 @@ from typing import Any, Callable
 from fastapi import Request as FastAPIRequest
 
 from config.v2_config import V2Config
+from core.memory.retained_input import (
+    read_json_object_admitted,
+    RetainedInputBudget,
+    RetainedInputRejected,
+)
 from vibe.ui_compat import Response, jsonify
 
 
 _PROCESSING_RECORD_CURSOR_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
 _PROCESSING_RECORD_ENTRY_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,256}\Z")
+_MEMORY_LIST_INPUT_BUDGET = RetainedInputBudget(max_reservations=4)
 
 
 def _memory_ui_user_key() -> str | None:
@@ -776,9 +782,18 @@ def register_memory_routes(app) -> None:
             if user_key is None:
                 return _memory_forbidden_response()
             try:
-                payload = await starlette_request.json()
-            except Exception:
+                payload, reservation = await read_json_object_admitted(
+                    starlette_request,
+                    _MEMORY_LIST_INPUT_BUDGET,
+                )
+            except RetainedInputRejected:
+                return _memory_response(
+                    {"status": "failed", "error": "memory_queue_full"},
+                    status_code=429,
+                )
+            except (TypeError, ValueError):
                 payload = None
+                reservation = None
             if not isinstance(payload, dict) or set(payload) - {
                 "project",
                 "page",
@@ -786,6 +801,8 @@ def register_memory_routes(app) -> None:
                 "limit",
                 "origin",
             }:
+                if reservation is not None:
+                    reservation.release()
                 return _memory_response(
                     {"status": "failed", "error": "memory_invalid_input"},
                     status_code=400,
@@ -827,22 +844,28 @@ def register_memory_routes(app) -> None:
                 or (project == "all" and page is not None)
                 or (project != "all" and cursor is not None)
             ):
+                if reservation is not None:
+                    reservation.release()
                 return _memory_response(
                     {"status": "failed", "error": "memory_invalid_input"},
                     status_code=400,
                 )
             from vibe import internal_client
 
-            return await _memory_internal_response(
-                lambda: internal_client.memory_list(
-                    user_key=user_key,
-                    project=project,
-                    page=page,
-                    cursor=cursor,
-                    limit=limit,
-                    origin=origin,
+            try:
+                return await _memory_internal_response(
+                    lambda: internal_client.memory_list(
+                        user_key=user_key,
+                        project=project,
+                        page=page,
+                        cursor=cursor,
+                        limit=limit,
+                        origin=origin,
+                    )
                 )
-            )
+            finally:
+                if reservation is not None:
+                    reservation.release()
 
         return await app.dispatch_native_request(starlette_request, handler)
 

@@ -489,7 +489,7 @@ def test_add_marks_post_submission_transport_failures_as_ambiguous(
     assert raised.value.ambiguous is True
 
 
-def test_add_preserves_provider_receipt_without_avibe_size_cap() -> None:
+def test_add_accepts_large_provider_receipt_as_bounded_control_metadata() -> None:
     request_id = "x" * 129
 
     def handler(_request: httpx.Request) -> httpx.Response:
@@ -506,7 +506,27 @@ def test_add_preserves_provider_receipt_without_avibe_size_cap() -> None:
     with _sidecar_transport(handler):
         ack = asyncio.run(run())
 
-    assert ack == AddAck(request_id=request_id, status="accumulated")
+    assert ack.status == "accumulated"
+    assert ack.request_id == memory_everos._VALIDATED_RECEIPT_MARKER
+
+
+def test_write_projection_bounds_control_scalars_before_worker_transfer() -> None:
+    projected = memory_everos._parse_spooled_json(
+        io.BytesIO(
+            json.dumps(
+                {
+                    "request_id": "r" * 10_000,
+                    "data": {"status": "s" * 10_000},
+                    "error": {"code": "e" * 10_000},
+                }
+            ).encode("utf-8")
+        ),
+        memory_everos._WRITE_RESPONSE_SCHEMA,
+    )
+
+    assert projected["request_id"] == memory_everos._VALIDATED_RECEIPT_MARKER
+    assert len(projected["data"]["status"].encode("utf-8")) == 128
+    assert len(projected["error"]["code"].encode("utf-8")) == 128
 
 
 @pytest.mark.parametrize(
@@ -734,7 +754,7 @@ def test_flush_rejects_empty_success_receipt() -> None:
     assert result == FlushUnknown(reason="transport")
 
 
-def test_flush_preserves_provider_receipt_without_avibe_size_cap() -> None:
+def test_flush_accepts_large_provider_receipt_as_bounded_control_metadata() -> None:
     request_id = "x" * 129
 
     def handler(_request: httpx.Request) -> httpx.Response:
@@ -746,7 +766,10 @@ def test_flush_preserves_provider_receipt_without_avibe_size_cap() -> None:
     with _sidecar_transport(handler):
         result = asyncio.run(EverOSPort(Path("/tmp/everos.sock")).flush(SESSION_REF))
 
-    assert result == FlushSucceeded(request_id=request_id, status="extracted")
+    assert result == FlushSucceeded(
+        request_id=memory_everos._VALIDATED_RECEIPT_MARKER,
+        status="extracted",
+    )
 
 
 @pytest.mark.parametrize(
@@ -1416,6 +1439,63 @@ def test_list_episodes_uses_exact_get_shape_and_projects_a_bounded_page() -> Non
     )
 
 
+def test_list_episodes_maps_large_provider_fields_inside_parser_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    large_text = "x" * (2 * 1024 * 1024 + 1)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "request_id": "request",
+                "data": {
+                    "episodes": [
+                        {
+                            "id": "episode-1",
+                            "user_id": PRINCIPAL,
+                            "app_id": "avibe",
+                            "project_id": PROJECT,
+                            "session_id": "provider-session",
+                            "timestamp": "2026-08-14T00:00:00Z",
+                            "sender_ids": [],
+                            "summary": large_text,
+                            "subject": "Subject",
+                            "episode": large_text,
+                            "type": "Conversation",
+                        }
+                    ],
+                    "profiles": [],
+                    "agent_cases": [],
+                    "agent_skills": [],
+                    "total_count": 1,
+                    "count": 1,
+                },
+            },
+        )
+
+    monkeypatch.setattr(
+        memory_everos,
+        "_map_episode_page",
+        lambda *_args, **_kwargs: pytest.fail(
+            "controller remapped the worker-prepared list page"
+        ),
+    )
+    with _sidecar_transport(handler):
+        result = asyncio.run(
+            EverOSPort(Path("/tmp/everos.sock")).list_episodes(
+                PRINCIPAL,
+                PROJECT,
+                1,
+                1,
+            )
+        )
+
+    assert result.items[0].summary == large_text
+    assert result.provider_validated is True
+    assert result.items[0].provider_validated is True
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -1428,6 +1508,9 @@ def test_list_episodes_uses_exact_get_shape_and_projects_a_bounded_page() -> Non
             timestamp="0001-01-01T00:00:00+23:59"
         ),
         lambda data: data["episodes"][0].update(summary="\ud800"),
+        lambda data: data["episodes"][0].update(sender_ids=[None]),
+        lambda data: data["episodes"][0].update(sender_ids=[{}]),
+        lambda data: data["episodes"][0].update(sender_ids=[[]]),
         lambda data: (
             data["episodes"].append(dict(data["episodes"][0])),
             data.update(total_count=2, count=2),

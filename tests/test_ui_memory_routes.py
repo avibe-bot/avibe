@@ -15,6 +15,7 @@ from config.v2_config import (
     SlackConfig,
     V2Config,
 )
+from core.memory.retained_input import RetainedInputBudget
 from tests.ui_server_test_helpers import csrf_headers
 from vibe import internal_client, ui_memory_routes
 from vibe.ui_server import app
@@ -620,3 +621,37 @@ def test_memory_list_route_forwards_large_aggregate_cursor(
             "origin": None,
         }
     ]
+
+
+def test_memory_list_route_admits_body_before_json_materialization(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config()
+    budget = RetainedInputBudget(max_bytes=1, max_reservations=2)
+    held = budget.reserve(1)
+    assert held is not None
+    monkeypatch.setattr(ui_memory_routes, "_MEMORY_LIST_INPUT_BUDGET", budget)
+    calls: list[dict[str, object]] = []
+
+    async def memory_list(**kwargs):
+        calls.append(kwargs)
+        return {"status_code": 200, "body": {"status": "ok", "items": []}}
+
+    monkeypatch.setattr(internal_client, "memory_list", memory_list)
+    client = app.test_client()
+    response = client.post(
+        "/api/memory/list",
+        json={"project": "all", "cursor": "a" * 10_000, "limit": 20},
+        headers=csrf_headers(client, BASE_URL),
+        **_request_options(),
+    )
+
+    held.release()
+    assert response.status_code == 429
+    assert response.get_json() == {
+        "status": "failed",
+        "error": "memory_queue_full",
+    }
+    assert calls == []

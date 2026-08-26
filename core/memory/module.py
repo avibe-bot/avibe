@@ -1470,6 +1470,12 @@ class MemoryModule:
             or any(warning != "memory_list_truncated" for warning in result.warnings)
         ):
             return OperationFailed(error="memory_provider_response_invalid")
+        provider_validated = result.provider_validated is True and all(
+            isinstance(item, MemoryListItem) and item.provider_validated is True
+            for item in result.items
+        )
+        if provider_validated:
+            return result
         seen_ids: set[str] = set()
         previous_instant: datetime | None = None
         for item in result.items:
@@ -1741,6 +1747,8 @@ def _provider_text_key(item: ProviderSearchItem) -> str:
 
 
 def _provider_rank_key(item: ProviderSearchItem, text_key: str) -> str:
+    if item.episode_id:
+        return item.episode_id
     if (
         item.provider_validated is True
         and item.item.provider_validated is True
@@ -1748,7 +1756,7 @@ def _provider_rank_key(item: ProviderSearchItem, text_key: str) -> str:
         and item.rank_fingerprint
     ):
         return item.rank_fingerprint
-    return item.episode_id or text_key
+    return text_key
 
 
 def _valid_search_query(value: object) -> bool:

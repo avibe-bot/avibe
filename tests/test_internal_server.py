@@ -1028,6 +1028,61 @@ def test_memory_list_forwards_large_aggregate_cursor_to_runtime() -> None:
     )
 
 
+def test_memory_list_controller_admits_body_before_json_materialization() -> None:
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.retained_input import RetainedInputBudget
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    budget = RetainedInputBudget(max_bytes=1, max_reservations=2)
+    held = budget.reserve(1)
+    assert held is not None
+    admitted_list = AsyncMock()
+    runtime = SimpleNamespace(
+        principal_for_user_key=Mock(
+            return_value="u-22222222222222222222222222222222"
+        ),
+        _cursor_input_budget=budget,
+        _list_all_episodes_payload_admitted=admitted_list,
+    )
+    controller = _build_controller_double()
+    controller.default_memory_project_id.return_value = "default"
+    controller.memory_runtime = runtime
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+    path = "/internal/memory/list"
+    user_key = "avibe:local"
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.post(
+                path,
+                headers={
+                    MEMORY_USER_KEY_HEADER: user_key,
+                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                        secret,
+                        method="POST",
+                        path=path,
+                        user_key=user_key,
+                    ),
+                },
+                json={"project": "all", "cursor": "a" * 10_000, "limit": 20},
+            )
+
+    response = asyncio.run(_exercise())
+    held.release()
+
+    assert response.status_code == 429
+    assert response.json() == {
+        "status": "failed",
+        "error": "memory_queue_full",
+    }
+    admitted_list.assert_not_awaited()
+
+
 def test_memory_wake_uses_non_destructive_runtime_operation() -> None:
     runtime = SimpleNamespace(
         wake=AsyncMock(return_value={"ok": True, "state": "running"})
