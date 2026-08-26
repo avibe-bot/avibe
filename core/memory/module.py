@@ -1490,7 +1490,9 @@ class MemoryModule:
             item_text = _utf8_bytes(item.text) if isinstance(item.text, str) else None
             if item_text is None or not item.text or "\x00" in item.text:
                 return OperationFailed(error="memory_provider_response_invalid")
-            total_bytes += len(item_text) + len(item.kind.encode("utf-8"))
+            total_bytes += len(item.kind.encode("utf-8"))
+            if item.kind != "profile":
+                total_bytes += len(item_text)
             if item.date is not None:
                 date_bytes = _utf8_bytes(item.date) if isinstance(item.date, str) else None
                 if date_bytes is None or len(date_bytes) > 64:
@@ -1503,8 +1505,8 @@ class MemoryModule:
             if item.profile is not None:
                 if item.kind != "profile":
                     return OperationFailed(error="memory_provider_response_invalid")
-                # The structured profile projects the same canonical payload as
-                # item.text, so validate it without charging those bytes twice.
+                # EverOS owns profile payload sizing; Avibe still validates the
+                # structured projection before returning it.
                 if _profile_bytes(item.profile) is None:
                     return OperationFailed(error="memory_provider_response_invalid")
             if item.origin not in {None, "user", "agent", "both"}:

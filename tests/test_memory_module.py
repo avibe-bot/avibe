@@ -154,7 +154,7 @@ async def test_agent_remember_round_trips_through_dual_owner_search(
 async def test_profile_accepts_large_items_from_both_everos_owners(
     tmp_path: Path,
 ) -> None:
-    summary = "profile " * 18_000
+    summary = "profile " * 40_000
     item = MemoryItem(
         kind="profile",
         text=summary,
@@ -170,7 +170,7 @@ async def test_profile_accepts_large_items_from_both_everos_owners(
 
     result = await module.profile(principal_id=PRINCIPAL, project_id="default")
 
-    assert 128 * 1024 < len(summary.encode()) < 256 * 1024
+    assert len(summary.encode()) > 256 * 1024
     assert result == MemoryItems(
         items=(
             MemoryItem(
@@ -187,6 +187,17 @@ async def test_profile_accepts_large_items_from_both_everos_owners(
             ),
         )
     )
+
+
+def test_non_profile_items_keep_provider_aggregate_cap(tmp_path: Path) -> None:
+    module, _store, _provider = _module(tmp_path)
+
+    result = module._bounded_items(
+        (MemoryItem(kind="fact", text="x" * (256 * 1024)),),
+        limit=20,
+    )
+
+    assert result == OperationFailed(error="memory_provider_response_invalid")
 
 
 @pytest.mark.asyncio
