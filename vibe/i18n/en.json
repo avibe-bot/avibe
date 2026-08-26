@@ -746,6 +746,13 @@
   "permission": {
     "adminOnly": "🔒 Only admins can change bot settings. Contact an admin if you need access."
   },
+  "lifecycle": {
+    "cli": {
+      "restartInProgressUpgrade": "A restart is already in progress; upgrade was not started.",
+      "restartInProgressRestart": "A restart is already in progress; restart was not scheduled.",
+      "restartInProgressAction": "A restart is already in progress; the operation was not performed."
+    }
+  },
   "memory": {
     "cli": {
       "help": {

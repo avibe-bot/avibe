@@ -746,6 +746,13 @@
   "permission": {
     "adminOnly": "🔒 仅管理员可以修改 Bot 设置。如需权限请联系管理员。"
   },
+  "lifecycle": {
+    "cli": {
+      "restartInProgressUpgrade": "已有重启正在进行，升级未执行。",
+      "restartInProgressRestart": "已有重启正在进行，未安排新的重启。",
+      "restartInProgressAction": "已有重启正在进行，操作未执行。"
+    }
+  },
   "memory": {
     "cli": {
       "help": {

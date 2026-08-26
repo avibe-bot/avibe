@@ -2560,6 +2560,7 @@
     "submitVerifyCode": "Continue",
     "scanHint": "Open WeChat on your phone and scan this QR code to log in.",
     "connected": "WeChat connected successfully!",
+    "restartRequired": "Login saved. A restart is needed to activate it.",
     "connectedTitle": "Connected",
     "connectionEstablished": "WeChat connection established",
     "nextStepTitle": "Next Step",

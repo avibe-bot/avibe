@@ -12631,10 +12631,10 @@ def cmd_start():
     try:
         with package_mutation_lock():
             if restart_in_flight():
-                return _restart_in_progress_exit()
+                return _restart_in_progress_exit(operation="lifecycle")
             return _cmd_start_under_package_lease()
     except MigrationLockTimeout:
-        return _restart_in_progress_exit()
+        return _restart_in_progress_exit(operation="lifecycle")
 
 
 def _cmd_start_under_package_lease():
@@ -12811,10 +12811,10 @@ def cmd_stop():
     try:
         with package_mutation_lock():
             if restart_in_flight():
-                return _restart_in_progress_exit()
+                return _restart_in_progress_exit(operation="lifecycle")
             return _cmd_stop_under_package_lease()
     except MigrationLockTimeout:
-        return _restart_in_progress_exit()
+        return _restart_in_progress_exit(operation="lifecycle")
 
 
 def _cmd_stop_under_package_lease():
@@ -14420,7 +14420,6 @@ def cmd_upgrade():
     print("\nUpgrading...")
 
     current_vibe_path = cache_running_vibe_path()
-    runtime_was_running = _runtime_process_was_running()
 
     # Use a stable directory as cwd to avoid issues when running from a
     # directory that uv may delete during upgrade (e.g. inside the uv tool venv).
@@ -14431,8 +14430,8 @@ def cmd_upgrade():
     try:
         with package_mutation_lock():
             if restart_in_flight():
-                print("\033[33mA restart is already in progress; upgrade was not started.\033[0m")
-                return 2
+                return _restart_in_progress_exit(operation="upgrade")
+            runtime_was_running = _runtime_process_was_running()
             plan = build_upgrade_plan(
                 vibe_path=current_vibe_path,
                 memory_enabled=configured_memory_enabled(),
@@ -14899,8 +14898,17 @@ def _format_restart_delay(delay_seconds: float) -> str:
     return f"{delay_seconds:g} seconds"
 
 
-def _restart_in_progress_exit() -> int:
-    print("\033[33mA restart is already in progress; restart was not scheduled.\033[0m")
+_RESTART_IN_PROGRESS_CLI_KEYS = {
+    "upgrade": "lifecycle.cli.restartInProgressUpgrade",
+    "restart": "lifecycle.cli.restartInProgressRestart",
+    "lifecycle": "lifecycle.cli.restartInProgressAction",
+}
+
+
+def _restart_in_progress_exit(*, operation: str = "restart") -> int:
+    language = normalize_language(_configured_cli_language())
+    message = i18n_t(_RESTART_IN_PROGRESS_CLI_KEYS[operation], language)
+    print(f"\033[33m{message}\033[0m")
     return 2
 
 

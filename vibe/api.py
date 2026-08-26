@@ -6137,7 +6137,6 @@ def do_upgrade(
         {"ok": bool, "message": str, "output": str | None, "restarting": bool}
     """
     current_vibe_path = get_running_vibe_path()
-    runtime_was_running = _runtime_process_was_running()
 
     # Use a stable directory as cwd to avoid "Current directory does not exist"
     # errors.  The vibe service process cwd may be inside the uv tool venv
@@ -6158,6 +6157,7 @@ def do_upgrade(
                     "reason": "restart_in_progress",
                     "code": "restart_in_progress",
                 }
+            runtime_was_running = _runtime_process_was_running()
             plan = build_upgrade_plan(
                 vibe_path=current_vibe_path,
                 memory_enabled=(

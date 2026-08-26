@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import ast
 import os
+import shutil
 import subprocess
 import sys
+import zipfile
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
@@ -129,8 +131,10 @@ def test_memory_indep_018_upgrade_and_rollback_preserve_optional_package_shape(
             forward.preflight_command.index("--dest") + 1
         ] == PIP_DOWNLOAD_DEST_PLACEHOLDER
         assert "--dry-run" not in forward.preflight_command
+        assert "--no-deps" in forward.preflight_command
     else:
         assert "--dry-run" in forward.preflight_command
+        assert "--no-deps" not in forward.preflight_command
     assert forward.rollback_to == RollbackTarget(
         version="3.0.14",
         package="avibe-os",
@@ -159,8 +163,10 @@ def test_memory_indep_018_upgrade_and_rollback_preserve_optional_package_shape(
             "download",
         ]
         assert "--dry-run" not in rollback_with_memory.preflight_command
+        assert "--no-deps" in rollback_with_memory.preflight_command
     else:
         assert "--dry-run" in rollback_with_memory.preflight_command
+        assert "--no-deps" not in rollback_with_memory.preflight_command
     assert rollback_with_memory.cleanup_command is None
 
     rollback_core_only = build_upgrade_plan(
@@ -181,6 +187,7 @@ def test_memory_indep_018_upgrade_and_rollback_preserve_optional_package_shape(
             "download",
             "--dest",
             PIP_DOWNLOAD_DEST_PLACEHOLDER,
+            "--no-deps",
             "avibe-os==3.0.14",
         ]
         assert not any(
@@ -222,6 +229,7 @@ def test_enabled_upgrade_selects_memory_extra_when_package_is_missing(monkeypatc
         plan.preflight_command.index("--dest") + 1
     ] == PIP_DOWNLOAD_DEST_PLACEHOLDER
     assert "--dry-run" not in plan.preflight_command
+    assert "--no-deps" in plan.preflight_command
 
 
 def test_enabled_pip_upgrade_renders_url_extra_as_named_requirement(monkeypatch):
@@ -332,6 +340,7 @@ def test_core_only_pip_rollback_download_failure_preserves_the_current_install(
     assert result.returncode == 42
     assert len(calls) == 1
     assert calls[0][:4] == ["/usr/bin/python3", "-m", "pip", "download"]
+    assert "--no-deps" in calls[0]
     assert calls[0][-1] == "avibe-os==3.0.13"
     assert not any("avibe-memory" in argument for argument in calls[0])
 
@@ -374,6 +383,7 @@ def test_pip_download_preflight_removes_scratch_on_success_and_failure(
             "download",
             "--dest",
             PIP_DOWNLOAD_DEST_PLACEHOLDER,
+            "--no-deps",
             "avibe-os[memory]",
         ],
         cleanup_command=["installer", "cleanup"],
@@ -393,6 +403,7 @@ def test_pip_download_preflight_removes_scratch_on_success_and_failure(
                 "download",
                 "--dest",
                 str(scratch),
+                "--no-deps",
                 "avibe-os[memory]",
             ]
         ]
@@ -405,6 +416,7 @@ def test_pip_download_preflight_removes_scratch_on_success_and_failure(
                 "download",
                 "--dest",
                 str(scratch),
+                "--no-deps",
                 "avibe-os[memory]",
             ],
             ["installer", "cleanup"],
@@ -525,6 +537,92 @@ def test_memory_add_plan_force_reinstalls_only_the_compatible_memory_distributio
         assert "--dry-run" not in plan.preflight_command
         assert "--force-reinstall" not in plan.preflight_command
         assert "--no-deps" in plan.preflight_command
+
+
+def _write_minimal_wheel(
+    wheel_dir: Path,
+    *,
+    name: str,
+    version: str,
+    requires_dist: tuple[str, ...] = (),
+    provides_extra: str | None = None,
+) -> Path:
+    normalized = name.replace("-", "_")
+    wheel = wheel_dir / f"{normalized}-{version}-py3-none-any.whl"
+    dist_info = f"{normalized}-{version}.dist-info"
+    module = normalized
+    metadata = [
+        "Metadata-Version: 2.1",
+        f"Name: {name}",
+        f"Version: {version}",
+    ]
+    if provides_extra:
+        metadata.append(f"Provides-Extra: {provides_extra}")
+    metadata.extend(f"Requires-Dist: {requirement}" for requirement in requires_dist)
+    files = {
+        f"{module}/__init__.py": "",
+        f"{dist_info}/METADATA": "\n".join(metadata) + "\n",
+        f"{dist_info}/WHEEL": (
+            "Wheel-Version: 1.0\n"
+            "Generator: avibe-test\n"
+            "Root-Is-Purelib: true\n"
+            "Tag: py3-none-any\n"
+        ),
+    }
+    files[f"{dist_info}/RECORD"] = "".join(f"{path},,\n" for path in files)
+    with zipfile.ZipFile(wheel, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path, content in files.items():
+            archive.writestr(path, content)
+    return wheel
+
+
+def test_pip_preflight_checks_only_target_artifacts_for_offline_local_wheel(
+    monkeypatch,
+    tmp_path,
+):
+    wheels = tmp_path / "wheels"
+    wheels.mkdir()
+    host = _write_minimal_wheel(
+        wheels,
+        name="avibe-os",
+        version="9.9.9",
+        requires_dist=('avibe-offline-only-dependency==1.0; extra == "memory"',),
+        provides_extra="memory",
+    )
+    offline_env = {
+        **os.environ,
+        "PIP_NO_INDEX": "1",
+        "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+    }
+    monkeypatch.setenv("AVIBE_UPGRADE_PACKAGE_SPEC", str(host))
+    monkeypatch.setattr("vibe.upgrade.installed_metadata_describes_running_code", lambda: True)
+
+    plan = build_upgrade_plan(
+        python_executable="/usr/bin/python3",
+        uv_path=None,
+        base_env=offline_env,
+        memory_enabled=True,
+    )
+
+    assert plan.preflight_command is not None
+    assert "--no-deps" in plan.preflight_command
+    assert "--no-deps" not in plan.command
+    scratch = tmp_path / "download"
+    scratch.mkdir()
+    pip_executable = shutil.which("pip3") or shutil.which("pip")
+    if pip_executable is None:
+        pytest.skip("a pip executable is required for the offline wheel smoke check")
+    preflight = [pip_executable, *plan.preflight_command[3:]]
+    preflight[preflight.index(PIP_DOWNLOAD_DEST_PLACEHOLDER)] = str(scratch)
+    resolved = subprocess.run(
+        preflight,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=offline_env,
+    )
+    assert resolved.returncode == 0, resolved.stderr
+    assert [path.name for path in scratch.iterdir()] == [host.name]
 
 
 def test_core_only_rollback_removes_memory_before_the_pinned_install():
@@ -1491,6 +1589,45 @@ def test_do_upgrade_uses_upgrade_plan_env_and_restarts(monkeypatch):
     assert mutation_lease_held is False
 
 
+def test_do_upgrade_samples_runtime_after_start_wins_the_package_lease(monkeypatch):
+    plan = UpgradePlan(command=["installer", "upgrade"], env=None, method="test")
+    runtime_running = False
+    sampled: list[bool] = []
+    scheduled: list[dict[str, Any]] = []
+
+    @contextmanager
+    def mutation_lock():
+        nonlocal runtime_running
+        runtime_running = True
+        yield
+
+    def sample_runtime() -> bool:
+        sampled.append(runtime_running)
+        return runtime_running
+
+    monkeypatch.setattr(api, "package_mutation_lock", mutation_lock)
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/custom/bin/vibe")
+    monkeypatch.setattr(api, "_runtime_process_was_running", sample_runtime)
+    monkeypatch.setattr(api, "build_upgrade_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(api, "schedule_restart", lambda **kwargs: scheduled.append(kwargs))
+    monkeypatch.setattr(
+        api.subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="done",
+            stderr="",
+        ),
+    )
+
+    result = api.do_upgrade(auto_restart=True)
+
+    assert sampled == [True]
+    assert result["restarting"] is True
+    assert len(scheduled) == 1
+
+
 def test_do_upgrade_refuses_an_in_flight_restart_before_planning_or_mutation(
     monkeypatch,
 ):
@@ -1781,6 +1918,53 @@ def test_cmd_upgrade_uses_upgrade_plan_env(monkeypatch):
         "rollback_to": LEGACY_INSTALL,
     }
     assert mutation_lease_held is False
+
+
+def test_cmd_upgrade_samples_runtime_after_stop_wins_the_package_lease(
+    monkeypatch,
+):
+    plan = UpgradePlan(command=["installer", "upgrade"], env=None, method="test")
+    runtime_running = True
+    sampled: list[bool] = []
+    commands: list[list[str]] = []
+
+    @contextmanager
+    def mutation_lock():
+        nonlocal runtime_running
+        runtime_running = False
+        yield
+
+    def sample_runtime() -> bool:
+        sampled.append(runtime_running)
+        return runtime_running
+
+    monkeypatch.setattr(cli, "package_mutation_lock", mutation_lock)
+    monkeypatch.setattr(
+        cli,
+        "get_latest_version",
+        lambda: {"error": None, "has_update": True, "latest": "2.2.0"},
+    )
+    monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/custom/bin/vibe")
+    monkeypatch.setattr(cli, "_runtime_process_was_running", sample_runtime)
+    monkeypatch.setattr(cli, "build_upgrade_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(
+        cli,
+        "schedule_restart",
+        lambda **kwargs: pytest.fail("a stopped runtime must not be restarted"),
+    )
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="done", stderr="")
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    assert cli.cmd_upgrade() == 0
+    assert sampled == [False]
+    assert commands == [
+        plan.command,
+        ["/custom/bin/vibe", "runtime", "prepare", "--strict"],
+    ]
 
 
 def test_cmd_upgrade_refuses_an_in_flight_restart_before_mutation(

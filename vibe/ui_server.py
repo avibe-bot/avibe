@@ -6569,6 +6569,43 @@ def _remove_pending_restart_marker() -> None:
         logger.debug("Failed to remove stale pending restart marker", exc_info=True)
 
 
+def _schedule_guarded_restart(
+    *,
+    pending_trigger: str,
+    schedule: Callable[[], dict[str, Any]],
+) -> dict[str, Any]:
+    def _mark_pending_or_schedule_after_finish() -> dict[str, Any]:
+        pending_result = _mark_service_restart_pending(trigger=pending_trigger)
+        if _restart_in_flight():
+            return pending_result
+
+        _remove_pending_restart_marker()
+        try:
+            with package_mutation_lock(
+                timeout_seconds=_RESTART_REACQUIRE_TIMEOUT_SECONDS,
+            ):
+                restart = schedule()
+        except MigrationLockTimeout:
+            _remove_pending_restart_marker()
+            return _restart_not_scheduled_package_busy()
+        return {
+            "ok": True,
+            "restart": restart,
+            "code": "restart_scheduled_after_in_flight_finished",
+        }
+
+    try:
+        with package_mutation_lock():
+            if _restart_in_flight():
+                return _mark_pending_or_schedule_after_finish()
+            restart = schedule()
+    except MigrationLockTimeout:
+        if _restart_in_flight():
+            return _mark_pending_or_schedule_after_finish()
+        return _restart_not_scheduled_package_busy()
+    return {"ok": True, "restart": restart}
+
+
 def _schedule_service_restart_for_config_fallback() -> dict[str, Any]:
     from vibe import runtime
     from vibe.restart_supervisor import schedule_restart
@@ -6578,46 +6615,10 @@ def _schedule_service_restart_for_config_fallback() -> dict[str, Any]:
         runtime.write_status("restarting", "restarting", status.get("service_pid"), status.get("ui_pid"))
         return schedule_restart(delay_seconds=0.0, trigger="web-ui-config", scope="service")
 
-    try:
-        with package_mutation_lock():
-            with _RESTART_CONTROL_LOCK:
-                if _restart_in_flight():
-                    pending_result = _mark_service_restart_pending(
-                        trigger="web-ui-config-pending",
-                    )
-                    if not _restart_in_flight():
-                        _remove_pending_restart_marker()
-                        restart = _schedule_restart()
-                        return {
-                            "ok": True,
-                            "restart": restart,
-                            "code": "restart_scheduled_after_in_flight_finished",
-                        }
-                    return pending_result
-                restart = _schedule_restart()
-    except MigrationLockTimeout:
-        if _restart_in_flight():
-            pending_result = _mark_service_restart_pending(
-                trigger="web-ui-config-pending",
-            )
-            if _restart_in_flight():
-                return pending_result
-            _remove_pending_restart_marker()
-            try:
-                with package_mutation_lock(
-                    timeout_seconds=_RESTART_REACQUIRE_TIMEOUT_SECONDS,
-                ):
-                    restart = _schedule_restart()
-            except MigrationLockTimeout:
-                _remove_pending_restart_marker()
-                return _restart_not_scheduled_package_busy()
-            return {
-                "ok": True,
-                "restart": restart,
-                "code": "restart_scheduled_after_in_flight_finished",
-            }
-        return _restart_not_scheduled_package_busy()
-    return {"ok": True, "restart": restart}
+    return _schedule_guarded_restart(
+        pending_trigger="web-ui-config-pending",
+        schedule=_schedule_restart,
+    )
 
 
 def _save_config_and_runtime_decisions(payload: dict) -> tuple[V2Config, bool, bool, list[str]]:
@@ -7691,19 +7692,13 @@ def _schedule_wechat_qr_login_restart() -> dict:
     """Schedule a managed restart after QR-login credentials are persisted."""
     from vibe.restart_supervisor import schedule_restart
 
-    try:
-        with package_mutation_lock():
-            if _restart_in_flight():
-                return _mark_service_restart_pending(
-                    trigger="wechat-qr-login-pending",
-                )
-            return schedule_restart(delay_seconds=2.0, trigger="wechat-qr-login")
-    except MigrationLockTimeout:
-        if _restart_in_flight():
-            return _mark_service_restart_pending(
-                trigger="wechat-qr-login-pending",
-            )
-        return _restart_not_scheduled_package_busy()
+    return _schedule_guarded_restart(
+        pending_trigger="wechat-qr-login-pending",
+        schedule=lambda: schedule_restart(
+            delay_seconds=2.0,
+            trigger="wechat-qr-login",
+        ),
+    )
 
 
 def _persist_wechat_qr_credentials(result: dict) -> None:
@@ -7803,8 +7798,20 @@ async def wechat_qr_login_poll():
             logger.warning("Failed to auto-bind WeChat user: %s", e)
 
         try:
-            restart = _schedule_wechat_qr_login_restart()
-            logger.info("Scheduled service restart after WeChat QR login: %s", restart.get("job_id"))
+            restart = await asyncio.to_thread(_schedule_wechat_qr_login_restart)
+            result["restart_scheduled"] = bool(restart.get("ok"))
+            if result["restart_scheduled"]:
+                restart_status = restart.get("restart") or {}
+                logger.info(
+                    "Scheduled service restart after WeChat QR login: %s",
+                    restart_status.get("job_id"),
+                )
+            else:
+                result["restart_reason"] = "restart_not_scheduled_package_busy"
+                logger.warning(
+                    "WeChat QR credentials were saved but restart was not scheduled: %s",
+                    restart.get("error") or restart.get("code"),
+                )
         except Exception as exc:
             logger.warning("Failed to schedule service restart after WeChat QR login: %s", exc)
 

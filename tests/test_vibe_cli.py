@@ -745,6 +745,26 @@ def test_cmd_restart_fails_closed_when_package_lease_is_held(
     assert "restart is already in progress" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize(
+    ("operation", "expected"),
+    [
+        ("upgrade", "已有重启正在进行，升级未执行。"),
+        ("restart", "已有重启正在进行，未安排新的重启。"),
+        ("lifecycle", "已有重启正在进行，操作未执行。"),
+    ],
+)
+def test_restart_contention_messages_follow_configured_cli_language(
+    monkeypatch,
+    capsys,
+    operation,
+    expected,
+):
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
+
+    assert cli._restart_in_progress_exit(operation=operation) == 2
+    assert expected in capsys.readouterr().out
+
+
 def test_cmd_stop_ignores_absent_services(monkeypatch):
     status = []
 

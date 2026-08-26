@@ -2560,6 +2560,7 @@
     "submitVerifyCode": "继续",
     "scanHint": "打开手机微信，扫描此二维码登录。",
     "connected": "微信连接成功！",
+    "restartRequired": "登录已保存，需重启后生效。",
     "connectedTitle": "已连接",
     "connectionEstablished": "微信连接已建立",
     "nextStepTitle": "下一步",

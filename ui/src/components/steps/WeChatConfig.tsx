@@ -171,7 +171,11 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
           setNeedsVerifyCode(false);
           setVerifyCode('');
           setLoginState('connected');
-          setMessage(result.message || t('wechatConfig.connected'));
+          setMessage(
+            result.restart_scheduled === false
+              ? t('wechatConfig.restartRequired')
+              : result.message || t('wechatConfig.connected')
+          );
           setBotToken(result.bot_token || '');
           setBaseUrl(result.base_url || '');
           activeSessionKeyRef.current = null;
@@ -233,7 +237,11 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
         setNeedsVerifyCode(false);
         setVerifyCode('');
         setLoginState('connected');
-        setMessage(result.message || t('wechatConfig.connected'));
+        setMessage(
+          result.restart_scheduled === false
+            ? t('wechatConfig.restartRequired')
+            : result.message || t('wechatConfig.connected')
+        );
         setBotToken(result.bot_token || '');
         setBaseUrl(result.base_url || '');
         activeSessionKeyRef.current = null;

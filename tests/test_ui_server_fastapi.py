@@ -2502,7 +2502,7 @@ def test_config_restart_fallback_schedules_when_in_flight_finishes_after_marker(
     mutation_lease_held = False
 
     @contextmanager
-    def mutation_lock():
+    def mutation_lock(*, timeout_seconds=None):
         nonlocal mutation_lease_held
         mutation_lease_held = True
         try:
@@ -3303,8 +3303,11 @@ def test_json_payload_parsing_runs_off_the_asgi_loop(monkeypatch):
 def test_wechat_qr_poll_marks_bind_hint_and_schedules_managed_restart(monkeypatch):
     from vibe import runtime
 
+    event_loop_threads = []
+
     class _Auth:
         async def poll_status(self, session_key, verify_code=None):
+            event_loop_threads.append(threading.get_ident())
             assert session_key == "qr-session"
             return {
                 "status": "confirmed",
@@ -3314,7 +3317,7 @@ def test_wechat_qr_poll_marks_bind_hint_and_schedules_managed_restart(monkeypatc
             }
 
     bound_users = []
-    restart_calls = []
+    restart_threads = []
     persisted = []
 
     runtime.ensure_config()
@@ -3323,7 +3326,8 @@ def test_wechat_qr_poll_marks_bind_hint_and_schedules_managed_restart(monkeypatc
     monkeypatch.setattr(
         ui_server,
         "_schedule_wechat_qr_login_restart",
-        lambda: restart_calls.append(True) or {"job_id": "restart-1"},
+        lambda: restart_threads.append(threading.get_ident())
+        or {"ok": True, "restart": {"job_id": "restart-1"}},
     )
     monkeypatch.setattr(
         "vibe.api.auto_bind_wechat_user",
@@ -3339,7 +3343,9 @@ def test_wechat_qr_poll_marks_bind_hint_and_schedules_managed_restart(monkeypatc
     )
 
     assert response.status_code == 200
-    assert response.get_json()["status"] == "confirmed"
+    payload = response.get_json()
+    assert payload["status"] == "confirmed"
+    assert payload["restart_scheduled"] is True
     assert persisted == [
         {
             "status": "confirmed",
@@ -3349,7 +3355,8 @@ def test_wechat_qr_poll_marks_bind_hint_and_schedules_managed_restart(monkeypatc
         }
     ]
     assert bound_users == ["wx-user"]
-    assert restart_calls == [True]
+    assert len(restart_threads) == 1
+    assert restart_threads[0] != event_loop_threads[0]
 
 
 def test_wechat_qr_restart_holds_package_lease_through_scheduling(monkeypatch):
@@ -3376,7 +3383,8 @@ def test_wechat_qr_restart_holds_package_lease_through_scheduling(monkeypatch):
     monkeypatch.setattr(restart_supervisor, "schedule_restart", schedule_restart)
 
     assert ui_server._schedule_wechat_qr_login_restart() == {
-        "job_id": "wechat-restart",
+        "ok": True,
+        "restart": {"job_id": "wechat-restart"},
     }
     assert mutation_lease_held is False
 
@@ -3399,7 +3407,8 @@ def test_wechat_qr_restart_marks_pending_for_an_in_flight_restart(monkeypatch, t
         yield
 
     monkeypatch.setattr(ui_server, "package_mutation_lock", mutation_lock)
-    monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: True)
+    in_flight_results = iter([True, True])
+    monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: next(in_flight_results))
     monkeypatch.setattr(
         restart_supervisor,
         "schedule_restart",
@@ -3437,7 +3446,8 @@ def test_wechat_qr_restart_marks_pending_after_lease_timeout_with_live_restart(
         yield
 
     monkeypatch.setattr(ui_server, "package_mutation_lock", blocked_mutation_lock)
-    monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: True)
+    in_flight_results = iter([True, True])
+    monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: next(in_flight_results))
     monkeypatch.setattr(
         restart_supervisor,
         "schedule_restart",
@@ -3450,6 +3460,54 @@ def test_wechat_qr_restart_marks_pending_after_lease_timeout_with_live_restart(
     assert result["restart"] == restart_status
     pending = runtime.read_json(restart_supervisor._pending_restart_path())
     assert pending["restart_job_id"] == "job-live"
+
+
+def test_wechat_qr_restart_reacquires_when_the_live_restart_finishes(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import restart_supervisor
+    from vibe import runtime
+
+    runtime.get_restart_status_path().parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_json(
+        runtime.get_restart_status_path(),
+        {"state": "running", "job_id": "job-finishing", "supervisor_pid": 4242},
+    )
+    lock_timeouts: list[float | None] = []
+    mutation_lease_held = False
+
+    @contextmanager
+    def mutation_lock(*, timeout_seconds=None):
+        nonlocal mutation_lease_held
+        lock_timeouts.append(timeout_seconds)
+        mutation_lease_held = True
+        try:
+            yield
+        finally:
+            mutation_lease_held = False
+
+    in_flight_results = iter([True, False])
+
+    def schedule_restart(**kwargs):
+        assert mutation_lease_held is True
+        assert kwargs == {"delay_seconds": 2.0, "trigger": "wechat-qr-login"}
+        return {"job_id": "wechat-followup"}
+
+    monkeypatch.setattr(ui_server, "package_mutation_lock", mutation_lock)
+    monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: next(in_flight_results))
+    monkeypatch.setattr(restart_supervisor, "schedule_restart", schedule_restart)
+
+    result = ui_server._schedule_wechat_qr_login_restart()
+
+    assert result == {
+        "ok": True,
+        "restart": {"job_id": "wechat-followup"},
+        "code": "restart_scheduled_after_in_flight_finished",
+    }
+    assert lock_timeouts == [None, ui_server._RESTART_REACQUIRE_TIMEOUT_SECONDS]
+    assert runtime.read_json(restart_supervisor._pending_restart_path()) is None
 
 
 def test_wechat_qr_restart_reports_busy_after_lease_timeout_without_restart(
@@ -3480,6 +3538,49 @@ def test_wechat_qr_restart_reports_busy_after_lease_timeout_without_restart(
         "code": "restart_not_scheduled_package_busy",
         "error": "a package operation is in progress; restart was not scheduled",
         "restart": {},
+    }
+
+
+def test_wechat_qr_poll_reports_saved_login_when_restart_is_package_busy(monkeypatch):
+    from vibe import runtime
+
+    class _Auth:
+        async def poll_status(self, session_key, verify_code=None):
+            return {
+                "status": "confirmed",
+                "bot_token": "wechat-token",
+                "user_id": "wx-user",
+            }
+
+    runtime.ensure_config()
+    monkeypatch.setattr(ui_server, "_get_wechat_auth", lambda: _Auth())
+    monkeypatch.setattr(ui_server, "_persist_wechat_qr_credentials", lambda result: None)
+    monkeypatch.setattr("vibe.api.auto_bind_wechat_user", lambda user_id: {"ok": True})
+    monkeypatch.setattr(
+        ui_server,
+        "_schedule_wechat_qr_login_restart",
+        lambda: {
+            "ok": False,
+            "code": "restart_not_scheduled_package_busy",
+            "error": "a package operation is in progress; restart was not scheduled",
+            "restart": {},
+        },
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/api/wechat/qr_login/poll",
+        json={"session_key": "qr-session"},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "status": "confirmed",
+        "bot_token": "wechat-token",
+        "user_id": "wx-user",
+        "restart_scheduled": False,
+        "restart_reason": "restart_not_scheduled_package_busy",
     }
 
 

@@ -1061,8 +1061,10 @@ def build_upgrade_plan(
         ]
     preflight_command = None
     if include_memory or cleanup_command is not None:
-        # Unlike install, download never treats installed metadata as satisfied;
-        # legacy pip therefore needs neither (nor supports) an upgrade flag here.
+        # Preflight checks that the target artifacts resolve before mutating the
+        # environment. The live install still resolves already-satisfied runtime
+        # dependencies; asking ``pip download`` for them would make an otherwise
+        # offline-safe upgrade depend on fetching every transitive wheel again.
         preflight_command = [
             executable,
             "-m",
@@ -1070,6 +1072,7 @@ def build_upgrade_plan(
             "download",
             "--dest",
             PIP_DOWNLOAD_DEST_PLACEHOLDER,
+            "--no-deps",
         ]
         preflight_command.append(package_spec)
         if pinned_memory_spec:

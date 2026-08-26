@@ -78,6 +78,19 @@ def test_no_backend_translation_is_blank() -> None:
 
 @pytest.mark.parametrize(
     "key",
+    [
+        "lifecycle.cli.restartInProgressUpgrade",
+        "lifecycle.cli.restartInProgressRestart",
+        "lifecycle.cli.restartInProgressAction",
+    ],
+)
+def test_cli_lifecycle_contention_messages_are_localized(key: str) -> None:
+    for lang in get_supported_languages():
+        assert t(key, lang) != key
+
+
+@pytest.mark.parametrize(
+    "key",
     sorted(
         {
             *_MEMORY_CLI_RUNTIME_STATE_I18N_KEYS.values(),
