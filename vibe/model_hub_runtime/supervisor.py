@@ -23,6 +23,10 @@ from vibe.model_hub_runtime.state import EngineStateStore
 logger = logging.getLogger(__name__)
 
 
+MODEL_HUB_STARTUP_TIMEOUT_SECONDS = 30.0
+_STARTUP_POLL_INTERVAL_SECONDS = 0.05
+
+
 class EngineUnavailableError(RuntimeError):
     """The Hub path is unavailable; callers may use explicitly configured Direct mode."""
 
@@ -41,7 +45,7 @@ class EngineSupervisor:
         *,
         installer: EngineRuntimeManager | Any | None = None,
         state_store: EngineStateStore | None = None,
-        startup_timeout: float = 10.0,
+        startup_timeout: float = MODEL_HUB_STARTUP_TIMEOUT_SECONDS,
         process_factory: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
         port_allocator: Callable[[], int] | None = None,
     ) -> None:
@@ -67,6 +71,12 @@ class EngineSupervisor:
     def stop(self) -> None:
         with self._lock:
             self._stop_locked()
+
+    def disable(self) -> None:
+        """Stop the managed engine and restore explicit lazy-start idleness."""
+        with self._lock:
+            self._stop_locked()
+            self._start_attempted = False
 
     def restart_if_running(self) -> None:
         with self._lock:
@@ -107,7 +117,11 @@ class EngineSupervisor:
                 health = "ok" if self._healthy_locked() else "degraded"
             elif install_state and install_state.get("state") == "installing":
                 health = "installing"
-            elif install_state and install_state.get("state") == "not_installed":
+            elif (
+                not installed
+                and install_state
+                and install_state.get("state") == "not_installed"
+            ):
                 health = "not_installed"
             elif installed:
                 health = "down" if self._start_attempted else "not_started"
@@ -195,11 +209,17 @@ class EngineSupervisor:
             raise EngineUnavailableError("models.engine.start_failed") from exc
         self._process = process
         self._connection = connection
-        deadline = time.monotonic() + self.startup_timeout
-        client = EngineClient(connection, timeout=1.0)
-        while time.monotonic() < deadline:
-            if process.poll() is not None:
+        started_at = time.monotonic()
+        deadline = started_at + self.startup_timeout
+        exit_code: int | None = None
+        while True:
+            exit_code = process.poll()
+            if exit_code is not None:
                 break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            client = EngineClient(connection, timeout=min(1.0, remaining / 2))
             if client.health():
                 try:
                     self.state_store.audit_auth_permissions()
@@ -208,12 +228,24 @@ class EngineSupervisor:
                     raise EngineUnavailableError("models.engine.unsafe_permissions") from exc
                 self._last_check = _utc_now()
                 logger.info(
-                    "Model Hub engine started on 127.0.0.1 with managed version %s",
+                    "Model Hub engine startup outcome=ready managed_version=%s "
+                    "elapsed_seconds=%.3f child_output_retained=false",
                     managed.get("version"),
+                    time.monotonic() - started_at,
                 )
                 return connection
-            time.sleep(0.05)
+            time.sleep(min(_STARTUP_POLL_INTERVAL_SECONDS, max(0.0, deadline - time.monotonic())))
         self._stop_locked()
+        logger.warning(
+            "Model Hub engine startup outcome=%s managed_version=%s exit_code=%s "
+            "elapsed_seconds=%.3f readiness_budget_seconds=%.3f "
+            "child_output_retained=false",
+            "process_exit" if exit_code is not None else "timeout",
+            managed.get("version"),
+            exit_code,
+            time.monotonic() - started_at,
+            self.startup_timeout,
+        )
         raise EngineUnavailableError("models.engine.health_failed")
 
     def _healthy_locked(self) -> bool:

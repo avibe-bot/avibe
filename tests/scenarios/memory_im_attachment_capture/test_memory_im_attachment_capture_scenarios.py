@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import io
 import json
+import threading
 import zipfile
 from types import SimpleNamespace
 
@@ -13,6 +13,7 @@ import pytest
 
 from core.caller_context import AVIBE_SESSION_ID_ENV
 from core.memory.admission import CaptureAdmission, InboundTurnFacts
+from core.memory.attachments import AttachmentCleanupUnprovenError, AttachmentPinError
 from core.memory.observations import AddAck, AddRejected
 from core.memory.types import RecallItems, RecallPolicy, memory_item_payload
 from modules.im.base import FileAttachment
@@ -39,7 +40,7 @@ def _xlsx_bytes() -> bytes:
     return payload.getvalue()
 
 
-def test_bound_slack_dm_attachment_reaches_search_with_redacted_call_log(
+def test_bound_slack_dm_attachment_reaches_search_with_provider_invocation(
     tmp_path,
     monkeypatch,
     capsys,
@@ -60,17 +61,9 @@ def test_bound_slack_dm_attachment_reaches_search_with_redacted_call_log(
         {"name": "screenshot.png", "max_bytes": None}
     ]
     assert len(harness.provider.captures) == 1
-    assert len(harness.provider.flushes) == 1
+    assert harness.provider.flushes == []
     assert harness.provider.observed_payloads == [PNG_BYTES]
-    assert len(harness.provider.call_log) == 1
-
-    call = harness.provider.call_log[0]
-    encoded = base64.b64encode(PNG_BYTES).decode("ascii")
-    assert call.kind == "multimodal_llm"
-    assert "data:image/png" not in call.request_json
-    assert encoded not in call.request_json
-    assert "file://" not in call.request_json
-    assert "[ATTACHMENT_OMITTED]" in call.request_json
+    assert harness.provider.provider_invocations == ["multimodal_llm"]
 
     monkeypatch.setenv(AVIBE_SESSION_ID_ENV, "ses-memory-im-attachment")
 
@@ -109,6 +102,7 @@ def test_bound_slack_dm_attachment_reaches_search_with_redacted_call_log(
             "kind": "fact",
             "text": "Captured Slack attachment screenshot.png",
             "date": None,
+            "origin": "user",
         }
     ]
 
@@ -142,7 +136,7 @@ def test_denied_slack_scope_never_reaches_memory_provider(
     assert len(harness.downloader.calls) == 1
     assert harness.provider.captures == []
     assert harness.provider.flushes == []
-    assert harness.provider.call_log == []
+    assert harness.provider.provider_invocations == []
     assert harness.memory_bundle_entries == ()
 
 
@@ -168,8 +162,8 @@ def test_missing_multimodal_config_preserves_text_without_attachment_activity(
     assert len(mixed.provider.captures) == 1
     assert mixed.provider.captures[0].text == "Remember the accompanying note"
     assert mixed.provider.captures[0].attachments == ()
-    assert len(mixed.provider.flushes) == 1
-    assert mixed.provider.call_log == []
+    assert mixed.provider.flushes == []
+    assert mixed.provider.provider_invocations == []
     assert mixed.memory_bundle_entries == ()
 
     attachment_only_root = tmp_path / "attachment-only"
@@ -187,7 +181,7 @@ def test_missing_multimodal_config_preserves_text_without_attachment_activity(
 
     assert attachment_only.provider.captures == []
     assert attachment_only.provider.flushes == []
-    assert attachment_only.provider.call_log == []
+    assert attachment_only.provider.provider_invocations == []
     assert attachment_only.memory_bundle_entries == ()
 
 
@@ -221,12 +215,12 @@ def test_invalid_sibling_preserves_valid_attachment_and_leaves_no_memory_leak(
     assert [item.name for item in harness.provider.captures[0].attachments] == [
         "valid.png"
     ]
-    assert len(harness.provider.call_log) == 1
+    assert harness.provider.provider_invocations == ["multimodal_llm"]
     assert harness.memory_bundle_entries == ()
     assert not tuple(harness.home.rglob("*.part"))
 
 
-def test_claimed_attachment_preflight_failure_retries_caption_as_text_only(
+def test_attachment_pin_failure_falls_back_to_caption_only(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -234,15 +228,10 @@ def test_claimed_attachment_preflight_failure_retries_caption_as_text_only(
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe-home"))
     harness = MemoryIMAttachmentScenarioHarness(tmp_path)
-    original_drain = harness.module.drain
+    def fail_pin(*_args, **_kwargs):
+        raise AttachmentPinError("memory_store_unavailable", "test pin failure")
 
-    async def corrupt_bundle_then_drain() -> int:
-        bundle_root = harness.home / "memory" / "attachments" / "bundles"
-        pinned_file = next(bundle_root.glob("*/*"))
-        pinned_file.write_bytes(b"corrupt after durable enqueue")
-        return await original_drain()
-
-    monkeypatch.setattr(harness.module, "drain", corrupt_bundle_then_drain)
+    monkeypatch.setattr(harness.module._attachment_store, "pin", fail_pin)
     asyncio.run(
         harness.capture(
             text="Keep this caption even if the image breaks",
@@ -256,7 +245,56 @@ def test_claimed_attachment_preflight_failure_retries_caption_as_text_only(
     )
     assert harness.provider.captures[0].attachments == ()
     assert harness.provider.observed_payloads == []
-    assert harness.provider.call_log == []
+    assert harness.provider.provider_invocations == []
+    assert harness.memory_bundle_entries == ()
+
+
+def test_cancelled_unproven_pin_cleanup_disables_only_attachment_intake(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Scenario: MEMORY-IM-ATTACH-013."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe-home"))
+    harness = MemoryIMAttachmentScenarioHarness(tmp_path)
+    pin_entered = threading.Event()
+    finish_pin = threading.Event()
+
+    def fail_pin(*_args, **_kwargs):
+        pin_entered.set()
+        finish_pin.wait(timeout=1.0)
+        raise AttachmentCleanupUnprovenError(
+            "memory_store_unavailable",
+            "partial attachment bundle could not be reclaimed",
+        )
+
+    monkeypatch.setattr(harness.module._attachment_store, "pin", fail_pin)
+
+    async def cancel_during_pin() -> None:
+        capture = asyncio.create_task(
+            harness.capture(
+                text="This cancelled image may be lost",
+                payloads={"cancelled.png": ("image/png", PNG_BYTES)},
+            )
+        )
+        assert await asyncio.to_thread(pin_entered.wait, 1.0)
+        capture.cancel()
+        finish_pin.set()
+        with pytest.raises(asyncio.CancelledError):
+            await capture
+
+    asyncio.run(cancel_during_pin())
+
+    assert not harness.module._writer.attachments_enabled
+    asyncio.run(
+        harness.capture(
+            text="Text capture stays available",
+            payloads={"ignored.png": ("image/png", PNG_BYTES)},
+        )
+    )
+    assert len(harness.provider.captures) == 1
+    assert harness.provider.captures[0].text == "Text capture stays available"
+    assert harness.provider.captures[0].attachments == ()
     assert harness.memory_bundle_entries == ()
 
 
@@ -285,7 +323,7 @@ def test_rejected_attachment_preserves_caption_without_multimodal_provider_call(
         "Keep this caption without the rejected file"
     )
     assert harness.provider.captures[0].attachments == ()
-    assert harness.provider.call_log == []
+    assert harness.provider.provider_invocations == []
     assert harness.memory_bundle_entries == ()
 
 

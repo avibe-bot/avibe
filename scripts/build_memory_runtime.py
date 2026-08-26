@@ -30,10 +30,6 @@ EXPECTED_PLATFORMS = {
     "linux-arm64",
     "linux-x64",
 }
-SYNC_BOOTSTRAP_REVISION = 1
-SYNC_ARGV = ("-I", "-m", "everos.entrypoints.cli.main", "cascade", "sync")
-SYNC_BOOTSTRAP_SOURCE = Path(__file__).with_name("memory_runtime_sitecustomize.py")
-SYNC_SCRUBBERS_SOURCE = Path(__file__).parents[1] / "core" / "memory" / "secret_scrubber.py"
 SMOKE_SCRIPT = (
     "from importlib.metadata import version\n"
     "import platform\n"
@@ -234,26 +230,6 @@ def prune_runtime(runtime_root: Path) -> None:
             writer.writerows(retained)
 
 
-def install_sync_bootstrap(runtime_root: Path) -> tuple[str, str]:
-    """Install the gated sitecustomize and return its source digest."""
-
-    source = SYNC_BOOTSTRAP_SOURCE.read_bytes()
-    scrubbers = SYNC_SCRUBBERS_SOURCE.read_bytes()
-    site_packages = runtime_root / "lib" / "python3.12" / "site-packages"
-    site_packages.mkdir(parents=True, exist_ok=True)
-    module = site_packages / "avibe_memory_sync_bootstrap.py"
-    module.write_bytes(source)
-    module.chmod(0o644)
-    scrubber_module = site_packages / "avibe_memory_sync_scrubbers.py"
-    scrubber_module.write_bytes(scrubbers)
-    scrubber_module.chmod(0o644)
-    (site_packages / "avibe_memory_sync_bootstrap.pth").write_text(
-        "import avibe_memory_sync_bootstrap\n",
-        encoding="ascii",
-    )
-    return hashlib.sha256(source).hexdigest(), hashlib.sha256(scrubbers).hexdigest()
-
-
 def _run(command: list[str], *, cwd: Path, capture_output: bool = False) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command,
@@ -285,6 +261,7 @@ from core.memory.provider_root import ProviderRoot, ProviderRootMetadata
 
 async def verify() -> None:
     effective_home = Path(sys.argv[2])
+    socket_path = effective_home / "memory" / ".rt" / "everos.sock"
     provider_root = ProviderRoot(
         effective_home / "memory" / "everos-root",
         effective_home=effective_home,
@@ -303,6 +280,7 @@ async def verify() -> None:
     process = EverOSProcess(
         python=Path(sys.argv[1]),
         effective_home=effective_home,
+        socket_path=socket_path,
         settings=EverOSProcessSettings(
             llm_base_url="https://llm.invalid/v1",
             llm_model="unused",
@@ -321,8 +299,8 @@ async def verify() -> None:
     started = await process.start()
     try:
         if not started:
-            raise RuntimeError(f"sidecar failed to start: {process.last_error}")
-        if not await EverOSPort(process.socket_path, sidecar_timeout_seconds=5).health():
+            raise RuntimeError("sidecar failed to start")
+        if not await EverOSPort(socket_path, sidecar_timeout_seconds=5).health():
             raise RuntimeError("sidecar UDS health endpoint failed")
     finally:
         await process.stop()
@@ -434,7 +412,6 @@ def build_runtime(
         shutil.move(str(runtime_root), str(relocated_root))
         _smoke(relocated_root / BIN_PATH, cwd=temporary)
         prune_runtime(relocated_root)
-        bootstrap_sha256, scrubbers_sha256 = install_sync_bootstrap(relocated_root)
         _smoke(relocated_root / BIN_PATH, cwd=temporary)
 
         archive = output_dir / f"memory-runtime-{EVEROS_VERSION}-{platform}.tar.gz"
@@ -447,10 +424,6 @@ def build_runtime(
         ).stdout.strip()
         metadata["lock_sha256"] = lock_sha256
         metadata["uv_version"] = UV_VERSION
-        metadata["sync_bootstrap_revision"] = SYNC_BOOTSTRAP_REVISION
-        metadata["sync_bootstrap_sha256"] = bootstrap_sha256
-        metadata["sync_scrubbers_sha256"] = scrubbers_sha256
-        metadata["sync_argv"] = list(SYNC_ARGV)
     return archive, metadata
 
 

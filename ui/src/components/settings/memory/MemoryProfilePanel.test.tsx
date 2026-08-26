@@ -1,11 +1,24 @@
+/* @vitest-environment jsdom */
+
 import { renderToStaticMarkup } from 'react-dom/server';
-import { describe, expect, it } from 'vitest';
+import { cleanup, render, screen } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { MemoryProfile } from '../../../context/ApiContext';
-import { StructuredMemoryProfile } from './MemoryProfilePanel';
+import { MemoryProfileItemBlock, MemoryProfilePanel, StructuredMemoryProfile } from './MemoryProfilePanel';
 import { structuredProfileFromItems } from './memoryProfile';
 
 const t = (key: string) => key;
+const getMemoryProfile = vi.hoisted(() => vi.fn());
+
+vi.mock('../../../context/ApiContext', async (loadOriginal) => {
+  const original = await loadOriginal<typeof import('../../../context/ApiContext')>();
+  return { ...original, useApi: () => ({ getMemoryProfile }) };
+});
+
+vi.mock('react-i18next', () => ({
+  useTranslation: () => ({ t }),
+}));
 
 const PROFILE: MemoryProfile = {
   summary: 'Prefers concise technical updates.',
@@ -26,6 +39,15 @@ const PROFILE: MemoryProfile = {
   ],
   updated_at: '2026-08-02T10:30:00Z',
 };
+
+beforeEach(() => {
+  getMemoryProfile.mockResolvedValue({ status: 'ok', items: [], warnings: [] });
+});
+
+afterEach(() => {
+  cleanup();
+  vi.clearAllMocks();
+});
 
 describe('MemoryProfilePanel structured text', () => {
   it('renders structured sections and keeps basis distinct from evidence', () => {
@@ -62,5 +84,32 @@ describe('MemoryProfilePanel structured text', () => {
 
     expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;');
     expect(html).not.toContain('<img src=x');
+  });
+
+  it('labels user and Agent profile blocks while legacy blocks still render', () => {
+    const html = renderToStaticMarkup(
+      <>
+        <MemoryProfileItemBlock item={{ kind: 'profile', text: 'User profile', date: null, origin: 'user' }} t={t} />
+        <MemoryProfileItemBlock item={{ kind: 'profile', text: 'Agent profile', date: null, origin: 'agent' }} t={t} />
+        <MemoryProfileItemBlock item={{ kind: 'profile', text: 'Legacy profile', date: null }} t={t} />
+      </>,
+    );
+
+    expect(html).toContain('memory.origin.user');
+    expect(html).toContain('memory.origin.agent');
+    expect(html).toContain('Legacy profile');
+  });
+
+  it('renders a partial warning while retaining the successful owner profile', async () => {
+    getMemoryProfile.mockResolvedValue({
+      status: 'ok',
+      items: [{ kind: 'profile', text: 'Available user profile', date: null, origin: 'user' }],
+      warnings: ['memory_search_partial'],
+    });
+
+    render(<MemoryProfilePanel enabled />);
+
+    expect(await screen.findByText('memory.profile.partial')).toBeTruthy();
+    expect(screen.getByText('Available user profile')).toBeTruthy();
   });
 });

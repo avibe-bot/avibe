@@ -143,6 +143,7 @@ class FakeAdapter:
         self.orphan_cleanup_succeeds = False
         self.cancel_disposition = RetainedMaterialDisposition.NONE
         self.start_calls = 0
+        self.stop_runtime_calls = 0
         self.install_calls = 0
         self.credential_count = 0
         self.observation: SourceObservation | None = None
@@ -164,6 +165,17 @@ class FakeAdapter:
     async def start(self):
         self.start_calls += 1
         return await self.status()
+
+    async def stop_runtime(self):
+        self.stop_runtime_calls += 1
+        return EngineStatus(
+            health=EngineHealth.NOT_STARTED,
+            installed_version="v7.2.95",
+            verified=True,
+            listen_host="127.0.0.1",
+            listen_port=None,
+            last_check_iso="2026-07-23T03:40:00+00:00",
+        )
 
     async def stop(self):
         return None
@@ -716,6 +728,9 @@ def test_every_model_hub_endpoint_returns_its_contract_response(
     monkeypatch.setenv("XDG_CONFIG_HOME", str(isolated_home / ".config"))
     save_config(isolated_home)
     service = _seed_response_conformance_service(tmp_path)
+    if endpoint == "POST /api/models/runtime/stop":
+        for agent in service.store.config.agents.values():
+            agent.mode = "direct"
     monkeypatch.setattr(ui_server, "_model_hub_service", lambda: _as_ui_client(service))
     client = app.test_client()
     base_url = "http://127.0.0.1:15131"
@@ -839,6 +854,30 @@ def test_runtime_start_is_explicit_and_returns_v4_status(tmp_path):
     assert adapter.start_calls == 1
     assert runtime["contract_version"] == 6
     assert runtime["status"]["health"] == "ok"
+    _assert_valid("runtime-dependency.schema.json", runtime)
+
+
+def test_runtime_stop_requires_every_backend_to_be_direct(tmp_path):
+    service, _store, adapter = _service(tmp_path)
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.runtime_stop())
+
+    assert exc_info.value.code == "runtime_in_use"
+    assert exc_info.value.status == 409
+    assert exc_info.value.data == {"backends": ["claude", "codex", "opencode"]}
+    assert adapter.stop_runtime_calls == 0
+
+
+def test_runtime_stop_returns_explicit_not_started_state(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    for agent in store.config.agents.values():
+        agent.mode = "direct"
+
+    runtime = asyncio.run(service.runtime_stop())
+
+    assert adapter.stop_runtime_calls == 1
+    assert runtime["status"]["health"] == "not_started"
     _assert_valid("runtime-dependency.schema.json", runtime)
 
 
@@ -1017,6 +1056,23 @@ def test_runtime_start_crosses_the_controller_rpc_boundary(monkeypatch):
     assert calls == [("runtime_start", None)]
 
 
+def test_runtime_stop_crosses_the_controller_rpc_boundary(monkeypatch):
+    from vibe import model_hub_client
+
+    calls = []
+
+    async def rpc(operation, payload=None):
+        calls.append((operation, payload))
+        return {"contract_version": 6, "status": {"health": "not_started"}}
+
+    monkeypatch.setattr(model_hub_client, "_rpc", rpc)
+
+    runtime = asyncio.run(ModelHubRemoteService().runtime_stop())
+
+    assert runtime["status"]["health"] == "not_started"
+    assert calls == [("runtime_stop", None)]
+
+
 def test_runtime_install_crosses_the_controller_rpc_boundary(monkeypatch):
     from vibe import model_hub_client
 
@@ -1043,6 +1099,19 @@ def test_runtime_start_is_allowlisted_by_controller_rpc(tmp_path):
 
     assert runtime["status"]["health"] == "ok"
     assert adapter.start_calls == 1
+
+
+def test_runtime_stop_is_allowlisted_by_controller_rpc(tmp_path):
+    from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
+
+    service, store, adapter = _service(tmp_path)
+    for agent in store.config.agents.values():
+        agent.mode = "direct"
+
+    runtime = asyncio.run(dispatch_model_hub_rpc(service, "runtime_stop", {}))
+
+    assert runtime["status"]["health"] == "not_started"
+    assert adapter.stop_runtime_calls == 1
 
 
 def test_runtime_install_is_allowlisted_by_controller_rpc(tmp_path):
@@ -1820,6 +1889,44 @@ def test_agents_endpoint_projects_exact_chain_runnability(tmp_path):
     assert blocked[model_id]["has_runnable_hop"] is False
 
 
+def test_agent_chains_returns_the_complete_overview_from_one_snapshot(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    agent = store.config.agents["claude"]
+    routed_extra = "claude-route-only"
+    selected_extra = "claude-selected-only"
+    agent.routes[routed_extra] = ModelHubRouteConfig()
+    store.requested_models["claude"] = selected_extra
+    expected_model_ids = list(
+        dict.fromkeys(
+            [
+                *service.get_agent_sources("claude")["builtin_models"],
+                selected_extra,
+                *agent.routes,
+            ]
+        )
+    )
+
+    load_count = 0
+    original_load = store.load
+
+    def counted_load():
+        nonlocal load_count
+        load_count += 1
+        return original_load()
+
+    store.load = counted_load
+    chains = service.agent_chains("claude")
+
+    assert load_count == 1
+    model_ids = [chain["model_id"] for chain in chains]
+    assert model_ids == expected_model_ids
+    assert selected_extra in model_ids
+    assert routed_extra in model_ids
+    assert len(model_ids) == len(set(model_ids))
+    for chain in chains:
+        _assert_valid("agent-chain.schema.json", chain)
+
+
 def test_agents_endpoint_cli_presence_probe_errors_fail_closed(tmp_path):
     service, _store, _adapter = _service(tmp_path)
 
@@ -2291,16 +2398,25 @@ def test_disabled_model_hub_rest_surface_returns_feature_disabled_without_runtim
     assert supervisor_calls == []
 
 
+@pytest.mark.parametrize("method", ["get", "post"])
 @pytest.mark.parametrize(("env_value", "expected"), [(None, False), ("0", False), ("1", True)])
-def test_config_capability_exactly_projects_backend_model_hub_gate(monkeypatch, env_value, expected):
+def test_config_capability_exactly_projects_backend_model_hub_gate(
+    monkeypatch, tmp_path, method, env_value, expected
+):
     from config.v2_config import is_model_hub_enabled
 
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     if env_value is None:
         monkeypatch.delenv("VIBE_MODEL_HUB_ENABLED", raising=False)
     else:
         monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", env_value)
 
-    response = app.test_client().get("/api/config")
+    client = app.test_client()
+    response = (
+        client.get("/api/config")
+        if method == "get"
+        else client.post("/api/config", json={}, headers=csrf_headers(client))
+    )
 
     assert response.status_code == 200
     enabled = response.get_json()["capabilities"]["model_hub"]["enabled"]
@@ -5268,6 +5384,32 @@ def test_runtime_start_route_requires_csrf_before_starting_engine(monkeypatch, t
     runtime = accepted.get_json()["runtime"]
     assert adapter.start_calls == 1
     assert runtime["contract_version"] == 6
+    _assert_valid("runtime-dependency.schema.json", runtime)
+
+
+def test_runtime_stop_route_requires_csrf_before_stopping_engine(monkeypatch, tmp_path):
+    service, store, adapter = _service(tmp_path)
+    for agent in store.config.agents.values():
+        agent.mode = "direct"
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+
+    rejected = client.post("/api/models/runtime/stop", base_url=base_url)
+
+    assert rejected.status_code == 403
+    assert adapter.stop_runtime_calls == 0
+
+    accepted = client.post(
+        "/api/models/runtime/stop",
+        headers=csrf_headers(client, base_url),
+        base_url=base_url,
+    )
+
+    assert accepted.status_code == 200
+    runtime = accepted.get_json()["runtime"]
+    assert adapter.stop_runtime_calls == 1
+    assert runtime["status"]["health"] == "not_started"
     _assert_valid("runtime-dependency.schema.json", runtime)
 
 

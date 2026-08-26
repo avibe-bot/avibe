@@ -9,9 +9,8 @@ import {
 } from './modelHubRoutes';
 
 describe('Model Hub capability route gate', () => {
-  it('redirects both current and legacy model routes while disabled', () => {
+  it('redirects the canonical model route while disabled', () => {
     expect(modelHubRouteTarget(MODEL_HUB_SETTINGS_PATH, false)).toBe(MODEL_HUB_DISABLED_REDIRECT);
-    expect(modelHubRouteTarget('/settings/models', false)).toBe(MODEL_HUB_DISABLED_REDIRECT);
   });
 
   it('does not render the Models child while disabled or unresolved', () => {

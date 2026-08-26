@@ -3,20 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import secrets
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal, TypeVar
 
 from core.memory.everos import ProviderHealthSnapshot
 from core.memory.confined_filesystem import PRIVATE_SQLITE_BUSY_TIMEOUT_SECONDS
-from core.memory.maintenance import (
-    ClearInProgressResult,
-    MaintenanceObservation,
-    MaintenanceResult,
-)
 from core.memory.module import PROVIDER_READ_TIMEOUT_SECONDS
 from core.memory.types import MemoryFailureLogEntry
 
@@ -61,9 +55,9 @@ class SourceObservation:
 
 @dataclass(frozen=True, slots=True)
 class ProcessingSourceObservations:
-    everos: SourceObservation
-    capture: SourceObservation
-    calls: SourceObservation
+    memcells: SourceObservation
+    runs: SourceObservation
+    semantic: SourceObservation
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,17 +85,23 @@ class FailureLogObservation:
 
 
 @dataclass(frozen=True, slots=True)
-class MaintenanceProjection:
-    source: SourceObservation
-    data_exists: bool
-    can_clear: bool
-    clear_in_progress: ClearInProgressResult | None
+class MaintenanceObservation:
+    block_reason: str | None
+    can_delete_data: bool
 
 
 @dataclass(frozen=True, slots=True)
-class ProviderCheckProjection:
+class MaintenanceResult:
+    data_exists: bool
+    can_delete_data: bool
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MaintenanceProjection:
     source: SourceObservation
-    items: tuple[dict[str, Any], ...]
+    data_exists: bool
+    can_delete_data: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,7 +110,6 @@ class ProcessingRecordSummary:
     sources: ProcessingSourceObservations
     anomalies: AnomalyProjection
     maintenance: MaintenanceProjection
-    provider_checks: ProviderCheckProjection
     status: Literal["ok"] = "ok"
 
 
@@ -125,9 +124,7 @@ class MemoryProcessingRecordPort:
         [str | None],
         Awaitable[FailureLogObservation],
     ]
-    recorder_health: Callable[[], Mapping[str, str | None]]
     observe_sources: Callable[[str | None], Awaitable[ProcessingSourceObservations]]
-    provider_checks: Callable[[str | None], Awaitable[ProviderCheckProjection]]
     maintenance: Callable[
         [str | None, MaintenanceObservation],
         Awaitable[MaintenanceResult],
@@ -141,12 +138,6 @@ class MemoryProcessingRecord:
         self._runtime = runtime
         self._last_health_snapshot: ProviderHealthSnapshot | None = None
         self._last_health_observed_at: str | None = None
-        self._recorder_health: dict[str, str | None] = {
-            "state": "disabled",
-            "reason": None,
-        }
-        self._recorder_episode_observed_at: str | None = None
-        self._recorder_episode_id: str | None = None
 
     async def read_record(
         self,
@@ -175,8 +166,7 @@ class MemoryProcessingRecord:
             deadline,
             timeout=PROVIDER_READ_TIMEOUT_SECONDS,
         )
-        runtime, _recorder_anomaly = await self._read_runtime(None, deadline)
-        return runtime
+        return await self._read_runtime(None, deadline)
 
     async def read_failures(
         self,
@@ -263,64 +253,31 @@ class MemoryProcessingRecord:
             operator_ref,
             deadline,
         )
-        runtime_result, sources, anomalies, maintenance, provider_checks = await asyncio.gather(
+        runtime, sources, anomalies, maintenance = await asyncio.gather(
             self._read_runtime(observation.block_reason, deadline),
             self._read_sources(observation.block_reason, deadline),
             self._read_durable_anomalies(observation.block_reason, deadline),
             self._read_maintenance(operator_ref, observation, deadline),
-            self._read_provider_checks(observation.block_reason, deadline),
         )
-        runtime, recorder_anomaly = runtime_result
         return ProcessingRecordSummary(
             runtime=runtime,
             sources=sources,
-            anomalies=self._merge_recorder_anomaly(anomalies, recorder_anomaly),
+            anomalies=anomalies,
             maintenance=maintenance,
-            provider_checks=provider_checks,
         )
-
-    async def _read_provider_checks(
-        self,
-        maintenance_reason: str | None,
-        deadline: float,
-    ) -> ProviderCheckProjection:
-        try:
-            return await _await_before(
-                deadline,
-                lambda: self._runtime.provider_checks(maintenance_reason),
-            )
-        except Exception:
-            return ProviderCheckProjection(
-                source=SourceObservation(
-                    "unavailable",
-                    reason="memory_store_unavailable",
-                ),
-                items=(),
-            )
 
     async def _read_runtime(
         self,
         maintenance_reason: str | None,
         deadline: float,
-    ) -> tuple[RuntimeHealthProjection, MemoryFailureLogEntry | None]:
-        runtime = await self._read_health(maintenance_reason, deadline)
-        self.observe_recorder(
-            self._runtime.recorder_health(),
-            observed_at=(
-                runtime.source.observed_at
-                if runtime.source.status == "available"
-                else None
-            ),
-        )
-        return runtime, self._recorder_anomaly()
+    ) -> RuntimeHealthProjection:
+        return await self._read_health(maintenance_reason, deadline)
 
     async def _read_failures(
         self,
         operator_ref: str | None,
         deadline: float,
     ) -> tuple[AnomalyProjection, MaintenanceProjection]:
-        self.observe_recorder(self._runtime.recorder_health())
-        recorder_anomaly = self._recorder_anomaly()
         observation = await self._read_maintenance_observation(
             operator_ref,
             deadline,
@@ -341,10 +298,7 @@ class MemoryProcessingRecord:
                 ),
                 items=anomalies.items,
             )
-        return (
-            self._merge_recorder_anomaly(anomalies, recorder_anomaly),
-            maintenance,
-        )
+        return anomalies, maintenance
 
     async def _read_maintenance_projection(
         self,
@@ -374,8 +328,7 @@ class MemoryProcessingRecord:
         except Exception:
             return MaintenanceObservation(
                 block_reason="memory_store_unavailable",
-                clear_in_progress=None,
-                can_clear=False,
+                can_delete_data=False,
             )
 
     async def _read_health(
@@ -434,9 +387,9 @@ class MemoryProcessingRecord:
                 reason="memory_store_unavailable",
             )
             return ProcessingSourceObservations(
-                everos=unavailable,
-                capture=unavailable,
-                calls=unavailable,
+                memcells=unavailable,
+                runs=unavailable,
+                semantic=unavailable,
             )
 
     async def _read_durable_anomalies(
@@ -466,16 +419,6 @@ class MemoryProcessingRecord:
             )
         return AnomalyProjection(source=source, items=durable[:50])
 
-    def _merge_recorder_anomaly(
-        self,
-        durable: AnomalyProjection,
-        recorder: MemoryFailureLogEntry | None,
-    ) -> AnomalyProjection:
-        items = list(durable.items)
-        if recorder is not None:
-            items.insert(0, recorder)
-        return AnomalyProjection(source=durable.source, items=tuple(items[:50]))
-
     async def _read_maintenance(
         self,
         operator_ref: str | None,
@@ -494,8 +437,7 @@ class MemoryProcessingRecord:
                     reason="memory_store_unavailable",
                 ),
                 data_exists=True,
-                can_clear=False,
-                clear_in_progress=None,
+                can_delete_data=False,
             )
         unavailable_reason = result.error
         if (
@@ -511,51 +453,8 @@ class MemoryProcessingRecord:
         return MaintenanceProjection(
             source=source,
             data_exists=result.data_exists,
-            can_clear=result.can_clear,
-            clear_in_progress=result.clear_in_progress,
+            can_delete_data=result.can_delete_data,
         )
-
-    def observe_recorder(
-        self,
-        health: Mapping[str, str | None],
-        *,
-        observed_at: str | None = None,
-    ) -> None:
-        previous = self._recorder_health
-        current = dict(health)
-        if current.get("state") != "degraded":
-            self._recorder_episode_observed_at = None
-            self._recorder_episode_id = None
-        elif (
-            previous.get("state") != "degraded"
-            or previous.get("reason") != current.get("reason")
-            or self._recorder_episode_observed_at is None
-            or self._recorder_episode_id is None
-        ):
-            self._recorder_episode_observed_at = observed_at or _utc_observed_at()
-            self._recorder_episode_id = _new_recorder_episode_id()
-        self._recorder_health = current
-
-    def _recorder_anomaly(self) -> MemoryFailureLogEntry | None:
-        if (
-            self._recorder_health.get("state") != "degraded"
-            or self._recorder_episode_observed_at is None
-            or self._recorder_episode_id is None
-        ):
-            return None
-        return MemoryFailureLogEntry(
-            id=self._recorder_episode_id,
-            kind="recorder_degraded",
-            state="degraded",
-            operation="record",
-            occurred_at=self._recorder_episode_observed_at,
-            error_code="memory_processing_failed",
-        )
-
-
-def _new_recorder_episode_id() -> str:
-    return f"ma_{secrets.token_hex(32)}"
-
 
 def _utc_observed_at() -> str:
     return (

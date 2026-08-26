@@ -302,7 +302,9 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
     viewer_examples = (
         ("GET", "/api/memory/settings"),
         ("PATCH", "/api/memory/settings"),
-        ("POST", "/api/memory/runtime/restart"),
+        ("POST", "/api/memory/runtime/wake"),
+        ("POST", "/api/memory/repair"),
+        ("POST", "/api/memory/delete-data"),
         ("POST", "/api/memory/future-capability"),
         ("POST", "/api/sessions/session-1/mark-read"),
         ("DELETE", "/api/terminal/term-1"),
@@ -323,6 +325,7 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         ("POST", "/api/agents/default"),
         ("PATCH", "/api/agents/demo"),
         ("DELETE", "/api/agents/demo"),
+        ("GET", "/api/models/agents/codex/chains"),
         ("PUT", "/api/models/agents/codex/chain"),
         ("PUT", "/api/global-prompts"),
         ("POST", "/api/projects"),
@@ -472,6 +475,7 @@ def test_agents_page_load_reads_are_admitted_for_every_rank_that_sees_the_page()
         ("GET", "/api/agents/demo"),
         ("GET", "/api/running-agents"),
         ("GET", "/api/models/agents"),
+        ("GET", "/api/models/agents/claude/chains"),
     )
     catalog_reads = (
         ("GET", "/api/claude/models"),

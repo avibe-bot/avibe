@@ -26,7 +26,7 @@ export const GatewayModule: React.FC<GatewayModuleProps> = ({ runtime, runtimeSn
   });
   const listening = runtimeSnapshot?.status.listening;
   return (
-    <section className="relative z-20 flex max-h-full min-h-[420px] flex-col self-start overflow-hidden rounded-[14px] border border-border bg-surface">
+    <section className="relative z-20 flex max-h-full min-h-[420px] w-full min-w-0 flex-col self-start overflow-hidden rounded-[14px] border border-border bg-surface">
       <header className="flex h-14 shrink-0 items-center justify-between border-b border-border px-3.5">
         <h2 className="text-[16px] font-bold leading-[23px] text-foreground">{t('settings.models.gateway.heading')}</h2>
         {listening && <span className="model-hub-pill model-hub-fill-0a border border-border text-muted">{listening.host}:{listening.port}</span>}

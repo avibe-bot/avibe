@@ -6,7 +6,7 @@ import threading
 import time
 from pathlib import Path
 from types import TracebackType
-from typing import Optional, Type
+from typing import Callable, IO, Optional, Type
 
 
 logger = logging.getLogger(__name__)
@@ -101,11 +101,24 @@ class MigrationFileLock:
     which is the right answer whenever the work behind the lock has no upper
     bound: the OS drops a file lock when its holder dies, so the only way to
     wait forever is for a live process to still be working.
+
+    Security-sensitive callers may supply the private opener and validator so
+    the same no-follow descriptor is checked before and after acquisition.
+    Default callers retain the ordinary append-open behavior.
     """
 
-    def __init__(self, lock_path: Path, *, timeout_seconds: float | None = 30.0):
+    def __init__(
+        self,
+        lock_path: Path,
+        *,
+        timeout_seconds: float | None = 30.0,
+        _handle_opener: Callable[[Path], IO[str]] | None = None,
+        _handle_validator: Callable[[IO[str]], bool] | None = None,
+    ):
         self.lock_path = lock_path
         self.timeout_seconds = timeout_seconds
+        self._handle_opener = _handle_opener
+        self._handle_validator = _handle_validator
         self._key = _state_key(self.lock_path)
         self._state: _PathLockState | None = None
         self._entries = 0
@@ -118,7 +131,16 @@ class MigrationFileLock:
             raise MigrationLockTimeout(f"Timed out waiting for migration lock: {self.lock_path}")
         try:
             if state.depth == 0:
-                state.handle = _acquire_file_lock(self.lock_path, deadline)
+                state.handle = _acquire_file_lock(
+                    self.lock_path,
+                    deadline,
+                    handle_opener=self._handle_opener,
+                    handle_validator=self._handle_validator,
+                )
+            elif self._handle_validator is not None and (
+                state.handle is None or not self._handle_validator(state.handle)
+            ):
+                raise OSError(f"Lock path failed identity validation: {self.lock_path}")
         except BaseException:
             state.gate.release()
             _return_state(self._key)
@@ -168,34 +190,52 @@ def _acquire_gate(gate, deadline: float | None) -> bool:
     return gate.acquire(timeout=remaining)
 
 
-def _acquire_file_lock(lock_path: Path, deadline: float | None):
+def _acquire_file_lock(
+    lock_path: Path,
+    deadline: float | None,
+    *,
+    handle_opener: Callable[[Path], IO[str]] | None = None,
+    handle_validator: Callable[[IO[str]], bool] | None = None,
+):
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    handle = open(lock_path, "a+", encoding="utf-8")
+    handle = handle_opener(lock_path) if handle_opener is not None else open(lock_path, "a+", encoding="utf-8")
     next_log = time.monotonic() + _WAIT_LOG_INTERVAL_SECONDS
-    while True:
-        # Every attempt locks the same byte. Windows locks a range starting at
-        # the current position, and both the append-mode open and the read below
-        # leave it at the end of the file, so seeking is what keeps two waiters
-        # contending for one byte instead of two disjoint ones.
-        handle.seek(0)
-        if _try_lock(handle):
+    locked = False
+    try:
+        if handle_validator is not None and not handle_validator(handle):
+            raise OSError(f"Lock path failed identity validation: {lock_path}")
+        while True:
+            # Every attempt locks the same byte. Windows locks a range starting at
+            # the current position, and both the append-mode open and the read below
+            # leave it at the end of the file, so seeking is what keeps two waiters
+            # contending for one byte instead of two disjoint ones.
             handle.seek(0)
-            handle.truncate()
-            handle.write(str(os.getpid()))
-            handle.flush()
-            return handle
-        now = time.monotonic()
-        if deadline is not None and now >= deadline:
+            if _try_lock(handle):
+                locked = True
+                if handle_validator is not None and not handle_validator(handle):
+                    raise OSError(f"Lock path failed identity validation after acquisition: {lock_path}")
+                handle.seek(0)
+                handle.truncate()
+                handle.write(str(os.getpid()))
+                handle.flush()
+                return handle
+            now = time.monotonic()
+            if deadline is not None and now >= deadline:
+                raise MigrationLockTimeout(f"Timed out waiting for migration lock: {lock_path}")
+            if now >= next_log:
+                next_log = now + _WAIT_LOG_INTERVAL_SECONDS
+                logger.info(
+                    "Waiting for the migration lock at %s, held by pid %s",
+                    lock_path,
+                    _recorded_holder(handle),
+                )
+            time.sleep(0.1)
+    except BaseException:
+        if locked:
+            _release_file_lock(handle)
+        else:
             handle.close()
-            raise MigrationLockTimeout(f"Timed out waiting for migration lock: {lock_path}")
-        if now >= next_log:
-            next_log = now + _WAIT_LOG_INTERVAL_SECONDS
-            logger.info(
-                "Waiting for the migration lock at %s, held by pid %s",
-                lock_path,
-                _recorded_holder(handle),
-            )
-        time.sleep(0.1)
+        raise
 
 
 def _release_file_lock(handle) -> None:

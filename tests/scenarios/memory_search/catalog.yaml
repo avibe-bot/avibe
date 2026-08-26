@@ -5,6 +5,9 @@ capability:
   canonical_tests:
     - tests/test_memory_admission.py
     - tests/test_memory_store.py
+    - tests/test_memory_module.py
+    - tests/test_memory_everos.py
+    - tests/test_memory_insight.py
     - tests/test_internal_server.py
     - tests/test_memory_cli.py
 status_legend:
@@ -36,20 +39,80 @@ scenarios:
     layer: contract
     test: tests/test_memory_project_ids.py::test_ui_parser_accepts_all_agent_does_not
   - id: MEMORY-SEARCH-005
-    name: v2 stores migrate and accept default enqueue
+    name: Released stores migrate to identity-only v4 and retain default project admission
     status: covered
     kind: migration
     layer: contract
-    test: tests/test_memory_store.py::test_store_migrates_v2_queue_and_accepts_default_project
+    test: tests/test_memory_store.py::test_released_v2_migration_discards_delivery_tables_and_derives_projects
   - id: MEMORY-SEARCH-006
-    name: Final flush visits every current session scope
-    status: partial
+    name: Session barriers flush only pending work from the same raw session
+    status: covered
     kind: lifecycle
     layer: contract
-    test: tests/test_memory_store.py::test_session_scope_recovery_survives_store_reopen_and_separates_sessions
+    test: tests/test_memory_writer.py::test_session_barrier_flushes_only_matching_raw_session
   - id: MEMORY-SEARCH-007
     name: Agentic CLI recall builds the bounded internal policy envelope
     status: covered
     kind: happy_path
     layer: contract
     test: tests/test_memory_cli.py::test_agentic_cli_builds_bounded_internal_recall_policy
+  - id: MEMORY-SEARCH-008
+    name: Derived Agent owners are stable, cross-user isolated, and session-disjoint
+    status: covered
+    kind: authorization
+    layer: contract
+    test: tests/test_memory_everos.py::test_assistant_owner_crosses_add_search_and_profile_provider_contract
+  - id: MEMORY-SEARCH-009
+    name: Dual-owner recall labels results and exact duplicates retain both origins
+    status: covered
+    kind: happy_path
+    layer: contract
+    test: tests/test_memory_everos.py::test_assistant_owner_crosses_add_search_and_profile_provider_contract
+  - id: MEMORY-SEARCH-010
+    name: Agentic dual-owner recall spends at most one agentic provider leg
+    status: covered
+    kind: budget
+    layer: contract
+    test: tests/test_memory_everos.py::test_agentic_search_retains_allowlisted_round_metadata
+  - id: MEMORY-SEARCH-011
+    name: Capture provenance routes writes to disjoint user and Agent owners
+    status: covered
+    kind: happy_path
+    layer: contract
+    test: tests/test_memory_everos.py::test_assistant_owner_crosses_add_search_and_profile_provider_contract
+  - id: MEMORY-SEARCH-012
+    name: Clear rotates the epoch without replacing the installation scope key
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_memory_store.py::test_clear_preserves_scope_key_and_rotates_epoch
+  - id: MEMORY-SEARCH-013
+    name: Volatile duplicate suppression prevents process-local repeat delivery
+    status: covered
+    kind: lifecycle
+    layer: contract
+    test: tests/test_memory_module.py::test_capture_is_accepted_and_duplicate_is_process_local
+  - id: MEMORY-SEARCH-014
+    name: Failure diagnostics are unavailable without durable delivery history
+    status: covered
+    kind: diagnostics
+    layer: contract
+    test: tests/test_memory_runtime.py::test_capture_diagnostics_are_unavailable_without_delivery_history
+  - id: MEMORY-SEARCH-015
+    name: Capture stamps caller-scoped identity and a native dedupe key
+    status: covered
+    kind: authorization
+    layer: contract
+    test: tests/test_memory_slice3.py::test_capture_stamps_user_principal_provenance_and_native_dedup_key
+  - id: MEMORY-SEARCH-016
+    name: Agent remember is returned by dual-owner search
+    status: covered
+    kind: happy_path
+    layer: contract
+    test: tests/test_memory_module.py::test_agent_remember_round_trips_through_dual_owner_search
+  - id: MEMORY-SEARCH-017
+    name: Lifecycle barrier admission does not wait for volatile delivery
+    status: covered
+    kind: lifecycle
+    layer: contract
+    test: tests/test_memory_module.py::test_lifecycle_barrier_does_not_wait_for_writer

@@ -41,6 +41,7 @@ compatibility path.
 | POST `/api/models/agents/<backend>/chains/reorder` | → `{agent: AgentSupply}` | Idempotently reorders every stored Route by the current Source order without adding, removing, remapping, matching, or guarding. The total order is defined below. |
 | PATCH `/api/models/agents/<backend>/mode` | `{mode}` → `{agent: AgentSupply}` | Explicit `hub` / `direct` switch. A qualifying Direct → Gateway switch atomically adopts the recognized CLI login as the first native Source; other switches create nothing. |
 | PUT `/api/models/agents/opencode/menu` | `{menu}` → `{agent: AgentSupply}` | Open-menu configuration. |
+| GET `/api/models/agents/<backend>/chains` | → `{chains: AgentChain[]}` | Hub only. Returns the complete Overview model set in menu order, followed by a selected model or configured Route not already present. All members share one config snapshot and observation time. Direct returns the documented `direct_mode` error. |
 | GET `/api/models/agents/<backend>/chain?model=<id>` | → `{chain: AgentChain}` | Hub only. Direct returns the documented `direct_mode` error. |
 | PUT `/api/models/agents/<backend>/chain?model=<id>` | `{hops: RouteHop[], force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409` or `{chain, removed_hops, interrupted}` | Replaces the exact Source/model pairs in submitted order after validating new or changed pairs; the handler never reads `sources.order`, and the submitted `hops` carry no Source-order semantics. It is the `mutation.route_replace` row of the authoritative mutation matrix. A visible noninterrupting hop removal is ordinary success; only a resulting protected-supply interruption enters the guard. |
 | POST `/api/models/agents/<backend>/probe` | `{model?}` → `{probe: ProbeResult}` | Hub only. Direct returns the same `direct_mode` error. |
@@ -56,6 +57,7 @@ compatibility path.
 | GET `/api/models/runtime/status` | → `{runtime: RuntimeDependency}` | Read-only managed engine status. The nested object carries `contract_version` 6; `not_started` is installed lazy-start idleness, not an alarm. |
 | POST `/api/models/runtime/install` | → `{runtime: RuntimeDependency}` | Idempotently starts server-owned installation. It returns and persists `installing`; reload reads the same state. Uses the existing mutation authentication and CSRF guards. |
 | POST `/api/models/runtime/start` | → `{runtime: RuntimeDependency}` | Explicitly starts the managed engine. Uses the existing mutation authentication and CSRF guards; status reads never start it. |
+| POST `/api/models/runtime/stop` | → `{runtime: RuntimeDependency}` | Explicitly stops the managed engine and returns it to `not_started`. The mutation is rejected with `runtime_in_use` while any Agent backend is configured for Hub mode, so disabling the shared runtime cannot strand a configured route. |
 
 The removed global route `PUT /api/models/priority` has no replacement. Backend Source
 order is explicit configuration through the sources route; exact per-model order is

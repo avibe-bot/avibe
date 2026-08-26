@@ -22,13 +22,11 @@ const rect = (left: number, top: number, width: number, height: number): DOMRect
 
 const Fixture: React.FC = () => {
   const ref = React.useRef<HTMLDivElement>(null);
-  const [mounted, setMounted] = React.useState(false);
-  React.useLayoutEffect(() => setMounted(true), []);
   return (
     <div ref={ref} data-testid="graph-root">
       <div data-source-id="src_a" />
       <div data-agent-backend="claude" />
-      {mounted && <SupplyGraph containerRef={ref} relations={[relation]} />}
+      <SupplyGraph containerRef={ref} relations={[relation]} />
     </div>
   );
 };
@@ -39,7 +37,7 @@ afterEach(() => {
 });
 
 describe('SupplyGraph', () => {
-  it('re-measures wires when a nested card scrolls without resizing the shell', async () => {
+  it('draws on the shared mount and re-measures when a nested card scrolls', async () => {
     let sourceTop = 10;
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function bounds() {
       if (this.dataset.testid === 'graph-root') return rect(0, 0, 120, 100);
@@ -54,6 +52,9 @@ describe('SupplyGraph', () => {
       expect(element).not.toBeNull();
       return element as SVGPathElement;
     });
+    const svg = view.container.querySelector('svg');
+    expect(svg?.classList.contains('overflow-hidden')).toBe(true);
+    expect(svg?.classList.contains('overflow-visible')).toBe(false);
     expect(path.getAttribute('d')).toContain('M 30 15');
 
     sourceTop = 30;

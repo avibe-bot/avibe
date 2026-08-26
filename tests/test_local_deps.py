@@ -1186,6 +1186,9 @@ def test_dependencies_status_shape(monkeypatch):
         def status(self):
             return {
                 "installed": False,
+                "version": None,
+                "selected_version": "1.2.3",
+                "matches_manifest": None,
                 "status": "missing",
                 "manifest": {"everos_version": "1.2.3", "release_state": "unavailable"},
                 "reason": "memory_runtime_unpublished",
@@ -1209,7 +1212,9 @@ def test_dependencies_status_shape(monkeypatch):
         "kind": "runtime",
         "required": True,
         "installed": False,
-        "version": "1.2.3",
+        "version": None,
+        "latest_version": "1.2.3",
+        "has_update": False,
         "status": "missing",
         "reason": "memory_runtime_unpublished",
         "release_state": "unavailable",
@@ -1235,7 +1240,7 @@ def test_dependencies_status_shape(monkeypatch):
         ),
         pytest.param(
             {
-                "provider": "github-source",
+                "provider": "npm",
                 "install": {"state": "installed", "runtime_version": None, "matches_manifest": None},
                 "manifest": None,
                 "node_available": True,
@@ -1243,7 +1248,7 @@ def test_dependencies_status_shape(monkeypatch):
                 "node_version": "22.12.0",
             },
             {"version": None, "latest_version": None, "has_update": False},
-            id="github-source-not-comparable",
+            id="npm-not-comparable",
         ),
     ),
 )

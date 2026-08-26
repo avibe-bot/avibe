@@ -861,6 +861,14 @@ class CLIProxyEngineAdapter:
             await asyncio.to_thread(self.supervisor.ensure_running)
             return await self.status()
 
+    async def stop_runtime(self) -> EngineStatus:
+        async with self._installation_lock:
+            status = await self.status()
+            if status.health is EngineHealth.INSTALLING:
+                return status
+            await asyncio.to_thread(self.supervisor.disable)
+            return await self.status()
+
     async def stop(self) -> None:
         async with self._installation_lock:
             self._installation_stopping = True

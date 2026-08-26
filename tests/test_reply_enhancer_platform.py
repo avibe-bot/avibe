@@ -301,19 +301,21 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("explicitly requested by the user", prompt)
         self.assertIn("### When to remember", prompt)
         # Explicit requests use Memory only after the existing eligibility,
-        # safety, and surface filters, and success is acknowledged only after
-        # the CLI confirms that the queue accepted the write.
+        # safety, and surface filters. CLI admission confirms only a volatile,
+        # best-effort submission, never persistence.
         self.assertIn(
             "When the user explicitly asks you to remember, note, or keep track of something",
             prompt,
         )
         self.assertIn("first apply the same eligibility, safety, and surface rules below", prompt)
-        self.assertIn("a durable, non-secret personal fact or stable user habit", prompt)
+        self.assertIn("a stable, non-secret personal fact or user habit", prompt)
         self.assertIn("overrides only the plain-text no-paraphrase rule below", prompt)
         self.assertIn("it never makes project knowledge, one-off task detail, transient state, or secrets eligible", prompt)
-        self.assertIn("After `remember` reports `accepted` or `duplicate`", prompt)
-        self.assertIn("If it returns any nonzero outcome, do not claim the fact was saved", prompt)
+        self.assertIn("accepted the request for best-effort processing", prompt)
+        self.assertIn("without claiming persistence", prompt)
         self.assertIn("do not start an unbounded retry loop", prompt)
+        self.assertNotIn("confirm the save", prompt)
+        self.assertNotIn("queues one durable fact", prompt)
         self.assertIn("Also call `remember` proactively, without being asked", prompt)
         self.assertIn("a correction of your own behavior", prompt)
         self.assertIn("a decision, conclusion, or agreement the conversation arrived at", prompt)
@@ -323,8 +325,8 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("a project or environment fact you discovered yourself", prompt)
         self.assertIn("belong in the nearest `AGENTS.md`", prompt)
 
-        # Automatic capture already holds every user message verbatim, so a
-        # proactive write must not re-queue a paraphrase of one.
+        # Automatic capture already offers every eligible user message, so a
+        # proactive write must not resubmit a paraphrase of one.
         self.assertIn(
             "a stable preference, habit, working style, or identity detail that emerged across several turns",
             prompt,
@@ -333,9 +335,8 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             "a stable preference, habit, working style, or identity detail the user states about themselves",
             prompt,
         )
-        self.assertIn("a fact stated outright in one of those is in Memory already", prompt)
         self.assertIn(
-            "never queue a paraphrase of it, unless the user explicitly asked you to remember it",
+            "never submit a paraphrase of a fact one already states unless the user explicitly asked you to remember it",
             prompt,
         )
         self.assertIn("only for a conclusion automatic capture cannot reach", prompt)
@@ -347,17 +348,22 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         # Automatic capture drops IM turns that carry files (see
         # `CaptureAdmission.decide`), while the prompt gate does not, so an
         # unconditional "everything you said is already stored" would strand a
-        # durable fact stated only in a message sent with an attachment.
-        self.assertIn("Avibe captures the user's plain text messages on its own", prompt)
+        # stable fact stated only in a message sent with an attachment.
+        self.assertIn(
+            "automatically offers the user's plain text messages for the same best-effort capture",
+            prompt,
+        )
         # The exclusion is wider than attachments: adapters also mark forwarded
         # or shared content non-ordinary, and `_is_ordinary_human_text` drops
         # every one of those. Naming only files would still strand the rest.
-        self.assertIn("That coverage stops at plain text", prompt)
+        self.assertIn("Automatic submission stops at plain text", prompt)
         self.assertIn(
             "a turn carrying a file, forwarded or shared content, or any other non-plain form",
             prompt,
         )
-        self.assertIn("record it rather than assuming it was captured", prompt)
+        self.assertIn("submit it rather than assuming it was offered", prompt)
+        self.assertNotIn("is in Memory already", prompt)
+        self.assertNotIn("retry is safe", prompt)
         self.assertNotIn("A message that arrived alongside a file is not always covered", prompt)
         self.assertNotIn("Avibe already captured every user message on its own", prompt)
         self.assertNotIn("anything the user stated outright in one message is in Memory already", prompt)
@@ -365,8 +371,8 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("One call carries one self-contained fact", prompt)
         self.assertIn("any secret, credential, or token", prompt)
         self.assertIn("At most one or two calls per turn", prompt)
-        self.assertIn("Record silently", prompt)
-        self.assertIn("idempotent", prompt)
+        self.assertIn("Submit silently", prompt)
+        self.assertIn("Do not retry an `accepted` or `duplicate` result", prompt)
 
     def test_memory_and_preferences_prompts_route_between_each_other(self):
         context = MessageContext(
@@ -390,7 +396,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             "Anything you decide to record proactively goes through `vibe memory remember`",
             prompt,
         )
-        self.assertIn("Everything you record proactively belongs here", prompt)
+        self.assertIn("Everything you submit proactively belongs here", prompt)
         self.assertIn(
             "personal facts and stable user habits — including ones the user asks you to remember — "
             "go to Avibe Memory through `vibe memory remember`",
@@ -1790,6 +1796,11 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("`vibe show path`", prompt)
         self.assertIn("`vibe show status`", prompt)
         self.assertIn("`vibe show update --visibility private`", prompt)
+        self.assertIn("`Accept: text/markdown`", prompt)
+        self.assertIn("use headings for sections, lists for sequences or groups", prompt)
+        self.assertIn("`<table>` for genuinely tabular data", prompt)
+        self.assertIn("`data-agent-hidden`", prompt)
+        self.assertIn('`agent-note="..."`', prompt)
         self.assertIn("History is saved automatically around each turn", prompt)
         self.assertIn("`git -C <workspace> status / log / diff / show`", prompt)
         self.assertIn("Restore only via `git restore --source=<ref> -- <path>`", prompt)

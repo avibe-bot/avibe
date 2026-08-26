@@ -121,7 +121,7 @@ vibe status
 
 ### `vibe memory`
 
-Read scoped local Memory or queue durable context to remember — facts the user explicitly asked to save, and conclusions the Agent distills on its own from the conversation and from work on this machine, including lasting environment or account facts it meets in files or tool output — through the existing mode-0600 controller socket. This command does not start a service and has no clear, configuration, export, or delete subcommands.
+Read scoped local Memory or submit context for best-effort, process-local capture — facts the user explicitly asked to remember, and conclusions the Agent distills on its own from the conversation and from work on this machine, including lasting environment or account facts it meets in files or tool output — through the existing mode-0600 controller socket. Acceptance does not guarantee provider delivery or persistence. This command does not start a service and has no clear, configuration, export, or delete subcommands.
 
 `status` works from a normal terminal. `profile`, `list`, `search`, and `remember`
 require an eligible Agent shell where Avibe has injected the current Session

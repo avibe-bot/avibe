@@ -50,8 +50,6 @@ const renderPill = (
         ? unreadRegion()
         : readyRegion(runtime(health, options.withAsset, options.hostPlatform))}
       starting={options.starting ?? false}
-      onStart={vi.fn()}
-      onInstall={vi.fn()}
     />
   </I18nextProvider>,
 );
@@ -75,22 +73,22 @@ describe('Model Hub runtime pill', () => {
     expect(freshRuntimeProjection(retained)).toBeNull();
   });
 
-  it('maps every runtime health to its registered shell copy and activation', () => {
+  it('maps every runtime health to its registered shell copy without owning activation', () => {
     expect(renderPill('ok')).toContain(zh.settings.models.shell.running);
     expect(renderPill('ok')).not.toContain('<button');
     expect(renderPill('degraded')).toContain(zh.settings.models.shell.degraded);
     expect(renderPill('degraded')).not.toContain('<button');
     expect(renderPill('down')).toContain(zh.settings.models.shell.stopped);
-    expect(renderPill('down')).toContain('<button');
+    expect(renderPill('down')).not.toContain('<button');
     expect(renderPill('not_started')).toContain(zh.settings.models.shell.notStarted);
-    expect(renderPill('not_started')).toContain('<button');
+    expect(renderPill('not_started')).not.toContain('<button');
   });
 
   it('uses the server manifest resolution without re-deriving host support', () => {
     expect(renderPill('not_installed', { withAsset: true })).toContain(zh.settings.models.shell.notInstalled);
-    expect(renderPill('not_installed', { withAsset: true })).toContain('<button');
+    expect(renderPill('not_installed', { withAsset: true })).not.toContain('<button');
     expect(renderPill('not_installed')).toContain(zh.settings.models.shell.notInstalled);
-    expect(renderPill('not_installed')).toContain('<button');
+    expect(renderPill('not_installed')).not.toContain('<button');
     expect(renderPill('not_installed', { withAsset: true, hostPlatform: 'linux-amd64' })).toContain(zh.settings.models.shell.unsupported);
     expect(renderPill('not_installed', { withAsset: true, hostPlatform: 'linux-amd64' })).not.toContain('<button');
   });
@@ -106,8 +104,6 @@ describe('Model Hub runtime pill', () => {
         <RuntimePill
           read={failRegionRead(readyRegion(runtime('ok')))}
           starting={false}
-          onStart={vi.fn()}
-          onInstall={vi.fn()}
         />
       </I18nextProvider>,
     );

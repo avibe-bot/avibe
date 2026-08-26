@@ -68,9 +68,6 @@ MEMORY_RECONCILE_TIMEOUT_SECONDS = 120.0
 # UI polls the job for 310s (``startAndPollDependencyInstall``), so anything
 # shorter reports a false failure on a slow link while the install continues.
 MEMORY_INSTALL_TIMEOUT_SECONDS = 300.0
-# The controller bounds final flush at 5s. Keep the transport outside that
-# bound so the UI does not archive while a timed-out controller call still runs.
-MEMORY_FINAL_FLUSH_TIMEOUT_SECONDS = 7.0
 # Clearing can include provider-side deletion and journal recovery. Keep the
 # transport outside the controller's bounded operation so a slow success does
 # not race a retry from the settings UI.
@@ -382,257 +379,6 @@ async def reconcile_agent_backends(
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
 
 
-async def reconcile_memory(
-    *,
-    socket_path: Optional[Path] = None,
-    timeout: float = MEMORY_RECONCILE_TIMEOUT_SECONDS,
-) -> dict[str, Any]:
-    """Ask the controller to apply persisted Memory settings in place."""
-
-    return await _memory_request("POST", "/internal/reconcile-memory", socket_path=socket_path, timeout=timeout)
-
-
-def memory_install_runtime_sync(
-    *,
-    socket_path: Optional[Path] = None,
-    timeout: float = MEMORY_INSTALL_TIMEOUT_SECONDS,
-) -> dict[str, Any]:
-    """Ask the controller to install EverOS through its live lifecycle."""
-
-    return _memory_request_sync(
-        "POST",
-        "/internal/memory/install-runtime",
-        socket_path=socket_path,
-        timeout=timeout,
-    )
-
-
-async def memory_status(
-    *,
-    socket_path: Optional[Path] = None,
-    timeout: float = MEMORY_STATUS_TIMEOUT_SECONDS,
-) -> dict[str, Any]:
-    return await _memory_request("GET", "/internal/memory/status", socket_path=socket_path, timeout=timeout)
-
-
-async def memory_failures(
-    *,
-    socket_path: Optional[Path] = None,
-    timeout: float = 10.0,
-) -> dict[str, Any]:
-    return await _memory_request("GET", "/internal/memory/failures", socket_path=socket_path, timeout=timeout)
-
-
-async def memory_profile(
-    *,
-    user_key: str,
-    socket_path: Optional[Path] = None,
-    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
-) -> dict[str, Any]:
-    return await _memory_request(
-        "GET",
-        "/internal/memory/profile",
-        headers=_memory_user_key_headers(
-            "GET",
-            "/internal/memory/profile",
-            user_key,
-        ),
-        socket_path=socket_path,
-        timeout=timeout,
-    )
-
-
-async def memory_search(
-    query: str,
-    limit: int,
-    *,
-    user_key: str,
-    socket_path: Optional[Path] = None,
-    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
-) -> dict[str, Any]:
-    return await _memory_request(
-        "POST",
-        "/internal/memory/search",
-        payload={"query": query, "limit": limit},
-        headers=_memory_user_key_headers(
-            "POST",
-            "/internal/memory/search",
-            user_key,
-        ),
-        socket_path=socket_path,
-        timeout=timeout,
-    )
-
-
-async def memory_clear(
-    *,
-    socket_path: Optional[Path] = None,
-    timeout: float = MEMORY_CLEAR_TIMEOUT_SECONDS,
-) -> dict[str, Any]:
-    return await _memory_request(
-        "POST",
-        "/internal/memory/clear",
-        payload={"confirm": True},
-        headers=_memory_user_key_headers(
-            "POST",
-            "/internal/memory/clear",
-            "avibe:local",
-        ),
-        socket_path=socket_path,
-        timeout=timeout,
-    )
-
-
-def memory_status_sync(
-    *,
-    caller_session_id: str | None = None,
-    socket_path: Optional[Path] = None,
-    timeout: float = MEMORY_STATUS_TIMEOUT_SECONDS,
-) -> dict[str, Any]:
-    return _memory_request_sync(
-        "GET",
-        "/internal/memory/status",
-        headers=_memory_cli_session_headers(caller_session_id),
-        socket_path=socket_path,
-        timeout=timeout,
-    )
-
-
-def memory_profile_sync(
-    *,
-    caller_session_id: str | None = None,
-    socket_path: Optional[Path] = None,
-    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
-) -> dict[str, Any]:
-    return _memory_request_sync(
-        "GET",
-        "/internal/memory/profile",
-        headers=_memory_cli_session_headers(caller_session_id),
-        socket_path=socket_path,
-        timeout=timeout,
-    )
-
-
-def memory_search_sync(
-    query: str,
-    limit: int,
-    *,
-    caller_session_id: str | None = None,
-    socket_path: Optional[Path] = None,
-    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
-) -> dict[str, Any]:
-    return _memory_request_sync(
-        "POST",
-        "/internal/memory/search",
-        payload={"query": query, "limit": limit},
-        headers=_memory_cli_session_headers(caller_session_id),
-        socket_path=socket_path,
-        timeout=timeout,
-    )
-
-
-def memory_remember_sync(
-    text: str,
-    *,
-    caller_session_id: str | None = None,
-    project: str | None = None,
-    socket_path: Optional[Path] = None,
-    timeout: float = 10.0,
-) -> dict[str, Any]:
-    payload: dict[str, object] = {"text": text}
-    if project is not None:
-        payload["project"] = project
-    return _memory_request_sync(
-        "POST",
-        "/internal/memory/remember",
-        payload=payload,
-        headers=_memory_cli_session_headers(caller_session_id),
-        socket_path=socket_path,
-        timeout=timeout,
-    )
-
-
-async def _memory_request(
-    method: str,
-    route: str,
-    *,
-    payload: dict[str, Any] | None = None,
-    headers: dict[str, str] | None = None,
-    socket_path: Optional[Path] = None,
-    timeout: float,
-) -> dict[str, Any]:
-    target = await _verified_socket_path_async(socket_path)
-    transport = httpx.AsyncHTTPTransport(uds=str(target))
-    try:
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://localhost",
-            timeout=httpx.Timeout(timeout, connect=min(timeout, 5.0)),
-        ) as client:
-            response = await client.request(method, route, json=payload, headers=headers)
-    except _SOCKET_ERRORS as exc:
-        raise InternalServerUnavailable(str(exc)) from exc
-    try:
-        body = response.json() if response.content else {}
-    except ValueError:
-        body = {"status": "failed", "error": "memory_provider_response_invalid"}
-    return {"status_code": response.status_code, "body": body}
-
-
-def _memory_request_sync(
-    method: str,
-    route: str,
-    *,
-    payload: dict[str, Any] | None = None,
-    headers: dict[str, str] | None = None,
-    socket_path: Optional[Path] = None,
-    timeout: float,
-) -> dict[str, Any]:
-    target = _verified_socket_path(socket_path)
-    transport = httpx.HTTPTransport(uds=str(target))
-    try:
-        with httpx.Client(
-            transport=transport,
-            base_url="http://localhost",
-            timeout=httpx.Timeout(timeout, connect=5.0),
-        ) as client:
-            response = client.request(method, route, json=payload, headers=headers)
-    except _SOCKET_ERRORS as exc:
-        raise InternalServerUnavailable(str(exc)) from exc
-    try:
-        body = response.json() if response.content else {}
-    except ValueError:
-        body = {"status": "failed", "error": "memory_provider_response_invalid"}
-    return {"status_code": response.status_code, "body": body}
-
-
-def _memory_cli_session_headers(session_id: str | None) -> dict[str, str] | None:
-    session_id = str(session_id or "").strip()
-    if not session_id:
-        return None
-    from core.memory.http_headers import CALLER_SESSION_HEADER
-
-    return {CALLER_SESSION_HEADER: session_id}
-
-
-def _memory_user_key_headers(method: str, path: str, user_key: str) -> dict[str, str]:
-    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
-    from core.memory.ui_access import (
-        MEMORY_UI_PROOF_HEADER,
-        build_ui_read_proof,
-        process_ui_read_secret,
-    )
-
-    headers = {MEMORY_USER_KEY_HEADER: user_key}
-    secret = process_ui_read_secret()
-    if secret:
-        headers[MEMORY_UI_PROOF_HEADER] = build_ui_read_proof(
-            secret,
-            method=method,
-            path=path,
-            user_key=user_key,
-        )
-    return headers
 
 
 async def test_backend_auth(
@@ -673,36 +419,19 @@ async def reconcile_memory(
     return await _memory_request("POST", "/internal/reconcile-memory", socket_path=socket_path, timeout=timeout)
 
 
-async def memory_restart(
+async def memory_wake(
     *,
     socket_path: Optional[Path] = None,
 ) -> dict[str, Any]:
-    """Wait without a reporting deadline for the retained Runtime restart."""
+    """Wait for one non-destructive wake attempt."""
 
     return await _memory_request(
         "POST",
-        "/internal/memory/restart",
+        "/internal/memory/wake",
         socket_path=socket_path,
         timeout=None,
     )
 
-
-async def memory_rebuild(
-    *,
-    user_key: str,
-    socket_path: Optional[Path] = None,
-) -> dict[str, Any]:
-    """Wait without a reporting deadline for the retained Runtime rebuild."""
-
-    path = "/internal/memory/rebuild"
-    return await _memory_request(
-        "POST",
-        path,
-        payload={"confirm": True},
-        headers=_memory_user_key_headers("POST", path, user_key),
-        socket_path=socket_path,
-        timeout=None,
-    )
 
 async def memory_preflight(
     *, payload: dict, user_key: str, socket_path: Optional[Path] = None,
@@ -715,53 +444,60 @@ async def memory_preflight(
     )
 
 
-async def memory_factory_reset(
-    *,
-    user_key: str,
-    socket_path: Optional[Path] = None,
-) -> dict[str, Any]:
-    """Wait for the Controller-owned factory reset and return its final result."""
-
-    path = "/internal/memory/factory-reset"
-    return await _memory_request(
-        "POST", path, payload={"confirm": True},
-        headers=_memory_user_key_headers("POST", path, user_key),
-        socket_path=socket_path, timeout=None,
-    )
-
-
 async def memory_repair(
     *,
+    confirm_loss: bool,
     user_key: str,
     socket_path: Optional[Path] = None,
 ) -> dict[str, Any]:
-    """Wait without a reporting deadline for the retained Runtime repair."""
-
     path = "/internal/memory/repair"
     return await _memory_request(
         "POST",
         path,
-        payload={"confirm": True},
+        payload={"confirm_loss": confirm_loss},
         headers=_memory_user_key_headers("POST", path, user_key),
         socket_path=socket_path,
         timeout=None,
     )
 
 
-async def memory_final_flush(
-    session_id: str,
+async def memory_delete_data(
     *,
+    confirm_loss: bool,
+    user_key: str,
     socket_path: Optional[Path] = None,
-    timeout: float = MEMORY_FINAL_FLUSH_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
-    """Request the controller's bounded final flush for a Workbench session."""
-
+    path = "/internal/memory/delete-data"
     return await _memory_request(
         "POST",
-        "/internal/memory/final-flush",
-        payload={"session_id": session_id},
+        path,
+        payload={"confirm_loss": confirm_loss},
+        headers=_memory_user_key_headers("POST", path, user_key),
         socket_path=socket_path,
-        timeout=timeout,
+        timeout=None,
+    )
+
+
+async def memory_reconfigure(
+    *,
+    confirm_loss: bool,
+    memory: dict[str, Any],
+    expected_memory: dict[str, Any],
+    user_key: str,
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    path = "/internal/memory/reconfigure"
+    return await _memory_request(
+        "POST",
+        path,
+        payload={
+            "confirm_loss": confirm_loss,
+            "memory": memory,
+            "expected_memory": expected_memory,
+        },
+        headers=_memory_user_key_headers("POST", path, user_key),
+        socket_path=socket_path,
+        timeout=None,
     )
 
 
@@ -770,11 +506,7 @@ async def memory_archive_session(
     *,
     socket_path: Optional[Path] = None,
 ) -> dict[str, Any]:
-    """Await the controller-owned Workbench archive write without a reporting deadline.
-
-    Memory final flush is not on this round-trip. The controller schedules it
-    best-effort after the archive row commits.
-    """
+    """Await the controller-owned Workbench archive write without a reporting deadline."""
 
     return await _memory_request(
         "POST",
@@ -818,6 +550,53 @@ async def memory_processing_record(
     return await _memory_request(
         "GET",
         path,
+        headers=_memory_user_key_headers("GET", path, user_key),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
+async def memory_processing_record_entries(
+    *,
+    cursor: str | None,
+    limit: int,
+    project: str | None,
+    user_key: str,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    path = "/internal/memory/processing-record/entries"
+    params: dict[str, str | int] = {"limit": limit}
+    if cursor is not None:
+        params["cursor"] = cursor
+    if project is not None:
+        params["project"] = project
+    return await _memory_request(
+        "GET",
+        path,
+        params=params,
+        headers=_memory_user_key_headers("GET", path, user_key),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
+async def memory_processing_record_entry(
+    memcell_id: str,
+    *,
+    project: str | None,
+    user_key: str,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    path = "/internal/memory/processing-record/entry"
+    return await _memory_request(
+        "GET",
+        path,
+        params={
+            "memcell_id": memcell_id,
+            **({"project": project} if project is not None else {}),
+        },
         headers=_memory_user_key_headers("GET", path, user_key),
         socket_path=socket_path,
         timeout=timeout,
@@ -901,6 +680,7 @@ async def memory_list(
     page: int | None = None,
     cursor: str | None = None,
     limit: int = 20,
+    origin: Literal["user", "agent"] | None = None,
     socket_path: Optional[Path] = None,
     timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
@@ -911,6 +691,8 @@ async def memory_list(
         payload["page"] = page
     if cursor is not None:
         payload["cursor"] = cursor
+    if origin is not None:
+        payload["origin"] = origin
     return await _memory_request(
         "POST",
         "/internal/memory/list",
@@ -951,83 +733,6 @@ async def memory_search(
     )
 
 
-async def memory_log(
-    *,
-    cursor: str | None,
-    limit: int,
-    user_key: str,
-    socket_path: Optional[Path] = None,
-    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
-) -> dict[str, Any]:
-    path = "/internal/memory/log"
-    params: dict[str, str | int] = {"limit": limit}
-    if cursor is not None:
-        params["cursor"] = cursor
-    return await _memory_request(
-        "GET",
-        path,
-        params=params,
-        headers=_memory_user_key_headers("GET", path, user_key),
-        socket_path=socket_path,
-        timeout=timeout,
-    )
-
-
-async def memory_log_unlinked(
-    *,
-    limit: int,
-    user_key: str,
-    socket_path: Optional[Path] = None,
-    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
-) -> dict[str, Any]:
-    path = "/internal/memory/log/unlinked"
-    return await _memory_request(
-        "GET",
-        path,
-        params={"limit": limit},
-        headers=_memory_user_key_headers("GET", path, user_key),
-        socket_path=socket_path,
-        timeout=timeout,
-    )
-
-
-async def memory_log_entry(
-    memcell_id: str,
-    *,
-    user_key: str,
-    socket_path: Optional[Path] = None,
-    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
-) -> dict[str, Any]:
-    path = "/internal/memory/log/entry"
-    return await _memory_request(
-        "GET",
-        path,
-        params={"memcell_id": memcell_id},
-        headers=_memory_user_key_headers("GET", path, user_key),
-        socket_path=socket_path,
-        timeout=timeout,
-    )
-
-
-async def memory_clear(
-    *,
-    user_key: str,
-    socket_path: Optional[Path] = None,
-) -> dict[str, Any]:
-    """Wait for the journaled clear, whose snapshot copy is size-unbounded."""
-
-    return await _memory_request(
-        "POST",
-        "/internal/memory/clear",
-        payload={"confirm": True},
-        headers=_memory_user_key_headers(
-            "POST",
-            "/internal/memory/clear",
-            user_key,
-        ),
-        socket_path=socket_path,
-        timeout=None,
-    )
 
 
 def memory_status_sync(

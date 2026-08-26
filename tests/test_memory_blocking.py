@@ -46,17 +46,21 @@ def test_run_blocking_settles_work_before_repeated_cancellation_propagates() -> 
     asyncio.run(run())
 
 
-def test_run_blocking_cancellation_precedes_later_operation_failure() -> None:
+def test_run_blocking_reports_later_operation_failure_before_cancellation() -> None:
     entered = threading.Event()
     release = threading.Event()
+    failure = RuntimeError("blocking operation failed")
+    reported: list[BaseException] = []
 
     def operation() -> None:
         entered.set()
         release.wait(timeout=2)
-        raise RuntimeError("blocking operation failed")
+        raise failure
 
     async def run() -> None:
-        call = asyncio.create_task(run_blocking(operation))
+        call = asyncio.create_task(
+            run_blocking(operation, on_cancel_error=reported.append)
+        )
         assert await asyncio.to_thread(entered.wait, 1)
         call.cancel("caller stopped")
         await asyncio.sleep(0)
@@ -66,6 +70,7 @@ def test_run_blocking_cancellation_precedes_later_operation_failure() -> None:
         with pytest.raises(asyncio.CancelledError) as raised:
             await call
         assert raised.value.args == ("caller stopped",)
+        assert reported == [failure]
 
     asyncio.run(run())
 
@@ -123,3 +128,60 @@ def test_run_blocking_completed_result_is_not_changed_by_late_cancellation() -> 
         assert call.result() == "settled"
 
     asyncio.run(run())
+
+
+def test_run_blocking_reclaims_settled_result_before_cancellation_propagates() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    reclaimed: list[str] = []
+
+    def operation() -> str:
+        entered.set()
+        release.wait(timeout=1.0)
+        return "bundle-1"
+
+    async def run() -> None:
+        call = asyncio.create_task(
+            run_blocking(operation, on_cancel_result=reclaimed.append)
+        )
+        assert await asyncio.to_thread(entered.wait, 1.0)
+        call.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await call
+
+    asyncio.run(run())
+    assert reclaimed == ["bundle-1"]
+
+
+def test_run_blocking_reports_cancelled_result_cleanup_failure() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    failure = RuntimeError("result cleanup failed")
+    reported: list[BaseException] = []
+
+    def operation() -> str:
+        entered.set()
+        release.wait(timeout=1.0)
+        return "bundle-1"
+
+    def reclaim(_result: str) -> None:
+        raise failure
+
+    async def run() -> None:
+        call = asyncio.create_task(
+            run_blocking(
+                operation,
+                on_cancel_result=reclaim,
+                on_cancel_error=reported.append,
+            )
+        )
+        assert await asyncio.to_thread(entered.wait, 1.0)
+        call.cancel("caller stopped")
+        release.set()
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await call
+        assert raised.value.args == ("caller stopped",)
+
+    asyncio.run(run())
+    assert reported == [failure]

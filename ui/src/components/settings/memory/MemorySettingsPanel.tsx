@@ -6,7 +6,6 @@ import {
   Building2,
   Cloud,
   Loader2,
-  RefreshCw,
   ShieldAlert,
   SlidersHorizontal,
   Trash2,
@@ -136,6 +135,7 @@ const EndpointFields: React.FC<{
         <div className="flex flex-col gap-1.5">
           <Label className="text-[12px] text-muted">{t('memory.settings.baseUrl')}</Label>
           <Input
+            aria-label={`${title}: ${t('memory.settings.baseUrl')}`}
             value={draft.baseUrl}
             disabled={disabled}
             placeholder={hints?.baseUrl ?? t('memory.settings.baseUrlPlaceholder')}
@@ -146,6 +146,7 @@ const EndpointFields: React.FC<{
         <div className="flex flex-col gap-1.5">
           <Label className="text-[12px] text-muted">{t('memory.settings.model')}</Label>
           <Input
+            aria-label={`${title}: ${t('memory.settings.model')}`}
             value={draft.model}
             disabled={disabled || provider === 'dashscope'}
             placeholder={hints?.model ?? t('memory.settings.modelPlaceholder')}
@@ -157,6 +158,7 @@ const EndpointFields: React.FC<{
       <div className="flex flex-col gap-1.5">
         <Label className="text-[12px] text-muted">{t('memory.settings.apiKey')}</Label>
         <Input
+          aria-label={`${title}: ${t('memory.settings.apiKey')}`}
           type="password"
           autoComplete="off"
           value={draft.apiKey}
@@ -204,31 +206,25 @@ export const MemorySettingsPanel: React.FC<{
   maintenance: MemoryMaintenance | null;
   maintenanceError: string | null;
   dependencyReady: boolean;
-  rebuildBusy?: boolean;
-  repairBusy?: boolean;
   mutationBusy?: boolean;
-  onRebuildBusyChange?: (busy: boolean) => void;
   onSavingChange?: (saving: boolean) => void;
   onSaved: (next: MemorySettingsOk) => void;
   onReloadSettings: () => void;
   onReloadMaintenance: () => void;
-  onClearAll: () => void;
-  clearing: boolean;
+  onDeleteData: () => void;
+  deleting: boolean;
 }> = ({
   settings,
   maintenance,
   maintenanceError,
   dependencyReady,
-  rebuildBusy = false,
-  repairBusy = false,
   mutationBusy = false,
-  onRebuildBusyChange,
   onSavingChange,
   onSaved,
   onReloadSettings,
   onReloadMaintenance,
-  onClearAll,
-  clearing,
+  onDeleteData,
+  deleting,
 }) => {
   const { t } = useTranslation();
   const api = useApi();
@@ -241,7 +237,7 @@ export const MemorySettingsPanel: React.FC<{
   const [multimodalDraft, setMultimodalDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.multimodal ?? EMPTY_ENDPOINT));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [confirmRebuildOpen, setConfirmRebuildOpen] = useState(false);
+  const [confirmLossOpen, setConfirmLossOpen] = useState(false);
   const [pendingPatch, setPendingPatch] = useState<MemorySettingsPatch | null>(null);
 
   // Reset drafts whenever a fresh settings snapshot lands (initial load or after a save).
@@ -254,11 +250,9 @@ export const MemorySettingsPanel: React.FC<{
     setMultimodalDraft(draftFromConfig(settings.processing.multimodal ?? EMPTY_ENDPOINT));
   }, [settings]);
 
-  const rebuildRequired = settings.rebuild_required === true;
-  const factoryResetRequired = settings.factory_reset_required === true;
   const canClearRequiredKeys = !enabledDraft;
-  const canClearMemory = maintenance?.can_clear === true;
-  const busy = saving || rebuildBusy || repairBusy || mutationBusy;
+  const canDeleteMemory = maintenance?.can_delete_data === true;
+  const busy = saving || mutationBusy;
   const customMode = modeDraft === 'custom';
 
   const buildPatch = (): MemorySettingsPatch => {
@@ -273,8 +267,7 @@ export const MemorySettingsPanel: React.FC<{
       settings.processing.llm,
       allowRequiredClear,
     );
-    // Identity fields stay editable even when data exists; rebuild confirmation
-    // is the safety gate instead of a silent lock.
+    // Identity fields stay editable; accepted data loss is the safety boundary.
     const embeddingPatch = buildEndpointPatch(
       embeddingDraft,
       settings.processing.embedding,
@@ -312,26 +305,22 @@ export const MemorySettingsPanel: React.FC<{
     setSaving(true);
     onSavingChange?.(true);
     setError(null);
-    const needsRebuild = Boolean(patch.confirm_rebuild);
-    if (needsRebuild) onRebuildBusyChange?.(true);
     try {
       const res = await api.saveMemorySettings(patch);
       if (isMemoryOk(res)) {
         onSaved(res);
         const runtime = res.runtime as { ok?: boolean; error?: string } | undefined;
-        // Ordinary reconcile also returns runtime.ok; only a confirmed rebuild
-        // (needsRebuild) or Retry path should announce rebuild outcomes.
-        if (needsRebuild && runtime && typeof runtime.ok === 'boolean') {
+        if (patch.confirm_loss && runtime && typeof runtime.ok === 'boolean') {
           showToast(
             runtime.ok
-              ? t('memory.settings.rebuildCompleted')
-              : memoryErrorMessage(t, runtime.error || 'memory_rebuild_failed'),
+              ? t('memory.settings.resetCompleted')
+              : memoryErrorMessage(t, runtime.error || 'memory_reconfigure_failed'),
             runtime.ok ? 'success' : 'error',
           );
         } else {
           showToast(t('memory.settings.saved'), 'success');
         }
-        setConfirmRebuildOpen(false);
+        setConfirmLossOpen(false);
         setPendingPatch(null);
       } else {
         const failure = res as {
@@ -341,7 +330,6 @@ export const MemorySettingsPanel: React.FC<{
             http_status?: number | null;
             provider_error_code?: string | null;
           };
-          rebuild_required?: boolean;
         };
         setError(
           memoryErrorMessage(
@@ -355,17 +343,14 @@ export const MemorySettingsPanel: React.FC<{
         if (!customMode && typeof patch.enabled === 'boolean') {
           setEnabledDraft(settings.enabled);
         }
-        // Confirmed rebuild keeps the candidate on failure. Exit the confirm
-        // modal so a second click cannot re-submit a now-non-identity patch;
-        // Retry rebuild is the recovery control under the pending marker.
-        setConfirmRebuildOpen(false);
+        setConfirmLossOpen(false);
         setPendingPatch(null);
         const validationFailure =
           failure.error === 'memory_embedding_unavailable' ||
           failure.error === 'memory_llm_unavailable' ||
           failure.error === 'memory_rerank_unavailable' ||
           failure.error === 'memory_multimodal_unavailable';
-        if (!validationFailure || failure.rebuild_required === true) {
+        if (!validationFailure) {
           onReloadSettings();
           onReloadMaintenance();
         }
@@ -375,14 +360,13 @@ export const MemorySettingsPanel: React.FC<{
       if (!customMode && typeof patch.enabled === 'boolean') {
         setEnabledDraft(settings.enabled);
       }
-      setConfirmRebuildOpen(false);
+      setConfirmLossOpen(false);
       setPendingPatch(null);
       onReloadSettings();
       onReloadMaintenance();
     } finally {
       setSaving(false);
       onSavingChange?.(false);
-      if (needsRebuild) onRebuildBusyChange?.(false);
     }
   };
 
@@ -397,51 +381,17 @@ export const MemorySettingsPanel: React.FC<{
         modeDraft !== settings.mode
         || identityChanged(embeddingDraft, settings.processing.embedding)
       )
-      && !factoryResetRequired
     ) {
-      // Retain the draft and open confirmation; the same patch is replayed with
-      // confirm_rebuild: true after the user accepts the cost/duration disclosure.
       setPendingPatch(patch);
-      setConfirmRebuildOpen(true);
+      setConfirmLossOpen(true);
       return;
     }
     await submitPatch(patch);
   };
 
-  const confirmRebuild = async () => {
+  const confirmLoss = async () => {
     if (!pendingPatch) return;
-    await submitPatch({ ...pendingPatch, confirm_rebuild: true });
-  };
-
-  const retryRebuild = async () => {
-    onRebuildBusyChange?.(true);
-    setError(null);
-    try {
-      const res = await api.rebuildMemoryRuntime();
-      if (res.ok) {
-        showToast(t('memory.settings.rebuildCompleted'), 'success');
-        onReloadSettings();
-        onReloadMaintenance();
-      } else {
-        setError(
-          memoryErrorMessage(
-            t,
-            res.error,
-            res.diagnostic?.message,
-            res.diagnostic?.http_status,
-            res.diagnostic?.provider_error_code,
-          ),
-        );
-        onReloadSettings();
-        onReloadMaintenance();
-      }
-    } catch {
-      setError(t('memory.settings.rebuildFailed'));
-      onReloadSettings();
-      onReloadMaintenance();
-    } finally {
-      onRebuildBusyChange?.(false);
-    }
+    await submitPatch({ ...pendingPatch, confirm_loss: true });
   };
 
   const setMemoryEnabled = (checked: boolean) => {
@@ -455,31 +405,16 @@ export const MemorySettingsPanel: React.FC<{
       return;
     }
     setPendingPatch({ mode: 'platform' });
-    setConfirmRebuildOpen(true);
+    setConfirmLossOpen(true);
   };
 
   const acknowledgeOrganizationTransition = () => {
     setPendingPatch({ acknowledge_transition: true });
-    setConfirmRebuildOpen(true);
+    setConfirmLossOpen(true);
   };
 
   return (
     <div className="flex flex-col gap-4">
-      {rebuildRequired ? (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gold/40 bg-gold/10 px-4 py-3">
-          <div className="flex min-w-0 flex-col gap-1">
-            <span className="text-[13px] font-semibold text-foreground">{t('memory.settings.rebuildRequiredTitle')}</span>
-            <span className="text-[12px] leading-snug text-muted">{t('memory.settings.rebuildRequiredDescription')}</span>
-          </div>
-          {!factoryResetRequired && !settings.transition_notice_pending ? (
-            <Button variant="secondary" size="sm" onClick={() => void retryRebuild()} disabled={busy}>
-              {rebuildBusy ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
-              {rebuildBusy ? t('memory.settings.retryingRebuild') : t('memory.settings.retryRebuild')}
-            </Button>
-          ) : null}
-        </div>
-      ) : null}
-
       {settings.transition_notice_pending ? (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gold/40 bg-gold/10 px-4 py-3">
           <div className="flex min-w-0 flex-col gap-1">
@@ -512,7 +447,7 @@ export const MemorySettingsPanel: React.FC<{
               <ShieldAlert className="size-3.5 shrink-0" />
               {t('memory.settings.dependencyNotReady')}
               <Button asChild variant="secondary" size="xs">
-                <Link to="/admin/settings/dependencies">
+                <Link to="/settings/dependencies">
                   {t('memory.settings.goToDependencies')}
                   <ArrowUpRight className="size-3.5" />
                 </Link>
@@ -525,8 +460,6 @@ export const MemorySettingsPanel: React.FC<{
           onCheckedChange={setMemoryEnabled}
           disabled={
             busy
-            || factoryResetRequired
-            || rebuildRequired
             || (!enabledDraft && !dependencyReady)
             || (!enabledDraft && !customMode && !settings.cloud_available)
           }
@@ -661,11 +594,11 @@ export const MemorySettingsPanel: React.FC<{
           className={customMode ? undefined : 'ml-auto'}
           variant="destructive"
           size="sm"
-          onClick={onClearAll}
-          disabled={clearing || !canClearMemory || busy || factoryResetRequired}
+          onClick={onDeleteData}
+          disabled={deleting || !canDeleteMemory || busy}
         >
           <Trash2 className="size-3.5" />
-          {t('memory.clear.button')}
+          {t('memory.deleteData.button')}
         </Button>
       </div>
 
@@ -695,15 +628,16 @@ export const MemorySettingsPanel: React.FC<{
       </div>
 
       <ConfirmDialog
-        open={confirmRebuildOpen}
+        open={confirmLossOpen}
         onOpenChange={(open) => {
-          setConfirmRebuildOpen(open);
+          setConfirmLossOpen(open);
           if (!open) setPendingPatch(null);
         }}
-        title={t('memory.settings.rebuildConfirmTitle')}
-        description={t('memory.settings.rebuildConfirmDescription')}
-        confirmLabel={t('memory.settings.rebuildConfirmLabel')}
-        onConfirm={confirmRebuild}
+        destructive
+        title={t('memory.settings.lossConfirmTitle')}
+        description={t('memory.settings.lossConfirmDescription')}
+        confirmLabel={t('memory.settings.lossConfirmLabel')}
+        onConfirm={confirmLoss}
       />
     </div>
   );

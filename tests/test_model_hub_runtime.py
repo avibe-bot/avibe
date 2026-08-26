@@ -41,6 +41,7 @@ from core.handlers.model_hub.stream_wire import (
 )
 from vibe.model_hub_runtime import adapter as runtime_adapter_module
 from vibe.model_hub_runtime import client as client_module
+from vibe.model_hub_runtime import installer as runtime_installer_module
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
 from vibe.model_hub_runtime.client import EngineClient, EngineClientError, EngineConnection
 from vibe.model_hub_runtime.config import write_engine_config
@@ -55,7 +56,11 @@ from vibe.model_hub_runtime.state import (
     EngineStateStore,
     SourceRecord,
 )
-from vibe.model_hub_runtime.supervisor import EngineSupervisor, EngineUnavailableError
+from vibe.model_hub_runtime.supervisor import (
+    MODEL_HUB_STARTUP_TIMEOUT_SECONDS,
+    EngineSupervisor,
+    EngineUnavailableError,
+)
 
 
 MODEL_HUB_FIXTURES = Path(__file__).parent / "fixtures" / "model_hub"
@@ -64,12 +69,14 @@ STREAM_TRANSPORT_BOUNDARIES = json.loads(
 )["cases"]
 DEEP_JSON_ARRAY = b"[" * 10_000 + b"0" + b"]" * 10_000
 RUNTIME_INSTALL_TARGET = {
-    "manifest_sha256": "1" * 64,
     "runtime_version": "v7.2.95",
     "platform": "fixture-platform",
     "archive_sha256": "2" * 64,
     "binary_sha256": "3" * 64,
 }
+RELEASED_INSTALL_CLAIMS = json.loads(
+    (MODEL_HUB_FIXTURES / "released_install_claims.json").read_text(encoding="utf-8")
+)["claims"]
 RUNTIME_INSTALL_GENERATION_A = "a" * 32
 RUNTIME_INSTALL_GENERATION_B = "b" * 32
 
@@ -85,6 +92,41 @@ def _create_runtime_install_claim(
         target=RUNTIME_INSTALL_TARGET,
     )
     return generation
+
+
+@pytest.mark.parametrize(
+    "released_claim",
+    RELEASED_INSTALL_CLAIMS,
+    ids=lambda claim: f"schema-{claim['schema_version']}",
+)
+def test_released_install_claim_is_read_without_rewrite_and_resumed_as_current_schema(
+    tmp_path: Path,
+    released_claim: dict[str, object],
+) -> None:
+    manager = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", offline=True)
+    managed_runtime.write_json_atomic(manager.install_state_path, released_claim)
+    released_bytes = manager.install_state_path.read_bytes()
+
+    projected = manager.install_state()
+
+    assert projected is not None
+    assert projected["target"] == RUNTIME_INSTALL_TARGET
+    assert manager.install_state_path.read_bytes() == released_bytes
+
+    assert manager.transition_install_claim(
+        InstallClaimTransition.RESUME,
+        generation=RUNTIME_INSTALL_GENERATION_B,
+        previous_generation=RUNTIME_INSTALL_GENERATION_A,
+        target=RUNTIME_INSTALL_TARGET,
+    )
+    persisted = json.loads(manager.install_state_path.read_text(encoding="utf-8"))
+    assert persisted == {
+        "schema_version": 3,
+        "state": "installing",
+        "generation": RUNTIME_INSTALL_GENERATION_B,
+        "error_key": None,
+        "target": RUNTIME_INSTALL_TARGET,
+    }
 
 
 def test_stream_prelude_does_not_charge_released_keepalives_to_frame_budget() -> None:
@@ -673,6 +715,154 @@ def test_install_admission_fetches_an_uncached_remote_manifest(tmp_path: Path) -
     assert manager.contract_manifest()["assets"]
 
 
+def test_released_claim_replay_ignores_unrelated_manifest_entry_without_reinstall(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive, binary = _write_fixture_archive(tmp_path / "fixture")
+    manifest_path = _write_fixture_manifest(tmp_path / "fixture", archive, binary)
+    manager = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest_path)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+    original_manifest = manager._load_manifest(allow_network=False)
+    assert original_manifest is not None
+    managed_runtime.write_json_atomic(
+        manager.install_state_path,
+        {
+            "schema_version": 2,
+            "state": "installing",
+            "generation": RUNTIME_INSTALL_GENERATION_A,
+            "error_key": None,
+            "target": {
+                "manifest_sha256": original_manifest.digest,
+                **installed["target"],
+            },
+        },
+    )
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["assets"].append(
+        {
+            "platform": "fixture-unrelated",
+            "url": "https://example.test/unrelated.tar.gz",
+            "size_bytes": 1,
+            "sha256": "d" * 64,
+            "binary_sha256": "e" * 64,
+            "bin_path": "unused",
+        }
+    )
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    pointer_path = manager.runtime_dir / "current.json"
+    metadata_path = Path(installed["install_dir"]) / manager.spec.metadata_filename
+    pointer_before = pointer_path.read_bytes()
+    metadata_before = metadata_path.read_bytes()
+    monkeypatch.setattr(
+        manager,
+        "_resolve_manifest_archive",
+        lambda _archive: pytest.fail("released claim replay accessed an archive"),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_write_current_pointer",
+        lambda *_args: pytest.fail("released claim replay rewrote the pointer"),
+    )
+
+    claim = manager.install_state()
+    assert claim is not None
+    replayed = manager.ensure(expected_target=claim["target"])
+
+    assert claim["target"] == installed["target"]
+    assert replayed["ok"] is True
+    assert replayed["changed"] is False
+    assert replayed["path"] == installed["path"]
+    assert pointer_path.read_bytes() == pointer_before
+    assert metadata_path.read_bytes() == metadata_before
+
+
+def test_released_linux_x64_pointer_and_claim_are_admitted_by_platform_alias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: "linux-x64")
+    archive, binary = _write_fixture_archive(tmp_path / "fixture")
+    manifest_path = _write_fixture_manifest(tmp_path / "fixture", archive, binary)
+    manager = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest_path)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+    assert installed["target"]["platform"] == "linux-amd64"
+    original_manifest = manager._load_manifest(allow_network=False)
+    assert original_manifest is not None
+
+    pointer_path = manager.runtime_dir / "current.json"
+    pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    canonical_install_dir = Path(pointer["install_dir"])
+    alias_platform_dir = canonical_install_dir.parent.with_name("linux-x64")
+    canonical_install_dir.parent.rename(alias_platform_dir)
+    alias_install_dir = alias_platform_dir / canonical_install_dir.name
+    pointer["platform"] = "linux-x64"
+    pointer["install_dir"] = str(alias_install_dir)
+    managed_runtime.write_json_atomic(pointer_path, pointer)
+    metadata_path = alias_install_dir / manager.spec.metadata_filename
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["platform"] = "linux-x64"
+    managed_runtime.write_json_atomic(metadata_path, metadata)
+    managed_runtime.write_json_atomic(
+        manager.install_state_path,
+        {
+            "schema_version": 2,
+            "state": "installing",
+            "generation": RUNTIME_INSTALL_GENERATION_A,
+            "error_key": None,
+            "target": {
+                "manifest_sha256": original_manifest.digest,
+                **installed["target"],
+                "platform": "linux-x64",
+            },
+        },
+    )
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["assets"].append(
+        {
+            "platform": "fixture-unrelated",
+            "url": "https://example.test/unrelated.tar.gz",
+            "size_bytes": 1,
+            "sha256": "d" * 64,
+            "binary_sha256": "e" * 64,
+            "bin_path": "unused",
+        }
+    )
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    pointer_before = pointer_path.read_bytes()
+    metadata_before = metadata_path.read_bytes()
+    monkeypatch.setattr(
+        manager,
+        "_resolve_manifest_archive",
+        lambda _archive: pytest.fail("alias-equivalent replay accessed an archive"),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_write_current_pointer",
+        lambda *_args: pytest.fail("alias-equivalent replay rewrote the pointer"),
+    )
+
+    status = manager.status()
+    claim = manager.install_state()
+    assert claim is not None
+    replayed = manager.ensure(expected_target=claim["target"])
+
+    assert status["installed"] is True
+    assert status["version"] == "v7.2.95"
+    assert status["selected_version"] == "v7.2.95"
+    assert status["matches_manifest"] is True
+    assert status["path"] == str(alias_install_dir / "cli-proxy-api")
+    assert manager.resolve_engine_path() == alias_install_dir / "cli-proxy-api"
+    assert claim["target"] == installed["target"]
+    assert replayed["ok"] is True
+    assert replayed["changed"] is False
+    assert replayed["path"] == str(alias_install_dir / "cli-proxy-api")
+    assert pointer_path.read_bytes() == pointer_before
+    assert metadata_path.read_bytes() == metadata_before
+
+
 @pytest.mark.parametrize("transition", tuple(InstallClaimTransition), ids=lambda item: item.value)
 def test_every_install_claim_transition_preserves_live_generation_ownership(
     tmp_path: Path,
@@ -947,6 +1137,12 @@ def test_engine_installer_selects_verified_packaged_asset(
     assert archive.size == size_bytes
     assert archive.sha256 == archive_sha256
     assert archive.binary_sha256 == binary_sha256
+
+
+def test_engine_platform_identity_is_normalized_locally() -> None:
+    assert dict(runtime_installer_module._ENGINE_SPEC.platform_aliases) == runtime_installer_module._ENGINE_PLATFORM_MAP
+    assert EngineRuntimeManager._normalize_engine_platform("linux-x64") == "linux-amd64"
+    assert EngineRuntimeManager._normalize_engine_platform("linux-amd64") == "linux-amd64"
 
 
 def test_engine_installer_is_idempotent_and_rejects_tampered_archive(tmp_path: Path) -> None:
@@ -1327,7 +1523,15 @@ def test_adapter_provisions_probes_and_revokes_credential(tmp_path: Path) -> Non
         asyncio.run(run(base_url, handler))
 
 
-def _write_mock_engine(path: Path) -> None:
+def _write_mock_engine(
+    path: Path,
+    *,
+    startup_delay: float = 0.0,
+    startup_output: bytes = b"",
+    startup_output_repeat: int = 1,
+    echo_runtime_secrets: bool = False,
+    exit_before_ready: int | None = None,
+) -> None:
     script = f"""#!{sys.executable}
 import json
 import sys
@@ -1341,6 +1545,30 @@ with open(config_path, encoding='utf-8') as handle:
     config = yaml.safe_load(handle)
 gateway = config['api-keys'][0]
 management = config['remote-management']['secret-key']
+startup_output = {startup_output!r} * {startup_output_repeat!r}
+if startup_output:
+    sys.stdout.buffer.write(startup_output)
+    sys.stdout.buffer.flush()
+    sys.stderr.buffer.write(startup_output)
+    sys.stderr.buffer.flush()
+if {echo_runtime_secrets!r}:
+    sys.stderr.buffer.write(
+        f'management-key={{management}} gateway-token={{gateway}}'.encode()
+    )
+    sys.stderr.buffer.flush()
+with open('startup-output-complete', 'w', encoding='utf-8') as handle:
+    handle.write(str(len(startup_output) * 2))
+exit_before_ready = {exit_before_ready!r}
+if exit_before_ready is not None:
+    raise SystemExit(exit_before_ready)
+time.sleep({startup_delay!r})
+health_surfaces = set()
+
+def mark_health_surface(surface):
+    health_surfaces.add(surface)
+    if len(health_surfaces) == 2:
+        with open('health-surfaces-complete', 'w', encoding='utf-8') as handle:
+            handle.write(','.join(sorted(health_surfaces)))
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
@@ -1356,9 +1584,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == '/v1/models' and self.headers.get('Authorization') == f'Bearer {{gateway}}':
+            mark_health_surface('gateway')
             self._json(200, {{'object': 'list', 'data': []}})
             return
         if self.path == '/v0/management/config' and self.headers.get('X-Management-Key') == management:
+            mark_health_surface('management')
             self._json(200, {{'host': config['host']}})
             return
         if self.path.startswith('/v0/management/auth-files/models'):
@@ -1485,17 +1715,30 @@ def _fixture_supervisor(
     tmp_path: Path,
     *,
     process_factory=subprocess.Popen,
+    startup_timeout: float = 5,
+    startup_delay: float = 0.0,
+    startup_output: bytes = b"",
+    startup_output_repeat: int = 1,
+    echo_runtime_secrets: bool = False,
+    exit_before_ready: int | None = None,
 ) -> tuple[EngineSupervisor, EngineStateStore]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     binary = tmp_path / "mock-engine"
-    _write_mock_engine(binary)
+    _write_mock_engine(
+        binary,
+        startup_delay=startup_delay,
+        startup_output=startup_output,
+        startup_output_repeat=startup_output_repeat,
+        echo_runtime_secrets=echo_runtime_secrets,
+        exit_before_ready=exit_before_ready,
+    )
     installer = _FixtureInstaller(binary, tmp_path / "versions" / "install-1")
     store = EngineStateStore(tmp_path / "state")
     return (
         EngineSupervisor(
             installer=installer,
             state_store=store,
-            startup_timeout=5,
+            startup_timeout=startup_timeout,
             process_factory=process_factory,
         ),
         store,
@@ -1560,6 +1803,57 @@ def test_supervisor_missing_runtime_stays_installable_after_start(tmp_path: Path
     assert supervisor.status()["status"]["health"] == "not_installed"
 
 
+def test_supervisor_starts_disk_engine_despite_released_failure_state_and_missing_manifest(
+    tmp_path: Path,
+) -> None:
+    source_binary = tmp_path / "fixture" / "mock-engine"
+    source_binary.parent.mkdir(parents=True)
+    _write_mock_engine(source_binary)
+    binary = source_binary.read_text(encoding="utf-8").replace(
+        "\nimport json\n",
+        "\nimport sys\n"
+        "if sys.argv[1:] == ['--help']:\n"
+        "    print('CLIProxyAPI Version: 7.2.95, Commit: fixture')\n"
+        "    raise SystemExit(0)\n"
+        "import json\n",
+        1,
+    ).encode()
+    archive = tmp_path / "fixture" / "CLIProxyAPI_fixture.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        member = tarfile.TarInfo("cli-proxy-api")
+        member.mode = 0o755
+        member.size = len(binary)
+        tar.addfile(member, io.BytesIO(binary))
+    manifest_path = _write_fixture_manifest(tmp_path / "fixture", archive, binary)
+    manager = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest_path)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+    assert manager.transition_install_claim(
+        InstallClaimTransition.CREATE,
+        generation=RUNTIME_INSTALL_GENERATION_A,
+        target=installed["target"],
+    )
+    assert manager.transition_install_claim(
+        InstallClaimTransition.SETTLE_FAILURE,
+        generation=RUNTIME_INSTALL_GENERATION_A,
+        reason="model_hub_engine_manifest_missing",
+    )
+    manifest_path.unlink()
+    manager.offline = True
+    supervisor = EngineSupervisor(
+        installer=manager,
+        state_store=EngineStateStore(tmp_path / "state"),
+        startup_timeout=5,
+    )
+
+    assert manager.status()["installed"] is True
+    assert supervisor.status()["status"]["health"] == "not_started"
+    connection = supervisor.ensure_running()
+    assert connection.base_url.startswith("http://127.0.0.1:")
+    assert supervisor.status()["status"]["health"] == "ok"
+    supervisor.stop()
+
+
 def test_supervisor_keeps_installing_state_unverified_until_settlement(
     tmp_path: Path,
 ) -> None:
@@ -1594,9 +1888,11 @@ def test_supervisor_starts_checks_health_and_stops_mock_engine(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured_env: dict[str, str] = {}
+    captured_stdio: dict[str, int] = {}
 
     def spawn(*args, **kwargs):
         captured_env.update(kwargs["env"])
+        captured_stdio.update(stdout=kwargs["stdout"], stderr=kwargs["stderr"])
         return subprocess.Popen(*args, **kwargs)
 
     monkeypatch.setenv("MANAGEMENT_PASSWORD", "untrusted-management-secret")
@@ -1615,6 +1911,10 @@ def test_supervisor_starts_checks_health_and_stops_mock_engine(
     assert "GITHUB_TOKEN" not in captured_env
     assert "HTTP_PROXY" not in captured_env
     assert captured_env == engine_subprocess_environment()
+    assert captured_stdio == {
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
     assert supervisor.status()["status"]["health"] == "ok"
     config_path = store.root / "instances" / "install-1" / "config.yaml"
     first_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -1627,6 +1927,233 @@ def test_supervisor_starts_checks_health_and_stops_mock_engine(
     assert second.gateway_token == first.gateway_token
     assert second.management_key == first.management_key
     supervisor.stop()
+
+
+def test_supervisor_disable_restores_explicit_off_state(tmp_path: Path) -> None:
+    supervisor, _store = _fixture_supervisor(tmp_path)
+    supervisor.ensure_running()
+
+    supervisor.disable()
+
+    assert supervisor.status()["status"]["health"] == "not_started"
+    supervisor.ensure_running()
+    assert supervisor.status()["status"]["health"] == "ok"
+    supervisor.stop()
+
+
+def _assert_supervisor_owned_startup_log(
+    message: str,
+    *,
+    outcome: str,
+    exit_code: int | None = None,
+    readiness_budget: float | None = None,
+) -> None:
+    prefix = "Model Hub engine startup "
+    assert message.startswith(prefix)
+    tokens = message.removeprefix(prefix).split()
+    assert all("=" in token for token in tokens)
+    fields = dict(token.split("=", 1) for token in tokens)
+    assert len(fields) == len(tokens)
+
+    expected_fields = {
+        "outcome",
+        "managed_version",
+        "elapsed_seconds",
+        "child_output_retained",
+    }
+    if readiness_budget is not None:
+        expected_fields.update({"exit_code", "readiness_budget_seconds"})
+    assert set(fields) == expected_fields
+    assert fields["outcome"] == outcome
+    assert fields["managed_version"] == "v7.2.95"
+    assert float(fields["elapsed_seconds"]) >= 0
+    assert fields["child_output_retained"] == "false"
+    if readiness_budget is not None:
+        assert fields["exit_code"] == str(exit_code)
+        assert float(fields["readiness_budget_seconds"]) == readiness_budget
+    assert len(message.encode("utf-8")) < 512
+
+
+def _assert_child_payload_absent(log_text: str, payload: bytes) -> None:
+    printable_run = bytearray()
+    candidates: list[bytes] = []
+    for byte in payload + b"\x00":
+        if 32 <= byte <= 126:
+            printable_run.append(byte)
+            continue
+        if len(printable_run) >= 8:
+            if len(printable_run) <= 128:
+                candidates.append(bytes(printable_run))
+            else:
+                candidates.extend((bytes(printable_run[:64]), bytes(printable_run[-64:])))
+        printable_run.clear()
+
+    assert candidates
+    assert all(candidate.decode("ascii") not in log_text for candidate in candidates)
+    assert "\ufffd" not in log_text
+
+
+def test_mh_runtime_005_first_cold_start_waits_for_readiness_within_bounded_budget(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """MH-RUNTIME-005: first cold start waits past an early probe and becomes ready."""
+
+    assert MODEL_HUB_STARTUP_TIMEOUT_SECONDS == 30.0
+    caplog.set_level(logging.INFO, logger="vibe.model_hub_runtime.supervisor")
+    child_payload = b"\n".join(
+        (
+            b"cold-start-safe-diagnostic-marker",
+            b'id_token="opaque-id-token-value"',
+            b'private_key="opaque-private-key-value"',
+            b'future_unknown_auth_material="opaque-unknown-value"',
+            b"binary-boundary-before-\xff\xfe-binary-boundary-after",
+        )
+    )
+    supervisor, store = _fixture_supervisor(
+        tmp_path,
+        startup_timeout=3.0,
+        startup_delay=0.25,
+        startup_output=child_payload,
+        echo_runtime_secrets=True,
+    )
+
+    started_at = time.monotonic()
+    connection = supervisor.ensure_running()
+    elapsed = time.monotonic() - started_at
+    runtime_secrets = store.prepare_instance("install-1", rotate=False)[1]
+    instance_dir = store.root / "instances" / "install-1"
+    ready_log = next(
+        record.getMessage()
+        for record in caplog.records
+        if "startup outcome=ready" in record.getMessage()
+    )
+
+    assert connection.base_url.startswith("http://127.0.0.1:")
+    assert 0.2 <= elapsed < 3.0
+    _assert_supervisor_owned_startup_log(ready_log, outcome="ready")
+    _assert_child_payload_absent(caplog.text, child_payload)
+    for secret in (runtime_secrets.management_key, runtime_secrets.gateway_token):
+        midpoint = len(secret) // 2
+        assert secret[:midpoint] not in caplog.text
+        assert secret[midpoint:] not in caplog.text
+    assert (instance_dir / "startup-output-complete").read_text(encoding="utf-8") == str(
+        len(child_payload) * 2
+    )
+    assert (instance_dir / "health-surfaces-complete").read_text(encoding="utf-8") == (
+        "gateway,management"
+    )
+    supervisor.stop()
+
+
+def test_supervisor_process_exit_discards_all_child_output(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    child_payload = b"\n".join(
+        (
+            b"process-exit-safe-diagnostic-marker",
+            b'id_token="process-exit-oauth-secret"',
+            b'private_key="process-exit-private-key"',
+            b'unknown_field="process-exit-opaque-value"',
+            b"process-exit-binary-before-\xff-process-exit-binary-after",
+        )
+    )
+    caplog.set_level(logging.WARNING, logger="vibe.model_hub_runtime.supervisor")
+    supervisor, store = _fixture_supervisor(
+        tmp_path,
+        startup_timeout=2.0,
+        startup_output=child_payload,
+        echo_runtime_secrets=True,
+        exit_before_ready=23,
+    )
+
+    with pytest.raises(EngineUnavailableError, match="models.engine.health_failed") as exc_info:
+        supervisor.ensure_running()
+
+    runtime_secrets = store.prepare_instance("install-1", rotate=False)[1]
+    instance_dir = store.root / "instances" / "install-1"
+    warning = next(
+        record.getMessage()
+        for record in caplog.records
+        if "startup outcome=process_exit" in record.getMessage()
+    )
+    assert exc_info.value.error_key == "models.engine.health_failed"
+    assert supervisor.status()["status"]["health"] == "down"
+    _assert_supervisor_owned_startup_log(
+        warning,
+        outcome="process_exit",
+        exit_code=23,
+        readiness_budget=2.0,
+    )
+    _assert_child_payload_absent(caplog.text, child_payload)
+    for secret in (runtime_secrets.management_key, runtime_secrets.gateway_token):
+        midpoint = len(secret) // 2
+        assert secret[:midpoint] not in caplog.text
+        assert secret[midpoint:] not in caplog.text
+    assert (instance_dir / "startup-output-complete").read_text(encoding="utf-8") == str(
+        len(child_payload) * 2
+    )
+    assert not (instance_dir / "health-surfaces-complete").exists()
+
+
+def test_mh_runtime_006_timeout_stops_engine_with_bounded_structured_diagnostics(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """MH-RUNTIME-006: readiness timeout is terminal with bounded diagnostics."""
+
+    caplog.set_level(logging.WARNING, logger="vibe.model_hub_runtime.supervisor")
+    child_payload = b"\n".join(
+        (
+            b"timeout-safe-diagnostic-marker",
+            b'id_token="timeout-oauth-secret"',
+            b'private_key="timeout-private-key"',
+            b'future_unknown_field="timeout-opaque-value"',
+            b"oversized-child-output-" + b"x" * 4_096,
+            b"timeout-binary-before-\xff\xfe-timeout-binary-after",
+        )
+    )
+    output_repeat = 256
+    supervisor, store = _fixture_supervisor(
+        tmp_path,
+        startup_timeout=1.0,
+        startup_delay=60.0,
+        startup_output=child_payload,
+        startup_output_repeat=output_repeat,
+        echo_runtime_secrets=True,
+    )
+
+    started_at = time.monotonic()
+    with pytest.raises(EngineUnavailableError, match="models.engine.health_failed") as exc_info:
+        supervisor.ensure_running()
+    elapsed = time.monotonic() - started_at
+    runtime_secrets = store.prepare_instance("install-1", rotate=False)[1]
+    instance_dir = store.root / "instances" / "install-1"
+    warning = next(
+        record.getMessage()
+        for record in caplog.records
+        if "startup outcome=timeout" in record.getMessage()
+    )
+
+    assert exc_info.value.error_key == "models.engine.health_failed"
+    assert elapsed < 2.5
+    assert supervisor.status()["status"]["health"] == "down"
+    _assert_supervisor_owned_startup_log(
+        warning,
+        outcome="timeout",
+        readiness_budget=1.0,
+    )
+    _assert_child_payload_absent(caplog.text, child_payload)
+    for secret in (runtime_secrets.management_key, runtime_secrets.gateway_token):
+        midpoint = len(secret) // 2
+        assert secret[:midpoint] not in caplog.text
+        assert secret[midpoint:] not in caplog.text
+    observed_output_bytes = int(
+        (instance_dir / "startup-output-complete").read_text(encoding="utf-8")
+    )
+    assert observed_output_bytes == len(child_payload) * output_repeat * 2
+    assert observed_output_bytes > 512 * 1024
 
 
 def test_mh_runtime_001_service_restart_reports_installed_engine_as_not_started(

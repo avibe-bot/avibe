@@ -82,6 +82,7 @@ class MessageHandler(BaseHandler):
         lifecycle_admission: Any = None,
         attachment_lease: Any = None,
         attachment_reservation: Any = None,
+        capture: object = None,
     ) -> None:
         """Retain a best-effort capture until asyncio reports its completion."""
 
@@ -99,6 +100,7 @@ class MessageHandler(BaseHandler):
             except Exception:
                 logger.warning("Memory capture task failed", exc_info=True)
             finally:
+                self._close_memory_capture(capture)
                 release_attachment = getattr(attachment_lease, "release", None)
                 if callable(release_attachment):
                     release_attachment()
@@ -198,6 +200,11 @@ class MessageHandler(BaseHandler):
         """Register a capture without awaiting Memory on the turn path."""
 
         if not self._memory_capture_registration_open:
+            self._close_memory_capture(capture)
+            for resource in (attachment_lease, attachment_reservation):
+                release = getattr(resource, "release", None)
+                if callable(release):
+                    release()
             return None
         capture_task = asyncio.create_task(
             self._run_memory_capture(session_id, expected_snapshot, capture),
@@ -208,6 +215,7 @@ class MessageHandler(BaseHandler):
             session_id=session_id,
             attachment_lease=attachment_lease,
             attachment_reservation=attachment_reservation,
+            capture=capture,
         )
         return capture_task
 
@@ -234,20 +242,55 @@ class MessageHandler(BaseHandler):
             return
         if not self._memory_capture_registration_open:
             return
+        capacity_reservation = None
+        reserve_capacity = getattr(
+            self.controller,
+            "reserve_memory_capture_capacity",
+            None,
+        )
+        if callable(reserve_capacity):
+            try:
+                capacity_reservation = reserve_capacity(context, text, session_id)
+            except Exception:
+                logger.warning(
+                    "Memory text capture capacity reservation failed",
+                    exc_info=True,
+                )
+                return
+            if getattr(
+                capacity_reservation,
+                "capacity_blocked",
+                getattr(capacity_reservation, "capacity_full", False),
+            ):
+                release = getattr(capacity_reservation, "release", None)
+                if callable(release):
+                    release()
+                return
         capture: Awaitable[None] | None = None
         try:
-            capture = capture_memory(context, text, session_id)
+            capture_options = {}
+            if capacity_reservation is not None:
+                capture_options["attachment_reservation"] = capacity_reservation
+            capture = capture_memory(context, text, session_id, **capture_options)
             if (
                 self._schedule_memory_capture_task(
                     session_id=session_id,
                     expected_snapshot=expected_snapshot,
                     capture=capture,
+                    attachment_reservation=capacity_reservation,
                 )
                 is None
             ):
                 self._close_memory_capture(capture)
         except Exception:
             self._close_memory_capture(capture)
+            release_reservation = getattr(
+                capacity_reservation,
+                "release",
+                None,
+            )
+            if callable(release_reservation):
+                release_reservation()
             logger.warning(
                 "Memory text capture could not be scheduled",
                 exc_info=True,
@@ -288,14 +331,6 @@ class MessageHandler(BaseHandler):
             self._memory_session_lifecycle_snapshot(session_id)
             == expected_snapshot
         )
-
-    async def drain_memory_capture_tasks(self) -> None:
-        """Settle captures accepted before controller shutdown closes Memory."""
-
-        while self._memory_capture_tasks:
-            tasks = tuple(self._memory_capture_tasks)
-            await asyncio.gather(*tasks, return_exceptions=True)
-            self._memory_capture_tasks.difference_update(tasks)
 
     async def cancel_memory_capture_tasks(self) -> None:
         """Cancel and join captures before the controller event loop closes."""
@@ -992,6 +1027,20 @@ class MessageHandler(BaseHandler):
                             and not stale_attachment_capture
                             else None
                         )
+                        if getattr(
+                            memory_capture_reservation,
+                            "capacity_blocked",
+                            getattr(memory_capture_reservation, "capacity_full", False),
+                        ):
+                            release = getattr(
+                                memory_capture_reservation,
+                                "release",
+                                None,
+                            )
+                            if callable(release):
+                                release()
+                            memory_capture_reservation = None
+                            raise _MemoryCaptureRegistrationClosed
                         from core.memory import admission as memory_admission
 
                         attachment_config_generation = (

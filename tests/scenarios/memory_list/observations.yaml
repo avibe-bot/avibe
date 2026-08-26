@@ -22,3 +22,7 @@ observations:
       - MEMORY-LIST-006
       - MEMORY-LIST-007
     observation: The existing Search tab selects browse or relevance search solely from the trimmed query, while UI-only aggregate cursors remain opaque and entry ids are exposed only through a copy affordance.
+  - id: MEMORY-LIST-OBS-005
+    scenarios:
+      - MEMORY-LIST-008
+    observation: Settings selects an owner origin rather than accepting a raw owner id; the controller derives the Agent owner from the authenticated principal and every returned row identifies its origin.

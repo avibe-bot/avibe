@@ -29,6 +29,45 @@
       "heading": "你无权访问此页面",
       "message": "请联系页面所有者，将你的邮箱加入允许访问名单。",
       "back": "返回首页"
+    },
+    "markdown": {
+      "help": "每个 Show Page URL 都提供 Agent 可读的表示；请求时设置 Accept: text/markdown 即可获取。",
+      "errors": {
+        "authenticationRequired": "需要先完成身份验证才能读取此 Show Page。",
+        "forbidden": "你无权读取此 Show Page。",
+        "pageOffline": "此 Show Page 已离线。",
+        "rendererUnavailable": "Markdown 渲染暂不可用。请升级 Show Runtime 后重试。",
+        "renderTimeout": "Show Runtime 渲染此页面时超时。",
+        "renderFailed": "Show Runtime 无法渲染此页面。",
+        "sessionUnknown": "Show Runtime 中没有此 Show Page 会话。"
+      }
+    },
+    "runtimeRecovery": {
+      "title": "Show Runtime 暂时不可用",
+      "loading": "正在加载 Show Page",
+      "eyebrow": "Show Page",
+      "heading": "Show Runtime 暂时不可用",
+      "downloadMessage": "Avibe 无法下载运行此 Show Page 所需的文件。",
+      "offlineMessage": "Avibe 当前处于离线模式，且没有可用的已验证 Show Runtime 归档。",
+      "nodeMessage": "Node.js 未安装，或当前版本不受支持。",
+      "platformMessage": "当前 Show Runtime 版本不支持此平台。",
+      "verificationMessage": "Show Runtime 文件未通过完整性校验。",
+      "configurationMessage": "当前配置的 Show Runtime 来源不可用。请移除 VIBE_SHOW_RUNTIME_SOURCE 以使用随 Avibe 发布的运行时，或将 VIBE_SHOW_RUNTIME_BIN 指向你自行构建的运行时。",
+      "policyMessage": "配置已关闭 Show Runtime 自动安装。",
+      "installMessage": "Avibe 无法安装 Show Runtime。",
+      "startMessage": "Show Runtime 已安装，但无法启动。",
+      "unavailableMessage": "Avibe 无法启动用于渲染此 Show Page 的服务。",
+      "repairHeading": "修复 Show Runtime",
+      "repairMessage": "请在终端运行以下命令：",
+      "settingsHeading": "修改 Show Runtime 设置",
+      "settingsMessage": "请修改下方所示的设置或前置条件，然后重新加载此页面。实例所有者也可以点击“立即重试”，发起一次显式尝试。",
+      "unsupportedHeading": "此处没有可用操作",
+      "unsupportedMessage": "原因记录如下；这台机器上的任何操作都无法改变这一结果。",
+      "ownerActionHeading": "需要实例所有者处理",
+      "ownerActionMessage": "请重新加载此页面，再次尝试请求；若仍然失败，请联系 Avibe 实例所有者执行可用的恢复操作。",
+      "reasonLabel": "原因",
+      "sessionLabel": "会话",
+      "retryNow": "立即重试"
     }
   },
   "harness": {
@@ -715,7 +754,7 @@
         "profile": "显示记忆档案",
         "list": "列出已处理的记忆片段",
         "search": "搜索本地记忆",
-        "remember": "将长期个人信息加入队列",
+        "remember": "提交个人信息供记忆系统尽力处理",
         "query": "搜索内容",
         "project": "记忆项目：default，或 billing 这类小写 slug",
         "page": "页码（从 1 开始）",
@@ -726,14 +765,16 @@
         "json": "输出机器可读格式"
       },
       "error": "记忆 {operation} 失败：{code}",
-      "status": "记忆来源：{state}",
+      "status": "记忆：{state}",
       "provider": "EverOS {version}：{state}",
       "attachmentCapture": "IM 附件捕获：{state}",
       "sourceReason": "来源原因：{reason}",
-      "sourceState": {
-        "available": "可用",
-        "stale": "数据已过期",
-        "unavailable": "不可用",
+      "runtimeState": {
+        "disabled": "已停用",
+        "starting": "正在启动",
+        "running": "运行中",
+        "degraded": "已降级",
+        "needsRepair": "需要修复",
         "unknown": "未知"
       },
       "providerState": {
@@ -759,14 +800,27 @@
         "runtimeUnsupported": "记忆运行时不受支持",
         "runtimeInstallFailed": "记忆运行时安装失败",
         "reconcileFailed": "记忆协调失败",
-        "restartFailed": "记忆重启失败",
+        "wakeFailed": "记忆唤醒失败，未删除数据",
+        "runtimeBusy": "记忆无法安全停止",
+        "permissionDenied": "记忆数据路径权限不足",
+        "diskUnavailable": "记忆磁盘不可用",
+        "localDataUnusable": "本地记忆数据需要修复",
+        "legacyRecoveryRequired": "旧版恢复状态需要明确修复",
         "sidecarUnavailable": "记忆 sidecar 不可用",
         "providerTimeout": "记忆服务请求超时",
         "providerResponseInvalid": "记忆服务响应无效",
         "capabilityUnavailable": "记忆能力不可用",
         "processingFailed": "记忆处理失败",
-        "clearFailed": "清除记忆失败",
-        "factoryResetFailed": "记忆初始化失败",
+        "lossConfirmationRequired": "需要确认接受记忆数据丢失",
+        "embeddingUnavailable": "记忆向量服务不可用",
+        "llmUnavailable": "记忆语言模型不可用",
+        "rerankUnavailable": "记忆重排服务不可用",
+        "multimodalUnavailable": "记忆多模态处理不可用",
+        "repairFailed": "记忆修复失败",
+        "repairNotRequired": "记忆无需修复",
+        "deleteDataFailed": "记忆数据删除失败",
+        "reconfigureFailed": "记忆重新配置失败",
+        "operationInProgress": "另一项记忆操作正在进行",
         "unknown": "未知原因"
       },
       "fault": {
@@ -774,9 +828,18 @@
         "engine": "记忆引擎内部错误，可尝试修复记忆运行时。"
       },
       "empty": "未找到记忆条目。",
-      "remembered": "记忆已加入队列。",
+      "originPrefix": "[{origin}] ",
+      "origin": {
+        "user": "用户记忆",
+        "agent": "Agent 记忆",
+        "both": "用户 + Agent"
+      },
+      "remembered": "记忆请求已确认；系统将尽力处理，但不保证持久保存。",
       "listWarning": {
         "truncated": "记忆列表已达到服务排序上限，后续页面可能不完整。"
+      },
+      "readWarning": {
+        "partial": "部分用户记忆、Agent 记忆或项目记忆来源未能加载，结果可能不完整。"
       },
       "partialRestartWarning": "记忆设置内容暂不可用：Web UI 已重启，但服务仍在运行，\n  两者共享的记忆访问凭证仅存在于运行中的进程内。\n  请先运行 'vibe stop'，再运行 'vibe'，以同时重启两者。"
     }
@@ -904,7 +967,8 @@
     "prepare": {
       "prepared": "Show Runtime 已准备完成。",
       "skipped": "Show Runtime 准备已跳过：{reason}",
-      "failed": "Show Runtime 准备失败：{reason}"
+      "failed": "Show Runtime 准备失败：{reason}",
+      "unsupportedSource": "Show Runtime 准备失败：{reason}。请移除 VIBE_SHOW_RUNTIME_SOURCE 以使用随 Avibe 发布的运行时，或将 VIBE_SHOW_RUNTIME_BIN 指向你自行构建的运行时。"
     },
     "clean": {
       "dryRunHelp": "\u4ec5\u62a5\u544a\u53ef\u6e05\u7406\u7684\u5f52\u6863\u4e0e\u7f13\u5b58\u6761\u76ee\uff0c\u4e0d\u5220\u9664\u4efb\u4f55\u5185\u5bb9\u3002",
@@ -928,9 +992,9 @@
       "archiveCacheSkipped": "未能检查 Show Runtime 归档缓存（{reason}）；其中可能仍有可回收归档。",
       "archiveCacheSkippedAction": "等待正在进行的安装或清理结束后，重新运行 Doctor。",
       "archiveCacheSkippedInspectionAction": "\u8bf7\u68c0\u67e5\u8fd0\u884c\u76ee\u5f55\u6743\u9650\u548c Avibe \u65e5\u5fd7\uff0c\u4fee\u590d\u540e\u91cd\u8bd5 Doctor\u3002",
+      "providerUnsupportedAction": "请移除 VIBE_SHOW_RUNTIME_SOURCE 以使用随 Avibe 发布的运行时，或将 VIBE_SHOW_RUNTIME_BIN 指向你自行构建的运行时。",
       "repairHealthy": "Show Runtime \u53ef\u4ee5\u6b63\u5e38\u542f\u52a8\uff0c\u65e0\u9700\u4fee\u590d\u3002",
       "repairExplicitCommandFailed": "VIBE_SHOW_RUNTIME_BIN \u6307\u5b9a\u7684 Show Runtime \u547d\u4ee4\u65e0\u6cd5\u542f\u52a8\uff1a{reason}\u3002\u8bf7\u4fee\u590d\u6216\u79fb\u9664\u8be5\u8986\u76d6\u540e\u91cd\u65b0\u8fd0\u884c Doctor\u3002",
-      "repairGitHubSourceUpdateFailed": "Show Runtime 未重新构建，因为 Avibe 无法在 {path} 完成托管源代码更新。已安装的 runtime 保持不变。请检查目录权限和 Avibe 日志，然后重新运行 Doctor。",
       "repairInstalled": "\u5df2\u5b89\u88c5\u5e76\u6210\u529f\u542f\u52a8 Show Runtime\u3002",
       "repairReinstalled": "\u5df2\u91cd\u65b0\u5b89\u88c5\u5e76\u6210\u529f\u542f\u52a8 Show Runtime\u3002",
       "repairInstallStartFailed": "Show Runtime \u5df2\u5b89\u88c5\uff0c\u4f46\u65e0\u6cd5\u542f\u52a8\uff1a{reason}",

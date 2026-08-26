@@ -1,0 +1,44 @@
+version: 1
+capability:
+  id: memory_delete_data
+  name: Explicit confirmed deletion of confined Memory data
+  canonical_tests:
+    - tests/test_controller_memory_data_reset.py
+    - tests/test_internal_server.py
+    - tests/test_internal_client.py
+    - tests/test_ui_memory_routes.py
+status_legend:
+  covered: executable evidence exists at the declared layer
+scenarios:
+  - id: MEMORY-DELETE-DATA-001
+    name: Explicit Delete data is distinct from Repair and requires accepted-loss confirmation
+    status: covered
+    kind: happy_path
+    layer: scenario
+    test: tests/test_ui_memory_routes.py::test_memory_delete_data_public_route_requires_exact_loss_confirmation
+    related_tests:
+      - tests/test_controller_memory_data_reset.py::test_delete_data_has_distinct_intent_but_reuses_reset
+    actor: Memory Settings user
+    trigger: The user submits Delete data with exact accepted-loss confirmation
+    conditions:
+      - The public route has valid CSRF authority and the operation lease is available
+    given: The user explicitly accepts deletion of Memory data
+    when: The public request reaches the distinct Delete data controller operation
+    then: The response identifies delete_data, resets only fixed confined data surfaces, and preserves settings and stable identity
+    expected_outputs:
+      - A distinct delete_data response and no implicit Repair authorization
+  - id: MEMORY-DELETE-DATA-002
+    name: Unsafe contents fail closed without recursive escape
+    status: covered
+    kind: safety
+    layer: contract
+    test: tests/test_controller_memory_data_reset.py::test_reset_memory_data_roots_fails_closed_on_special_entry
+    actor: Memory reset primitive
+    trigger: Confirmed deletion inspects a mutable root
+    conditions:
+      - The root contains an unsafe foreign or special entry
+    given: A mutable root contains an unsafe foreign or special entry
+    when: The shared confined deletion primitive inspects it
+    then: The entry remains, the exact root reports failure, and no path outside the root is touched
+    expected_outputs:
+      - Truthful data_remaining result with the unsafe entry intact

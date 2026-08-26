@@ -1,0 +1,18 @@
+{
+  "released_provider_session_ref": {
+    "epoch": 0,
+    "principal_id": "u-11111111111111111111111111111111",
+    "project_ref": "p-22222222222222222222222222222222",
+    "session_id": "src--4f619a27f96acb8854d2c1f4d2b301263832544740e2c0b176d1a1a05f5b997d--e0"
+  },
+  "pre_owner_split_queue_row": {
+    "occurred_at_ms": 3,
+    "payload_text": "legacy agent payload",
+    "principal_id": "u-11111111111111111111111111111111",
+    "project_ref": "p-22222222222222222222222222222222",
+    "provenance": "agent",
+    "provider_timestamp_ms": 3,
+    "session_id": "legacy-session",
+    "source_message_digest": "legacy-agent-pending"
+  }
+}

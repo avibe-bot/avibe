@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import type { ReactNode } from 'react';
@@ -39,6 +39,11 @@ const api = vi.hoisted(() => ({
 }));
 const status = vi.hoisted(() => ({ state: 'ready' as const }));
 const inbox = vi.hoisted(() => ({ totalUnread: 0 }));
+const i18n = vi.hoisted(() => ({
+  language: 'en',
+  options: { resources: { en: {}, zh: {} } },
+  changeLanguage: vi.fn(),
+}));
 const instanceAuth = vi.hoisted(() => ({
   remote: true,
   instanceKind: null as 'personal' | 'organization' | null,
@@ -79,9 +84,9 @@ vi.mock('../context/ShowPageDragProvider', () => ({
   ShowPageDragProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
 }));
 vi.mock('./AppsLauncher', () => ({ AppsLauncher: () => <div data-testid="apps-launcher" /> }));
-vi.mock('./AccountMenu', () => ({ AccountMenu: () => null }));
-vi.mock('./LanguageSwitcher', () => ({ LanguageSwitcher: () => null }));
-vi.mock('./ThemeToggle', () => ({ ThemeToggle: () => null }));
+vi.mock('./AccountMenu', () => ({ AccountMenu: () => <div data-testid="account-menu" /> }));
+vi.mock('./LanguageSwitcher', () => ({ LanguageSwitcher: () => <div data-testid="language-switcher" /> }));
+vi.mock('./ThemeToggle', () => ({ ThemeToggle: () => <div data-testid="theme-toggle" /> }));
 vi.mock('./VersionBadge', () => ({ VersionBadge: () => null }));
 vi.mock('./apps/MobileDockDrawer', () => ({
   MobileDockDrawer: () => <div data-testid="mobile-dock-drawer" />,
@@ -97,11 +102,7 @@ vi.mock('./workbench/search/SearchPalette', () => ({ SearchPalette: () => null }
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: (key: string) => key,
-    i18n: {
-      language: 'en',
-      options: { resources: { en: {}, zh: {} } },
-      changeLanguage: vi.fn(),
-    },
+    i18n,
   }),
 }));
 
@@ -112,6 +113,8 @@ beforeEach(() => {
   instanceAuth.capabilities.can_manage_instance = true;
   instanceAuth.capabilities.can_chat = true;
   instanceAuth.capabilities.can_use_show_pages = true;
+  i18n.language = 'en';
+  i18n.changeLanguage.mockResolvedValue(undefined);
   api.getConfig.mockResolvedValue({ platforms: { enabled: [] } });
   api.getMemorySettings.mockResolvedValue({
     status: 'failed',
@@ -139,7 +142,7 @@ describe('AppShell setup recovery', () => {
     );
 
     expect(await screen.findByText('setup.remoteOwner.title')).toBeTruthy();
-    expect(screen.getByRole('link', { name: 'setup.remoteOwner.action' }).getAttribute('href')).toBe('/admin/dashboard');
+    expect(screen.getByRole('link', { name: 'setup.remoteOwner.action' }).getAttribute('href')).toBe('/settings/service');
     expect(screen.queryByTestId('wizard')).toBeNull();
   });
 });
@@ -225,43 +228,73 @@ describe('AppShell workbench sidebar', () => {
   });
 });
 
-describe('AppShell Permissions navigation', () => {
-  it.each([
-    'personal',
-    null,
-    'organization',
-  ] as const)('keeps current-instance Permissions in More Settings for %s instances', async (instanceKind) => {
-    const user = userEvent.setup();
-    instanceAuth.instanceKind = instanceKind;
+describe('AppShell persistent Workbench chrome', () => {
+  it('applies the instance language while Settings controls stay unmounted', async () => {
+    viewport.isDesktop = true;
+    api.getConfig.mockResolvedValue({ language: 'zh', platforms: { enabled: [] } });
 
     render(
-      <MemoryRouter initialEntries={['/admin/dashboard']}>
+      <MemoryRouter initialEntries={['/']}>
         <Routes>
           <Route element={<AppShell />}>
-            <Route path="admin/dashboard" element={<div data-testid="dashboard" />} />
+            <Route index element={<div data-testid="workbench" />} />
           </Route>
         </Routes>
       </MemoryRouter>,
     );
 
-    expect(await screen.findByTestId('dashboard')).toBeTruthy();
+    expect(await screen.findByTestId('workbench')).toBeTruthy();
+    expect(screen.queryByTestId('language-switcher')).toBeNull();
+    await waitFor(() => expect(i18n.changeLanguage).toHaveBeenCalledWith('zh'));
+  });
 
-    const moreTab = screen.getByRole('button', { name: 'nav.more' });
-    const bottomNav = moreTab.closest('nav');
-    expect(bottomNav).not.toBeNull();
-    expect(within(bottomNav!).queryByText('nav.permissions')).toBeNull();
+  it.each([
+    'personal',
+    null,
+    'organization',
+  ] as const)('keeps Settings in the Workbench sidebar without preference controls for %s instances', async (instanceKind) => {
+    viewport.isDesktop = true;
+    instanceAuth.instanceKind = instanceKind;
 
-    await user.click(moreTab);
-    const moreSettings = screen.getByRole('dialog');
-    expect(within(moreSettings).getByRole('link', { name: 'nav.permissions' }).getAttribute('href')).toBe(
-      '/admin/permissions',
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route index element={<div data-testid="workbench" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
     );
 
-    const desktopSidebar = document.querySelector('aside');
-    expect(desktopSidebar).not.toBeNull();
-    expect(within(desktopSidebar!).getByRole('link', { name: 'nav.permissions' }).getAttribute('href')).toBe(
-      '/admin/permissions',
+    expect(await screen.findByTestId('workbench')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'appShell.openControlPanel' }).getAttribute('href')).toBe(
+      '/settings/replies',
     );
+    expect(screen.queryByTestId('language-switcher')).toBeNull();
+    expect(screen.queryByTestId('theme-toggle')).toBeNull();
+    expect(screen.queryByTestId('account-menu')).toBeNull();
+  });
+
+  it('uses the Settings button to close an open Settings surface', async () => {
+    viewport.isDesktop = true;
+    const user = userEvent.setup();
+
+    render(
+      <MemoryRouter initialEntries={['/settings/replies']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route index element={<div data-testid="workbench" />} />
+            <Route path="settings/replies" element={<div data-testid="settings" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('settings')).toBeTruthy();
+    const settingsToggle = screen.getByRole('link', { name: 'appShell.openControlPanel' });
+    expect(settingsToggle.getAttribute('href')).toBe('/');
+    await user.click(settingsToggle);
+    expect(await screen.findByTestId('workbench')).toBeTruthy();
   });
 });
 

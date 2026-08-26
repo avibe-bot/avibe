@@ -8,6 +8,7 @@ import { cn } from '@/lib/utils';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { collapsedModelRows, listedModelIds, modelChainKey, modelSupplyState, type ModelChainIndex, type ModelChainRead } from './modelRows';
 import { foldRegionRead } from './regionRead';
+import { agentGroupStatus } from './supply';
 import { agentHasLiveChainProjection, type FreshRuntimeProjection } from './runtimeLifecycle';
 import { currentChainLink, isTakeoverChain } from './takeover';
 import { ACCENT_ICON, ACCENT_TILE, backendVisual } from './vendorMeta';
@@ -104,7 +105,7 @@ const AgentModelCard: React.FC<{
   const hasTakeover = chainProjectionLive
     && allModels.some((modelId) => isTakeoverRead(chains[modelChainKey(agent.backend, modelId)]));
   const modeWord = t(`settings.models.gateway.group.mode.${agent.mode === 'hub' ? 'gateway' : 'direct'}`) as string;
-  const health = agent.supply_status ?? 'noSelection';
+  const health = agent.mode === 'hub' ? agentGroupStatus(agent.named_agents ?? []) : 'unused';
   const subtitle = agent.mode === 'direct'
     ? t('settings.models.gateway.group.subtitle.direct', { mode: modeWord }) as string
     : t('settings.models.gateway.group.subtitle.gateway', { mode: modeWord, health: t(`settings.models.gateway.group.status.${health}`) }) as string;
@@ -153,7 +154,7 @@ const AgentModelCard: React.FC<{
           <ModelHubInfoHint label={switchFailed ? t('settings.models.gateway.fail.switchToDirect') : subtitle} content={switchFailed ? t('settings.models.gateway.fail.switchToDirect') : subtitle} className="model-hub-overview-info size-[13px]" />
         </span>
       </div>
-      {agent.mode === 'hub' && (models.length === 0 ? <div className="px-4 py-10 text-center sm:px-5"><p className="text-[12.5px] text-muted">{t('settings.models.gateway.group.emptyModels')}</p></div> : <div className="space-y-2 p-2">{noUsableSource && <p className="px-3 py-1 text-[11px] font-semibold text-muted">{t('settings.models.gateway.supply.none')}</p>}{models.map((modelId) => <ModelRow key={modelId} agent={agent} modelId={modelId} sources={sources} read={chainProjectionLive ? chains[modelChainKey(agent.backend, modelId)] : undefined} onOpenRoute={onOpenRoute} />)}{canCollapse ? <button type="button" onClick={toggleCollapsed} className="model-hub-model-collapse flex h-6 w-full items-center gap-1.5 hover:text-foreground">{expanded ? <ChevronUp /> : <ChevronDown />}{expanded ? t('settings.models.gateway.collapse', { count: collapsedAtRest.hidden.length }) : t('settings.models.gateway.collapse', { count: collapsed.hidden.length })}</button> : needsChainRepair ? <button type="button" onClick={retryChains} className="model-hub-model-collapse flex h-6 w-full items-center gap-1.5 hover:text-foreground"><RefreshCw />{t('settings.models.gateway.retry')}</button> : null}</div>)}
+      {agent.mode === 'hub' && (models.length === 0 ? <div className="px-4 py-10 text-center sm:px-5"><p className="text-[12.5px] text-muted">{t('settings.models.gateway.group.emptyModels')}</p></div> : <div className="space-y-2 p-2">{noUsableSource && <p className="px-3 py-1 text-[11px] font-semibold text-muted">{t('settings.models.gateway.supply.none')}</p>}{models.map((modelId) => <ModelRow key={modelId} agent={agent} modelId={modelId} sources={sources} read={chainProjectionLive ? chains[modelChainKey(agent.backend, modelId)] : undefined} onOpenRoute={onOpenRoute} />)}{canCollapse ? <button type="button" onClick={toggleCollapsed} className="model-hub-model-collapse flex h-6 w-full items-center gap-1.5 hover:text-foreground">{expanded ? <ChevronUp /> : <ChevronDown />}{expanded ? t('settings.models.gateway.collapse') : t('settings.models.gateway.moreModels', { count: collapsed.hidden.length })}</button> : needsChainRepair ? <button type="button" onClick={retryChains} className="model-hub-model-collapse flex h-6 w-full items-center gap-1.5 hover:text-foreground"><RefreshCw />{t('settings.models.gateway.retry')}</button> : null}</div>)}
     </section>
   );
 };

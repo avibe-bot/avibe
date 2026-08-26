@@ -374,7 +374,6 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
 
         async def close(self) -> None:
             assert stopped["capture"] is True
-            assert archive_flush_task.cancelled()
             self.closed = True
             stopped["runtime"] = True
             stop_order.append("memory-runtime")
@@ -394,25 +393,9 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
     controller.watch_service = _WatchStopper("watch")
     controller.runtime_command_watcher = _Stopper("runtime")
     controller.message_handler = _MessageHandler()
-    old_memory_runtime = _MemoryRuntime()
-    fresh_memory_runtime = _MemoryRuntime()
-    controller.memory_runtime = old_memory_runtime
+    memory_runtime = _MemoryRuntime()
+    controller.memory_runtime = memory_runtime
 
-    async def retained_factory_reset() -> None:
-        await asyncio.sleep(0)
-        stop_order.append("factory-reset")
-        controller.memory_runtime = fresh_memory_runtime
-
-    controller._memory_factory_reset_task = loop.create_task(retained_factory_reset())
-
-    async def pending_archive_flush() -> None:
-        try:
-            await asyncio.Event().wait()
-        finally:
-            stop_order.append("archive-flush")
-
-    archive_flush_task = loop.create_task(pending_archive_flush())
-    controller._archive_memory_flush_tasks = {archive_flush_task}
     loop.run_until_complete(asyncio.sleep(0))
     controller.update_checker = type("UpdateChecker", (), {"stop": lambda self: None})()
     controller.receiver_tasks = {}
@@ -422,67 +405,23 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
     try:
         controller.cleanup_sync()
     finally:
-        if not archive_flush_task.done():
-            archive_flush_task.cancel()
-            loop.run_until_complete(
-                asyncio.gather(archive_flush_task, return_exceptions=True)
-            )
         loop.close()
 
-    assert archive_flush_task.cancelled()
     assert stopped["tasks"] is True
     assert stopped["watch"] is True
     assert stopped["supervisor"] is True
     assert stopped["runtime"] is True
     assert stopped["capture"] is True
     assert stopped["capture-registration"] is True
-    assert old_memory_runtime.closed is False
-    assert fresh_memory_runtime.closed is True
-    runtime_work_order = [
-        event for event in stop_order if event != "factory-reset"
-    ]
-    assert runtime_work_order[0] == "quiesce"
-    assert set(runtime_work_order[1:3]) == {"tasks", "watch"}
-    assert runtime_work_order[3] == "supervisor"
-    assert stop_order.index("factory-reset") < stop_order.index("capture")
-    assert stop_order[-4:] == [
+    assert memory_runtime.closed is True
+    assert stop_order[0] == "quiesce"
+    assert set(stop_order[1:3]) == {"tasks", "watch"}
+    assert stop_order[3] == "supervisor"
+    assert stop_order[-3:] == [
         "capture-registration",
         "capture",
-        "archive-flush",
         "memory-runtime",
     ]
-
-
-@pytest.mark.asyncio
-async def test_controller_joins_retained_factory_reset_task() -> None:
-    controller = Controller.__new__(Controller)
-    entered = asyncio.Event()
-    release = asyncio.Event()
-
-    async def retained_reset() -> None:
-        entered.set()
-        await release.wait()
-
-    task = asyncio.create_task(retained_reset())
-    controller._memory_factory_reset_task = task
-    await entered.wait()
-
-    joining = asyncio.create_task(controller._join_memory_factory_reset_task())
-    await asyncio.sleep(0)
-    assert joining.done() is False
-
-    joining.cancel()
-    await asyncio.sleep(0)
-    assert task.done() is False
-
-    release.set()
-    with pytest.raises(asyncio.CancelledError):
-        await joining
-
-    assert task.done() is True
-    assert controller._memory_factory_reset_task is None
-
-
 @pytest.mark.anyio
 async def test_runtime_work_stack_stops_supervisor_after_service_failure() -> None:
     controller = Controller.__new__(Controller)
@@ -921,10 +860,18 @@ def test_cleanup_sync_cancels_memory_reconcile_before_closing_runtime() -> None:
 
     reconcile_task = loop.create_task(never_returns())
     controller._memory_reconcile_task = reconcile_task
+    cleanup_order: list[str] = []
+
+    async def join_destructive_transactions() -> None:
+        cleanup_order.append("destructive-transactions")
+
+    controller._join_memory_destructive_transactions = join_destructive_transactions
 
     class _MemoryRuntime:
         async def close(self) -> None:
             assert reconcile_task.cancelled()
+            assert cleanup_order == ["destructive-transactions"]
+            cleanup_order.append("runtime")
 
     controller.memory_runtime = _MemoryRuntime()
 
@@ -935,3 +882,4 @@ def test_cleanup_sync_cancels_memory_reconcile_before_closing_runtime() -> None:
 
     assert reconcile_task.cancelled()
     assert controller._memory_reconcile_task is None
+    assert cleanup_order == ["destructive-transactions", "runtime"]
