@@ -317,6 +317,25 @@ def test_launcher_generation_recognizes_windows_hardlink(monkeypatch, tmp_path):
     assert upgrade._launcher_generation(launcher, root) == generation
 
 
+def test_cli_launcher_path_uses_hardlinked_generation(monkeypatch, tmp_path):
+    from vibe import upgrade
+
+    root = tmp_path / "home" / "runtime" / "install-generations"
+    generation = root / "old"
+    source = generation / "bin" / "vibe.exe"
+    launcher = tmp_path / ".local" / "bin" / "vibe.exe"
+    source.parent.mkdir(parents=True)
+    launcher.parent.mkdir(parents=True)
+    source.write_text("old\n", encoding="utf-8")
+    source.chmod(0o755)
+    os.link(source, launcher)
+    monkeypatch.setattr(upgrade, "atomic_uv_install_root", lambda: root)
+
+    saved = ServiceLauncher(python=str(launcher), main="service_main.py")
+
+    assert upgrade.get_cli_launcher_path(saved) == source
+
+
 def test_activate_upgrade_candidate_falls_back_to_hardlink(monkeypatch, tmp_path):
     from vibe import upgrade
 

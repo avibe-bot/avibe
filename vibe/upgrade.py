@@ -184,8 +184,23 @@ def _candidate_python(candidate_launcher: Path) -> Path | None:
 def get_cli_launcher_path(launcher: runtime_mod.ServiceLauncher) -> Path | None:
     """Find the CLI launcher next to a saved service interpreter."""
 
-    python_bin = Path(launcher.python).expanduser().parent
     names = ("vibe.exe", "vibe") if os.name == "nt" else ("vibe", "vibe.exe")
+    python_path = Path(launcher.python).expanduser()
+    root = atomic_uv_install_root()
+    generation = _launcher_generation(python_path, root)
+    if generation is not None:
+        generation_bin = generation / "bin"
+        for name in names:
+            candidate = generation_bin / name
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return candidate
+        with contextlib.suppress(OSError):
+            for name in names:
+                candidate = next(generation.rglob(name), None)
+                if candidate is not None and candidate.is_file() and os.access(candidate, os.X_OK):
+                    return candidate
+
+    python_bin = python_path.parent
     for name in names:
         candidate = python_bin / name
         if candidate.is_file() and os.access(candidate, os.X_OK):
