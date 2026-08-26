@@ -101,6 +101,26 @@ describe('inShortcutBlockingOverlay', () => {
     )).toBe(false);
   });
 
+  it('blocks only shortcut capture controls that are actually active', () => {
+    const hasBareCapture = (selector: string) => (
+      selector.split(', ').includes('[data-shortcut-capture]')
+    );
+    expect(inShortcutBlockingOverlay(
+      elWithClosest(() => false),
+      {
+        querySelector: vi.fn((selector: string) => (hasBareCapture(selector) ? {} : null)),
+      } as unknown as Pick<Document, 'querySelector'>,
+    )).toBe(false);
+    expect(inShortcutBlockingOverlay(
+      elWithClosest(() => false),
+      {
+        querySelector: vi.fn((selector: string) => (
+          selector.split(', ').includes('[data-shortcut-capture="active"]') ? {} : null
+        )),
+      } as unknown as Pick<Document, 'querySelector'>,
+    )).toBe(true);
+  });
+
   it('leaves the unobstructed chat surface to the active shortcut owner', () => {
     expect(inShortcutBlockingOverlay(
       elWithClosest(() => false),

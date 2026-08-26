@@ -62,14 +62,36 @@ describe('action shortcuts', () => {
   });
 
   it('keeps shell-wide commands out of the configurable shortcut namespace', () => {
-    expect(isReservedActionShortcut(shortcutFromKeyboardEvent(chord({ code: 'KeyW', altKey: true }))!)).toBe(true);
-    expect(isReservedActionShortcut(shortcutFromKeyboardEvent(chord({ code: 'KeyK', metaKey: true }))!)).toBe(true);
-    expect(isReservedActionShortcut(shortcutFromKeyboardEvent(chord({ code: 'KeyD', ctrlKey: true, shiftKey: true }))!)).toBe(true);
-    expect(isReservedActionShortcut(shortcutFromKeyboardEvent(chord({ code: 'KeyL', ctrlKey: true }))!)).toBe(true);
-    expect(isReservedActionShortcut(shortcutFromKeyboardEvent(chord({ code: 'KeyT', metaKey: true }))!)).toBe(true);
-    expect(isReservedActionShortcut(shortcutFromKeyboardEvent(chord({ code: 'KeyQ', metaKey: true }))!)).toBe(true);
-    expect(isReservedActionShortcut(shortcutFromKeyboardEvent(chord({ code: 'Tab', ctrlKey: true }))!)).toBe(true);
-    expect(isReservedActionShortcut(shortcutFromKeyboardEvent(chord({ code: 'KeyV', altKey: true }))!)).toBe(false);
+    expect(isReservedActionShortcut('voiceInput', shortcutFromKeyboardEvent(chord({ code: 'KeyW', altKey: true }))!)).toBe(true);
+    expect(isReservedActionShortcut('voiceInput', shortcutFromKeyboardEvent(chord({ code: 'KeyK', key: 'k', metaKey: true }))!)).toBe(true);
+    expect(isReservedActionShortcut('voiceInput', shortcutFromKeyboardEvent(chord({ code: 'KeyD', ctrlKey: true, shiftKey: true }))!)).toBe(true);
+    expect(isReservedActionShortcut('voiceInput', shortcutFromKeyboardEvent(chord({ code: 'KeyL', key: 'l', ctrlKey: true }))!)).toBe(true);
+    expect(isReservedActionShortcut('voiceInput', shortcutFromKeyboardEvent(chord({ code: 'KeyT', key: 't', metaKey: true }))!)).toBe(true);
+    expect(isReservedActionShortcut('voiceInput', shortcutFromKeyboardEvent(chord({ code: 'KeyQ', key: 'q', metaKey: true }))!)).toBe(true);
+    expect(isReservedActionShortcut('voiceInput', shortcutFromKeyboardEvent(chord({ code: 'Tab', ctrlKey: true }))!)).toBe(true);
+    expect(isReservedActionShortcut('voiceInput', shortcutFromKeyboardEvent(chord({ code: 'KeyV', altKey: true }))!)).toBe(false);
+  });
+
+  it('reserves action-owned Enter chords and layout-key shell commands', async () => {
+    const enter = shortcutFromKeyboardEvent(chord({ code: 'Enter', key: 'Enter', ctrlKey: true }))!;
+    const numpadEnter = shortcutFromKeyboardEvent(chord({ code: 'NumpadEnter', key: 'Enter', altKey: true }))!;
+    const shiftedEnter = shortcutFromKeyboardEvent(chord({ code: 'Enter', key: 'Enter', ctrlKey: true, shiftKey: true }))!;
+    expect(isReservedActionShortcut('voiceInput', enter)).toBe(true);
+    expect(isReservedActionShortcut('voiceInput', numpadEnter)).toBe(true);
+    expect(isReservedActionShortcut('voiceInput', shiftedEnter)).toBe(false);
+    expect(isReservedActionShortcut('showPageAnnotation', enter)).toBe(false);
+
+    const dvorakSearch = await shortcutFromKeyboardEventWithLayout(
+      chord({ code: 'KeyV', key: 'v', ctrlKey: true }),
+      { getLayoutMap: async () => new Map([['KeyV', 'k']]) },
+    );
+    expect(isReservedActionShortcut('voiceInput', dvorakSearch!)).toBe(true);
+
+    const remappedPhysicalK = await shortcutFromKeyboardEventWithLayout(
+      chord({ code: 'KeyK', key: 'k', ctrlKey: true }),
+      { getLayoutMap: async () => new Map([['KeyK', 'j']]) },
+    );
+    expect(isReservedActionShortcut('voiceInput', remappedPhysicalK!)).toBe(false);
   });
 
   it('persists valid settings and degrades malformed or colliding storage to defaults', () => {
@@ -88,5 +110,14 @@ describe('action shortcuts', () => {
         showPageAnnotation: custom.showPageAnnotation,
       }),
     })).toEqual(defaultActionShortcuts());
+
+    const composerOwned = defaultActionShortcuts();
+    composerOwned.voiceInput = shortcutFromKeyboardEvent(chord({
+      code: 'Enter',
+      key: 'Enter',
+      ctrlKey: true,
+    }))!;
+    expect(readActionShortcuts({ getItem: () => JSON.stringify(composerOwned) }))
+      .toEqual(defaultActionShortcuts());
   });
 });

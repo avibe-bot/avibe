@@ -7,7 +7,7 @@ import { isApplePlatform } from '../../lib/platform';
 type ChordEvent = Pick<KeyboardEvent, 'altKey' | 'ctrlKey' | 'metaKey' | 'shiftKey' | 'code'>;
 
 const SHORTCUT_BLOCKING_TARGET_SELECTOR = [
-  '[data-shortcut-capture]',
+  '[data-shortcut-capture="active"]',
   '[data-shortcut-overlay="open"]',
   '[aria-expanded="true"][aria-haspopup]',
   '[role="menu"][data-state="open"]',
@@ -18,7 +18,7 @@ const SHORTCUT_BLOCKING_TARGET_SELECTOR = [
 ].join(', ');
 
 const SHORTCUT_OPEN_OVERLAY_SELECTOR = [
-  '[data-shortcut-capture]',
+  '[data-shortcut-capture="active"]',
   '[data-shortcut-overlay="open"]',
   '[aria-expanded="true"][aria-haspopup]',
   '[role="menu"][data-state="open"]',

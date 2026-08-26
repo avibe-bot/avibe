@@ -59,11 +59,11 @@ const MODIFIER_CODES = new Set([
   'ShiftRight',
 ]);
 
-const BROWSER_RESERVED_PRIMARY_CODES = new Set([
-  'KeyL', // focus location bar
-  'KeyN', // new window
-  'KeyQ', // quit browser
-  'KeyT', // new/reopen tab
+const BROWSER_RESERVED_PRIMARY_KEYS = new Set([
+  'L', // focus location bar
+  'N', // new window
+  'Q', // quit browser
+  'T', // new/reopen tab
 ]);
 
 const cloneShortcut = (shortcut: ActionShortcut): ActionShortcut => ({ ...shortcut });
@@ -108,11 +108,11 @@ function normalizeActionShortcuts(value: unknown): ActionShortcuts {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return defaults;
   const candidate = value as Partial<Record<ActionShortcutId, unknown>>;
   const voiceInput = isActionShortcut(candidate.voiceInput)
-    && !isReservedActionShortcut(candidate.voiceInput)
+    && !isReservedActionShortcut('voiceInput', candidate.voiceInput)
     ? cloneShortcut(candidate.voiceInput)
     : defaults.voiceInput;
   const showPageAnnotation = isActionShortcut(candidate.showPageAnnotation)
-    && !isReservedActionShortcut(candidate.showPageAnnotation)
+    && !isReservedActionShortcut('showPageAnnotation', candidate.showPageAnnotation)
     ? cloneShortcut(candidate.showPageAnnotation)
     : defaults.showPageAnnotation;
   if (actionShortcutsEqual(voiceInput, showPageAnnotation)) return defaults;
@@ -203,8 +203,22 @@ export function actionShortcutMatches(event: ShortcutEvent, shortcut: ActionShor
   );
 }
 
-/** Chords already owned by shell-wide commands must never be assigned twice. */
-export function isReservedActionShortcut(shortcut: ActionShortcut): boolean {
+function actionShortcutLayoutKey(shortcut: ActionShortcut): string | undefined {
+  const displayKey = normalizedDisplayKey(shortcut.displayKey);
+  if (displayKey) return displayKey;
+  const match = /^Key([A-Z])$/.exec(shortcut.code);
+  return match?.[1];
+}
+
+function shortcutUsesLayoutKey(shortcut: ActionShortcut, key: string): boolean {
+  return actionShortcutLayoutKey(shortcut) === key;
+}
+
+/** Chords already owned by the browser, shell, or action surface cannot be assigned. */
+export function isReservedActionShortcut(
+  id: ActionShortcutId,
+  shortcut: ActionShortcut,
+): boolean {
   const exactAlt = shortcut.altKey && !shortcut.ctrlKey && !shortcut.metaKey && !shortcut.shiftKey;
   if (exactAlt && (
     shortcut.code === 'KeyW'
@@ -212,12 +226,21 @@ export function isReservedActionShortcut(shortcut: ActionShortcut): boolean {
   )) {
     return true;
   }
+  // Both Chat composer implementations submit every non-Shift Enter before
+  // the window-level voice listener can run.
+  if (
+    id === 'voiceInput'
+    && !shortcut.shiftKey
+    && (shortcut.code === 'Enter' || shortcut.code === 'NumpadEnter')
+  ) {
+    return true;
+  }
   // AppShell owns search even when an extra modifier is present.
-  if (shortcut.code === 'KeyK' && (shortcut.ctrlKey || shortcut.metaKey)) return true;
+  if (shortcutUsesLayoutKey(shortcut, 'K') && (shortcut.ctrlKey || shortcut.metaKey)) return true;
   // Browsers and the OS consume these before page content can reliably cancel
   // them, so accepting them would save a shortcut that never fires.
   if (!shortcut.altKey && (shortcut.ctrlKey || shortcut.metaKey) && (
-    BROWSER_RESERVED_PRIMARY_CODES.has(shortcut.code)
+    BROWSER_RESERVED_PRIMARY_KEYS.has(actionShortcutLayoutKey(shortcut) ?? '')
     || /^Digit[0-9]$/.test(shortcut.code)
     || shortcut.code === 'Tab'
   )) {
@@ -226,7 +249,7 @@ export function isReservedActionShortcut(shortcut: ActionShortcut): boolean {
   if (shortcut.code === 'Tab' && (shortcut.altKey || shortcut.metaKey)) return true;
   // Window close/minimize accepts Shift but yields when Alt is held.
   if (
-    (shortcut.code === 'KeyW' || shortcut.code === 'KeyM')
+    (shortcutUsesLayoutKey(shortcut, 'W') || shortcutUsesLayoutKey(shortcut, 'M'))
     && !shortcut.altKey
     && (shortcut.ctrlKey || shortcut.metaKey)
   ) {

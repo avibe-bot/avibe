@@ -72,6 +72,36 @@ describe('SettingsShortcutsPage', () => {
     expect(readActionShortcuts().voiceInput.code).toBe('KeyZ');
   });
 
+  it('reserves Chat Enter and shell commands resolved from the active layout', async () => {
+    Object.defineProperty(navigator, 'keyboard', {
+      configurable: true,
+      value: { getLayoutMap: async () => new Map([['KeyV', 'k']]) },
+    });
+    renderPage();
+    const voice = screen.getByRole('button', { name: 'Change Chat voice input shortcut' });
+
+    fireEvent.click(voice);
+    fireEvent.keyDown(voice, { code: 'Enter', key: 'Enter', ctrlKey: true });
+    expect(screen.getByRole('alert').textContent).toBe('This shortcut is already used by Avibe.');
+
+    fireEvent.keyDown(voice, { code: 'KeyV', key: 'v', ctrlKey: true });
+    await waitFor(() => {
+      expect(screen.getByRole('alert').textContent).toBe('This shortcut is already used by Avibe.');
+    });
+    expect(readActionShortcuts().voiceInput.code).toBe('KeyZ');
+  });
+
+  it('marks only the control that is actively capturing a shortcut', () => {
+    renderPage();
+    const voice = screen.getByRole('button', { name: 'Change Chat voice input shortcut' });
+    const annotation = screen.getByRole('button', { name: 'Change Show Page annotation mode shortcut' });
+
+    expect(document.querySelector('[data-shortcut-capture="active"]')).toBeNull();
+    fireEvent.click(voice);
+    expect(voice.getAttribute('data-shortcut-capture')).toBe('active');
+    expect(annotation.hasAttribute('data-shortcut-capture')).toBe(false);
+  });
+
   it('cancels capture with plain Escape', () => {
     renderPage();
     const voice = screen.getByRole('button', { name: 'Change Chat voice input shortcut' });

@@ -51,7 +51,7 @@ export const SettingsShortcutsPage: React.FC = () => {
       setError({ id, message: t('settings.shortcuts.modifierRequired') });
       return;
     }
-    if (isReservedActionShortcut(next)) {
+    if (isReservedActionShortcut(id, next)) {
       setError({ id, message: t('settings.shortcuts.reserved') });
       return;
     }
@@ -66,9 +66,14 @@ export const SettingsShortcutsPage: React.FC = () => {
       return;
     }
 
+    setError(null);
     const request = ++captureRequestRef.current;
     const layoutAware = await shortcutFromKeyboardEventWithLayout(event.nativeEvent);
     if (request !== captureRequestRef.current || !layoutAware) return;
+    if (isReservedActionShortcut(id, layoutAware)) {
+      setError({ id, message: t('settings.shortcuts.reserved') });
+      return;
+    }
     writeActionShortcuts({ ...shortcuts, [id]: layoutAware });
     setCapturing(null);
     setError(null);
@@ -81,7 +86,7 @@ export const SettingsShortcutsPage: React.FC = () => {
       <div className="flex min-w-[190px] flex-col items-stretch gap-1.5 md:items-end">
         <button
           type="button"
-          data-shortcut-capture
+          data-shortcut-capture={active ? 'active' : undefined}
           aria-label={t('settings.shortcuts.change', { action: actionLabel(id) })}
           aria-pressed={active}
           onClick={() => {
