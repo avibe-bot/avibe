@@ -7,7 +7,7 @@ never back. So editing a released revision's parentage does not change what thos
 databases have already done -- it changes what they will do next, silently, with no error
 at the moment of the edit and no error at the moment of the upgrade.
 
-Seven properties, one primitive: the graph as a released tag actually shipped it, read
+Eight properties, one primitive: the graph as a released tag actually shipped it, read
 straight out of git. Nothing here is an allowlist of known-bad cases that outlives its
 reason, and nothing needs an old Python environment -- ``env.py`` reads
 ``target_metadata`` only during autogenerate, so today's runtime can drive an older
@@ -25,6 +25,8 @@ reason, and nothing needs an old Python environment -- ``env.py`` reads
     unrepairable_releases()       a database built by a released graph, carrying rows,
                                   still comes out ready when the upgrade users run
                                   upgrades it
+    analyze_released_schema_      every tightening each released schema will meet is
+    tightenings()                 guaranteed already or explicitly established first
     releases_with_state_but_no   every release that wrote a database is inside the
     _graph()                      window the property above walks
 
@@ -61,20 +63,27 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import warnings
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
+from alembic.runtime.environment import EnvironmentContext
+from alembic.script import ScriptDirectory
 from alembic.script.base import _only_source_rev_file
 from alembic.util import to_tuple
 from packaging.version import InvalidVersion, Version
+from sqlalchemy.dialects.sqlite.base import SQLiteDialect
+from sqlalchemy.exc import SAWarning
 
 from scripts.release_package_version import package_version_from_release_tag
 from storage.migrations import (
@@ -658,6 +667,965 @@ def _alembic_config(db_path: Path, versions: Path | None = None) -> Config:
         config.set_main_option("version_locations", str(versions))
     config.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
     return config
+
+
+_UNKNOWN = object()
+_SQL_SPACE = re.compile(r"\s+")
+_SQL_IDENTIFIER = r'["`\[]?([A-Za-z_][A-Za-z0-9_]*)["`\]]?'
+_DML_TARGET = re.compile(
+    rf"(?is)^\s*(?:update\s+{_SQL_IDENTIFIER}|delete\s+from\s+{_SQL_IDENTIFIER}|"
+    rf"insert(?:\s+or\s+\w+)?\s+into\s+{_SQL_IDENTIFIER}|replace\s+into\s+{_SQL_IDENTIFIER})"
+)
+_SELECT_TARGET = re.compile(rf"(?is)\bfrom\s+{_SQL_IDENTIFIER}")
+_UNIQUE_TARGET = re.compile(rf"(?is)^\s*create\s+unique\s+index\b.*?\bon\s+{_SQL_IDENTIFIER}")
+
+
+def _normalized_sql(value: str | None) -> str:
+    if value is None:
+        return ""
+    return _SQL_SPACE.sub(" ", value.strip()).lower()
+
+
+def _effective_default(value: object) -> object | None:
+    if value is None or (isinstance(value, str) and value.strip().lower() == "null"):
+        return None
+    return value
+
+
+@dataclass(frozen=True)
+class SchemaColumn:
+    name: str
+    not_null: bool
+    default: str | None
+
+
+@dataclass(frozen=True)
+class UniqueGuarantee:
+    terms: frozenset[str] | None
+    term_sql: str
+    predicate: str | None
+
+    def implies(self, other: "UniqueGuarantee") -> bool:
+        """Whether this guarantee makes ``other`` redundant under SQLite semantics."""
+        if self.predicate is not None and self.predicate != other.predicate:
+            return False
+        if self.terms is not None and other.terms is not None:
+            # UNIQUE(a) implies UNIQUE(a, b), not the other way around. A NULL in
+            # either key cannot violate SQLite uniqueness, so it does not change this.
+            return self.terms <= other.terms
+        return self.term_sql == other.term_sql
+
+
+@dataclass(frozen=True)
+class TableGuarantees:
+    columns: tuple[SchemaColumn, ...]
+    unique: frozenset[UniqueGuarantee]
+    checks: frozenset[str]
+
+    def column_map(self) -> dict[str, SchemaColumn]:
+        return {column.name: column for column in self.columns}
+
+
+@dataclass(frozen=True)
+class SchemaGuarantees:
+    tables: tuple[tuple[str, TableGuarantees], ...]
+
+    def table_map(self) -> dict[str, TableGuarantees]:
+        return dict(self.tables)
+
+
+@dataclass(frozen=True)
+class SchemaTightening:
+    kind: str
+    table: str
+    detail: str
+    column: str | None = None
+    terms: frozenset[str] | None = None
+    predicate: str | None = None
+    new_null_columns: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class SourceEffect:
+    order: int
+    kind: str
+    table: str | None
+    detail: str
+    column: str | None = None
+    default: object = _UNKNOWN
+    terms: frozenset[str] | None = None
+    predicate: str | None = None
+
+
+@dataclass(frozen=True)
+class MigrationSourceAnalysis:
+    effects: tuple[SourceEffect, ...]
+
+    @staticmethod
+    def _matches(effect: SourceEffect, tightening: SchemaTightening) -> bool:
+        if tightening.kind == "backfill":
+            return (
+                effect.kind == "drop_column"
+                and effect.table == tightening.table
+                and effect.column == tightening.column
+            )
+        if effect.kind != tightening.kind or effect.table != tightening.table:
+            return False
+        if tightening.kind == "not_null":
+            return effect.column == tightening.column
+        if tightening.kind == "unique":
+            if effect.terms is not None and tightening.terms is not None:
+                return effect.terms == tightening.terms and effect.predicate == tightening.predicate
+            return effect.detail == tightening.detail
+        if tightening.kind == "check":
+            return effect.detail == tightening.detail
+        return True
+
+    @staticmethod
+    def _subjects(tightening: SchemaTightening) -> set[str]:
+        if tightening.column or tightening.terms:
+            return ({tightening.column} if tightening.column else set()) | set(tightening.terms or ())
+        words = set(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", tightening.detail.lower()))
+        return words - {
+            tightening.table,
+            "and",
+            "as",
+            "check",
+            "in",
+            "is",
+            "lower",
+            "not",
+            "null",
+            "or",
+            "unique",
+            "where",
+        }
+
+    def establishes(self, tightening: SchemaTightening) -> bool:
+        candidates = [
+            effect
+            for effect in self.effects
+            if self._matches(effect, tightening)
+        ]
+        if not candidates:
+            return False
+        cutoff = min(effect.order for effect in candidates)
+
+        if any(
+            effect.kind == "reset"
+            and effect.table == tightening.table
+            and effect.order < cutoff
+            for effect in self.effects
+        ):
+            return True
+
+        if any(
+            effect.kind == "data"
+            and effect.table == tightening.table
+            and effect.order < cutoff
+            and re.fullmatch(
+                rf"delete\s+from\s+[\"`\[]?{re.escape(tightening.table)}[\"`\]]?\s*;?",
+                effect.detail,
+            )
+            for effect in self.effects
+        ):
+            return True
+
+        subjects = self._subjects(tightening)
+        if tightening.kind == "backfill" and any(
+            effect.kind == "data"
+            and effect.table == tightening.table
+            and effect.order < cutoff
+            and tightening.column is not None
+            and re.search(rf"\b{re.escape(tightening.column)}\b", effect.detail)
+            and any(re.search(rf"\b{re.escape(target)}\b", effect.detail) for target in tightening.terms or ())
+            for effect in self.effects
+        ):
+            return True
+        if any(
+            effect.kind in {"data", "validation"}
+            and effect.table == tightening.table
+            and effect.order < cutoff
+            and (
+                tightening.kind != "unique"
+                or effect.kind == "validation"
+                or effect.detail.startswith("delete from ")
+            )
+            and subjects
+            and all(re.search(rf"\b{re.escape(subject)}\b", effect.detail) for subject in subjects)
+            for effect in self.effects
+        ):
+            return True
+
+        additions = [
+            effect
+            for effect in self.effects
+            if effect.kind == "column"
+            and effect.table == tightening.table
+            and effect.order < cutoff
+            and effect.column is not None
+        ]
+        if tightening.kind == "unique" and tightening.predicate:
+            added_null_is_excluded = any(
+                re.search(rf"\b{re.escape(column)}\b\s+is\s+not\s+null", tightening.predicate)
+                for column in tightening.new_null_columns
+            )
+            return added_null_is_excluded or any(
+                re.search(rf"\b{re.escape(effect.column or '')}\b\s+is\s+not\s+null", tightening.predicate)
+                for effect in additions
+                if effect.default is None
+            )
+        if tightening.kind == "not_null":
+            return any(
+                effect.column == tightening.column and effect.default is not None
+                for effect in additions
+            )
+        if tightening.kind == "check":
+            return _check_holds_for_added_defaults(tightening.detail, additions)
+        return False
+
+    def tightenings_against(self, schema: SchemaGuarantees) -> list[SchemaTightening]:
+        """Dangerous source operations not already guaranteed by ``schema``.
+
+        The before/after database comparison catches durable guarantees. Reading the
+        operations as well catches a transient NOT NULL/constraint that would fail before
+        a later operation removes or relaxes it.
+        """
+        tables = schema.table_map()
+        tightenings: list[SchemaTightening] = []
+        additions: dict[str, set[str]] = defaultdict(set)
+        for effect in self.effects:
+            table = tables.get(effect.table or "")
+            if effect.kind == "column" and effect.table and effect.column:
+                additions[effect.table].add(effect.column)
+            if table is None:
+                continue
+            if effect.kind == "not_null" and effect.column:
+                prior = table.column_map().get(effect.column)
+                if prior is None or not prior.not_null:
+                    tightenings.append(
+                        SchemaTightening(
+                            "not_null",
+                            effect.table or "",
+                            f"column {effect.column} becomes NOT NULL",
+                            column=effect.column,
+                        )
+                    )
+            elif effect.kind == "unique":
+                guarantee = UniqueGuarantee(effect.terms, effect.detail, effect.predicate)
+                if not any(existing.implies(guarantee) for existing in table.unique):
+                    tightenings.append(
+                        SchemaTightening(
+                            "unique",
+                            effect.table or "",
+                            effect.detail,
+                            terms=effect.terms,
+                            predicate=effect.predicate,
+                        )
+                    )
+            elif effect.kind == "check" and effect.detail != "<unresolved check>" and not any(
+                _check_implies(existing, effect.detail) for existing in table.checks
+            ):
+                terms = frozenset(
+                    column
+                    for column in table.column_map()
+                    if re.search(rf"\b{re.escape(column)}\b", effect.detail)
+                )
+                tightenings.append(
+                    SchemaTightening(
+                        "check",
+                        effect.table or "",
+                        effect.detail,
+                        terms=terms or None,
+                    )
+                )
+            elif effect.kind == "drop_column" and effect.column and additions[effect.table or ""]:
+                related = ", ".join(sorted(additions[effect.table or ""]))
+                tightenings.append(
+                    SchemaTightening(
+                        "backfill",
+                        effect.table or "",
+                        f"column {effect.column} is dropped after adding {related}",
+                        column=effect.column,
+                        terms=frozenset(additions[effect.table or ""]),
+                    )
+                )
+        return tightenings
+
+
+@dataclass(frozen=True)
+class TighteningAudit:
+    problems: tuple[str, ...]
+    planned: frozenset[tuple[str, str]]
+    analyzed: frozenset[tuple[str, str]]
+    tightenings: tuple[tuple[str, str, SchemaTightening], ...]
+
+
+class _RawResult:
+    def __init__(self, cursor: sqlite3.Cursor):
+        self.cursor = cursor
+
+    def scalar(self) -> object | None:
+        row = self.cursor.fetchone()
+        return None if row is None else row[0]
+
+
+class _RawReflectionConnection:
+    """The one method SQLAlchemy's SQLite CHECK parser needs from a Connection."""
+
+    def __init__(self, connection: sqlite3.Connection):
+        self.connection = connection
+
+    def exec_driver_sql(self, statement: str, parameters: tuple[object, ...] = ()) -> _RawResult:
+        return _RawResult(self.connection.execute(statement, parameters))
+
+
+def _quoted_identifier(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
+def _index_term_sql(sql: str | None) -> tuple[str, str | None]:
+    """Return an index's term list and optional predicate, without naming the index."""
+    if not sql:
+        return "", None
+    match = re.search(r"\bon\b", sql, re.IGNORECASE)
+    start = sql.find("(", match.end() if match else 0)
+    if start < 0:
+        return _normalized_sql(sql), None
+    depth = 0
+    quote: str | None = None
+    end = -1
+    for offset, character in enumerate(sql[start:], start):
+        if quote:
+            if character == quote:
+                quote = None
+            continue
+        if character in {"'", '"', "`"}:
+            quote = character
+        elif character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+            if depth == 0:
+                end = offset
+                break
+    if end < 0:
+        return _normalized_sql(sql), None
+    tail = sql[end + 1 :].strip()
+    predicate = _normalized_sql(tail[5:]) if tail.lower().startswith("where") else None
+    return _normalized_sql(sql[start + 1 : end]), predicate
+
+
+def _plain_index_terms(term_sql: str) -> frozenset[str] | None:
+    terms = [term.strip().strip('"`[]') for term in term_sql.split(",")]
+    if terms and all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", term) for term in terms):
+        return frozenset(terms)
+    return None
+
+
+def _unique_detail(term_sql: str, predicate: str | None) -> str:
+    detail = f"UNIQUE({term_sql})"
+    return f"{detail} WHERE {predicate}" if predicate else detail
+
+
+def _table_guarantees(connection: sqlite3.Connection, table: str) -> TableGuarantees:
+    quoted = _quoted_identifier(table)
+    column_rows = [row for row in connection.execute(f"pragma table_xinfo({quoted})") if int(row[6]) == 0]
+    columns = tuple(
+        SchemaColumn(
+            str(row[1]),
+            bool(row[3]),
+            None if _effective_default(row[4]) is None else str(row[4]),
+        )
+        for row in column_rows
+    )
+    unique: set[UniqueGuarantee] = set()
+    primary_key = [str(row[1]) for row in sorted(column_rows, key=lambda row: int(row[5])) if int(row[5])]
+    if primary_key:
+        unique.add(UniqueGuarantee(frozenset(primary_key), ", ".join(primary_key), None))
+    for index in connection.execute(f"pragma index_list({quoted})"):
+        if not bool(index[2]):
+            continue
+        name = str(index[1])
+        key_rows = [row for row in connection.execute(f"pragma index_xinfo({_quoted_identifier(name)})") if row[5]]
+        names = [None if row[2] is None else str(row[2]) for row in key_rows]
+        sql_row = connection.execute(
+            "select sql from sqlite_master where type = 'index' and name = ?",
+            (name,),
+        ).fetchone()
+        term_sql, predicate = _index_term_sql(None if sql_row is None else sql_row[0])
+        unique.add(
+            UniqueGuarantee(
+                frozenset(names) if names and all(name is not None for name in names) else None,
+                term_sql or ", ".join(name or "<expression>" for name in names),
+                predicate,
+            )
+        )
+
+    checks = SQLiteDialect().get_check_constraints(_RawReflectionConnection(connection), table)
+    return TableGuarantees(
+        columns,
+        frozenset(unique),
+        frozenset(_normalized_sql(str(check["sqltext"])) for check in checks),
+    )
+
+
+def schema_guarantees(connection: sqlite3.Connection) -> SchemaGuarantees:
+    tables = [
+        str(row[0])
+        for row in connection.execute(
+            "select name from sqlite_master where type = 'table' and name not like 'sqlite_%' order by name"
+        )
+        if str(row[0]) != ALEMBIC_BOOKKEEPING_TABLE
+    ]
+    return SchemaGuarantees(tuple((table, _table_guarantees(connection, table)) for table in tables))
+
+
+def schema_tightenings(before: SchemaGuarantees, after: SchemaGuarantees) -> list[SchemaTightening]:
+    previous = before.table_map()
+    current = after.table_map()
+    tightenings: list[SchemaTightening] = []
+    for table in sorted(previous.keys() & current.keys()):
+        old = previous[table]
+        new = current[table]
+        old_columns = old.column_map()
+        new_columns = new.column_map()
+        new_null_columns = frozenset(
+            column
+            for column, definition in new_columns.items()
+            if column not in old_columns and not definition.not_null and definition.default is None
+        )
+        for column, definition in sorted(new_columns.items()):
+            prior = old_columns.get(column)
+            if prior is None and definition.not_null and definition.default is None:
+                tightenings.append(
+                    SchemaTightening(
+                        "not_null",
+                        table,
+                        f"new column {column} is NOT NULL",
+                        column=column,
+                    )
+                )
+            elif prior is not None and not prior.not_null and definition.not_null:
+                tightenings.append(
+                    SchemaTightening(
+                        "not_null",
+                        table,
+                        f"column {column} became NOT NULL",
+                        column=column,
+                    )
+                )
+        for guarantee in sorted(new.unique, key=repr):
+            if any(existing.implies(guarantee) for existing in old.unique):
+                continue
+            predicate = guarantee.predicate
+            detail = _unique_detail(guarantee.term_sql, predicate)
+            tightenings.append(
+                SchemaTightening(
+                    "unique",
+                    table,
+                    detail,
+                    terms=guarantee.terms,
+                    predicate=predicate,
+                    new_null_columns=new_null_columns,
+                )
+            )
+        for check in sorted(new.checks - old.checks):
+            if not any(_check_implies(existing, check) for existing in old.checks):
+                terms = frozenset(
+                    column
+                    for column in new_columns
+                    if re.search(rf"\b{re.escape(column)}\b", check)
+                )
+                tightenings.append(SchemaTightening("check", table, check, terms=terms or None))
+    return tightenings
+
+
+def _same_obligation(left: SchemaTightening, right: SchemaTightening) -> bool:
+    if left.kind != right.kind or left.table != right.table:
+        return False
+    if left.kind == "not_null":
+        return left.column == right.column
+    return left.detail == right.detail
+
+
+def _check_implies(existing: str, candidate: str) -> bool:
+    """Prove the narrow CHECK relaxation SQLite migrations currently use.
+
+    Equality becoming an IN-list containing the old literal is a relaxation. This is
+    deliberately one-way and exact after whitespace normalization; any other expression
+    change remains a tightening until the analyzer learns a proof for it.
+    """
+    if existing == candidate:
+        return True
+    membership = re.compile(
+        r"\b([A-Za-z_][A-Za-z0-9_]*)\s+in\s*\((('[^']*'|\"[^\"]*\")(\s*,\s*('[^']*'|\"[^\"]*\"))*)\)"
+    )
+    for match in membership.finditer(candidate):
+        identifier = match.group(1)
+        literals = re.findall(r"'[^']*'|\"[^\"]*\"", match.group(2))
+        for literal in literals:
+            narrowed = candidate[: match.start()] + f"{identifier} = {literal}" + candidate[match.end() :]
+            if _normalized_sql(narrowed) == existing:
+                return True
+    return False
+
+
+def _static_value(node: ast.AST, constants: dict[str, object]) -> object:
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name):
+        return constants.get(node.id, _UNKNOWN)
+    if isinstance(node, (ast.Tuple, ast.List)):
+        values = [_static_value(item, constants) for item in node.elts]
+        return _UNKNOWN if _UNKNOWN in values else tuple(values)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _static_value(node.left, constants)
+        right = _static_value(node.right, constants)
+        return left + right if isinstance(left, str) and isinstance(right, str) else _UNKNOWN
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        for value in node.values:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                parts.append(value.value)
+            elif isinstance(value, ast.FormattedValue):
+                part = _static_value(value.value, constants)
+                if part is _UNKNOWN:
+                    return _UNKNOWN
+                parts.append(str(part))
+            else:
+                return _UNKNOWN
+        return "".join(parts)
+    if isinstance(node, ast.Call):
+        name = _call_name(node.func)
+        if name in {"sa.text", "sqlalchemy.text"} and node.args:
+            return _static_value(node.args[0], constants)
+        if name.endswith(".bindparams"):
+            return _static_value(node.func.value, constants)
+    return _UNKNOWN
+
+
+def _call_name(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        owner = _call_name(node.value)
+        return f"{owner}.{node.attr}" if owner else node.attr
+    return ""
+
+
+def _keyword(call: ast.Call, name: str, constants: dict[str, object], default: object = _UNKNOWN) -> object:
+    for keyword in call.keywords:
+        if keyword.arg == name:
+            return _static_value(keyword.value, constants)
+    return default
+
+
+def _string_arg(call: ast.Call, index: int, constants: dict[str, object]) -> str | None:
+    if len(call.args) <= index:
+        return None
+    value = _static_value(call.args[index], constants)
+    return value if isinstance(value, str) else None
+
+
+def _sql_match_target(pattern: re.Pattern[str], sql: str) -> str | None:
+    match = pattern.search(sql)
+    if match is None:
+        return None
+    return next((group for group in match.groups() if group), None)
+
+
+class _MigrationSourceScanner:
+    def __init__(self, source: str):
+        self.tree = ast.parse(source)
+        self.functions = {
+            node.name: node for node in self.tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        self.constants: dict[str, object] = {}
+        for node in self.tree.body:
+            if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                value = _static_value(node.value, self.constants)
+                if value is not _UNKNOWN:
+                    self.constants[node.targets[0].id] = value
+        self.effects: list[SourceEffect] = []
+        self.order = 0
+
+    def scan(self) -> MigrationSourceAnalysis:
+        upgrade = self.functions.get("upgrade")
+        if upgrade is None:
+            return MigrationSourceAnalysis(())
+        self._block(upgrade.body, {}, set(), False, dict(self.constants))
+        return MigrationSourceAnalysis(tuple(self.effects))
+
+    def _record(
+        self,
+        kind: str,
+        table: str | None,
+        detail: str,
+        *,
+        column: str | None = None,
+        default: object = _UNKNOWN,
+        terms: frozenset[str] | None = None,
+        predicate: str | None = None,
+    ) -> None:
+        self.order += 1
+        self.effects.append(
+            SourceEffect(
+                self.order,
+                kind,
+                table,
+                detail,
+                column,
+                default,
+                terms,
+                predicate,
+            )
+        )
+
+    def _block(
+        self,
+        statements: list[ast.stmt],
+        batches: dict[str, str],
+        stack: set[str],
+        validating: bool,
+        values: dict[str, object],
+    ) -> None:
+        for statement in statements:
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            if isinstance(statement, (ast.If, ast.For, ast.AsyncFor, ast.While)):
+                self._expr(
+                    statement.test if isinstance(statement, (ast.If, ast.While)) else statement.iter,
+                    batches,
+                    stack,
+                    validating,
+                    values,
+                )
+                self._block(statement.body, dict(batches), stack, validating, dict(values))
+                self._block(statement.orelse, dict(batches), stack, validating, dict(values))
+                continue
+            if isinstance(statement, ast.Try):
+                self._block(statement.body, dict(batches), stack, validating, dict(values))
+                for handler in statement.handlers:
+                    self._block(handler.body, dict(batches), stack, validating, dict(values))
+                self._block(statement.orelse, dict(batches), stack, validating, dict(values))
+                self._block(statement.finalbody, dict(batches), stack, validating, dict(values))
+                continue
+            if isinstance(statement, (ast.With, ast.AsyncWith)):
+                nested = dict(batches)
+                for item in statement.items:
+                    self._expr(item.context_expr, batches, stack, validating, values)
+                    if (
+                        isinstance(item.optional_vars, ast.Name)
+                        and isinstance(item.context_expr, ast.Call)
+                        and _call_name(item.context_expr.func).endswith("batch_alter_table")
+                    ):
+                        table = _string_arg(item.context_expr, 0, values)
+                        if table:
+                            nested[item.optional_vars.id] = table
+                self._block(statement.body, nested, stack, validating, dict(values))
+                continue
+            if isinstance(statement, ast.Assign) and len(statement.targets) == 1 and isinstance(statement.targets[0], ast.Name):
+                value = _static_value(statement.value, values)
+                if value is not _UNKNOWN:
+                    values[statement.targets[0].id] = value
+            for child in ast.iter_child_nodes(statement):
+                if isinstance(child, ast.expr):
+                    self._expr(child, batches, stack, validating, values)
+
+    def _expr(
+        self,
+        node: ast.AST,
+        batches: dict[str, str],
+        stack: set[str],
+        validating: bool,
+        values: dict[str, object],
+    ) -> None:
+        if not isinstance(node, ast.Call):
+            for child in ast.iter_child_nodes(node):
+                self._expr(child, batches, stack, validating, values)
+            return
+        name = _call_name(node.func)
+        local = self.functions.get(name)
+        if local is not None and name not in stack:
+            for child in [*node.args, *(keyword.value for keyword in node.keywords)]:
+                self._expr(child, batches, stack, validating, values)
+            local_values = dict(values)
+            for parameter, argument in zip(local.args.args, node.args, strict=False):
+                value = _static_value(argument, values)
+                if value is not _UNKNOWN:
+                    local_values[parameter.arg] = value
+            for keyword in node.keywords:
+                if keyword.arg:
+                    value = _static_value(keyword.value, values)
+                    if value is not _UNKNOWN:
+                        local_values[keyword.arg] = value
+            helper_validates = any(isinstance(item, ast.Raise) for item in ast.walk(local))
+            self._block(local.body, {}, stack | {name}, helper_validates, local_values)
+            return
+        self._expr(node.func, batches, stack, validating, values)
+        for child in [*node.args, *(keyword.value for keyword in node.keywords)]:
+            self._expr(child, batches, stack, validating, values)
+        self._call(node, name, batches, validating, values)
+
+    def _call(
+        self,
+        call: ast.Call,
+        name: str,
+        batches: dict[str, str],
+        validation: bool,
+        values: dict[str, object],
+    ) -> None:
+        sql = _static_value(call.args[0], values) if call.args and name.endswith(("execute", "exec_driver_sql")) else _UNKNOWN
+        if isinstance(sql, str):
+            data_table = _sql_match_target(_DML_TARGET, sql)
+            if data_table:
+                self._record("data", data_table, _normalized_sql(sql))
+            elif validation and _normalized_sql(sql).startswith("select"):
+                table = _sql_match_target(_SELECT_TARGET, sql)
+                if table:
+                    self._record("validation", table, _normalized_sql(sql))
+            unique_table = _sql_match_target(_UNIQUE_TARGET, sql)
+            if unique_table:
+                term_sql, predicate = _index_term_sql(sql)
+                self._record(
+                    "unique",
+                    unique_table,
+                    _unique_detail(term_sql, predicate),
+                    terms=_plain_index_terms(term_sql),
+                    predicate=predicate,
+                )
+
+        owner, _, operation = name.rpartition(".")
+        batch_table = batches.get(owner)
+        if operation == "create_index" and _keyword(call, "unique", values, False) is True:
+            table = batch_table or _string_arg(call, 1, values)
+            index = 1 if batch_table else 2
+            columns = _static_value(call.args[index], values) if len(call.args) > index else _UNKNOWN
+            terms = (
+                frozenset(str(column) for column in columns)
+                if isinstance(columns, tuple) and all(isinstance(column, str) for column in columns)
+                else None
+            )
+            term_sql = ", ".join(columns) if terms is not None else "<unresolved>"
+            predicate_value = _keyword(call, "sqlite_where", values, None)
+            predicate = _normalized_sql(predicate_value) if isinstance(predicate_value, str) else None
+            self._record(
+                "unique",
+                table,
+                _unique_detail(term_sql, predicate),
+                terms=terms,
+                predicate=predicate,
+            )
+        elif operation == "create_unique_constraint":
+            table = batch_table or _string_arg(call, 1, values)
+            index = 1 if batch_table else 2
+            columns = _static_value(call.args[index], values) if len(call.args) > index else _UNKNOWN
+            terms = (
+                frozenset(str(column) for column in columns)
+                if isinstance(columns, tuple) and all(isinstance(column, str) for column in columns)
+                else None
+            )
+            term_sql = ", ".join(columns) if terms is not None else "<unresolved>"
+            self._record("unique", table, _unique_detail(term_sql, None), terms=terms)
+        elif operation == "create_check_constraint":
+            table = batch_table or _string_arg(call, 1, values)
+            index = 1 if batch_table else 2
+            expression = _static_value(call.args[index], values) if len(call.args) > index else _UNKNOWN
+            detail = _normalized_sql(expression) if isinstance(expression, str) else "<unresolved check>"
+            self._record("check", table, detail)
+        elif operation == "alter_column" and _keyword(call, "nullable", values) is False:
+            table = batch_table or _string_arg(call, 0, values)
+            column_index = 0 if batch_table else 1
+            column = _string_arg(call, column_index, values)
+            self._record("not_null", table, "alter_column", column=column)
+        elif operation in {"add_column", "add_column_if_not_exists"}:
+            table = batch_table or _string_arg(call, 0, values)
+            column_node = call.args[0] if batch_table and call.args else call.args[1] if len(call.args) > 1 else None
+            if not isinstance(column_node, ast.Call):
+                return
+            column = _string_arg(column_node, 0, values)
+            nullable = _keyword(column_node, "nullable", values, True)
+            default = _effective_default(_keyword(column_node, "server_default", values, None))
+            self._record("column", table, "add_column", column=column, default=default)
+            if any(
+                isinstance(nested, ast.Call) and _call_name(nested.func).endswith("CheckConstraint")
+                for nested in ast.walk(column_node)
+            ):
+                for nested in ast.walk(column_node):
+                    if isinstance(nested, ast.Call) and _call_name(nested.func).endswith("CheckConstraint"):
+                        expression = _string_arg(nested, 0, values)
+                        self._record("check", table, _normalized_sql(expression) or "<unresolved check>")
+            if nullable is False:
+                self._record("not_null", table, "add_column", column=column)
+        elif operation == "drop_column":
+            table = batch_table or _string_arg(call, 0, values)
+            column_index = 0 if batch_table else 1
+            self._record(
+                "drop_column",
+                table,
+                "drop_column",
+                column=_string_arg(call, column_index, values),
+            )
+        elif operation == "drop_table":
+            self._record("reset", _string_arg(call, 0, values), "drop_table")
+        elif operation == "create_table":
+            table = _string_arg(call, 0, values)
+            for item in call.args[1:]:
+                if not isinstance(item, ast.Call):
+                    continue
+                item_name = _call_name(item.func)
+                if item_name.endswith("Column"):
+                    column = _string_arg(item, 0, values)
+                    nullable = _keyword(item, "nullable", values, True)
+                    default = _effective_default(_keyword(item, "server_default", values, None))
+                    self._record("column", table, "create_table column", column=column, default=default)
+                    if nullable is False:
+                        self._record("not_null", table, "create_table column", column=column)
+                    for nested in ast.walk(item):
+                        if isinstance(nested, ast.Call) and _call_name(nested.func).endswith("CheckConstraint"):
+                            expression = _string_arg(nested, 0, values)
+                            self._record("check", table, _normalized_sql(expression) or "<unresolved check>")
+                elif item_name.endswith("UniqueConstraint"):
+                    columns = tuple(
+                        value
+                        for argument in item.args
+                        if isinstance((value := _static_value(argument, values)), str)
+                    )
+                    self._record(
+                        "unique",
+                        table,
+                        _unique_detail(", ".join(columns) or "<unresolved>", None),
+                        terms=frozenset(columns) or None,
+                    )
+                elif item_name.endswith("CheckConstraint"):
+                    expression = _string_arg(item, 0, values)
+                    self._record("check", table, _normalized_sql(expression) or "<unresolved check>")
+
+
+def analyze_migration_source(source: str) -> MigrationSourceAnalysis:
+    return _MigrationSourceScanner(source).scan()
+
+
+def _check_holds_for_added_defaults(expression: str, additions: list[SourceEffect]) -> bool:
+    known = [effect for effect in additions if effect.default is not _UNKNOWN and effect.column]
+    if not known:
+        return False
+    aliases = ", ".join(f"? as {_quoted_identifier(effect.column or '')}" for effect in known)
+    values = tuple(effect.default for effect in known)
+    connection = sqlite3.connect(":memory:")
+    try:
+        # SQLite rejects a CHECK only when it evaluates to integer zero; NULL is
+        # accepted. New nullable columns therefore establish predicates that stay
+        # unknown for old rows, but not predicates such as ``column IS NOT NULL``.
+        row = connection.execute(
+            f"select case when ({expression}) is 0 then 0 else 1 end from (select {aliases})",
+            values,
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    finally:
+        connection.close()
+    return row is not None and int(row[0]) == 1
+
+
+def _current_heads(connection: sqlite3.Connection) -> tuple[str, ...]:
+    try:
+        rows = connection.execute(f"select version_num from {ALEMBIC_BOOKKEEPING_TABLE}").fetchall()
+    except sqlite3.OperationalError:
+        return ()
+    return tuple(str(row[0]) for row in rows)
+
+
+def analyze_released_schema_tightenings(tags: Iterable[str] | None = None) -> TighteningAudit:
+    """Check every tightening on every distinct released schema's current upgrade plan.
+
+    Alembic and SQLite own the plan and schemas. The only model here is the property being
+    checked: which guarantees became stricter, and whether the migration source contains an
+    ordered step that establishes each one.
+    """
+    sources = working_tree_sources()
+    graph = revision_graph(sources)
+    analyses = {
+        revision: analyze_migration_source(sources[filename])
+        for revision, (filename, _) in graph.items()
+    }
+    problems: list[str] = []
+    planned: set[tuple[str, str]] = set()
+    analyzed: set[tuple[str, str]] = set()
+    found: list[tuple[str, str, SchemaTightening]] = []
+
+    for tag in tags or released_graphs():
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            db_path = root / "vibe.sqlite"
+            versions = extract_released_versions(tag, root / "release")
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message="Skipped unsupported reflection of expression-based index.*",
+                    category=SAWarning,
+                )
+                command.upgrade(_alembic_config(db_path, versions), "heads")
+
+            config = _alembic_config(db_path)
+            script = ScriptDirectory.from_config(config)
+            engine = sa.create_engine(config.get_main_option("sqlalchemy.url"))
+            with engine.connect() as connection:
+                connection.exec_driver_sql("pragma foreign_keys = on")
+                connection.commit()
+                raw = connection.connection.driver_connection
+                before = schema_guarantees(raw)
+                expected = {step.revision.revision for step in script._upgrade_revs("heads", _current_heads(raw))}
+                planned.update((tag, revision) for revision in expected)
+
+                def migrations(revisions: tuple[str, ...], context: Any) -> list[Any]:
+                    return script._upgrade_revs("heads", revisions)
+
+                def observed(*, ctx: Any, step: Any, heads: set[str], run_args: dict[str, Any]) -> None:
+                    del ctx, heads, run_args
+                    nonlocal before
+                    revision = str(step.up_revision_id)
+                    pair = (tag, revision)
+                    analyzed.add(pair)
+                    after = schema_guarantees(raw)
+                    source_analysis = analyses.get(revision)
+                    if source_analysis is None:
+                        problems.append(f"{tag}: applied revision {revision} has no statically analyzable source")
+                    else:
+                        durable = schema_tightenings(before, after)
+                        transient = [
+                            tightening
+                            for tightening in source_analysis.tightenings_against(before)
+                            if not any(_same_obligation(tightening, item) for item in durable)
+                        ]
+                        tightenings = {*durable, *transient}
+                        for tightening in sorted(tightenings, key=repr):
+                            found.append((tag, revision, tightening))
+                            if not source_analysis.establishes(tightening):
+                                problems.append(
+                                    f"{tag}: {revision} adds {tightening.detail} on {tightening.table} "
+                                    "without an incoming guarantee or an explicit preceding establishing step"
+                                )
+                    before = after
+
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore",
+                        message="Skipped unsupported reflection of expression-based index.*",
+                        category=SAWarning,
+                    )
+                    with EnvironmentContext(config, script, fn=migrations) as environment:
+                        environment.configure(connection=connection, on_version_apply=observed)
+                        with environment.begin_transaction():
+                            environment.run_migrations()
+            engine.dispose()
+
+    missing = planned - analyzed
+    extra = analyzed - planned
+    problems.extend(f"{tag}: planned revision {revision} was not analyzed" for tag, revision in sorted(missing))
+    problems.extend(f"{tag}: unplanned revision {revision} was analyzed" for tag, revision in sorted(extra))
+    return TighteningAudit(tuple(problems), frozenset(planned), frozenset(analyzed), tuple(found))
 
 
 def table_names(db_path: Path) -> set[str]:
@@ -1509,6 +2477,7 @@ def collect_problems(
     problems.extend(spent_body_edit_declarations(baseline))
 
     if include_upgrade:
+        problems.extend(analyze_released_schema_tightenings().problems)
         failures, refused = unrepairable_releases()
         for tag, reasons in sorted(failures.items(), key=lambda item: version_key(item[0])):
             problems.extend(f"{tag}: {reason}" for reason in reasons)
@@ -1525,7 +2494,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--skip-upgrade",
         action="store_true",
-        help="check only the metadata properties, skipping the per-release upgrade",
+        help="check only metadata, skipping per-release upgrades and tightening analysis",
     )
     return parser
 

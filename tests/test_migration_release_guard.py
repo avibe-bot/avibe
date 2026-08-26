@@ -69,6 +69,347 @@ def _revision_file(revision: str, down_revision: str, *, annotated: bool = False
     return '"""a migration"""\n\n' + "\n".join(lines) + "\n"
 
 
+def _schema(ddl: str) -> guard.SchemaGuarantees:
+    connection = sqlite3.connect(":memory:")
+    try:
+        connection.executescript(ddl)
+        return guard.schema_guarantees(connection)
+    finally:
+        connection.close()
+
+
+def _tightening(kind: str, table: str, detail: str, **kwargs) -> guard.SchemaTightening:
+    return guard.SchemaTightening(kind, table, detail, **kwargs)
+
+
+def test_the_incoming_schema_decides_whether_a_unique_index_tightens():
+    before = _schema("create table records (a text, b text, unique (a))")
+    implied = _schema(
+        "create table records (a text, b text, unique (a)); "
+        "create unique index uq_records_ab on records (a, b)"
+    )
+    tightened = _schema(
+        "create table records (a text, b text, unique (a)); "
+        "create unique index uq_records_b on records (b)"
+    )
+
+    assert guard.schema_tightenings(before, implied) == []
+    assert [item.kind for item in guard.schema_tightenings(before, tightened)] == ["unique"]
+
+    primary_key = _schema("create table records (a text primary key, b text)")
+    primary_key_indexed = _schema(
+        "create table records (a text primary key, b text); "
+        "create unique index uq_records_a on records (a)"
+    )
+    assert guard.schema_tightenings(primary_key, primary_key_indexed) == []
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "detail"),
+    [
+        (
+            "create table records (id text)",
+            "create table records (id text, slug text not null)",
+            "new column slug is NOT NULL",
+        ),
+        (
+            "create table records (id text, slug text)",
+            "create table records (id text, slug text not null)",
+            "column slug became NOT NULL",
+        ),
+        (
+            "create table records (id text)",
+            "create table records (id text, slug text not null default null)",
+            "new column slug is NOT NULL",
+        ),
+    ],
+)
+def test_not_null_tightening_is_derived_from_the_schema(before, after, detail):
+    assert guard.schema_tightenings(_schema(before), _schema(after)) == [
+        _tightening("not_null", "records", detail, column="slug")
+    ]
+
+
+def test_an_added_check_is_a_tightening_but_a_membership_widening_is_not():
+    unconstrained = _schema("create table records (state text)")
+    narrow = _schema("create table records (state text check (state = 'ready'))")
+    wider = _schema("create table records (state text check (state in ('ready', 'done')))")
+
+    assert guard.schema_tightenings(unconstrained, narrow) == [
+        _tightening("check", "records", "state = 'ready'", terms=frozenset({"state"}))
+    ]
+    assert guard.schema_tightenings(narrow, wider) == []
+
+
+@pytest.mark.parametrize(
+    ("operation", "safe_step", "kind", "detail"),
+    [
+        (
+            'op.create_index("uq_records_slug", "records", ["slug"], unique=True)',
+            'op.execute("delete from records where id in '
+            '(select id from records group by slug having count(*) > 1)")',
+            "unique",
+            "UNIQUE(slug)",
+        ),
+        (
+            'op.create_unique_constraint("uq_records_slug", "records", ["slug"])',
+            'op.execute("delete from records where id in '
+            '(select id from records group by slug having count(*) > 1)")',
+            "unique",
+            "UNIQUE(slug)",
+        ),
+        (
+            'op.add_column("records", sa.Column("slug", sa.String(), nullable=False))',
+            'op.execute("delete from records")',
+            "not_null",
+            "new column slug is NOT NULL",
+        ),
+        (
+            'op.alter_column("records", "slug", nullable=False)',
+            "op.execute(\"update records set slug = 'legacy' where slug is null\")",
+            "not_null",
+            "column slug became NOT NULL",
+        ),
+        (
+            'op.create_check_constraint("ck_records_slug", "records", "length(slug) > 0")',
+            "op.execute(\"update records set slug = 'legacy' where slug is null\")",
+            "check",
+            "length(slug) > 0",
+        ),
+    ],
+)
+def test_every_data_tightening_requires_a_preceding_establishing_step(operation, safe_step, kind, detail):
+    unsafe = f"""
+def upgrade():
+    {operation}
+"""
+    safe = f"""
+def upgrade():
+    {safe_step}
+    {operation}
+"""
+    too_late = f"""
+def upgrade():
+    {operation}
+    {safe_step}
+"""
+    tightening = _tightening(
+        kind,
+        "records",
+        detail,
+        column="slug" if kind == "not_null" else None,
+        terms=frozenset({"slug"}) if kind in {"unique", "check"} else None,
+    )
+
+    assert not guard.analyze_migration_source(unsafe).establishes(tightening)
+    assert guard.analyze_migration_source(safe).establishes(tightening)
+    assert not guard.analyze_migration_source(too_late).establishes(tightening)
+
+
+def test_an_update_is_not_assumed_to_deduplicate_a_unique_key():
+    source = """
+def upgrade():
+    op.execute("update records set slug = trim(slug)")
+    op.create_index("uq_records_slug", "records", ["slug"], unique=True)
+"""
+    tightening = _tightening(
+        "unique",
+        "records",
+        "UNIQUE(slug)",
+        terms=frozenset({"slug"}),
+    )
+
+    assert not guard.analyze_migration_source(source).establishes(tightening)
+
+
+def test_a_backfill_from_the_column_being_removed_establishes_the_new_not_null_shape():
+    source = """
+def upgrade():
+    op.add_column("records", sa.Column("audience", sa.String(), nullable=True))
+    op.execute("update records set audience = visibility")
+    with op.batch_alter_table("records") as batch:
+        batch.alter_column("audience", nullable=False)
+        batch.drop_column("visibility")
+"""
+    analysis = guard.analyze_migration_source(source)
+
+    assert analysis.establishes(
+        _tightening(
+            "not_null",
+            "records",
+            "column audience became NOT NULL",
+            column="audience",
+        )
+    )
+    assert any(effect.kind == "data" and "visibility" in effect.detail for effect in analysis.effects)
+
+    incoming = _schema("create table records (visibility text not null)")
+    backfill = next(
+        tightening
+        for tightening in analysis.tightenings_against(incoming)
+        if tightening.kind == "backfill"
+    )
+    assert analysis.establishes(backfill)
+
+
+def test_dropping_a_replaced_column_without_a_preceding_backfill_is_rejected():
+    source = """
+def upgrade():
+    op.add_column("records", sa.Column("audience", sa.String(), nullable=True))
+    with op.batch_alter_table("records") as batch:
+        batch.drop_column("visibility")
+"""
+    analysis = guard.analyze_migration_source(source)
+    incoming = _schema("create table records (visibility text not null)")
+    backfill = next(
+        tightening
+        for tightening in analysis.tightenings_against(incoming)
+        if tightening.kind == "backfill"
+    )
+
+    assert not analysis.establishes(backfill)
+
+
+def test_replacing_a_table_explicitly_establishes_its_new_constraints():
+    source = """
+def upgrade():
+    op.drop_table("records")
+    op.create_table(
+        "records",
+        sa.Column("id", sa.String(), nullable=False),
+    )
+"""
+    analysis = guard.analyze_migration_source(source)
+    tightening = _tightening(
+        "not_null",
+        "records",
+        "column id becomes NOT NULL",
+        column="id",
+    )
+
+    assert analysis.establishes(tightening)
+
+
+def test_a_transient_not_null_addition_is_still_a_tightening():
+    source = """
+def upgrade():
+    op.add_column("records", sa.Column("slug", sa.String(), nullable=False))
+    op.alter_column("records", "slug", server_default="legacy")
+"""
+    analysis = guard.analyze_migration_source(source)
+
+    assert _tightening(
+        "not_null",
+        "records",
+        "column slug becomes NOT NULL",
+        column="slug",
+    ) in analysis.tightenings_against(_schema("create table records (id text)"))
+
+    null_default = guard.analyze_migration_source(
+        """
+def upgrade():
+    op.add_column(
+        "records",
+        sa.Column("slug", sa.String(), nullable=False, server_default=sa.text("NULL")),
+    )
+"""
+    )
+    assert any(
+        tightening.kind == "not_null"
+        for tightening in null_default.tightenings_against(_schema("create table records (id text)"))
+    )
+
+    safe_default = guard.analyze_migration_source(
+        """
+def upgrade():
+    op.add_column(
+        "records",
+        sa.Column("slug", sa.String(), nullable=False, server_default="legacy"),
+    )
+"""
+    )
+    obligation = next(
+        tightening
+        for tightening in safe_default.tightenings_against(_schema("create table records (id text)"))
+        if tightening.kind == "not_null"
+    )
+    assert safe_default.establishes(obligation)
+
+
+def test_a_new_nullable_column_can_establish_a_partial_unique_predicate():
+    source = """
+def upgrade():
+    op.add_column("records", sa.Column("scope_id", sa.String(), nullable=True))
+    op.create_index(
+        "uq_records_scope", "records", ["scope_id"], unique=True,
+        sqlite_where=sa.text("scope_id is not null"),
+    )
+"""
+    tightening = _tightening(
+        "unique",
+        "records",
+        "UNIQUE(scope_id) WHERE scope_id is not null",
+        terms=frozenset({"scope_id"}),
+        predicate="scope_id is not null",
+        new_null_columns=frozenset({"scope_id"}),
+    )
+
+    assert guard.analyze_migration_source(source).establishes(tightening)
+
+
+def test_a_column_default_can_establish_its_own_check():
+    source = """
+def upgrade():
+    op.add_column(
+        "records",
+        sa.Column(
+            "revision",
+            sa.Integer(),
+            sa.CheckConstraint("revision >= 0"),
+            nullable=False,
+            server_default="0",
+        ),
+    )
+"""
+
+    assert guard.analyze_migration_source(source).establishes(
+        _tightening(
+            "check",
+            "records",
+            "revision >= 0",
+            terms=frozenset({"revision"}),
+        )
+    )
+
+
+def test_a_new_nullable_column_establishes_only_checks_that_accept_null():
+    source = """
+def upgrade():
+    op.add_column("records", sa.Column("kind", sa.String(), nullable=True))
+    op.create_check_constraint("ck_records_kind", "records", "kind in ('one', 'two')")
+"""
+    analysis = guard.analyze_migration_source(source)
+
+    assert analysis.establishes(
+        _tightening(
+            "check",
+            "records",
+            "kind in ('one', 'two')",
+            terms=frozenset({"kind"}),
+        )
+    )
+
+    unsafe = source.replace("kind in ('one', 'two')", "kind is not null")
+    assert not guard.analyze_migration_source(unsafe).establishes(
+        _tightening(
+            "check",
+            "records",
+            "kind is not null",
+            terms=frozenset({"kind"}),
+        )
+    )
+
+
 # One revision of every shape the real graph contains: a root with no parent, an ordinary
 # linear child declared in the annotated form, a sibling branch carrying a branch label,
 # and a merge with a tuple parent and a dependency edge. Seeding every shape rather than
@@ -536,6 +877,23 @@ def test_the_command_line_refuses_rather_than_passing_without_history(monkeypatc
     assert "could not run" in capsys.readouterr().err
 
 
+def test_the_cli_verdict_includes_schema_tightening_findings(monkeypatch):
+    monkeypatch.setattr(guard, "releases_with_state_but_no_graph", lambda: [])
+    monkeypatch.setattr(guard, "fresh_install_tables", lambda: set(guard.HEAD_TABLES))
+    monkeypatch.setattr(guard, "new_slot_collisions", lambda baseline: {})
+    monkeypatch.setattr(guard, "rechained_revisions", lambda baseline: [])
+    monkeypatch.setattr(guard, "edited_released_bodies", lambda baseline: [])
+    monkeypatch.setattr(guard, "spent_body_edit_declarations", lambda baseline: [])
+    monkeypatch.setattr(
+        guard,
+        "analyze_released_schema_tightenings",
+        lambda: guard.TighteningAudit(("unsafe tightening",), frozenset(), frozenset(), ()),
+    )
+    monkeypatch.setattr(guard, "unrepairable_releases", lambda: ({}, {}))
+
+    assert guard.collect_problems("v9.9.9")[1] == ["unsafe tightening"]
+
+
 def test_head_tables_is_what_a_fresh_install_has():
     """The derivation source for the upgrade property must itself be measured, not maintained.
 
@@ -879,6 +1237,16 @@ def test_every_installable_tag_is_covered_exactly_once():
 
     assert {guard.versions_tree(tag) for tag in covered} == {guard.versions_tree(tag) for tag in guard.released_tags()}
     assert len({guard.versions_tree(tag) for tag in covered}) == len(covered)
+
+
+@requires_release_history
+def test_every_tightening_on_every_released_schema_is_established():
+    """The graph is the enumeration: a future migration joins without a test allowlist."""
+    audit = guard.analyze_released_schema_tightenings()
+
+    assert audit.planned
+    assert audit.analyzed == audit.planned
+    assert audit.problems == ()
 
 
 @requires_release_history
