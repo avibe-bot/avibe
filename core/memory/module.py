@@ -68,6 +68,7 @@ from core.memory.types import (
     RecallPolicy,
     RecallResult,
     is_memory_error_code,
+    is_opaque_provider_id,
 )
 from core.memory.writer import (
     BestEffortMemoryWriter,
@@ -1460,7 +1461,7 @@ class MemoryModule:
                 or item.kind != "episode"
                 or item.project != project_id
                 or item.origin is not None
-                or not _valid_list_identifier(item.id)
+                or not is_opaque_provider_id(item.id)
                 or item.id in seen_ids
                 or instant is None
                 or (
@@ -1730,11 +1731,6 @@ def _list_text_bytes(value: object, *, allow_empty: bool) -> bytes | None:
     if any(ord(character) < 32 and character not in {"\n", "\t", "\r"} for character in value):
         return None
     return encoded
-
-
-def _valid_list_identifier(value: object) -> bool:
-    encoded = _utf8_bytes(value) if isinstance(value, str) else None
-    return bool(value) and encoded is not None and "\x00" not in value
 
 
 def _list_timestamp_instant(value: object) -> datetime | None:

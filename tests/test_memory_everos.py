@@ -1500,6 +1500,43 @@ def test_profile_canonicalizes_structured_profile() -> None:
     assert items[0].profile is None
 
 
+def test_profile_rendering_stays_inside_bounded_parser_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile_data = {"large_provider_field": "x" * (2 * 1024 * 1024)}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "profiles": [
+                        {"user_id": "owner-1", "profile_data": profile_data}
+                    ]
+                }
+            },
+        )
+
+    def fail_controller_render(_value: object) -> str:
+        raise AssertionError("profile rendered on the controller")
+
+    memory_everos._terminate_json_parse_pool()
+    monkeypatch.setattr(
+        memory_everos,
+        "_canonical_profile_text",
+        fail_controller_render,
+    )
+    try:
+        with _sidecar_transport(handler):
+            items = asyncio.run(
+                EverOSPort(Path("/tmp/everos.sock")).profile("owner-1", PROJECT)
+            )
+    finally:
+        memory_everos._terminate_json_parse_pool()
+
+    assert json.loads(items[0].text) == profile_data
+
+
 @pytest.mark.parametrize(
     "owner_id",
     (
@@ -1803,6 +1840,56 @@ def test_cancelled_json_parse_terminates_worker_pool(
 
     assert executor.shutdown_called
     assert memory_everos._JSON_PARSE_POOL is None
+
+
+def test_json_parser_pool_uses_spawn_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    context = object()
+    requested_methods: list[str] = []
+
+    class ImmediateExecutor:
+        def __init__(self, *, max_workers: int, mp_context: object) -> None:
+            assert max_workers == 1
+            assert mp_context is context
+            self._processes = {}
+
+        def submit(self, operation, *args):
+            future: concurrent.futures.Future[object] = concurrent.futures.Future()
+            future.set_result(operation(*args))
+            return future
+
+        def shutdown(self, *, wait: bool, cancel_futures: bool) -> None:
+            assert wait is True
+            assert cancel_futures is True
+
+    def get_context(method: str) -> object:
+        requested_methods.append(method)
+        return context
+
+    response_path = tmp_path / "provider-response.json"
+    response_path.write_text("{}", encoding="utf-8")
+    memory_everos._terminate_json_parse_pool()
+    monkeypatch.setattr(memory_everos.multiprocessing, "get_context", get_context)
+    monkeypatch.setattr(
+        memory_everos.concurrent.futures,
+        "ProcessPoolExecutor",
+        ImmediateExecutor,
+    )
+    try:
+        value = asyncio.run(
+            memory_everos._parse_spooled_json_async(
+                str(response_path),
+                memory_everos._JSON_ANY,
+                1.0,
+            )
+        )
+    finally:
+        memory_everos._terminate_json_parse_pool()
+
+    assert value == {}
+    assert requested_methods == ["spawn"]
 
 
 def test_stale_parser_pool_termination_preserves_replacement(

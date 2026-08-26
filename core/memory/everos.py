@@ -40,6 +40,7 @@ from core.memory.types import (
     ProviderSearchItem,
     ProviderSessionRef,
     is_memory_error_code,
+    is_opaque_provider_id,
     MemoryPreflightDiagnostic,
     MAX_AGENTIC_TIMEOUT_SECONDS,
 )
@@ -160,6 +161,12 @@ class _JSONMapSchema(_JSONSchema):
     additional_values: _JSONSchema | None = None
     max_items: int | None = None
     reject_unknown: bool = False
+
+
+@dataclass(frozen=True)
+class _PreparedProfileData:
+    text: str | None
+    structured: MemoryProfile | None
 
 
 _JSON_SCALAR = _JSONScalarSchema()
@@ -849,7 +856,7 @@ class EverOSPort:
             response_schema=_PROFILE_RESPONSE_SCHEMA,
         )
         data = body.get("data") if isinstance(body, dict) else None
-        if not isinstance(data, dict) or not _is_json_value(data):
+        if not isinstance(data, dict):
             raise MemoryProviderFailure("memory_provider_response_invalid")
         profile = _map_profile_item(data, principal_id=principal_id)
         # "Valid response, no profile payload" is exactly "zero items returned",
@@ -1559,10 +1566,7 @@ async def _parse_spooled_json_async(
         slot_acquired = True
         with _JSON_PARSE_POOL_LOCK:
             if _JSON_PARSE_POOL is None:
-                try:
-                    context = multiprocessing.get_context("fork")
-                except ValueError:
-                    context = multiprocessing.get_context("spawn")
+                context = multiprocessing.get_context("spawn")
                 _JSON_PARSE_POOL = concurrent.futures.ProcessPoolExecutor(
                     max_workers=1,
                     mp_context=context,
@@ -1623,6 +1627,8 @@ def _parse_spooled_json_path(path: str, schema: _JSONSchema) -> tuple[bool, Any]
     try:
         with open(path, "rb") as spool:
             value = _parse_spooled_json(spool, schema)
+        if _is_profile_response_schema(schema):
+            value = _prepare_profile_response(value)
         # The process boundary must be able to return the projection without
         # recursively walking an adversarially deep profile object.
         pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
@@ -1644,6 +1650,29 @@ def _is_profile_response_schema(schema: _JSONSchema) -> bool:
         and isinstance(schema.fields.get("data"), _JSONMapSchema)
         and set(schema.fields["data"].fields) == {"profiles"}
     )
+
+
+def _prepare_profile_response(value: Any) -> Any:
+    """Canonicalize unbounded profile data before it crosses into the controller."""
+
+    if not isinstance(value, dict):
+        return value
+    data = value.get("data")
+    if not isinstance(data, dict):
+        return value
+    profiles = data.get("profiles")
+    if not isinstance(profiles, list):
+        return value
+    for profile in profiles:
+        if not isinstance(profile, dict):
+            continue
+        profile_data = profile.get("profile_data")
+        structured_profile = _structured_profile(profile_data)
+        profile["profile_data"] = _PreparedProfileData(
+            text=_canonical_profile_text(profile_data),
+            structured=structured_profile,
+        )
+    return value
 
 
 def _parse_spooled_json(spool: BinaryIO, schema: _JSONSchema) -> Any:
@@ -2126,8 +2155,10 @@ def _map_profile_item(data: dict[str, Any], *, principal_id: str) -> MemoryItem 
         if not isinstance(profile, dict) or profile.get("user_id") != principal_id:
             continue
         profile_data = profile.get("profile_data")
-        structured_profile = _structured_profile(profile_data)
-        text = _canonical_profile_text(profile_data)
+        if not isinstance(profile_data, _PreparedProfileData):
+            raise MemoryProviderFailure("memory_provider_response_invalid")
+        structured_profile = profile_data.structured
+        text = profile_data.text
         if text is not None:
             updated_at = structured_profile.updated_at if structured_profile is not None else None
             return MemoryItem(
@@ -2559,10 +2590,7 @@ def _bounded_opaque_string(value: object, *, max_bytes: int = 128) -> str | None
 
 
 def _strict_receipt_id(value: object) -> str | None:
-    if not isinstance(value, str):
-        return None
-    raw = _utf8_bytes(value)
-    return value if value and raw is not None else None
+    return value if isinstance(value, str) and is_opaque_provider_id(value) else None
 
 
 def _utf8_bytes(value: str) -> bytes | None:

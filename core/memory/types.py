@@ -100,6 +100,18 @@ def is_memory_error_code(value: object) -> bool:
     return isinstance(value, str) and value in CLOSED_MEMORY_ERROR_CODES
 
 
+def is_opaque_provider_id(value: object) -> bool:
+    """Return whether *value* can cross every provider-ID transport unchanged."""
+
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeError:
+        return False
+    return True
+
+
 @dataclass(frozen=True)
 class MemoryPreflightDiagnostic:
     side: Literal["embedding", "llm", "rerank", "multimodal"]

@@ -99,6 +99,7 @@ from core.memory.types import (
     RecallItems,
     RecallPolicy,
     RecallResult,
+    is_opaque_provider_id,
     memory_item_payload,
     memory_list_page_payload,
 )
@@ -3000,12 +3001,9 @@ def _decode_memory_list_cursor(
 
 
 def _encode_memory_list_boundary_id(value: str) -> str:
-    try:
-        raw = value.encode("utf-8")
-    except UnicodeEncodeError:
-        raise ValueError("invalid Memory list boundary ID") from None
-    if not raw or "\x00" in value:
+    if not is_opaque_provider_id(value):
         raise ValueError("invalid Memory list boundary ID")
+    raw = value.encode("utf-8")
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
 

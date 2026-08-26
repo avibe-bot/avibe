@@ -8,11 +8,16 @@ import pytest
 
 import core.memory.runtime as runtime_module
 from config.v2_config import MemoryEndpointConfig, MemoryProcessingConfig
-from core.memory.everos import ProviderHealthSnapshot
+from core.memory.everos import FakeMemoryProvider, ProviderHealthSnapshot
 from core.memory.processing_record import RuntimeHealthProjection, SourceObservation
 from core.memory.runtime import MemoryConfig, MemoryRuntime
 from core.memory.store import MemoryStore
-from core.memory.types import MemoryItems
+from core.memory.types import (
+    MemoryItems,
+    MemoryListItem,
+    MemoryListPage,
+    is_opaque_provider_id,
+)
 
 
 def _runtime(tmp_path: Path) -> MemoryRuntime:
@@ -417,14 +422,25 @@ def test_aggregate_list_cursor_is_bound_to_selected_owner() -> None:
         )
 
 
-def test_aggregate_list_cursor_round_trips_provider_id_without_size_cap() -> None:
+@pytest.mark.parametrize(
+    "provider_id",
+    (
+        "episode-" + "x" * 10_000,
+        "episode-\x00opaque",
+        "episode-\ncontrol",
+        "episode-\u8bb0",
+    ),
+)
+def test_aggregate_list_cursor_round_trips_every_accepted_provider_id(
+    provider_id: str,
+) -> None:
     projects = ("default",)
     fingerprint = runtime_module._memory_list_catalog_fingerprint(
         "u-11111111111111111111111111111111",
         projects,
         origin="user",
     )
-    provider_id = "episode-" + "x" * 10_000
+    assert is_opaque_provider_id(provider_id)
     cursor = runtime_module._encode_memory_list_cursor(
         fingerprint,
         {"default": ("2026-08-26T00:00:00Z", provider_id)},
@@ -438,9 +454,63 @@ def test_aggregate_list_cursor_round_trips_provider_id_without_size_cap() -> Non
         fingerprint=fingerprint,
     )
 
-    assert len(cursor.encode("ascii")) > 8192
+    if len(provider_id) > 8192:
+        assert len(cursor.encode("ascii")) > 8192
     assert boundaries == {
         "default": ("2026-08-26T00:00:00Z", provider_id),
     }
     assert page_hints == {"default": 1}
     assert total_hints == {"default": 2}
+
+
+@pytest.mark.asyncio
+async def test_aggregate_list_pages_round_trip_opaque_nul_provider_id(
+    tmp_path: Path,
+) -> None:
+    provider_id = "episode-\x00opaque"
+    runtime = _runtime(tmp_path)
+    runtime.module.replace_provider(
+        FakeMemoryProvider(
+            list_page=MemoryListPage(
+                items=(
+                    MemoryListItem(
+                        id=provider_id,
+                        subject="newer",
+                        summary="newer",
+                        body="newer body",
+                        timestamp="2026-08-26T00:00:01Z",
+                        project="default",
+                    ),
+                    MemoryListItem(
+                        id="episode-older",
+                        subject="older",
+                        summary="older",
+                        body="older body",
+                        timestamp="2026-08-26T00:00:00Z",
+                        project="default",
+                    ),
+                ),
+                page=1,
+                page_size=20,
+                count=2,
+                total_count=2,
+            )
+        )
+    )
+
+    first = await runtime.list_all_episodes_payload(
+        "u-11111111111111111111111111111111",
+        cursor=None,
+        limit=1,
+    )
+    second = await runtime.list_all_episodes_payload(
+        "u-11111111111111111111111111111111",
+        cursor=first["next_cursor"],
+        limit=1,
+    )
+
+    assert [item["id"] for item in first["items"]] == [provider_id]
+    assert first["next_cursor"] is not None
+    assert [item["id"] for item in second["items"]] == ["episode-older"]
+    assert second["next_cursor"] is None
+    await runtime.close()
