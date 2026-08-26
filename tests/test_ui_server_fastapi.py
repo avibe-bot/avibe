@@ -2371,6 +2371,20 @@ def test_config_restart_fallback_marks_pending_restart_when_restart_in_flight(mo
     assert pending["scope"] == "service"
 
 
+def test_ui_restart_in_flight_uses_the_shared_supervisor_predicate(monkeypatch):
+    from vibe import restart_supervisor
+
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        restart_supervisor,
+        "restart_in_flight",
+        lambda: calls.append(True) or True,
+    )
+
+    assert ui_server._restart_in_flight() is True
+    assert calls == [True]
+
+
 def test_config_restart_fallback_schedules_when_in_flight_finishes_after_marker(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     from vibe import restart_supervisor

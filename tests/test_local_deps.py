@@ -15,7 +15,7 @@ import os
 import subprocess
 import tarfile
 import urllib.error
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -23,6 +23,11 @@ import pytest
 
 from core import latest_version_cache
 from vibe import api
+
+
+@pytest.fixture(autouse=True)
+def _no_restart_in_flight(monkeypatch):
+    monkeypatch.setattr(api, "restart_in_flight", lambda: False)
 
 
 class _FakeHTTPResponse:
@@ -1352,6 +1357,16 @@ def test_memory_runtime_dependency_job_restarts_after_repairing_unavailable_fact
     controller_calls: list[bool] = []
     installs: list[bool] = []
     restarts: list[dict] = []
+    mutation_lease_held = False
+
+    @contextmanager
+    def mutation_lock():
+        nonlocal mutation_lease_held
+        mutation_lease_held = True
+        try:
+            yield
+        finally:
+            mutation_lease_held = False
 
     def install_runtime() -> dict:
         controller_calls.append(True)
@@ -1370,13 +1385,20 @@ def test_memory_runtime_dependency_job_restarts_after_repairing_unavailable_fact
     monkeypatch.setattr(
         api,
         "_install_memory_package_for_current_release",
-        lambda: installs.append(True) or {"ok": True, "output": "installed"},
+        lambda: (
+            installs.append(mutation_lease_held)
+            or {"ok": True, "output": "installed"}
+        ),
     )
+    monkeypatch.setattr(api, "package_mutation_lock", mutation_lock)
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/bin/vibe")
     monkeypatch.setattr(
         api,
         "schedule_restart",
-        lambda **kwargs: restarts.append(kwargs) or {"ok": True, "job_id": "memory-repair"},
+        lambda **kwargs: (
+            restarts.append({**kwargs, "lease_held": mutation_lease_held})
+            or {"ok": True, "job_id": "memory-repair"}
+        ),
     )
 
     assert api._prepare_memory_runtime_job() == {
@@ -1394,8 +1416,45 @@ def test_memory_runtime_dependency_job_restarts_after_repairing_unavailable_fact
             "delay_seconds": 2.0,
             "vibe_path": "/bin/vibe",
             "trigger": "memory-package-repair",
+            "lease_held": True,
         }
     ]
+    assert mutation_lease_held is False
+
+
+def test_memory_runtime_dependency_job_refuses_an_in_flight_restart_before_repair(
+    monkeypatch,
+):
+    from vibe import internal_client
+
+    monkeypatch.setattr(
+        internal_client,
+        "memory_install_runtime_sync",
+        lambda: {
+            "status_code": 503,
+            "body": {"ok": False, "reason": "memory_plugin_unavailable"},
+        },
+    )
+    monkeypatch.setattr(api, "restart_in_flight", lambda: True)
+    monkeypatch.setattr(
+        api,
+        "_install_memory_package_for_current_release",
+        lambda: pytest.fail("an in-flight restart must prevent package repair"),
+    )
+    monkeypatch.setattr(
+        api,
+        "schedule_restart",
+        lambda **kwargs: pytest.fail("an in-flight restart must not schedule another"),
+    )
+
+    assert api._prepare_memory_runtime_job() == {
+        "ok": False,
+        "message": "restart_in_progress",
+        "output": None,
+        "reason": "restart_in_progress",
+        "download_error": None,
+        "restarting": False,
+    }
 
 
 def test_memory_runtime_dependency_job_restarts_after_repairing_incompatible_package(

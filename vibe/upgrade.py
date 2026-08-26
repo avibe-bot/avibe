@@ -106,15 +106,15 @@ def execute_upgrade_plan(
 ) -> subprocess.CompletedProcess[str]:
     """Resolve, remove an overlapping optional package, then install.
 
-    The optional preflight exists for plans that require the Memory extra. Its
-    installer performs dependency resolution without writing the environment,
-    so an unavailable or incompatible ``avibe-memory`` release returns before
-    the command that replaces the running Avibe install. A core-only pip
-    rollback needs cleanup because pip installs are additive: pinning only
-    ``avibe-os`` does not remove an optional distribution left by the failed
-    generation. That cleanup runs before the pinned host reinstall because the
-    split distribution and a pre-split host own the same implementation paths;
-    uninstalling it afterward would delete files the restored host just wrote.
+    The optional preflight resolves required distributions without writing the
+    environment. It protects both Memory-preserving plans and destructive pip
+    rollbacks, so an unavailable optional package or pinned host returns before
+    the current install is changed. A core-only pip rollback needs cleanup
+    because pip installs are additive: pinning only ``avibe-os`` does not remove
+    an optional distribution left by the failed generation. That cleanup runs
+    before the pinned host reinstall because the split distribution and a
+    pre-split host own the same implementation paths; uninstalling it afterward
+    would delete files the restored host just wrote.
     """
 
     with package_mutation_lock():
@@ -651,14 +651,22 @@ def configured_memory_enabled() -> bool:
 
 
 def _distributions_providing_this_package() -> list[str]:
-    """Every installed distribution that provides the package this module is in."""
+    """Host distributions that provide the package this module is in."""
 
     try:
         from importlib.metadata import packages_distributions
+        from packaging.utils import canonicalize_name
     except ImportError:  # pragma: no cover - importlib.metadata ships with 3.10+
         return []
     try:
-        return sorted(set(packages_distributions().get(__name__.split(".")[0], [])))
+        memory_name = canonicalize_name(MEMORY_PACKAGE_NAME)
+        return sorted(
+            {
+                name
+                for name in packages_distributions().get(__name__.split(".")[0], [])
+                if canonicalize_name(name) != memory_name
+            }
+        )
     except Exception:  # pragma: no cover - a broken environment answers nothing
         logger.debug("Failed to read installed distribution metadata", exc_info=True)
         return []
@@ -1038,8 +1046,18 @@ def build_upgrade_plan(
     command.append(package_spec)
     if pinned_memory_spec:
         command.append(pinned_memory_spec)
+    cleanup_command = None
+    if version and not include_memory and memory_package_installed():
+        cleanup_command = [
+            executable,
+            "-m",
+            "pip",
+            "uninstall",
+            "--yes",
+            MEMORY_PACKAGE_NAME,
+        ]
     preflight_command = None
-    if include_memory:
+    if include_memory or cleanup_command is not None:
         # Unlike install, download never treats installed metadata as satisfied;
         # legacy pip therefore needs neither (nor supports) an upgrade flag here.
         preflight_command = [
@@ -1053,16 +1071,6 @@ def build_upgrade_plan(
         preflight_command.append(package_spec)
         if pinned_memory_spec:
             preflight_command.append(pinned_memory_spec)
-    cleanup_command = None
-    if version and not include_memory and memory_package_installed():
-        cleanup_command = [
-            executable,
-            "-m",
-            "pip",
-            "uninstall",
-            "--yes",
-            MEMORY_PACKAGE_NAME,
-        ]
     return UpgradePlan(
         command=command,
         env=dict(base_env or os.environ),

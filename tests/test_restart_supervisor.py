@@ -8,6 +8,7 @@ import sqlite3
 import sys
 import textwrap
 import threading
+import time
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
@@ -155,6 +156,56 @@ def test_schedule_restart_spawns_supervisor_and_records_status(monkeypatch, tmp_
     assert calls["kwargs"]["start_new_session"] is True
     assert calls["kwargs"]["env"] == {"PATH": "/bin"}
     assert runtime.read_json(runtime.get_restart_status_path())["job_id"] == result["job_id"]
+
+
+def test_restart_in_flight_uses_live_supervisor_identity_and_seed_grace(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    status_path = runtime.get_restart_status_path()
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 4242)
+    monkeypatch.setattr(
+        runtime,
+        "process_create_time",
+        lambda pid: 12.5 if pid == 4242 else None,
+    )
+
+    runtime.write_json(
+        status_path,
+        {
+            "state": "running",
+            "supervisor_pid": 4242,
+            "supervisor_started_at": 12.5,
+        },
+    )
+    assert restart_supervisor.restart_in_flight() is True
+
+    runtime.write_json(
+        status_path,
+        {
+            "state": "running",
+            "supervisor_pid": 4242,
+            "supervisor_started_at": 13.5,
+        },
+    )
+    assert restart_supervisor.restart_in_flight() is False
+
+    runtime.write_json(
+        status_path,
+        {"state": "scheduled", "supervisor_pid": None},
+    )
+    assert restart_supervisor.restart_in_flight() is True
+    stale = time.time() - restart_supervisor.RESTART_SEED_GRACE_SECONDS - 1
+    os.utime(status_path, (stale, stale))
+    assert restart_supervisor.restart_in_flight() is False
+
+    runtime.write_json(
+        status_path,
+        {"state": "succeeded", "supervisor_pid": 4242},
+    )
+    assert restart_supervisor.restart_in_flight() is False
 
 
 def test_legacy_upgrade_target_reads_the_running_release_and_launcher(monkeypatch, tmp_path):
@@ -776,6 +827,11 @@ def test_restart_job_prepares_show_runtime_after_service_start(monkeypatch, tmp_
     monkeypatch.setattr(restart_supervisor, "get_restart_environment", lambda vibe_path=None: None)
     monkeypatch.setattr(restart_supervisor, "_discover_legacy_upgrade_target", lambda **kwargs: None)
     monkeypatch.setattr(restart_supervisor, "get_build_identity", lambda: SimpleNamespace(kind="source"))
+    monkeypatch.setattr(
+        restart_supervisor,
+        "restart_in_flight",
+        lambda: pytest.fail("the supervisor prepare path must bypass ordinary refusal"),
+    )
 
     def fake_run(command, **kwargs):
         calls.append(("run", command))
@@ -816,6 +872,11 @@ def test_restart_job_schedules_pending_followup_after_success(monkeypatch, tmp_p
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 222)
     monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: pid == 222)
     monkeypatch.setattr(runtime, "service_instance_started", lambda pid: pid == 222)
+    monkeypatch.setattr(
+        restart_supervisor,
+        "restart_in_flight",
+        lambda: pytest.fail("the supervisor follow-up path must bypass ordinary refusal"),
+    )
 
     original_schedule_restart = restart_supervisor.schedule_restart
 
@@ -1354,6 +1415,11 @@ def test_a_restart_that_leaves_nothing_running_puts_the_old_version_back(monkeyp
     """
 
     armed = _upgrade_restart_that_dies_after_migrating(monkeypatch, tmp_path, service_running=False)
+    monkeypatch.setattr(
+        restart_supervisor,
+        "restart_in_flight",
+        lambda: pytest.fail("the supervisor rollback path must bypass ordinary refusal"),
+    )
 
     rc = restart_supervisor._run_restart_job(
         job_id="jobroll", delay_seconds=0, vibe_path="/bin/vibe", trigger="upgrade", rollback_to=_rollback_target()

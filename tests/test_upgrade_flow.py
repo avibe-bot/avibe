@@ -18,6 +18,7 @@ from vibe.upgrade import (
     MEMORY_PACKAGE_COMPATIBILITY,
     PIP_DOWNLOAD_DEST_PLACEHOLDER,
     UpgradePlan,
+    _distributions_providing_this_package,
     build_memory_add_plan,
     build_upgrade_plan,
     configured_memory_enabled,
@@ -31,6 +32,7 @@ from vibe.upgrade import (
     get_restart_shell_command,
     get_running_vibe_path,
     get_safe_cwd,
+    installed_metadata_describes_running_code,
     installed_package_name,
     pinned_package_spec,
     RollbackTarget,
@@ -65,6 +67,8 @@ def _tree_is_not_an_installed_distribution(monkeypatch):
     monkeypatch.setattr(cli, "package_mutation_lock", nullcontext)
     monkeypatch.setattr(api, "configured_memory_enabled", lambda: False)
     monkeypatch.setattr(cli, "configured_memory_enabled", lambda: False)
+    monkeypatch.setattr(api, "restart_in_flight", lambda: False)
+    monkeypatch.setattr(cli, "restart_in_flight", lambda: False)
 
 
 def test_upgrade_preserves_memory_shape_when_config_cannot_be_read(monkeypatch):
@@ -169,6 +173,19 @@ def test_memory_indep_018_upgrade_and_rollback_preserve_optional_package_shape(
     assert "avibe-os==3.0.14" in rollback_core_only.command
     assert not any("[memory]" in argument for argument in rollback_core_only.command)
     if method == "pip":
+        assert rollback_core_only.preflight_command == [
+            python_executable,
+            "-m",
+            "pip",
+            "download",
+            "--dest",
+            PIP_DOWNLOAD_DEST_PLACEHOLDER,
+            "avibe-os==3.0.14",
+        ]
+        assert not any(
+            "avibe-memory" in argument
+            for argument in rollback_core_only.preflight_command
+        )
         assert rollback_core_only.cleanup_command == [
             python_executable,
             "-m",
@@ -178,6 +195,7 @@ def test_memory_indep_018_upgrade_and_rollback_preserve_optional_package_shape(
             "avibe-memory",
         ]
     else:
+        assert rollback_core_only.preflight_command is None
         assert rollback_core_only.cleanup_command is None
 
 
@@ -283,6 +301,38 @@ def test_memory_preflight_failure_never_runs_the_replacing_install():
 
     assert result.returncode == 42
     assert calls == [["installer", "preflight"]]
+
+
+def test_core_only_pip_rollback_download_failure_preserves_the_current_install(
+    monkeypatch,
+):
+    monkeypatch.setattr("vibe.upgrade.memory_package_installed", lambda: True)
+    plan = build_upgrade_plan(
+        python_executable="/usr/bin/python3",
+        uv_path=None,
+        base_env={"PATH": "/usr/bin"},
+        version="3.0.13",
+        package_name="avibe-os",
+        memory_package=False,
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            42,
+            stdout="",
+            stderr="host release unavailable",
+        )
+
+    result = execute_upgrade_plan(plan, run=fake_run, capture_output=True, text=True)
+
+    assert result.returncode == 42
+    assert len(calls) == 1
+    assert calls[0][:4] == ["/usr/bin/python3", "-m", "pip", "download"]
+    assert calls[0][-1] == "avibe-os==3.0.13"
+    assert not any("avibe-memory" in argument for argument in calls[0])
 
 
 @pytest.mark.parametrize("preflight_returncode", [0, 42])
@@ -761,6 +811,37 @@ def test_a_forward_upgrade_on_an_undamaged_install_is_left_to_the_installer(monk
 
     assert "--upgrade" in plan.command
     assert "--force-reinstall" not in plan.command
+
+
+def test_optional_memory_provider_does_not_describe_the_running_host(monkeypatch):
+    monkeypatch.setattr(
+        "vibe.upgrade._distributions_providing_this_package",
+        _distributions_providing_this_package,
+    )
+    monkeypatch.setattr(
+        "importlib.metadata.packages_distributions",
+        lambda: {"vibe": ["avibe-os", "avibe_memory"]},
+    )
+    recorded = {"avibe-os": "3.0.14", "avibe_memory": "3.0.13"}
+    monkeypatch.setattr("importlib.metadata.version", lambda name: recorded[name])
+    monkeypatch.setattr("vibe.__version__", "3.0.14")
+
+    assert _distributions_providing_this_package() == ["avibe-os"]
+    assert installed_metadata_describes_running_code() is True
+    assert installed_package_name() == "avibe-os"
+
+
+def test_mismatched_host_rename_pair_still_marks_metadata_stale(monkeypatch):
+    monkeypatch.setattr(
+        "vibe.upgrade._distributions_providing_this_package",
+        lambda: ["avibe-os", "vibe-remote"],
+    )
+    recorded = {"avibe-os": "3.0.14", "vibe-remote": "3.0.13"}
+    monkeypatch.setattr("importlib.metadata.version", lambda name: recorded[name])
+    monkeypatch.setattr("vibe.__version__", "3.0.14")
+
+    assert installed_metadata_describes_running_code() is False
+    assert installed_package_name() == "avibe-os"
 
 
 @pytest.mark.parametrize(
@@ -1330,11 +1411,26 @@ def test_do_upgrade_uses_upgrade_plan_env_and_restarts(monkeypatch):
         rollback_to=LEGACY_INSTALL,
     )
     calls: dict[str, Any] = {}
+    mutation_lease_held = False
 
+    @contextmanager
+    def mutation_lock():
+        nonlocal mutation_lease_held
+        mutation_lease_held = True
+        try:
+            yield
+        finally:
+            mutation_lease_held = False
+
+    monkeypatch.setattr(api, "package_mutation_lock", mutation_lock)
     monkeypatch.setattr(api, "build_upgrade_plan", lambda **kwargs: plan)
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/custom/bin/vibe")
     monkeypatch.setattr(api, "_runtime_process_was_running", lambda: True)
-    monkeypatch.setattr(api, "schedule_restart", lambda **kwargs: calls.setdefault("restart_kwargs", kwargs))
+    def schedule_restart(**kwargs):
+        assert mutation_lease_held is True
+        calls["restart_kwargs"] = kwargs
+
+    monkeypatch.setattr(api, "schedule_restart", schedule_restart)
 
     def fake_run(cmd, **kwargs):
         if cmd == plan.command:
@@ -1367,6 +1463,34 @@ def test_do_upgrade_uses_upgrade_plan_env_and_restarts(monkeypatch):
         # together, because a pin needs the first two and a machine that predates
         # the rename does not answer "avibe-os" for either.
         "rollback_to": LEGACY_INSTALL,
+    }
+    assert mutation_lease_held is False
+
+
+def test_do_upgrade_refuses_an_in_flight_restart_before_planning_or_mutation(
+    monkeypatch,
+):
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/custom/bin/vibe")
+    monkeypatch.setattr(api, "_runtime_process_was_running", lambda: True)
+    monkeypatch.setattr(api, "restart_in_flight", lambda: True)
+    monkeypatch.setattr(
+        api,
+        "build_upgrade_plan",
+        lambda **kwargs: pytest.fail("an in-flight restart must prevent planning"),
+    )
+    monkeypatch.setattr(
+        api,
+        "schedule_restart",
+        lambda **kwargs: pytest.fail("an in-flight restart must not schedule another"),
+    )
+
+    assert api.do_upgrade(auto_restart=True) == {
+        "ok": False,
+        "message": "restart_in_progress",
+        "output": None,
+        "restarting": False,
+        "reason": "restart_in_progress",
+        "code": "restart_in_progress",
     }
 
 
@@ -1581,13 +1705,25 @@ def test_cmd_upgrade_uses_upgrade_plan_env(monkeypatch):
         rollback_to=LEGACY_INSTALL,
     )
     calls: dict[str, Any] = {}
+    mutation_lease_held = False
 
+    @contextmanager
+    def mutation_lock():
+        nonlocal mutation_lease_held
+        mutation_lease_held = True
+        try:
+            yield
+        finally:
+            mutation_lease_held = False
+
+    monkeypatch.setattr(cli, "package_mutation_lock", mutation_lock)
     monkeypatch.setattr(cli, "get_latest_version", lambda: {"error": None, "has_update": True, "latest": "2.2.0"})
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/custom/bin/vibe")
     monkeypatch.setattr(cli, "build_upgrade_plan", lambda **kwargs: plan)
     monkeypatch.setattr(cli, "_runtime_process_was_running", lambda: True)
 
     def fake_schedule_restart(**kwargs):
+        assert mutation_lease_held is True
         calls["restart_kwargs"] = kwargs
         return {"job_id": "restart"}
 
@@ -1620,6 +1756,34 @@ def test_cmd_upgrade_uses_upgrade_plan_env(monkeypatch):
         # See the do_upgrade case: the restart is handed the install to fall back to.
         "rollback_to": LEGACY_INSTALL,
     }
+    assert mutation_lease_held is False
+
+
+def test_cmd_upgrade_refuses_an_in_flight_restart_before_mutation(
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setattr(
+        cli,
+        "get_latest_version",
+        lambda: {"error": None, "has_update": True, "latest": "3.0.15"},
+    )
+    monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/custom/bin/vibe")
+    monkeypatch.setattr(cli, "_runtime_process_was_running", lambda: True)
+    monkeypatch.setattr(cli, "restart_in_flight", lambda: True)
+    monkeypatch.setattr(
+        cli,
+        "build_upgrade_plan",
+        lambda **kwargs: pytest.fail("an in-flight restart must prevent planning"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "schedule_restart",
+        lambda **kwargs: pytest.fail("an in-flight restart must not schedule another"),
+    )
+
+    assert cli.cmd_upgrade() == 2
+    assert "restart is already in progress" in capsys.readouterr().out
 
 
 def test_cmd_upgrade_running_runtime_honors_show_runtime_skip_for_restart(monkeypatch):

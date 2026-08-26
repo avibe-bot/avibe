@@ -73,7 +73,7 @@ from vibe.upgrade import (
     package_mutation_lock,
     should_skip_show_runtime_prepare,
 )
-from vibe.restart_supervisor import schedule_restart
+from vibe.restart_supervisor import restart_in_flight, schedule_restart
 from vibe import backend_model_catalog
 from vibe.i18n import t as backend_t
 from modules.agents.catalog import (
@@ -6143,9 +6143,21 @@ def do_upgrade(
     # errors.  The vibe service process cwd may be inside the uv tool venv
     # directory, which uv deletes and recreates during upgrade.
     safe_cwd = get_safe_cwd()
+    restarting = False
+    restart_failed = False
+    runtime_output = None
 
     try:
         with package_mutation_lock():
+            if restart_in_flight():
+                return {
+                    "ok": False,
+                    "message": "restart_in_progress",
+                    "output": None,
+                    "restarting": False,
+                    "reason": "restart_in_progress",
+                    "code": "restart_in_progress",
+                }
             plan = build_upgrade_plan(
                 vibe_path=current_vibe_path,
                 memory_enabled=(
@@ -6162,11 +6174,7 @@ def do_upgrade(
                 timeout=120,
                 cwd=safe_cwd,
             )
-        if result.returncode == 0:
-            restarting = False
-            restart_failed = False
-            runtime_output = None
-            if auto_restart and runtime_was_running:
+            if result.returncode == 0 and auto_restart and runtime_was_running:
                 try:
                     schedule_restart(
                         delay_seconds=2.0,
@@ -6178,8 +6186,12 @@ def do_upgrade(
                     restarting = True
                 except Exception as exc:
                     restart_failed = True
-                    runtime_output = f"Restart scheduling failed; run `vibe restart` to use the new version.\n{exc}"
-            else:
+                    runtime_output = (
+                        "Restart scheduling failed; run `vibe restart` to use the new version.\n"
+                        f"{exc}"
+                    )
+        if result.returncode == 0:
+            if not (auto_restart and runtime_was_running):
                 runtime_output = _prepare_show_runtime_after_upgrade(current_vibe_path, safe_cwd)
             if restarting:
                 message = "Upgrade successful. Restarting..."
@@ -8687,24 +8699,34 @@ def _prepare_memory_runtime_job() -> dict:
     first_payload = response.get("body") if isinstance(response.get("body"), dict) else {}
     first_reason = first_payload.get("reason")
     if first_reason in {"memory_plugin_unavailable", "memory_plugin_incompatible"}:
-        package_result = _install_memory_package_for_current_release()
-        if not package_result.get("ok"):
-            return package_result
-        try:
-            schedule_restart(
-                delay_seconds=2.0,
-                vibe_path=get_running_vibe_path(),
-                trigger="memory-package-repair",
-            )
-        except Exception as exc:  # noqa: BLE001
-            return {
-                "ok": False,
-                "message": "memory_runtime_restart_required",
-                "output": str(exc),
-                "reason": "memory_runtime_restart_required",
-                "download_error": None,
-                "restarting": False,
-            }
+        with package_mutation_lock():
+            if restart_in_flight():
+                return {
+                    "ok": False,
+                    "message": "restart_in_progress",
+                    "output": None,
+                    "reason": "restart_in_progress",
+                    "download_error": None,
+                    "restarting": False,
+                }
+            package_result = _install_memory_package_for_current_release()
+            if not package_result.get("ok"):
+                return package_result
+            try:
+                schedule_restart(
+                    delay_seconds=2.0,
+                    vibe_path=get_running_vibe_path(),
+                    trigger="memory-package-repair",
+                )
+            except Exception as exc:  # noqa: BLE001
+                return {
+                    "ok": False,
+                    "message": "memory_runtime_restart_required",
+                    "output": str(exc),
+                    "reason": "memory_runtime_restart_required",
+                    "download_error": None,
+                    "restarting": False,
+                }
         return {
             "ok": True,
             "message": "memory_runtime_restart_scheduled",

@@ -6517,42 +6517,14 @@ def local_version():
 # could both pass the check before either seeds restart_status.json, scheduling
 # two supervisors that race on the same pid files + lock.
 _RESTART_CONTROL_LOCK = threading.Lock()
-# How long a just-seeded, pid-less "scheduled" status is treated as in flight
-# (its supervisor is still starting up). Past this, a pid-less status is stale
-# (the supervisor died before recording its pid) and must NOT block restarts.
-_RESTART_SEED_GRACE_SECONDS = 60.0
 
 
 def _restart_in_flight() -> bool:
-    """True only when a restart is genuinely still running, so a stale status
-    can never permanently block Web restarts."""
-    from vibe import runtime
+    """Delegate restart ownership checks to the shared supervisor predicate."""
 
-    status = runtime.read_json(runtime.get_restart_status_path()) or {}
-    if status.get("state") not in ("scheduled", "running"):
-        return False
-    sup_pid = status.get("supervisor_pid")
-    if isinstance(sup_pid, int):
-        if not runtime.pid_alive(sup_pid):
-            return False
-        # Guard against PID reuse: a dead supervisor's pid can be reclaimed by an
-        # unrelated process (notably across a reboot), which would otherwise keep
-        # blocking restarts until that process exits. The job records its
-        # ``supervisor_started_at`` (process create time), so only treat the pid
-        # as the live supervisor when the create time still matches.
-        started_at = status.get("supervisor_started_at")
-        if started_at is not None:
-            current = runtime.process_create_time(sup_pid)
-            if current is not None and current != started_at:
-                return False
-        return True
-    # No supervisor pid recorded yet: in flight only while the seed is fresh
-    # (the child is still starting). An older pid-less status is stale.
-    try:
-        age = time.time() - runtime.get_restart_status_path().stat().st_mtime
-    except OSError:
-        return False
-    return age < _RESTART_SEED_GRACE_SECONDS
+    from vibe.restart_supervisor import restart_in_flight
+
+    return restart_in_flight()
 
 
 def _schedule_service_restart_for_config_fallback() -> dict[str, Any]:

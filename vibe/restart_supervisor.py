@@ -51,6 +51,7 @@ from vibe.upgrade import (
 logger = logging.getLogger(__name__)
 _RESTART_LOG_RETENTION = 10
 _SERVICE_LOCK_RELEASE_TIMEOUT_SECONDS = 30.0
+RESTART_SEED_GRACE_SECONDS = 60.0
 # Long enough for a package index to be slow, short enough that a hung download
 # does not leave the machine sitting with no service forever. A rollback that
 # times out is recorded as failed, which is a diagnosable state; a rollback that
@@ -325,6 +326,30 @@ def _restart_log_path(job_id: str) -> Path:
 
 def _pending_restart_path() -> Path:
     return paths.get_runtime_dir() / "pending_restart.json"
+
+
+def restart_in_flight() -> bool:
+    """Whether restart status identifies a live or freshly seeded job."""
+
+    status_path = runtime.get_restart_status_path()
+    status = runtime.read_json(status_path) or {}
+    if status.get("state") not in ("scheduled", "running"):
+        return False
+    supervisor_pid = status.get("supervisor_pid")
+    if isinstance(supervisor_pid, int):
+        if not runtime.pid_alive(supervisor_pid):
+            return False
+        started_at = status.get("supervisor_started_at")
+        if started_at is not None:
+            current = runtime.process_create_time(supervisor_pid)
+            if current is not None and current != started_at:
+                return False
+        return True
+    try:
+        age = time.time() - status_path.stat().st_mtime
+    except OSError:
+        return False
+    return age < RESTART_SEED_GRACE_SECONDS
 
 
 def mark_pending_restart(
