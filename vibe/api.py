@@ -7040,7 +7040,13 @@ def _run_install_command(
             stdout, stderr = process.communicate(timeout=10)
             output = (stdout or "") + ("\n" + stderr if stderr else "")
             output = truncate_output(output.strip())
-            return {"ok": False, "message": f"{mode.capitalize()} timed out", "output": output or None}
+            return {
+                "ok": False,
+                "message": f"{mode.capitalize()} timed out",
+                "reason": f"{name}_{mode}_timeout",
+                "timeout_seconds": 300,
+                "output": output or None,
+            }
         result = subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
         output = result.stdout + ("\n" + result.stderr if result.stderr else "")
         output = truncate_output(output.strip())
@@ -7112,11 +7118,19 @@ def _run_install_command(
         return {
             "ok": False,
             "message": f"{mode.capitalize()} failed (exit code {result.returncode})",
+            "reason": f"{name}_{mode}_failed",
+            "exit_code": result.returncode,
             "output": output,
         }
     except Exception as e:
         logger.error("Agent %s %s error: %s", name, mode, e)
-        return {"ok": False, "message": str(e), "output": None}
+        return {
+            "ok": False,
+            "message": str(e),
+            "reason": f"{name}_{mode}_error",
+            "error": str(e),
+            "output": None,
+        }
 
 
 # =============================================================================
@@ -7238,9 +7252,14 @@ def install_askill() -> dict:
     # No npm fallback: askill is distributed via the askill.sh installer, not a
     # public npm package, so a curl/bash-less host (e.g. Windows) must install
     # it manually rather than hit a guaranteed-failing `npm i -g`.
+    import platform
+
     return {
         "ok": False,
         "message": "askill auto-install needs curl + bash (macOS/Linux). Install it manually from https://askill.sh.",
+        "reason": "askill_auto_install_unsupported",
+        "required_tools": ["curl", "bash"],
+        "platform": platform.system() or "unknown",
         "output": None,
     }
 
@@ -7272,6 +7291,8 @@ def ensure_askill_installed(force: bool = False) -> dict:
         result["path"] = resolved
         if result.get("ok") and not installed:
             result["ok"] = False
+            result["reason"] = "askill_install_path_missing"
+            result["expected_path"] = "askill"
             result["message"] = (
                 result.get("message") or "askill installed but was not found on PATH; restart the service or check PATH."
             )
@@ -7459,6 +7480,8 @@ def install_avault(force: bool = False) -> dict:
         return {
             "ok": False,
             "message": backend_t("dependencies.avault.noBuild", platform=platform_label),
+            "reason": "avault_platform_unsupported",
+            "platform": platform_label,
             "output": None,
             "path": None,
         }
@@ -7481,6 +7504,11 @@ def install_avault(force: bool = False) -> dict:
             return {
                 "ok": False,
                 "message": backend_t("dependencies.avault.checksumMismatch"),
+                "reason": "avault_checksum_mismatch",
+                "expected_sha256": expected_sha256,
+                "actual_sha256": actual_sha256,
+                "platform": target,
+                "url": archive_url,
                 "output": f"expected {expected_sha256}, got {actual_sha256}",
                 "path": None,
             }
@@ -7512,6 +7540,9 @@ def install_avault(force: bool = False) -> dict:
         result = {
             "ok": False,
             "message": backend_t("dependencies.avault.installFailed", error=str(exc)),
+            "reason": "avault_install_failed",
+            "error": str(exc),
+            "platform": platform_label,
             "output": None,
             "path": None,
         }
@@ -7591,6 +7622,8 @@ def ensure_avault_installed(force: bool = False) -> dict:
         result["path"] = resolved
         if result.get("ok") and not installed:
             result["ok"] = False
+            result["reason"] = "avault_install_path_missing"
+            result["expected_path"] = "avault"
             result["message"] = (
                 result.get("message") or backend_t("dependencies.avault.installedNotFound")
             )

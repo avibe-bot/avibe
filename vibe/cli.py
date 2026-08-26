@@ -127,6 +127,83 @@ DOCTOR_REPAIR_DRY_RUN_I18N_KEYS = {
     "tmux": "doctor.repair.dryTmux",
 }
 
+DOCTOR_TUNNEL_VALUE_I18N_KEYS = {
+    "state": {
+        "healthy": "doctor.value.tunnelStateHealthy",
+        "degraded": "doctor.value.tunnelStateDegraded",
+        "recovering": "doctor.value.tunnelStateRecovering",
+        "unknown": "doctor.value.tunnelStateUnknown",
+    },
+    "grade": {
+        "good": "doctor.value.tunnelGradeGood",
+        "fair": "doctor.value.tunnelGradeFair",
+        "poor": "doctor.value.tunnelGradePoor",
+        "critical": "doctor.value.tunnelGradeCritical",
+        "unknown": "doctor.value.tunnelGradeUnknown",
+    },
+    "protocol": {
+        "quic": "doctor.value.tunnelProtocolQuic",
+        "http2": "doctor.value.tunnelProtocolHttp2",
+        "unknown": "doctor.value.tunnelProtocolUnknown",
+    },
+}
+
+DOCTOR_DEPENDENCY_DOWNLOAD_KIND_I18N_KEYS = {
+    "http": "doctor.repair.dependencyDownloadHttp",
+    "dns": "doctor.repair.dependencyDownloadDns",
+    "tls": "doctor.repair.dependencyDownloadTls",
+    "timeout": "doctor.repair.dependencyDownloadTimeout",
+    "network": "doctor.repair.dependencyDownloadNetwork",
+    "permission": "doctor.repair.dependencyDownloadPermission",
+    "disk": "doctor.repair.dependencyDownloadDisk",
+    "io": "doctor.repair.dependencyDownloadIo",
+}
+
+DOCTOR_MANAGED_REPAIR_REASON_I18N_KEYS = {
+    "askill_auto_install_unsupported": "doctor.repair.askillAutoInstallUnsupported",
+    "askill_install_path_missing": "doctor.repair.askillInstallPathMissing",
+    "askill_install_timeout": "doctor.repair.installTimeout",
+    "askill_install_failed": "doctor.repair.installCommandFailed",
+    "askill_install_error": "doctor.repair.installError",
+    "avault_platform_unsupported": "doctor.repair.avaultPlatformUnsupported",
+    "avault_checksum_mismatch": "doctor.repair.avaultChecksumMismatch",
+    "avault_install_path_missing": "doctor.repair.avaultInstallPathMissing",
+    "avault_install_failed": "doctor.repair.avaultInstallFailed",
+    "avault_download_failed": "doctor.repair.dependencyArchiveDownloadFailed",
+    "avault_p2_release_unavailable": "doctor.repair.avaultReleaseUnavailable",
+    "git_runtime_unpublished": "doctor.repair.dependencyManifestUnavailable",
+}
+
+DOCTOR_MANAGED_REPAIR_SUFFIX_I18N_KEYS = {
+    "install_already_running": "doctor.repair.dependencyAlreadyRunning",
+    "platform_unsupported": "doctor.repair.dependencyPlatformUnsupported",
+    "manifest_missing": "doctor.repair.dependencyManifestMissing",
+    "manifest_invalid": "doctor.repair.dependencyManifestInvalid",
+    "manifest_unavailable": "doctor.repair.dependencyManifestUnavailable",
+    "manifest_unavailable_offline": "doctor.repair.dependencyManifestUnavailable",
+    "manifest_download_failed": "doctor.repair.dependencyManifestDownloadFailed",
+    "manifest_url_unsupported": "doctor.repair.dependencyManifestUnavailable",
+    "archive_unavailable": "doctor.repair.dependencyArchiveUnavailable",
+    "archive_unavailable_offline": "doctor.repair.dependencyArchiveUnavailable",
+    "archive_url_unsupported": "doctor.repair.dependencyArchiveUnavailable",
+    "archive_download_failed": "doctor.repair.dependencyArchiveDownloadFailed",
+    "archive_checksum_mismatch": "doctor.repair.dependencyArchiveVerificationFailed",
+    "archive_size_mismatch": "doctor.repair.dependencyArchiveVerificationFailed",
+    "binary_checksum_mismatch": "doctor.repair.dependencyBinaryVerificationFailed",
+    "binary_not_runnable": "doctor.repair.dependencyBinaryNotRunnable",
+    "binary_prepare_failed": "doctor.repair.dependencyBinaryPrepareFailed",
+    "install_missing_binary": "doctor.repair.dependencyInstallMissingBinary",
+    "install_failed": "doctor.repair.installError",
+    "install_lock_failed": "doctor.repair.dependencyInstallLockFailed",
+    "install_claim_failed": "doctor.repair.dependencyInstallClaimFailed",
+    "install_target_changed": "doctor.repair.dependencyInstallTargetChanged",
+    "pointer_write_failed": "doctor.repair.dependencyPointerWriteFailed",
+    "codesign_missing": "doctor.repair.dependencyCodeSignMissing",
+    "codesign_failed": "doctor.repair.dependencyCodeSignFailed",
+    "codesign_verify_failed": "doctor.repair.dependencyCodeSignFailed",
+    "xattr_failed": "doctor.repair.dependencyMetadataFailed",
+}
+
 DEFAULT_VAULT_APPROVAL_WAIT_SECONDS = 9 * 60
 WATCH_STARTUP_STABLE_RUNNING_SECONDS = 1.5
 WATCH_STARTUP_JITTER_BUFFER_SECONDS = 1.0
@@ -11555,6 +11632,9 @@ def _doctor(*, deep: bool = False):
         else:
             state = str(quality.get("state") or "unknown")
             grade = str(quality.get("grade") or "unknown")
+            display_state = _doctor_tunnel_display_value(state, "state", language)
+            display_grade = _doctor_tunnel_display_value(grade, "grade", language)
+            display_protocol = _doctor_tunnel_display_value(quality.get("protocol"), "protocol", language)
             try:
                 sampled_at = datetime.fromisoformat(str(quality.get("sampled_at") or "").replace("Z", "+00:00"))
                 quality_stale = time.time() - sampled_at.timestamp() > 150
@@ -11599,11 +11679,11 @@ def _doctor(*, deep: bool = False):
                         i18n_t(
                             "doctor.item.tunnelQualityRequestsUnavailable",
                             language,
-                            state=state,
-                            grade=grade,
+                            state=display_state,
+                            grade=display_grade,
                             succeeded=int(request_path.get("success_count") or 0),
                             samples=int(request_path.get("sample_count") or 0),
-                            protocol=quality.get("protocol") or "unknown",
+                            protocol=display_protocol,
                         ),
                         i18n_t("doctor.action.tunnelQualityWarn", language)
                         if quality_status == "warn"
@@ -11617,12 +11697,12 @@ def _doctor(*, deep: bool = False):
                         i18n_t(
                             "doctor.item.tunnelQualityLatency",
                             language,
-                            state=state,
-                            grade=grade,
+                            state=display_state,
+                            grade=display_grade,
                             p95=request_latency.get("p95"),
                             p99=request_latency.get("p99"),
                             slow_rate=round(float(slow_rate.get("over_1000_ms") or 0) * 100),
-                            protocol=quality.get("protocol") or "unknown",
+                            protocol=display_protocol,
                         ),
                         i18n_t("doctor.action.tunnelQualityWarn", language)
                         if quality_status == "warn"
@@ -11635,8 +11715,8 @@ def _doctor(*, deep: bool = False):
                         i18n_t(
                             "doctor.item.tunnelQualityRttUnavailable",
                             language,
-                            state=state,
-                            protocol=quality.get("protocol") or "unknown",
+                            state=display_state,
+                            protocol=display_protocol,
                         ),
                         i18n_t("doctor.action.tunnelQualityWarn", language)
                         if quality_status == "warn"
@@ -11649,8 +11729,8 @@ def _doctor(*, deep: bool = False):
                         i18n_t(
                             "doctor.item.tunnelQualityRtt",
                             language,
-                            state=state,
-                            grade=grade,
+                            state=display_state,
+                            grade=display_grade,
                             median=rtt.get("median"),
                             maximum=rtt.get("max"),
                         ),
@@ -12175,6 +12255,63 @@ def _local_cli_installation_items() -> list[dict]:
     return items
 
 
+def _doctor_tunnel_display_value(value: object, value_type: str, language: str) -> str:
+    raw_value = str(value or "unknown")
+    key = DOCTOR_TUNNEL_VALUE_I18N_KEYS.get(value_type, {}).get(raw_value)
+    return i18n_t(key, language) if key else raw_value
+
+
+def _doctor_managed_reason_key(reason: str) -> str | None:
+    key = DOCTOR_MANAGED_REPAIR_REASON_I18N_KEYS.get(reason)
+    if key:
+        return key
+    for suffix, suffix_key in sorted(
+        DOCTOR_MANAGED_REPAIR_SUFFIX_I18N_KEYS.items(),
+        key=lambda entry: len(entry[0]),
+        reverse=True,
+    ):
+        if reason.endswith(f"_{suffix}"):
+            return suffix_key
+    return None
+
+
+def _doctor_managed_failure_detail(target: str, result: dict, language: str) -> str:
+    download_error = result.get("download_error") if isinstance(result.get("download_error"), dict) else None
+    if download_error:
+        kind = str(download_error.get("kind") or "")
+        key = DOCTOR_DEPENDENCY_DOWNLOAD_KIND_I18N_KEYS.get(kind)
+        attempts = int(download_error.get("attempts") or 1)
+        if key == "doctor.repair.dependencyDownloadHttp":
+            return i18n_t(
+                key,
+                language,
+                status=download_error.get("http_status") or i18n_t("doctor.value.unknown", language),
+                attempts=attempts,
+            )
+        if key:
+            return i18n_t(key, language, attempts=attempts)
+        return i18n_t("doctor.repair.dependencyDownloadUnknown", language)
+
+    reason = str(result.get("reason") or "")
+    key = _doctor_managed_reason_key(reason)
+    error = result.get("error") or i18n_t("doctor.value.unknownError", language)
+    kwargs = {"target": target, "error": error}
+    if reason == "askill_auto_install_unsupported":
+        kwargs["tools"] = "+".join(str(tool) for tool in result.get("required_tools") or ("curl", "bash"))
+    elif reason == "avault_platform_unsupported":
+        kwargs["platform"] = result.get("platform") or i18n_t("doctor.value.unknown", language)
+    elif reason == "avault_checksum_mismatch":
+        kwargs["expected_sha256"] = result.get("expected_sha256") or i18n_t("doctor.value.unknown", language)
+        kwargs["actual_sha256"] = result.get("actual_sha256") or i18n_t("doctor.value.unknown", language)
+    elif reason in {"askill_install_timeout"}:
+        kwargs["timeout_seconds"] = result.get("timeout_seconds") or 300
+    elif reason == "askill_install_failed" or reason.endswith("_install_failed"):
+        kwargs["exit_code"] = result.get("exit_code") or i18n_t("doctor.value.unknown", language)
+    if key:
+        return i18n_t(key, language, **kwargs)
+    return i18n_t("doctor.repair.dependencyFailedDefault", language)
+
+
 def _doctor_repair_result(target: str, status: str, message: str, **details) -> dict:
     payload = {"target": target, "status": status, "message": message}
     payload.update({key: value for key, value in details.items() if value is not None})
@@ -12511,8 +12648,21 @@ def _repair_managed_dependency(target: str, installer, *, dry_run: bool = False)
         return _doctor_repair_result(
             target,
             "failed",
-            i18n_t("doctor.repair.dependencyFailed", language, target=target, reason=exc),
+            i18n_t(
+                "doctor.repair.dependencyResultFailed",
+                language,
+                target=target,
+                detail=i18n_t("doctor.repair.dependencyException", language, target=target, error=exc),
+            ),
+            reason=f"{target}_repair_exception",
+            error=str(exc),
         )
+    if not isinstance(result, dict):
+        result = {
+            "ok": False,
+            "reason": f"{target}_invalid_result",
+            "error": i18n_t("doctor.value.unknownError", language),
+        }
     if result.get("ok"):
         version = result.get("version")
         detail = (
@@ -12533,17 +12683,7 @@ def _repair_managed_dependency(target: str, installer, *, dry_run: bool = False)
             version=version,
         )
     download_error = result.get("download_error") if isinstance(result.get("download_error"), dict) else None
-    if download_error:
-        detail = i18n_t(
-            "doctor.repair.dependencyDownloadFailed",
-            language,
-            kind=download_error.get("kind") or i18n_t("doctor.value.unknown", language),
-            attempts=int(download_error.get("attempts") or 1),
-        )
-    elif result.get("reason"):
-        detail = i18n_t("doctor.repair.dependencyReason", language, reason=result["reason"])
-    else:
-        detail = i18n_t("doctor.repair.dependencyFailedDefault", language)
+    detail = _doctor_managed_failure_detail(target, result, language)
     return _doctor_repair_result(
         target,
         "failed",
