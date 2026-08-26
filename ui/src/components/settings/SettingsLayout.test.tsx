@@ -69,6 +69,7 @@ const renderLayout = (path: string) => render(
     <Routes>
       <Route path="/settings" element={<SettingsLayoutHarness />}>
         <Route path="replies" element={<div>replies-body</div>} />
+        <Route path="shortcuts" element={<div>shortcuts-body</div>} />
         <Route path="service" element={<div>service-body</div>} />
         <Route path="platforms" element={<div>platforms-body</div>} />
         <Route path="platforms/users" element={<div>users-body</div>} />
@@ -233,6 +234,7 @@ describe('SettingsLayout', () => {
 
     expect(screen.getByText('replies-body')).toBeTruthy();
     expect(screen.getByRole('link', { name: 'settings.sections.replies' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'settings.sections.shortcuts' })).toBeTruthy();
     expect(screen.getByRole('link', { name: 'settings.sections.access' })).toBeTruthy();
     expect(screen.queryByRole('link', { name: 'settings.sections.service' })).toBeNull();
     expect(api.getConfig).not.toHaveBeenCalled();

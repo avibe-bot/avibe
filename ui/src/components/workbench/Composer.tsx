@@ -17,6 +17,11 @@ import { primeCloudToken } from '../../lib/avibeFetch';
 import { isSoftKeyboardOpen, isTouchCapableDevice } from '../../lib/softKeyboard';
 import { cn, copyTextToClipboard } from '../../lib/utils';
 import {
+  actionShortcutMatches,
+  formatActionShortcut,
+  useActionShortcuts,
+} from '../../lib/actionShortcuts';
+import {
   applyVoiceInsertionWithSnapshot,
   voiceInsertionSnapshot,
   type VoiceInsertionSnapshot,
@@ -57,6 +62,7 @@ import {
   type SessionSearchResult,
 } from './MentionEditor';
 import type { MentionReference } from '../../lib/mentions';
+import { inForegroundSurface } from './chatShortcuts';
 
 export type ComposerAttachment = {
   localId: string;
@@ -341,6 +347,9 @@ export interface ComposerProps {
    *  never pops the on-screen keyboard). The chat composer remounts per session,
    *  so this also covers opening / switching sessions. */
   autoFocus?: boolean;
+  /** The chat surface currently owns keyboard commands. False while a Show Page
+   *  or app window is in front of this still-mounted composer. */
+  voiceShortcutActive?: boolean;
   /** When BOTH are provided, the input upgrades to the rich mention editor:
    *  `@` autocompletes enabled Agents, `#` autocompletes Sessions. Leaving them
    *  unset keeps the plain textarea (e.g. the Workbench home). */
@@ -378,10 +387,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   className,
   sessionId,
   autoFocus = false,
+  voiceShortcutActive = true,
   onSearchAgents,
   onSearchSessions,
 }, ref) {
   const { t } = useTranslation();
+  const { voiceInput: voiceInputShortcut } = useActionShortcuts();
+  const voiceShortcutLabel = formatActionShortcut(voiceInputShortcut);
+  const voiceShortcutHint = t('chat.compose.voiceShortcutHint', { shortcut: voiceShortcutLabel });
   const { showToast } = useToast();
   const [value, setValue] = useState('');
   // The mention editor (Lexical) OWNS its text, so we don't mirror every
@@ -1202,7 +1215,43 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   );
   const voiceCaptureActive = recording || voiceProcessing;
   const voiceDiscardAvailable = recording || voiceRetainedSession !== null;
+  const voiceShortcutAvailable = (
+    voiceShortcutActive
+    && (voiceControlMode === 'record' || voiceControlMode === 'finish')
+    && !isVoiceControlDisabled(
+      disabled,
+      recording,
+      voiceProcessing,
+      Boolean(voiceRetainedSession),
+    )
+  );
   const [stopArmed, setStopArmed] = useState(false);
+
+  useEffect(() => {
+    if (!voiceShortcutAvailable) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        event.defaultPrevented
+        || event.repeat
+        || !actionShortcutMatches(event, voiceInputShortcut)
+        || inForegroundSurface(event.target as Element | null)
+      ) {
+        return;
+      }
+      event.preventDefault();
+      if (voiceControlMode === 'finish') stopRecording();
+      else void startRecording(captureVoiceInsertion());
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [
+    captureVoiceInsertion,
+    startRecording,
+    stopRecording,
+    voiceControlMode,
+    voiceInputShortcut,
+    voiceShortcutAvailable,
+  ]);
 
   useEffect(() => {
     if (!busyControls) {
@@ -1384,6 +1433,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                   Boolean(voiceRetainedSession),
                 )}
                 aria-label={t('chat.compose.voice')}
+                title={voiceShortcutHint}
                 className="size-9 shrink-0"
               >
                 <Mic className="size-4" />
@@ -1396,6 +1446,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 size="icon"
                 onClick={stopRecording}
                 aria-label={t('chat.compose.stopRecording')}
+                title={voiceShortcutHint}
                 className="h-9 w-12 shrink-0"
               >
                 <Check className="size-[18px]" strokeWidth={2.5} />

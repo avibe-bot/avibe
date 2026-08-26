@@ -281,6 +281,7 @@
       "platforms": "Platforms",
       "platformConnections": "Platform Connections",
       "remoteAccess": "Remote Access",
+      "shortcuts": "Shortcuts",
       "service": "Service",
       "dependencies": "Dependencies",
       "diagnostics": "Diagnostics & Logs",
@@ -289,6 +290,27 @@
     "navigationLabel": "Settings sections",
     "backToSections": "All settings",
     "close": "Close Settings",
+    "shortcuts": {
+      "title": "Shortcuts",
+      "subtitle": "Choose the keyboard commands you use most often in Chat and Show Pages.",
+      "panelTitle": "Action shortcuts",
+      "panelDescription": "Changes apply immediately in this browser.",
+      "voiceInput": {
+        "title": "Chat voice input",
+        "description": "Start dictation in the chat composer, then finish it with the same shortcut."
+      },
+      "showPageAnnotation": {
+        "title": "Show Page annotation mode",
+        "description": "Enter annotation mode on the Show Page in front."
+      },
+      "change": "Change {{action}} shortcut",
+      "pressKeys": "Press shortcut",
+      "escapeToCancel": "Esc cancels",
+      "modifierRequired": "Include Option, Command, or Control.",
+      "reserved": "This shortcut is already used by Avibe.",
+      "conflict": "Already used by {{action}}.",
+      "reset": "Restore defaults"
+    },
     "diagnosticsTab": "Diagnostics",
     "logsTab": "Logs",
     "diagnosticsNavigationLabel": "Diagnostics and logs",
@@ -3672,6 +3694,7 @@
         "closeAnnotation": "Turn off annotation",
         "modeTitle": "Annotation mode",
         "rememberHint": "Remembers last choice",
+        "shortcutHint": "Press {{shortcut}} to enter annotation mode; press Esc to exit",
         "unavailable": "Annotation not available yet"
       },
       "title": "Show Page",
@@ -3810,6 +3833,7 @@
       "stop": "Stop",
       "attach": "Attach files",
       "voice": "Voice input",
+      "voiceShortcutHint": "Press {{shortcut}} for voice input, press it again to finish, or press Esc to cancel",
       "stopRecording": "Finish recording",
       "cancelRecording": "Cancel recording",
       "voicePreview": "Live transcription preview",

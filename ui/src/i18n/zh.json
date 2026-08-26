@@ -281,6 +281,7 @@
       "platforms": "通讯平台",
       "platformConnections": "平台接入",
       "remoteAccess": "远程访问",
+      "shortcuts": "快捷键",
       "service": "服务",
       "dependencies": "依赖",
       "diagnostics": "诊断与日志",
@@ -289,6 +290,27 @@
     "navigationLabel": "设置分区",
     "backToSections": "全部设置",
     "close": "关闭设置",
+    "shortcuts": {
+      "title": "快捷键",
+      "subtitle": "设置你在聊天和 Show Page 中最常用的键盘操作。",
+      "panelTitle": "操作快捷键",
+      "panelDescription": "修改后会立即在当前浏览器生效。",
+      "voiceInput": {
+        "title": "Chat 聊天框语音输入",
+        "description": "在聊天框开始语音输入，再按同一快捷键完成。"
+      },
+      "showPageAnnotation": {
+        "title": "Show Page 标注模式",
+        "description": "进入当前 Show Page 的标注模式。"
+      },
+      "change": "修改{{action}}快捷键",
+      "pressKeys": "请按快捷键",
+      "escapeToCancel": "按 Esc 取消",
+      "modifierRequired": "请包含 Option、Command 或 Control。",
+      "reserved": "这个快捷键已被 Avibe 使用。",
+      "conflict": "已被{{action}}使用。",
+      "reset": "恢复默认"
+    },
     "diagnosticsTab": "诊断",
     "logsTab": "日志",
     "diagnosticsNavigationLabel": "诊断与日志",
@@ -3672,6 +3694,7 @@
         "closeAnnotation": "关闭标注",
         "modeTitle": "标注模式",
         "rememberHint": "记住上次选择",
+        "shortcutHint": "按下{{shortcut}}进入标注模式，按 ESC 退出",
         "unavailable": "标注暂不可用"
       },
       "title": "Show Page",
@@ -3810,6 +3833,7 @@
       "stop": "停止",
       "attach": "添加附件",
       "voice": "语音输入",
+      "voiceShortcutHint": "按下{{shortcut}}进行语音输入，再按一下完成，按 ESC 取消",
       "stopRecording": "完成录音",
       "cancelRecording": "取消录音",
       "voicePreview": "实时转写预览",

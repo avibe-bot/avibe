@@ -1,0 +1,74 @@
+/* @vitest-environment jsdom */
+
+import { createInstance } from 'i18next';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { I18nextProvider, initReactI18next } from 'react-i18next';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+
+import en from '../../i18n/en.json';
+import { readActionShortcuts } from '../../lib/actionShortcuts';
+import { SettingsShortcutsPage } from './SettingsShortcutsPage';
+
+const i18n = createInstance();
+void i18n.use(initReactI18next).init({
+  lng: 'en',
+  fallbackLng: 'en',
+  resources: { en: { translation: en } },
+  interpolation: { escapeValue: false },
+});
+
+const renderPage = () => render(
+  <I18nextProvider i18n={i18n}>
+    <SettingsShortcutsPage />
+  </I18nextProvider>,
+);
+
+beforeEach(() => window.localStorage.clear());
+afterEach(cleanup);
+
+describe('SettingsShortcutsPage', () => {
+  it('records a new chord immediately and restores both defaults', () => {
+    renderPage();
+    const voice = screen.getByRole('button', { name: 'Change Chat voice input shortcut' });
+
+    fireEvent.click(voice);
+    fireEvent.keyDown(voice, { code: 'KeyV', altKey: true });
+    expect(readActionShortcuts().voiceInput.code).toBe('KeyV');
+    expect(voice.textContent).toContain('Alt+V');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Restore defaults' }));
+    expect(readActionShortcuts()).toMatchObject({
+      voiceInput: { code: 'KeyZ', altKey: true },
+      showPageAnnotation: { code: 'KeyX', altKey: true },
+    });
+  });
+
+  it('rejects modifierless, reserved, and duplicate chords without changing storage', () => {
+    renderPage();
+    const voice = screen.getByRole('button', { name: 'Change Chat voice input shortcut' });
+
+    fireEvent.click(voice);
+    fireEvent.keyDown(voice, { code: 'KeyV' });
+    expect(screen.getByRole('alert').textContent).toBe('Include Option, Command, or Control.');
+
+    fireEvent.keyDown(voice, { code: 'KeyV', shiftKey: true });
+    expect(screen.getByRole('alert').textContent).toBe('Include Option, Command, or Control.');
+
+    fireEvent.keyDown(voice, { code: 'KeyW', altKey: true });
+    expect(screen.getByRole('alert').textContent).toBe('This shortcut is already used by Avibe.');
+
+    fireEvent.keyDown(voice, { code: 'KeyX', altKey: true });
+    expect(screen.getByRole('alert').textContent).toBe('Already used by Show Page annotation mode.');
+    expect(readActionShortcuts().voiceInput.code).toBe('KeyZ');
+  });
+
+  it('cancels capture with plain Escape', () => {
+    renderPage();
+    const voice = screen.getByRole('button', { name: 'Change Chat voice input shortcut' });
+
+    fireEvent.click(voice);
+    expect(voice.getAttribute('aria-pressed')).toBe('true');
+    fireEvent.keyDown(voice, { code: 'Escape' });
+    expect(voice.getAttribute('aria-pressed')).toBe('false');
+  });
+});

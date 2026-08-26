@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { actionShortcutMatches, useActionShortcuts } from '../../lib/actionShortcuts';
+import { useLatestRef } from '../../lib/useLatestRef';
+import { bindFrameChord } from '../apps/windowChords';
+
 // postMessage bridge between the chat host and the annotation overlay running
 // inside the chat's Show Page iframe (plan show-page-annotation-phase1 §3).
 //
@@ -37,6 +41,8 @@ type ControlMessage =
 
 const PARENT_ESCAPE_CLAIM_SELECTOR =
   'input, textarea, [contenteditable]:not([contenteditable="false"]), [data-state="open"], [role="menu"], [aria-expanded="true"][aria-haspopup], [role="dialog"]:not([data-window-id]), dialog[open]';
+const PARENT_SHORTCUT_CLAIM_SELECTOR =
+  '[data-shortcut-capture], [data-state="open"], [role="menu"], [aria-expanded="true"][aria-haspopup], [role="dialog"]:not([data-window-id]), dialog[open]';
 
 /**
  * `src` is the current iframe URL; changing it (first open, or a private↔public
@@ -44,10 +50,15 @@ const PARENT_ESCAPE_CLAIM_SELECTOR =
  * "unknown" so the control disables until the freshly loaded overlay reports —
  * and so one session's state never briefly shows over another's page.
  */
-export function useShowPageAnnotation(src: string | null): AnnotationBridge {
+export function useShowPageAnnotation(src: string | null, shortcutActive = true): AnnotationBridge {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const frameShortcutCleanupRef = useRef<() => void>(() => undefined);
   const [state, setState] = useState<AnnotationState | null>(null);
   const [lastSrc, setLastSrc] = useState(src);
+  const { showPageAnnotation: annotationShortcut } = useActionShortcuts();
+  const stateRef = useLatestRef(state);
+  const shortcutActiveRef = useLatestRef(shortcutActive);
+  const shortcutRef = useLatestRef(annotationShortcut);
 
   // The loaded page changed — the new overlay hasn't reported yet, so drop back
   // to "unknown" until it does (and so one session's state never briefly shows
@@ -140,18 +151,6 @@ export function useShowPageAnnotation(src: string | null): AnnotationBridge {
     if (win) win.postMessage(message, window.location.origin);
   }, []);
 
-  const setIframe = useCallback<React.RefCallback<HTMLIFrameElement>>(
-    (iframe) => {
-      if (iframeRef.current !== iframe) stopEscapeListening();
-      iframeRef.current = iframe;
-      if (iframe) {
-        startListening();
-        if (state?.enabled === true) startEscapeListening();
-      }
-    },
-    [startEscapeListening, startListening, state?.enabled, stopEscapeListening],
-  );
-
   const enable = useCallback(
     (mode?: AnnotationMode) =>
       post(
@@ -166,6 +165,69 @@ export function useShowPageAnnotation(src: string | null): AnnotationBridge {
     (mode: AnnotationMode) => post({ type: 'avibe:annotation:control', action: 'set-mode', mode }),
     [post],
   );
+  const enableFromShortcut = useCallback(() => {
+    const current = stateRef.current;
+    if (current?.available !== true || current.enabled) return;
+    post({ type: 'avibe:annotation:control', action: 'enable' });
+  }, [post, stateRef]);
+
+  const setIframe = useCallback<React.RefCallback<HTMLIFrameElement>>(
+    (iframe) => {
+      if (iframeRef.current !== iframe) {
+        stopEscapeListening();
+      }
+      frameShortcutCleanupRef.current();
+      frameShortcutCleanupRef.current = () => undefined;
+      iframeRef.current = iframe;
+      if (!iframe) return;
+      startListening();
+      if (stateRef.current?.enabled === true) startEscapeListening();
+      frameShortcutCleanupRef.current = bindFrameChord(
+        iframe,
+        (event) => (
+          !event.defaultPrevented
+          && !event.repeat
+          && shortcutActiveRef.current
+          && stateRef.current?.available === true
+          && stateRef.current.enabled !== true
+          && actionShortcutMatches(event, shortcutRef.current)
+        ),
+        enableFromShortcut,
+      );
+    },
+    [
+      enableFromShortcut,
+      shortcutActiveRef,
+      shortcutRef,
+      startEscapeListening,
+      startListening,
+      stateRef,
+      stopEscapeListening,
+    ],
+  );
+
+  useEffect(() => () => frameShortcutCleanupRef.current(), []);
+
+  useEffect(() => {
+    if (!shortcutActive || state?.available !== true || state.enabled || !iframeRef.current) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        event.defaultPrevented
+        || event.repeat
+        || !actionShortcutMatches(event, annotationShortcut)
+      ) {
+        return;
+      }
+      const target = event.target;
+      if (target instanceof Element && target.closest(PARENT_SHORTCUT_CLAIM_SELECTOR)) return;
+      if (document.querySelector('[role="menu"]')) return;
+      event.preventDefault();
+      enableFromShortcut();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [annotationShortcut, enableFromShortcut, shortcutActive, state?.available, state?.enabled]);
+
   // On (re)load the overlay broadcasts its state on mount, but the parent
   // listener is already attached, so we also query as a backstop (§3).
   const handleIframeLoad = useCallback(() => post({ type: 'avibe:annotation:query' }), [post]);

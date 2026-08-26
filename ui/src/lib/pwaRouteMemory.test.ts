@@ -11,6 +11,7 @@ import {
 describe('PWA route memory', () => {
   it('restores canonical and dynamic app pages while dropping URL state', () => {
     expect(normalizeRestorablePwaPath('/inbox')).toBe('/inbox');
+    expect(normalizeRestorablePwaPath('/settings/shortcuts')).toBe('/settings/shortcuts');
     expect(normalizeRestorablePwaPath('/chat/session-123?from=push#latest')).toBe('/chat/session-123');
     expect(normalizeRestorablePwaPath('/admin/settings/backends/codex')).toBe(
       '/admin/settings/backends/codex',

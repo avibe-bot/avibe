@@ -30,7 +30,7 @@ const ShowPageWindow: React.FC<{
   win: WindowInstance;
 }> = ({ archived, iconVersion, layerHeight, layerWidth, revalidateVersion, sessionId, win }) => {
   const api = useApi();
-  const { setTitle } = useWindowManager();
+  const { focusedId, setTitle } = useWindowManager();
   const [status, setStatus] = useState<ShowPageWindowStatus>(sessionId ? 'loading' : 'missing');
 
   useEffect(() => {
@@ -58,7 +58,10 @@ const ShowPageWindow: React.FC<{
 
   const src = showPageWindowSource(sessionId, status, archived);
   return (
-    <ShowPageAnnotationHost src={src}>
+    <ShowPageAnnotationHost
+      src={src}
+      shortcutActive={src !== null && !win.minimized && focusedId === win.id}
+    >
       <AppWindow win={win} layerWidth={layerWidth} layerHeight={layerHeight} iconVersion={iconVersion} />
     </ShowPageAnnotationHost>
   );
