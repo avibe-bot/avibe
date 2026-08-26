@@ -173,13 +173,11 @@ def launcher_is_current_process(launcher: Path | str) -> bool:
     if os.name != "nt":
         return False
     target = os.path.normcase(os.path.abspath(os.path.expanduser(str(launcher))))
-    for candidate in (sys.argv[0], os.environ.get(CURRENT_VIBE_EXECUTABLE_ENV)):
-        if not candidate:
-            continue
-        current = os.path.normcase(os.path.abspath(os.path.expanduser(candidate)))
-        if current == target:
-            return True
-    return False
+    # ``VIBE_CURRENT_EXECUTABLE`` is inherited by the long-lived Web process
+    # from the CLI that started it. It identifies a PATH entry, not the image
+    # currently holding the file open, so only argv[0] is authoritative here.
+    current = os.path.normcase(os.path.abspath(os.path.expanduser(sys.argv[0])))
+    return current == target
 
 
 def _staged_uv_environment(vibe_path: str | None) -> tuple[Path, Path, AtomicActivation | None]:

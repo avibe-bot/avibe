@@ -481,11 +481,20 @@ prune_install_generations() {
     local active_path="$1"
     local previous_path="$2"
     local root="$AVIBE_RUNTIME_HOME/runtime/install-generations"
-    local active_generation previous_generation generation
+    local stable_bin_dir="${VIBE_TOOL_BIN_DIR:-$HOME/.local/bin}"
+    local live_target live_generation active_generation previous_generation generation
 
     [ -d "$root" ] || return 0
     active_generation="$(generation_path_for "$active_path" || true)"
     previous_generation="$(generation_path_for "$previous_path" || true)"
+    # The installer and runtime upgrades are separate processes. Re-read the
+    # launcher immediately before pruning so an activation that happened after
+    # this install was staged is retained.
+    live_target="$(resolve_binary_path "$stable_bin_dir/vibe" || true)"
+    live_generation="$(generation_path_for "$live_target" || true)"
+    if [ -n "$live_generation" ]; then
+        active_generation="$live_generation"
+    fi
     for generation in "$root"/*; do
         [ -d "$generation" ] || continue
         if [ -n "$active_generation" ] && [ "$generation" = "$active_generation" ]; then
@@ -520,14 +529,14 @@ verify_uv_candidate() {
     local detail
     detail="$(
         cd "$AVIBE_RUNTIME_HOME" || exit 1
-        "$candidate_python" -c 'from core.install_integrity import verify_python_environment; result = verify_python_environment(__import__("sys").executable); print(result.detail); raise SystemExit(0 if result.ok else 1)'
+        env -u PYTHONPATH -u PYTHONHOME "$candidate_python" -c 'from core.install_integrity import verify_python_environment; result = verify_python_environment(__import__("sys").executable); print(result.detail); raise SystemExit(0 if result.ok else 1)'
     )" || {
         [ -n "$detail" ] && warn "$detail"
         return 1
     }
     if ! (
         cd "$AVIBE_RUNTIME_HOME" || exit 1
-        "$candidate" --help >/dev/null 2>&1
+        env -u PYTHONPATH -u PYTHONHOME "$candidate" --help >/dev/null 2>&1
     ); then
         warn "candidate vibe launcher failed its startup probe"
         return 1

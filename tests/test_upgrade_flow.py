@@ -361,6 +361,19 @@ def test_launcher_is_current_process_only_matches_windows_launcher(monkeypatch, 
     assert not upgrade.launcher_is_current_process(tmp_path / "bin" / "other.exe")
 
 
+def test_launcher_is_current_process_ignores_inherited_launcher_hint(monkeypatch, tmp_path):
+    from vibe import upgrade
+
+    launcher = tmp_path / "bin" / "vibe.exe"
+    launcher.parent.mkdir()
+    launcher.write_text("launcher\n", encoding="utf-8")
+    monkeypatch.setattr(upgrade.os, "name", "nt")
+    monkeypatch.setattr(upgrade.sys, "argv", [str(tmp_path / "service_main.py")])
+    monkeypatch.setenv("VIBE_CURRENT_EXECUTABLE", str(launcher))
+
+    assert not upgrade.launcher_is_current_process(launcher)
+
+
 def test_deferred_activation_dispatch_activates_then_schedules_restart(monkeypatch, tmp_path):
     from vibe import cli
 
@@ -433,6 +446,24 @@ def test_deferred_upgrade_activation_uses_candidate_python(monkeypatch, tmp_path
     assert "--restart" in calls["command"]
     assert "--prepare-show-runtime" in calls["command"]
     assert calls["kwargs"]["env"] == {"PATH": "clean"}
+
+
+def test_deferred_activation_rejects_missing_source_when_launcher_changed(monkeypatch, tmp_path):
+    from vibe import cli
+
+    calls: list[str] = []
+    monkeypatch.setattr(cli.runtime, "pid_alive", lambda _pid: False)
+    monkeypatch.setattr(cli, "atomic_upgrade_lock", lambda: nullcontext())
+    monkeypatch.setattr(cli, "atomic_activation_source_is_current", lambda _activation: False)
+    monkeypatch.setattr(cli, "discard_atomic_uv_install_generation", lambda _path: calls.append("discard"))
+    monkeypatch.setattr(cli, "activate_upgrade_candidate", lambda _activation: calls.append("activate"))
+
+    result = cli._dispatch_deferred_upgrade_activation(
+        ["--parent-pid", "123", "--launcher", str(tmp_path / "vibe.exe"), "--candidate", str(tmp_path / "candidate")]
+    )
+
+    assert result == 1
+    assert calls == ["discard"]
 
 
 def test_cli_launcher_path_uses_hardlinked_generation(monkeypatch, tmp_path):

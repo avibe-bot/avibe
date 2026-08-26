@@ -12038,7 +12038,7 @@ def _local_cli_installation_items() -> list[dict]:
                     items,
                     "fail",
                     f"Python package integrity check failed: {integrity.detail}",
-                    "Run `vibe upgrade` to install a new verified environment, or rerun the Avibe installer if the current CLI cannot start.",
+                    "Rerun the Avibe installer to replace the active environment with a verified wheel.",
                     code="installation.package_integrity",
                 )
 
@@ -16778,7 +16778,7 @@ def _dispatch_deferred_upgrade_activation(argv: list[str]) -> int:
     )
     try:
         with atomic_upgrade_lock():
-            if source_generation is not None and not atomic_activation_source_is_current(activation):
+            if not atomic_activation_source_is_current(activation):
                 discard_atomic_uv_install_generation(activation.candidate_launcher)
                 print("deferred upgrade activation was superseded by another activation", file=sys.stderr)
                 return 1

@@ -540,6 +540,15 @@ def test_windows_installer_honors_configured_tool_bin_and_cross_volume_copy_fall
     assert "Remove-StaleInstallGenerations -RuntimeHome $runtimeHome" in powershell
 
 
+def test_install_script_candidate_probes_ignore_python_path_overrides():
+    script = INSTALL_SCRIPT.read_text(encoding="utf-8")
+    assert 'env -u PYTHONPATH -u PYTHONHOME "$candidate_python"' in script
+    assert 'env -u PYTHONPATH -u PYTHONHOME "$candidate" --help' in script
+    powershell = INSTALL_POWERSHELL.read_text(encoding="utf-8")
+    assert "$previousPythonPath = $env:PYTHONPATH" in powershell
+    assert "Remove-Item Env:PYTHONHOME" in powershell
+
+
 def test_install_script_continues_when_show_runtime_prepare_fails(tmp_path):
     home_dir = tmp_path / "home"
     home_dir.mkdir()

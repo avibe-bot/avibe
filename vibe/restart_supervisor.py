@@ -1139,6 +1139,12 @@ def schedule_restart(
         if rollback_to.package:
             command.extend(["--rollback-package", rollback_to.package])
     env = get_restart_environment(vibe_path=vibe_path)
+    if python_executable:
+        # A candidate supervisor must import the staged wheel, never a source
+        # checkout inherited from the parent process.
+        env = dict(os.environ if env is None else env)
+        env.pop("PYTHONPATH", None)
+        env.pop("PYTHONHOME", None)
     log_path = _restart_log_path(job_id)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     # Seed the status BEFORE spawning the job so the child's own writes (which set

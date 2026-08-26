@@ -181,6 +181,36 @@ def test_schedule_restart_can_use_candidate_python_without_launcher_lock(monkeyp
     ]
 
 
+def test_candidate_supervisor_drops_source_pythonpath(monkeypatch, tmp_path):
+    monkeypatch.setenv("PYTHONPATH", "/source/checkout")
+    monkeypatch.setenv("PYTHONHOME", "/source/python")
+    monkeypatch.setattr(restart_supervisor, "get_restart_environment", lambda vibe_path=None: None)
+    monkeypatch.setattr(restart_supervisor, "get_safe_cwd", lambda: str(tmp_path))
+    monkeypatch.setattr(restart_supervisor, "_prune_restart_logs", lambda: None)
+    calls = {}
+
+    def fake_popen(command, **kwargs):
+        calls["kwargs"] = kwargs
+
+        class Proc:
+            pid = 45680
+
+        return Proc()
+
+    monkeypatch.setattr(restart_supervisor.subprocess, "Popen", fake_popen)
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+
+    restart_supervisor.schedule_restart(
+        vibe_path=str(tmp_path / "stable" / "vibe.exe"),
+        python_executable=str(tmp_path / "generation" / "python.exe"),
+        trigger="upgrade",
+    )
+
+    assert "PYTHONPATH" not in calls["kwargs"]["env"]
+    assert "PYTHONHOME" not in calls["kwargs"]["env"]
+
+
 def test_legacy_upgrade_target_reads_the_running_release_and_launcher(monkeypatch, tmp_path):
     """A pre-rollback release can still hand the new supervisor its target."""
 

@@ -121,6 +121,10 @@ function Remove-StaleInstallGenerations {
     if (-not (Test-Path -LiteralPath $root -PathType Container)) {
         return
     }
+    $liveGeneration = Get-LauncherGeneration -Launcher (Join-Path (Get-StableBinDirectory) "vibe.exe") -StableBin (Get-StableBinDirectory) -GenerationRoot $root
+    if ($liveGeneration) {
+        $ActivePath = Join-Path $liveGeneration "bin\vibe.exe"
+    }
     $keep = @{}
     foreach ($path in @($ActivePath, $PreviousPath)) {
         if ($path) {
@@ -388,11 +392,17 @@ function Invoke-UvToolInstallAttempt {
             return $integrity
         }
 
+        $previousPythonPath = $env:PYTHONPATH
+        $previousPythonHome = $env:PYTHONHOME
+        Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+        Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
         Push-Location $runtimeHome
         try {
             $launcherProbe = Invoke-NativeCommand -FilePath $candidate -Arguments @("--help")
         } finally {
             Pop-Location
+            if ($null -eq $previousPythonPath) { Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue } else { $env:PYTHONPATH = $previousPythonPath }
+            if ($null -eq $previousPythonHome) { Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue } else { $env:PYTHONHOME = $previousPythonHome }
         }
         if (-not $launcherProbe.Success) {
             Remove-Item -LiteralPath $generationRoot -Recurse -Force -ErrorAction SilentlyContinue
