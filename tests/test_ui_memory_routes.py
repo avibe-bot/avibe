@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import ast
+import builtins
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -576,6 +579,83 @@ def test_memory_list_route_forwards_agent_origin(
         headers=csrf_headers(client, BASE_URL),
         **_request_options(),
     )
+    assert invalid.status_code == 400
+    assert invalid.get_json() == {
+        "status": "failed",
+        "error": "memory_invalid_input",
+    }
+    assert len(calls) == 1
+
+
+def test_memory_list_ui_route_stays_host_owned_when_runtime_import_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """The UI list route must use the host cursor contract, not Memory runtime."""
+
+    tree = ast.parse(Path(ui_memory_routes.__file__).read_text(encoding="utf-8"))
+    implementation_imports = [
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        and node.module == "core.memory.runtime"
+    ]
+    assert implementation_imports == []
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config()
+    calls: list[dict[str, object]] = []
+
+    async def memory_list(**kwargs):
+        calls.append(kwargs)
+        return {
+            "status_code": 200,
+            "body": {"status": "ok", "items": [], "next_cursor": None},
+        }
+
+    monkeypatch.setattr(internal_client, "memory_list", memory_list)
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "core.memory.runtime":
+            raise RuntimeError("optional implementation initializer")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    from core.memory_loader import MEMORY_LIST_CURSOR_MAX_BYTES
+
+    client = app.test_client()
+    response = client.post(
+        "/api/memory/list",
+        json={"project": "all", "cursor": "a" * MEMORY_LIST_CURSOR_MAX_BYTES},
+        headers=csrf_headers(client, BASE_URL),
+        **_request_options(),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "status": "ok",
+        "items": [],
+        "next_cursor": None,
+    }
+    assert calls == [
+        {
+            "user_key": "avibe:local",
+            "project": "all",
+            "page": None,
+            "cursor": "a" * MEMORY_LIST_CURSOR_MAX_BYTES,
+            "limit": 20,
+            "origin": None,
+        }
+    ]
+
+    invalid = client.post(
+        "/api/memory/list",
+        json={"project": "all", "cursor": "a" * (MEMORY_LIST_CURSOR_MAX_BYTES + 1)},
+        headers=csrf_headers(client, BASE_URL),
+        **_request_options(),
+    )
+
     assert invalid.status_code == 400
     assert invalid.get_json() == {
         "status": "failed",

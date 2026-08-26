@@ -795,7 +795,7 @@ def register_memory_routes(app) -> None:
             cursor = payload.get("cursor")
             limit = payload.get("limit", 20)
             origin = payload.get("origin")
-            from core.memory.runtime import MEMORY_LIST_CURSOR_MAX_BYTES
+            from core.memory_loader import MEMORY_LIST_CURSOR_MAX_BYTES
 
             cursor_bytes: int | None = None
             if isinstance(cursor, str):
