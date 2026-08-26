@@ -2193,7 +2193,7 @@ def _memory_child_environment(
         "PATH": f"{python.parent}:/usr/bin:/bin",
         "PYTHONNOUSERSITE": "1",
         "PYTHONUNBUFFERED": "1",
-        "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
+        "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
         "XDG_CACHE_HOME": str(child_home / ".cache"),
         "XDG_CONFIG_HOME": str(child_home / ".config"),
         "XDG_DATA_HOME": str(child_home / ".local" / "share"),

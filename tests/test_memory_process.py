@@ -4,12 +4,14 @@ from collections import deque
 import json
 import os
 from pathlib import Path
+import sys
 
 import pytest
 
 from avibe_memory.confined_filesystem import ConfinedFilesystemError
 from avibe_memory.process import (
     _ProcessIdentity,
+    _memory_child_environment,
     EverOSProcessSettings,
     FakeEverOSProcess,
     FakeEverOSProcessFactory,
@@ -299,6 +301,23 @@ def test_process_factory_keeps_secrets_out_of_repr(tmp_path: Path) -> None:
     assert "embedding-secret" not in repr(settings)
     assert process.settings is settings
     assert factory.supervised == [process]
+
+
+def test_memory_child_environment_exposes_top_level_package_root(
+    tmp_path: Path,
+) -> None:
+    environment = _memory_child_environment(
+        python=Path(sys.executable),
+        memory_dir=tmp_path / "memory",
+        provider_root=tmp_path / "memory" / "everos-root",
+        attachments_root=tmp_path / "memory" / "attachments",
+        settings=EverOSProcessSettings(),
+        role=None,
+    )
+
+    package_root = Path(__file__).resolve().parents[1]
+    assert environment["PYTHONPATH"] == str(package_root)
+    assert (package_root / "avibe_memory").is_dir()
 
 
 def test_recorded_sidecar_reaper_confines_provider_root(tmp_path: Path) -> None:

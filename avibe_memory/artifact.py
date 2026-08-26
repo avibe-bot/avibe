@@ -870,7 +870,7 @@ class MemoryArtifactManager(ManagedRuntimeManager):
     def _admit_error_scrubbers(self, binary: Path) -> bool:
         """Prove the child can install mandatory diagnostic scrubbers before launch."""
 
-        source_root = Path(__file__).resolve().parents[2]
+        source_root = Path(__file__).resolve().parents[1]
         try:
             with tempfile.TemporaryDirectory(prefix="avibe-memory-admission-") as home:
                 child_home = Path(home)
