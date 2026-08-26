@@ -1821,7 +1821,6 @@ def create_app(
             or set(payload) - {"text", "project"}
             or not isinstance(payload.get("text"), str)
             or not payload["text"].strip()
-            or len(payload["text"]) > 4_000
         ):
             return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
         from core.memory.project_ids import omitted_project_to_default, parse_writable_memory_project

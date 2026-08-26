@@ -37,7 +37,7 @@ _MEMORY_HELP_BY_LANGUAGE = {
             "Recall mode (default: hybrid)",
             "Print machine-readable output",
         ),
-        "remember": ("Text to remember (maximum 4,000 characters)", "Print machine-readable output"),
+        "remember": ("Text to remember", "Print machine-readable output"),
     },
     "zh": {
         "top": ("通过运行中的控制器使用本地记忆",),
@@ -52,7 +52,7 @@ _MEMORY_HELP_BY_LANGUAGE = {
         "profile": ("输出机器可读格式",),
         "list": ("页码（从 1 开始）", "每页记忆片段数（1-20）", "输出机器可读格式"),
         "search": ("搜索内容", "最大结果数（1-20）", "召回模式（默认：hybrid）", "输出机器可读格式"),
-        "remember": ("要记住的文本（最多 4,000 个字符）", "输出机器可读格式"),
+        "remember": ("要记住的文本", "输出机器可读格式"),
     },
 }
 
@@ -85,6 +85,8 @@ def test_memory_subcommand_help_uses_configured_i18n(language, command, monkeypa
     output = capsys.readouterr().out
     for expected in _MEMORY_HELP_BY_LANGUAGE[language][command]:
         assert expected in output
+    if command == "remember":
+        assert "4,000" not in output
 
 
 def test_memory_help_copy_is_not_hardcoded_in_cli_module() -> None:
@@ -632,13 +634,17 @@ def test_memory_remember_nonqueued_outcomes_exit_nonzero(monkeypatch, capsys, bo
     assert json.loads(capsys.readouterr().out)["code"] == expected
 
 
-def test_memory_remember_rejects_over_limit_text_before_transport(monkeypatch, capsys) -> None:
-    args = cli.build_parser().parse_args(["memory", "remember", "x" * 4_001, "--json"])
-    monkeypatch.setattr(
-        internal_client,
-        "memory_remember_sync",
-        lambda *_args, **_kwargs: pytest.fail("invalid input reached the controller"),
-    )
+def test_memory_remember_forwards_large_text_from_parser(monkeypatch, capsys) -> None:
+    text = "x" * 70_000
+    args = cli.build_parser().parse_args(["memory", "remember", text, "--json"])
+    forwarded: list[str] = []
 
-    assert cli.cmd_memory(args) == 1
-    assert json.loads(capsys.readouterr().out)["code"] == "memory_invalid_input"
+    def remember(query: str, **_kwargs):
+        forwarded.append(query)
+        return {"status_code": 200, "body": {"status": "accepted"}}
+
+    monkeypatch.setattr(internal_client, "memory_remember_sync", remember)
+
+    assert cli.cmd_memory(args) == 0
+    assert json.loads(capsys.readouterr().out)["result"] == {"status": "accepted"}
+    assert forwarded == [text]

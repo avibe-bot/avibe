@@ -1537,6 +1537,43 @@ def test_native_processing_record_routes_authorize_the_selected_project() -> Non
     assert runtime.list_memory_projects.call_count == 3
 
 
+def test_memory_remember_route_forwards_large_text_to_controller() -> None:
+    from core.memory import CaptureAccepted
+    from core.memory.http_headers import CALLER_SESSION_HEADER
+
+    text = "x" * 70_000
+    controller = _build_controller_double()
+    controller.memory_runtime = SimpleNamespace()
+    controller.memory_scope_for_cli_session.return_value = (
+        "u-" + "1" * 32,
+        "default",
+    )
+    controller.capture_memory = AsyncMock(return_value=CaptureAccepted())
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.post(
+                "/internal/memory/remember",
+                json={"text": text},
+                headers={CALLER_SESSION_HEADER: "session-1"},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "accepted"}
+    request = controller.capture_memory.await_args.args[0]
+    assert request.text == text
+    assert request.principal_id == "u-" + "1" * 32
+    assert request.project_id == "default"
+    assert request.session_id == "session-1"
+
+
 def test_memory_remember_route_rejects_capture_queued_across_runtime_replacement() -> None:
     """The production CLI route cannot repopulate the fresh reset aggregate."""
 

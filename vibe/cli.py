@@ -645,7 +645,7 @@ def cmd_memory(args) -> int:
         return _print_memory_cli_error(operation, "memory_invalid_input", as_json=as_json, language=language)
     if operation == "remember":
         query = args.text if isinstance(args.text, str) else ""
-        if not query.strip() or len(query) > 4_000:
+        if not query.strip():
             return _print_memory_cli_error(operation, "memory_invalid_input", as_json=as_json, language=language)
     try:
         caller = caller_context_from_env()

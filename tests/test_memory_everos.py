@@ -829,6 +829,39 @@ def test_search_uses_public_search_only_and_maps_episode_and_nested_fact() -> No
     assert items[1].item.text == "Uses Python for automation."
 
 
+def test_search_fact_projection_counts_only_valid_text() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "episodes": [
+                        {
+                            "user_id": PRINCIPAL,
+                            "atomic_facts": [
+                                {"content": "   "},
+                                {"content": "retained after blank fact"},
+                            ],
+                        }
+                    ]
+                }
+            },
+        )
+
+    with _sidecar_transport(handler):
+        items = asyncio.run(
+            EverOSPort(Path("/tmp/everos.sock")).search(
+                PRINCIPAL,
+                PROJECT,
+                "fact",
+                1,
+                session_ref=SESSION_REF,
+            )
+        )
+
+    assert [item.item.text for item in items] == ["retained after blank fact"]
+
+
 def test_assistant_owner_crosses_add_search_and_profile_provider_contract() -> None:
     """MEMORY-SEARCH-008, MEMORY-SEARCH-009, MEMORY-SEARCH-011 stay scoped."""
 
@@ -1535,6 +1568,30 @@ def test_profile_projection_rejects_more_than_requested_profile() -> None:
         )
 
 
+def test_projection_rejects_container_in_scalar_before_reading_its_body() -> None:
+    class PrefixOnlyStream:
+        def __init__(self) -> None:
+            self.sent = False
+
+        def seek(self, offset: int) -> int:
+            assert offset == 0
+            return 0
+
+        def read(self, size: int = -1) -> bytes:
+            if size == 0:
+                return b""
+            if self.sent:
+                pytest.fail("parser read the invalid scalar container body")
+            self.sent = True
+            return b'{"request_id":{'
+
+    with pytest.raises(ValueError, match="unexpected scalar value shape"):
+        memory_everos._parse_spooled_json(
+            PrefixOnlyStream(),
+            memory_everos._WRITE_RESPONSE_SCHEMA,
+        )
+
+
 def test_profile_parse_is_inside_total_response_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"data": {"profiles": []}})
@@ -2232,7 +2289,7 @@ def test_processing_preflight_requires_completion_metadata_for_empty_chat_conten
     assert result.failure.diagnostic.message == expected
 
 
-def test_processing_preflight_rejects_unhashable_finish_reason() -> None:
+def test_processing_preflight_rejects_container_finish_reason_during_projection() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/chat/completions"):
             return httpx.Response(
@@ -2269,7 +2326,7 @@ def test_processing_preflight_rejects_unhashable_finish_reason() -> None:
     assert result.ok is False
     assert result.failure is not None
     assert result.failure.diagnostic.http_status == 200
-    assert result.failure.diagnostic.message == "provider_response_invalid_finish_reason"
+    assert result.failure.diagnostic.message == "provider_response_not_object"
 
 
 def test_processing_preflight_probes_configured_rerank_endpoint() -> None:

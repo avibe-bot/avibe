@@ -137,9 +137,10 @@ class _JSONNullableSchema(_JSONSchema):
 class _JSONArraySchema(_JSONSchema):
     item: _JSONSchema
     max_items: int | None = None
-    retention: Literal["all", "first", "none", "presence"] = "all"
+    retention: Literal["all", "first", "none", "presence", "valid_text"] = "all"
     retain_items: int | None = None
     validate_discarded_items: bool = False
+    retention_field: str | None = None
 
 
 @dataclass(frozen=True)
@@ -309,7 +310,12 @@ def _search_response_schema(limit: int) -> _JSONMapSchema:
             "subject": _JSON_SCALAR,
             "episode": _JSON_SCALAR,
             "content": _JSON_SCALAR,
-            "atomic_facts": _JSONArraySchema(fact, retain_items=limit),
+            "atomic_facts": _JSONArraySchema(
+                fact,
+                retention="valid_text",
+                retain_items=limit,
+                retention_field="content",
+            ),
             **timestamps,
         }
     )
@@ -1533,6 +1539,7 @@ class _ProjectedFrame:
     value: dict[str, Any] | list[Any] | None
     pending_key: str | None = None
     count: int = 0
+    deferred_attach: bool = False
 
 
 class _ProjectedJSONParser:
@@ -1574,12 +1581,7 @@ class _ProjectedJSONParser:
             if isinstance(schema, _JSONNullableSchema):
                 schema = schema.value
             if isinstance(schema, _JSONScalarSchema):
-                # Keep an incorrectly shaped value for endpoint validators to
-                # report the specific contract error instead of collapsing it
-                # into a generic non-object response.
-                if schema.number_only:
-                    raise ValueError("unexpected numeric value shape")
-                schema = _JSON_ANY
+                raise ValueError("unexpected scalar value shape")
             if event == "start_map":
                 if not isinstance(schema, (_JSONMapSchema, _JSONAnySchema)):
                     raise ValueError("unexpected object")
@@ -1588,8 +1590,16 @@ class _ProjectedJSONParser:
                 if not isinstance(schema, (_JSONArraySchema, _JSONAnySchema)):
                     raise ValueError("unexpected array")
                 value = []
-            self._attach(value)
-            self._frames.append(_ProjectedFrame(schema, value))
+            deferred_attach = self._defer_container_attach()
+            if not deferred_attach:
+                self._attach(value)
+            self._frames.append(
+                _ProjectedFrame(
+                    schema,
+                    value,
+                    deferred_attach=deferred_attach,
+                )
+            )
             return
         if event in {"end_map", "end_array"}:
             if not self._frames:
@@ -1601,6 +1611,8 @@ class _ProjectedJSONParser:
                 raise ValueError("mismatched container")
             if event == "end_array" and not isinstance(frame.value, list):
                 raise ValueError("mismatched container")
+            if frame.deferred_attach:
+                self._attach(frame.value)
             return
         if self._frames and self._frames[-1].value is None:
             return
@@ -1645,6 +1657,13 @@ class _ProjectedJSONParser:
                 return _JSON_ANY
             if schema.max_items is not None and frame.count > schema.max_items:
                 raise ValueError("array exceeds response contract")
+            if schema.retention == "valid_text":
+                if (
+                    schema.retain_items is not None
+                    and len(frame.value) >= schema.retain_items
+                ):
+                    return _JSON_SKIP
+                return schema.item
             if schema.retention in {"none", "presence"} or (
                 schema.retain_items is not None and frame.count > schema.retain_items
             ):
@@ -1653,6 +1672,14 @@ class _ProjectedJSONParser:
                 return _JSON_SKIP
             return schema.item
         raise ValueError("unexpected value")
+
+    def _defer_container_attach(self) -> bool:
+        if not self._frames or not isinstance(self._frames[-1].value, list):
+            return False
+        schema = self._frames[-1].schema
+        if isinstance(schema, _JSONNullableSchema):
+            schema = schema.value
+        return isinstance(schema, _JSONArraySchema) and schema.retention == "valid_text"
 
     def _attach(self, value: Any) -> None:
         if not self._frames:
@@ -1682,7 +1709,19 @@ class _ProjectedJSONParser:
             if isinstance(schema, _JSONNullableSchema):
                 schema = schema.value
             if isinstance(schema, _JSONArraySchema):
-                if schema.retention in {"none", "presence"} or (
+                if schema.retention == "valid_text":
+                    field = schema.retention_field
+                    if (
+                        not isinstance(value, dict)
+                        or field is None
+                        or _safe_text(value.get(field)) is None
+                        or (
+                            schema.retain_items is not None
+                            and len(frame.value) >= schema.retain_items
+                        )
+                    ):
+                        return
+                elif schema.retention in {"none", "presence"} or (
                     schema.retain_items is not None
                     and frame.count > schema.retain_items
                 ):
