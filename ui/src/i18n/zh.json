@@ -306,7 +306,7 @@
       "change": "修改{{action}}快捷键",
       "pressKeys": "请按快捷键",
       "escapeToCancel": "按 Esc 取消",
-      "modifierRequired": "请包含 Option、Command 或 Control。",
+      "modifierRequired": "请包含 Option、Alt、Command 或 Control。",
       "reserved": "这个快捷键已被 Avibe 使用。",
       "conflict": "已被{{action}}使用。",
       "modifierLabels": {

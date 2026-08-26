@@ -306,7 +306,7 @@
       "change": "Change {{action}} shortcut",
       "pressKeys": "Press shortcut",
       "escapeToCancel": "Esc cancels",
-      "modifierRequired": "Include Option, Command, or Control.",
+      "modifierRequired": "Include Option, Alt, Command, or Control.",
       "reserved": "This shortcut is already used by Avibe.",
       "conflict": "Already used by {{action}}.",
       "modifierLabels": {

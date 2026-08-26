@@ -9,6 +9,7 @@ import {
   isAltGraphShortcutEvent,
   isReservedActionShortcut,
   isPlainEscape,
+  readActionShortcuts,
   shortcutFromKeyboardEvent,
   shortcutFromKeyboardEventWithLayout,
   useActionShortcutLabel,
@@ -59,8 +60,12 @@ export const SettingsShortcutsPage: React.FC = () => {
       setError({ id, message: t('settings.shortcuts.reserved') });
       return;
     }
+    const storedShortcuts = readActionShortcuts();
     const conflict = SHORTCUT_IDS.find(
-      (candidate) => candidate !== id && actionShortcutsEqual(shortcuts[candidate], next),
+      (candidate) => candidate !== id && (
+        actionShortcutsEqual(shortcuts[candidate], next)
+        || actionShortcutsEqual(storedShortcuts[candidate], next)
+      ),
     );
     if (conflict) {
       setError({
@@ -78,7 +83,19 @@ export const SettingsShortcutsPage: React.FC = () => {
       setError({ id, message: t('settings.shortcuts.reserved') });
       return;
     }
-    writeActionShortcuts({ ...shortcuts, [id]: layoutAware });
+    const latestStoredShortcuts = readActionShortcuts();
+    const latestConflict = SHORTCUT_IDS.find(
+      (candidate) => candidate !== id
+        && actionShortcutsEqual(latestStoredShortcuts[candidate], layoutAware),
+    );
+    if (latestConflict) {
+      setError({
+        id,
+        message: t('settings.shortcuts.conflict', { action: actionLabel(latestConflict) }),
+      });
+      return;
+    }
+    writeActionShortcuts({ ...latestStoredShortcuts, [id]: layoutAware });
     setCapturing(null);
     setError(null);
   };

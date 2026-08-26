@@ -154,7 +154,8 @@ function normalizedDisplayKey(value: string | undefined): string | undefined {
   if (value === ' ') return undefined;
   const glyphs = Array.from(value);
   if (glyphs.length !== 1) return undefined;
-  return value.toLocaleUpperCase();
+  const uppercased = value.toLocaleUpperCase();
+  return Array.from(uppercased).length === 1 ? uppercased : undefined;
 }
 
 export function isPlainEscape(

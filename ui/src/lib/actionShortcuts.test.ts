@@ -96,6 +96,16 @@ describe('action shortcuts', () => {
     expect(actionShortcutMatches(chord({ code: 'KeyV', key: 'k', ctrlKey: true }), shortcut!)).toBe(true);
   });
 
+  it('falls back to the physical key label when uppercasing a layout glyph expands it', async () => {
+    const shortcut = await shortcutFromKeyboardEventWithLayout(
+      chord({ code: 'Minus', key: 'ß', altKey: true }),
+      { getLayoutMap: async () => new Map([['Minus', 'ß']]) },
+    );
+
+    expect(shortcut?.displayKey).toBeUndefined();
+    expect(formatActionShortcut(shortcut!, enT, false)).toBe('Alt+-');
+  });
+
   it('localizes every generated word in a shortcut label', () => {
     const numpad = shortcutFromKeyboardEvent(chord({
       code: 'Numpad1',

@@ -77,8 +77,8 @@ describe('SettingsShortcutsPage', () => {
     expect(annotation.textContent).toContain('Alt+R');
   });
 
-  it('stops advertising a saved chord when a layout change makes it shell-reserved', async () => {
-    let layout = new Map([['KeyV', 'v'], ['KeyZ', 'z'], ['KeyX', 'x']]);
+  it('preserves a temporarily inactive chord when the other shortcut changes', async () => {
+    let layout = new Map([['KeyV', 'v'], ['KeyZ', 'z'], ['KeyX', 'x'], ['KeyB', 'b']]);
     const keyboard = Object.assign(new EventTarget(), {
       getLayoutMap: async () => layout,
     });
@@ -99,7 +99,15 @@ describe('SettingsShortcutsPage', () => {
     keyboard.dispatchEvent(new Event('layoutchange'));
     await waitFor(() => expect(voice.textContent).toContain('Alt+Y'));
 
-    layout = new Map([['KeyV', 'v'], ['KeyZ', 'z'], ['KeyX', 'x']]);
+    const annotation = screen.getByRole('button', { name: 'Change Show Page annotation mode shortcut' });
+    fireEvent.click(annotation);
+    fireEvent.keyDown(annotation, { code: 'KeyB', key: 'b', altKey: true });
+    await waitFor(() => expect(readActionShortcuts()).toMatchObject({
+      voiceInput: { code: 'KeyV', ctrlKey: true },
+      showPageAnnotation: { code: 'KeyB', altKey: true },
+    }));
+
+    layout = new Map([['KeyV', 'v'], ['KeyZ', 'z'], ['KeyX', 'x'], ['KeyB', 'b']]);
     keyboard.dispatchEvent(new Event('layoutchange'));
     await waitFor(() => expect(voice.textContent).toContain('Ctrl+V'));
   });
@@ -110,10 +118,10 @@ describe('SettingsShortcutsPage', () => {
 
     fireEvent.click(voice);
     fireEvent.keyDown(voice, { code: 'KeyV' });
-    expect(screen.getByRole('alert').textContent).toBe('Include Option, Command, or Control.');
+    expect(screen.getByRole('alert').textContent).toBe('Include Option, Alt, Command, or Control.');
 
     fireEvent.keyDown(voice, { code: 'KeyV', shiftKey: true });
-    expect(screen.getByRole('alert').textContent).toBe('Include Option, Command, or Control.');
+    expect(screen.getByRole('alert').textContent).toBe('Include Option, Alt, Command, or Control.');
 
     fireEvent.keyDown(voice, { code: 'KeyW', altKey: true });
     expect(screen.getByRole('alert').textContent).toBe('This shortcut is already used by Avibe.');
