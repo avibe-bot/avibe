@@ -135,6 +135,26 @@ describe('SourceOrderDrawer keyboard ordering', () => {
     await waitFor(() => expect(reorderAgentChains).toHaveBeenCalledWith('claude', ['src_b']));
   });
 
+  it('allows reapplying an unchanged saved priority to existing route chains', async () => {
+    const user = userEvent.setup();
+    const savedAgent: AgentSupply = {
+      ...agent,
+      sources: {
+        order: ['src_b', 'src_a'],
+        eligibility: sources.map((item) => ({ source_id: item.id, eligible: true })),
+      },
+    };
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(savedAgent);
+    const reorderAgentChains = vi.spyOn(modelsApi, 'reorderAgentChains').mockResolvedValue(savedAgent);
+    renderDrawer({ agent: savedAgent });
+
+    const save = await screen.findByRole('button', { name: 'Save order' });
+    expect(save.hasAttribute('disabled')).toBe(false);
+    await user.click(save);
+
+    await waitFor(() => expect(reorderAgentChains).toHaveBeenCalledWith('claude', ['src_b', 'src_a']));
+  });
+
   it('keeps a read failure inside the drawer and retries the collection read', async () => {
     const user = userEvent.setup();
     const read = vi.spyOn(modelsApi, 'getAgentSources')

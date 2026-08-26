@@ -94,7 +94,6 @@ export const SourceOrderDrawer: React.FC<{
   const [viewSources, setViewSources] = React.useState(sources);
   const [readState, setReadState] = React.useState<ReadState>('loading');
   const [order, setOrder] = React.useState<string[]>([]);
-  const [dirty, setDirty] = React.useState(false);
   const [saveFailed, setSaveFailed] = React.useState(false);
   const [grabbedId, setGrabbedId] = React.useState<string | null>(null);
   const [announcement, setAnnouncement] = React.useState<OrderAnnouncement>(null);
@@ -111,7 +110,6 @@ export const SourceOrderDrawer: React.FC<{
     setViewSources(nextSources);
     saved.current = nextOrder;
     setOrder(nextOrder);
-    setDirty(false);
     setSaveFailed(false);
     setGrabbedId(null);
     setAnnouncement(null);
@@ -160,7 +158,6 @@ export const SourceOrderDrawer: React.FC<{
   const persist = (next: string[]) => {
     if (sameIds(next, order)) return;
     setOrder(next);
-    setDirty(!sameIds(next, saved.current));
     setSaveFailed(false);
   };
   const focusHandle = (sourceId: string) => handles.current.get(sourceId)?.focus();
@@ -191,7 +188,6 @@ export const SourceOrderDrawer: React.FC<{
     const sourceId = grabbedId;
     const restored = grabbedFrom.current;
     setOrder(restored);
-    setDirty(!sameIds(restored, saved.current));
     setAnnouncement({ key: 'grabCancelled', source: byId.get(sourceId)?.display_name ?? sourceId });
     setGrabbedId(null);
     requestAnimationFrame(() => focusHandle(sourceId));
@@ -237,7 +233,6 @@ export const SourceOrderDrawer: React.FC<{
         const echoed = await modelsApi.reorderAgentChains(agent.backend, order);
         saved.current = echoed.sources?.order ?? order;
         setOrder(saved.current);
-        setDirty(false);
         setSaveFailed(false);
         await Promise.resolve(onSaved(echoed)).catch(() => {});
         onClose();
@@ -252,7 +247,9 @@ export const SourceOrderDrawer: React.FC<{
   const backend = t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend });
   const title = t('settings.models.order.title', { backend });
   const announcementText = announcement ? t(`settings.models.order.${announcement.key}`, announcement) : '';
-  const saveEnabled = readState === 'ready' && available.length > 0 && (dirty || order.length === 0);
+  // Saving is also the explicit action for reapplying the stored priority to
+  // routes that may have been edited independently since the last save.
+  const saveEnabled = readState === 'ready' && available.length > 0;
 
   return (
     <DialogPrimitive.Root open={open} onOpenChange={(next) => !next && !saving && onClose()}>

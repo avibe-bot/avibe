@@ -1031,6 +1031,8 @@ describe('SettingsModelsPage surface branches', () => {
     expect(agentRead).toHaveBeenCalledTimes(2);
     await waitFor(() => expect(sourceRead).toHaveBeenCalledOnce());
     expect(screen.queryByText(/Could not read the source list · the gateway itself is fine|来源列表没读到 · 网关本身正常/i)).toBeNull();
+    expect(screen.queryByText(/Supplying Codex|正在供给 Codex/i)).toBeNull();
+    expect(screen.getByText(/Available · not currently supplying|可用 · 当前未供给/i)).toBeTruthy();
   });
 
   it('does not compete for source inventory during Direct-mode recovery', () => {

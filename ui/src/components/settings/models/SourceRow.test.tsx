@@ -63,6 +63,20 @@ describe('SourceRow', () => {
     expect(screen.getByText(/Supplying Codex|正在供给 Codex/i)).toBeTruthy();
   });
 
+  it('does not show a cached adoption after that backend switches to direct mode', () => {
+    render(
+      <I18nextProvider i18n={i18n}>
+        <SourceRow
+          source={{ ...source, state: { ...source.state, status: 'standby' }, adopted_by: [{ backend: 'codex', menu_model: 'gpt-5' }] }}
+          activeBackends={new Set(['claude'])}
+          onOpen={vi.fn()}
+        />
+      </I18nextProvider>,
+    );
+    expect(screen.queryByText(/Supplying Codex|正在供给 Codex/i)).toBeNull();
+    expect(screen.getByText(/Available · not currently supplying|可用 · 当前未供给/i)).toBeTruthy();
+  });
+
   it('advances cooldown copy when its retry deadline passes', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-08-11T14:00:00Z'));

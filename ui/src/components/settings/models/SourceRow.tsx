@@ -9,12 +9,16 @@ import {
   sourceDetail,
   sourceProviderIdentity,
 } from './sourcePresentation';
-import { sourceStatePresentation } from './sourceStatePresentation';
+import { activeSourceAdoption, sourceStatePresentation } from './sourceStatePresentation';
 import { useDeadlineClock } from './useDeadlineClock';
 import { ACCENT_ICON, ACCENT_PILL, ACCENT_TILE, sourceVisual } from './vendorMeta';
-import type { Source } from './types';
+import type { AgentBackend, Source } from './types';
 
-export const SourceRow: React.FC<{ source: Source; onOpen: (source: Source) => void }> = ({ source, onOpen }) => {
+export const SourceRow: React.FC<{
+  source: Source;
+  onOpen: (source: Source) => void;
+  activeBackends?: ReadonlySet<AgentBackend>;
+}> = ({ source, onOpen, activeBackends }) => {
   const { t, i18n } = useTranslation();
   const now = useDeadlineClock(source.state.status === 'cooldown' ? source.state.retry_at : null);
   const { Icon, accent } = sourceVisual(source);
@@ -23,9 +27,10 @@ export const SourceRow: React.FC<{ source: Source; onOpen: (source: Source) => v
   const providerCopyKey = SOURCE_PROVIDER_COPY_KEYS[providerIdentity];
   const providerLabel = providerCopyKey ? t(providerCopyKey) : providerIdentity;
   const interfaceLabel = `${providerLabel} · ${t(PROTOCOL_COPY_KEYS[source.protocol])}`;
-  const adoptedBackends = [...new Set((source.adopted_by ?? []).map(({ backend }) => t(`settings.models.backends.${backend}`, { defaultValue: backend }) as string))];
+  const adoptedBy = activeSourceAdoption(source.adopted_by, activeBackends);
+  const adoptedBackends = [...new Set((adoptedBy ?? []).map(({ backend }) => t(`settings.models.backends.${backend}`, { defaultValue: backend }) as string))];
   const state = sourceStatePresentation(source.state, 'card', i18n.language, now, {
-    known: source.adopted_by !== undefined,
+    known: adoptedBy !== undefined,
     backends: adoptedBackends,
     native: source.supply_channel === 'native_cli',
   });
@@ -34,7 +39,7 @@ export const SourceRow: React.FC<{ source: Source; onOpen: (source: Source) => v
     : source.kind === 'subscription'
       ? 'subscription'
       : 'apiKey';
-  const adopted = (source.state.status === 'active' || source.state.status === 'standby') && (source.adopted_by?.length ?? 0) > 0;
+  const adopted = (source.state.status === 'active' || source.state.status === 'standby') && (adoptedBy?.length ?? 0) > 0;
   return (
     <button
       type="button"

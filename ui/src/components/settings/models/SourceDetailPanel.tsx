@@ -46,11 +46,11 @@ import {
 import { handOffProviderTab } from './providerTab';
 import { reconcileUnknownWrite } from './reconcileUnknownWrite';
 import { REPAIR_DESTINATION, REPAIR_LABEL_KEY, reauthBodyKey, reauthCost, repairAction } from './repair';
-import { sourceStatePresentation } from './sourceStatePresentation';
+import { activeSourceAdoption, sourceStatePresentation } from './sourceStatePresentation';
 import { tierMutationPayload, type TierMutationIntent } from './tierMutation';
 import { useDeadlineClock } from './useDeadlineClock';
 import { ACCENT_ICON, ACCENT_TILE, isCustomEndpoint, sourceVisual } from './vendorMeta';
-import type { RouteHopRef, Source, SourcePatch, SuppliedModel, SupplyGap } from './types';
+import type { AgentBackend, RouteHopRef, Source, SourcePatch, SuppliedModel, SupplyGap } from './types';
 
 const ManualModelMenu: React.FC<{
   model: SuppliedModel;
@@ -300,7 +300,9 @@ export const SourceDetailPanel: React.FC<{
   onMutationCommitted: PresentSourceMutationCommit;
   /** Stable focus target for callers that navigate into this detail surface. */
   headingRef?: React.Ref<HTMLHeadingElement>;
-}> = ({ source, trackMutation, onReauth, onMutationCommitted, headingRef }) => {
+  /** Authoritative backends still using the gateway, when the Agent read is ready. */
+  activeBackends?: ReadonlySet<AgentBackend>;
+}> = ({ source, trackMutation, onReauth, onMutationCommitted, headingRef, activeBackends }) => {
   const { t, i18n } = useTranslation();
   const now = useDeadlineClock(source.state.status === 'cooldown' ? source.state.retry_at : null);
   const { Icon, accent } = sourceVisual(source);
@@ -734,9 +736,10 @@ export const SourceDetailPanel: React.FC<{
     if (guard.kind === 'refetch') void refetch(confirmGuardPlan(guard.plan));
     if (guard.kind === 'removeModel') void remove(guard.model, confirmGuardPlan(guard.plan));
   };
-  const adoptedBackends = [...new Set((source.adopted_by ?? []).map(({ backend }) => t(`settings.models.backends.${backend}`, { defaultValue: backend }) as string))];
+  const adoptedBy = activeSourceAdoption(source.adopted_by, activeBackends);
+  const adoptedBackends = [...new Set((adoptedBy ?? []).map(({ backend }) => t(`settings.models.backends.${backend}`, { defaultValue: backend }) as string))];
   const state = sourceStatePresentation(source.state, 'detail', i18n.language, now, {
-    known: source.adopted_by !== undefined,
+    known: adoptedBy !== undefined,
     backends: adoptedBackends,
     native: source.supply_channel === 'native_cli',
   });

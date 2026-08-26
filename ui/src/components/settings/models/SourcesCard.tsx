@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { foldRegionRead, type RegionRead } from './regionRead';
 import { SourceRow } from './SourceRow';
-import type { Source } from './types';
+import type { AgentBackend, Source } from './types';
 
 export const SourcesCard: React.FC<{
   read: RegionRead<Source[]>;
@@ -17,7 +17,8 @@ export const SourcesCard: React.FC<{
   onAddSubscription: () => void;
   subscriptionPickerOpen?: boolean;
   subscriptionTriggerRef?: React.Ref<HTMLButtonElement>;
-}> = ({ read, onRetry, readFailureCopy, onOpenSource, onAddApiKey, onAddSubscription, subscriptionPickerOpen, subscriptionTriggerRef }) => {
+  activeBackends?: ReadonlySet<AgentBackend>;
+}> = ({ read, onRetry, readFailureCopy, onOpenSource, onAddApiKey, onAddSubscription, subscriptionPickerOpen, subscriptionTriggerRef, activeBackends }) => {
   const { t } = useTranslation();
   const sources = foldRegionRead<Source[], Source[] | undefined>(read, {
     loading: () => undefined,
@@ -54,7 +55,7 @@ export const SourcesCard: React.FC<{
             : <>
                 {read.kind === 'degraded' && read.cause === 'read_failed' && <div className="mb-2 flex items-center justify-between gap-3 rounded-lg border border-destructive/25 bg-destructive/[0.08] px-3 py-2"><p className="text-[11px] text-destructive-ink">{readFailureCopy ?? t('settings.models.upstream.unread')}</p><Button variant="outline" size="xs" onClick={onRetry}>{t('settings.models.upstream.retry')}</Button></div>}
                 {groups.length > 0
-                  ? groups.map((group) => <div key={group.id} className="space-y-2.5"><h3 className="model-hub-upstream-group-label flex h-[18px] items-center uppercase">{t(`settings.models.upstream.group.${group.id}`)}</h3>{group.sources.map((source) => <SourceRow key={source.id} source={source} onOpen={onOpenSource} />)}</div>)
+                  ? groups.map((group) => <div key={group.id} className="space-y-2.5"><h3 className="model-hub-upstream-group-label flex h-[18px] items-center uppercase">{t(`settings.models.upstream.group.${group.id}`)}</h3>{group.sources.map((source) => <SourceRow key={source.id} source={source} onOpen={onOpenSource} activeBackends={activeBackends} />)}</div>)
                   : <p className="px-3 py-10 text-center text-[12px] text-muted">{t('settings.models.upstream.empty')}</p>}
               </>}
       </div>

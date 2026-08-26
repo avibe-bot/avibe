@@ -1,4 +1,4 @@
-import type { NeedsActionDetailKey, SourceState, SourceStatus } from './types';
+import type { AgentBackend, AdoptedBy, NeedsActionDetailKey, SourceState, SourceStatus } from './types';
 
 export type SourceStateSurface = 'card' | 'detail';
 
@@ -8,6 +8,18 @@ export type SourceStatePresentation = {
   textClass: string;
   dotClass: string;
 };
+
+/**
+ * Keep the cached Source adoption projection readable while removing backends
+ * that the authoritative Agent projection has already switched to direct mode.
+ * An omitted active-backend set means the Agent read is not authoritative yet.
+ */
+export const activeSourceAdoption = (
+  adoptedBy: AdoptedBy[] | undefined,
+  activeBackends?: ReadonlySet<AgentBackend>,
+): AdoptedBy[] | undefined => activeBackends && adoptedBy
+  ? adoptedBy.filter(({ backend }) => activeBackends.has(backend))
+  : adoptedBy;
 
 const NEEDS_ACTION_KEY: Readonly<Record<NeedsActionDetailKey, string>> = {
   'models.source.needs_action.oauth_expired': 'settings.models.sourceDetail.status.needsAction.oauthExpired',
