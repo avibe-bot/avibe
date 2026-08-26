@@ -14881,12 +14881,14 @@ def _print_runtime_clean_failure(
     language: str,
 ) -> None:
     key = "runtime.clean.consumerPreviewFailed" if dry_run else "runtime.clean.consumerFailed"
+    archives = result.get("archives")
+    archive_reason = archives.get("skipped_reason") if isinstance(archives, Mapping) else None
     print(
         i18n_t(
             key,
             language,
             consumer=consumer,
-            reason=result.get("reason") or "unknown",
+            reason=result.get("reason") or archive_reason or "unknown",
         ),
         file=sys.stderr,
     )

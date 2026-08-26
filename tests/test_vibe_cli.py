@@ -2912,7 +2912,10 @@ def test_runtime_clean_returns_nonzero_for_show_failure_without_false_archive_su
             return {
                 "ok": False,
                 "removed": [],
-                "reason": "clean_inspection_failed",
+                "archives": {
+                    "outcome": "skipped",
+                    "skipped_reason": "archive_inspection_failed",
+                },
             }
 
     monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: FailingShowRuntimeManager())
@@ -2921,7 +2924,8 @@ def test_runtime_clean_returns_nonzero_for_show_failure_without_false_archive_su
 
     assert cli.cmd_runtime(args) == 1
     captured = capsys.readouterr()
-    assert "clean_inspection_failed" in captured.err
+    assert "archive_inspection_failed" in captured.err
+    assert "unknown" not in captured.err
     assert "downloaded Show Runtime archive" not in captured.out
 
 
