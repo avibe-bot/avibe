@@ -1554,39 +1554,7 @@ class ModelHubService:
                 )
                 if matched_model is None or any(hop.source_id == source.id for hop in route.hops):
                     continue
-                route_source_ids = [hop.source_id for hop in route.hops]
-                listed_route_ids = [
-                    source_id
-                    for source_id in route_source_ids
-                    if source_id in agent.sources.order
-                ]
-                expected_listed_ids = [
-                    source_id
-                    for source_id in agent.sources.order
-                    if source_id in route_source_ids
-                ]
-                has_default_priority_shape = (
-                    bool(listed_route_ids)
-                    and route_source_ids[: len(listed_route_ids)] == listed_route_ids
-                    and listed_route_ids == expected_listed_ids
-                )
-                insert_at = (
-                    next(
-                        (
-                            index
-                            for index, hop in enumerate(route.hops)
-                            if hop.source_id not in agent.sources.order
-                        ),
-                        len(route.hops),
-                    )
-                    if has_default_priority_shape
-                    else len(route.hops)
-                )
-                route.hops = (
-                    *route.hops[:insert_at],
-                    ModelHubRouteHopConfig(source.id, matched_model),
-                    *route.hops[insert_at:],
-                )
+                route.hops = (*route.hops, ModelHubRouteHopConfig(source.id, matched_model))
 
     @staticmethod
     def _agent_menu_model_ids(agent: ModelHubAgentSupplyConfig) -> tuple[str, ...]:

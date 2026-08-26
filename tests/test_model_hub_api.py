@@ -2391,7 +2391,7 @@ def test_reorder_agent_chains_commits_source_order_with_route_reorder(tmp_path):
     ]
 
 
-def test_new_source_is_placed_before_held_out_route_hops(tmp_path):
+def test_new_source_is_appended_to_route_hops(tmp_path):
     service, store, _ = _service(tmp_path)
     model_id = "claude-opus-4-6"
     _set_claude_route_fixture(store, ("src_listed01", "src_heldout1"), model_id)
@@ -2416,8 +2416,8 @@ def test_new_source_is_placed_before_held_out_route_hops(tmp_path):
     assert agent.sources.order == ["src_listed01", "src_new0001"]
     assert [hop.source_id for hop in agent.routes[model_id].hops] == [
         "src_listed01",
-        "src_new0001",
         "src_heldout1",
+        "src_new0001",
     ]
 
 
