@@ -46,7 +46,7 @@ class BackendRestartCoordinator:
         self._request_locks: dict[str, asyncio.Lock] = {}
 
     async def request_restart(self, backend: str) -> str:
-        """Begin or join a restart and return without waiting for a long drain."""
+        """Begin or join a restart, waiting only when no work is draining."""
         lock = self._request_locks.setdefault(backend, asyncio.Lock())
         async with lock:
             existing = self._tasks.get(backend)
@@ -54,31 +54,31 @@ class BackendRestartCoordinator:
                 if self._preflight is not None:
                     prepared = await self._preflight(backend)
                     self._pending_refreshes[backend] = prepared
-                return "draining"
+                task = existing
+                had_active_work = await self._has_active_turns(backend)
+            else:
+                agent_service = self.controller.agent_service
+                session_turns = self.controller.session_turns
+                agent_service.begin_backend_drain(backend)
+                session_turns.begin_backend_drain(backend)
+                try:
+                    await agent_service.prepare_backend_restart(backend)
+                    prepared = await self._preflight(backend) if self._preflight is not None else None
+                except Exception:
+                    agent_service.end_backend_drain(backend)
+                    await session_turns.end_backend_drain(backend, resume_deferred=False)
+                    raise
+                had_active_work = await self._has_active_turns(backend)
+                task = asyncio.create_task(
+                    self._run(backend, prepared),
+                    name=f"backend-restart:{backend}",
+                )
+                self._tasks[backend] = task
+                task.add_done_callback(lambda completed, name=backend: self._on_done(name, completed))
 
-            agent_service = self.controller.agent_service
-            session_turns = self.controller.session_turns
-            agent_service.begin_backend_drain(backend)
-            session_turns.begin_backend_drain(backend)
-            try:
-                await agent_service.prepare_backend_restart(backend)
-                prepared = await self._preflight(backend) if self._preflight is not None else None
-            except Exception:
-                agent_service.end_backend_drain(backend)
-                await session_turns.end_backend_drain(backend, resume_deferred=False)
-                raise
-            had_active_work = await self._has_active_turns(backend)
-            task = asyncio.create_task(
-                self._run(backend, prepared),
-                name=f"backend-restart:{backend}",
-            )
-            self._tasks[backend] = task
-            task.add_done_callback(lambda completed, name=backend: self._on_done(name, completed))
-
-        # Backends without a prepared generation keep the historical synchronous
-        # idle refresh contract. A prepared generation is safe to acknowledge as
-        # soon as its background cutover is durably owned by this coordinator.
-        if not had_active_work and prepared is None:
+        # An idle acknowledgement means the requested generation is live. Only
+        # an active drain may return before the cutover itself completes.
+        if not had_active_work:
             await task
             return "restarted"
         return "draining"

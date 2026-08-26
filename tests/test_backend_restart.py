@@ -129,6 +129,7 @@ def test_concurrent_restart_requests_coalesce() -> None:
 def test_joined_preflight_queues_follow_up_before_reopening_drain() -> None:
     async def run() -> None:
         service = _AgentService()
+        service.active = True
         controller = _controller(service)
         first_refresh_started = asyncio.Event()
         release_first_refresh = asyncio.Event()
@@ -150,12 +151,11 @@ def test_joined_preflight_queues_follow_up_before_reopening_drain() -> None:
             drain_timeout=1,
         )
 
-        first_request = asyncio.create_task(coordinator.request_restart("opencode"))
-        await first_refresh_started.wait()
-        assert await first_request == "draining"
-
+        assert await coordinator.request_restart("opencode") == "draining"
         assert await coordinator.request_restart("opencode") == "draining"
         assert service.draining is True
+        service.active = False
+        await first_refresh_started.wait()
         release_first_refresh.set()
 
         await coordinator.wait("opencode")
@@ -166,6 +166,52 @@ def test_joined_preflight_queues_follow_up_before_reopening_drain() -> None:
             "opencode",
             resume_deferred=True,
         )
+        assert service.draining is False
+
+    asyncio.run(run())
+
+
+def test_joined_idle_preflight_waits_for_latest_generation_before_ack() -> None:
+    async def run() -> None:
+        service = _AgentService()
+        controller = _controller(service)
+        first_refresh_started = asyncio.Event()
+        release_first_refresh = asyncio.Event()
+        second_preflight_done = asyncio.Event()
+        prepared_generations: list[str] = []
+        preflight_count = 0
+
+        async def preflight(_backend: str) -> str:
+            nonlocal preflight_count
+            preflight_count += 1
+            if preflight_count == 2:
+                second_preflight_done.set()
+            return f"generation-{preflight_count}"
+
+        async def refresh(_backend: str, _forced: bool, prepared: object) -> None:
+            prepared_generations.append(str(prepared))
+            if len(prepared_generations) == 1:
+                first_refresh_started.set()
+                await release_first_refresh.wait()
+
+        coordinator = BackendRestartCoordinator(
+            controller,
+            refresh,
+            preflight=preflight,
+            drain_timeout=1,
+        )
+
+        first_request = asyncio.create_task(coordinator.request_restart("opencode"))
+        await first_refresh_started.wait()
+        second_request = asyncio.create_task(coordinator.request_restart("opencode"))
+        await second_preflight_done.wait()
+
+        assert first_request.done() is False
+        assert second_request.done() is False
+        release_first_refresh.set()
+
+        assert await asyncio.gather(first_request, second_request) == ["restarted", "restarted"]
+        assert prepared_generations == ["generation-1", "generation-2"]
         assert service.draining is False
 
     asyncio.run(run())
@@ -249,6 +295,32 @@ def test_idle_refresh_failure_is_propagated_before_ack() -> None:
         with pytest.raises(RuntimeError, match="invalid config"):
             await coordinator.request_restart("opencode")
 
+        assert service.draining is False
+        controller.session_turns.end_backend_drain.assert_awaited_once_with(
+            "opencode",
+            resume_deferred=False,
+        )
+
+    asyncio.run(run())
+
+
+def test_idle_prepared_refresh_failure_is_propagated_before_ack() -> None:
+    async def run() -> None:
+        service = _AgentService()
+        controller = _controller(service)
+        refresh = AsyncMock(side_effect=RuntimeError("catalog publish failed"))
+        preflight = AsyncMock(return_value="generation-a")
+        coordinator = BackendRestartCoordinator(
+            controller,
+            refresh,
+            preflight=preflight,
+            drain_timeout=1,
+        )
+
+        with pytest.raises(RuntimeError, match="catalog publish failed"):
+            await coordinator.request_restart("opencode")
+
+        refresh.assert_awaited_once_with("opencode", False, "generation-a")
         assert service.draining is False
         controller.session_turns.end_backend_drain.assert_awaited_once_with(
             "opencode",
