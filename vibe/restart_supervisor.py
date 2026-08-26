@@ -15,6 +15,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import NamedTuple
 
+from packaging.version import InvalidVersion, Version
+
 from config import paths
 
 # Imported here, at the top, rather than where the rollback path uses it. This
@@ -31,13 +33,18 @@ from vibe.upgrade import (
     PACKAGE_NAME,
     RollbackTarget,
     _names_a_published_release,
+    build_memory_add_plan,
     build_upgrade_plan,
+    configured_memory_enabled,
     execute_upgrade_plan,
     get_restart_command,
     get_restart_environment,
     get_restart_invocation_command,
     get_safe_cwd,
+    installed_memory_package_version,
     installed_package_name,
+    memory_package_installed,
+    package_mutation_lock,
 )
 
 
@@ -54,6 +61,7 @@ _ROLLBACK_INSTALL_TIMEOUT_SECONDS = 600.0
 # next to an already-warm CLI -- is not the right bound here. This one is only
 # ever paid in full when the UI is genuinely not coming.
 _ROLLBACK_UI_READY_TIMEOUT_SECONDS = 60.0
+_MEMORY_SPLIT_MIN_VERSION = Version("3.0.14.dev0")
 
 
 class StartedRuntime(NamedTuple):
@@ -279,7 +287,30 @@ def _discover_legacy_upgrade_target(*, trigger: str, vibe_path: str | None) -> R
         if metadata is None:
             return None
         version, package = metadata
-    return RollbackTarget(version=version, package=package, launcher=launcher)
+    memory_package, memory_version = _legacy_memory_package_shape(version)
+    return RollbackTarget(
+        version=version,
+        package=package,
+        launcher=launcher,
+        memory_package=memory_package,
+        memory_version=memory_version,
+    )
+
+
+def _legacy_memory_package_shape(version: str) -> tuple[bool, str | None]:
+    """Infer the prior shape when an older release could not serialize it."""
+
+    try:
+        if Version(version) < _MEMORY_SPLIT_MIN_VERSION:
+            return False, None
+    except InvalidVersion:
+        pass
+    installed = memory_package_installed()
+    enabled = configured_memory_enabled()
+    return (
+        installed or enabled,
+        installed_memory_package_version() if installed else None,
+    )
 
 
 def _now_iso() -> str:
@@ -656,31 +687,32 @@ def _roll_back_failed_upgrade(
         write(f"cannot roll back to {version}: the failed generation did not stop")
         return rollback
 
+    plan = None
     try:
-        plan = build_upgrade_plan(
-            vibe_path=vibe_path,
-            version=version,
-            package_name=rollback_to.package,
-            memory_package=rollback_to.memory_package,
-        )
+        with package_mutation_lock():
+            plan = build_upgrade_plan(
+                vibe_path=vibe_path,
+                version=version,
+                package_name=rollback_to.package,
+                memory_package=rollback_to.memory_package,
+                memory_version=rollback_to.memory_version,
+            )
+            rollback["install"] = {"method": plan.method, "ok": None}
+            record(rollback)
+            result = execute_upgrade_plan(
+                plan,
+                run=subprocess.run,
+                capture_output=True,
+                text=True,
+                cwd=get_safe_cwd(),
+                timeout=_ROLLBACK_INSTALL_TIMEOUT_SECONDS,
+            )
     except Exception as exc:
-        rollback.update(state="failed", error=f"cannot build a pinned install for {version}: {exc}")
-        record(rollback)
-        return rollback
-
-    rollback["install"] = {"method": plan.method, "ok": None}
-    record(rollback)
-    try:
-        result = execute_upgrade_plan(
-            plan,
-            run=subprocess.run,
-            capture_output=True,
-            text=True,
-            cwd=get_safe_cwd(),
-            timeout=_ROLLBACK_INSTALL_TIMEOUT_SECONDS,
-        )
-    except Exception as exc:
-        rollback["install"] = {"method": plan.method, "ok": False, "error": str(exc)}
+        rollback["install"] = {
+            "method": plan.method if plan is not None else "unknown",
+            "ok": False,
+            "error": str(exc),
+        }
         rollback.update(state="failed", error=f"installing {version} failed: {exc}")
         record(rollback)
         return rollback
@@ -876,13 +908,14 @@ def _run_restart_job(
             "scope": scope,
             # Recorded whether or not a rollback ends up happening, so a failed
             # restart with no `rollback` record is readable: armed and killed
-            # before it could recover, versus never recoverable at all. All three
-            # fields of the target, because a record that named the version and
-            # the distribution but not the install would be silent about the one
-            # of the three that has actually been wrong in production.
+            # before it could recover, versus never recoverable at all. Every
+            # dimension is recorded because a target that named the version and
+            # distribution but not the install would be silent about one of the
+            # dimensions that have actually been wrong in production.
             "rollback_to": rollback_to.version if rollback_to else None,
             "rollback_package": rollback_to.package if rollback_to else None,
             "rollback_memory_package": rollback_to.memory_package if rollback_to else None,
+            "rollback_memory_version": rollback_to.memory_version if rollback_to else None,
             "rollback_launcher": rollback_to.launcher._asdict() if rollback_to else None,
             "rollback_target_source": rollback_target_source,
             "rollback_discovery_error": rollback_discovery_error,
@@ -941,6 +974,59 @@ def _run_restart_job(
             mark_duration("wait_service_lock_release_seconds", wait_lock_release_started_at)
             return fail("service lock did not release after stopping runtime", 2, started_at=restart_started_at)
         mark_duration("wait_service_lock_release_seconds", wait_lock_release_started_at)
+
+        if (
+            rollback_target_source == "running_service"
+            and configured_memory_enabled()
+        ):
+            try:
+                from vibe import __version__
+
+                with package_mutation_lock():
+                    memory_plan = build_memory_add_plan(
+                        version=__version__,
+                        vibe_path=vibe_path,
+                        package_name=installed_package_name(),
+                    )
+                    memory_result = execute_upgrade_plan(
+                        memory_plan,
+                        run=subprocess.run,
+                        capture_output=True,
+                        text=True,
+                        cwd=safe_cwd,
+                        timeout=_ROLLBACK_INSTALL_TIMEOUT_SECONDS,
+                    )
+            except Exception as exc:
+                payload["memory_package_prepare"] = {
+                    "method": None,
+                    "ok": False,
+                    "error": str(exc),
+                }
+                _write_status(payload)
+                return fail(
+                    f"preparing Memory for the upgraded release failed: {exc}",
+                    2,
+                    started_at=restart_started_at,
+                )
+            if memory_result.returncode != 0:
+                detail = (memory_result.stderr or memory_result.stdout or "").strip()[-2000:]
+                payload["memory_package_prepare"] = {
+                    "method": memory_plan.method,
+                    "ok": False,
+                    "error": detail or f"exit code {memory_result.returncode}",
+                }
+                _write_status(payload)
+                return fail(
+                    "preparing Memory for the upgraded release failed",
+                    2,
+                    started_at=restart_started_at,
+                )
+            payload["memory_package_prepare"] = {
+                "method": memory_plan.method,
+                "ok": True,
+            }
+            _write_status(payload)
+            write(f"prepared Memory package using {memory_plan.method}")
 
         if rollback_to:
             # Read here and nowhere else: the service is stopped, its lock is
@@ -1115,6 +1201,8 @@ def schedule_restart(
             command.extend(["--rollback-package", rollback_to.package])
         if rollback_to.memory_package:
             command.append("--rollback-memory-package")
+        if rollback_to.memory_version:
+            command.extend(["--rollback-memory-version", rollback_to.memory_version])
     env = get_restart_environment(vibe_path=vibe_path)
     log_path = _restart_log_path(job_id)
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1187,6 +1275,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rollback-to")
     parser.add_argument("--rollback-package")
     parser.add_argument("--rollback-memory-package", action="store_true")
+    parser.add_argument("--rollback-memory-version")
     parser.add_argument("--rollback-python")
     parser.add_argument("--rollback-main")
     args = parser.parse_args(argv)
@@ -1199,11 +1288,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.rollback_to:
         if not args.rollback_python or not args.rollback_main:
             parser.error("--rollback-to requires --rollback-python and --rollback-main")
+        if args.rollback_memory_version and not args.rollback_memory_package:
+            parser.error("--rollback-memory-version requires --rollback-memory-package")
         rollback_to = RollbackTarget(
             version=args.rollback_to,
             package=args.rollback_package,
             launcher=runtime.ServiceLauncher(python=args.rollback_python, main=args.rollback_main),
             memory_package=args.rollback_memory_package,
+            memory_version=args.rollback_memory_version,
         )
     return _run_restart_job(
         job_id=args.job_id,

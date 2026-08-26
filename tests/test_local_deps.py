@@ -15,6 +15,7 @@ import os
 import subprocess
 import tarfile
 import urllib.error
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -1415,6 +1416,69 @@ def test_memory_runtime_dependency_job_stops_when_package_resolution_fails(monke
         "download_error": None,
     }
     assert calls == [True]
+
+
+def test_memory_package_install_uses_the_non_replacing_add_plan(monkeypatch):
+    from vibe import __version__
+
+    plan = object()
+    planned: list[dict] = []
+    executed: list[object] = []
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/bin/vibe")
+    monkeypatch.setattr(
+        api,
+        "installed_metadata_describes_running_code",
+        lambda: True,
+    )
+    monkeypatch.setattr(api, "installed_package_name", lambda: "avibe-os")
+    monkeypatch.setattr(api, "package_mutation_lock", nullcontext)
+    monkeypatch.setattr(
+        api,
+        "build_memory_add_plan",
+        lambda **kwargs: planned.append(kwargs) or plan,
+    )
+    monkeypatch.setattr(
+        api,
+        "execute_upgrade_plan",
+        lambda selected, **kwargs: executed.append(selected)
+        or subprocess.CompletedProcess([], 0, stdout="installed", stderr=""),
+    )
+
+    result = api._install_memory_package_for_current_release()
+
+    assert result["ok"] is True
+    assert planned == [
+        {
+            "vibe_path": "/bin/vibe",
+            "version": __version__,
+            "package_name": "avibe-os",
+        }
+    ]
+    assert executed == [plan]
+
+
+def test_memory_package_install_refuses_a_stale_pre_restart_process(monkeypatch):
+    monkeypatch.setattr(api, "package_mutation_lock", nullcontext)
+    monkeypatch.setattr(
+        api,
+        "installed_metadata_describes_running_code",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        api,
+        "build_memory_add_plan",
+        lambda **kwargs: pytest.fail("stale code must not pin or mutate the replaced install"),
+    )
+
+    result = api._install_memory_package_for_current_release()
+
+    assert result == {
+        "ok": False,
+        "message": "memory_runtime_install_failed",
+        "output": "Avibe changed on disk; restart before installing Memory.",
+        "reason": "memory_runtime_install_failed",
+        "download_error": None,
+    }
 
 
 def test_dependencies_status_node_unsupported_not_ready(monkeypatch):

@@ -1046,7 +1046,18 @@ class Controller:
             allow_disabled=True,
             retry_plugin_error=True,
         ) as lease:
-            return await lease.runtime.install_artifact()
+            result = await lease.runtime.install_artifact()
+            if result.get("ok") is True and lease.temporary:
+                condition = self._memory_runtime_condition()
+                async with condition:
+                    if (
+                        getattr(self, "memory_runtime", None) is lease.runtime
+                        and getattr(self, "_memory_runtime_temporary", False)
+                        and self.config.memory.enabled
+                    ):
+                        self._memory_runtime_temporary = False
+                        self._memory_runtime_temporary_config = None
+            return result
 
     async def reconcile_memory(self, memory_config: MemoryConfig) -> dict[str, Any]:
         """Hot-apply persisted Memory settings without destructive fallback."""

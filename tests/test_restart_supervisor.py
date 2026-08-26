@@ -32,7 +32,12 @@ _REPLACED_INSTALL = runtime.ServiceLauncher(
 )
 
 
-def _rollback_target(version: str = "3.0.10", *, memory_package: bool = False) -> RollbackTarget:
+def _rollback_target(
+    version: str = "3.0.10",
+    *,
+    memory_package: bool = False,
+    memory_version: str | None = None,
+) -> RollbackTarget:
     """The install to go back to, as the upgrade captured it before installing."""
 
     return RollbackTarget(
@@ -40,6 +45,7 @@ def _rollback_target(version: str = "3.0.10", *, memory_package: bool = False) -
         package="vibe-remote",
         launcher=_REPLACED_INSTALL,
         memory_package=memory_package,
+        memory_version=memory_version,
     )
 
 
@@ -185,6 +191,30 @@ def test_legacy_upgrade_target_reads_the_running_release_and_launcher(monkeypatc
         version="3.0.12",
         package="avibe-os",
         launcher=runtime.ServiceLauncher(python=str(python_path), main=str(service_main)),
+    )
+
+
+def test_legacy_rollback_shape_distinguishes_bundled_and_split_memory(monkeypatch):
+    monkeypatch.setattr(restart_supervisor, "memory_package_installed", lambda: False)
+    monkeypatch.setattr(
+        restart_supervisor,
+        "installed_memory_package_version",
+        lambda: None,
+    )
+    monkeypatch.setattr(restart_supervisor, "configured_memory_enabled", lambda: True)
+
+    assert restart_supervisor._legacy_memory_package_shape("3.0.13") == (False, None)
+    assert restart_supervisor._legacy_memory_package_shape("3.0.14") == (True, None)
+
+    monkeypatch.setattr(restart_supervisor, "memory_package_installed", lambda: True)
+    monkeypatch.setattr(
+        restart_supervisor,
+        "installed_memory_package_version",
+        lambda: "3.0.14",
+    )
+    assert restart_supervisor._legacy_memory_package_shape("3.0.14") == (
+        True,
+        "3.0.14",
     )
 
 
@@ -605,6 +635,59 @@ def test_restart_job_stops_and_starts_service(monkeypatch, tmp_path):
     assert "wait_service_lock_release_seconds" in status["stage_durations"]
     assert "start_runtime_seconds" in status["stage_durations"]
     assert "restart_total_seconds" in status["stage_durations"]
+
+
+def test_first_split_upgrade_adds_memory_after_stop_and_before_start(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    calls: list[str] = []
+    target = _rollback_target(version="3.0.13")
+    plan = SimpleNamespace(method="pip")
+
+    monkeypatch.setattr(restart_supervisor, "get_build_identity", lambda: SimpleNamespace(kind="package"))
+    monkeypatch.setattr(
+        restart_supervisor,
+        "_discover_legacy_upgrade_target",
+        lambda **kwargs: target,
+    )
+    monkeypatch.setattr(restart_supervisor, "configured_memory_enabled", lambda: True)
+    monkeypatch.setattr(
+        restart_supervisor,
+        "build_memory_add_plan",
+        lambda **kwargs: plan,
+    )
+    monkeypatch.setattr(
+        restart_supervisor,
+        "execute_upgrade_plan",
+        lambda selected, **kwargs: calls.append("add-memory")
+        or SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(
+        restart_supervisor,
+        "_stop_runtime_for_restart",
+        lambda stop_ui=True: _fake_stop_runtime(calls),
+    )
+    monkeypatch.setattr(
+        restart_supervisor,
+        "_start_runtime_processes",
+        lambda start_ui=True: _fake_start_runtime(calls),
+    )
+    monkeypatch.setattr(restart_supervisor, "_wait_for_service_lock_release", lambda: True)
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 222)
+    monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: pid == 222)
+    monkeypatch.setattr(runtime, "service_instance_started", lambda pid: pid == 222)
+
+    rc = restart_supervisor._run_restart_job(
+        job_id="job-first-split",
+        delay_seconds=0,
+        vibe_path="/bin/vibe",
+        trigger="upgrade",
+    )
+
+    assert rc == 0
+    assert calls == ["stop_runtime", "add-memory", "start_runtime"]
+    status = runtime.read_json(runtime.get_restart_status_path())
+    assert status["memory_package_prepare"] == {"method": "pip", "ok": True}
 
 
 def test_restart_job_uses_lock_holder_when_pidfile_is_missing(monkeypatch, tmp_path):
@@ -1519,7 +1602,11 @@ def test_a_recoverable_restart_carries_its_rollback_target_into_the_job(monkeypa
 
     monkeypatch.setattr(restart_supervisor.subprocess, "Popen", fake_popen)
 
-    target = _rollback_target(memory_package=True)
+    target = _rollback_target(
+        version="3.0.14",
+        memory_package=True,
+        memory_version="3.0.14",
+    )
     restart_supervisor.schedule_restart(
         delay_seconds=0,
         vibe_path="/bin/vibe",
@@ -1545,3 +1632,18 @@ def test_a_recoverable_restart_carries_its_rollback_target_into_the_job(monkeypa
     # from here" is the exact wrong answer, and a silent one.
     with pytest.raises(SystemExit):
         restart_supervisor.main(["--job-id", "jobpartial", "--rollback-to", "3.0.10"])
+    with pytest.raises(SystemExit):
+        restart_supervisor.main(
+            [
+                "--job-id",
+                "jobpartialmemory",
+                "--rollback-to",
+                "3.0.14",
+                "--rollback-python",
+                "/bin/python",
+                "--rollback-main",
+                "/site-packages/vibe/service_main.py",
+                "--rollback-memory-version",
+                "3.0.14",
+            ]
+        )

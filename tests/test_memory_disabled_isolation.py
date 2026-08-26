@@ -877,6 +877,40 @@ async def test_disabled_install_owns_runtime_until_successful_close() -> None:
 
 
 @pytest.mark.asyncio
+async def test_enabled_install_promotes_the_recovered_runtime_for_capture() -> None:
+    controller = Controller.__new__(Controller)
+    controller.config = types.SimpleNamespace(
+        memory=replace(_disabled_app_config().memory, enabled=True)
+    )
+    controller.memory_adapter = DisabledMemoryAdapter()
+    controller.memory_runtime = None
+    controller.memory_module = None
+    controller._memory_reconcile_task = None
+    controller._memory_disabled_cleanup_task = None
+    controller._memory_plugin_error = MemoryPluginUnavailableError("startup failed")
+
+    class _Runtime:
+        module = object()
+        closed = False
+        retired = False
+
+        async def install_artifact(self) -> dict[str, object]:
+            return {"ok": True}
+
+        async def close(self) -> None:
+            raise AssertionError("an enabled repaired runtime must stay attached")
+
+    runtime = _Runtime()
+    controller._create_memory_runtime = lambda config, **kwargs: runtime
+
+    assert await controller.install_memory_runtime() == {"ok": True}
+    assert controller.memory_runtime is runtime
+    assert controller.memory_module is runtime.module
+    assert isinstance(controller.memory_adapter, EnabledMemoryAdapter)
+    assert controller._memory_runtime_temporary is False
+
+
+@pytest.mark.asyncio
 async def test_cancelled_install_does_not_cancel_shared_disabled_cleanup() -> None:
     controller = Controller.__new__(Controller)
     controller.config = types.SimpleNamespace(memory=_disabled_app_config().memory)

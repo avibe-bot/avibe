@@ -4,6 +4,7 @@ import ast
 import os
 import subprocess
 import sys
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ from vibe import api, cli
 from vibe.runtime import ServiceLauncher
 from vibe.upgrade import (
     UpgradePlan,
+    build_memory_add_plan,
     build_upgrade_plan,
     configured_memory_enabled,
     execute_upgrade_plan,
@@ -55,6 +57,10 @@ def _tree_is_not_an_installed_distribution(monkeypatch):
 
     monkeypatch.setattr("vibe.upgrade._distributions_providing_this_package", lambda: [])
     monkeypatch.setattr("vibe.upgrade.memory_package_installed", lambda: False)
+    monkeypatch.setattr("vibe.upgrade.installed_memory_package_version", lambda: None)
+    monkeypatch.setattr("vibe.upgrade.package_mutation_lock", nullcontext)
+    monkeypatch.setattr(api, "package_mutation_lock", nullcontext)
+    monkeypatch.setattr(cli, "package_mutation_lock", nullcontext)
     monkeypatch.setattr(api, "configured_memory_enabled", lambda: False)
     monkeypatch.setattr(cli, "configured_memory_enabled", lambda: False)
 
@@ -84,6 +90,10 @@ def test_memory_indep_018_upgrade_and_rollback_preserve_optional_package_shape(
     monkeypatch.setattr("vibe.upgrade.os.path.exists", lambda path: True)
     monkeypatch.setattr("vibe.upgrade.os.access", lambda path, mode: True)
     monkeypatch.setattr("vibe.upgrade.memory_package_installed", lambda: True)
+    monkeypatch.setattr(
+        "vibe.upgrade.installed_memory_package_version",
+        lambda: "3.0.14",
+    )
     monkeypatch.setattr("vibe.__version__", "3.0.14")
     launcher = ServiceLauncher(
         python="/uv/tools/avibe-os/bin/python",
@@ -107,6 +117,7 @@ def test_memory_indep_018_upgrade_and_rollback_preserve_optional_package_shape(
         package="avibe-os",
         launcher=launcher,
         memory_package=True,
+        memory_version="3.0.14",
     )
 
     rollback_with_memory = build_upgrade_plan(
@@ -116,8 +127,10 @@ def test_memory_indep_018_upgrade_and_rollback_preserve_optional_package_shape(
         version="3.0.14",
         package_name="avibe-os",
         memory_package=True,
+        memory_version="3.0.14",
     )
     assert "avibe-os[memory]==3.0.14" in rollback_with_memory.command
+    assert "avibe-memory==3.0.14" in rollback_with_memory.command
     assert rollback_with_memory.preflight_command is not None
     assert rollback_with_memory.cleanup_command is None
 
@@ -189,6 +202,81 @@ def test_memory_preflight_failure_never_runs_the_replacing_install():
 
     assert result.returncode == 42
     assert calls == [["installer", "preflight"]]
+
+
+def test_package_plan_holds_the_shared_mutation_lease_for_resolution_and_install(
+    monkeypatch,
+):
+    held = False
+    calls: list[tuple[list[str], bool]] = []
+
+    @contextmanager
+    def mutation_lock():
+        nonlocal held
+        assert held is False
+        held = True
+        try:
+            yield
+        finally:
+            held = False
+
+    def fake_run(command, **kwargs):
+        calls.append((command, held))
+        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr("vibe.upgrade.package_mutation_lock", mutation_lock)
+    plan = UpgradePlan(
+        command=["installer", "install"],
+        env=None,
+        method="test",
+        preflight_command=["installer", "preflight"],
+    )
+
+    result = execute_upgrade_plan(plan, run=fake_run, capture_output=True, text=True)
+
+    assert result.returncode == 0
+    assert calls == [
+        (["installer", "preflight"], True),
+        (["installer", "install"], True),
+    ]
+    assert held is False
+
+
+@pytest.mark.parametrize(
+    ("python_executable", "uv_path", "method"),
+    [
+        ("/tmp/.local/share/uv/tools/avibe-os/bin/python", "/usr/local/bin/uv", "uv"),
+        ("/usr/bin/python3", None, "pip"),
+    ],
+)
+def test_memory_add_plan_never_force_reinstalls_the_running_core(
+    monkeypatch,
+    python_executable,
+    uv_path,
+    method,
+):
+    monkeypatch.setattr("vibe.upgrade.os.path.exists", lambda path: True)
+    monkeypatch.setattr("vibe.upgrade.os.access", lambda path, mode: True)
+
+    plan = build_memory_add_plan(
+        version="3.0.14",
+        package_name="avibe-os",
+        python_executable=python_executable,
+        uv_path=uv_path,
+        base_env={"PATH": "/usr/bin"},
+    )
+
+    assert plan.method == method
+    assert "avibe-os[memory]==3.0.14" in plan.command
+    assert plan.preflight_command is not None
+    assert "--dry-run" in plan.preflight_command
+    assert "--force" not in plan.command
+    assert "--force-reinstall" not in plan.command
+    if method == "uv":
+        assert plan.command[:3] == ["/usr/local/bin/uv", "pip", "install"]
+        assert "tool" not in plan.command
+    else:
+        assert plan.command[:4] == [python_executable, "-m", "pip", "install"]
 
 
 def test_core_only_rollback_removes_memory_only_after_the_pinned_install_succeeds():

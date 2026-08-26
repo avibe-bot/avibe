@@ -61,13 +61,16 @@ from vibe.opencode_config import (
 from vibe.build_identity import get_build_identity
 from vibe.upgrade import (
     PACKAGE_NAME,
+    build_memory_add_plan,
     build_upgrade_plan,
     configured_memory_enabled,
     execute_upgrade_plan,
     get_latest_version_info,
     get_running_vibe_path,
     get_safe_cwd,
+    installed_metadata_describes_running_code,
     installed_package_name,
+    package_mutation_lock,
     should_skip_show_runtime_prepare,
 )
 from vibe.restart_supervisor import schedule_restart
@@ -6134,14 +6137,6 @@ def do_upgrade(
         {"ok": bool, "message": str, "output": str | None, "restarting": bool}
     """
     current_vibe_path = get_running_vibe_path()
-    plan = build_upgrade_plan(
-        vibe_path=current_vibe_path,
-        memory_enabled=(
-            configured_memory_enabled()
-            if memory_enabled is None
-            else memory_enabled
-        ),
-    )
     runtime_was_running = _runtime_process_was_running()
 
     # Use a stable directory as cwd to avoid "Current directory does not exist"
@@ -6150,14 +6145,23 @@ def do_upgrade(
     safe_cwd = get_safe_cwd()
 
     try:
-        result = execute_upgrade_plan(
-            plan,
-            run=subprocess.run,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            cwd=safe_cwd,
-        )
+        with package_mutation_lock():
+            plan = build_upgrade_plan(
+                vibe_path=current_vibe_path,
+                memory_enabled=(
+                    configured_memory_enabled()
+                    if memory_enabled is None
+                    else memory_enabled
+                ),
+            )
+            result = execute_upgrade_plan(
+                plan,
+                run=subprocess.run,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                cwd=safe_cwd,
+            )
         if result.returncode == 0:
             restarting = False
             restart_failed = False
@@ -8583,20 +8587,28 @@ def _install_memory_package_for_current_release() -> dict:
     from vibe import __version__
 
     try:
-        plan = build_upgrade_plan(
-            vibe_path=get_running_vibe_path(),
-            version=__version__,
-            package_name=installed_package_name() or PACKAGE_NAME,
-            memory_package=True,
-        )
-        result = execute_upgrade_plan(
-            plan,
-            run=subprocess.run,
-            capture_output=True,
-            text=True,
-            timeout=600,
-            cwd=get_safe_cwd(),
-        )
+        with package_mutation_lock():
+            if not installed_metadata_describes_running_code():
+                return {
+                    "ok": False,
+                    "message": "memory_runtime_install_failed",
+                    "output": "Avibe changed on disk; restart before installing Memory.",
+                    "reason": "memory_runtime_install_failed",
+                    "download_error": None,
+                }
+            plan = build_memory_add_plan(
+                vibe_path=get_running_vibe_path(),
+                version=__version__,
+                package_name=installed_package_name() or PACKAGE_NAME,
+            )
+            result = execute_upgrade_plan(
+                plan,
+                run=subprocess.run,
+                capture_output=True,
+                text=True,
+                timeout=600,
+                cwd=get_safe_cwd(),
+            )
     except Exception as exc:  # noqa: BLE001
         return {
             "ok": False,
