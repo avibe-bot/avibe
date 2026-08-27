@@ -1943,7 +1943,7 @@ class ManagedRuntimeManager:
         *,
         reason: str | None = None,
     ) -> dict[str, Any]:
-        if self.resolve_binary() != binary:
+        if ManagedRuntimeManager.resolve_binary(self) != binary:
             try:
                 self._write_current_pointer(install_dir, manifest, archive)
             except Exception as exc:  # noqa: BLE001

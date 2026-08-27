@@ -369,23 +369,27 @@ def test_exact_released_packaged_install_is_adopted_without_archive_resolution(
     binary.write_text("#!/bin/sh\necho tmux 3.6b\n", encoding="utf-8")
     binary.chmod(0o755)
     manager = TmuxRuntimeManager(runtime_dir=runtime_dir)
-    metadata_path = released_dir / manager.spec.metadata_filename
-    metadata_path.write_text(
-        json.dumps(
-            {
-                "provider": "manifest",
-                "manifest_sha256": manifest_sha256,
-                "tmux_version": "3.6b",
-                "platform": platform_tag,
-                "archive_name": archive["name"],
-                "archive_sha256": archive_sha256,
-                "bin_path": "tmux",
-                "manifest_source": "package:tmux_runtime_manifest.json",
-                "source": released_manifest["source"],
-                "requires_utf8proc": True,
-                "terminfo": "bundled-or-system",
-            }
-        ),
+    released_metadata = {
+        "provider": "manifest",
+        "manifest_sha256": manifest_sha256,
+        "tmux_version": "3.6b",
+        "platform": platform_tag,
+        "archive_name": archive["name"],
+        "archive_sha256": archive_sha256,
+        "bin_path": "tmux",
+        "manifest_source": "package:tmux_runtime_manifest.json",
+        "source": released_manifest["source"],
+        "requires_utf8proc": True,
+        "terminfo": "bundled-or-system",
+    }
+    (released_dir / manager.spec.metadata_filename).write_text(
+        json.dumps(released_metadata),
+        encoding="utf-8",
+    )
+    stale_dir = released_dir.parent / "stale"
+    stale_dir.mkdir()
+    (stale_dir / manager.spec.metadata_filename).write_text(
+        json.dumps(released_metadata),
         encoding="utf-8",
     )
     original_file_sha256 = managed_runtime.file_sha256
@@ -403,13 +407,20 @@ def test_exact_released_packaged_install_is_adopted_without_archive_resolution(
     )
 
     result = manager.ensure()
+    pointer = json.loads((manager.runtime_dir / "current.json").read_text(encoding="utf-8"))
+    cleanup = manager.clean(keep_previous=0)
 
     assert result["ok"] is True
     assert result["changed"] is False
     assert Path(result["path"]) == binary
     assert manager.resolve_binary() == binary
     assert result["install_dir"] == str(released_dir)
-    assert not (manager.runtime_dir / "current.json").exists()
+    assert pointer["runtime_id"] == "tmux"
+    assert pointer["install_dir"] == str(released_dir)
+    assert cleanup["ok"] is True
+    assert cleanup["removed"] == [str(stale_dir)]
+    assert released_dir.is_dir()
+    assert not stale_dir.exists()
 
 
 def test_remote_manifest_and_archive_cache_support_offline_reuse(tmp_path: Path) -> None:
