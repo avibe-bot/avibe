@@ -453,6 +453,72 @@ def test_forced_repair_replaces_canonical_install_for_pointerless_recovery(
     assert manager.resolve_binary() == repaired_binary
 
 
+def test_nonforced_repair_replaces_non_runnable_canonical_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = _write_tmux_archive(tmp_path)
+    manifest = _write_manifest(tmp_path, archive)
+    manager = TmuxRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+    canonical_dir = Path(installed["install_dir"])
+    non_runnable_marker = canonical_dir / "non-runnable"
+    non_runnable_marker.touch()
+    real_binary_version = tmux_runtime._tmux_binary_version
+
+    def binary_version(binary: Path | None) -> str | None:
+        if binary is not None and (binary.parent / non_runnable_marker.name).is_file():
+            return None
+        return real_binary_version(binary)
+
+    monkeypatch.setattr(tmux_runtime, "_tmux_binary_version", binary_version)
+
+    repaired = manager.ensure()
+
+    assert repaired["ok"] is True
+    assert repaired["changed"] is True
+    assert Path(repaired["install_dir"]) == canonical_dir
+    repaired_binary = Path(repaired["path"])
+    assert repaired_binary == canonical_dir / "tmux"
+    assert not non_runnable_marker.exists()
+
+    (manager.runtime_dir / "current.json").unlink()
+    monkeypatch.setattr(
+        manager,
+        "_resolve_manifest_archive",
+        lambda _archive: pytest.fail("pointerless recovery accessed an archive"),
+    )
+    assert manager.resolve_binary() == repaired_binary
+
+
+def test_nonforced_repair_preserves_target_when_staged_binary_is_not_runnable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = _write_tmux_archive(tmp_path)
+    manifest = _write_manifest(tmp_path, archive)
+    manager = TmuxRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+    install_dir = Path(installed["install_dir"])
+    installed_binary = Path(installed["path"])
+    binary_before = installed_binary.read_bytes()
+    pointer_path = manager.runtime_dir / "current.json"
+    pointer_before = pointer_path.read_bytes()
+    sentinel = install_dir / "preserve-existing"
+    sentinel.touch()
+    monkeypatch.setattr(tmux_runtime, "_tmux_binary_version", lambda _binary: None)
+
+    failed = manager.ensure()
+
+    assert failed["ok"] is False
+    assert failed["reason"] == "tmux_binary_not_runnable"
+    assert installed_binary.read_bytes() == binary_before
+    assert pointer_path.read_bytes() == pointer_before
+    assert sentinel.is_file()
+
+
 def test_updated_manifest_uses_discoverable_deterministic_install(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -498,6 +564,35 @@ def test_updated_manifest_uses_discoverable_deterministic_install(
         lambda _archive: pytest.fail("pointerless recovery accessed an archive"),
     )
     assert manager.resolve_binary() == second_binary
+
+
+def test_replays_returned_install_target_without_archive_or_pointer_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = _write_tmux_archive(tmp_path)
+    manifest = _write_manifest(tmp_path, archive)
+    manager = TmuxRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+    monkeypatch.setattr(
+        manager,
+        "_resolve_manifest_archive",
+        lambda _archive: pytest.fail("claim replay accessed an archive"),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_write_current_pointer",
+        lambda *_args: pytest.fail("claim replay rewrote the pointer"),
+    )
+
+    replayed = manager.ensure(expected_target=installed["target"])
+
+    assert replayed["ok"] is True
+    assert replayed["changed"] is False
+    assert replayed["path"] == installed["path"]
+    assert replayed["install_dir"] == installed["install_dir"]
+    assert replayed["target"] == installed["target"]
 
 
 def test_resolve_tmux_binary_returns_none_when_absent(tmp_path: Path) -> None:

@@ -52,6 +52,7 @@ _TMUX_SPEC = ManagedRuntimeSpec(
     allow_legacy_missing_runtime_id=True,
     staging_prefixes=("install-", "manifest-"),
     replace_target_on_force=True,
+    replace_invalid_target_on_repair=True,
     include_manifest_digest_in_install_fingerprint=True,
 )
 

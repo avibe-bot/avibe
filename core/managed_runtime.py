@@ -138,6 +138,7 @@ class ManagedRuntimeSpec:
     allow_legacy_missing_runtime_id: bool = False
     staging_prefixes: tuple[str, ...] = ("install-",)
     replace_target_on_force: bool = False
+    replace_invalid_target_on_repair: bool = False
     include_manifest_digest_in_install_fingerprint: bool = False
 
     @property
@@ -209,7 +210,11 @@ class ManagedRuntimeManager:
                     manifest=manifest,
                 )
             target = self._install_target_identity(manifest, archive)
-            if expected_target is not None and self._normalized_install_target(expected_target) != target:
+            if (
+                expected_target is not None
+                and self._normalized_install_target(expected_target)
+                != self._normalized_install_target(target)
+            ):
                 return self._failure(
                     self._reason("install_target_changed"),
                     manifest=manifest,
@@ -245,8 +250,11 @@ class ManagedRuntimeManager:
             unique_install_dirs = list(dict.fromkeys(candidate_install_dirs))
             existing_install_dir = unique_install_dirs[0]
             existing: Path | None = None
+            canonical_target_was_rejected = False
             for candidate_install_dir in unique_install_dirs:
                 candidate = self._verified_manifest_binary(candidate_install_dir, manifest, archive)
+                if candidate_install_dir == install_dir and candidate is None:
+                    canonical_target_was_rejected = True
                 if candidate is not None:
                     existing_install_dir = candidate_install_dir
                     existing = candidate
@@ -317,7 +325,13 @@ class ManagedRuntimeManager:
 
                 install_dir.parent.mkdir(parents=True, exist_ok=True)
                 if install_dir.exists():
-                    if force and self.spec.replace_target_on_force:
+                    replace_target = (
+                        force and self.spec.replace_target_on_force
+                    ) or (
+                        canonical_target_was_rejected
+                        and self.spec.replace_invalid_target_on_repair
+                    )
+                    if replace_target:
                         if not self._remove_install_target_for_replacement(install_dir):
                             return self._failure(
                                 self._reason("install_failed"),
@@ -1858,11 +1872,10 @@ class ManagedRuntimeManager:
                 or expected_binary_sha256 is None
                 or file_sha256(binary) == expected_binary_sha256
             )
-            and (
-                not legacy_without_binary_digest
-                or self._binary_matches_manifest(binary, manifest)
-            )
         ):
+            return None
+        if not self._binary_matches_manifest(binary, manifest):
+            self._install_reason = self._reason("binary_not_runnable")
             return None
         return binary
 
