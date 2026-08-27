@@ -105,8 +105,9 @@ intent, pending-restart protocol, or package transaction record.
 
 `MEMORY-INDEP-022` reserves packaged evidence for this hop: an old bundled core
 must start with any residual split `avibe-memory` distribution present without
-import shadowing, and the transition first start must emit one shape-reconciliation
-warning without package mutation.
+import shadowing, the transition first start must emit one shape-reconciliation
+warning without package mutation, and rollback must reproduce the captured
+bundled-plus-residual distribution shape exactly.
 
 ## Invariant 2: Rollback Family Semantics
 
@@ -117,8 +118,10 @@ may not create an unpinned fallback.
 | Captured family | Rollback target and cleanup |
 | --- | --- |
 | Pre-split bundled core | Stage exact legacy core, stop the failed generation, explicitly uninstall the replacement `avibe-os` and every canonical `avibe-memory` provider introduced by the forward mutation, install the staged legacy core, then verify replacement metadata/provider absence and canonical Memory-provider absence |
+| Pre-split bundled core plus residual split Memory | Capture the residual canonical provider, exact Memory version, and cardinality; stage the exact legacy core and residual Memory artifact, remove the failed replacement shape, install the legacy core, and delete/reinstall Memory as needed to reproduce the captured residual provider/version/cardinality exactly |
 | Optional-era split core plus Memory | Install the captured exact core pin and independently captured exact Memory pin, then verify provider cardinality and versions |
 | Optional-era split core without Memory | Install the captured exact core pin, explicitly remove any Memory introduced by forward mutation, and verify zero canonical providers |
+| Transition core with exact matching Memory | Stage and restore both captured exact distributions, then verify both versions and exactly one canonical Memory provider |
 | Transition core with missing Memory | Fail closed before mutation; the hard dependency target cannot be reconstructed safely |
 | Transition core with mismatched Memory | Fail closed before mutation; the captured shape is resolver-inconsistent with the hard dependency |
 
@@ -134,9 +137,13 @@ fails closed before mutation and no rollback plan is constructed.
 Legacy rollback is a cleanup operation, not omission of a requirement. It
 re-enumerates every canonical `avibe-memory` dist-info provider and requires a
 cardinality of zero for the bundled target or exactly one matching provider for
-a split target. Duplicate providers, missing/unreadable metadata, a missing
-staged artifact, failed replacement-core uninstall, or failed post-cleanup
-verification all fail closed into Doc A's recovery/quarantine path.
+a split or bundled-plus-residual target. A residual provider present in the
+captured bundled shape is package state, not cleanup residue: rollback restores
+its exact captured version and cardinality and never removes it as a side effect.
+Residual cleanup is a separate explicit repair intent. Duplicate providers,
+missing/unreadable metadata, a missing staged artifact, failed replacement-core
+uninstall, or failed post-cleanup verification all fail closed into Doc A's
+recovery/quarantine path.
 
 The rejected alternative is to accept any core/Memory mismatch and let a broad
 resolver choose a convenient pair. That hides residue and can make a
@@ -147,8 +154,9 @@ express a real captured shape, including a mismatch that can be restored exactly
 but remains non-ready; the hard-dependency transition family does not.
 
 `MEMORY-INDEP-019` therefore includes duplicate-provider rejection, legacy
-replacement-core uninstall and absence verification, transition missing or
-mismatched rejection, and exact split-family rollback.
+replacement-core uninstall and absence verification, exact bundled-residual
+restoration, healthy transition restoration, transition missing or mismatched
+rejection, and exact split-family rollback.
 
 ## Invariant 3: Publication, Manifest Ownership, And Gate Removal
 
@@ -165,25 +173,38 @@ that one release identity:
    EverOS-manifest files. Verify core hashes, metadata, and the complete staged
    asset set while the release remains Draft.
 4. Immediately before finalization, repeat staged hash/metadata/local-resolver
-   checks. The single finalizer publishes the Memory distribution first.
+   checks. The single finalizer publishes the Memory distribution first and
+   records a verifiable version/hash publication checkpoint in the release
+   audit.
 5. Before uploading or declaring core available, verify that the exact public
    Memory distribution resolves and downloads, and that its public manifest URLs
-   and hashes match the staged bytes.
-6. Upload the core distribution from the same asset-complete finalizer, then
-   resolve/download both public distributions together and recheck release
-   assets, metadata, manifests, and hashes.
+   and hashes match the staged bytes. On rerun, the same finalizer probes this
+   checkpoint and public version/hash: an identical published Memory artifact is
+   skipped and finalization resumes at core; absence or non-identical bytes fail
+   closed.
+6. Upload the core distribution from the same asset-complete finalizer, record
+   its verifiable publication checkpoint, then resolve/download both public
+   distributions together and recheck release assets, metadata, manifests, and
+   hashes. A rerun likewise skips only an exact already-published core artifact.
 7. Only after all post-publication checks pass may the finalizer declare the
    transition release available and remove the transition gate.
 
 No release manifest points at Draft/private assets or a differently-versioned
 distribution. A failed staged or public check leaves the gate in place and
-requires recovery through the existing finalizer; it does not publish a partial
-release or mint a replacement identity.
+requires idempotent recovery through a rerun of the same finalizer and release
+identity. If Memory is already public but core publication cannot complete, the
+identical Memory artifact remains published by default, is recorded as stranded
+in the release audit, and is not advertised as a completed transition release.
+It is yanked only when the Memory artifact itself is defective, never merely
+because core publication failed. Recovery resumes from the verified Memory
+checkpoint; it does not publish another Memory version, create a second
+finalizer, or mint a replacement release identity.
 
 The release guard scans the full shipped wheel contents and staged/public asset
 set. It proves that Memory implementation and manifest ownership are absent
 from core, present in the Memory distribution, and resolver-compatible at both
-the staged and public gates.
+the staged and public gates. It also covers same-finalizer continuation from an
+exact Memory checkpoint and the stranded-Memory keep/yank policy.
 
 ## Invariant 4: KBD Retirement And Compatibility
 
@@ -216,11 +237,11 @@ not duplicate or redefine their contracts.
 | Scenario | Contract | Required automated evidence | Packaged/release evidence |
 | --- | --- | --- | --- |
 | `MEMORY-INDEP-018` | Doc A UI recovery and exact package lifecycle remain valid across release-family transitions | Reference Doc A's nonce/identity polling and terminal/active/quarantine truth table | Settings repair, enabled upgrade, restart/transport loss, rollback, and post-release availability using real wheels |
-| `MEMORY-INDEP-019` | Every family rollback is exact and resolver-satisfiable | Provider cardinality property; legacy replacement-core uninstall/absence; transition missing/mismatch matrix; independent split pins | Core-only, matching split, optional-era mismatch, duplicate provider, legacy cleanup, resolver failure, and activation rollback wheelhouse |
+| `MEMORY-INDEP-019` | Every family rollback is exact and resolver-satisfiable | Provider cardinality property; legacy replacement-core uninstall/absence; bundled-plus-residual and healthy-transition exact plans; transition missing/mismatch matrix; independent split pins | Core-only, bundled residual, matching split, healthy transition, optional-era mismatch, duplicate provider, legacy cleanup, resolver failure, and activation rollback wheelhouse |
 | `MEMORY-INDEP-020` | Doc A's single transaction owner remains the only mutation/admission primitive | Legacy `restart_status.json` fixture; nonce recovery/unknown ID; quarantine and ordinary-restart busy cases; no extra release coordination | Concurrent package requests, ordinary restart contention, killed-owner recovery, and release finalizer observations |
 | `MEMORY-INDEP-021` | Not-required packaged Memory remains import-free per Doc A | Disabled/safe-degraded/whole-config import guard | Core-only and transition first-start smoke with no optional implementation import |
-| `MEMORY-INDEP-022` | Pre-split first hop is inert with residual split package; transition first start reconciles shape once | Fixture for bundled old core plus residual split `avibe-memory`; import-shadow guard; one-time warning marker/read-only assertion | Old bundled wheel starts normally; transition wheel hard dependency resolves exact Memory; first start emits warning and performs zero package mutation |
-| `MEMORY-INDEP-023` | Transition rejects missing or mismatched Memory before mutation | Truth table for missing distribution, unreadable metadata, duplicate provider, and mismatched version; mutation call count remains zero | Packaged transition installs with each invalid shape fail closed before package mutation and preserve release gate |
+| `MEMORY-INDEP-022` | Pre-split first hop is inert with residual split package; transition first start reconciles shape once; rollback preserves the exact residual shape | Fixture for bundled old core plus residual split `avibe-memory`; capture version/cardinality; import-shadow guard; one-time warning marker/read-only assertion; exact bundled-plus-residual rollback equality | Old bundled wheel starts normally; transition wheel hard dependency resolves exact Memory; first start emits warning and performs zero package mutation; failed hop restores the exact legacy core and residual Memory shape |
+| `MEMORY-INDEP-023` | Healthy transition shape restores exactly; missing or mismatched Memory is rejected before mutation | Matching-transition plan stages/restores both exact distributions and provider cardinality; truth table for missing distribution, unreadable metadata, duplicate provider, and mismatched version keeps mutation call count zero | Failed post-transition upgrade restores exact matching core/Memory; packaged transition with each invalid shape fails closed before package mutation and preserves release gate |
 
 `MEMORY-INDEP-020` release evidence additionally covers a legacy
 `restart_status.json` fixture, expired intent/nonce recovery, kill-owner plus
