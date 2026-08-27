@@ -1152,6 +1152,55 @@ def build_upgrade_plan(
         cleanup_after_command=cleanup_after_command,
     )
 
+
+def build_memory_package_repair_plan(
+    *,
+    current_version: str | None = None,
+    python_executable: str | None = None,
+    uv_path: str | None = None,
+    vibe_path: str | None = None,
+    base_env: dict[str, str] | None = None,
+) -> UpgradePlan:
+    """Reinstall this released Avibe version with its matching Memory extra."""
+
+    if current_version is None:
+        from vibe import __version__
+
+        current_version = __version__
+    if not memory_package_repair_supported(current_version):
+        raise ValueError(
+            "Memory package repair requires a published split-package release"
+        )
+    version = Version(current_version)
+    normalized_version = str(version)
+    return build_upgrade_plan(
+        python_executable=python_executable,
+        uv_path=uv_path,
+        vibe_path=vibe_path,
+        base_env=base_env,
+        version=normalized_version,
+        package_name=PACKAGE_NAME,
+        memory_package=True,
+        memory_version=normalized_version,
+    )
+
+
+def memory_package_repair_supported(current_version: str | None = None) -> bool:
+    """Return whether the running version names a published split release."""
+
+    if current_version is None:
+        from vibe import __version__
+
+        current_version = __version__
+    try:
+        version = Version(current_version)
+    except InvalidVersion:
+        return False
+    return (
+        _names_a_published_release(str(version))
+        and version >= _MEMORY_SPLIT_MIN_VERSION
+    )
+
 def get_safe_cwd() -> str:
     """Return a stable, existing absolute directory for subprocess cwd.
 

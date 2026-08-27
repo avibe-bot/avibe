@@ -15,6 +15,7 @@ from vibe import api, cli
 from vibe.runtime import ServiceLauncher
 from vibe.upgrade import (
     UpgradePlan,
+    build_memory_package_repair_plan,
     build_upgrade_plan,
     configured_memory_enabled,
     has_newer_version,
@@ -27,6 +28,7 @@ from vibe.upgrade import (
     get_running_vibe_path,
     get_safe_cwd,
     installed_package_name,
+    memory_package_repair_supported,
     pinned_package_spec,
     RollbackTarget,
     rollback_target,
@@ -101,6 +103,80 @@ def test_build_upgrade_plan_uses_pip_for_non_uv_install():
     assert plan.method == "pip"
     assert plan.command == ["/usr/bin/python3", "-m", "pip", "install", "--upgrade", "avibe-os"]
     assert plan.env == {"PATH": "/usr/bin"}
+
+
+def test_memory_package_repair_plan_pins_the_running_release_for_pip(monkeypatch):
+    monkeypatch.setattr("vibe.upgrade.find_uv_binary", lambda **kwargs: None)
+
+    plan = build_memory_package_repair_plan(
+        current_version="3.0.14",
+        python_executable="/usr/bin/python3",
+        base_env={"PATH": "/usr/bin"},
+    )
+
+    assert plan.command == [
+        "/usr/bin/python3",
+        "-m",
+        "pip",
+        "install",
+        "--force-reinstall",
+        "avibe-os[memory]==3.0.14",
+        "avibe-memory==3.0.14",
+    ]
+    assert plan.preflight_command == [
+        "/usr/bin/python3",
+        "-m",
+        "pip",
+        "download",
+        "--dest",
+        "{avibe-pip-download-destination}",
+        "--no-deps",
+        "avibe-os[memory]==3.0.14",
+        "avibe-memory==3.0.14",
+    ]
+    assert plan.rollback_to is None
+
+
+def test_memory_package_repair_plan_pins_the_running_release_for_uv(monkeypatch):
+    monkeypatch.setattr("vibe.upgrade.is_uv_tool_install", lambda executable: True)
+    monkeypatch.setattr("vibe.upgrade.find_uv_binary", lambda **kwargs: "/usr/bin/uv")
+    monkeypatch.setattr("vibe.upgrade.get_current_vibe_bin_dir", lambda vibe_path: "/custom/bin")
+
+    plan = build_memory_package_repair_plan(
+        current_version="3.0.14",
+        python_executable="/tools/avibe-os/bin/python",
+        vibe_path="/custom/bin/vibe",
+        base_env={"PATH": "/usr/bin"},
+    )
+
+    assert plan.command == [
+        "/usr/bin/uv",
+        "tool",
+        "install",
+        "avibe-os[memory]==3.0.14",
+        "--with",
+        "avibe-memory==3.0.14",
+        "--force",
+    ]
+    assert plan.env is not None
+    assert plan.env["UV_TOOL_BIN_DIR"] == "/custom/bin"
+    assert plan.rollback_to is None
+
+
+@pytest.mark.parametrize("current_version", ["0.0.0.dev0", "3.0.14.dev1", "not-a-version"])
+def test_memory_package_repair_plan_rejects_unpublished_source_versions(current_version):
+    with pytest.raises(ValueError, match="published split-package release"):
+        build_memory_package_repair_plan(current_version=current_version)
+
+
+@pytest.mark.parametrize(
+    ("current_version", "expected"),
+    [("3.0.13", False), ("3.0.14.dev1", False), ("3.0.14", True)],
+)
+def test_memory_package_repair_support_starts_at_the_first_split_release(
+    current_version, expected
+):
+    assert memory_package_repair_supported(current_version) is expected
 
 
 def test_build_upgrade_plan_uses_env_package_spec(monkeypatch):

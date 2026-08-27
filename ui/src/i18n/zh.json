@@ -363,6 +363,10 @@
           "label": "Node.js",
           "detail": "上述运行时的共同前置依赖。"
         },
+        "memory-package": {
+          "label": "记忆 Python 包",
+          "detail": "安装与当前 Avibe 版本匹配的可选记忆实现。"
+        },
         "memory-runtime": {
           "label": "记忆运行时",
           "detail": "在本机运行记忆提炼与搜索。"
@@ -1767,6 +1771,11 @@
     "memory_disabled": "记忆功能已禁用，或当前连接无法访问它。",
     "memory_plugin_unavailable": "记忆实现当前不可用。",
     "memory_plugin_incompatible": "记忆实现与此 Avibe 版本不兼容。",
+    "memory_package_install_failed": "记忆 Python 包安装失败。",
+    "memory_package_metadata_unreadable": "无法读取记忆 Python 包元数据。",
+    "memory_package_missing": "记忆 Python 包尚未安装。",
+    "memory_package_repair_unavailable": "记忆包修复仅适用于已安装的 Avibe 正式版本。",
+    "memory_package_restart_required": "记忆 Python 包已安装，但需要手动重启 Avibe。",
     "memory_invalid_input": "该记忆请求无效。",
     "memory_processing_record_entry_not_found": "该记忆处理条目已不可用。",
     "memory_failure_history_unavailable": "详细的记忆失败历史记录不可用。",

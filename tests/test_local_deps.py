@@ -1168,6 +1168,9 @@ def test_dependencies_status_shape(monkeypatch):
         "avault_status",
         lambda: {"id": "avault", "installed": True, "version": "0.0.1", "status": "ready", "path": "/x/avault"},
     )
+    monkeypatch.setattr(api, "memory_package_installed", lambda: False)
+    monkeypatch.setattr(api, "installed_memory_package_version", lambda: None)
+    monkeypatch.setattr(api, "memory_package_repair_supported", lambda: True)
     import core.show_runtime as srt_mod
 
     class _Mgr:
@@ -1198,7 +1201,7 @@ def test_dependencies_status_shape(monkeypatch):
     out = api.dependencies_status()
     assert out["ok"]
     by = {d["id"]: d for d in out["deps"]}
-    assert list(by) == ["askill", "avault", "show-runtime", "memory-runtime", "tmux", "node"]
+    assert list(by) == ["askill", "avault", "show-runtime", "memory-package", "memory-runtime", "tmux", "node"]
     assert "tmux" in by and by["tmux"]["required"] is False  # tmux is the optional terminal backend
     assert by["askill"]["status"] == "ready" and by["askill"]["version"] == "0.1.13" and by["askill"]["required"]
     assert by["askill"]["latest_version"] is None and by["askill"]["has_update"] is False
@@ -1207,6 +1210,17 @@ def test_dependencies_status_shape(monkeypatch):
     assert by["show-runtime"]["installed"] and by["show-runtime"]["version"] == "1.4.0"
     assert by["show-runtime"]["latest_version"] == "1.4.0"
     assert by["show-runtime"]["has_update"] is False
+    assert by["memory-package"] == {
+        "id": "memory-package",
+        "kind": "runtime",
+        "required": True,
+        "installed": False,
+        "version": None,
+        "latest_version": None,
+        "has_update": False,
+        "status": "missing",
+        "reason": "memory_package_missing",
+    }
     assert by["memory-runtime"] == {
         "id": "memory-runtime",
         "kind": "runtime",
@@ -1221,6 +1235,19 @@ def test_dependencies_status_shape(monkeypatch):
         "download_error": None,
     }
     assert by["node"]["installed"] and by["node"]["version"] == "20.11"
+
+
+def test_source_version_does_not_advertise_python_package_repair(monkeypatch):
+    monkeypatch.setattr(api, "memory_package_repair_supported", lambda: False)
+    monkeypatch.setattr(
+        api,
+        "memory_package_installed",
+        lambda: pytest.fail("an unsupported source build must not inspect package repair state"),
+    )
+
+    deps = api.dependencies_status(offline=True)["deps"]
+
+    assert all(dependency["id"] != "memory-package" for dependency in deps)
 
 
 @pytest.mark.parametrize(
@@ -1340,6 +1367,44 @@ def test_memory_runtime_dependency_job_preserves_controller_closed_error(monkeyp
         "output": None,
         "reason": "memory_runtime_missing",
         "download_error": None,
+    }
+
+
+def test_memory_package_dependency_job_uses_current_release_plan(monkeypatch):
+    plan = SimpleNamespace(command=["repair"], rollback_to=None)
+    calls: dict[str, object] = {}
+
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/bin/vibe")
+    monkeypatch.setattr(
+        api,
+        "build_memory_package_repair_plan",
+        lambda **kwargs: calls.setdefault("plan", kwargs) and plan,
+    )
+    monkeypatch.setattr(api, "get_safe_cwd", lambda: "/safe")
+    monkeypatch.setattr(
+        api,
+        "execute_upgrade_plan",
+        lambda actual, **kwargs: calls.setdefault("execute", (actual, kwargs))
+        and subprocess.CompletedProcess(["repair"], 0, stdout="installed", stderr=""),
+    )
+    monkeypatch.setattr(api, "_runtime_process_was_running", lambda: True)
+    monkeypatch.setattr(
+        api,
+        "schedule_restart",
+        lambda **kwargs: calls.setdefault("restart", kwargs) or {"ok": True},
+    )
+
+    result = api._prepare_memory_package_job()
+
+    assert result["ok"] is True
+    assert result["message"] == "memory_package_ready"
+    assert result["restarting"] is True
+    assert calls["plan"] == {"vibe_path": "/bin/vibe"}
+    assert calls["restart"] == {
+        "delay_seconds": 2.0,
+        "vibe_path": "/bin/vibe",
+        "trigger": "memory_package_repair",
+        "prepare_show_runtime": False,
     }
 
 

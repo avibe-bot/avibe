@@ -40,6 +40,7 @@ const DEP_META: Record<string, DepMeta> = {
   askill: { icon: WandSparkles, tileCls: 'bg-mint-soft', iconCls: 'text-mint-ink' },
   avault: { icon: KeyRound, tileCls: 'bg-gold-soft', iconCls: 'text-gold-ink' },
   'show-runtime': { icon: LayoutDashboard, tileCls: 'bg-cyan-soft', iconCls: 'text-cyan-ink' },
+  'memory-package': { icon: Brain, tileCls: 'bg-gold-soft', iconCls: 'text-gold-ink' },
   'memory-runtime': { icon: Brain, tileCls: 'bg-violet-soft', iconCls: 'text-violet-ink' },
   tmux: { icon: SquareTerminal, tileCls: 'bg-surface-3', iconCls: 'text-foreground' },
   node: { icon: Hexagon, tileCls: 'bg-violet-soft', iconCls: 'text-violet-ink' },
@@ -156,8 +157,9 @@ export const SettingsDependenciesPage: React.FC = () => {
             const installing = busy === d.id;
             const showAction = dependencyHasInstallAction(d);
             const isMemoryRuntime = d.id === 'memory-runtime';
-            const sidecarRunning = isMemoryRuntime && memoryRuntimeSidecarRunning(memoryStatus);
-            const repairBlockedBySidecar = isMemoryRuntime && (!memoryStatusLoaded || sidecarRunning);
+            const isMemoryDependency = d.id === 'memory-package' || isMemoryRuntime;
+            const sidecarRunning = isMemoryDependency && memoryRuntimeSidecarRunning(memoryStatus);
+            const repairBlockedBySidecar = isMemoryDependency && (!memoryStatusLoaded || sidecarRunning);
             const dependencyOperationBusy = busy !== null;
             return (
               <SettingsResourceRow

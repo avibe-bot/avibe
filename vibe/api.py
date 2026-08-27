@@ -60,12 +60,16 @@ from vibe.opencode_config import (
 )
 from vibe.build_identity import get_build_identity
 from vibe.upgrade import (
+    build_memory_package_repair_plan,
     build_upgrade_plan,
     configured_memory_enabled,
     execute_upgrade_plan,
     get_latest_version_info,
     get_running_vibe_path,
     get_safe_cwd,
+    installed_memory_package_version,
+    memory_package_installed,
+    memory_package_repair_supported,
     should_skip_show_runtime_prepare,
 )
 from vibe.restart_supervisor import schedule_restart
@@ -8397,10 +8401,17 @@ def reconcile_askill_auto_update() -> dict:
 
 
 # =============================================================================
-# Dependencies aggregate + manual install jobs (askill / show runtime)
+# Dependencies aggregate + explicit manual install jobs
 # =============================================================================
 
-_ALLOWED_DEP_INSTALLS = {"askill", "avault", "show-runtime", "memory-runtime", "tmux"}
+_ALLOWED_DEP_INSTALLS = {
+    "askill",
+    "avault",
+    "show-runtime",
+    "memory-package",
+    "memory-runtime",
+    "tmux",
+}
 _STARTUP_DEPENDENCY_RECONCILE_LOCK = threading.Lock()
 _DEFAULT_STARTUP_SHOW_PAGE_PREWARM_LIMIT = 3
 _MAX_STARTUP_SHOW_PAGE_PREWARM_LIMIT = 10
@@ -8493,6 +8504,39 @@ def dependencies_status(*, offline: bool = False) -> dict:
         memory_required = bool(V2Config.load().memory.enabled)
     except Exception:  # noqa: BLE001
         memory_required = False
+    if (
+        get_build_identity().kind != "source"
+        and memory_package_repair_supported()
+    ):
+        memory_package = memory_package_installed()
+        memory_package_version = (
+            installed_memory_package_version() if memory_package else None
+        )
+        deps.append(
+            {
+                "id": "memory-package",
+                "kind": "runtime",
+                "required": memory_required,
+                "installed": memory_package,
+                "version": memory_package_version,
+                "latest_version": None,
+                "has_update": False,
+                "status": (
+                    "ready"
+                    if memory_package_version is not None
+                    else ("error" if memory_package else "missing")
+                ),
+                "reason": (
+                    None
+                    if memory_package_version is not None
+                    else (
+                        "memory_package_metadata_unreadable"
+                        if memory_package
+                        else "memory_package_missing"
+                    )
+                ),
+            }
+        )
     deps.append(
         {
             "id": "memory-runtime",
@@ -8635,6 +8679,73 @@ def _prepare_memory_runtime_job() -> dict:
         "output": None,
         "reason": None if ok else (reason or "memory_runtime_install_failed"),
         "download_error": payload.get("download_error"),
+    }
+
+
+def _prepare_memory_package_job() -> dict:
+    """Reinstall the running release with its matching Python Memory package."""
+
+    current_vibe_path = get_running_vibe_path()
+    try:
+        plan = build_memory_package_repair_plan(vibe_path=current_vibe_path)
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "message": "memory_package_repair_unavailable",
+            "output": str(exc),
+            "reason": "memory_package_repair_unavailable",
+            "restarting": False,
+        }
+    try:
+        result = execute_upgrade_plan(
+            plan,
+            run=subprocess.run,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            cwd=get_safe_cwd(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {
+            "ok": False,
+            "message": "memory_package_install_failed",
+            "output": str(exc),
+            "reason": "memory_package_install_failed",
+            "restarting": False,
+        }
+    if result.returncode != 0:
+        return {
+            "ok": False,
+            "message": "memory_package_install_failed",
+            "output": result.stderr or result.stdout,
+            "reason": "memory_package_install_failed",
+            "restarting": False,
+        }
+
+    restarting = False
+    if _runtime_process_was_running():
+        try:
+            schedule_restart(
+                delay_seconds=2.0,
+                vibe_path=current_vibe_path,
+                trigger="memory_package_repair",
+                prepare_show_runtime=False,
+            )
+            restarting = True
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "ok": False,
+                "message": "memory_package_restart_required",
+                "output": str(exc),
+                "reason": "memory_package_restart_required",
+                "restarting": False,
+            }
+    return {
+        "ok": True,
+        "message": "memory_package_ready",
+        "output": result.stdout,
+        "reason": None,
+        "restarting": restarting,
     }
 
 
@@ -8863,6 +8974,8 @@ def start_dependency_install_job(dep: str) -> dict:
                 result = ensure_avault_installed(force=True)
             elif dep == "show-runtime":
                 result = _prepare_show_runtime_job()
+            elif dep == "memory-package":
+                result = _prepare_memory_package_job()
             elif dep == "memory-runtime":
                 result = _prepare_memory_runtime_job()
             elif dep == "tmux":

@@ -67,6 +67,23 @@ afterEach(() => {
 });
 
 describe('SettingsDependenciesPage Memory runtime', () => {
+  it('keeps Python distribution recovery separate from EverOS runtime repair', async () => {
+    api.listDependencies.mockResolvedValue({
+      ok: true,
+      deps: [
+        dependency({ id: 'memory-package', installed: false, status: 'missing', version: null }),
+        dependency(),
+      ],
+    });
+    renderPage();
+
+    await userEvent.click(await screen.findByRole('button', { name: 'settings.dependencies.install' }));
+
+    await waitFor(() => expect(api.installDependency).toHaveBeenCalledWith('memory-package'));
+    expect(api.installDependency).not.toHaveBeenCalledWith('memory-runtime');
+    expect(screen.getByRole('button', { name: 'settings.dependencies.repair' })).toBeTruthy();
+  });
+
   it('shows only dependency repair and the Memory settings link', async () => {
     renderPage();
     expect(await screen.findByRole('button', { name: 'settings.dependencies.repair' })).toBeTruthy();

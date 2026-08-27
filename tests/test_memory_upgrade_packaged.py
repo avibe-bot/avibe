@@ -15,7 +15,12 @@ from pathlib import Path
 import pytest
 
 from vibe import restart_supervisor, runtime
-from vibe.upgrade import RollbackTarget, build_upgrade_plan, execute_upgrade_plan
+from vibe.upgrade import (
+    RollbackTarget,
+    build_memory_package_repair_plan,
+    build_upgrade_plan,
+    execute_upgrade_plan,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -258,6 +263,38 @@ def test_packaged_core_only_upgrade_preserves_core_only_shape(
     versions = _installed_versions(python)
     assert versions["avibe-os"] == "3.0.15"
     assert "avibe-memory" not in versions
+
+
+@pytest.mark.integration
+def test_packaged_settings_repair_adds_memory_without_changing_core(
+    tmp_path: Path, packaged_dependency_seed: Path
+) -> None:
+    wheelhouse = tmp_path / "wheelhouse"
+    wheelhouse.mkdir()
+    _build_release_wheels("3.0.14", wheelhouse)
+    python = _venv(tmp_path / "core-only-repair-venv")
+    _install_initial(python, wheelhouse, memory=False, dependency_seed=packaged_dependency_seed)
+    assert _installed_versions(python)["avibe-os"] == "3.0.14"
+    assert "avibe-memory" not in _installed_versions(python)
+
+    plan = build_memory_package_repair_plan(
+        current_version="3.0.14",
+        python_executable=str(python),
+        base_env=_plan_env(wheelhouse),
+    )
+    result = execute_upgrade_plan(
+        plan,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=600,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    repaired = _installed_versions(python)
+    assert repaired["avibe-os"] == "3.0.14"
+    assert repaired["avibe-memory"] == "3.0.14"
 
 
 @pytest.mark.integration
