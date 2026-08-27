@@ -736,6 +736,7 @@ class _UniqueShape:
     table: str
     columns: tuple[str | None, ...]
     partial: bool
+    ddl: str | None = None
 
 
 @dataclass(frozen=True)
@@ -757,10 +758,165 @@ def _quote_identifier(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
 
 
+def _sql_words(sql: str) -> Iterable[tuple[str, int, int]]:
+    """Yield unquoted, uncommented word tokens without interpreting SQL expressions."""
+    index = 0
+    length = len(sql)
+    while index < length:
+        character = sql[index]
+        if character in {"'", '"', "`"}:
+            quote = character
+            index += 1
+            while index < length:
+                if sql[index] == quote:
+                    if index + 1 < length and sql[index + 1] == quote:
+                        index += 2
+                        continue
+                    index += 1
+                    break
+                index += 1
+            continue
+        if character == "[":
+            closing = sql.find("]", index + 1)
+            index = length if closing < 0 else closing + 1
+            continue
+        if sql.startswith("--", index):
+            newline = sql.find("\n", index + 2)
+            index = length if newline < 0 else newline + 1
+            continue
+        if sql.startswith("/*", index):
+            closing = sql.find("*/", index + 2)
+            index = length if closing < 0 else closing + 2
+            continue
+        if character.isalpha() or character == "_":
+            start = index
+            index += 1
+            while index < length and (sql[index].isalnum() or sql[index] in {"_", "$"}):
+                index += 1
+            yield sql[start:index], start, index
+            continue
+        index += 1
+
+
+def _sql_keyword_count(sql: str, keyword: str) -> int:
+    expected = keyword.casefold()
+    return sum(1 for word, _, _ in _sql_words(sql) if word.casefold() == expected)
+
+
+def _sql_top_level_parts(ddl: str) -> tuple[str, ...] | None:
+    """Split a CREATE TABLE body without inspecting expression semantics."""
+    quote: str | None = None
+    comment: str | None = None
+    depth = 0
+    body_start: int | None = None
+    parts: list[str] = []
+    part_start = 0
+    index = 0
+    while index < len(ddl):
+        character = ddl[index]
+        if comment == "line":
+            if character == "\n":
+                comment = None
+            index += 1
+            continue
+        if comment == "block":
+            if ddl.startswith("*/", index):
+                comment = None
+                index += 2
+            else:
+                index += 1
+            continue
+        if quote is not None:
+            if character == quote:
+                if index + 1 < len(ddl) and ddl[index + 1] == quote:
+                    index += 2
+                    continue
+                quote = None
+            index += 1
+            continue
+        if ddl.startswith("--", index):
+            comment = "line"
+            index += 2
+            continue
+        if ddl.startswith("/*", index):
+            comment = "block"
+            index += 2
+            continue
+        if character in {"'", '"', "`"}:
+            quote = character
+            index += 1
+            continue
+        if character == "[":
+            closing = ddl.find("]", index + 1)
+            index = len(ddl) if closing < 0 else closing + 1
+            continue
+        if character == "(":
+            if depth == 0 and body_start is None:
+                body_start = index + 1
+                part_start = body_start
+            depth += 1
+        elif character == ")" and body_start is not None:
+            depth -= 1
+            if depth < 0:
+                return None
+            if depth == 0:
+                parts.append(ddl[part_start:index].strip())
+                return tuple(part for part in parts if part)
+        elif character == "," and body_start is not None and depth == 1:
+            parts.append(ddl[part_start:index].strip())
+            part_start = index + 1
+        index += 1
+    return None
+
+
+def _sql_identifier(part: str) -> str | None:
+    """Read only the first identifier of a top-level table declaration."""
+    part = part.lstrip()
+    if not part:
+        return None
+    if part[0] in {'"', "`"}:
+        quote = part[0]
+        end = 1
+        value: list[str] = []
+        while end < len(part):
+            if part[end] == quote:
+                if end + 1 < len(part) and part[end + 1] == quote:
+                    value.append(quote)
+                    end += 2
+                    continue
+                return "".join(value)
+            value.append(part[end])
+            end += 1
+        return None
+    if part[0] == "[":
+        end = part.find("]", 1)
+        return None if end < 0 else part[1:end]
+    match = re.match(r"[A-Za-z_][A-Za-z0-9_$]*", part)
+    return None if match is None else match.group(0)
+
+
+def _ddl_is_additive_column_change(before: str, after: str, added: set[str]) -> bool:
+    """Prove the raw DDL only appended the newly reported column definitions."""
+    if not added:
+        return False
+    old_parts = _sql_top_level_parts(before)
+    new_parts = _sql_top_level_parts(after)
+    if old_parts is None or new_parts is None or len(new_parts) != len(old_parts) + len(added):
+        return False
+    if new_parts[: len(old_parts)] != old_parts:
+        return False
+    return {
+        identifier
+        for identifier in (_sql_identifier(part) for part in new_parts[len(old_parts) :])
+        if identifier is not None
+    } == added
+
+
 def sqlite_schema_shape(connection: sqlite3.Connection) -> _SchemaShape:
     """Capture only SQLite's structural facts needed by the safety contract.
 
-    The DDL text is used for a count of newly present ``CHECK`` tokens, never evaluated.
+    The DDL text is lexed only for structural ``CHECK`` changes, never evaluated. Unique
+    index DDL is retained verbatim so predicate and expression identity cannot collapse.
     Column and unique-index facts come from SQLite PRAGMAs, so this function carries no
     SQL expression or migration-source semantics of its own.
     """
@@ -786,13 +942,17 @@ def sqlite_schema_shape(connection: sqlite3.Connection) -> _SchemaShape:
         )
         tables[table] = _TableShape(
             columns=columns,
-            check_count=len(re.findall(r"\bcheck\b", table_sql, re.IGNORECASE)),
+            check_count=_sql_keyword_count(table_sql, "check"),
             ddl=table_sql,
         )
         for index_row in connection.execute(f"pragma index_list({_quote_identifier(table)})"):
             index_name = str(index_row[1])
             if not bool(index_row[2]):
                 continue
+            index_sql_row = connection.execute(
+                "select sql from sqlite_master where type = 'index' and name = ?", (index_name,)
+            ).fetchone()
+            index_sql = None if index_sql_row is None else index_sql_row[0]
             columns_for_index = tuple(
                 None if info[2] is None else str(info[2])
                 for info in connection.execute(f"pragma index_info({_quote_identifier(index_name)})")
@@ -802,6 +962,7 @@ def sqlite_schema_shape(connection: sqlite3.Connection) -> _SchemaShape:
                     table=table,
                     columns=columns_for_index,
                     partial=bool(index_row[4]),
+                    ddl=None if index_sql is None else str(index_sql),
                 )
             )
     return _SchemaShape(tables=tables, unique_indexes=frozenset(unique_indexes))
@@ -822,7 +983,7 @@ def _default_is_non_null(default: str | None) -> bool:
         re.fullmatch(r"[-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)", value)
         or re.fullmatch(r"(?:'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\")", value)
         or re.fullmatch(r"X'[0-9A-Fa-f]*'", value)
-        or value.upper() in {"CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME"}
+        or value.upper() in {"CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME", "TRUE", "FALSE"}
     )
 
 
@@ -847,9 +1008,11 @@ def schema_tightenings(before: _SchemaShape, after: _SchemaShape) -> tuple[Schem
         }
         check_added = after.tables[table].check_count > before.tables[table].check_count
         added = set(new) - set(old)
-        added_only = bool(added) and not removed and not changed
         ddl_changed = before.tables[table].ddl != after.tables[table].ddl
-        if removed or changed or check_added or (ddl_changed and not added_only):
+        ddl_added_only = _ddl_is_additive_column_change(
+            before.tables[table].ddl, after.tables[table].ddl, added
+        )
+        if removed or changed or check_added or (ddl_changed and not ddl_added_only):
             rebuilt_tables.add(table)
             reason = []
             if removed:
@@ -976,6 +1139,10 @@ def migration_safety_problems(baseline: str | None = None) -> list[str]:
     }
     for pair, obligations in sorted(observed.items()):
         if not obligations:
+            declaration = declarations.get(pair[1])
+            if declaration is not None:
+                detail = "computed or malformed" if declaration is COMPUTED else ", ".join(declaration)
+                problems.append(f"{pair[0]}: {pair[1]} declares MIGRATION_SAFETY ({detail}) but has no structural obligation")
             continue
         expected = {obligation.kind for obligation in obligations}
         error = _migration_safety_declaration_error(pair[1], declarations.get(pair[1]), expected)

@@ -611,6 +611,88 @@ def test_check_replacement_is_not_treated_as_a_relaxation(tmp_path):
     assert [(item.kind, item.table) for item in obligations] == [("copy", "checked")]
 
 
+def test_check_tokens_inside_literals_identifiers_and_comments_are_ignored(tmp_path):
+    db_path = tmp_path / "check_tokens.sqlite"
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            "create table quoted (label text default 'check', \"check\" text, note text /* check */)"
+        )
+        shape = guard.sqlite_schema_shape(connection)
+    finally:
+        connection.close()
+
+    assert shape.tables["quoted"].check_count == 0
+
+
+def test_added_column_plus_replaced_check_requires_copy(tmp_path):
+    db_path = tmp_path / "mixed_check.sqlite"
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute("create table mixed (id integer primary key, value text check (value != 'old'))")
+        before = guard.sqlite_schema_shape(connection)
+        connection.execute("alter table mixed rename to mixed_old")
+        connection.execute(
+            "create table mixed (id integer primary key, value text check (value != 'new'), added text)"
+        )
+        connection.execute("insert into mixed (id, value) select id, value from mixed_old")
+        connection.execute("drop table mixed_old")
+        after = guard.sqlite_schema_shape(connection)
+    finally:
+        connection.close()
+
+    obligations = guard.schema_tightenings(before, after)
+    assert [(item.kind, item.table) for item in obligations] == [("copy", "mixed")]
+
+
+def test_sqlite_boolean_defaults_are_known_non_null(tmp_path):
+    db_path = tmp_path / "boolean_default.sqlite"
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute("create table flags (id integer primary key)")
+        before = guard.sqlite_schema_shape(connection)
+        connection.execute("alter table flags add column enabled integer not null default TRUE")
+        after = guard.sqlite_schema_shape(connection)
+    finally:
+        connection.close()
+
+    assert guard.schema_tightenings(before, after) == ()
+
+
+def test_partial_unique_predicate_change_is_a_new_deduplication_obligation(tmp_path):
+    db_path = tmp_path / "partial_unique.sqlite"
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute("create table scoped (key text, active integer)")
+        connection.execute("create unique index ux_scoped_key on scoped (key) where active = 1")
+        before = guard.sqlite_schema_shape(connection)
+        connection.execute("drop index ux_scoped_key")
+        connection.execute("create unique index ux_scoped_key on scoped (key) where active = 0")
+        after = guard.sqlite_schema_shape(connection)
+    finally:
+        connection.close()
+
+    obligations = guard.schema_tightenings(before, after)
+    assert [(item.kind, item.table) for item in obligations] == [("deduplicate", "scoped")]
+
+
+def test_unique_expression_change_is_a_new_deduplication_obligation(tmp_path):
+    db_path = tmp_path / "expression_unique.sqlite"
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute("create table normalized (value text)")
+        connection.execute("create unique index ux_normalized_value on normalized (lower(value))")
+        before = guard.sqlite_schema_shape(connection)
+        connection.execute("drop index ux_normalized_value")
+        connection.execute("create unique index ux_normalized_value on normalized (upper(value))")
+        after = guard.sqlite_schema_shape(connection)
+    finally:
+        connection.close()
+
+    obligations = guard.schema_tightenings(before, after)
+    assert [(item.kind, item.table) for item in obligations] == [("deduplicate", "normalized")]
+
+
 @pytest.mark.parametrize("kind", sorted(guard.MIGRATION_SAFETY_KINDS))
 def test_each_safety_kind_requires_an_exact_positive_declaration(kind):
     """The finite contract accepts its matching kind and rejects a different mechanism."""
@@ -671,6 +753,36 @@ def test_new_planned_revision_is_audited_without_an_id_allowlist(monkeypatch, tm
         assert problems == []
     else:
         assert any(expected_fragment in problem and revision in problem for problem in problems)
+
+
+def test_safety_declaration_on_an_empty_obligation_is_rejected(monkeypatch):
+    revision = "20260105_0005"
+    shipped = dict(SHIPPED_GRAPH)
+    current = dict(shipped)
+    current[f"{revision}_new.py"] = _revision_file(revision, '"20260104_0004"') + 'MIGRATION_SAFETY = "copy"\n'
+    before = guard._SchemaShape(
+        tables={
+            "records": guard._TableShape(
+                (
+                    guard._ColumnShape("id", "INTEGER", False, None, 1),
+                    guard._ColumnShape("key", "TEXT", False, None, 0),
+                ),
+                0,
+            )
+        },
+        unique_indexes=frozenset(),
+    )
+    _graphs(monkeypatch, shipped, current)
+    monkeypatch.setattr(guard, "latest_released_tag", lambda: "v0.0.0")
+    monkeypatch.setattr(guard, "released_graphs", lambda: ["v0.0.0"])
+    monkeypatch.setattr(guard, "extract_released_versions", lambda tag, destination: destination)
+    monkeypatch.setattr(guard, "shipped_head_revisions", lambda sources: {"20260104_0004"})
+    monkeypatch.setattr(guard, "_planned_revisions", lambda config, heads: [revision])
+    monkeypatch.setattr(guard, "sqlite_schema_shape", lambda connection: before)
+    monkeypatch.setattr(guard.command, "upgrade", lambda *args, **kwargs: None)
+
+    problems = guard.migration_safety_problems("v0.0.0")
+    assert any("no structural obligation" in problem and revision in problem for problem in problems)
 
 
 @requires_release_history
