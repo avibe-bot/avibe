@@ -27,3 +27,13 @@ export const badgeVariants = cva(
     },
   }
 );
+
+// Native buttons styled as badges remain compact on desktop, but every mobile
+// projection needs a complete touch target rather than the visual chip alone.
+export const interactiveBadgeTriggerClassName =
+  'min-h-11 min-w-11 cursor-pointer justify-center md:min-h-0 md:min-w-0';
+
+// Mobile badge popovers sit below shell headers and must reserve the notch area
+// in both their origin and their available height.
+export const mobileHeaderPopoverClassName =
+  'fixed inset-x-3 top-[calc(4.5rem+env(safe-area-inset-top))] max-h-[calc(100dvh-5.5rem-env(safe-area-inset-top))] overflow-auto';

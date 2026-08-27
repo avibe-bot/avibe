@@ -12,6 +12,7 @@ const api = vi.hoisted(() => {
   return {
     configChangedHandlers,
     getConfig: vi.fn(),
+    getVersion: vi.fn(),
     getMemorySettings: vi.fn(),
     onConfigChanged: vi.fn((handler: (config: unknown) => void) => {
       configChangedHandlers.add(handler);
@@ -40,7 +41,6 @@ vi.mock('../LanguageSwitcher', () => ({
   ),
 }));
 vi.mock('../ThemeToggle', () => ({ ThemeToggle: () => <div data-testid="theme-toggle" /> }));
-vi.mock('../VersionBadge', () => ({ VersionBadge: () => <div data-testid="version-badge" /> }));
 vi.mock('../AccountMenu', () => ({
   AccountMenu: ({ openUpward }: { openUpward?: boolean }) => (
     <div data-testid="account-menu" data-open-upward={String(openUpward)} />
@@ -90,6 +90,13 @@ beforeEach(() => {
   media.listeners.clear();
   api.configChangedHandlers.clear();
   api.getConfig.mockResolvedValue({ capabilities: { model_hub: { enabled: true } } });
+  api.getVersion.mockResolvedValue({
+    current: '3.1.4',
+    latest: '3.1.4',
+    has_update: false,
+    error: null,
+    build: { kind: 'package' },
+  });
   api.getMemorySettings.mockResolvedValue({ status: 'ok', enabled: true });
   vi.stubGlobal('matchMedia', vi.fn().mockReturnValue({
     get matches() {
@@ -267,7 +274,7 @@ describe('SettingsLayout', () => {
     expect(screen.getByRole('link', { name: 'settings.sections.shortcuts' })).toBeTruthy();
     expect(screen.getByRole('link', { name: 'settings.sections.access' })).toBeTruthy();
     expect(screen.queryByRole('link', { name: 'settings.sections.service' })).toBeNull();
-    expect(screen.queryByTestId('version-badge')).toBeNull();
+    expect(api.getVersion).not.toHaveBeenCalled();
     expect(api.getConfig).not.toHaveBeenCalled();
   });
 
@@ -303,14 +310,28 @@ describe('SettingsLayout', () => {
     expect(screen.getByRole('banner').className).toContain('pt-[env(safe-area-inset-top)]');
   });
 
-  it('keeps mobile navigation and header actions touch-sized', () => {
+  it('keeps mobile navigation and the Back action touch-sized', () => {
     renderLayout('/settings');
 
     expect(screen.getByRole('link', { name: 'settings.sections.replies' }).className).toContain('min-h-11');
     const back = screen.getByRole('link', { name: 'settings.backToWorkbench' });
     expect(back.getAttribute('href')).toBe('/');
     expect(back.className).toContain('size-11');
-    expect(screen.getByTestId('version-badge').parentElement?.className).toContain('md:hidden');
+  });
+
+  it('shows a touch-sized current version with a safe-area-aware mobile popup', async () => {
+    const user = userEvent.setup();
+    renderLayout('/settings');
+
+    const version = await screen.findByTitle('v3.1.4');
+    expect(version.className).toContain('min-h-11');
+    expect(version.className).toContain('min-w-11');
+    expect(version.parentElement?.parentElement?.className).toContain('md:hidden');
+
+    await user.click(version);
+    const popup = screen.getByText('dashboard.versionAndUpdate').closest('.fixed');
+    expect(popup?.className).toContain('top-[calc(4.5rem+env(safe-area-inset-top))]');
+    expect(popup?.className).toContain('max-h-[calc(100dvh-5.5rem-env(safe-area-inset-top))]');
   });
 
   it('keeps mobile navigation and detail controls above the bottom safe-area inset', () => {
