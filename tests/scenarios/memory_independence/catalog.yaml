@@ -14,6 +14,10 @@ capability:
     - tests/test_core_services_dispatch.py
     - tests/test_admin_notifications.py
     - tests/test_memory_disabled_isolation.py
+    - tests/test_memory_loader.py
+    - tests/test_local_deps.py
+    - tests/test_memory_upgrade_packaged.py
+    - tests/test_upgrade_flow.py
 contract:
   dispatch: capture_must_not_fence_turn_start
   destructive_ops: new_and_archive_fail_open_on_capture_timeout
@@ -129,3 +133,9 @@ scenarios:
     kind: guardrail
     layer: scenario
     test: tests/test_memory_disabled_isolation.py::test_memory_indep_017_core_workflows_run_without_avibe_memory
+  - id: MEMORY-INDEP-021
+    name: Not-required and unreadable Memory status imports no optional implementation
+    status: covered
+    kind: guardrail
+    layer: scenario
+    test: tests/test_local_deps.py::test_memory_indep_021_status_import_fence

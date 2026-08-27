@@ -331,6 +331,7 @@
       "statusReady": "就绪",
       "statusDetected": "已检测",
       "statusMissing": "未安装",
+      "statusNotRequired": "无需安装",
       "statusUpgradeRequired": "需要升级",
       "install": "安装",
       "reinstall": "重新安装",
@@ -362,6 +363,10 @@
         "node": {
           "label": "Node.js",
           "detail": "上述运行时的共同前置依赖。"
+        },
+        "memory-package": {
+          "label": "记忆 Python 包",
+          "detail": "与当前 Avibe 版本匹配的可选记忆实现。"
         },
         "memory-runtime": {
           "label": "记忆运行时",

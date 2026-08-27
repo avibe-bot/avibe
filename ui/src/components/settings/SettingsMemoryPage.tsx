@@ -95,8 +95,8 @@ export const SettingsMemoryPage: React.FC = () => {
       const res = await api.listDependencies();
       const dep = res.deps?.find((item) => item.id === 'memory-runtime');
       if (dep) {
-        setRuntimeInstalled(dep.installed);
-        setDependencyReady(dep.installed && dep.status === 'ready');
+        setRuntimeInstalled(dep.installed === true);
+        setDependencyReady(dep.installed === true && dep.status === 'ready');
       } else {
         setRuntimeInstalled(true);
       }

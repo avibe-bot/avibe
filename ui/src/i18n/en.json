@@ -331,6 +331,7 @@
       "statusReady": "Ready",
       "statusDetected": "Detected",
       "statusMissing": "Not installed",
+      "statusNotRequired": "Not required",
       "statusUpgradeRequired": "Upgrade required",
       "install": "Install",
       "reinstall": "Reinstall",
@@ -362,6 +363,10 @@
         "node": {
           "label": "Node.js",
           "detail": "Shared prerequisite for the runtimes above."
+        },
+        "memory-package": {
+          "label": "Memory Python package",
+          "detail": "Optional Memory implementation matched to this Avibe release."
         },
         "memory-runtime": {
           "label": "Memory runtime",

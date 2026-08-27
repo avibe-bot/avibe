@@ -5,6 +5,9 @@ import { dependencyHasInstallAction, memoryRuntimeSidecarRunning } from './Setti
 describe('dependencyHasInstallAction', () => {
   it('hides install and repair actions for unsupported dependencies', () => {
     expect(dependencyHasInstallAction({ id: 'memory-runtime', status: 'unsupported' })).toBe(false);
+    expect(dependencyHasInstallAction({ id: 'memory-runtime', status: 'not_required' })).toBe(false);
+    expect(dependencyHasInstallAction({ id: 'memory-runtime', status: 'error', action_class: 'operator_only' })).toBe(false);
+    expect(dependencyHasInstallAction({ id: 'memory-runtime', status: 'missing', action_class: 'none' })).toBe(false);
   });
 
   it('keeps supported dependency actions unchanged', () => {

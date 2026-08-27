@@ -75,6 +75,10 @@ _PRE_ORDER = {
 }
 
 
+class MemoryRequirementUnreadableError(ValueError):
+    """Persisted configuration cannot safely decide Memory package shape."""
+
+
 @dataclass(frozen=True)
 class UpgradePlan:
     """A command that installs a version of avibe, and what it will replace.
@@ -644,12 +648,16 @@ def configured_memory_enabled() -> bool:
     try:
         from config.v2_config import V2Config
 
-        return bool(V2Config.load().memory.enabled)
-    except FileNotFoundError:
-        return False
-    except Exception:
-        logger.warning("Could not read Memory enablement; treating it as disabled", exc_info=True)
-        return False
+        required = V2Config.load().memory_required
+    except Exception as exc:
+        raise MemoryRequirementUnreadableError(
+            "The persisted Memory requirement could not be read"
+        ) from exc
+    if required is None:
+        raise MemoryRequirementUnreadableError(
+            "The persisted Memory requirement could not be read"
+        )
+    return required
 
 
 def _distributions_providing_this_package() -> list[str]:
