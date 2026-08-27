@@ -16,6 +16,7 @@ import threading
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from sysconfig import get_platform
 from typing import Any
@@ -37,6 +38,30 @@ logger = logging.getLogger(__name__)
 _TMUX_MANIFEST_RESOURCE = "tmux_runtime_manifest.json"
 _TMUX_RUNTIME_SOURCE_MANIFEST = "manifest"
 _TMUX_INSTALL_LOCK = threading.Lock()
+
+
+class TmuxFailureReason(str, Enum):
+    """Closed failure vocabulary returned by the managed tmux producer."""
+
+    INSTALL_ALREADY_RUNNING = "tmux_install_already_running"
+    MANIFEST_MISSING = "tmux_manifest_missing"
+    MANIFEST_UNAVAILABLE_OFFLINE = "tmux_manifest_unavailable_offline"
+    MANIFEST_DOWNLOAD_FAILED = "tmux_manifest_download_failed"
+    MANIFEST_INVALID = "tmux_manifest_invalid"
+    PLATFORM_UNSUPPORTED = "tmux_platform_unsupported"
+    ARCHIVE_UNAVAILABLE = "tmux_archive_unavailable"
+    ARCHIVE_UNAVAILABLE_OFFLINE = "tmux_archive_unavailable_offline"
+    ARCHIVE_URL_UNSUPPORTED = "tmux_archive_url_unsupported"
+    ARCHIVE_DOWNLOAD_FAILED = "tmux_archive_download_failed"
+    ARCHIVE_SIZE_MISMATCH = "tmux_archive_size_mismatch"
+    ARCHIVE_CHECKSUM_MISMATCH = "tmux_archive_checksum_mismatch"
+    INSTALL_MISSING_BIN = "tmux_install_missing_bin"
+    CODESIGN_MISSING = "codesign_missing"
+    CODESIGN_FAILED = "codesign_failed"
+    CODESIGN_VERIFY_FAILED = "codesign_verify_failed"
+    TMUX_CODESIGN_FAILED = "tmux_codesign_failed"
+    BINARY_NOT_RUNNABLE = "tmux_binary_not_runnable"
+    INSTALL_FAILED = "tmux_install_failed"
 
 
 @dataclass(frozen=True)
@@ -85,7 +110,7 @@ class TmuxRuntimeManager:
         self.manifest_path = Path(manifest_path_value).expanduser() if manifest_path_value else None
         self.manifest_url = manifest_url if manifest_url is not None else os.environ.get("VIBE_TMUX_MANIFEST_URL")
         self.offline = _env_flag_enabled("VIBE_TMUX_OFFLINE", default=False) if offline is None else offline
-        self._install_reason: str | None = None
+        self._install_reason: TmuxFailureReason | None = None
         self._download_error: dict[str, Any] | None = None
 
     def ensure(self, *, force: bool = False) -> dict[str, Any]:
@@ -93,16 +118,16 @@ class TmuxRuntimeManager:
             return {
                 "ok": False,
                 "skipped": True,
-                "reason": "tmux_install_already_running",
+                "reason": TmuxFailureReason.INSTALL_ALREADY_RUNNING.value,
                 "message": "tmux install or repair is already running; try again shortly.",
             }
         try:
             manifest = self._load_manifest()
             if not manifest:
-                return self._failure(self._install_reason or "tmux_manifest_missing")
+                return self._failure(self._install_reason or TmuxFailureReason.MANIFEST_MISSING)
             archive = self._manifest_archive_for_platform(manifest)
             if not archive:
-                return self._failure(self._install_reason or "tmux_platform_unsupported", manifest=manifest)
+                return self._failure(self._install_reason or TmuxFailureReason.PLATFORM_UNSUPPORTED, manifest=manifest)
             install_dir = self._manifest_install_dir(manifest, archive)
             existing = self._verified_manifest_binary(install_dir, manifest, archive)
             if existing and not force:
@@ -126,9 +151,13 @@ class TmuxRuntimeManager:
                         "version": manifest.tmux_version,
                         "platform": archive.platform,
                         "install_dir": str(install_dir),
-                        "reason": self._install_reason,
+                        "reason": self._install_reason.value if self._install_reason else None,
                     }
-                return self._failure(self._install_reason or "tmux_archive_unavailable", manifest=manifest, archive=archive)
+                return self._failure(
+                    self._install_reason or TmuxFailureReason.ARCHIVE_UNAVAILABLE,
+                    manifest=manifest,
+                    archive=archive,
+                )
             self.runtime_dir.mkdir(parents=True, exist_ok=True)
             tmp_dir = Path(tempfile.mkdtemp(prefix="manifest-", dir=self.runtime_dir))
             try:
@@ -136,16 +165,19 @@ class TmuxRuntimeManager:
                     _safe_extract_tar(tar, tmp_dir)
                 binary = tmp_dir / archive.bin_path
                 if not binary.is_file():
-                    return self._failure("tmux_install_missing_bin", manifest=manifest, archive=archive)
+                    return self._failure(TmuxFailureReason.INSTALL_MISSING_BIN, manifest=manifest, archive=archive)
                 _make_executable(binary)
                 signing = self._prepare_macos_binary(binary)
                 if not signing.get("ok"):
+                    signing_reason = TmuxFailureReason(
+                        str(signing.get("reason") or TmuxFailureReason.TMUX_CODESIGN_FAILED.value)
+                    )
                     return {
-                        **self._failure(str(signing.get("reason") or "tmux_codesign_failed"), manifest=manifest, archive=archive),
+                        **self._failure(signing_reason, manifest=manifest, archive=archive),
                         "signing": signing,
                     }
                 if not _tmux_binary_runnable(binary):
-                    return self._failure("tmux_binary_not_runnable", manifest=manifest, archive=archive)
+                    return self._failure(TmuxFailureReason.BINARY_NOT_RUNNABLE, manifest=manifest, archive=archive)
                 if install_dir.exists():
                     shutil.rmtree(install_dir)
                 install_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -166,7 +198,12 @@ class TmuxRuntimeManager:
                 }
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Failed to install tmux runtime")
-                return self._failure("tmux_install_failed", manifest=manifest, archive=archive, message=str(exc))
+                return self._failure(
+                    TmuxFailureReason.INSTALL_FAILED,
+                    manifest=manifest,
+                    archive=archive,
+                    message=str(exc),
+                )
             finally:
                 if tmp_dir.exists():
                     shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -203,7 +240,7 @@ class TmuxRuntimeManager:
             "install_dir": str(install_dir) if install_dir else None,
             "manifest": _manifest_status_payload(manifest),
             "archive": _archive_status_payload(archive),
-            "reason": self._install_reason,
+            "reason": self._install_reason.value if self._install_reason else None,
             "download_error": self._download_error,
         }
 
@@ -213,18 +250,22 @@ class TmuxRuntimeManager:
             return {
                 "ok": False,
                 "checked": bool(self._download_error),
-                "reason": self._install_reason or "tmux_manifest_missing",
+                "reason": (self._install_reason or TmuxFailureReason.MANIFEST_MISSING).value,
                 "download_error": self._download_error,
             }
         archive = self._manifest_archive_for_platform(manifest)
         if archive is None:
-            return {"ok": False, "checked": False, "reason": self._install_reason}
+            return {
+                "ok": False,
+                "checked": False,
+                "reason": self._install_reason.value if self._install_reason else None,
+            }
         parsed = urllib.parse.urlparse(archive.url)
         if parsed.scheme not in {"https", "file"}:
             return {
                 "ok": False,
                 "checked": False,
-                "reason": "tmux_archive_url_unsupported",
+                "reason": TmuxFailureReason.ARCHIVE_URL_UNSUPPORTED.value,
                 "url": redact_url(archive.url),
             }
         return probe_url(
@@ -239,13 +280,13 @@ class TmuxRuntimeManager:
         loaded_from = ""
         if self.manifest_path:
             if not self.manifest_path.exists():
-                self._install_reason = "tmux_manifest_missing"
+                self._install_reason = TmuxFailureReason.MANIFEST_MISSING
                 return None
             payload = self.manifest_path.read_bytes()
             loaded_from = str(self.manifest_path)
         elif self.manifest_url:
             if self.offline:
-                self._install_reason = "tmux_manifest_unavailable_offline"
+                self._install_reason = TmuxFailureReason.MANIFEST_UNAVAILABLE_OFFLINE
                 return None
             try:
                 payload = fetch_bytes(
@@ -256,7 +297,7 @@ class TmuxRuntimeManager:
                 loaded_from = self.manifest_url
             except Exception as exc:
                 logger.exception("Failed to download tmux manifest from %s", self.manifest_url)
-                self._install_reason = "tmux_manifest_download_failed"
+                self._install_reason = TmuxFailureReason.MANIFEST_DOWNLOAD_FAILED
                 self._download_error = dependency_error_details(exc, self.manifest_url)
                 return None
         else:
@@ -265,7 +306,7 @@ class TmuxRuntimeManager:
             except Exception:
                 resource = None
             if resource is None or not resource.is_file():
-                self._install_reason = "tmux_manifest_missing"
+                self._install_reason = TmuxFailureReason.MANIFEST_MISSING
                 return None
             payload = resource.read_bytes()
             loaded_from = f"package:{_TMUX_MANIFEST_RESOURCE}"
@@ -296,10 +337,10 @@ class TmuxRuntimeManager:
                 loaded_from=loaded_from,
             )
         except Exception:
-            self._install_reason = "tmux_manifest_invalid"
+            self._install_reason = TmuxFailureReason.MANIFEST_INVALID
             return None
         if manifest.schema_version != 1 or not manifest.tmux_version or not manifest.archives:
-            self._install_reason = "tmux_manifest_invalid"
+            self._install_reason = TmuxFailureReason.MANIFEST_INVALID
             return None
         return manifest
 
@@ -307,7 +348,7 @@ class TmuxRuntimeManager:
         platform_tag = _runtime_platform_tag()
         archive = manifest.archives.get(platform_tag)
         if not archive:
-            self._install_reason = "tmux_platform_unsupported"
+            self._install_reason = TmuxFailureReason.PLATFORM_UNSUPPORTED
             return None
         return archive
 
@@ -316,11 +357,11 @@ class TmuxRuntimeManager:
         if cached.exists() and self._downloaded_archive_matches(cached, archive):
             return cached
         if self.offline:
-            self._install_reason = "tmux_archive_unavailable_offline"
+            self._install_reason = TmuxFailureReason.ARCHIVE_UNAVAILABLE_OFFLINE
             return None
         parsed = urllib.parse.urlparse(archive.url)
         if parsed.scheme not in {"https", "file"}:
-            self._install_reason = "tmux_archive_url_unsupported"
+            self._install_reason = TmuxFailureReason.ARCHIVE_URL_UNSUPPORTED
             return None
         tmp_path = cached.with_suffix(cached.suffix + ".tmp")
         cached.parent.mkdir(parents=True, exist_ok=True)
@@ -340,16 +381,16 @@ class TmuxRuntimeManager:
         except Exception as exc:
             logger.exception("Failed to download tmux archive from %s", archive.url)
             tmp_path.unlink(missing_ok=True)
-            self._install_reason = "tmux_archive_download_failed"
+            self._install_reason = TmuxFailureReason.ARCHIVE_DOWNLOAD_FAILED
             self._download_error = dependency_error_details(exc, archive.url)
             return None
 
     def _downloaded_archive_matches(self, path: Path, archive: TmuxArchive) -> bool:
         if archive.size is not None and path.stat().st_size != archive.size:
-            self._install_reason = "tmux_archive_size_mismatch"
+            self._install_reason = TmuxFailureReason.ARCHIVE_SIZE_MISMATCH
             return False
         if _file_sha256(path) != archive.sha256:
-            self._install_reason = "tmux_archive_checksum_mismatch"
+            self._install_reason = TmuxFailureReason.ARCHIVE_CHECKSUM_MISMATCH
             return False
         return True
 
@@ -441,7 +482,11 @@ class TmuxRuntimeManager:
             return {"ok": True, "changed": False, "quarantine": quarantine}
         codesign = shutil.which("codesign")
         if not codesign:
-            return {"ok": False, "reason": "codesign_missing", "quarantine": quarantine}
+            return {
+                "ok": False,
+                "reason": TmuxFailureReason.CODESIGN_MISSING.value,
+                "quarantine": quarantine,
+            }
         proc = subprocess.run(
             [codesign, "-f", "-s", "-", str(binary)],
             capture_output=True,
@@ -453,30 +498,37 @@ class TmuxRuntimeManager:
         return {
             "ok": verified,
             "changed": proc.returncode == 0,
-            "reason": None if verified else ("codesign_failed" if proc.returncode != 0 else "codesign_verify_failed"),
+            "reason": None
+            if verified
+            else (
+                TmuxFailureReason.CODESIGN_FAILED.value
+                if proc.returncode != 0
+                else TmuxFailureReason.CODESIGN_VERIFY_FAILED.value
+            ),
             "output": _truncate((proc.stdout or "") + (proc.stderr or "")),
             "quarantine": quarantine,
         }
 
     def _failure(
         self,
-        reason: str,
+        reason: TmuxFailureReason,
         *,
         manifest: TmuxManifest | None = None,
         archive: TmuxArchive | None = None,
         message: str | None = None,
     ) -> dict[str, Any]:
         self._install_reason = reason
+        raw_reason = reason.value
         return {
             "ok": False,
             "installed": False,
             "changed": False,
-            "reason": reason,
+            "reason": raw_reason,
             "message": message
             or (
                 dependency_error_message(self._download_error, label="tmux dependency download")
                 if self._download_error
-                else _reason_message(reason)
+                else _reason_message(raw_reason)
             ),
             "version": manifest.tmux_version if manifest else None,
             "platform": archive.platform if archive else _runtime_platform_tag(),

@@ -51,6 +51,7 @@ from core.scheduled_tasks import (
 )
 from core.caller_context import caller_context_from_env, caller_resource_user_context
 from core.command_runner import command_line_preview
+from core.tmux_runtime import TmuxFailureReason
 from core.vibe_agents import AgentArchivedEditError, AgentArchiveError, AgentNameValidationError, AgentReferenceRewriteError, VibeAgent, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
 from core.watches import (
     DEFAULT_RETRY_EXIT_CODE,
@@ -62,7 +63,7 @@ from core.watches import (
 )
 from vibe import __version__, api, runtime
 from vibe.i18n import normalize_language, t as i18n_t
-from vibe.restart_supervisor import schedule_restart
+from vibe.restart_supervisor import RestartState, schedule_restart
 from vibe.screenshot import ScreenshotError, capture_screenshot
 from vibe.upgrade import (
     CURRENT_VIBE_EXECUTABLE_ENV,
@@ -169,6 +170,10 @@ DOCTOR_DISPLAY_PROJECTIONS = {
         "avault_download_failed": "doctor.repair.dependencyArchiveDownloadFailed",
         "avault_p2_release_unavailable": "doctor.repair.avaultReleaseUnavailable",
         "git_runtime_unpublished": "doctor.repair.dependencyManifestUnavailable",
+        TmuxFailureReason.INSTALL_MISSING_BIN.value: "doctor.repair.dependencyInstallMissingBinary",
+        TmuxFailureReason.CODESIGN_MISSING.value: "doctor.repair.dependencyCodeSignMissing",
+        TmuxFailureReason.CODESIGN_FAILED.value: "doctor.repair.dependencyCodeSignFailed",
+        TmuxFailureReason.CODESIGN_VERIFY_FAILED.value: "doctor.repair.dependencyCodeSignFailed",
     },
     "repair_suffix": {
         "install_already_running": "doctor.repair.dependencyAlreadyRunning",
@@ -200,12 +205,7 @@ DOCTOR_DISPLAY_PROJECTIONS = {
         "xattr_failed": "doctor.repair.dependencyMetadataFailed",
     },
     "restart_state": {
-        "running": "doctor.value.restartStateRunning",
-        "scheduled": "doctor.value.restartStateScheduled",
-        "succeeded": "doctor.value.restartStateSucceeded",
-        "failed": "doctor.value.restartStateFailed",
-        "skipped": "doctor.value.restartStateSkipped",
-        "unknown": "doctor.value.restartStateUnknown",
+        state.value: f"doctor.value.restartState{state.name.title()}" for state in RestartState
     },
     "show_runtime_provider": {
         "manifest-cache": "doctor.value.showRuntimeProviderManifest",
@@ -1329,8 +1329,12 @@ def _service_install_family_items(*, detect_extra_processes: bool = True) -> lis
 
 
 def _restart_status_is_stale(payload: dict, path: Path) -> bool:
-    state = payload.get("state")
-    if state in {"scheduled", "running"}:
+    try:
+        state = RestartState(payload.get("state"))
+    except (TypeError, ValueError):
+        return False
+
+    if state.retention == "seed":
         supervisor_pid = payload.get("supervisor_pid")
         if isinstance(supervisor_pid, int) and runtime.pid_alive(supervisor_pid):
             started_at = payload.get("supervisor_started_at")
@@ -1343,7 +1347,7 @@ def _restart_status_is_stale(payload: dict, path: Path) -> bool:
             return False
         return age > DOCTOR_RESTART_SEED_GRACE_SECONDS
 
-    if state in {"succeeded", "failed", "error", "cancelled"}:
+    if state.retention == "result":
         try:
             age = time.time() - path.stat().st_mtime
         except OSError:
@@ -1352,7 +1356,7 @@ def _restart_status_is_stale(payload: dict, path: Path) -> bool:
     return False
 
 
-def _restart_failure_summary(payload: dict) -> str:
+def _restart_failure_summary(payload: dict, language: str) -> str:
     """Describe a recorded restart failure on the single line doctor prints.
 
     Why it failed is the entire value of the item, so the recorded error is
@@ -1360,14 +1364,21 @@ def _restart_failure_summary(payload: dict) -> str:
     because the report prints one line per item.
     """
 
+    raw_state = payload.get("state") or RestartState.UNKNOWN.value
     pairs = (
-        ("state", payload.get("state") or "unknown"),
-        ("error", " ".join(str(payload.get("error") or "").split())),
-        ("trigger", payload.get("trigger")),
-        ("job_id", payload.get("job_id")),
-        ("log", payload.get("log_path")),
+        (
+            "doctor.value.restartSummaryState",
+            _doctor_display_value(raw_state, "restart_state", language),
+        ),
+        (
+            "doctor.value.restartSummaryError",
+            " ".join(str(payload.get("error") or "").split()),
+        ),
+        ("doctor.value.restartSummaryTrigger", payload.get("trigger")),
+        ("doctor.value.restartSummaryJobId", payload.get("job_id")),
+        ("doctor.value.restartSummaryLog", payload.get("log_path")),
     )
-    return " ".join(f"{name}={value}" for name, value in pairs if value)
+    return " ".join(i18n_t(key, language, value=value) for key, value in pairs if value)
 
 
 def _restart_state_items() -> list[dict]:
@@ -1449,7 +1460,7 @@ def _restart_state_items() -> list[dict]:
             i18n_t(
                 "doctor.item.restartFailed",
                 language,
-                summary=_restart_failure_summary(payload),
+                summary=_restart_failure_summary(payload, language),
             ),
             i18n_t("doctor.action.restartFailed", language),
             code="runtime.restart_failed",
@@ -1490,6 +1501,7 @@ def _restart_state_items() -> list[dict]:
 def _service_lifecycle_items(*, detect_extra_processes: bool = True) -> list[dict]:
     items: list[dict] = []
     language = _configured_cli_language()
+    missing_value = i18n_t("doctor.value.missing", language)
     pid_path = paths.get_runtime_pid_path()
     recorded_pid: int | None = None
     try:
@@ -1532,7 +1544,7 @@ def _service_lifecycle_items(*, detect_extra_processes: bool = True) -> list[dic
             i18n_t(
                 "doctor.item.servicePidfileMismatch",
                 language,
-                pidfile=recorded_pid or "missing",
+                pidfile=recorded_pid or missing_value,
                 owner=owner_pid,
             ),
             i18n_t("doctor.action.servicePidfileMismatch", language),
@@ -1550,7 +1562,7 @@ def _service_lifecycle_items(*, detect_extra_processes: bool = True) -> list[dic
             i18n_t(
                 "doctor.item.statusPidMismatch",
                 language,
-                status=status_pid or "missing",
+                status=status_pid or missing_value,
                 owner=owner_pid,
             ),
             i18n_t("doctor.action.statusPidMismatch", language),

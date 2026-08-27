@@ -12,6 +12,7 @@ import urllib.error
 import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from enum import Enum
 from pathlib import Path
 from typing import NamedTuple
 
@@ -53,6 +54,25 @@ _ROLLBACK_INSTALL_TIMEOUT_SECONDS = 600.0
 # next to an already-warm CLI -- is not the right bound here. This one is only
 # ever paid in full when the UI is genuinely not coming.
 _ROLLBACK_UI_READY_TIMEOUT_SECONDS = 60.0
+
+
+class RestartState(str, Enum):
+    """Closed restart-state vocabulary and its Doctor retention policy."""
+
+    def __new__(cls, value: str, retention: str | None):
+        member = str.__new__(cls, value)
+        member._value_ = value
+        member.retention = retention
+        return member
+
+    SCHEDULED = ("scheduled", "seed")
+    RUNNING = ("running", "seed")
+    SUCCEEDED = ("succeeded", "result")
+    FAILED = ("failed", "result")
+    ERROR = ("error", "result")
+    CANCELLED = ("cancelled", "result")
+    SKIPPED = ("skipped", "result")
+    UNKNOWN = ("unknown", None)
 
 
 class StartedRuntime(NamedTuple):
@@ -407,7 +427,7 @@ def _fail(payload: dict, error: str, log, return_code: int, *, started_at: float
         durations = dict(payload.get("stage_durations") or {})
         durations["restart_total_seconds"] = _rounded_seconds(time.monotonic() - started_at)
         payload["stage_durations"] = durations
-    payload.update(ok=False, state="failed", error=error)
+    payload.update(ok=False, state=RestartState.FAILED.value, error=error)
     _write_status(payload)
     log.write(f"{_now_iso()} {error}\n")
     log.flush()
@@ -627,7 +647,11 @@ def _roll_back_failed_upgrade(
     """
 
     version = rollback_to.version
-    rollback: dict = {"target_version": version, "state": "running", "started_at": _now_iso()}
+    rollback: dict = {
+        "target_version": version,
+        "state": RestartState.RUNNING.value,
+        "started_at": _now_iso(),
+    }
     record(rollback)
     write(f"rolling back to {version}: no service is running after the failed restart")
 
@@ -648,7 +672,7 @@ def _roll_back_failed_upgrade(
         # launching what was reinstalled -- so a rollback that continued here
         # would report success for the version it was rolling back from.
         rollback.update(
-            state="failed",
+            state=RestartState.FAILED.value,
             error=f"the failed generation is still running; not rolling back to {version}",
         )
         record(rollback)
@@ -658,7 +682,10 @@ def _roll_back_failed_upgrade(
     try:
         plan = build_upgrade_plan(vibe_path=vibe_path, version=version, package_name=rollback_to.package)
     except Exception as exc:
-        rollback.update(state="failed", error=f"cannot build a pinned install for {version}: {exc}")
+        rollback.update(
+            state=RestartState.FAILED.value,
+            error=f"cannot build a pinned install for {version}: {exc}",
+        )
         record(rollback)
         return rollback
 
@@ -675,7 +702,7 @@ def _roll_back_failed_upgrade(
         )
     except Exception as exc:
         rollback["install"] = {"method": plan.method, "ok": False, "error": str(exc)}
-        rollback.update(state="failed", error=f"installing {version} failed: {exc}")
+        rollback.update(state=RestartState.FAILED.value, error=f"installing {version} failed: {exc}")
         record(rollback)
         return rollback
     if result.returncode != 0:
@@ -684,7 +711,10 @@ def _roll_back_failed_upgrade(
         # resolver output.
         detail = (result.stderr or result.stdout or "").strip()[-2000:]
         rollback["install"] = {"method": plan.method, "ok": False, "error": detail or f"exit code {result.returncode}"}
-        rollback.update(state="failed", error=f"installing {version} failed with exit code {result.returncode}")
+        rollback.update(
+            state=RestartState.FAILED.value,
+            error=f"installing {version} failed with exit code {result.returncode}",
+        )
         record(rollback)
         write(f"pinned install of {version} failed: {detail}")
         return rollback
@@ -696,7 +726,7 @@ def _roll_back_failed_upgrade(
         rollback["database"] = _restore_database_for_rollback(backup_watermark, write)
     except Exception as exc:
         rollback["database"] = {"restored": False, "error": str(exc)}
-        rollback.update(state="failed", error=f"restoring the database failed: {exc}")
+        rollback.update(state=RestartState.FAILED.value, error=f"restoring the database failed: {exc}")
         record(rollback)
         return rollback
     record(rollback)
@@ -704,13 +734,13 @@ def _roll_back_failed_upgrade(
     try:
         started = _start_runtime_processes(start_ui=start_ui, launcher=rollback_to.launcher)
     except Exception as exc:
-        rollback.update(state="failed", error=f"starting {version} failed: {exc}")
+        rollback.update(state=RestartState.FAILED.value, error=f"starting {version} failed: {exc}")
         record(rollback)
         return rollback
     ready_pid = runtime.wait_for_service_ready(started.service_pid, timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS)
     if ready_pid is None:
         rollback.update(
-            state="failed",
+            state=RestartState.FAILED.value,
             service_pid=started.service_pid,
             error=f"{version} started but service pid {started.service_pid} did not finish starting",
         )
@@ -732,7 +762,7 @@ def _roll_back_failed_upgrade(
     runtime.write_status("running", f"pid={ready_pid}", ready_pid, _live_ui_pid(started.ui_pid))
     if ui_serving is False:
         rollback.update(
-            state="failed",
+            state=RestartState.FAILED.value,
             service_pid=ready_pid,
             error=(
                 f"rolled back to {version} and the service is running as pid {ready_pid}, "
@@ -742,7 +772,7 @@ def _roll_back_failed_upgrade(
         record(rollback)
         write(f"rolled back to {version} but the Web UI did not come back; service pid={ready_pid}")
         return rollback
-    rollback.update(state="succeeded", service_pid=ready_pid, error=None)
+    rollback.update(state=RestartState.SUCCEEDED.value, service_pid=ready_pid, error=None)
     record(rollback)
     write(f"rolled back to {version}; service pid={ready_pid}")
     return rollback
@@ -845,11 +875,21 @@ def _run_restart_job(
                     # A rollback that raises must not swallow the failure that
                     # caused it: the original error is what the operator needs,
                     # and the rollback's own is recorded beside it.
-                    record_rollback({"target_version": rollback_to.version, "state": "failed", "error": str(exc)})
+                    record_rollback(
+                        {
+                            "target_version": rollback_to.version,
+                            "state": RestartState.FAILED.value,
+                            "error": str(exc),
+                        }
+                    )
                     write(f"rollback to {rollback_to.version} raised: {exc}")
             elif rollback_to:
                 record_rollback(
-                    {"target_version": rollback_to.version, "state": "skipped", "reason": "service_running"}
+                    {
+                        "target_version": rollback_to.version,
+                        "state": RestartState.SKIPPED.value,
+                        "reason": "service_running",
+                    }
                 )
             return _fail(payload, error, log, return_code, started_at=started_at)
 
@@ -864,7 +904,11 @@ def _run_restart_job(
             # seeds with the spawned subprocess pid (this process is that pid).
             "supervisor_pid": os.getpid(),
             "supervisor_started_at": runtime.process_create_time(os.getpid()),
-            "state": "scheduled" if delay_seconds > 0 else "running",
+            "state": (
+                RestartState.SCHEDULED.value
+                if delay_seconds > 0
+                else RestartState.RUNNING.value
+            ),
             "trigger": trigger,
             "delay_seconds": delay_seconds,
             "scope": scope,
@@ -894,7 +938,7 @@ def _run_restart_job(
             delay_started_at = time.monotonic()
             time.sleep(delay_seconds)
             mark_duration("delay_seconds_actual", delay_started_at)
-            payload["state"] = "running"
+            payload["state"] = RestartState.RUNNING.value
             _write_status(payload)
             write("restart job started after delay")
             restart_started_at = time.monotonic()
@@ -985,7 +1029,7 @@ def _run_restart_job(
         runtime.write_status("running", f"pid={new_pid}", new_pid, _live_ui_pid(recorded_ui_pid))
 
         mark_duration("restart_total_seconds", restart_started_at)
-        payload.update(ok=True, state="succeeded", new_pid=new_pid, error=None)
+        payload.update(ok=True, state=RestartState.SUCCEEDED.value, new_pid=new_pid, error=None)
         _write_status(payload)
         write(f"restart job succeeded new_pid={new_pid}")
 
@@ -1118,7 +1162,7 @@ def schedule_restart(
     payload = {
         "ok": None,
         "job_id": job_id,
-        "state": "scheduled",
+        "state": RestartState.SCHEDULED.value,
         "trigger": trigger,
         "scope": scope,
         "delay_seconds": delay_seconds,
@@ -1153,7 +1197,11 @@ def schedule_restart(
         # (bad cached vibe path, missing executable, permission/log-open error) no
         # child will ever overwrite it, leaving a permanently pending restart in
         # `vibe status`. Mark it failed before propagating.
-        payload.update(ok=False, state="failed", error=f"failed to spawn restart supervisor: {exc}")
+        payload.update(
+            ok=False,
+            state=RestartState.FAILED.value,
+            error=f"failed to spawn restart supervisor: {exc}",
+        )
         _write_status(payload)
         _prune_restart_logs()
         raise

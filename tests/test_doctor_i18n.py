@@ -10,13 +10,17 @@ from pathlib import Path
 
 import pytest
 
+from core.tmux_runtime import TmuxFailureReason, TmuxRuntimeManager
 from vibe import cli
 from vibe.i18n import get_supported_languages, t
+from vibe.restart_supervisor import RestartState
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 I18N_DIR = REPO_ROOT / "vibe" / "i18n"
 DOCTOR_SOURCE = REPO_ROOT / "vibe" / "cli.py"
+RESTART_SOURCE = REPO_ROOT / "vibe" / "restart_supervisor.py"
+TMUX_SOURCE = REPO_ROOT / "core" / "tmux_runtime.py"
 
 
 def _flatten(value: object, prefix: str = "") -> dict[str, str]:
@@ -99,64 +103,233 @@ def test_doctor_bundles_have_identical_keys_and_interpolation() -> None:
 
 
 def test_doctor_finite_vocabulary_has_one_projection_owner() -> None:
-    expected = {
-        "tunnel_state": {"healthy", "degraded", "recovering", "unknown"},
-        "tunnel_grade": {"good", "fair", "poor", "critical", "unknown"},
-        "tunnel_protocol": {"quic", "http2", "unknown"},
-        "download_kind": {"http", "dns", "tls", "timeout", "network", "permission", "disk", "io"},
-        "repair_reason": {
-            "askill_auto_install_unsupported",
-            "askill_install_path_missing",
-            "askill_install_timeout",
-            "askill_install_failed",
-            "askill_install_error",
-            "avault_platform_unsupported",
-            "avault_checksum_mismatch",
-            "avault_install_path_missing",
-            "avault_install_failed",
-            "avault_download_failed",
-            "avault_p2_release_unavailable",
-            "git_runtime_unpublished",
-        },
-        "repair_suffix": {
-            "install_already_running",
-            "platform_unsupported",
-            "manifest_missing",
-            "manifest_invalid",
-            "manifest_unavailable",
-            "manifest_unavailable_offline",
-            "manifest_download_failed",
-            "manifest_url_unsupported",
-            "archive_unavailable",
-            "archive_unavailable_offline",
-            "archive_url_unsupported",
-            "archive_download_failed",
-            "archive_checksum_mismatch",
-            "archive_size_mismatch",
-            "binary_checksum_mismatch",
-            "binary_not_runnable",
-            "binary_prepare_failed",
-            "install_missing_binary",
-            "install_failed",
-            "install_lock_failed",
-            "install_claim_failed",
-            "install_target_changed",
-            "pointer_write_failed",
-            "codesign_missing",
-            "codesign_failed",
-            "codesign_verify_failed",
-            "xattr_failed",
-        },
-        "restart_state": {"running", "scheduled", "succeeded", "failed", "skipped", "unknown"},
-        "show_runtime_provider": {"manifest-cache", "archive", "npm", "unknown"},
+    assert set(cli.DOCTOR_DISPLAY_PROJECTIONS) == {
+        "tunnel_state",
+        "tunnel_grade",
+        "tunnel_protocol",
+        "download_kind",
+        "repair_reason",
+        "repair_suffix",
+        "restart_state",
+        "show_runtime_provider",
     }
-    assert set(cli.DOCTOR_DISPLAY_PROJECTIONS) == set(expected)
-    for category, members in expected.items():
-        assert set(cli.DOCTOR_DISPLAY_PROJECTIONS[category]) == members
-        assert all(key.startswith("doctor.") for key in cli.DOCTOR_DISPLAY_PROJECTIONS[category].values())
+    for projection in cli.DOCTOR_DISPLAY_PROJECTIONS.values():
+        assert projection
+        assert all(key.startswith("doctor.") for key in projection.values())
 
     assert cli._doctor_display_value("future-state", "tunnel_state", "zh") == "未知"
     assert cli._doctor_display_value("future-kind", "download_kind", "zh") == "未知"
+
+
+def test_restart_state_owner_drives_producer_retention_display_and_tests(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    projection = cli.DOCTOR_DISPLAY_PROJECTIONS["restart_state"]
+    assert set(projection) == {state.value for state in RestartState}
+
+    status_path = tmp_path / "restart.json"
+    status_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(cli.time, "time", lambda: status_path.stat().st_mtime + 3600)
+    for state in RestartState:
+        expected_stale = state.retention is not None
+        assert cli._restart_status_is_stale({"state": state.value}, status_path) is expected_stale
+        for language in ("en", "zh"):
+            assert cli._doctor_display_value(state.value, "restart_state", language) == t(
+                projection[state.value], language
+            )
+
+
+def test_restart_producer_cannot_bypass_owned_state_vocabulary() -> None:
+    tree = ast.parse(RESTART_SOURCE.read_text(encoding="utf-8"), filename=str(RESTART_SOURCE))
+    bypasses: list[int] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values):
+                if (
+                    isinstance(key, ast.Constant)
+                    and key.value == "state"
+                    and isinstance(value, ast.Constant)
+                    and isinstance(value.value, str)
+                ):
+                    bypasses.append(value.lineno)
+        elif isinstance(node, ast.keyword) and node.arg == "state":
+            if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                bypasses.append(node.value.lineno)
+        elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+            for target in node.targets:
+                if (
+                    isinstance(target, ast.Subscript)
+                    and isinstance(target.slice, ast.Constant)
+                    and target.slice.value == "state"
+                    and isinstance(node.value.value, str)
+                ):
+                    bypasses.append(node.value.lineno)
+    assert not bypasses, f"restart state literal bypassed RestartState at lines {bypasses}"
+
+
+def test_tmux_failure_reasons_are_producer_owned_and_doctor_projected() -> None:
+    source = TMUX_SOURCE.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(TMUX_SOURCE))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "_failure":
+            assert node.args and not isinstance(node.args[0], ast.Constant), (
+                f"tmux failure at line {node.lineno} bypassed TmuxFailureReason"
+            )
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Attribute) and target.attr == "_install_reason" for target in node.targets
+        ):
+            assert not (isinstance(node.value, ast.Constant) and node.value.value is not None), (
+                f"tmux install reason at line {node.lineno} bypassed TmuxFailureReason"
+            )
+
+    for reason in TmuxFailureReason:
+        key = cli._doctor_managed_reason_key(reason.value)
+        assert key is not None, f"Doctor has no display projection for {reason.value}"
+        for language in ("en", "zh"):
+            detail = cli._doctor_managed_failure_detail("tmux", {"reason": reason.value}, language)
+            assert detail
+            assert reason.value not in detail
+
+
+@pytest.mark.parametrize(
+    ("reason", "english_marker", "chinese_marker"),
+    [
+        (
+            TmuxFailureReason.INSTALL_MISSING_BIN,
+            "archive did not contain its binary",
+            "归档不包含其二进制文件",
+        ),
+        (
+            TmuxFailureReason.CODESIGN_MISSING,
+            "codesign is unavailable",
+            "codesign 不可用",
+        ),
+        (
+            TmuxFailureReason.CODESIGN_FAILED,
+            "could not be code-signed",
+            "无法为 tmux 二进制签名",
+        ),
+        (
+            TmuxFailureReason.CODESIGN_VERIFY_FAILED,
+            "could not be code-signed",
+            "无法为 tmux 二进制签名",
+        ),
+    ],
+)
+def test_tmux_actual_failure_spellings_render_in_both_languages(
+    reason: TmuxFailureReason,
+    english_marker: str,
+    chinese_marker: str,
+) -> None:
+    result = {"ok": False, "reason": reason.value}
+
+    english = cli._doctor_managed_failure_detail("tmux", result, "en")
+    chinese = cli._doctor_managed_failure_detail("tmux", result, "zh")
+
+    assert english_marker in english
+    assert chinese_marker in chinese
+    assert reason.value not in english
+    assert reason.value not in chinese
+    assert result["reason"] == reason.value
+
+
+@pytest.mark.parametrize(
+    ("language", "state_marker", "field_markers"),
+    [
+        ("en", "state=error", ("error=disk full", "trigger=upgrade", "job_id=job-1", "log=/tmp/restart.log")),
+        ("zh", "状态=错误", ("错误=disk full", "触发来源=upgrade", "任务 ID=job-1", "日志=/tmp/restart.log")),
+    ],
+)
+def test_restart_failure_summary_localizes_labels_and_preserves_raw_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    language: str,
+    state_marker: str,
+    field_markers: tuple[str, ...],
+) -> None:
+    payload = {
+        "ok": False,
+        "state": RestartState.ERROR.value,
+        "error": "disk\nfull",
+        "trigger": "upgrade",
+        "job_id": "job-1",
+        "log_path": "/tmp/restart.log",
+    }
+    original = dict(payload)
+    status_path = tmp_path / "restart.json"
+    status_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
+    monkeypatch.setattr(cli.runtime, "get_restart_status_path", lambda: status_path)
+    monkeypatch.setattr(cli.runtime, "read_json", lambda _path: payload)
+    monkeypatch.setattr(cli.runtime, "verified_service_running", lambda: False)
+
+    item = cli._restart_state_items()[0]
+
+    assert item["code"] == "runtime.restart_failed"
+    assert state_marker in item["message"]
+    assert all(marker in item["message"] for marker in field_markers)
+    assert payload == original
+    if language == "zh":
+        assert "state=error" not in item["message"]
+
+
+@pytest.mark.parametrize(("language", "missing_marker"), [("en", "missing"), ("zh", "缺失")])
+def test_service_pid_sentinel_is_localized_only_at_rendering_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    language: str,
+    missing_marker: str,
+) -> None:
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
+    monkeypatch.setattr(cli.paths, "get_runtime_pid_path", lambda: tmp_path / "absent.pid")
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda **_kwargs: 4242)
+    monkeypatch.setattr(cli.runtime, "service_lock_holder_pid", lambda: 4242)
+    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"service_pid": None})
+
+    items = cli._service_lifecycle_items(detect_extra_processes=False)
+
+    mismatch_codes = {
+        "runtime.service_pidfile_mismatch",
+        "runtime.status_pid_mismatch",
+    }
+    mismatches = [item for item in items if item.get("code") in mismatch_codes]
+    assert {item["code"] for item in mismatches} == mismatch_codes
+    assert all(missing_marker in item["message"] for item in mismatches)
+    if language == "zh":
+        assert all("missing" not in item["message"] for item in mismatches)
+
+
+@pytest.mark.parametrize(
+    ("language", "attempt_marker"),
+    [("en", "after 3 attempts"), ("zh", "经过 3 次尝试")],
+)
+def test_dependency_attempt_copy_reports_total_attempts(language: str, attempt_marker: str) -> None:
+    item = t(
+        "doctor.item.dependencyHttpErrorRetried",
+        language,
+        label="tmux",
+        status=503,
+        attempts=3,
+        url="https://example.test/tmux.tgz",
+    )
+    repair = t("doctor.repair.dependencyDownloadNetwork", language, attempts=3)
+
+    assert attempt_marker in item
+    assert ("3 attempts" if language == "en" else "3 次尝试") in repair
+    if language == "zh":
+        assert "重试 3 次" not in item
+        assert "已重试 3 次" not in repair
+
+
+def test_restart_recovery_action_preserves_branch_semantics_in_both_languages() -> None:
+    english = t("doctor.action.restartFailed", "en")
+    chinese = t("doctor.action.restartFailed", "zh")
+
+    assert "stops a process holding no lock and brings the service up" in english
+    assert "if the failed process holds the lock itself, and then repeat the start above" in english
+    assert "停止未持有锁的进程并启动服务" in chinese
+    assert "若失败进程持有锁，则运行 `vibe stop`，然后重试上述启动命令" in chinese
 
 
 def test_doctor_dependency_status_stays_machine_data_and_out_of_sentence(
@@ -484,11 +657,11 @@ def test_managed_repair_failure_contract_has_structured_identity(
         "avault": cli.api.install_avault(),
     }
     from core.git_runtime import GitRuntimeManager
-    from core.tmux_runtime import TmuxRuntimeManager
-
     producer_failures.update(
         {
-            "tmux": TmuxRuntimeManager(runtime_dir=tmp_path / "tmux")._failure("tmux_archive_unavailable"),
+            "tmux": TmuxRuntimeManager(runtime_dir=tmp_path / "tmux")._failure(
+                TmuxFailureReason.ARCHIVE_UNAVAILABLE
+            ),
             "git-runtime": GitRuntimeManager(runtime_dir=tmp_path / "git")._failure("git_archive_unavailable"),
         }
     )
