@@ -252,6 +252,51 @@ describe("RouteChainDialog", () => {
     expect(screen.getByText("Done").closest("button")).toBeTruthy();
   });
 
+  it("MH-ROUTE-EDIT-001 replaces one hop in place and saves the exact order", async () => {
+    const user = userEvent.setup();
+    const put = vi
+      .spyOn(modelsApi, "putAgentChain")
+      .mockResolvedValue(mutation());
+    renderStockedDialog();
+    const editButtons = await screen.findAllByRole("button", {
+      name: "Edit hop",
+    });
+
+    await user.click(editButtons[0]);
+    expect(
+      [...document.querySelectorAll(".model-hub-route-candidate-model")].map(
+        (element) => element.textContent,
+      ),
+    ).toEqual([
+      "claude-haiku-5",
+      "claude-opus-5",
+      "claude-sonnet-5",
+      "sonnet-5",
+    ]);
+    await user.type(
+      screen.getByPlaceholderText("Search sources or models"),
+      "claude-sonnet-5",
+    );
+    await user.click(screen.getByRole("button", { name: "Replace" }));
+
+    await waitFor(() =>
+      expect(
+        [...document.querySelectorAll(".model-hub-route-hop-model")].map(
+          (element) => element.textContent,
+        ),
+      ).toEqual(["claude-sonnet-5", "opus-5"]),
+    );
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith("claude", "opus-5", {
+        hops: [
+          { source_id: "src_a", model_id: "claude-sonnet-5" },
+          { source_id: "src_b", model_id: "opus-5" },
+        ],
+      }),
+    );
+  });
+
   it("renders the complete removed-hop impact after a successful save", async () => {
     const user = userEvent.setup();
     const removed = {
@@ -572,7 +617,7 @@ describe("RouteChainDialog", () => {
 
     expect(
       await screen.findAllByText(
-        "This edited hop is unavailable after the refresh. Remove it before saving.",
+        "This edited hop is unavailable after the refresh. Replace or remove it before saving.",
       ),
     ).toHaveLength(2);
     expect(screen.getAllByRole("button", { name: "Remove hop" })).toHaveLength(3);

@@ -1194,6 +1194,7 @@
         "label": "这个型号的路由链",
         "section": "这个型号的路由链",
         "removeHop": "移除这一跳",
+        "editHop": "修改这一跳",
         "addHop": "添加一跳",
         "add": {
           "source": "来源",
@@ -1203,8 +1204,12 @@
           "noMatch": "没有匹配的来源型号",
           "none": "没有可添加的来源型号"
         },
+        "edit": {
+          "confirm": "替换",
+          "replaced": "已替换第 {{position}} 跳。"
+        },
         "sourceMissing": "来源不存在",
-        "invalidAfterRefresh": "这个已编辑的跳在刷新后的来源中不可用。移除它后再保存。",
+        "invalidAfterRefresh": "这个已编辑的跳在刷新后的来源中不可用。替换或移除它后再保存。",
         "reorder": {
           "label": "按来源顺序重排",
           "grabbed": "已抓取第 {{position}} 跳。使用方向键移动。",
