@@ -149,9 +149,12 @@ distribution. Required non-ready states have an explicit action class:
 
 - `missing`, version mismatch, and runtime/artifact probe failure are
   `repairable`; status exposes the existing centrally admitted repair action;
-- duplicate canonical providers, unreadable metadata, quarantine, and source or
-  unpublished builds are `operator_only`; status exposes no repair action and a
-  direct repair intent is rejected before mutation with its structured reason.
+- duplicate canonical providers, unreadable metadata, and source or unpublished
+  builds are `operator_only`; status exposes no repair action and a direct repair
+  intent is rejected before mutation with its structured reason. Quarantine is
+  also `operator_only` for ordinary forward repair: that action is hidden and
+  rejected, while the separately named `repair_quarantine` recovery action
+  remains explicitly exposed as described in Invariant 3.
 
 The repairable action is an admission path, not a promise that every repair can
 be planned: a later owner preflight may still return the same structured
