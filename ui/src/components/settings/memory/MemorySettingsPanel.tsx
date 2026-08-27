@@ -1,12 +1,9 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
-  ArrowUpRight,
   Building2,
   Cloud,
   Loader2,
-  ShieldAlert,
   SlidersHorizontal,
   Trash2,
 } from 'lucide-react';
@@ -205,7 +202,6 @@ export const MemorySettingsPanel: React.FC<{
   settings: MemorySettings;
   maintenance: MemoryMaintenance | null;
   maintenanceError: string | null;
-  dependencyReady: boolean;
   mutationBusy?: boolean;
   onSavingChange?: (saving: boolean) => void;
   onSaved: (next: MemorySettingsOk) => void;
@@ -217,7 +213,6 @@ export const MemorySettingsPanel: React.FC<{
   settings,
   maintenance,
   maintenanceError,
-  dependencyReady,
   mutationBusy = false,
   onSavingChange,
   onSaved,
@@ -442,25 +437,12 @@ export const MemorySettingsPanel: React.FC<{
         <div className="flex min-w-0 flex-col gap-1">
           <span className="text-[13px] font-semibold text-foreground">{t('memory.settings.enableLabel')}</span>
           <span className="text-[11.5px] leading-snug text-muted">{t('memory.settings.enableHint')}</span>
-          {!dependencyReady && !enabledDraft ? (
-            <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11.5px] text-gold-ink">
-              <ShieldAlert className="size-3.5 shrink-0" />
-              {t('memory.settings.dependencyNotReady')}
-              <Button asChild variant="secondary" size="xs">
-                <Link to="/settings/dependencies">
-                  {t('memory.settings.goToDependencies')}
-                  <ArrowUpRight className="size-3.5" />
-                </Link>
-              </Button>
-            </div>
-          ) : null}
         </div>
         <Switch
           checked={enabledDraft}
           onCheckedChange={setMemoryEnabled}
           disabled={
             busy
-            || (!enabledDraft && !dependencyReady)
             || (!enabledDraft && !customMode && !settings.cloud_available)
           }
           label={t('memory.settings.enableLabel')}

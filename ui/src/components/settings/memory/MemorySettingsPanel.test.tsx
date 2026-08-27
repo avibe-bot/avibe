@@ -56,7 +56,6 @@ const renderPanel = (overrides: Partial<React.ComponentProps<typeof MemorySettin
     settings,
     maintenance: { status: 'ok', data_exists: true, can_delete_data: true },
     maintenanceError: null,
-    dependencyReady: true,
     onSaved: vi.fn(),
     onReloadSettings: vi.fn(),
     onReloadMaintenance: vi.fn(),
@@ -78,6 +77,18 @@ afterEach(() => {
 });
 
 describe('MemorySettingsPanel', () => {
+  it('keeps configuration enablement reachable while Memory is disabled', async () => {
+    const user = userEvent.setup();
+    renderPanel({ settings: { ...settings, enabled: false } });
+    const enable = screen.getByRole('switch', { name: 'memory.settings.enableLabel' });
+
+    expect((enable as HTMLButtonElement).disabled).toBe(false);
+    await user.click(enable);
+    await user.click(screen.getByRole('button', { name: 'memory.settings.save' }));
+
+    await waitFor(() => expect(api.saveMemorySettings).toHaveBeenCalledWith({ enabled: true }));
+  });
+
   it('exposes one explicit Delete data action', async () => {
     const props = renderPanel();
     await userEvent.click(screen.getByRole('button', { name: 'memory.deleteData.button' }));

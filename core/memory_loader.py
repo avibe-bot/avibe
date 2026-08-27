@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+from collections.abc import Callable
 from typing import Any
 
 from vibe.memory_contract import (
@@ -20,21 +21,9 @@ MEMORY_LIST_CURSOR_MAX_BYTES = 8192
 _PROTOCOL_ATTR = "MEMORY_RUNTIME_PROTOCOL_VERSION"
 
 
-def load_memory_runtime(
-    config: Any,
-    *,
-    allow_disabled: bool = False,
-    **runtime_kwargs: Any,
-) -> Any:
-    """Load and construct the fixed Memory runtime for an enabled snapshot.
+def _resolve_memory_runtime_factory() -> Callable[..., Any]:
+    """Import the fixed entrypoint and return its compatible factory."""
 
-    This module intentionally imports no implementation module at import time.
-    The entrypoint, protocol comparison, and constructor are deliberately fixed
-    so a missing/broken optional implementation cannot affect core startup.
-    """
-
-    if not bool(getattr(config, "enabled", False)) and not allow_disabled:
-        return None
     try:
         implementation = importlib.import_module(MEMORY_RUNTIME_ENTRYPOINT)
     except Exception as exc:
@@ -56,6 +45,31 @@ def load_memory_runtime(
         raise MemoryPluginUnavailableError(
             "Memory implementation constructor is unavailable"
         )
+    return factory
+
+
+def probe_memory_runtime_entrypoint() -> None:
+    """Validate the runtime entrypoint contract without constructing it."""
+
+    _resolve_memory_runtime_factory()
+
+
+def load_memory_runtime(
+    config: Any,
+    *,
+    allow_disabled: bool = False,
+    **runtime_kwargs: Any,
+) -> Any:
+    """Load and construct the fixed Memory runtime for an enabled snapshot.
+
+    This module intentionally imports no implementation module at import time.
+    The entrypoint, protocol comparison, and constructor are deliberately fixed
+    so a missing/broken optional implementation cannot affect core startup.
+    """
+
+    if not bool(getattr(config, "enabled", False)) and not allow_disabled:
+        return None
+    factory = _resolve_memory_runtime_factory()
     try:
         runtime = factory(config, **runtime_kwargs)
     except Exception as exc:

@@ -7903,12 +7903,19 @@ def backend_restart(name):
     return jsonify(api.restart_backend(name, metadata=metadata))
 
 
-_ALLOWED_DEPENDENCIES = {"askill", "avault", "show-runtime", "memory-runtime", "tmux"}
+_ALLOWED_DEPENDENCIES = {
+    "askill",
+    "avault",
+    "show-runtime",
+    "memory-package",
+    "memory-runtime",
+    "tmux",
+}
 
 
 @app.route("/api/dependencies")
 def get_dependencies():
-    """Status of required local runtime dependencies (askill, Show runtime, Node)."""
+    """Status of local tool, package, and managed-runtime dependencies."""
     from vibe import api
 
     return jsonify(api.dependencies_status())

@@ -62,6 +62,10 @@ capabilities:
       - tests/test_native_session_providers.py
       - tests/test_core_services_dispatch.py
       - tests/test_admin_notifications.py
+      - tests/test_memory_loader.py
+      - tests/test_local_deps.py
+      - tests/test_memory_upgrade_packaged.py
+      - tests/test_upgrade_flow.py
   - id: memory_im_attachment_capture
     name: Bound-DM attachment capture through EverOS multimodal ingest
     status: active

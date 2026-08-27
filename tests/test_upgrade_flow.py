@@ -6,6 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
@@ -14,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from vibe import api, cli
 from vibe.runtime import ServiceLauncher
 from vibe.upgrade import (
+    MemoryRequirementUnreadableError,
     UpgradePlan,
     build_upgrade_plan,
     configured_memory_enabled,
@@ -859,6 +861,7 @@ def test_do_upgrade_uses_upgrade_plan_env_and_restarts(monkeypatch):
     )
     calls: dict[str, Any] = {}
 
+    monkeypatch.setattr(api, "configured_memory_enabled", lambda: False)
     monkeypatch.setattr(api, "get_version_info", lambda: {"latest": "3.0.15"})
     monkeypatch.setattr(
         api,
@@ -904,6 +907,26 @@ def test_do_upgrade_uses_upgrade_plan_env_and_restarts(monkeypatch):
     }
 
 
+def test_do_upgrade_blocks_mutation_when_memory_requirement_is_unreadable(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        api,
+        "configured_memory_enabled",
+        Mock(side_effect=MemoryRequirementUnreadableError()),
+    )
+    plan = Mock(side_effect=AssertionError("unreadable requirement built a plan"))
+    monkeypatch.setattr(api, "build_upgrade_plan", plan)
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/custom/bin/vibe")
+
+    result = api.do_upgrade()
+
+    assert result["ok"] is False
+    assert result["reason"] == "memory_requirement_unreadable"
+    assert result["restarting"] is False
+    plan.assert_not_called()
+
+
 def test_do_upgrade_auto_restart_does_not_block_on_runtime_prepare(monkeypatch):
     plan = UpgradePlan(
         command=["/usr/local/bin/uv", "tool", "install", "avibe-os", "--upgrade"],
@@ -912,6 +935,7 @@ def test_do_upgrade_auto_restart_does_not_block_on_runtime_prepare(monkeypatch):
     )
     events: list[str] = []
 
+    monkeypatch.setattr(api, "configured_memory_enabled", lambda: False)
     monkeypatch.setattr(api, "build_upgrade_plan", lambda **kwargs: plan)
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/custom/bin/vibe")
     monkeypatch.setattr(api, "_runtime_process_was_running", lambda: True)
@@ -940,6 +964,7 @@ def test_do_upgrade_running_runtime_honors_show_runtime_skip_for_restart(monkeyp
     )
     calls: dict[str, Any] = {}
 
+    monkeypatch.setattr(api, "configured_memory_enabled", lambda: False)
     monkeypatch.setenv("VIBE_INSTALL_SKIP_SHOW_RUNTIME", "1")
     monkeypatch.setattr(api, "build_upgrade_plan", lambda **kwargs: plan)
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/custom/bin/vibe")
@@ -965,6 +990,7 @@ def test_do_upgrade_reports_restart_scheduling_failure_as_partial_success(monkey
         method="uv",
     )
 
+    monkeypatch.setattr(api, "configured_memory_enabled", lambda: False)
     monkeypatch.setattr(api, "build_upgrade_plan", lambda **kwargs: plan)
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/custom/bin/vibe")
     monkeypatch.setattr(api, "_runtime_process_was_running", lambda: True)
@@ -996,6 +1022,7 @@ def test_do_upgrade_without_auto_restart_prepares_runtime(monkeypatch):
     )
     calls: dict[str, Any] = {}
 
+    monkeypatch.setattr(api, "configured_memory_enabled", lambda: False)
     monkeypatch.setattr(api, "build_upgrade_plan", lambda **kwargs: plan)
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/custom/bin/vibe")
     monkeypatch.setattr(api, "_runtime_process_was_running", lambda: True)
@@ -1038,6 +1065,7 @@ def test_do_upgrade_keeps_runtime_stopped_when_it_was_not_running(monkeypatch):
     )
     calls: dict[str, Any] = {}
 
+    monkeypatch.setattr(api, "configured_memory_enabled", lambda: False)
     monkeypatch.setattr(api, "build_upgrade_plan", lambda **kwargs: plan)
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/custom/bin/vibe")
     monkeypatch.setattr(api, "_runtime_process_was_running", lambda: False)
@@ -1116,6 +1144,7 @@ def test_cmd_upgrade_uses_upgrade_plan_env(monkeypatch):
     )
     calls: dict[str, Any] = {}
 
+    monkeypatch.setattr(cli, "configured_memory_enabled", lambda: False)
     monkeypatch.setattr(cli, "get_latest_version", lambda: {"error": None, "has_update": True, "latest": "2.2.0"})
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/custom/bin/vibe")
     monkeypatch.setattr(
@@ -1169,6 +1198,7 @@ def test_cmd_upgrade_running_runtime_honors_show_runtime_skip_for_restart(monkey
     )
     calls: dict[str, Any] = {}
 
+    monkeypatch.setattr(cli, "configured_memory_enabled", lambda: False)
     monkeypatch.setenv("VIBE_INSTALL_SKIP_SHOW_RUNTIME", "true")
     monkeypatch.setattr(cli, "get_latest_version", lambda: {"error": None, "has_update": True, "latest": "2.2.0"})
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/custom/bin/vibe")
@@ -1197,6 +1227,7 @@ def test_cmd_upgrade_reports_restart_scheduling_failure_as_partial_success(monke
         method="uv",
     )
 
+    monkeypatch.setattr(cli, "configured_memory_enabled", lambda: False)
     monkeypatch.setattr(cli, "get_latest_version", lambda: {"error": None, "has_update": True, "latest": "2.2.0"})
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/custom/bin/vibe")
     monkeypatch.setattr(cli, "build_upgrade_plan", lambda **kwargs: plan)
@@ -1228,6 +1259,7 @@ def test_cmd_upgrade_keeps_runtime_stopped_when_it_was_not_running(monkeypatch):
     )
     calls: dict[str, Any] = {}
 
+    monkeypatch.setattr(cli, "configured_memory_enabled", lambda: False)
     monkeypatch.setattr(cli, "get_latest_version", lambda: {"error": None, "has_update": True, "latest": "2.2.0"})
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/custom/bin/vibe")
     monkeypatch.setattr(cli, "build_upgrade_plan", lambda **kwargs: plan)
@@ -1265,6 +1297,29 @@ def test_cmd_upgrade_skips_install_when_already_latest(monkeypatch):
     monkeypatch.setattr(cli.subprocess, "run", fail_run)
 
     assert cli.cmd_upgrade() == 0
+
+
+def test_cmd_upgrade_blocks_mutation_when_memory_requirement_is_unreadable(
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "get_latest_version",
+        lambda: {"error": "metadata unavailable", "has_update": False, "latest": None},
+    )
+    monkeypatch.setattr(
+        cli,
+        "configured_memory_enabled",
+        Mock(side_effect=MemoryRequirementUnreadableError()),
+    )
+    plan = Mock(side_effect=AssertionError("unreadable requirement built a plan"))
+    monkeypatch.setattr(cli, "build_upgrade_plan", plan)
+    monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/custom/bin/vibe")
+
+    assert cli.cmd_upgrade() == 1
+    assert "persisted Memory requirement" in capsys.readouterr().out
+    plan.assert_not_called()
 
 
 @pytest.mark.parametrize("source", ["local", "direct"])
@@ -1677,24 +1732,20 @@ def test_pip_preflight_does_not_fallback_on_resolver_failure():
     assert calls == [plan.preflight_command]
 
 
-@pytest.mark.parametrize("memory_installed", [False, True])
-def test_unreadable_memory_config_preserves_only_an_installed_package(monkeypatch, memory_installed):
+def test_unreadable_memory_config_blocks_package_plan(monkeypatch):
     monkeypatch.setattr("config.v2_config.V2Config.load", lambda: (_ for _ in ()).throw(ValueError("bad config")))
-    monkeypatch.setattr("vibe.upgrade.memory_package_installed", lambda: memory_installed)
-    monkeypatch.setattr("vibe.upgrade.find_uv_binary", lambda **kwargs: None)
-    monkeypatch.setattr("vibe.upgrade.installed_metadata_describes_running_code", lambda: True)
 
-    enabled = configured_memory_enabled()
-    plan = build_upgrade_plan(
-        python_executable="/usr/bin/python3",
-        base_env={"PATH": "/usr/bin"},
-        memory_enabled=enabled,
-        target_version="3.1.0",
-        package_spec="avibe-os",
+    with pytest.raises(MemoryRequirementUnreadableError):
+        configured_memory_enabled()
+
+
+def test_missing_first_run_config_does_not_block_package_plan(monkeypatch):
+    monkeypatch.setattr(
+        "config.v2_config.V2Config.load",
+        lambda: (_ for _ in ()).throw(FileNotFoundError()),
     )
 
-    assert enabled is False
-    assert ("avibe-os[memory]" in plan.command) is memory_installed
+    assert configured_memory_enabled() is False
 
 
 def test_uv_forward_plan_locks_memory_to_target_release(monkeypatch):

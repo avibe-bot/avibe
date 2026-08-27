@@ -67,6 +67,7 @@ from vibe.screenshot import ScreenshotError, capture_screenshot
 from vibe.upgrade import (
     CURRENT_VIBE_EXECUTABLE_ENV,
     LEGACY_PACKAGE_NAME,
+    MemoryRequirementUnreadableError,
     PACKAGE_NAME,
     build_upgrade_plan,
     cache_running_vibe_path,
@@ -14401,6 +14402,9 @@ def cmd_upgrade():
             memory_enabled=configured_memory_enabled(),
             target_version=info.get("latest"),
         )
+    except MemoryRequirementUnreadableError:
+        print(f"\033[31m{i18n_t('update.memoryRequirementUnreadable')}\033[0m")
+        return 1
     except ValueError as exc:
         print(f"\033[31mUpgrade failed: {exc}\033[0m")
         return 1
