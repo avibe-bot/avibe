@@ -181,6 +181,91 @@ def test_released_show_links_install_through_shared_manager(
         assert (install_dir / row[2]).stat().st_ino == (install_dir / row[6]).stat().st_ino
 
 
+@pytest.mark.parametrize(
+    "platform",
+    (
+        "darwin-arm64",
+        "darwin-x64",
+        "linux-arm64",
+        "linux-x64",
+        "win32-arm64",
+        "win32-x64",
+    ),
+)
+def test_released_show_composite_shape_installs_through_production_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    platform: str,
+) -> None:
+    fixture = _released_fixture()
+    release = fixture["release"]
+    released_manifest_bytes = (FIXTURE_ROOT / release["manifest_name"]).read_bytes()
+    assert hashlib.sha256(released_manifest_bytes).hexdigest() == release["manifest_sha256"]
+    released_manifest = json.loads(released_manifest_bytes)
+    released_archive = released_manifest["archives"][platform]
+    provenance = fixture["archives"][platform]["provenance"]
+    assert {
+        "name": released_archive["name"],
+        "sha256": released_archive["sha256"],
+        "size": released_archive["size"],
+    } == {key: provenance[key] for key in ("name", "sha256", "size")}
+
+    archive_fixture = fixture["archives"][platform]
+    archive_path = _write_released_shape_archive(tmp_path, platform, archive_fixture)
+    cli_path = archive_fixture["entrypoints"]["cli_path"][1]
+    manifest_path = tmp_path / f"{platform}-manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": released_manifest["schema_version"],
+                "runtime_version": released_manifest["runtime_version"],
+                "minimum_node": released_manifest["minimum_node"],
+                "archives": {
+                    platform: {
+                        "name": archive_path.name,
+                        "url": archive_path.as_uri(),
+                        "sha256": hashlib.sha256(archive_path.read_bytes()).hexdigest(),
+                        "size": archive_path.stat().st_size,
+                        "bin_path": cli_path,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: platform)
+    monkeypatch.setattr(show_runtime, "_runtime_platform_tag", lambda: platform)
+    monkeypatch.setattr(
+        show_runtime,
+        "_resolve_command",
+        lambda command: ["/bin/node"] if command == "node" else None,
+    )
+    monkeypatch.setattr(show_runtime, "_node_version", lambda _node: (22, 12, 0))
+    runtime_dir = tmp_path / f"runtime-{platform}"
+    manager = show_runtime.ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        manifest_path=manifest_path,
+    )
+
+    result = manager.prepare()
+
+    assert result["ok"] is True
+    pointer = json.loads((runtime_dir / "current.json").read_text(encoding="utf-8"))
+    install_dir = Path(pointer["install_dir"])
+    assert result["command"] == ["/bin/node", str(install_dir / cli_path)]
+    assert (install_dir / cli_path).read_bytes() == CLI_PAYLOAD
+    for key in ("esbuild_bin", "esbuild_package", "esbuild_platform"):
+        assert (install_dir / archive_fixture["entrypoints"][key][1]).read_bytes() == ESBUILD_PAYLOAD
+    for row in archive_fixture["links"]:
+        linked = install_dir / row[2]
+        if row[1] == "symlink":
+            assert linked.is_symlink()
+            assert linked.exists()
+        else:
+            assert linked.stat().st_ino == (install_dir / row[6]).stat().st_ino
+
+
 def _write_link_probe(path: Path, *, escaping: bool = False) -> None:
     with tarfile.open(path, "w") as archive:
         if escaping:

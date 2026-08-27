@@ -490,7 +490,7 @@ def _install_remote_manifest_runtime(monkeypatch, tmp_path: Path):
     )
     monkeypatch.setattr("core.show_runtime._node_version", lambda _node: (22, 12, 0))
     monkeypatch.setattr(
-        "core.show_runtime.fetch_bytes",
+        "core.managed_runtime.fetch_bytes",
         lambda url, **_kwargs: manifest_path.read_bytes()
         if url == manifest_url
         else pytest.fail(f"unexpected fetch: {url}"),
@@ -524,6 +524,8 @@ def _write_cached_runtime_install_at(
     manifest_source: str = "package:show_runtime_manifest.json",
     mtime: float,
 ) -> tuple[Path, Path]:
+    manifest_sha256 = hashlib.sha256(f"manifest:{name}".encode()).hexdigest()
+    archive_sha256 = hashlib.sha256(f"archive:{name}".encode()).hexdigest()
     cli_path = install_dir / "node_modules" / "@avibe" / "show-runtime" / "dist" / "cli.js"
     cli_path.parent.mkdir(parents=True)
     cli_path.write_text(f"{name}\n", encoding="utf-8")
@@ -532,14 +534,36 @@ def _write_cached_runtime_install_at(
             {
                 "provider": "manifest-cache",
                 "manifest_source": manifest_source,
+                "manifest_sha256": manifest_sha256,
                 "runtime_version": name,
                 "platform": _runtime_platform_tag(),
+                "archive_name": f"{archive_sha256}.tgz",
+                "archive_sha256": archive_sha256,
             }
         ),
         encoding="utf-8",
     )
     os.utime(install_dir, (mtime, mtime))
     return install_dir, cli_path
+
+
+def _write_cached_runtime_pointer(runtime_dir: Path, install_dir: Path) -> None:
+    metadata = json.loads(
+        (install_dir / ".vibe-show-runtime.json").read_text(encoding="utf-8")
+    )
+    (runtime_dir / "current.json").write_text(
+        json.dumps(
+            {
+                "provider": "manifest-cache",
+                "runtime_version": metadata["runtime_version"],
+                "platform": metadata["platform"],
+                "install_dir": str(install_dir),
+                "manifest_sha256": metadata["manifest_sha256"],
+                "archive_sha256": metadata["archive_sha256"],
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def test_private_show_page_requires_remote_login(monkeypatch, tmp_path):
@@ -7727,7 +7751,7 @@ def test_show_runtime_reason_literals_have_declared_evidence():
     reason_literals = {
         value
         for value in re.findall(r'(["\'])(runtime_[a-z0-9_]+)\1', source)
-        if value[1] not in {"runtime_source", "runtime_version"}
+        if value[1] not in {"runtime_id", "runtime_source", "runtime_version"}
     }
     declared = {reason for reason, _provenance, _retryable in SHOW_RUNTIME_FAILURE_DECLARATIONS}
     assert {value for _quote, value in reason_literals} <= declared
@@ -9528,11 +9552,14 @@ def test_show_runtime_manager_forced_manifest_fallback_reports_failed_operation_
     installed = manager.prepare()
     assert installed["ok"] is True
 
-    def fail_archive_resolution(*_args, **_kwargs):
-        manager._install_reason = "runtime_archive_download_failed"
+    def fail_archive_resolution(shared_manager, _archive):
+        shared_manager._install_reason = "runtime_archive_download_failed"
         return None
 
-    monkeypatch.setattr(manager, "_resolve_manifest_archive", fail_archive_resolution)
+    monkeypatch.setattr(
+        "core.show_runtime._ShowManifestRuntimeManager._resolve_manifest_archive",
+        fail_archive_resolution,
+    )
 
     result = manager.prepare(force=True)
 
@@ -9641,7 +9668,7 @@ def test_manifest_download_failure_publishes_measured_retryability(
             }
         )
 
-    monkeypatch.setattr("core.show_runtime.fetch_bytes", fail_manifest)
+    monkeypatch.setattr("core.managed_runtime.fetch_bytes", fail_manifest)
 
     result = manager.prepare()
 
@@ -10051,6 +10078,7 @@ def test_show_runtime_prepare_prunes_old_packaged_installs_and_keeps_rollback(mo
     old_install, _old_cli = _write_cached_runtime_install(runtime_dir, "old", mtime=100)
     previous_install, _previous_cli = _write_cached_runtime_install(runtime_dir, "previous", mtime=200)
     current_install, current_cli = _write_cached_runtime_install(runtime_dir, "current", mtime=300)
+    _write_cached_runtime_pointer(runtime_dir, current_install)
     custom_install, _custom_cli = _write_cached_runtime_install(
         runtime_dir,
         "custom",
@@ -10092,6 +10120,7 @@ def test_show_runtime_prepare_preserves_nested_retained_rollback(monkeypatch, tm
     runtime_dir = tmp_path / "runtime"
     old_install, _old_cli = _write_cached_runtime_install(runtime_dir, "old", mtime=10)
     current_install, current_cli = _write_cached_runtime_install(runtime_dir, "current", mtime=300)
+    _write_cached_runtime_pointer(runtime_dir, current_install)
     rollback_parent = runtime_dir / "versions" / "rollback" / _runtime_platform_tag()
     _rollback_parent, rollback_parent_cli = _write_cached_runtime_install_at(
         rollback_parent,
@@ -10144,6 +10173,7 @@ def test_show_runtime_prepare_prunes_siblings_under_current_legacy_parent(monkey
         "current",
         mtime=300,
     )
+    _write_cached_runtime_pointer(runtime_dir, current_install)
     stale_sibling, _stale_cli = _write_cached_runtime_install_at(
         current_parent / "stale-fingerprint",
         "stale-current",
@@ -10180,6 +10210,7 @@ def test_show_runtime_prepare_preserves_descendants_of_current_legacy_parent(mon
     previous_install, _previous_cli = _write_cached_runtime_install(runtime_dir, "previous", mtime=250)
     current_parent = runtime_dir / "versions" / "current" / _runtime_platform_tag()
     _parent_install, parent_cli = _write_cached_runtime_install_at(current_parent, "current-legacy", mtime=400)
+    _write_cached_runtime_pointer(runtime_dir, current_parent)
     current_child, current_child_cli = _write_cached_runtime_install_at(
         current_parent / "current-fingerprint",
         "current-child",
@@ -10214,6 +10245,7 @@ def test_show_runtime_prepare_preserves_custom_child_under_stale_packaged_parent
     old_install, _old_cli = _write_cached_runtime_install(runtime_dir, "old", mtime=20)
     previous_install, _previous_cli = _write_cached_runtime_install(runtime_dir, "previous", mtime=250)
     current_install, current_cli = _write_cached_runtime_install(runtime_dir, "current", mtime=300)
+    _write_cached_runtime_pointer(runtime_dir, current_install)
     stale_parent = runtime_dir / "versions" / "stale-parent" / _runtime_platform_tag()
     _parent_install, parent_cli = _write_cached_runtime_install_at(stale_parent, "stale-parent", mtime=80)
     custom_child, custom_cli = _write_cached_runtime_install_at(
@@ -10596,7 +10628,7 @@ def test_show_runtime_remote_manifest_install_remains_installed_when_source_is_u
     def fail_manifest_fetch(*_args, **_kwargs):
         raise OSError("manifest host unavailable")
 
-    monkeypatch.setattr("core.show_runtime.fetch_bytes", fail_manifest_fetch)
+    monkeypatch.setattr("core.managed_runtime.fetch_bytes", fail_manifest_fetch)
     status = manager.status()
 
     assert status["install"]["state"] == "installed"

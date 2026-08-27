@@ -200,6 +200,103 @@ def _fixture_runtime_manager(
     )
 
 
+def test_force_install_uses_sibling_target_by_default(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    _write_fixture_runtime_release(
+        tmp_path,
+        manifest_path,
+        label="default-force",
+        version="1.0.0",
+    )
+    manager = _fixture_runtime_manager(tmp_path / "runtime", manifest_path=manifest_path)
+    installed = manager.ensure()
+
+    refreshed = manager.ensure(force=True)
+
+    assert refreshed["ok"] is True
+    assert refreshed["install_dir"] != installed["install_dir"]
+    assert Path(installed["install_dir"]).is_dir()
+
+
+def test_force_target_replacement_failure_does_not_publish_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    _write_fixture_runtime_release(
+        tmp_path,
+        manifest_path,
+        label="exact-force",
+        version="1.0.0",
+    )
+    manager = FixtureRuntimeManager(
+        spec=ManagedRuntimeSpec(
+            runtime_id="fixture-exact-force",
+            manifest_resource="unused.json",
+            version_field="runtime_version",
+            default_bin_path="bin/runtime",
+            replace_target_on_force=True,
+        ),
+        runtime_dir=tmp_path / "runtime",
+        manifest_path=manifest_path,
+    )
+    installed = manager.ensure()
+    pointer_path = manager.runtime_dir / "current.json"
+    pointer_before = pointer_path.read_bytes()
+    binary_before = Path(installed["path"]).read_bytes()
+    monkeypatch.setattr(manager, "_remove_install_target_for_replacement", lambda _path: False)
+
+    failed = manager.ensure(force=True)
+
+    assert failed["ok"] is False
+    assert failed["reason"] == "fixture-exact-force_install_failed"
+    assert pointer_path.read_bytes() == pointer_before
+    assert Path(installed["path"]).read_bytes() == binary_before
+
+
+def test_force_target_replacement_rejects_symlinked_canonical_leaf(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    _write_fixture_runtime_release(
+        tmp_path,
+        manifest_path,
+        label="symlink-force",
+        version="1.0.0",
+    )
+    manager = FixtureRuntimeManager(
+        spec=ManagedRuntimeSpec(
+            runtime_id="fixture-symlink-force",
+            manifest_resource="unused.json",
+            version_field="runtime_version",
+            default_bin_path="bin/runtime",
+            replace_target_on_force=True,
+        ),
+        runtime_dir=tmp_path / "runtime",
+        manifest_path=manifest_path,
+    )
+    installed = manager.ensure()
+    canonical = Path(installed["install_dir"])
+    pointer_path = manager.runtime_dir / "current.json"
+    pointer_before = pointer_path.read_bytes()
+    redirected = canonical.parent / "redirected"
+    redirected.mkdir()
+    sentinel = redirected / "sentinel"
+    sentinel.write_text("preserve", encoding="utf-8")
+    shutil.rmtree(canonical)
+    canonical.symlink_to(redirected, target_is_directory=True)
+
+    failed = manager.ensure(force=True)
+
+    assert failed["ok"] is False
+    assert failed["reason"] == "fixture-symlink-force_install_failed"
+    assert canonical.is_symlink()
+    assert sentinel.read_text(encoding="utf-8") == "preserve"
+    assert pointer_path.read_bytes() == pointer_before
+
+
 def _write_fixture_runtime_release(
     root: Path,
     manifest_path: Path,
@@ -238,6 +335,35 @@ def _write_fixture_runtime_release(
         encoding="utf-8",
     )
     return archive_path
+
+
+def test_binary_artifact_manifest_still_requires_binary_sha256(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    _write_fixture_runtime_release(
+        tmp_path,
+        manifest_path,
+        label="missing-binary-digest",
+        version="1.0.0",
+    )
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    archive = payload["archives"][managed_runtime.runtime_platform_tag()]
+    archive.pop("binary_sha256")
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    manager = FixtureRuntimeManager(
+        spec=ManagedRuntimeSpec(
+            runtime_id="fixture-binary-digest",
+            manifest_resource="unused.json",
+            version_field="runtime_version",
+            default_bin_path="bin/runtime",
+        ),
+        runtime_dir=tmp_path / "runtime",
+        manifest_path=manifest_path,
+    )
+
+    result = manager.ensure()
+
+    assert result["ok"] is False
+    assert result["reason"] == "fixture-binary-digest_manifest_invalid"
 
 
 def _install_fixture_runtime_release(
