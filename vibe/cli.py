@@ -51,6 +51,7 @@ from core.scheduled_tasks import (
 )
 from core.caller_context import caller_context_from_env, caller_resource_user_context
 from core.command_runner import command_line_preview
+from core.install_integrity import verify_python_environment, verify_site_packages
 from core.vibe_agents import AgentArchivedEditError, AgentArchiveError, AgentNameValidationError, AgentReferenceRewriteError, VibeAgent, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
 from core.watches import (
     DEFAULT_RETRY_EXIT_CODE,
@@ -68,11 +69,28 @@ from vibe.upgrade import (
     CURRENT_VIBE_EXECUTABLE_ENV,
     LEGACY_PACKAGE_NAME,
     PACKAGE_NAME,
+    AtomicActivation,
+    DEFERRED_ACTIVATION_TIMEOUT_SECONDS,
+    RollbackTarget,
+    activate_installer_candidate,
+    activate_upgrade_candidate,
+    activation_block_reason,
+    atomic_uv_install_root,
+    atomic_upgrade_lock,
     build_upgrade_plan,
     cache_running_vibe_path,
+    defer_upgrade_activation,
     get_latest_version_info,
     get_safe_cwd,
+    _launcher_generation,
+    _candidate_python,
+    launcher_is_current_process,
+    restart_is_pending,
+    restart_record_is_pending,
+    discard_atomic_uv_install_generation,
     should_skip_show_runtime_prepare,
+    UPGRADE_INSTALL_TIMEOUT_SECONDS,
+    verify_upgrade_candidate,
 )
 from storage.db import create_sqlite_engine
 from storage.background import (
@@ -1218,17 +1236,7 @@ def _service_install_family_items(*, detect_extra_processes: bool = True) -> lis
 def _restart_status_is_stale(payload: dict, path: Path) -> bool:
     state = payload.get("state")
     if state in {"scheduled", "running"}:
-        supervisor_pid = payload.get("supervisor_pid")
-        if isinstance(supervisor_pid, int) and runtime.pid_alive(supervisor_pid):
-            started_at = payload.get("supervisor_started_at")
-            if started_at is not None:
-                current_started_at = runtime.process_create_time(supervisor_pid)
-                return current_started_at is not None and current_started_at != started_at
-        try:
-            age = time.time() - path.stat().st_mtime
-        except OSError:
-            return False
-        return age > DOCTOR_RESTART_SEED_GRACE_SECONDS
+        return not restart_record_is_pending(payload, path, grace_seconds=DOCTOR_RESTART_SEED_GRACE_SECONDS)
 
     if state in {"succeeded", "failed", "error", "cancelled"}:
         try:
@@ -11832,6 +11840,16 @@ def _uv_tool_site_packages_for_vibe(vibe_path: Path) -> list[Path]:
             seen_roots.add(key)
             tool_roots.append(resolved)
 
+    # Atomic upgrades keep each validated uv environment in a durable
+    # generation directory and switch only the stable PATH launcher.  Resolve
+    # that generation directly so doctor inspects the active candidate just as
+    # it inspects a conventional ``~/.local/share/uv/tools/<package>`` root.
+    generation_root = atomic_uv_install_root().expanduser().resolve()
+    generation = _launcher_generation(vibe_path, generation_root)
+    if generation:
+        for package_name in UV_TOOL_PACKAGE_NAMES:
+            add_tool_root(generation / "tools" / package_name)
+
     parts = vibe_path.parts
     try:
         tools_index = parts.index("tools")
@@ -11996,6 +12014,28 @@ def _local_cli_installation_items() -> list[dict]:
             )
         else:
             _add_doctor_item(items, "pass", f"uv tool installation is not editable: {site_packages}")
+
+        # A successful package-manager exit only proves that its metadata was
+        # written.  RECORD is the wheel-level evidence that every installed
+        # file is still present and unchanged; this is what catches an
+        # interrupted dependency copy such as a half-written lark-oapi tree.
+        if any(site_packages.glob("*.dist-info")):
+            integrity = verify_site_packages(site_packages)
+            if integrity.ok:
+                _add_doctor_item(
+                    items,
+                    "pass",
+                    f"Python package files are intact: {integrity.detail}",
+                    code="installation.package_integrity",
+                )
+            else:
+                _add_doctor_item(
+                    items,
+                    "fail",
+                    f"Python package integrity check failed: {integrity.detail}",
+                    "Rerun the Avibe installer to replace the active environment with a verified wheel.",
+                    code="installation.package_integrity",
+                )
 
         alembic_dir = site_packages / "storage" / "alembic"
         versions_dir = alembic_dir / "versions"
@@ -14389,18 +14429,65 @@ def cmd_upgrade():
 
     current_vibe_path = cache_running_vibe_path()
     plan = build_upgrade_plan(vibe_path=current_vibe_path)
+    if plan.preflight_error:
+        print(f"\033[31mUpgrade cannot be activated safely: {plan.preflight_error}\033[0m")
+        return 1
     print(f"Using {plan.method}: {' '.join(plan.command)}")
     runtime_was_running = _runtime_process_was_running()
 
     # Use a stable directory as cwd to avoid issues when running from a
     # directory that uv may delete during upgrade (e.g. inside the uv tool venv).
     safe_cwd = get_safe_cwd()
+    restart = None
+    restart_error = None
+    deferred_activation = False
+    restart_python = None
 
     try:
-        result = subprocess.run(plan.command, capture_output=True, text=True, env=plan.env, cwd=safe_cwd)
-        if result.returncode == 0:
-            print("\033[32mUpgrade successful!\033[0m")
-            if runtime_was_running:
+        with atomic_upgrade_lock():
+            if restart_is_pending():
+                print("\033[31mUpgrade already has a restart in progress; wait for it to finish.\033[0m")
+                return 1
+            if plan.activation is not None and activation_block_reason(plan.activation) == "superseded":
+                print("\033[31mUpgrade was superseded by another activation; retry the upgrade.\033[0m")
+                return 1
+            result = subprocess.run(
+                plan.command,
+                capture_output=True,
+                text=True,
+                env=plan.env,
+                cwd=safe_cwd,
+                timeout=UPGRADE_INSTALL_TIMEOUT_SECONDS,
+            )
+            if result.returncode == 0 and plan.activation is not None:
+                try:
+                    if os.name == "nt" and launcher_is_current_process(plan.activation.launcher):
+                        candidate_result = verify_upgrade_candidate(plan.activation)
+                        if not candidate_result.ok:
+                            raise RuntimeError(candidate_result.detail)
+                        defer_upgrade_activation(
+                            plan.activation,
+                            parent_pid=os.getpid(),
+                            rollback_to=plan.rollback_to,
+                            restart_required=runtime_was_running,
+                            prepare_show_runtime=not should_skip_show_runtime_prepare(),
+                        )
+                        deferred_activation = True
+                    else:
+                        restart_python = _candidate_python(plan.activation.candidate_launcher)
+                        activate_upgrade_candidate(plan.activation)
+                except Exception as exc:  # noqa: BLE001
+                    discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
+                    print(f"\033[31mUpgrade candidate failed integrity verification: {exc}\033[0m")
+                    return 1
+            elif result.returncode != 0 and plan.activation is not None:
+                discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
+            if result.returncode == 0 and plan.activation is None and plan.method == "pip":
+                integrity = verify_python_environment(sys.executable)
+                if not integrity.ok:
+                    print(f"\033[31mUpgrade installed an incomplete Python environment: {integrity.detail}\033[0m")
+                    return 1
+            if result.returncode == 0 and runtime_was_running and not deferred_activation:
                 try:
                     restart = schedule_restart(
                         delay_seconds=0.0,
@@ -14408,16 +14495,26 @@ def cmd_upgrade():
                         trigger="upgrade",
                         prepare_show_runtime=not should_skip_show_runtime_prepare(),
                         rollback_to=plan.rollback_to,
+                        **({"python_executable": str(restart_python)} if restart_python else {}),
                     )
                 except Exception as exc:
-                    print("\033[33mUpgrade installed, but restart scheduling failed.\033[0m")
-                    print(f"Restart error: {exc}")
-                    print("Run `vibe restart` to use the new version.")
-                    return 2
-                else:
-                    print("Restart scheduled to use the new version.")
-                    print(f"Job ID: {restart['job_id']}")
-                    print("Run `vibe status` to inspect the restart result.")
+                    restart_error = exc
+        if result.returncode == 0:
+            print("\033[32mUpgrade successful!\033[0m")
+            if deferred_activation:
+                print("Upgrade validated; launcher activation will complete after this command exits.")
+                if runtime_was_running:
+                    print("Restart will be scheduled by the activation helper.")
+                return 0
+            if restart_error is not None:
+                print("\033[33mUpgrade installed, but restart scheduling failed.\033[0m")
+                print(f"Restart error: {restart_error}")
+                print("Run `vibe restart` to use the new version.")
+                return 2
+            if restart is not None:
+                print("Restart scheduled to use the new version.")
+                print(f"Job ID: {restart['job_id']}")
+                print("Run `vibe status` to inspect the restart result.")
             else:
                 _prepare_show_runtime_after_install(current_vibe_path)
                 print("Avibe was not running; the new version will be used next time you start it.")
@@ -14426,6 +14523,8 @@ def cmd_upgrade():
             print(f"\033[31mUpgrade failed:\033[0m\n{result.stderr}")
             return 1
     except Exception as e:
+        if plan.activation is not None:
+            discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
         print(f"\033[31mUpgrade failed: {e}\033[0m")
         return 1
 
@@ -16859,11 +16958,130 @@ def _dispatch_restart_supervisor(argv: list[str]) -> int:
     return restart_supervisor_main(argv)
 
 
+def _dispatch_deferred_upgrade_activation(argv: list[str]) -> int:
+    """Activate a Windows CLI upgrade after the parent launcher exits."""
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--parent-pid", type=int, required=True)
+    parser.add_argument("--parent-started-at", type=float)
+    parser.add_argument("--launcher", required=True)
+    parser.add_argument("--candidate", required=True)
+    parser.add_argument("--source-generation")
+    parser.add_argument("--restart", action="store_true")
+    parser.add_argument("--prepare-show-runtime", action="store_true")
+    parser.add_argument("--rollback-to")
+    parser.add_argument("--rollback-package")
+    parser.add_argument("--rollback-python")
+    parser.add_argument("--rollback-main")
+    args = parser.parse_args(argv)
+
+    deadline = time.monotonic() + DEFERRED_ACTIVATION_TIMEOUT_SECONDS
+    while runtime.pid_alive(args.parent_pid):
+        if args.parent_started_at is not None:
+            observed = runtime.process_create_time(args.parent_pid)
+            if observed is not None and observed != args.parent_started_at:
+                break
+        if time.monotonic() >= deadline:
+            print("deferred upgrade activation timed out waiting for the parent launcher", file=sys.stderr)
+            return 1
+        time.sleep(0.1)
+
+    source_generation = Path(args.source_generation) if args.source_generation else None
+    activation = AtomicActivation(
+        launcher=Path(args.launcher),
+        candidate_launcher=Path(args.candidate),
+        source_generation=source_generation,
+    )
+    if args.restart and args.rollback_to and (not args.rollback_python or not args.rollback_main):
+        print("deferred upgrade restart is missing its rollback launcher", file=sys.stderr)
+        return 1
+    rollback_to = (
+        RollbackTarget(
+            version=args.rollback_to,
+            package=args.rollback_package,
+            launcher=runtime.ServiceLauncher(python=args.rollback_python, main=args.rollback_main),
+        )
+        if args.rollback_to
+        else None
+    )
+    activated = False
+    try:
+        with atomic_upgrade_lock():
+            reason = activation_block_reason(activation)
+            if reason == "restart_pending":
+                discard_atomic_uv_install_generation(activation.candidate_launcher)
+                print("deferred upgrade activation found another restart in progress", file=sys.stderr)
+                return 1
+            if reason == "superseded":
+                discard_atomic_uv_install_generation(activation.candidate_launcher)
+                print("deferred upgrade activation was superseded by another activation", file=sys.stderr)
+                return 1
+            activate_upgrade_candidate(activation)
+            activated = True
+            if args.restart:
+                schedule_restart(
+                    delay_seconds=0.0,
+                    vibe_path=args.launcher,
+                    trigger="upgrade",
+                    prepare_show_runtime=args.prepare_show_runtime,
+                    rollback_to=rollback_to,
+                    python_executable=sys.executable,
+                )
+    except Exception as exc:
+        if not activated:
+            discard_atomic_uv_install_generation(activation.candidate_launcher)
+            print(f"deferred upgrade activation failed: {exc}", file=sys.stderr)
+        else:
+            print(f"deferred upgrade restart scheduling failed: {exc}", file=sys.stderr)
+        return 1
+
+    if not args.restart and args.prepare_show_runtime:
+        _prepare_show_runtime_after_install(args.launcher)
+    return 0
+
+
+def _dispatch_installer_activation(argv: list[str]) -> int:
+    """Activate a staged one-command install through the shared Python owner."""
+
+    if argv == ["--protocol-version"]:
+        print("2")
+        return 0
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--snapshot", action="store_true")
+    parser.add_argument("--launcher", required=True)
+    parser.add_argument("--candidate")
+    parser.add_argument("--source-generation")
+    args = parser.parse_args(argv)
+    if args.snapshot:
+        generation = _launcher_generation(Path(args.launcher), atomic_uv_install_root())
+        if generation is not None:
+            print(generation)
+        return 0
+    if not args.candidate:
+        parser.error("--candidate is required unless --snapshot is used")
+    activation = AtomicActivation(
+        launcher=Path(args.launcher),
+        candidate_launcher=Path(args.candidate),
+        source_generation=Path(args.source_generation) if args.source_generation else None,
+    )
+    try:
+        activate_installer_candidate(activation)
+    except Exception as exc:
+        discard_atomic_uv_install_generation(activation.candidate_launcher)
+        print(f"installer activation failed: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main():
     cache_running_vibe_path()
     argv = sys.argv[1:]
     if argv and argv[0] == "__restart-supervisor":
         sys.exit(_dispatch_restart_supervisor(argv[1:]))
+    if argv and argv[0] == "__activate-upgrade":
+        sys.exit(_dispatch_deferred_upgrade_activation(argv[1:]))
+    if argv and argv[0] == "__activate-install":
+        sys.exit(_dispatch_installer_activation(argv[1:]))
     parser = build_parser()
     args = parser.parse_args()
 

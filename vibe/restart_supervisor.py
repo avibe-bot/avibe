@@ -30,6 +30,11 @@ from vibe.upgrade import (
     LEGACY_PACKAGE_NAME,
     PACKAGE_NAME,
     RollbackTarget,
+    activate_launcher_target,
+    atomic_uv_install_root,
+    atomic_upgrade_lock,
+    _launcher_generation,
+    get_cli_launcher_path,
     _names_a_published_release,
     build_upgrade_plan,
     get_restart_command,
@@ -627,6 +632,9 @@ def _roll_back_failed_upgrade(
     """
 
     version = rollback_to.version
+    restore_stable_launcher = bool(
+        vibe_path and _launcher_generation(Path(vibe_path).expanduser(), atomic_uv_install_root()) is not None
+    )
     rollback: dict = {"target_version": version, "state": "running", "started_at": _now_iso()}
     record(rollback)
     write(f"rolling back to {version}: no service is running after the failed restart")
@@ -655,42 +663,62 @@ def _roll_back_failed_upgrade(
         write(f"cannot roll back to {version}: the failed generation did not stop")
         return rollback
 
-    try:
-        plan = build_upgrade_plan(vibe_path=vibe_path, version=version, package_name=rollback_to.package)
-    except Exception as exc:
-        rollback.update(state="failed", error=f"cannot build a pinned install for {version}: {exc}")
+    # A staged upgrade leaves the previous tool generation untouched. Reuse it
+    # directly during rollback; reinstalling the old wheel would reintroduce a
+    # long, mutable operation into the one path that exists to recover quickly.
+    rollback_cli_launcher = get_cli_launcher_path(rollback_to.launcher) if restore_stable_launcher else None
+    if restore_stable_launcher and vibe_path and rollback_cli_launcher is not None:
+        rollback["install"] = {"method": "atomic", "ok": True, "reused": True}
         record(rollback)
-        return rollback
+        write(f"reusing the previous {version} generation")
+    else:
+        try:
+            plan = build_upgrade_plan(vibe_path=vibe_path, version=version, package_name=rollback_to.package)
+        except Exception as exc:
+            rollback.update(state="failed", error=f"cannot build a pinned install for {version}: {exc}")
+            record(rollback)
+            return rollback
 
-    rollback["install"] = {"method": plan.method, "ok": None}
-    record(rollback)
-    try:
-        result = subprocess.run(
-            plan.command,
-            capture_output=True,
-            text=True,
-            env=plan.env,
-            cwd=get_safe_cwd(),
-            timeout=_ROLLBACK_INSTALL_TIMEOUT_SECONDS,
-        )
-    except Exception as exc:
-        rollback["install"] = {"method": plan.method, "ok": False, "error": str(exc)}
-        rollback.update(state="failed", error=f"installing {version} failed: {exc}")
+        rollback["install"] = {"method": plan.method, "ok": None}
         record(rollback)
-        return rollback
-    if result.returncode != 0:
-        # The installer's own stderr, trimmed: it is the only account of why the
-        # rollback could not proceed, and the full text can be megabytes of
-        # resolver output.
-        detail = (result.stderr or result.stdout or "").strip()[-2000:]
-        rollback["install"] = {"method": plan.method, "ok": False, "error": detail or f"exit code {result.returncode}"}
-        rollback.update(state="failed", error=f"installing {version} failed with exit code {result.returncode}")
+        try:
+            result = subprocess.run(
+                plan.command,
+                capture_output=True,
+                text=True,
+                env=plan.env,
+                cwd=get_safe_cwd(),
+                timeout=_ROLLBACK_INSTALL_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            rollback["install"] = {"method": plan.method, "ok": False, "error": str(exc)}
+            rollback.update(state="failed", error=f"installing {version} failed: {exc}")
+            record(rollback)
+            return rollback
+        if result.returncode != 0:
+            # The installer's own stderr, trimmed: it is the only account of why the
+            # rollback could not proceed, and the full text can be megabytes of
+            # resolver output.
+            detail = (result.stderr or result.stdout or "").strip()[-2000:]
+            rollback["install"] = {"method": plan.method, "ok": False, "error": detail or f"exit code {result.returncode}"}
+            rollback.update(state="failed", error=f"installing {version} failed with exit code {result.returncode}")
+            record(rollback)
+            write(f"pinned install of {version} failed: {detail}")
+            return rollback
+        rollback["install"] = {"method": plan.method, "ok": True}
         record(rollback)
-        write(f"pinned install of {version} failed: {detail}")
-        return rollback
-    rollback["install"] = {"method": plan.method, "ok": True}
-    record(rollback)
-    write(f"installed {version} using {plan.method}")
+        write(f"installed {version} using {plan.method}")
+
+    if restore_stable_launcher and vibe_path and rollback_cli_launcher is not None:
+        try:
+            with atomic_upgrade_lock():
+                activate_launcher_target(vibe_path, rollback_cli_launcher)
+        except Exception as exc:  # noqa: BLE001
+            rollback.update(state="failed", error=f"restoring the active launcher failed: {exc}")
+            record(rollback)
+            return rollback
+        rollback["launcher"] = {"restored": True, "path": str(rollback_cli_launcher)}
+        record(rollback)
 
     try:
         rollback["database"] = _restore_database_for_rollback(backup_watermark, write)
@@ -1051,6 +1079,39 @@ def schedule_restart(
     prepare_show_runtime: bool = False,
     memory_ui_secret: str | None = None,
     rollback_to: RollbackTarget | None = None,
+    python_executable: str | None = None,
+) -> dict:
+    """Serialize every restart seed with install activation and pruning."""
+
+    from storage.migrations import guard_source_checkout_default_state_bootstrap
+
+    # The lock lives under the runtime directory. Preserve the development
+    # guard's contract by checking it before lock acquisition can create that
+    # directory.
+    guard_source_checkout_default_state_bootstrap()
+    with atomic_upgrade_lock():
+        return _schedule_restart_locked(
+            delay_seconds=delay_seconds,
+            vibe_path=vibe_path,
+            trigger=trigger,
+            scope=scope,
+            prepare_show_runtime=prepare_show_runtime,
+            memory_ui_secret=memory_ui_secret,
+            rollback_to=rollback_to,
+            python_executable=python_executable,
+        )
+
+
+def _schedule_restart_locked(
+    *,
+    delay_seconds: float,
+    vibe_path: str | None,
+    trigger: str,
+    scope: str,
+    prepare_show_runtime: bool,
+    memory_ui_secret: str | None,
+    rollback_to: RollbackTarget | None,
+    python_executable: str | None,
 ) -> dict:
     """Spawn the detached restart job.
 
@@ -1071,12 +1132,12 @@ def schedule_restart(
     is the only place they are put back together.
     """
     from core.memory.ui_access import process_ui_read_secret
-    from storage.migrations import guard_source_checkout_default_state_bootstrap
-
     memory_ui_secret = memory_ui_secret or process_ui_read_secret()
-    guard_source_checkout_default_state_bootstrap()
     job_id = uuid.uuid4().hex[:12]
-    invocation = get_restart_invocation_command(vibe_path=vibe_path)
+    if python_executable:
+        invocation = [python_executable, "-c", "from vibe.cli import main; main()", "restart"]
+    else:
+        invocation = get_restart_invocation_command(vibe_path=vibe_path)
     command = [*invocation[:-1], "__restart-supervisor"] if invocation and invocation[-1] == "restart" else [
         *(invocation or ["vibe"]),
         "__restart-supervisor",
@@ -1107,6 +1168,12 @@ def schedule_restart(
         if rollback_to.package:
             command.extend(["--rollback-package", rollback_to.package])
     env = get_restart_environment(vibe_path=vibe_path)
+    if python_executable:
+        # A candidate supervisor must import the staged wheel, never a source
+        # checkout inherited from the parent process.
+        env = dict(os.environ if env is None else env)
+        env.pop("PYTHONPATH", None)
+        env.pop("PYTHONHOME", None)
     log_path = _restart_log_path(job_id)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     # Seed the status BEFORE spawning the job so the child's own writes (which set

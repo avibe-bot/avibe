@@ -54,6 +54,89 @@ function Test-Command {
     return $?
 }
 
+function Resolve-InstallPath {
+    param([string]$Path)
+
+    $expanded = $Path
+    if ($expanded -eq "~") {
+        $expanded = $env:USERPROFILE
+    } elseif ($expanded.StartsWith("~\") -or $expanded.StartsWith("~/")) {
+        $expanded = Join-Path $env:USERPROFILE $expanded.Substring(2)
+    }
+    if (-not [System.IO.Path]::IsPathRooted($expanded)) {
+        $expanded = Join-Path (Get-Location) $expanded
+    }
+    return [System.IO.Path]::GetFullPath($expanded)
+}
+
+function Get-StableBinDirectory {
+    $configured = $env:UV_TOOL_BIN_DIR
+    $directory = if ($configured) { $configured } else { Join-Path $env:USERPROFILE ".local\bin" }
+    return Resolve-InstallPath $directory
+}
+
+function Get-LauncherState {
+    param(
+        [string]$Launcher,
+        [string]$RuntimeHome
+    )
+
+    $state = @{
+        Exists = Test-Path -LiteralPath $Launcher
+        SourcePath = $null
+        ActivationOwner = $null
+    }
+    if (-not $state.Exists) {
+        return $state
+    }
+
+    $previousPythonPath = $env:PYTHONPATH
+    $previousPythonHome = $env:PYTHONHOME
+    $previousAvibeHome = $env:AVIBE_HOME
+    Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+    Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
+    $env:AVIBE_HOME = $RuntimeHome
+    Push-Location $RuntimeHome
+    try {
+        $protocol = Invoke-NativeCommand -FilePath $Launcher -Arguments @("__activate-install", "--protocol-version")
+        if ((Get-InstallProtocolVersion $protocol) -ge 2) {
+            $snapshot = Invoke-NativeCommand `
+                -FilePath $Launcher `
+                -Arguments @("__activate-install", "--snapshot", "--launcher", $Launcher)
+            if ($snapshot.Success -and $snapshot.Stdout.Trim()) {
+                $state.SourcePath = $snapshot.Stdout.Trim()
+                $owner = Join-Path $state.SourcePath "bin\vibe.exe"
+                if (Test-Path -LiteralPath $owner) {
+                    $state.ActivationOwner = $owner
+                }
+                return $state
+            }
+        }
+    } catch {
+        # Released pre-protocol launchers fall through to legacy link discovery.
+    } finally {
+        Pop-Location
+        if ($null -eq $previousPythonPath) { Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue } else { $env:PYTHONPATH = $previousPythonPath }
+        if ($null -eq $previousPythonHome) { Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue } else { $env:PYTHONHOME = $previousPythonHome }
+        if ($null -eq $previousAvibeHome) { Remove-Item Env:AVIBE_HOME -ErrorAction SilentlyContinue } else { $env:AVIBE_HOME = $previousAvibeHome }
+    }
+    try {
+        $item = Get-Item -LiteralPath $Launcher -ErrorAction Stop
+        $target = @($item.Target)[0]
+        if (-not $target) {
+            return $state
+        }
+        if (-not [System.IO.Path]::IsPathRooted($target)) {
+            $target = Join-Path $item.DirectoryName $target
+        }
+        $state.SourcePath = Resolve-InstallPath $target
+        $state.ActivationOwner = $state.SourcePath
+    } catch {
+        return $state
+    }
+    return $state
+}
+
 function Invoke-WebScriptWithRetry {
     param([string]$Url)
 
@@ -192,14 +275,11 @@ function Invoke-NativeCommand {
     $stderrPath = [System.IO.Path]::GetTempFileName()
 
     try {
-        $process = Start-Process -FilePath $FilePath `
-            -ArgumentList $Arguments `
-            -RedirectStandardOutput $stdoutPath `
-            -RedirectStandardError $stderrPath `
-            -NoNewWindow `
-            -Wait `
-            -PassThru `
-            -ErrorAction Stop
+        # PowerShell's call operator preserves the argument vector. In
+        # contrast, Start-Process joins ArgumentList with spaces and loses the
+        # boundaries around paths containing whitespace.
+        & $FilePath @Arguments 1> $stdoutPath 2> $stderrPath
+        $exitCode = $LASTEXITCODE
 
         $stdout = if (Test-Path $stdoutPath) { [System.IO.File]::ReadAllText($stdoutPath) } else { "" }
         $stderr = if (Test-Path $stderrPath) { [System.IO.File]::ReadAllText($stderrPath) } else { "" }
@@ -213,30 +293,37 @@ function Invoke-NativeCommand {
         }
 
         return @{
-            Success = ($process.ExitCode -eq 0)
-            ExitCode = $process.ExitCode
+            Success = ($exitCode -eq 0)
+            ExitCode = $exitCode
+            Stdout = $stdout.Trim()
+            Stderr = $stderr.Trim()
             Output = ($capturedOutput -join [System.Environment]::NewLine).Trim()
         }
     } catch {
         $capturedOutput = @()
+        $stdout = ""
+        $stderr = ""
 
-        foreach ($path in @($stdoutPath, $stderrPath)) {
-            if (Test-Path $path) {
-                $streamOutput = [System.IO.File]::ReadAllText($path).Trim()
-                if ($streamOutput) {
-                    $capturedOutput += $streamOutput
-                }
-            }
+        if (Test-Path $stdoutPath) {
+            $stdout = [System.IO.File]::ReadAllText($stdoutPath).Trim()
+            if ($stdout) { $capturedOutput += $stdout }
+        }
+        if (Test-Path $stderrPath) {
+            $stderr = [System.IO.File]::ReadAllText($stderrPath).Trim()
+            if ($stderr) { $capturedOutput += $stderr }
         }
 
         $errorText = ($_ | Out-String).Trim()
         if ($errorText) {
             $capturedOutput += $errorText
         }
+        $capturedStderr = (($stderr, $errorText) | Where-Object { $_ }) -join [System.Environment]::NewLine
 
         return @{
             Success = $false
             ExitCode = 1
+            Stdout = $stdout
+            Stderr = $capturedStderr
             Output = ($capturedOutput -join [System.Environment]::NewLine).Trim()
         }
     } finally {
@@ -248,10 +335,184 @@ function Invoke-NativeCommand {
     }
 }
 
+function Get-InstallProtocolVersion {
+    param([object]$Result)
+
+    if (-not $Result.Success) {
+        return 0
+    }
+    [int]$version = 0
+    if (-not [int]::TryParse($Result.Stdout.Trim(), [ref]$version)) {
+        return 0
+    }
+    return $version
+}
+
+function Activate-LegacyInstallCandidate {
+    param(
+        [string]$Candidate,
+        [string]$StableLauncher,
+        [string]$StableBin,
+        [string]$GenerationRoot
+    )
+
+    $probe = Invoke-NativeCommand -FilePath $Candidate -Arguments @("--help")
+    if (-not $probe.Success) {
+        return @{
+            Success = $false
+            ExitCode = $probe.ExitCode
+            Output = if ($probe.Output) { $probe.Output } else { "candidate vibe launcher failed its startup probe" }
+        }
+    }
+
+    $replacement = Join-Path $StableBin ("vibe.exe.avibe-" + [Guid]::NewGuid().ToString("N") + ".new")
+    try {
+        try {
+            New-Item -ItemType SymbolicLink -Path $replacement -Target $Candidate -ErrorAction Stop | Out-Null
+        } catch {
+            try {
+                New-Item -ItemType HardLink -Path $replacement -Target $Candidate -ErrorAction Stop | Out-Null
+            } catch {
+                Copy-Item -LiteralPath $Candidate -Destination $replacement -Force -ErrorAction Stop
+            }
+        }
+        # This fallback is fresh-install only. File.Move atomically refuses to
+        # overwrite a launcher that appeared while the candidate was staging.
+        [System.IO.File]::Move($replacement, $StableLauncher)
+    } catch {
+        Remove-Item -LiteralPath $replacement -Force -ErrorAction SilentlyContinue
+        return @{ Success = $false; ExitCode = 1; Output = (($_ | Out-String).Trim()) }
+    }
+
+    $markerReplacement = $null
+    try {
+        $marker = Join-Path $StableBin ".vibe.exe.avibe-generation"
+        $markerReplacement = Join-Path $StableBin (".vibe.exe.avibe-generation-" + [Guid]::NewGuid().ToString("N") + ".new")
+        Set-Content -LiteralPath $markerReplacement -Value $GenerationRoot -Encoding UTF8
+        Move-Item -Force -Path $markerReplacement -Destination $marker
+    } catch {
+        if ($markerReplacement) {
+            Remove-Item -LiteralPath $markerReplacement -Force -ErrorAction SilentlyContinue
+        }
+        Write-Warning "Could not record the legacy install generation; retained all installed generations."
+    }
+    return @{ Success = $true; ExitCode = 0; Output = "" }
+}
+
 function Invoke-UvToolInstallAttempt {
     param([string[]]$Arguments)
 
-    return Invoke-NativeCommand -FilePath "uv" -Arguments (@("tool", "install") + $Arguments)
+    $defaultHome = Join-Path $env:USERPROFILE ".avibe"
+    $legacyHome = Join-Path $env:USERPROFILE ".vibe_remote"
+    $runtimeHome = if ($env:AVIBE_HOME) {
+        $env:AVIBE_HOME
+    } elseif (Test-Path $defaultHome) {
+        $defaultHome
+    } elseif (Test-Path $legacyHome) {
+        $legacyHome
+    } else {
+        $defaultHome
+    }
+    $runtimeHome = Resolve-InstallPath $runtimeHome
+    $generationRoot = Join-Path (Join-Path $runtimeHome "runtime\install-generations") ([Guid]::NewGuid().ToString("N"))
+    $generationTools = Join-Path $generationRoot "tools"
+    $generationBin = Join-Path $generationRoot "bin"
+    $stableBin = Get-StableBinDirectory
+    $stableLauncher = Join-Path $stableBin "vibe.exe"
+    # The candidate's shared Python activation owner resolves this snapshot to
+    # a generation. PowerShell must not duplicate junction/symlink identity.
+    $launcherState = Get-LauncherState -Launcher $stableLauncher -RuntimeHome $runtimeHome
+    $previousSourcePath = $launcherState.SourcePath
+    New-Item -ItemType Directory -Force -Path $generationTools, $generationBin, $stableBin | Out-Null
+
+    $previousToolDir = $env:UV_TOOL_DIR
+    $previousToolBinDir = $env:UV_TOOL_BIN_DIR
+    try {
+        $env:UV_TOOL_DIR = $generationTools
+        $env:UV_TOOL_BIN_DIR = $generationBin
+        $result = Invoke-NativeCommand -FilePath "uv" -Arguments (@("tool", "install") + $Arguments)
+        if (-not $result.Success) {
+            Remove-Item -LiteralPath $generationRoot -Recurse -Force -ErrorAction SilentlyContinue
+            return $result
+        }
+
+        $candidate = Join-Path $generationBin "vibe.exe"
+        if (-not (Test-Path $candidate)) {
+            Remove-Item -LiteralPath $generationRoot -Recurse -Force -ErrorAction SilentlyContinue
+            return @{
+                Success = $false
+                ExitCode = 1
+                Output = "uv completed but the candidate vibe launcher was not created"
+            }
+        }
+
+        $previousPythonPath = $env:PYTHONPATH
+        $previousPythonHome = $env:PYTHONHOME
+        $previousAvibeHome = $env:AVIBE_HOME
+        Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+        Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
+        $env:AVIBE_HOME = $runtimeHome
+        Push-Location $runtimeHome
+        try {
+            $protocol = Invoke-NativeCommand -FilePath $candidate -Arguments @("__activate-install", "--protocol-version")
+            $activationOwner = if ((Get-InstallProtocolVersion $protocol) -ge 1) {
+                $candidate
+            } elseif ($launcherState.ActivationOwner) {
+                $ownerProtocol = Invoke-NativeCommand `
+                    -FilePath $launcherState.ActivationOwner `
+                    -Arguments @("__activate-install", "--protocol-version")
+                if ((Get-InstallProtocolVersion $ownerProtocol) -ge 1) {
+                    $launcherState.ActivationOwner
+                } else {
+                    $null
+                }
+            } else {
+                $null
+            }
+            if ($activationOwner) {
+                $activationArguments = @(
+                    "__activate-install",
+                    "--launcher", $stableLauncher,
+                    "--candidate", $candidate
+                )
+                if ($previousSourcePath) {
+                    $activationArguments += @("--source-generation", $previousSourcePath)
+                }
+                $activation = Invoke-NativeCommand -FilePath $activationOwner -Arguments $activationArguments
+            } elseif ($launcherState.Exists) {
+                $activation = @{
+                    Success = $false
+                    ExitCode = 1
+                    Output = "legacy candidate cannot safely replace an existing Avibe installation"
+                }
+            } else {
+                # A legacy wheel may bootstrap a fresh machine. Existing
+                # installs must route through a protocol-aware current owner.
+                $activation = Activate-LegacyInstallCandidate `
+                    -Candidate $candidate `
+                    -StableLauncher $stableLauncher `
+                    -StableBin $stableBin `
+                    -GenerationRoot $generationRoot
+            }
+        } finally {
+            Pop-Location
+            if ($null -eq $previousPythonPath) { Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue } else { $env:PYTHONPATH = $previousPythonPath }
+            if ($null -eq $previousPythonHome) { Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue } else { $env:PYTHONHOME = $previousPythonHome }
+            if ($null -eq $previousAvibeHome) { Remove-Item Env:AVIBE_HOME -ErrorAction SilentlyContinue } else { $env:AVIBE_HOME = $previousAvibeHome }
+        }
+        if (-not $activation.Success) {
+            Remove-Item -LiteralPath $generationRoot -Recurse -Force -ErrorAction SilentlyContinue
+            return @{
+                Success = $false
+                ExitCode = $activation.ExitCode
+                Output = if ($activation.Output) { $activation.Output } else { "candidate Avibe environment could not be activated" }
+            }
+        }
+        return $result
+    } finally {
+        if ($null -eq $previousToolDir) { Remove-Item Env:UV_TOOL_DIR -ErrorAction SilentlyContinue } else { $env:UV_TOOL_DIR = $previousToolDir }
+        if ($null -eq $previousToolBinDir) { Remove-Item Env:UV_TOOL_BIN_DIR -ErrorAction SilentlyContinue } else { $env:UV_TOOL_BIN_DIR = $previousToolBinDir }
+    }
 }
 
 function Install-Vibe {
@@ -322,34 +583,19 @@ function Install-Vibe {
 
 function Test-Installation {
     Write-Info "Verifying installation..."
-    
-    # Refresh PATH
-    $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
-    $env:Path += ";$env:USERPROFILE\.local\bin"
-    
-    if (Test-Command "vibe") {
+
+    $stableBin = Get-StableBinDirectory
+    $stableLauncher = Join-Path $stableBin "vibe.exe"
+    $persistedPath = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+    $env:Path = "$stableBin;$persistedPath"
+
+    if (Test-Path -LiteralPath $stableLauncher) {
         Write-Success "vibe command is available"
         Write-Host ""
-        & vibe --help
+        & $stableLauncher --help
         return $true
     }
-    
-    # Check common install locations
-    $vibeLocations = @(
-        "$env:USERPROFILE\.local\bin\vibe.exe"
-    )
-    
-    foreach ($loc in $vibeLocations) {
-        if (Test-Path $loc) {
-            Write-Warning "vibe installed at $loc but not in PATH"
-            Write-Host ""
-            Write-Host "Add this directory to your PATH:" -ForegroundColor Yellow
-            Write-Host "  $(Split-Path $loc)"
-            Write-Host ""
-            return $true
-        }
-    }
-    
+
     Write-Error "Installation verification failed. vibe command not found."
 }
 
@@ -359,13 +605,14 @@ function Prepare-ShowRuntime {
         return
     }
 
-    if (-not (Test-Command "vibe")) {
+    $stableLauncher = Join-Path (Get-StableBinDirectory) "vibe.exe"
+    if (-not (Test-Path -LiteralPath $stableLauncher)) {
         Write-Warning "Show Runtime was not prepared because the vibe command is not available yet"
         return
     }
 
     Write-Info "Preparing Show Runtime for this platform..."
-    $result = Invoke-NativeCommand -FilePath "vibe" -Arguments @("runtime", "prepare", "--strict")
+    $result = Invoke-NativeCommand -FilePath $stableLauncher -Arguments @("runtime", "prepare", "--strict")
     if ($result.Success) {
         Write-Success "Show Runtime is ready"
         return
@@ -379,6 +626,7 @@ function Prepare-ShowRuntime {
 }
 
 function Write-NextSteps {
+    $stableBin = Get-StableBinDirectory
     Write-Host ""
     Write-Host "Installation complete!" -ForegroundColor Green
     Write-Host ""
@@ -397,7 +645,11 @@ function Write-NextSteps {
     Write-Host "  uv tool uninstall avibe-os"
     Write-Host "  uv tool uninstall vibe-remote"
     Write-Host "  pip uninstall avibe-os vibe-remote"
-    Write-Host "  Remove-Item -Recurse ~\.avibe, ~\.vibe_remote  # remove config and data"
+    Write-Host ("  Remove-Item -Force `"$(Join-Path $stableBin 'vibe.exe')`"")
+    Write-Host ("  Remove-Item -Force `"$(Join-Path $stableBin '.vibe.exe.avibe-generation')`"")
+    Write-Host '  $avibeHome = if ($env:AVIBE_HOME) { $env:AVIBE_HOME -replace ''^~(?=[\\/]|$)'', $env:USERPROFILE } else { "$env:USERPROFILE\.avibe" }'
+    Write-Host '  Remove-Item -Recurse -Force (Join-Path $avibeHome "runtime\install-generations")'
+    Write-Host '  Remove-Item -Recurse $avibeHome, ~\.vibe_remote  # remove config and data'
     Write-Host ""
     Write-Host "Documentation:" -ForegroundColor Blue
     Write-Host "  https://github.com/$REPO#readme"

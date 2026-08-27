@@ -12,6 +12,7 @@ import socket
 import ssl
 import stat
 import subprocess
+import sys
 import threading
 import time
 import urllib.parse
@@ -52,6 +53,7 @@ from config.v2_settings import (
 from config.v2_sessions import SessionsStore
 from config.platform_registry import get_platform_descriptor
 from core import latest_version_cache
+from core.install_integrity import verify_python_environment
 from core.memory.operation_lock import MemoryOperationBusy, MemoryOperationLease
 from vibe.opencode_config import (
     get_opencode_config_paths,
@@ -60,11 +62,22 @@ from vibe.opencode_config import (
 )
 from vibe.build_identity import get_build_identity
 from vibe.upgrade import (
+    AtomicActivation,
+    _candidate_python,
+    activation_block_reason,
+    activate_upgrade_candidate,
+    atomic_upgrade_lock,
     build_upgrade_plan,
+    defer_upgrade_activation,
+    discard_atomic_uv_install_generation,
     get_latest_version_info,
     get_running_vibe_path,
     get_safe_cwd,
+    launcher_is_current_process,
+    restart_is_pending,
     should_skip_show_runtime_prepare,
+    UPGRADE_INSTALL_TIMEOUT_SECONDS,
+    verify_upgrade_candidate,
 )
 from vibe.restart_supervisor import schedule_restart
 from vibe import backend_model_catalog
@@ -6251,27 +6264,91 @@ def do_upgrade(auto_restart: bool = True) -> dict:
     """
     current_vibe_path = get_running_vibe_path()
     plan = build_upgrade_plan(vibe_path=current_vibe_path)
+    if plan.preflight_error:
+        return {
+            "ok": False,
+            "message": "Upgrade cannot be activated safely",
+            "output": plan.preflight_error,
+            "restarting": False,
+        }
     runtime_was_running = _runtime_process_was_running()
 
     # Use a stable directory as cwd to avoid "Current directory does not exist"
     # errors.  The vibe service process cwd may be inside the uv tool venv
     # directory, which uv deletes and recreates during upgrade.
     safe_cwd = get_safe_cwd()
+    restarting = False
+    restart_failed = False
+    runtime_output = None
+    deferred_activation = False
+    restart_python = None
 
     try:
-        result = subprocess.run(
-            plan.command,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            env=plan.env,
-            cwd=safe_cwd,
-        )
-        if result.returncode == 0:
-            restarting = False
-            restart_failed = False
-            runtime_output = None
-            if auto_restart and runtime_was_running:
+        with atomic_upgrade_lock():
+            if restart_is_pending():
+                return {
+                    "ok": False,
+                    "message": "Upgrade already has a restart in progress",
+                    "output": "Wait for the pending restart to finish before starting another upgrade.",
+                    "restarting": False,
+                }
+            if plan.activation is not None and activation_block_reason(plan.activation) == "superseded":
+                return {
+                    "ok": False,
+                    "message": "Upgrade was superseded by another activation",
+                    "output": "The active Avibe generation changed while waiting for the upgrade lock; retry the upgrade.",
+                    "restarting": False,
+                }
+            result = subprocess.run(
+                plan.command,
+                capture_output=True,
+                text=True,
+                # A wheel install copies the complete candidate environment before
+                # it can be activated.  The old 120s bound interrupted that copy
+                # in-place and left metadata claiming a package tree that no longer
+                # existed.  The candidate is isolated now; this is only a bound for
+                # a genuinely hung resolver/download.
+                timeout=UPGRADE_INSTALL_TIMEOUT_SECONDS,
+                env=plan.env,
+                cwd=safe_cwd,
+            )
+            if result.returncode == 0 and plan.activation is not None:
+                try:
+                    if os.name == "nt" and launcher_is_current_process(plan.activation.launcher):
+                        candidate_result = verify_upgrade_candidate(plan.activation)
+                        if not candidate_result.ok:
+                            raise RuntimeError(candidate_result.detail)
+                        defer_upgrade_activation(
+                            plan.activation,
+                            parent_pid=os.getpid(),
+                            rollback_to=plan.rollback_to,
+                            restart_required=auto_restart and runtime_was_running,
+                            prepare_show_runtime=not should_skip_show_runtime_prepare(),
+                        )
+                        deferred_activation = True
+                    else:
+                        restart_python = _candidate_python(plan.activation.candidate_launcher)
+                        activate_upgrade_candidate(plan.activation)
+                except Exception as exc:  # noqa: BLE001
+                    discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
+                    return {
+                        "ok": False,
+                        "message": "Upgrade candidate failed integrity verification",
+                        "output": str(exc),
+                        "restarting": False,
+                    }
+            elif result.returncode != 0 and plan.activation is not None:
+                discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
+            if result.returncode == 0 and plan.activation is None and plan.method == "pip":
+                integrity = verify_python_environment(sys.executable)
+                if not integrity.ok:
+                    return {
+                        "ok": False,
+                        "message": "Upgrade installed an incomplete Python environment",
+                        "output": integrity.detail,
+                        "restarting": False,
+                    }
+            if result.returncode == 0 and auto_restart and runtime_was_running and not deferred_activation:
                 try:
                     schedule_restart(
                         delay_seconds=2.0,
@@ -6279,12 +6356,21 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                         trigger="upgrade",
                         prepare_show_runtime=not should_skip_show_runtime_prepare(),
                         rollback_to=plan.rollback_to,
+                        **({"python_executable": str(restart_python)} if restart_python else {}),
                     )
                     restarting = True
                 except Exception as exc:
                     restart_failed = True
                     runtime_output = f"Restart scheduling failed; run `vibe restart` to use the new version.\n{exc}"
-            else:
+        if result.returncode == 0:
+            if deferred_activation:
+                return {
+                    "ok": True,
+                    "message": "Upgrade successful. Activation will complete after this process exits.",
+                    "output": _append_upgrade_output(result.stdout, None),
+                    "restarting": auto_restart and runtime_was_running,
+                }
+            if not restarting and not restart_failed:
                 runtime_output = _prepare_show_runtime_after_upgrade(current_vibe_path, safe_cwd)
             if restarting:
                 message = "Upgrade successful. Restarting..."
@@ -6307,6 +6393,8 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                 "restarting": False,
             }
     except subprocess.TimeoutExpired:
+        if plan.activation is not None:
+            discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
         return {
             "ok": False,
             "message": "Upgrade timed out",
@@ -6314,6 +6402,8 @@ def do_upgrade(auto_restart: bool = True) -> dict:
             "restarting": False,
         }
     except Exception as e:
+        if plan.activation is not None:
+            discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
         return {"ok": False, "message": str(e), "output": None, "restarting": False}
 
 
