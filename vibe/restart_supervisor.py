@@ -201,34 +201,43 @@ def _legacy_service_launcher(
         return fallback
 
 
-def _launcher_core_dist_metadata(launcher: runtime.ServiceLauncher) -> list[tuple[str, str]]:
-    """Read only core distributions from the launcher's site-packages."""
+def _launcher_dist_metadata(launcher: runtime.ServiceLauncher) -> list[tuple[str, str]]:
+    """Read valid distributions without letting one broken entry hide the rest."""
 
-    site_packages = Path(launcher.main).resolve().parent.parent
     entries: list[tuple[str, str]] = []
     try:
-        for metadata_path in sorted(site_packages.glob("*.dist-info/METADATA")):
+        site_packages = Path(launcher.main).resolve().parent.parent
+        metadata_paths = sorted(site_packages.glob("*.dist-info/METADATA"))
+    except (OSError, UnicodeError, ValueError):
+        return entries
+    for metadata_path in metadata_paths:
+        try:
             payload = email.parser.Parser().parsestr(metadata_path.read_text(encoding="utf-8"))
             name = str(payload.get("Name") or "").strip()
             version = str(payload.get("Version") or "").strip()
-            if name in {PACKAGE_NAME, LEGACY_PACKAGE_NAME} and version:
+            if name and version:
                 entries.append((name, version))
-    except (OSError, UnicodeError, ValueError):
-        return []
+        except (OSError, UnicodeError, ValueError):
+            continue
     return entries
+
+
+def _launcher_core_dist_metadata(launcher: runtime.ServiceLauncher) -> list[tuple[str, str]]:
+    """Read only core distributions from the launcher's site-packages."""
+
+    return [
+        (name, version)
+        for name, version in _launcher_dist_metadata(launcher)
+        if name in {PACKAGE_NAME, LEGACY_PACKAGE_NAME}
+    ]
 
 
 def _launcher_memory_version(launcher: runtime.ServiceLauncher) -> str | None:
     """Read optional Memory metadata without exposing it to core ownership."""
 
-    site_packages = Path(launcher.main).resolve().parent.parent
-    try:
-        for metadata_path in sorted(site_packages.glob("*.dist-info/METADATA")):
-            payload = email.parser.Parser().parsestr(metadata_path.read_text(encoding="utf-8"))
-            if str(payload.get("Name") or "").strip() == MEMORY_PACKAGE_NAME:
-                return str(payload.get("Version") or "").strip() or None
-    except (OSError, UnicodeError, ValueError):
-        return None
+    for name, version in _launcher_dist_metadata(launcher):
+        if name == MEMORY_PACKAGE_NAME:
+            return version
     return None
 
 

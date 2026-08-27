@@ -14398,10 +14398,15 @@ def cmd_upgrade():
     print("\nUpgrading...")
 
     current_vibe_path = cache_running_vibe_path()
-    plan = build_upgrade_plan(
-        vibe_path=current_vibe_path,
-        memory_enabled=configured_memory_enabled(),
-    )
+    try:
+        plan = build_upgrade_plan(
+            vibe_path=current_vibe_path,
+            memory_enabled=configured_memory_enabled(),
+            target_version=info.get("latest"),
+        )
+    except ValueError as exc:
+        print(f"\033[31mUpgrade failed: {exc}\033[0m")
+        return 1
     print(f"Using {plan.method}: {' '.join(plan.command)}")
     runtime_was_running = _runtime_process_was_running()
 

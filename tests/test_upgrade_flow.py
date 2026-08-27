@@ -859,7 +859,12 @@ def test_do_upgrade_uses_upgrade_plan_env_and_restarts(monkeypatch):
     )
     calls: dict[str, Any] = {}
 
-    monkeypatch.setattr(api, "build_upgrade_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(api, "get_version_info", lambda: {"latest": "3.0.15"})
+    monkeypatch.setattr(
+        api,
+        "build_upgrade_plan",
+        lambda **kwargs: calls.setdefault("plan_kwargs", kwargs) and plan,
+    )
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/custom/bin/vibe")
     monkeypatch.setattr(api, "_runtime_process_was_running", lambda: True)
     monkeypatch.setattr(api, "schedule_restart", lambda **kwargs: calls.setdefault("restart_kwargs", kwargs))
@@ -882,6 +887,7 @@ def test_do_upgrade_uses_upgrade_plan_env_and_restarts(monkeypatch):
     assert calls["run_kwargs"]["text"] is True
     assert calls["run_kwargs"]["timeout"] == 120
     assert calls["run_kwargs"]["env"] == plan.env
+    assert calls["plan_kwargs"]["target_version"] == "3.0.15"
     safe_cwd = calls["run_kwargs"].get("cwd")
     assert safe_cwd and os.path.isabs(safe_cwd), f"subprocess.run cwd must be an absolute path, got {safe_cwd!r}"
     assert calls["restart_kwargs"] == {
@@ -1112,7 +1118,11 @@ def test_cmd_upgrade_uses_upgrade_plan_env(monkeypatch):
 
     monkeypatch.setattr(cli, "get_latest_version", lambda: {"error": None, "has_update": True, "latest": "2.2.0"})
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/custom/bin/vibe")
-    monkeypatch.setattr(cli, "build_upgrade_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(
+        cli,
+        "build_upgrade_plan",
+        lambda **kwargs: calls.setdefault("plan_kwargs", kwargs) and plan,
+    )
     monkeypatch.setattr(cli, "_runtime_process_was_running", lambda: True)
 
     def fake_schedule_restart(**kwargs):
@@ -1138,6 +1148,7 @@ def test_cmd_upgrade_uses_upgrade_plan_env(monkeypatch):
     assert calls["kwargs"]["capture_output"] is True
     assert calls["kwargs"]["text"] is True
     assert calls["kwargs"]["env"] == plan.env
+    assert calls["plan_kwargs"]["target_version"] == "2.2.0"
     assert "cwd" in calls["kwargs"], "subprocess.run must specify cwd to avoid stale venv cwd"
     assert os.path.isabs(calls["kwargs"]["cwd"]), f"cwd must be absolute, got {calls['kwargs']['cwd']!r}"
     assert calls["restart_kwargs"] == {
@@ -1256,7 +1267,7 @@ def test_cmd_upgrade_skips_install_when_already_latest(monkeypatch):
     assert cli.cmd_upgrade() == 0
 
 
-def test_memory_enabled_forward_plan_uses_only_target_extra(monkeypatch):
+def test_memory_enabled_forward_plan_locks_memory_to_target_release(monkeypatch):
     monkeypatch.setattr("vibe.upgrade.find_uv_binary", lambda **kwargs: None)
     monkeypatch.setattr("vibe.upgrade.installed_metadata_describes_running_code", lambda: True)
 
@@ -1265,11 +1276,14 @@ def test_memory_enabled_forward_plan_uses_only_target_extra(monkeypatch):
         base_env={"PATH": "/usr/bin"},
         memory_enabled=True,
         memory_package=True,
+        memory_version="3.0.14",
+        target_version="3.1.0",
         package_spec="avibe-os>=3.1,<3.2",
     )
 
     target = "avibe-os[memory]<3.2,>=3.1"
-    assert plan.command == ["/usr/bin/python3", "-m", "pip", "install", "--upgrade", target]
+    memory = "avibe-memory==3.1.0"
+    assert plan.command == ["/usr/bin/python3", "-m", "pip", "install", "--upgrade", target, memory]
     assert plan.preflight_command == [
         "/usr/bin/python3",
         "-m",
@@ -1278,6 +1292,7 @@ def test_memory_enabled_forward_plan_uses_only_target_extra(monkeypatch):
         "--dry-run",
         "--upgrade",
         target,
+        memory,
     ]
     assert plan.preflight_fallback_command == [
         "/usr/bin/python3",
@@ -1287,9 +1302,22 @@ def test_memory_enabled_forward_plan_uses_only_target_extra(monkeypatch):
         "--dest",
         "{avibe-pip-download-destination}",
         target,
+        memory,
     ]
-    assert "avibe-memory" not in " ".join(plan.command + plan.preflight_command)
     assert "<3.1" not in " ".join(plan.command + plan.preflight_command)
+
+
+def test_memory_enabled_forward_plan_requires_target_release(monkeypatch):
+    monkeypatch.setattr("vibe.upgrade.find_uv_binary", lambda **kwargs: None)
+
+    with pytest.raises(ValueError, match="target release version"):
+        build_upgrade_plan(
+            python_executable="/usr/bin/python3",
+            base_env={"PATH": "/usr/bin"},
+            memory_enabled=True,
+            memory_package=True,
+            package_spec="avibe-os",
+        )
 
 
 def test_memory_preflight_failure_does_not_mutate_package(monkeypatch):
@@ -1423,6 +1451,7 @@ def test_unreadable_memory_config_preserves_only_an_installed_package(monkeypatc
         python_executable="/usr/bin/python3",
         base_env={"PATH": "/usr/bin"},
         memory_enabled=enabled,
+        target_version="3.1.0",
         package_spec="avibe-os",
     )
 
@@ -1430,7 +1459,7 @@ def test_unreadable_memory_config_preserves_only_an_installed_package(monkeypatc
     assert ("avibe-os[memory]" in plan.command) is memory_installed
 
 
-def test_uv_forward_plan_resolves_only_target_extra(monkeypatch):
+def test_uv_forward_plan_locks_memory_to_target_release(monkeypatch):
     monkeypatch.setattr("vibe.upgrade.is_uv_tool_install", lambda executable: True)
     monkeypatch.setattr("vibe.upgrade.is_legacy_uv_tool_install", lambda executable: False)
     monkeypatch.setattr("vibe.upgrade.find_uv_binary", lambda **kwargs: "/usr/bin/uv")
@@ -1441,11 +1470,22 @@ def test_uv_forward_plan_resolves_only_target_extra(monkeypatch):
         base_env={"PATH": "/usr/bin"},
         memory_enabled=True,
         memory_package=True,
+        target_version="3.1.0",
         package_spec="avibe-os>=3.1,<3.2",
     )
 
     target = "avibe-os[memory]<3.2,>=3.1"
-    assert plan.command == ["/usr/bin/uv", "tool", "install", target, "--upgrade", "--force"]
+    memory = "avibe-memory==3.1.0"
+    assert plan.command == [
+        "/usr/bin/uv",
+        "tool",
+        "install",
+        target,
+        "--with",
+        memory,
+        "--upgrade",
+        "--force",
+    ]
     assert plan.preflight_command == [
         "/usr/bin/uv",
         "pip",
@@ -1455,8 +1495,8 @@ def test_uv_forward_plan_resolves_only_target_extra(monkeypatch):
         "/tools/avibe/bin/python",
         "--upgrade",
         target,
+        memory,
     ]
-    assert "--with" not in plan.command
 
 
 def test_pinned_rollback_keeps_exact_memory_version(monkeypatch):

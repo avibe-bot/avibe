@@ -934,6 +934,7 @@ def build_upgrade_plan(
     vibe_path: str | None = None,
     base_env: dict[str, str] | None = None,
     version: str | None = None,
+    target_version: str | None = None,
     package_name: str | None = None,
     memory_enabled: bool = False,
     memory_package: bool | None = None,
@@ -968,6 +969,10 @@ def build_upgrade_plan(
         if version or memory_package is not None
         else bool(memory_enabled or memory_package_installed())
     )
+    if not version and include_memory and (
+        not isinstance(target_version, str) or not _names_a_published_release(target_version)
+    ):
+        raise ValueError("A Memory-preserving upgrade requires a target release version")
     uv_binary = find_uv_binary(uv_path=uv_path, base_env=base_env)
     package_spec = (
         pinned_package_spec(
@@ -981,7 +986,8 @@ def build_upgrade_plan(
     )
     if not version and include_memory and f"[{MEMORY_EXTRA_NAME}]" not in package_spec:
         package_spec = _with_memory_extra(package_spec)
-    pinned_memory_spec = f"{MEMORY_PACKAGE_NAME}=={memory_version}" if include_memory and memory_version else None
+    memory_target = memory_version if version else target_version
+    pinned_memory_spec = f"{MEMORY_PACKAGE_NAME}=={memory_target}" if include_memory and memory_target else None
 
     if is_uv_tool_install(executable) and uv_binary:
         env = dict(base_env or os.environ)
@@ -1065,6 +1071,9 @@ def build_upgrade_plan(
             PIP_DOWNLOAD_DEST_PLACEHOLDER,
             package_spec,
         ]
+        if pinned_memory_spec:
+            preflight_command.append(pinned_memory_spec)
+            preflight_fallback_command.append(pinned_memory_spec)
     elif include_memory or cleanup_command is not None:
         preflight_command = [
             executable,

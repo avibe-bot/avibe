@@ -188,10 +188,11 @@ def test_packaged_memory_shape_survives_synchronous_upgrade_and_supervisor_rollb
         base_env=env,
         memory_enabled=True,
         memory_package=True,
+        target_version="3.0.15",
         package_spec="avibe-os",
     )
-    assert forward.command[-1] == "avibe-os[memory]"
-    assert all("avibe-memory" not in argument for argument in forward.command)
+    assert "avibe-os[memory]" in forward.command
+    assert "avibe-memory==3.0.15" in forward.command
     result = execute_upgrade_plan(forward, cwd=tmp_path, capture_output=True, text=True, check=False, timeout=600)
     assert result.returncode == 0, result.stdout + result.stderr
     upgraded = _installed_versions(python)
@@ -274,6 +275,7 @@ def test_packaged_missing_memory_fails_before_install(tmp_path: Path, packaged_d
         base_env=_plan_env(wheelhouse),
         memory_enabled=True,
         memory_package=True,
+        target_version="3.0.15",
         package_spec="avibe-os",
     )
     result = execute_upgrade_plan(plan, cwd=tmp_path, capture_output=True, text=True, check=False, timeout=600)
