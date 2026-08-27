@@ -27,8 +27,8 @@ reason, and nothing needs an old Python environment -- ``env.py`` reads
                                   upgrades it
     releases_with_state_but_no   every release that wrote a database is inside the
     _graph()                      window the property above walks
-    migration_safety_problems()   each post-baseline tightening has one finite, explicit
-                                  safety declaration, checked against SQLite's observed delta
+    migration_safety_problems()   each post-baseline revision has one finite, explicit
+                                  migration-safety attestation
 
 Readiness is not this module's opinion. ``unrepairable_releases`` drives
 ``run_migrations`` and asks ``background_tables_ready``, so it covers the repair and
@@ -341,12 +341,10 @@ GRAPH_FIELDS = {
 
 GRAPH_EDGES = tuple(field for field in GRAPH_FIELDS if field != "revision")
 
-# A migration may acknowledge one bounded data-safety mechanism. The guard deliberately
-# does not inspect the mechanism: doing so would recreate the Python/SQL interpreter this
-# contract replaces. The observed SQLite delta is the obligation; this literal is the
-# migration author's explicit ownership of how its data establishes that obligation.
+# The guard deliberately does not infer a data-safety obligation from Python or SQL. Every
+# new migration owns one explicit attestation, and only this finite vocabulary is accepted.
 MIGRATION_SAFETY_FIELD = "MIGRATION_SAFETY"
-MIGRATION_SAFETY_KINDS = frozenset({"deduplicate", "backfill", "copy"})
+MIGRATION_SAFETY_KINDS = frozenset({"additive", "deduplicate", "backfill", "copy"})
 
 
 def declared_graph_fields(source: str) -> dict[str, object]:
@@ -379,14 +377,8 @@ def declared_graph_fields(source: str) -> dict[str, object]:
     return declared
 
 
-def declared_migration_safety(source: str) -> tuple[str, ...] | _ComputedMetadata | None:
-    """Read one finite top-level safety declaration without evaluating migration code.
-
-    Only a literal string or tuple/list of strings is part of the contract. A call,
-    comprehension, import-derived value, duplicate assignment, or unsupported value is
-    ``COMPUTED`` and therefore fails closed. This is intentionally the same tiny AST
-    literal reader used for Alembic graph metadata, not a model of Python control flow.
-    """
+def declared_migration_safety(source: str) -> str | _ComputedMetadata | None:
+    """Read exactly one top-level string literal without evaluating migration code."""
     values: list[object] = []
     try:
         nodes = ast.parse(source).body
@@ -409,11 +401,7 @@ def declared_migration_safety(source: str) -> tuple[str, ...] | _ComputedMetadat
     if len(values) != 1:
         return COMPUTED
     literal = values[0]
-    if isinstance(literal, str):
-        return (literal,)
-    if isinstance(literal, (tuple, list)) and all(isinstance(item, str) for item in literal):
-        return tuple(literal)
-    return COMPUTED
+    return literal if isinstance(literal, str) else COMPUTED
 
 
 def revision_claims(sources: dict[str, str]) -> dict[str, list[tuple[str, dict[str, object]]]]:
@@ -715,364 +703,32 @@ def table_names(db_path: Path) -> set[str]:
         connection.close()
 
 
-@dataclass(frozen=True)
-class _ColumnShape:
-    name: str
-    declared_type: str
-    not_null: bool
-    default: str | None
-    primary_key: int
-
-
-@dataclass(frozen=True)
-class _TableShape:
-    columns: tuple[_ColumnShape, ...]
-    check_count: int
-    ddl: str = ""
-
-
-@dataclass(frozen=True)
-class _UniqueShape:
-    table: str
-    columns: tuple[str | None, ...]
-    partial: bool
-    ddl: str | None = None
-
-
-@dataclass(frozen=True)
-class _SchemaShape:
-    tables: dict[str, _TableShape]
-    unique_indexes: frozenset[_UniqueShape]
-
-
-@dataclass(frozen=True)
-class SchemaTightening:
-    """One structural obligation observed between two SQLite schema snapshots."""
-
-    kind: str
-    table: str
-    detail: str
-
-
-def _quote_identifier(identifier: str) -> str:
-    return '"' + identifier.replace('"', '""') + '"'
-
-
-def _sql_words(sql: str) -> Iterable[tuple[str, int, int]]:
-    """Yield unquoted, uncommented word tokens without interpreting SQL expressions."""
-    index = 0
-    length = len(sql)
-    while index < length:
-        character = sql[index]
-        if character in {"'", '"', "`"}:
-            quote = character
-            index += 1
-            while index < length:
-                if sql[index] == quote:
-                    if index + 1 < length and sql[index + 1] == quote:
-                        index += 2
-                        continue
-                    index += 1
-                    break
-                index += 1
-            continue
-        if character == "[":
-            closing = sql.find("]", index + 1)
-            index = length if closing < 0 else closing + 1
-            continue
-        if sql.startswith("--", index):
-            newline = sql.find("\n", index + 2)
-            index = length if newline < 0 else newline + 1
-            continue
-        if sql.startswith("/*", index):
-            closing = sql.find("*/", index + 2)
-            index = length if closing < 0 else closing + 2
-            continue
-        if character.isalpha() or character == "_":
-            start = index
-            index += 1
-            while index < length and (sql[index].isalnum() or sql[index] in {"_", "$"}):
-                index += 1
-            yield sql[start:index], start, index
-            continue
-        index += 1
-
-
-def _sql_keyword_count(sql: str, keyword: str) -> int:
-    expected = keyword.casefold()
-    return sum(1 for word, _, _ in _sql_words(sql) if word.casefold() == expected)
-
-
-def _sql_top_level_parts(ddl: str) -> tuple[str, ...] | None:
-    """Split a CREATE TABLE body without inspecting expression semantics."""
-    quote: str | None = None
-    comment: str | None = None
-    depth = 0
-    body_start: int | None = None
-    parts: list[str] = []
-    part_start = 0
-    index = 0
-    while index < len(ddl):
-        character = ddl[index]
-        if comment == "line":
-            if character == "\n":
-                comment = None
-            index += 1
-            continue
-        if comment == "block":
-            if ddl.startswith("*/", index):
-                comment = None
-                index += 2
-            else:
-                index += 1
-            continue
-        if quote is not None:
-            if character == quote:
-                if index + 1 < len(ddl) and ddl[index + 1] == quote:
-                    index += 2
-                    continue
-                quote = None
-            index += 1
-            continue
-        if ddl.startswith("--", index):
-            comment = "line"
-            index += 2
-            continue
-        if ddl.startswith("/*", index):
-            comment = "block"
-            index += 2
-            continue
-        if character in {"'", '"', "`"}:
-            quote = character
-            index += 1
-            continue
-        if character == "[":
-            closing = ddl.find("]", index + 1)
-            index = len(ddl) if closing < 0 else closing + 1
-            continue
-        if character == "(":
-            if depth == 0 and body_start is None:
-                body_start = index + 1
-                part_start = body_start
-            depth += 1
-        elif character == ")" and body_start is not None:
-            depth -= 1
-            if depth < 0:
-                return None
-            if depth == 0:
-                parts.append(ddl[part_start:index].strip())
-                return tuple(part for part in parts if part)
-        elif character == "," and body_start is not None and depth == 1:
-            parts.append(ddl[part_start:index].strip())
-            part_start = index + 1
-        index += 1
-    return None
-
-
-def _sql_identifier(part: str) -> str | None:
-    """Read only the first identifier of a top-level table declaration."""
-    part = part.lstrip()
-    if not part:
-        return None
-    if part[0] in {'"', "`"}:
-        quote = part[0]
-        end = 1
-        value: list[str] = []
-        while end < len(part):
-            if part[end] == quote:
-                if end + 1 < len(part) and part[end + 1] == quote:
-                    value.append(quote)
-                    end += 2
-                    continue
-                return "".join(value)
-            value.append(part[end])
-            end += 1
-        return None
-    if part[0] == "[":
-        end = part.find("]", 1)
-        return None if end < 0 else part[1:end]
-    match = re.match(r"[A-Za-z_][A-Za-z0-9_$]*", part)
-    return None if match is None else match.group(0)
-
-
-def _ddl_is_additive_column_change(before: str, after: str, added: set[str]) -> bool:
-    """Prove the raw DDL only appended the newly reported column definitions."""
-    if not added:
-        return False
-    old_parts = _sql_top_level_parts(before)
-    new_parts = _sql_top_level_parts(after)
-    if old_parts is None or new_parts is None or len(new_parts) != len(old_parts) + len(added):
-        return False
-    if new_parts[: len(old_parts)] != old_parts:
-        return False
-    return {
-        identifier
-        for identifier in (_sql_identifier(part) for part in new_parts[len(old_parts) :])
-        if identifier is not None
-    } == added
-
-
-def sqlite_schema_shape(connection: sqlite3.Connection) -> _SchemaShape:
-    """Capture only SQLite's structural facts needed by the safety contract.
-
-    The DDL text is lexed only for structural ``CHECK`` changes, never evaluated. Unique
-    index DDL is retained verbatim so predicate and expression identity cannot collapse.
-    Column and unique-index facts come from SQLite PRAGMAs, so this function carries no
-    SQL expression or migration-source semantics of its own.
-    """
-    rows = connection.execute(
-        "select name, sql from sqlite_master "
-        "where type = 'table' and name not like 'sqlite_%' and name != ?",
-        (ALEMBIC_BOOKKEEPING_TABLE,),
-    ).fetchall()
-    tables: dict[str, _TableShape] = {}
-    unique_indexes: set[_UniqueShape] = set()
-    for raw_name, raw_sql in rows:
-        table = str(raw_name)
-        table_sql = str(raw_sql or "")
-        columns = tuple(
-            _ColumnShape(
-                name=str(row[1]),
-                declared_type=str(row[2] or ""),
-                not_null=bool(row[3]),
-                default=None if row[4] is None else str(row[4]),
-                primary_key=int(row[5]),
-            )
-            for row in connection.execute(f"pragma table_info({_quote_identifier(table)})")
-        )
-        tables[table] = _TableShape(
-            columns=columns,
-            check_count=_sql_keyword_count(table_sql, "check"),
-            ddl=table_sql,
-        )
-        for index_row in connection.execute(f"pragma index_list({_quote_identifier(table)})"):
-            index_name = str(index_row[1])
-            if not bool(index_row[2]):
-                continue
-            index_sql_row = connection.execute(
-                "select sql from sqlite_master where type = 'index' and name = ?", (index_name,)
-            ).fetchone()
-            index_sql = None if index_sql_row is None else index_sql_row[0]
-            columns_for_index = tuple(
-                None if info[2] is None else str(info[2])
-                for info in connection.execute(f"pragma index_info({_quote_identifier(index_name)})")
-            )
-            unique_indexes.add(
-                _UniqueShape(
-                    table=table,
-                    columns=columns_for_index,
-                    partial=bool(index_row[4]),
-                    ddl=None if index_sql is None else str(index_sql),
-                )
-            )
-    return _SchemaShape(tables=tables, unique_indexes=frozenset(unique_indexes))
-
-
-def _default_is_non_null(default: str | None) -> bool:
-    if default is None:
-        return False
-    value = default.strip()
-    while value.startswith("(") and value.endswith(")"):
-        value = value[1:-1].strip()
-    if value.upper() == "NULL":
-        return False
-    # SQLite's literal defaults and its three timestamp keywords are the only values
-    # whose non-NULL result is decidable here. An expression that merely looks unlike
-    # NULL may still evaluate to NULL, so it is deliberately refused.
-    return bool(
-        re.fullmatch(r"[-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)", value)
-        or re.fullmatch(r"(?:'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\")", value)
-        or re.fullmatch(r"X'[0-9A-Fa-f]*'", value)
-        or value.upper() in {"CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME", "TRUE", "FALSE"}
-    )
-
-
-def schema_tightenings(before: _SchemaShape, after: _SchemaShape) -> tuple[SchemaTightening, ...]:
-    """Classify only finite, structural tightenings; unknown semantics are not inferred."""
-    obligations: list[SchemaTightening] = []
-    before_tables = set(before.tables)
-    after_tables = set(after.tables)
-
-    for table in sorted(before_tables - after_tables):
-        obligations.append(SchemaTightening("copy", table, f"table {table} was removed"))
-
-    rebuilt_tables: set[str] = set()
-    for table in sorted(before_tables & after_tables):
-        old = {column.name: column for column in before.tables[table].columns}
-        new = {column.name: column for column in after.tables[table].columns}
-        removed = set(old) - set(new)
-        changed = {
-            name
-            for name in set(old) & set(new)
-            if old[name] != new[name]
-        }
-        check_added = after.tables[table].check_count > before.tables[table].check_count
-        added = set(new) - set(old)
-        ddl_changed = before.tables[table].ddl != after.tables[table].ddl
-        ddl_added_only = _ddl_is_additive_column_change(
-            before.tables[table].ddl, after.tables[table].ddl, added
-        )
-        if removed or changed or check_added or (ddl_changed and not ddl_added_only):
-            rebuilt_tables.add(table)
-            reason = []
-            if removed:
-                reason.append(f"removed columns {', '.join(sorted(removed))}")
-            if changed:
-                reason.append(f"changed columns {', '.join(sorted(changed))}")
-            if check_added:
-                reason.append("added CHECK constraint")
-            if ddl_changed and not (removed or changed or check_added):
-                reason.append("changed table definition")
-            obligations.append(SchemaTightening("copy", table, "; ".join(reason)))
-            continue
-
-        for name in sorted(set(new) - set(old)):
-            column = new[name]
-            if column.not_null and not _default_is_non_null(column.default):
-                obligations.append(SchemaTightening("backfill", table, f"new NOT NULL column {table}.{name}"))
-
-    for index in sorted(after.unique_indexes - before.unique_indexes, key=repr):
-        if index.table not in before_tables or index.table in rebuilt_tables:
-            continue
-        columns = ", ".join(column or "<expression>" for column in index.columns)
-        predicate = " partial" if index.partial else ""
-        obligations.append(SchemaTightening("deduplicate", index.table, f"new{predicate} unique key ({columns})"))
-
-    return tuple(obligations)
-
-
-def _migration_safety_declaration_error(
-    revision: str, declaration: tuple[str, ...] | _ComputedMetadata | None, expected: set[str]
-) -> str | None:
-    if declaration is None:
-        return f"{revision} has {', '.join(sorted(expected))} obligations but no MIGRATION_SAFETY declaration"
-    if declaration is COMPUTED:
-        return f"{revision} MIGRATION_SAFETY is computed or malformed; only a literal is supported"
-    if not declaration or len(set(declaration)) != len(declaration):
-        return f"{revision} MIGRATION_SAFETY must contain each mechanism exactly once"
-    unsupported = set(declaration) - MIGRATION_SAFETY_KINDS
-    if unsupported:
-        return f"{revision} MIGRATION_SAFETY contains unsupported kinds: {', '.join(sorted(unsupported))}"
-    if set(declaration) != expected:
-        return (
-            f"{revision} MIGRATION_SAFETY names {', '.join(declaration)}, "
-            f"but observed obligations are {', '.join(sorted(expected))}"
-        )
-    return None
-
-
 def _planned_revisions(config: Config, shipped_heads: set[str]) -> list[str]:
     """Return Alembic's ordered upgrade revisions from a released graph to today's head."""
     script = ScriptDirectory.from_config(config)
     return [step.revision.revision for step in script._upgrade_revs("head", tuple(sorted(shipped_heads)))]
 
 
-def migration_safety_problems(baseline: str | None = None) -> list[str]:
-    """Check new revisions using SQLite deltas and the finite declaration contract.
+def _migration_safety_declaration_error(
+    revision: str, declaration: str | _ComputedMetadata | None
+) -> str | None:
+    if declaration is None:
+        return f"{revision} has no MIGRATION_SAFETY declaration"
+    if declaration is COMPUTED:
+        return f"{revision} MIGRATION_SAFETY is computed or malformed; only one literal string is supported"
+    if not isinstance(declaration, str):
+        return f"{revision} MIGRATION_SAFETY is malformed; only one literal string is supported"
+    if declaration not in MIGRATION_SAFETY_KINDS:
+        return f"{revision} MIGRATION_SAFETY contains unsupported kind: {declaration}"
+    return None
 
-    The latest released graph is the grandfather boundary. Each distinct released graph is
-    materialized once, then today's actual Alembic plan is applied one revision at a time so
-    the before/after facts come from the runtime database rather than a source interpreter.
+
+def migration_safety_problems(baseline: str | None = None) -> list[str]:
+    """Require one explicit attestation for every post-baseline revision.
+
+    The latest released graph is the grandfather boundary. The actual Alembic plan is still
+    executed from each released graph as independent behavioral evidence, but this gate does
+    not infer data guarantees from the resulting database or from migration source effects.
     """
     baseline = baseline or latest_released_tag()
     baseline_graph = revision_graph(released_sources(baseline))
@@ -1082,11 +738,17 @@ def migration_safety_problems(baseline: str | None = None) -> list[str]:
     if not new_revisions:
         return []
 
+    problems = [
+        error
+        for revision in sorted(new_revisions)
+        if (error := _migration_safety_declaration_error(
+            revision,
+            declared_migration_safety(current_sources[current_graph[revision][0]]),
+        ))
+    ]
+
     planned: set[tuple[str, str]] = set()
     analyzed: set[tuple[str, str]] = set()
-    observed: dict[tuple[str, str], tuple[SchemaTightening, ...]] = {}
-    problems: list[str] = []
-
     for tag in released_graphs():
         try:
             with tempfile.TemporaryDirectory() as workspace:
@@ -1098,66 +760,28 @@ def migration_safety_problems(baseline: str | None = None) -> list[str]:
                 command.upgrade(released_config, "head")
                 current_config = _alembic_config(db_path)
                 revisions = _planned_revisions(current_config, shipped_heads)
-                tag_plan = [(tag, revision) for revision in revisions if revision in new_revisions]
-                planned.update(tag_plan)
-                with sqlite3.connect(db_path) as connection:
-                    # Apply every step in Alembic's plan so a snapshot for a new revision is
-                    # not polluted by earlier post-release steps. Only new revisions are
-                    # obligations; released steps are replayed to reach each one's boundary
-                    # and then discarded under the baseline grandfather rule.
-                    for revision in revisions:
-                        before = sqlite_schema_shape(connection)
-                        try:
-                            command.upgrade(current_config, revision)
-                        except Exception as exc:  # noqa: BLE001 - an unanalyzable plan fails closed
-                            problems.append(
-                                f"{tag}: {revision} could not be analyzed after its released schema: "
-                                f"{type(exc).__name__}: {str(exc).splitlines()[0]}"
-                            )
-                            break
-                        after = sqlite_schema_shape(connection)
-                        if revision not in new_revisions:
-                            continue
-                        pair = (tag, revision)
-                        analyzed.add(pair)
-                        observed[pair] = schema_tightenings(before, after)
+                planned.update((tag, revision) for revision in revisions if revision in new_revisions)
+                for revision in revisions:
+                    try:
+                        command.upgrade(current_config, revision)
+                    except Exception as exc:  # noqa: BLE001 - an unanalyzable plan fails closed
+                        problems.append(
+                            f"{tag}: {revision} could not be executed from its released schema: "
+                            f"{type(exc).__name__}: {str(exc).splitlines()[0]}"
+                        )
+                        break
+                    if revision in new_revisions:
+                        analyzed.add((tag, revision))
         except Exception as exc:  # noqa: BLE001 - plan/setup failure is a closed-gate result
             problems.append(
-                f"{tag}: migration safety plan could not be analyzed: "
+                f"{tag}: migration safety plan could not be executed: "
                 f"{type(exc).__name__}: {str(exc).splitlines()[0]}"
             )
 
     for tag, revision in sorted(planned - analyzed):
-        problems.append(f"{tag}: planned revision {revision} was not analyzed")
+        problems.append(f"{tag}: planned revision {revision} was not executed")
     for tag, revision in sorted(analyzed - planned):
-        problems.append(f"{tag}: unplanned revision {revision} was analyzed")
-
-    declarations = {
-        revision: declared_migration_safety(current_sources[name])
-        for revision, (name, _) in current_graph.items()
-        if revision in new_revisions
-    }
-    for pair, obligations in sorted(observed.items()):
-        if not obligations:
-            declaration = declarations.get(pair[1])
-            if declaration is not None:
-                detail = "computed or malformed" if declaration is COMPUTED else ", ".join(declaration)
-                problems.append(f"{pair[0]}: {pair[1]} declares MIGRATION_SAFETY ({detail}) but has no structural obligation")
-            continue
-        expected = {obligation.kind for obligation in obligations}
-        error = _migration_safety_declaration_error(pair[1], declarations.get(pair[1]), expected)
-        if error:
-            details = "; ".join(obligation.detail for obligation in obligations)
-            problems.append(f"{pair[0]}: {error} ({details})")
-
-    observed_revisions = {revision for _, revision in observed}
-    for revision, declaration in sorted(declarations.items()):
-        if revision in observed_revisions:
-            continue
-        if declaration is not None:
-            detail = "computed or malformed" if declaration is COMPUTED else ", ".join(declaration)
-            problems.append(f"{revision} declares MIGRATION_SAFETY ({detail}) but has no structural obligation")
-
+        problems.append(f"{tag}: unplanned revision {revision} was executed")
     return problems
 
 
