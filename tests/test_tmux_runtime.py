@@ -420,6 +420,39 @@ def test_install_rejects_non_runnable_binary_without_replacing_current(
     assert sentinel.read_text(encoding="utf-8") == "keep me"
 
 
+def test_forced_repair_replaces_canonical_install_for_pointerless_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = _write_tmux_archive(tmp_path)
+    manifest = _write_manifest(tmp_path, archive)
+    source_bytes = (tmp_path / "archive-root" / "tmux").read_bytes()
+    manager = TmuxRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+    canonical_dir = Path(installed["install_dir"])
+    damaged_binary = Path(installed["path"])
+    damaged_binary.write_bytes(b"damaged tmux")
+    damaged_binary.chmod(0o755)
+
+    repaired = manager.ensure(force=True)
+
+    assert repaired["ok"] is True
+    assert repaired["changed"] is True
+    assert Path(repaired["install_dir"]) == canonical_dir
+    repaired_binary = Path(repaired["path"])
+    assert repaired_binary == canonical_dir / "tmux"
+    assert repaired_binary.read_bytes() == source_bytes
+
+    (manager.runtime_dir / "current.json").unlink()
+    monkeypatch.setattr(
+        manager,
+        "_resolve_manifest_archive",
+        lambda _archive: pytest.fail("pointerless recovery accessed an archive"),
+    )
+    assert manager.resolve_binary() == repaired_binary
+
+
 def test_resolve_tmux_binary_returns_none_when_absent(tmp_path: Path) -> None:
     archive = _write_tmux_archive(tmp_path)
     manifest = _write_manifest(tmp_path, archive)

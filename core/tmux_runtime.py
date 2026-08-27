@@ -51,6 +51,7 @@ _TMUX_SPEC = ManagedRuntimeSpec(
     allow_missing_binary_sha256=True,
     allow_legacy_missing_runtime_id=True,
     staging_prefixes=("install-", "manifest-"),
+    replace_target_on_force=True,
 )
 
 
