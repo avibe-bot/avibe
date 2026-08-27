@@ -641,7 +641,13 @@ class _ShowManifestRuntimeManager(ManagedRuntimeManager):
         return report, terminal_names
 
     def _record_matches_configured_source(self, metadata: Mapping[str, Any]) -> bool:
-        return metadata.get("manifest_source") == self.owner._configured_manifest_source()
+        source = metadata.get("manifest_source")
+        configured_source = self.owner._configured_manifest_source()
+        return source == configured_source or (
+            isinstance(source, str)
+            and self.owner.manifest_url is not None
+            and source == f"cache:{self.owner.manifest_url}"
+        )
 
     def _record_install_dir_matches(
         self,
@@ -3041,7 +3047,26 @@ class ShowRuntimeManager:
         if not node:
             return None
         manager = self._shared_manifest_manager(offline=self.offline if offline is None else offline)
-        disk_install = self._shared_manifest_disk_install(manager)
+        entrypoint = manager.resolve_selected_entrypoint()
+        if entrypoint is not None:
+            self._adopt_shared_manifest_evidence(manager)
+            return [*node, str(entrypoint)]
+
+        source_reason = manager._install_reason
+        source_download_error = manager._download_error
+        if source_reason not in {
+            "runtime_manifest_download_failed",
+            "runtime_manifest_invalid",
+            "runtime_manifest_missing",
+            "runtime_manifest_unavailable_offline",
+        }:
+            self._adopt_shared_manifest_evidence(manager)
+            return None
+
+        disk_install = self._shared_manifest_disk_install(manager, adopt_evidence=False)
+        manager._install_reason = source_reason
+        manager._download_error = source_download_error
+        self._adopt_shared_manifest_evidence(manager)
         return disk_install.command if disk_install else None
 
     def _shared_manifest_disk_install(

@@ -9879,6 +9879,63 @@ def test_show_runtime_manager_manifest_install_dir_includes_runtime_and_archive_
     assert new_manager.status()["install"]["matches_manifest"] is True
 
 
+@pytest.mark.parametrize("manifest_source", ("path", "packaged"))
+def test_show_runtime_manager_revalidates_selected_manifest_identity_before_reuse(
+    monkeypatch,
+    tmp_path,
+    manifest_source,
+):
+    old_archive = _write_runtime_archive(tmp_path / "old", text="old runtime\n")
+    old_manifest = _write_runtime_manifest(tmp_path / "old", old_archive)
+    if manifest_source == "path":
+        selected_manifest = old_manifest
+        manager_kwargs = {"manifest_path": selected_manifest}
+    else:
+        package_root = tmp_path / "package"
+        selected_manifest = package_root / show_runtime._RUNTIME_MANIFEST_RESOURCE
+        selected_manifest.parent.mkdir(parents=True)
+        selected_manifest.write_bytes(old_manifest.read_bytes())
+        monkeypatch.setattr(
+            "core.managed_runtime.package_resources.files",
+            lambda _package: package_root,
+        )
+        manager_kwargs = {}
+
+    runtime_dir = tmp_path / "runtime"
+    monkeypatch.setattr(
+        "core.show_runtime._resolve_command",
+        lambda command: ["/bin/node"] if command == "node" else None,
+    )
+    old_manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        **manager_kwargs,
+    )
+    old_result = old_manager.prepare()
+    old_cli = Path(old_result["command"][1])
+
+    new_archive = _write_runtime_archive(tmp_path / "new", text="new runtime\n")
+    new_manifest = _write_runtime_manifest(
+        tmp_path / "new",
+        new_archive,
+        runtime_version="runtime-new-ref",
+    )
+    selected_manifest.write_bytes(new_manifest.read_bytes())
+    new_manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        **manager_kwargs,
+    )
+
+    result = new_manager.prepare()
+
+    new_cli = Path(result["command"][1])
+    assert result["ok"] is True
+    assert new_cli != old_cli
+    assert new_cli.read_text(encoding="utf-8") == "new runtime\n"
+    assert old_cli.read_text(encoding="utf-8") == "old runtime\n"
+
+
 def test_show_runtime_manager_manifest_install_identity_ignores_other_platform_edits(monkeypatch, tmp_path):
     archive_path = _write_runtime_archive(tmp_path, text="current platform runtime\n")
     manifest_path = _write_runtime_manifest(tmp_path, archive_path)
@@ -10430,6 +10487,42 @@ def test_show_runtime_manager_rejects_node_below_manifest_minimum(monkeypatch, t
     assert result["status"]["node_supported"] is False
 
 
+def test_show_runtime_manager_revalidates_changed_node_prerequisite_before_reuse(
+    monkeypatch,
+    tmp_path,
+):
+    archive_path = _write_runtime_archive(tmp_path, text="installed runtime\n")
+    manifest_path = _write_runtime_manifest(tmp_path, archive_path)
+    runtime_dir = tmp_path / "runtime"
+    monkeypatch.setattr(
+        "core.show_runtime._resolve_command",
+        lambda command: ["/bin/node"] if command == "node" else None,
+    )
+    monkeypatch.setattr("core.show_runtime._node_version", lambda _node: (22, 12, 0))
+    initial = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        manifest_path=manifest_path,
+    ).prepare()
+    installed_cli = Path(initial["command"][1])
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["minimum_node"] = ">=99.0.0"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        manifest_path=manifest_path,
+    )
+
+    result = manager.prepare()
+
+    assert result["ok"] is False
+    assert result["reason"] == "runtime_node_unsupported"
+    assert result["command"] is None
+    assert installed_cli.read_text(encoding="utf-8") == "installed runtime\n"
+
+
 def test_show_runtime_manager_rejects_manifest_archive_checksum_mismatch(monkeypatch, tmp_path):
     archive_path = _write_runtime_archive(tmp_path)
     manifest_path = _write_runtime_manifest(tmp_path, archive_path, sha256="0" * 64)
@@ -10495,6 +10588,80 @@ def test_show_runtime_manager_installs_manifest_archive_from_verified_offline_ca
 
     assert result["ok"] is True
     assert result["reason"] is None
+
+
+def test_show_runtime_manager_falls_back_to_installed_record_when_manifest_source_is_missing(
+    monkeypatch,
+    tmp_path,
+):
+    archive_path = _write_runtime_archive(tmp_path)
+    manifest_path = _write_runtime_manifest(tmp_path, archive_path)
+    runtime_dir = tmp_path / "runtime"
+    monkeypatch.setattr(
+        "core.show_runtime._resolve_command",
+        lambda command: ["/bin/node"] if command == "node" else None,
+    )
+    installed = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        manifest_path=manifest_path,
+    ).prepare()
+    manifest_path.unlink()
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        manifest_path=manifest_path,
+    )
+
+    availability = asyncio.run(manager._resolve_managed_availability())
+
+    assert availability.command == installed["command"]
+    assert manager.status()["reason"] == "runtime_manifest_missing"
+
+
+@pytest.mark.parametrize("manifest_source", ("path", "packaged"))
+def test_show_runtime_manager_falls_back_when_selected_manifest_is_invalid(
+    monkeypatch,
+    tmp_path,
+    manifest_source,
+):
+    archive_path = _write_runtime_archive(tmp_path)
+    valid_manifest = _write_runtime_manifest(tmp_path, archive_path)
+    if manifest_source == "path":
+        selected_manifest = valid_manifest
+        manager_kwargs = {"manifest_path": selected_manifest}
+    else:
+        package_root = tmp_path / "package"
+        selected_manifest = package_root / show_runtime._RUNTIME_MANIFEST_RESOURCE
+        selected_manifest.parent.mkdir(parents=True)
+        selected_manifest.write_bytes(valid_manifest.read_bytes())
+        monkeypatch.setattr(
+            "core.managed_runtime.package_resources.files",
+            lambda _package: package_root,
+        )
+        manager_kwargs = {}
+
+    runtime_dir = tmp_path / "runtime"
+    monkeypatch.setattr(
+        "core.show_runtime._resolve_command",
+        lambda command: ["/bin/node"] if command == "node" else None,
+    )
+    installed = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        **manager_kwargs,
+    ).prepare()
+    selected_manifest.write_text("not-json", encoding="utf-8")
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        **manager_kwargs,
+    )
+
+    availability = asyncio.run(manager._resolve_managed_availability())
+
+    assert availability.command == installed["command"]
+    assert manager.status()["reason"] == "runtime_manifest_invalid"
 
 
 def test_show_runtime_manager_status_does_not_read_manifest_for_legacy_sources(tmp_path):
@@ -10641,6 +10808,59 @@ def test_show_runtime_remote_manifest_install_remains_installed_when_source_is_u
     assert status["reason"] == "runtime_manifest_download_failed"
 
 
+def test_show_runtime_offline_remote_cache_record_resolves_for_fresh_manager(monkeypatch, tmp_path):
+    archive_path = _write_runtime_archive(tmp_path)
+    manifest_path = _write_runtime_manifest(tmp_path, archive_path)
+    manifest_url = "https://example.test/show-runtime-manifest.json"
+    runtime_dir = tmp_path / "runtime"
+    monkeypatch.setattr(
+        "core.show_runtime._resolve_command",
+        lambda command: ["test-node"] if command == "node" else None,
+    )
+    monkeypatch.setattr("core.show_runtime._node_version", lambda _node: (22, 12, 0))
+    monkeypatch.setattr(
+        "core.managed_runtime.fetch_bytes",
+        lambda url, **_kwargs: manifest_path.read_bytes()
+        if url == manifest_url
+        else pytest.fail(f"unexpected fetch: {url}"),
+    )
+    warming_manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        manifest_url=manifest_url,
+    )._shared_manifest_manager(offline=False)
+    assert warming_manager.load_manifest(allow_network=True) is not None
+    digest = _sha256(archive_path)
+    cached_archive = runtime_dir / "downloads" / f"{digest}.tgz"
+    cached_archive.parent.mkdir(parents=True, exist_ok=True)
+    cached_archive.write_bytes(archive_path.read_bytes())
+
+    offline_manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        manifest_url=manifest_url,
+        offline=True,
+    )
+    installed = offline_manager.prepare()
+    install_dir = Path(installed["command"][1]).parents[4]
+    metadata = json.loads(
+        (install_dir / ".vibe-show-runtime.json").read_text(encoding="utf-8")
+    )
+    assert metadata["manifest_source"] == f"cache:{manifest_url}"
+
+    fresh_manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        manifest_url=manifest_url,
+        offline=True,
+        auto_install=False,
+    )
+    resolved = fresh_manager.prepare(automatic=True)
+
+    assert resolved["install"]["state"] == "installed"
+    assert resolved["command"] == installed["command"]
+
+
 def test_show_runtime_status_keeps_installed_identity_separate_from_selected_manifest(monkeypatch, tmp_path):
     runtime_dir, manifest_url, install_dir, command = _install_remote_manifest_runtime(monkeypatch, tmp_path)
     selected_archive = _write_runtime_archive(tmp_path, text="#!/usr/bin/env node\n// selected runtime\n")
@@ -10707,7 +10927,15 @@ def test_show_runtime_disk_install_fact_does_not_require_node(monkeypatch, tmp_p
 
 @pytest.mark.parametrize(
     "corruption",
-    ("outside-versions", "source-lineage", "pointer-metadata", "invalid-json"),
+    (
+        "outside-versions",
+        "source-lineage",
+        "unrelated-cache-source",
+        "malformed-cache-source",
+        "non-string-source",
+        "pointer-metadata",
+        "invalid-json",
+    ),
 )
 def test_show_runtime_disk_install_pointer_fails_closed(monkeypatch, tmp_path, corruption):
     runtime_dir, manifest_url, install_dir, _command = _install_remote_manifest_runtime(monkeypatch, tmp_path)
@@ -10720,6 +10948,18 @@ def test_show_runtime_disk_install_pointer_fails_closed(monkeypatch, tmp_path, c
     elif corruption == "source-lineage":
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         metadata["manifest_source"] = "https://other.example/show-runtime-manifest.json"
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    elif corruption == "unrelated-cache-source":
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["manifest_source"] = "cache:https://other.example/show-runtime-manifest.json"
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    elif corruption == "malformed-cache-source":
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["manifest_source"] = "cache:"
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    elif corruption == "non-string-source":
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["manifest_source"] = {"cache": manifest_url}
         metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
     elif corruption == "pointer-metadata":
         pointer = json.loads(pointer_path.read_text(encoding="utf-8"))

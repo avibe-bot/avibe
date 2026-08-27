@@ -2055,7 +2055,8 @@ def install_lock_for(runtime_id: str) -> threading.Lock:
 def safe_extract_tar(archive: tarfile.TarFile, destination: Path) -> None:
     supports_data_filter = hasattr(tarfile, "data_filter")
     destination_resolved = destination.resolve()
-    for member in archive.getmembers():
+    members = archive.getmembers()
+    for member in members:
         if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
             raise ValueError(f"Unsupported managed runtime archive member: {member.name}")
         if archive_path_is_unsafe(member.name):
@@ -2063,10 +2064,6 @@ def safe_extract_tar(archive: tarfile.TarFile, destination: Path) -> None:
         target = (destination / member.name).resolve()
         if target != destination_resolved and destination_resolved not in target.parents:
             raise ValueError(f"Unsafe managed runtime archive path: {member.name}")
-        if (member.issym() or member.islnk()) and not supports_data_filter:
-            raise ValueError(
-                f"Managed runtime archive link requires tarfile.data_filter: {member.name}"
-            )
         if member.issym():
             link_target = (destination / member.name).parent / member.linkname
             link_target_resolved = link_target.resolve()
@@ -2086,7 +2083,154 @@ def safe_extract_tar(archive: tarfile.TarFile, destination: Path) -> None:
     if supports_data_filter:
         archive.extractall(destination, filter="data")
     else:
-        archive.extractall(destination)
+        _extract_tar_without_filter(archive, destination, members)
+
+
+def _extract_tar_without_filter(
+    archive: tarfile.TarFile,
+    destination: Path,
+    members: list[tarfile.TarInfo],
+) -> None:
+    member_paths: dict[tuple[str, ...], tarfile.TarInfo] = {}
+    link_targets: dict[tuple[str, ...], tuple[str, ...]] = {}
+    for member in members:
+        path = _normalized_tar_path(member.name)
+        if not path and not member.isdir():
+            raise ValueError(f"Unsafe managed runtime archive path: {member.name}")
+        if path in member_paths:
+            raise ValueError(f"Managed runtime archive path collision: {member.name}")
+        member_paths[path] = member
+
+    for path, member in member_paths.items():
+        for index in range(1, len(path)):
+            ancestor = member_paths.get(path[:index])
+            if ancestor is not None and not ancestor.isdir():
+                raise ValueError(f"Managed runtime archive path/type collision: {member.name}")
+
+    for path, member in member_paths.items():
+        if member.issym():
+            target = _normalized_tar_link_target(path[:-1], member.linkname, member.name)
+            resolved_target = _resolved_tar_symlink_target(target, member_paths)
+            if resolved_target and resolved_target not in member_paths and not any(
+                candidate[: len(resolved_target)] == resolved_target
+                for candidate in member_paths
+            ):
+                raise ValueError(f"Missing managed runtime archive link target: {member.name}")
+            link_targets[path] = target
+        elif member.islnk():
+            target = _normalized_tar_link_target((), member.linkname, member.name)
+            target_member = member_paths.get(target)
+            if target_member is None or not target_member.isfile():
+                raise ValueError(f"Unsafe managed runtime archive hardlink target: {member.name}")
+            link_targets[path] = target
+
+    try:
+        destination_info = destination.lstat()
+    except FileNotFoundError:
+        destination.mkdir(parents=True)
+    else:
+        if _is_reparse_point(destination_info) or not stat.S_ISDIR(destination_info.st_mode):
+            raise ValueError("Managed runtime archive destination is not a directory")
+        if any(destination.iterdir()):
+            raise ValueError("Managed runtime archive destination is not empty")
+
+    directories = sorted(
+        ((path, member) for path, member in member_paths.items() if member.isdir()),
+        key=lambda item: len(item[0]),
+    )
+    for path, _member in directories:
+        destination.joinpath(*path).mkdir(parents=True, exist_ok=True)
+
+    for path, member in member_paths.items():
+        if not member.isfile():
+            continue
+        target = destination.joinpath(*path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source = archive.extractfile(member)
+        if source is None:
+            raise ValueError(f"Unreadable managed runtime archive member: {member.name}")
+        with source, target.open("xb") as handle:
+            shutil.copyfileobj(source, handle)
+        target.chmod(member.mode & 0o777)
+
+    for path, member in member_paths.items():
+        if not member.islnk():
+            continue
+        target = destination.joinpath(*path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.link(destination.joinpath(*link_targets[path]), target)
+
+    for path, member in member_paths.items():
+        if not member.issym():
+            continue
+        target = destination.joinpath(*path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(member.linkname, target)
+
+    for path, member in reversed(directories):
+        destination.joinpath(*path).chmod(member.mode & 0o777)
+
+
+def _normalized_tar_path(value: str) -> tuple[str, ...]:
+    if archive_path_is_unsafe(value) or "\\" in value:
+        raise ValueError(f"Unsafe managed runtime archive path: {value}")
+    parts = tuple(part for part in PurePosixPath(value).parts if part not in {"", "."})
+    return parts
+
+
+def _normalized_tar_link_target(
+    base: tuple[str, ...],
+    value: str,
+    member_name: str,
+) -> tuple[str, ...]:
+    posix_path = PurePosixPath(value)
+    windows_path = PureWindowsPath(value)
+    if (
+        not value
+        or "\\" in value
+        or posix_path.is_absolute()
+        or windows_path.is_absolute()
+        or windows_path.drive
+        or windows_path.root
+    ):
+        raise ValueError(f"Unsafe managed runtime archive link target: {member_name}")
+    parts = list(base)
+    for part in posix_path.parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not parts:
+                raise ValueError(f"Unsafe managed runtime archive link target: {member_name}")
+            parts.pop()
+        else:
+            parts.append(part)
+    return tuple(parts)
+
+
+def _resolved_tar_symlink_target(
+    target: tuple[str, ...],
+    member_paths: Mapping[tuple[str, ...], tarfile.TarInfo],
+) -> tuple[str, ...]:
+    pending = list(target)
+    resolved: list[str] = []
+    visited: set[tuple[str, ...]] = set()
+    while pending:
+        resolved.append(pending.pop(0))
+        candidate = tuple(resolved)
+        member = member_paths.get(candidate)
+        if member is None or not member.issym():
+            continue
+        if candidate in visited:
+            raise ValueError(f"Managed runtime archive symlink cycle: {member.name}")
+        visited.add(candidate)
+        linked = _normalized_tar_link_target(
+            candidate[:-1],
+            member.linkname,
+            member.name,
+        )
+        resolved = []
+        pending = [*linked, *pending]
+    return tuple(resolved)
 
 
 def archive_path_is_unsafe(value: str) -> bool:

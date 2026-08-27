@@ -241,6 +241,7 @@ def test_released_show_composite_shape_installs_through_production_adapter(
         lambda command: ["/bin/node"] if command == "node" else None,
     )
     monkeypatch.setattr(show_runtime, "_node_version", lambda _node: (22, 12, 0))
+    monkeypatch.delattr(tarfile, "data_filter", raising=False)
     runtime_dir = tmp_path / f"runtime-{platform}"
     manager = show_runtime.ShowRuntimeManager(
         workspace_root=tmp_path / "show",
@@ -346,7 +347,7 @@ def _write_fallback_escape_probe(path: Path) -> None:
         archive.addfile(regular, io.BytesIO(payload))
 
 
-def test_shared_fallback_refuses_links_before_extraction(
+def test_shared_fallback_rejects_symlink_pivot_before_extraction(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -363,7 +364,7 @@ def test_shared_fallback_refuses_links_before_extraction(
     with tarfile.open(archive_path) as archive:
         with pytest.raises(
             ValueError,
-            match=r"^Managed runtime archive link requires tarfile\.data_filter: a$",
+            match=r"^Managed runtime archive path/type collision: a/x$",
         ):
             managed_runtime.safe_extract_tar(archive, destination)
 
@@ -373,12 +374,16 @@ def test_shared_fallback_refuses_links_before_extraction(
     assert not destination.exists()
 
 
-def test_shared_fallback_refuses_hardlinks_before_extraction(
+def test_shared_fallback_materializes_confined_hardlinks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     archive_path = tmp_path / "fallback-hardlink.tar"
     with tarfile.open(archive_path, "w") as archive:
+        root = tarfile.TarInfo(".")
+        root.type = tarfile.DIRTYPE
+        root.mode = 0o755
+        archive.addfile(root)
         payload = b"payload\n"
         regular = tarfile.TarInfo("root/regular")
         regular.size = len(payload)
@@ -391,16 +396,113 @@ def test_shared_fallback_refuses_hardlinks_before_extraction(
     monkeypatch.delattr(tarfile, "data_filter", raising=False)
 
     with tarfile.open(archive_path) as archive:
+        managed_runtime.safe_extract_tar(archive, destination)
+
+    assert (destination / "root/regular").read_bytes() == payload
+    assert (destination / "root/hardlink").stat().st_ino == (
+        destination / "root/regular"
+    ).stat().st_ino
+
+
+def test_shared_fallback_rejects_hardlink_target_substitution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive_path = tmp_path / "fallback-hardlink-substitution.tar"
+    with tarfile.open(archive_path, "w") as archive:
+        payload = b"payload\n"
+        regular = tarfile.TarInfo("root/regular")
+        regular.size = len(payload)
+        archive.addfile(regular, io.BytesIO(payload))
+        symlink = tarfile.TarInfo("root/symlink")
+        symlink.type = tarfile.SYMTYPE
+        symlink.linkname = "regular"
+        archive.addfile(symlink)
+        hardlink = tarfile.TarInfo("root/hardlink")
+        hardlink.type = tarfile.LNKTYPE
+        hardlink.linkname = "root/symlink"
+        archive.addfile(hardlink)
+    destination = tmp_path / "fallback-hardlink-substitution"
+    monkeypatch.delattr(tarfile, "data_filter", raising=False)
+
+    with tarfile.open(archive_path) as archive:
         with pytest.raises(
             ValueError,
-            match=(
-                r"^Managed runtime archive link requires "
-                r"tarfile\.data_filter: root/hardlink$"
-            ),
+            match=r"^Unsafe managed runtime archive hardlink target: root/hardlink$",
         ):
             managed_runtime.safe_extract_tar(archive, destination)
 
     assert not destination.exists()
+
+
+@pytest.mark.parametrize(
+    "invalid_shape",
+    ("unsupported", "unsafe-path", "duplicate-path", "symlink-cycle"),
+)
+def test_shared_fallback_rejects_invalid_archive_before_writing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_shape: str,
+) -> None:
+    archive_path = tmp_path / f"fallback-{invalid_shape}.tar"
+    with tarfile.open(archive_path, "w") as archive:
+        if invalid_shape == "unsupported":
+            member = tarfile.TarInfo("root/fifo")
+            member.type = tarfile.FIFOTYPE
+            archive.addfile(member)
+        elif invalid_shape == "unsafe-path":
+            member = tarfile.TarInfo("../outside")
+            member.size = 1
+            archive.addfile(member, io.BytesIO(b"x"))
+        elif invalid_shape == "duplicate-path":
+            for name in ("root/file", "root/./file"):
+                member = tarfile.TarInfo(name)
+                member.size = 1
+                archive.addfile(member, io.BytesIO(b"x"))
+        else:
+            first = tarfile.TarInfo("root/first")
+            first.type = tarfile.SYMTYPE
+            first.linkname = "second"
+            archive.addfile(first)
+            second = tarfile.TarInfo("root/second")
+            second.type = tarfile.SYMTYPE
+            second.linkname = "first"
+            archive.addfile(second)
+    destination = tmp_path / "destination"
+    monkeypatch.delattr(tarfile, "data_filter", raising=False)
+
+    with tarfile.open(archive_path) as archive:
+        with pytest.raises(ValueError):
+            managed_runtime.safe_extract_tar(archive, destination)
+
+    assert not destination.exists()
+    assert not (tmp_path / "outside").exists()
+
+
+def test_shared_fallback_keeps_order_dependent_links_confined(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive_path = tmp_path / "fallback-ordering.tar"
+    _write_ordering_probe(archive_path)
+    case = tmp_path / "fallback-ordering"
+    destination = case / "destination"
+    destination.mkdir(parents=True)
+    outside = case / "outside"
+    outside.write_bytes(b"outside\n")
+    outside_stat = outside.stat()
+    monkeypatch.delattr(tarfile, "data_filter", raising=False)
+
+    with tarfile.open(archive_path) as archive:
+        managed_runtime.safe_extract_tar(archive, destination)
+
+    assert outside.read_bytes() == b"outside\n"
+    assert outside.stat().st_ino == outside_stat.st_ino
+    assert outside.stat().st_nlink == outside_stat.st_nlink
+    assert (destination / "inside-hard").stat().st_ino == (
+        destination / "outside"
+    ).stat().st_ino
+    assert (destination / "inside-hard").stat().st_ino != outside.stat().st_ino
 
 
 @pytest.mark.parametrize(
@@ -507,6 +609,8 @@ def test_filter_capability_path(
 
     if supports_filter:
         expected_calls = ["data"]
+    elif _name == "shared":
+        expected_calls = []
     elif detects_before_extract:
         expected_calls = [None]
     else:
