@@ -2531,7 +2531,7 @@ shared `models.hub.guard.*` owner.
 | `reorder.cancelled` `[derived]` | 已取消重排,恢复到第 {{position}} 跳。 | Reorder cancelled. Restored to hop {{position}}. |
 | `reorder.sorted` `[derived]` | 已按来源顺序重排。 | Reordered by Source order. |
 | `reorder.unchanged` `[derived]` | 路由链已经符合来源顺序。 | The route chain already matches Source order. |
-| `hint` `[frame]` | 这条链是写下来的配置。以后来源顺序怎么变,它都不变。 | This chain is stored configuration. Later Source-order changes do not change it. |
+| `hint` `[frame]` | 这条链是写下来的配置。以后调整来源顺序时,其中的来源会按新的顺序重排。 | This chain is stored configuration. Later Source order changes reorder its hops to match. |
 | `empty` `[derived]` | 这条路由链是空的。添加一跳,或保持为空配置。 | This route chain is empty. Add a hop, or leave it unconfigured. |
 | `removeHop` `[derived]` | 移除这一跳 | Remove this hop |
 | `grip` `[derived]` | 调整这一跳的顺序 | Reorder this hop |
