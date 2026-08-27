@@ -1452,12 +1452,33 @@ def test_dependencies_status_marks_matching_package_import_failure_repairable(
     }
 
 
-def test_dependencies_status_keeps_importable_package_ready_when_runtime_probe_fails(
+def test_dependencies_status_marks_broken_memory_runtime_contract_repairable(
+    monkeypatch,
+):
+    _patch_memory_dependency_status_shell(monkeypatch)
+    monkeypatch.setattr(
+        api,
+        "probe_memory_runtime_entrypoint",
+        Mock(side_effect=RuntimeError("broken Memory runtime entrypoint")),
+    )
+
+    by_id = {
+        item["id"]: item
+        for item in api.dependencies_status()["deps"]
+    }
+
+    assert by_id["memory-package"]["status"] == "error"
+    assert by_id["memory-package"]["reason"] == "memory_package_import_unavailable"
+
+
+def test_dependencies_status_keeps_valid_package_ready_when_everos_status_fails(
     monkeypatch,
 ):
     import avibe_memory.artifact as memory_artifact
 
     _patch_memory_dependency_status_shell(monkeypatch)
+    runtime_probe = Mock()
+    monkeypatch.setattr(api, "probe_memory_runtime_entrypoint", runtime_probe)
     monkeypatch.setattr(
         memory_artifact,
         "get_memory_artifact_manager",
@@ -1473,6 +1494,7 @@ def test_dependencies_status_keeps_importable_package_ready_when_runtime_probe_f
     assert by_id["memory-package"]["reason"] is None
     assert by_id["memory-runtime"]["status"] == "error"
     assert by_id["memory-runtime"]["reason"] == "memory_runtime_install_failed"
+    runtime_probe.assert_called_once_with()
 
 
 def test_source_version_does_not_advertise_python_package_repair(monkeypatch):

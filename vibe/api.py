@@ -52,6 +52,7 @@ from config.v2_settings import (
 from config.v2_sessions import SessionsStore
 from config.platform_registry import get_platform_descriptor
 from core import latest_version_cache
+from core.memory_loader import probe_memory_runtime_entrypoint
 from config.memory_operation_lock import MemoryOperationBusy, MemoryOperationLease
 from vibe.opencode_config import (
     get_opencode_config_paths,
@@ -8624,11 +8625,20 @@ def dependencies_status(*, offline: bool = False) -> dict:
     ):
         from vibe import __version__
 
+        try:
+            probe_memory_runtime_entrypoint()
+            memory_runtime_contract_ready = True
+        except Exception:  # noqa: BLE001
+            memory_runtime_contract_ready = False
+
         deps.append(
             _memory_package_dependency(
                 required=memory_required,
                 current_version=__version__,
-                importable=memory_package_importable,
+                importable=(
+                    memory_package_importable
+                    and memory_runtime_contract_ready
+                ),
             )
         )
     deps.append(
