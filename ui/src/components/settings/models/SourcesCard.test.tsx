@@ -35,6 +35,8 @@ describe('SourcesCard footer', () => {
     const panel = screen.getByRole('heading', { name: /Upstream sources|上游来源/i }).closest('section');
     expect(panel?.className).toContain('w-full');
     expect(panel?.className).toContain('min-w-0');
+    expect(panel?.className).not.toContain('max-h-full');
+    expect(panel?.children.item(1)?.className).not.toContain('overflow-y-auto');
   });
 
   it('keeps the source title on its own line above the interface and kind tags', () => {

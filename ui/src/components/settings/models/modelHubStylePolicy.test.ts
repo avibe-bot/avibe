@@ -36,6 +36,18 @@ describe('Model Hub theme token policy', () => {
 });
 
 describe('Model Hub visual token policy', () => {
+  it('lets the settings route pane own overview scrolling', () => {
+    const overviewGrid = surfaceCss.match(/\.model-hub-overview-grid\s*\{([^}]*)\}/)?.[1] ?? '';
+    const overviewBody = surfaceCss.match(/\.model-hub-overview-body\s*\{([^}]*)\}/)?.[1] ?? '';
+    const legendBlocks = [...surfaceCss.matchAll(/\.model-hub-legend\s*\{([^}]*)\}/g)]
+      .map((match) => match[1]);
+
+    expect(overviewGrid).not.toMatch(/(?:^|;)\s*height\s*:/);
+    expect(overviewBody).not.toMatch(/(?:^|;)\s*height\s*:/);
+    expect(legendBlocks).not.toEqual([]);
+    for (const legend of legendBlocks) expect(legend).not.toContain('position: absolute');
+  });
+
   it('keeps approximate utility colors out of product surfaces', () => {
     const forbidden = /(?:text-(?:foreground|muted)\/\d+|bg-foreground\/\[[^\]]+\]|border-foreground\/\d+|\btext-(?:gold|violet|mint)\b)/g;
     const violations = productFiles(__dirname).flatMap((path) => (

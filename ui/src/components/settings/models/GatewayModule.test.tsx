@@ -50,6 +50,8 @@ describe('GatewayModule region failure treatment', () => {
     const panel = screen.getByRole('heading', { name: /Gateway routes|网关路由/i }).closest('section');
     expect(panel?.className).toContain('w-full');
     expect(panel?.className).toContain('min-w-0');
+    expect(panel?.className).not.toContain('max-h-full');
+    expect(panel?.children.item(1)?.className).not.toContain('overflow-y-auto');
   });
 
   it('keeps the last good Agent rows visible with an F2 retry after a later read fails', async () => {
