@@ -4428,6 +4428,10 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         protocol=_ProtocolProof.PROVEN,
         authentication=_AuthenticationEvidence.UNKNOWN,
     )
+    unproven_accepted = _ProtocolEvidence(
+        protocol=_ProtocolProof.UNPROVEN,
+        authentication=_AuthenticationEvidence.ACCEPTED,
+    )
     unproven_unknown = _ProtocolEvidence(
         protocol=_ProtocolProof.UNPROVEN,
         authentication=_AuthenticationEvidence.UNKNOWN,
@@ -4488,6 +4492,72 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     assert ambiguous.protocol is None
     assert ambiguous.authenticated is None
     assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(hinted_order)
+    inventory_probe.assert_not_awaited()
+
+    pairwise_order = ("openai_chat", "openai_responses")
+
+    async def openai_pairwise_elimination(**kwargs) -> _ProtocolEvidence:
+        if kwargs["protocol"] == "openai_chat":
+            return unproven_accepted
+        if kwargs["protocol"] == "openai_responses":
+            return unproven_unknown
+        raise AssertionError(kwargs["protocol"])
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(side_effect=openai_pairwise_elimination),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=("deepseek-chat",)),
+        ) as inventory_probe,
+    ):
+        observed = asyncio.run(
+            adapter.observe_source(
+                "openai",
+                base_url,
+                credential_ref,
+                pairwise_order,
+            )
+        )
+
+    assert observed.outcome.value == "observed"
+    assert observed.protocol == "openai_chat"
+    assert observed.model_ids == ("deepseek-chat",)
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(pairwise_order)
+    assert inventory_probe.await_args.kwargs["protocol"] == "openai_chat"
+
+    openai_family = {"openai_responses", "openai_chat"}
+
+    async def indistinguishable_openai_family(**kwargs) -> _ProtocolEvidence:
+        if kwargs["protocol"] in openai_family:
+            return unproven_accepted
+        return unproven_unknown
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(side_effect=indistinguishable_openai_family),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=("should-not-discover",)),
+        ) as inventory_probe,
+    ):
+        ambiguous = asyncio.run(
+            adapter.observe_source(
+                "openai",
+                base_url,
+                credential_ref,
+                SOURCE_PROTOCOLS,
+            )
+        )
+
+    assert ambiguous.outcome.value == "ambiguous"
+    assert ambiguous.protocol is None
+    assert ambiguous.authenticated is None
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
     inventory_probe.assert_not_awaited()
 
     async def shaped_server_failure(**kwargs) -> _ProtocolEvidence:
@@ -4747,6 +4817,29 @@ def test_oauth_observation_uses_the_bound_auth_index_and_requires_response_proof
     assert ambiguous.authenticated is None
 
 
+DEEPSEEK_AUTHENTICATION_ERROR_PAYLOAD = {
+    "error": {
+        "message": "Authentication Fails, Your api key: **** is invalid",
+        "type": "authentication_error",
+        "param": None,
+        "code": "invalid_request_error",
+    }
+}
+DEEPSEEK_MODEL_NOT_FOUND_PAYLOAD = {
+    "error": {
+        "type": "invalid_request_error",
+        "param": None,
+        "code": "model_not_found",
+    }
+}
+ANTHROPIC_RELAY_REQUEST_ERROR_PAYLOAD = {
+    "error": {
+        "message": "model is required",
+        "type": "invalid_request_error",
+    }
+}
+
+
 @pytest.mark.parametrize(
     ("protocol", "success_body", "request_error_body", "auth_error_body"),
     [
@@ -4823,6 +4916,47 @@ def test_protocol_evidence_parser_requires_candidate_specific_response_shapes(
 
 
 @pytest.mark.parametrize(
+    ("status", "body", "expected"),
+    [
+        (
+            400,
+            ANTHROPIC_RELAY_REQUEST_ERROR_PAYLOAD,
+            _ProtocolEvidence(
+                protocol=_ProtocolProof.PROVEN,
+                authentication=_AuthenticationEvidence.ACCEPTED,
+            ),
+        ),
+        (
+            401,
+            {"error": {"type": "authentication_error"}},
+            _ProtocolEvidence(
+                protocol=_ProtocolProof.PROVEN,
+                authentication=_AuthenticationEvidence.REJECTED,
+            ),
+        ),
+        (
+            400,
+            {"error": {"type": "future_error"}},
+            _ProtocolEvidence(
+                protocol=_ProtocolProof.PROVEN,
+                authentication=_AuthenticationEvidence.UNKNOWN,
+            ),
+        ),
+    ],
+)
+def test_anthropic_relay_openai_style_error_wrapper_preserves_canonical_semantics(
+    status: int,
+    body: dict,
+    expected: _ProtocolEvidence,
+) -> None:
+    assert _parse_protocol_authenticated_evidence(
+        "anthropic",
+        status,
+        json.dumps(body),
+    ) == expected
+
+
+@pytest.mark.parametrize(
     ("protocol", "status", "body"),
     [
         (
@@ -4888,32 +5022,67 @@ def test_protocol_evidence_table_defaults_shaped_non_auth_rows_to_unknown(
 
 
 @pytest.mark.parametrize(
-    ("protocol", "body"),
+    ("protocol", "status", "body"),
     [
         (
             "anthropic",
+            404,
             {"type": "error", "error": {"type": "not_found_error"}},
         ),
         (
             "openai_responses",
+            404,
             {"error": {"type": "invalid_request_error", "code": "model_not_found"}},
         ),
         (
             "openai_chat",
+            404,
             {"error": {"type": "invalid_request_error", "code": "model_not_found"}},
+        ),
+        (
+            "openai_responses",
+            400,
+            DEEPSEEK_MODEL_NOT_FOUND_PAYLOAD,
+        ),
+        (
+            "openai_chat",
+            400,
+            DEEPSEEK_MODEL_NOT_FOUND_PAYLOAD,
         ),
     ],
 )
 def test_protocol_evidence_table_accepts_authenticated_model_errors(
     protocol: str,
+    status: int,
     body: dict,
 ) -> None:
     assert _parse_protocol_authenticated_evidence(
         protocol,
-        404,
+        status,
         json.dumps(body),
     ) == _ProtocolEvidence(
         protocol=_ProtocolProof.PROVEN,
+        authentication=_AuthenticationEvidence.ACCEPTED,
+    )
+
+
+@pytest.mark.parametrize("protocol", ("openai_responses", "openai_chat"))
+def test_openai_request_error_without_family_param_records_accepted_but_unproven_evidence(
+    protocol: str,
+) -> None:
+    assert _parse_protocol_authenticated_evidence(
+        protocol,
+        400,
+        json.dumps(
+            {
+                "error": {
+                    "type": "invalid_request_error",
+                    "param": None,
+                }
+            }
+        ),
+    ) == _ProtocolEvidence(
+        protocol=_ProtocolProof.UNPROVEN,
         authentication=_AuthenticationEvidence.ACCEPTED,
     )
 
@@ -4938,6 +5107,20 @@ def test_shared_openai_authentication_rejection_does_not_prove_a_protocol() -> N
             protocol=_ProtocolProof.UNPROVEN,
             authentication=_AuthenticationEvidence.REJECTED,
         )
+
+
+@pytest.mark.parametrize("protocol", ("openai_responses", "openai_chat"))
+def test_deepseek_authentication_rejection_with_null_param_stays_unproven(
+    protocol: str,
+) -> None:
+    assert _parse_protocol_authenticated_evidence(
+        protocol,
+        401,
+        json.dumps(DEEPSEEK_AUTHENTICATION_ERROR_PAYLOAD),
+    ) == _ProtocolEvidence(
+        protocol=_ProtocolProof.UNPROVEN,
+        authentication=_AuthenticationEvidence.REJECTED,
+    )
 
 
 def test_top_level_authentication_rejection_is_classified_without_forging_protocol() -> None:

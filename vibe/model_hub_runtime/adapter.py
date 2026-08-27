@@ -94,15 +94,23 @@ class _ProtocolEvidenceRule:
     top_level_values: frozenset[str] = frozenset()
     error_identifiers: frozenset[str] = frozenset()
     error_params: frozenset[str] | None = None
+    allow_missing_top_level_error_wrapper: bool = False
 
     def matches(self, status: int, payload: Mapping[str, Any]) -> bool:
         if status not in self.statuses:
             return False
+        error = payload.get("error")
         if self.top_level_field is not None:
             value = payload.get(self.top_level_field)
             if not isinstance(value, str) or value.strip().lower() not in self.top_level_values:
-                return False
-        error = payload.get("error")
+                if not (
+                    self.allow_missing_top_level_error_wrapper
+                    and self.top_level_field == "type"
+                    and "error" in self.top_level_values
+                    and isinstance(error, dict)
+                    and isinstance(error.get("type"), str)
+                ):
+                    return False
         if self.error_identifiers or self.error_params is not None:
             if not isinstance(error, dict):
                 return False
@@ -174,6 +182,8 @@ _OPENAI_CHAT_PARAMS = frozenset(
         "top_p",
     }
 )
+_OPENAI_FAMILY_PROTOCOLS = frozenset({"openai_responses", "openai_chat"})
+_OPENAI_FAMILY_PARAMS = _OPENAI_RESPONSES_PARAMS | _OPENAI_CHAT_PARAMS
 
 
 def _openai_evidence_rules(
@@ -196,7 +206,7 @@ def _openai_evidence_rules(
             authentication=_AuthenticationEvidence.ACCEPTED,
         ),
         _ProtocolEvidenceRule(
-            statuses=frozenset({404}),
+            statuses=_REQUEST_ERROR_STATUSES,
             error_identifiers=_MODEL_ERROR_IDENTIFIERS,
             protocol=_ProtocolProof.PROVEN,
             authentication=_AuthenticationEvidence.ACCEPTED,
@@ -254,6 +264,7 @@ _PROTOCOL_OBSERVATION_TAXONOMY = {
                 error_identifiers=_REQUEST_ERROR_IDENTIFIERS | _MODEL_ERROR_IDENTIFIERS,
                 protocol=_ProtocolProof.PROVEN,
                 authentication=_AuthenticationEvidence.ACCEPTED,
+                allow_missing_top_level_error_wrapper=True,
             ),
             _ProtocolEvidenceRule(
                 statuses=_AUTHENTICATION_ERROR_STATUSES,
@@ -262,6 +273,7 @@ _PROTOCOL_OBSERVATION_TAXONOMY = {
                 error_identifiers=_AUTHENTICATION_ERROR_IDENTIFIERS,
                 protocol=_ProtocolProof.PROVEN,
                 authentication=_AuthenticationEvidence.REJECTED,
+                allow_missing_top_level_error_wrapper=True,
             ),
             _ProtocolEvidenceRule(
                 statuses=_SERVER_ERROR_STATUSES,
@@ -270,6 +282,7 @@ _PROTOCOL_OBSERVATION_TAXONOMY = {
                 error_identifiers=_SERVER_ERROR_IDENTIFIERS,
                 protocol=_ProtocolProof.PROVEN,
                 authentication=_AuthenticationEvidence.UNKNOWN,
+                allow_missing_top_level_error_wrapper=True,
             ),
             _ProtocolEvidenceRule(
                 statuses=_RATE_LIMIT_STATUSES,
@@ -278,6 +291,7 @@ _PROTOCOL_OBSERVATION_TAXONOMY = {
                 error_identifiers=_RATE_LIMIT_ERROR_IDENTIFIERS,
                 protocol=_ProtocolProof.PROVEN,
                 authentication=_AuthenticationEvidence.UNKNOWN,
+                allow_missing_top_level_error_wrapper=True,
             ),
         ),
     ),
@@ -355,6 +369,23 @@ def _parse_protocol_authenticated_evidence(
                 protocol=rule.protocol,
                 authentication=rule.authentication,
             )
+    if protocol in _OPENAI_FAMILY_PROTOCOLS and status in _REQUEST_ERROR_STATUSES:
+        error = payload.get("error")
+        if isinstance(error, dict):
+            identifiers = {
+                value.strip().lower()
+                for value in (error.get("type"), error.get("code"))
+                if isinstance(value, str)
+            }
+            if (
+                not _REQUEST_ERROR_IDENTIFIERS.isdisjoint(identifiers)
+                and _AUTHENTICATION_ERROR_IDENTIFIERS.isdisjoint(identifiers)
+                and error.get("param") not in _OPENAI_FAMILY_PARAMS
+            ):
+                return _ProtocolEvidence(
+                    protocol=_ProtocolProof.UNPROVEN,
+                    authentication=_AuthenticationEvidence.ACCEPTED,
+                )
     return _ProtocolEvidence(
         protocol=(
             _ProtocolProof.PROVEN if _response_shape_proves_protocol(protocol, payload) else _ProtocolProof.UNPROVEN
@@ -437,7 +468,9 @@ def _response_shape_proves_protocol(
     if protocol == "anthropic":
         error = body.get("error")
         return body.get("type") == "message" or (
-            body.get("type") == "error" and isinstance(error, dict) and isinstance(error.get("type"), str)
+            isinstance(error, dict)
+            and isinstance(error.get("type"), str)
+            and body.get("type") in {"error", None}
         )
     error = body.get("error")
     if protocol == "openai_responses":
@@ -449,6 +482,41 @@ def _response_shape_proves_protocol(
             isinstance(error, dict) and error.get("param") in _OPENAI_CHAT_PARAMS
         )
     return False
+
+
+def _openai_family_elimination_proof(
+    responses: Mapping[str, _ProtocolEvidence],
+) -> str | None:
+    """Prove one OpenAI-family protocol from the pair of responses, not from the URL.
+
+    A request-error row with matched identifiers but no family-distinctive
+    ``param`` proves only that one endpoint parsed the synthetic request with
+    authentication accepted. The sibling protocol becomes excluded only when its
+    own endpoint answers the same source with an unproven shape, so the proof is
+    carried by the response pair rather than by either request path alone.
+    """
+
+    candidate = responses.get("openai_responses")
+    sibling = responses.get("openai_chat")
+    if (
+        candidate is not None
+        and sibling is not None
+        and candidate.protocol is _ProtocolProof.UNPROVEN
+        and candidate.authentication is _AuthenticationEvidence.ACCEPTED
+        and sibling.protocol is _ProtocolProof.UNPROVEN
+        and sibling.authentication is _AuthenticationEvidence.UNKNOWN
+    ):
+        return "openai_responses"
+    if (
+        candidate is not None
+        and sibling is not None
+        and sibling.protocol is _ProtocolProof.UNPROVEN
+        and sibling.authentication is _AuthenticationEvidence.ACCEPTED
+        and candidate.protocol is _ProtocolProof.UNPROVEN
+        and candidate.authentication is _AuthenticationEvidence.UNKNOWN
+    ):
+        return "openai_chat"
+    return None
 
 
 def _probe_oauth_protocol_response(
@@ -1217,6 +1285,7 @@ class CLIProxyEngineAdapter:
         received_rejection = False
         received_proven_unknown = False
         received_unproven_response = False
+        openai_family_responses: dict[str, _ProtocolEvidence] = {}
         for protocol in protocol_order:
             if protocol not in SOURCE_PROTOCOLS:
                 raise EngineStateError("unsupported source protocol")
@@ -1243,25 +1312,33 @@ class CLIProxyEngineAdapter:
             if evidence.authentication is _AuthenticationEvidence.REJECTED:
                 received_rejection = True
                 continue
+            proved_protocol: str | None = None
             if evidence.protocol is _ProtocolProof.PROVEN:
                 if evidence.authentication is _AuthenticationEvidence.UNKNOWN:
                     received_proven_unknown = True
                     continue
+                proved_protocol = protocol
             else:
                 received_unproven_response = True
-                continue
+                if protocol in _OPENAI_FAMILY_PROTOCOLS:
+                    openai_family_responses[protocol] = evidence
+                    proved_protocol = _openai_family_elimination_proof(
+                        openai_family_responses,
+                    )
+                if proved_protocol is None:
+                    continue
             try:
                 if credential_kind == "api_key":
                     models = await probe_models(
                         vendor=normalized_vendor,
-                        protocol=protocol,
+                        protocol=proved_protocol,
                         base_url=base_url,
                         secret=secret or "",
                     )
                 else:
                     models = await self.discover_models(
                         normalized_vendor,
-                        protocol,
+                        proved_protocol,
                         None,
                         credential_ref,
                     )
@@ -1274,7 +1351,7 @@ class CLIProxyEngineAdapter:
                 outcome=ObservationOutcome.OBSERVED,
                 reachable=True,
                 authenticated=True,
-                protocol=protocol,
+                protocol=proved_protocol,
                 discovery=discovery,
                 model_ids=tuple(models),
             )

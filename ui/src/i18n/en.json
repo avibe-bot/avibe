@@ -1267,7 +1267,7 @@
         "retry": "Retry",
         "undetermined": {
           "title": "Connected and authenticated — but we cannot tell which interface it speaks",
-          "detail": "The response shape matches no interface we know; choose a concrete interface and retry"
+          "detail": "This response shape matches no interface we know; choosing one only narrows the retry probe, and the endpoint still has to prove the interface in its response"
         },
         "protocol": {
           "auto": "Auto detect",
