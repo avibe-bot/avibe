@@ -182,6 +182,45 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
             "/tmp/a%2520b",
         )
 
+    async def test_user_catalog_projects_current_hub_models_before_overlay_start(self):
+        class _CatalogSession(_FakeSession):
+            def get(self, url, headers=None, timeout=None):
+                self.gets.append({"url": url, "headers": headers, "timeout": timeout})
+                return _FakeResponse(
+                    status=200,
+                    json_data={
+                        "providers": [
+                            {"id": "openai", "models": {"native-model": {}}},
+                        ],
+                        "default": {"openai": "native-model"},
+                    },
+                )
+
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        manager._get_http_session = AsyncMock(return_value=_CatalogSession())  # type: ignore[method-assign]
+
+        models = await manager.get_available_models(
+            "/tmp/work",
+            model_hub_models={
+                "custom/current-model": {
+                    "id": "custom/current-model",
+                    "name": "Current model",
+                },
+            },
+        )
+
+        model_index = {row["id"]: row["models"] for row in models["providers"]}
+        self.assertEqual(set(model_index), {"openai", "custom"})
+        self.assertEqual(set(model_index["openai"]), {"native-model"})
+        self.assertEqual(
+            model_index["custom"]["current-model"],
+            {
+                "id": "current-model",
+                "name": "Current model",
+                "vibe_remote": {"model_hub_projected": True},
+            },
+        )
+
     async def test_user_catalog_boundary_excludes_model_hub_runtime_provider(self):
         private_id = "avibe-model-hub-0123456789abcdef01234567"
         legacy_custom_id = "avibe-model-hub-fedcba9876543210fedcba98"
@@ -250,7 +289,18 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         manager._get_http_session = AsyncMock(return_value=session)  # type: ignore[method-assign]
         manager.ensure_running = AsyncMock()  # type: ignore[method-assign]
 
-        models = await manager.get_available_models("/tmp/work")
+        models = await manager.get_available_models(
+            "/tmp/work",
+            model_hub_models={
+                "openai/gpt-5": {
+                    "id": "openai/gpt-5",
+                    "variants": {"high": {}},
+                },
+                "custom/first-model": {
+                    "id": "custom/first-model",
+                },
+            },
+        )
         native_models = await manager.get_native_available_models("/tmp/work")
         providers = await manager.get_providers()
         config = await manager.get_default_config("/tmp/work")

@@ -7676,9 +7676,23 @@ def logs():
 @app.route("/api/opencode/options", methods=["POST"])
 async def opencode_options():
     from vibe import api
+    from core.handlers.model_hub import ModelHubError
 
     payload = request.json or {}
-    result = await api.opencode_options_async(payload.get("cwd", "."))
+    try:
+        public_models = await asyncio.to_thread(
+            _model_hub_service().opencode_public_models,
+        )
+    except ModelHubError:
+        logger.warning(
+            "Model Hub public projection unavailable; serving native OpenCode options",
+            exc_info=True,
+        )
+        public_models = {}
+    result = await api.opencode_options_async(
+        payload.get("cwd", "."),
+        model_hub_models=public_models,
+    )
     return jsonify(result)
 
 

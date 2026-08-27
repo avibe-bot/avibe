@@ -4260,6 +4260,38 @@ def test_opencode_overlay_projects_menu_identity_to_exact_hop_model(tmp_path: Pa
     }
 
 
+def test_opencode_public_models_follow_persisted_config_without_overlay(
+    tmp_path: Path,
+) -> None:
+    source = _source("src_catalog01", "Catalog", model_id="upstream-model")
+    source.models[0].display_name = "Current model"
+    source.models[0].reasoning_efforts = ["low", "high"]
+    config = _config([source])
+    agent = config.agents["opencode"]
+    agent.routes = {
+        "custom/current-model": ModelHubRouteConfig(
+            hops=(ModelHubRouteHopConfig(source.id, "upstream-model"),)
+        )
+    }
+    agent.menu.checked = ["custom/current-model"]
+    service = _service(tmp_path, sources=[source])
+    service.store.config = config
+
+    assert service.opencode_public_models() == {
+        "custom/current-model": {
+            "id": "custom/current-model",
+            "name": "Current model",
+            "variants": {
+                "low": {"reasoningEffort": "low"},
+                "high": {"reasoningEffort": "high"},
+            },
+        }
+    }
+
+    service.store.config.agents["opencode"].mode = "direct"
+    assert service.opencode_public_models() == {}
+
+
 def test_opencode_overlay_private_provider_id_is_credential_scoped(
     tmp_path: Path,
 ) -> None:

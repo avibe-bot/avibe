@@ -2112,6 +2112,23 @@ def test_agent_presence_refresh_crosses_the_controller_rpc_boundary(monkeypatch)
     assert calls == [("list_agents", {"refresh_cli_presence": True})]
 
 
+def test_opencode_public_models_cross_the_controller_rpc_boundary(monkeypatch):
+    from vibe import model_hub_client
+
+    calls = []
+
+    def rpc(operation, payload=None):
+        calls.append((operation, payload))
+        return {"custom/current-model": {"id": "custom/current-model"}}
+
+    monkeypatch.setattr(model_hub_client, "_rpc_sync", rpc)
+
+    models = ModelHubRemoteService().opencode_public_models()
+
+    assert models == {"custom/current-model": {"id": "custom/current-model"}}
+    assert calls == [("get_opencode_public_models", None)]
+
+
 def test_agents_route_requests_deep_presence_only_when_explicit(monkeypatch):
     calls = []
 
@@ -2469,6 +2486,65 @@ def test_ui_model_hub_default_is_controller_rpc_client(monkeypatch):
 
     assert isinstance(service, ModelHubRemoteService)
     assert not hasattr(service, "adapter")
+
+
+def test_opencode_options_route_passes_controller_projection(monkeypatch):
+    from vibe import api
+
+    projection = {
+        "custom/current-model": {"id": "custom/current-model"},
+    }
+    calls = []
+
+    class RemoteService:
+        def opencode_public_models(self):
+            return projection
+
+    async def options(cwd, *, model_hub_models=None):
+        calls.append((cwd, model_hub_models))
+        return {"ok": True, "data": {"models": {}}}
+
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: RemoteService())
+    monkeypatch.setattr(api, "opencode_options_async", options)
+
+    with app.test_request_context(
+        "/api/opencode/options",
+        method="POST",
+        json={"cwd": "/tmp/workspace"},
+    ):
+        response = asyncio.run(ui_server.opencode_options())
+
+    assert response.status_code == 200
+    assert calls == [("/tmp/workspace", projection)]
+
+
+def test_opencode_options_route_keeps_native_catalog_when_projection_is_unavailable(
+    monkeypatch,
+):
+    from vibe import api
+
+    calls = []
+
+    class UnavailableService:
+        def opencode_public_models(self):
+            raise ModelHubError("engine_down", status=503)
+
+    async def options(cwd, *, model_hub_models=None):
+        calls.append((cwd, model_hub_models))
+        return {"ok": True, "data": {"models": {}}}
+
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: UnavailableService())
+    monkeypatch.setattr(api, "opencode_options_async", options)
+
+    with app.test_request_context(
+        "/api/opencode/options",
+        method="POST",
+        json={"cwd": "/tmp/workspace"},
+    ):
+        response = asyncio.run(ui_server.opencode_options())
+
+    assert response.status_code == 200
+    assert calls == [("/tmp/workspace", {})]
 
 
 def test_ui_model_hub_rpc_preserves_controller_error_contract():

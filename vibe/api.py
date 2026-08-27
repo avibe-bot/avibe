@@ -5912,7 +5912,11 @@ async def _telegram_get_me(bot_token: str, proxy_url: str | None = None) -> dict
     return result.get("result") or {}
 
 
-async def opencode_options_async(cwd: str) -> dict:
+async def opencode_options_async(
+    cwd: str,
+    *,
+    model_hub_models: dict[str, Any] | None = None,
+) -> dict:
     # Expand ~ to user home directory
     request_loop = asyncio.get_running_loop()
     expanded_cwd = os.path.expanduser(cwd)
@@ -5920,7 +5924,17 @@ async def opencode_options_async(cwd: str) -> dict:
     cache_data = cache_entry.get("data")
     updated_at = cache_entry.get("updated_at", 0.0)
     cache_age = time.monotonic() - updated_at
-    if cache_data and cache_age < _OPENCODE_OPTIONS_TTL_SECONDS:
+    projection_key = json.dumps(
+        model_hub_models or {},
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    if (
+        cache_data
+        and cache_age < _OPENCODE_OPTIONS_TTL_SECONDS
+        and cache_entry.get("model_hub_projection") == projection_key
+    ):
         return {"ok": True, "data": cache_data, "cached": True}
 
     server = None
@@ -5969,7 +5983,15 @@ async def opencode_options_async(cwd: str) -> dict:
         )
         await asyncio.wait_for(server.ensure_running(), timeout=timeout_seconds)
         agents = await asyncio.wait_for(server.get_available_agents(expanded_cwd), timeout=timeout_seconds)
-        models = await asyncio.wait_for(server.get_available_models(expanded_cwd), timeout=timeout_seconds)
+        model_request = (
+            server.get_available_models(expanded_cwd)
+            if model_hub_models is None
+            else server.get_available_models(
+                expanded_cwd,
+                model_hub_models=model_hub_models,
+            )
+        )
+        models = await asyncio.wait_for(model_request, timeout=timeout_seconds)
         provider_catalog_available = True
         try:
             providers_raw = await asyncio.wait_for(server.get_providers(), timeout=timeout_seconds)
@@ -6020,6 +6042,7 @@ async def opencode_options_async(cwd: str) -> dict:
         _OPENCODE_OPTIONS_CACHE[expanded_cwd] = {
             "data": data,
             "updated_at": time.monotonic(),
+            "model_hub_projection": projection_key,
         }
         return {"ok": True, "data": data}
     except Exception as exc:

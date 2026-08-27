@@ -117,14 +117,13 @@ def _public_opencode_catalog(
     payload: Any,
     *,
     runtime_provider_id: str | None,
-    project_runtime_models: bool = False,
+    model_hub_models: dict[str, Any] | None = None,
 ) -> Any:
-    """Remove the active runtime provider while retaining its public models."""
+    """Remove private transport state and merge the desired public projection."""
 
-    if not isinstance(payload, dict) or not runtime_provider_id:
+    if not isinstance(payload, dict):
         return payload
     projected = dict(payload)
-    runtime_models: dict[str, Any] = {}
 
     def _provider_id(entry: object) -> object:
         if isinstance(entry, dict):
@@ -134,23 +133,18 @@ def _public_opencode_catalog(
     for key in ("providers", "all"):
         value = projected.get(key)
         if isinstance(value, list):
-            if key == "providers" and project_runtime_models:
-                runtime_entry = next(
-                    (entry for entry in value if _provider_id(entry) == runtime_provider_id),
-                    None,
-                )
-                if isinstance(runtime_entry, dict) and isinstance(runtime_entry.get("models"), dict):
-                    runtime_models = runtime_entry["models"]
             projected[key] = [
                 entry
                 for entry in value
-                if _provider_id(entry) != runtime_provider_id
+                if runtime_provider_id is None
+                or _provider_id(entry) != runtime_provider_id
             ]
         elif isinstance(value, dict):
             projected[key] = {
                 provider_id: entry
                 for provider_id, entry in value.items()
-                if provider_id != runtime_provider_id
+                if runtime_provider_id is None
+                or provider_id != runtime_provider_id
             }
 
     connected = projected.get("connected")
@@ -158,7 +152,7 @@ def _public_opencode_catalog(
         projected["connected"] = [
             provider_id
             for provider_id in connected
-            if provider_id != runtime_provider_id
+            if runtime_provider_id is None or provider_id != runtime_provider_id
         ]
 
     for key in ("default", "provider"):
@@ -167,18 +161,23 @@ def _public_opencode_catalog(
             projected[key] = {
                 provider_id: entry
                 for provider_id, entry in value.items()
-                if provider_id != runtime_provider_id
+                if runtime_provider_id is None
+                or provider_id != runtime_provider_id
             }
 
     providers = projected.get("providers")
-    if project_runtime_models and runtime_models and isinstance(providers, list):
+    if model_hub_models and isinstance(providers, list):
         projected["providers"] = _project_model_hub_models(
             providers,
-            runtime_models,
+            model_hub_models,
         )
 
     model = projected.get("model")
-    if isinstance(model, str) and model.split("/", 1)[0] == runtime_provider_id:
+    if (
+        runtime_provider_id is not None
+        and isinstance(model, str)
+        and model.split("/", 1)[0] == runtime_provider_id
+    ):
         projected.pop("model", None)
     return projected
 
@@ -1999,7 +1998,7 @@ class OpenCodeServerManager:
         self,
         directory: str,
         *,
-        project_runtime_models: bool,
+        model_hub_models: dict[str, Any] | None,
     ) -> Dict[str, Any]:
         """Fetch the OpenCode catalog with the requested public projection."""
 
@@ -2014,14 +2013,19 @@ class OpenCodeServerManager:
                         return _public_opencode_catalog(
                             await resp.json(),
                             runtime_provider_id=self._active_model_hub_provider_id(),
-                            project_runtime_models=project_runtime_models,
+                            model_hub_models=model_hub_models,
                         )
                     return {"providers": [], "default": {}}
             except Exception as e:
                 logger.warning(f"Failed to get available models: {e}")
                 return {"providers": [], "default": {}}
 
-    async def get_available_models(self, directory: str) -> Dict[str, Any]:
+    async def get_available_models(
+        self,
+        directory: str,
+        *,
+        model_hub_models: dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
         """Fetch the user-facing catalog, including exact Hub projections.
 
         Returns:
@@ -2030,7 +2034,7 @@ class OpenCodeServerManager:
 
         return await self._get_available_models(
             directory,
-            project_runtime_models=True,
+            model_hub_models=model_hub_models,
         )
 
     async def get_native_available_models(self, directory: str) -> Dict[str, Any]:
@@ -2038,7 +2042,7 @@ class OpenCodeServerManager:
 
         return await self._get_available_models(
             directory,
-            project_runtime_models=False,
+            model_hub_models=None,
         )
 
     async def get_default_config(self, directory: str) -> Dict[str, Any]:

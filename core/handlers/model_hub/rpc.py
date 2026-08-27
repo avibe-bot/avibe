@@ -145,6 +145,8 @@ async def dispatch_model_hub_rpc(
         return service.agent_chain(payload.get("backend"), payload.get("model_id"))
     if operation == "get_agent_chains":
         return service.agent_chains(payload.get("backend"))
+    if operation == "get_opencode_public_models":
+        return service.opencode_public_models()
     if operation == "probe_agent":
         return await service.probe_agent(
             payload.get("backend"),

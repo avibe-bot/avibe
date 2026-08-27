@@ -40,6 +40,7 @@ from core.handlers.model_hub.service import (
     ModelHubError,
     ModelHubService,
     create_default_service,
+    project_opencode_public_model,
 )
 from core.services.settings import load_config_or_default
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
@@ -1017,28 +1018,14 @@ class ModelHubRuntimeRouter:
                     "models": {},
                 },
             )
-            model = next(
-                (item for item in source.models if item.id == exact_model_id),
-                None,
-            )
             runtime_model = identifier
             if self.turn_gateway is None:
                 prefix = await self._source_prefix(source.id)
                 runtime_model = f"{prefix}/{exact_model_id}"
-            projected_model: dict[str, Any] = {
-                "id": runtime_model,
-                "name": (
-                    model.display_name
-                    if model is not None and model.display_name
-                    else identifier
-                ),
-            }
-            variants = {
-                effort: {"reasoningEffort": effort}
-                for effort in (model.reasoning_efforts if model is not None else ())
-            }
-            if variants:
-                projected_model["variants"] = variants
+            projected_model = project_opencode_public_model(identifier, resolution)
+            if projected_model is None:
+                continue
+            projected_model["id"] = runtime_model
             provider["models"][identifier] = projected_model
             projected_identifiers.append(identifier)
             if resolution.candidate_hops:

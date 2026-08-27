@@ -180,6 +180,84 @@ def test_opencode_options_passes_resource_governor_from_v2_runtime(monkeypatch):
     assert governor.config["agent_group_name"] == "ui-agents"
 
 
+def test_opencode_options_cache_tracks_current_model_hub_projection(monkeypatch):
+    import config.v2_compat as v2_compat
+    import modules.agents.opencode as opencode_module
+
+    projections = []
+
+    class _FakeManager:
+        async def ensure_running(self):
+            return "http://127.0.0.1:4096"
+
+        async def get_available_agents(self, directory):
+            return []
+
+        async def get_available_models(self, directory, *, model_hub_models=None):
+            projections.append(model_hub_models)
+            return {"providers": []}
+
+        async def get_providers(self):
+            return {"all": [], "connected": []}
+
+        async def get_default_config(self, directory):
+            return {}
+
+        async def close_http_session(self, *, loop=None):
+            pass
+
+    manager = _FakeManager()
+
+    class _FakeServerManager:
+        @staticmethod
+        async def get_instance(**kwargs):
+            return manager
+
+    monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {})
+    monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: object()))
+    monkeypatch.setattr(
+        v2_compat,
+        "to_app_config",
+        lambda config: SimpleNamespace(
+            opencode=SimpleNamespace(
+                binary="opencode",
+                port=4096,
+                request_timeout_seconds=10,
+            )
+        ),
+    )
+    monkeypatch.setattr(opencode_module, "OpenCodeServerManager", _FakeServerManager)
+    monkeypatch.setattr(
+        opencode_module,
+        "build_reasoning_effort_options",
+        lambda models, model_key: [],
+    )
+    first = {"custom/first": {"id": "custom/first"}}
+    second = {"custom/second": {"id": "custom/second"}}
+
+    asyncio.run(
+        api.opencode_options_async(
+            "/tmp/workspace",
+            model_hub_models=first,
+        )
+    )
+    cached = asyncio.run(
+        api.opencode_options_async(
+            "/tmp/workspace",
+            model_hub_models=first,
+        )
+    )
+    asyncio.run(
+        api.opencode_options_async(
+            "/tmp/workspace",
+            model_hub_models=second,
+        )
+    )
+
+    assert cached["cached"] is True
+    assert projections == [first, second]
+
+
 def test_opencode_get_server_passes_resource_governor_from_v2_runtime(monkeypatch):
     import config.v2_compat as v2_compat
     import modules.agents.opencode as opencode_module
