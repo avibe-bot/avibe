@@ -288,6 +288,7 @@
       "access": "Access"
     },
     "navigationLabel": "Settings sections",
+    "backToWorkbench": "Back to Workbench",
     "backToSections": "All settings",
     "backToSection": "Back to {{section}}",
     "close": "Close Settings",

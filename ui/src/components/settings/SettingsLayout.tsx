@@ -31,6 +31,7 @@ import { useIsDesktop } from '@/lib/useIsDesktop';
 import { AccountMenu } from '../AccountMenu';
 import { LanguageSwitcher } from '../LanguageSwitcher';
 import { ThemeToggle } from '../ThemeToggle';
+import { VersionBadge } from '../VersionBadge';
 import { modelHubEnabledFromConfig } from './models/featureFlags';
 
 type SettingsItem = {
@@ -270,7 +271,7 @@ export const SettingsLayout: React.FC = () => {
   }, [location.pathname]);
 
   const mobileBackTarget = useMemo(() => {
-    if (atRoot) return null;
+    if (atRoot) return '/';
     const activeSection = activeTrail.at(-1);
     if (!activeSection) return '/settings';
     return normalizedSettingsPath(location.pathname) === normalizedSettingsPath(activeSection.path)
@@ -278,11 +279,13 @@ export const SettingsLayout: React.FC = () => {
       : activeSection.path;
   }, [activeTrail, atRoot, location.pathname]);
 
-  const mobileBackLabel = mobileBackTarget === '/settings'
-    ? t('settings.backToSections')
-    : t('settings.backToSection', {
-      section: t(activeTrail.at(-1)?.labelKey ?? 'nav.settings'),
-    });
+  const mobileBackLabel = mobileBackTarget === '/'
+    ? t('settings.backToWorkbench')
+    : mobileBackTarget === '/settings'
+      ? t('settings.backToSections')
+      : t('settings.backToSection', {
+        section: t(activeTrail.at(-1)?.labelKey ?? 'nav.settings'),
+      });
 
   useEffect(() => {
     if (atRoot || !location.pathname.startsWith('/settings/')) return;
@@ -318,13 +321,20 @@ export const SettingsLayout: React.FC = () => {
             </>
           )}
         </div>
-        <NavLink
-          to="/"
-          aria-label={t('settings.close')}
-          className="grid size-10 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-foreground/[0.05] hover:text-foreground md:size-8"
-        >
-          <X className="size-4" />
-        </NavLink>
+        <div className="flex shrink-0 items-center gap-1">
+          {capabilities.can_manage_instance && (
+            <div className="md:hidden">
+              <VersionBadge />
+            </div>
+          )}
+          <NavLink
+            to="/"
+            aria-label={t('settings.close')}
+            className="hidden size-8 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-foreground/[0.05] hover:text-foreground md:grid"
+          >
+            <X className="size-4" />
+          </NavLink>
+        </div>
       </header>
 
       <div className="flex min-h-0 flex-1">

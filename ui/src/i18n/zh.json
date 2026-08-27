@@ -288,6 +288,7 @@
       "access": "访问"
     },
     "navigationLabel": "设置分区",
+    "backToWorkbench": "返回工作台",
     "backToSections": "全部设置",
     "backToSection": "返回{{section}}",
     "close": "关闭设置",

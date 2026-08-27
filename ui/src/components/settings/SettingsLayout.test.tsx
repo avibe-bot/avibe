@@ -40,6 +40,7 @@ vi.mock('../LanguageSwitcher', () => ({
   ),
 }));
 vi.mock('../ThemeToggle', () => ({ ThemeToggle: () => <div data-testid="theme-toggle" /> }));
+vi.mock('../VersionBadge', () => ({ VersionBadge: () => <div data-testid="version-badge" /> }));
 vi.mock('../AccountMenu', () => ({
   AccountMenu: ({ openUpward }: { openUpward?: boolean }) => (
     <div data-testid="account-menu" data-open-upward={String(openUpward)} />
@@ -266,6 +267,7 @@ describe('SettingsLayout', () => {
     expect(screen.getByRole('link', { name: 'settings.sections.shortcuts' })).toBeTruthy();
     expect(screen.getByRole('link', { name: 'settings.sections.access' })).toBeTruthy();
     expect(screen.queryByRole('link', { name: 'settings.sections.service' })).toBeNull();
+    expect(screen.queryByTestId('version-badge')).toBeNull();
     expect(api.getConfig).not.toHaveBeenCalled();
   });
 
@@ -305,7 +307,10 @@ describe('SettingsLayout', () => {
     renderLayout('/settings');
 
     expect(screen.getByRole('link', { name: 'settings.sections.replies' }).className).toContain('min-h-11');
-    expect(screen.getByRole('link', { name: 'settings.close' }).className).toContain('size-10');
+    const back = screen.getByRole('link', { name: 'settings.backToWorkbench' });
+    expect(back.getAttribute('href')).toBe('/');
+    expect(back.className).toContain('size-10');
+    expect(screen.getByTestId('version-badge').parentElement?.className).toContain('md:hidden');
   });
 
   it('keeps mobile navigation and detail controls above the bottom safe-area inset', () => {
