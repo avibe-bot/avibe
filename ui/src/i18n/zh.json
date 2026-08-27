@@ -1451,6 +1451,8 @@
             "accountBanned": "账号被限制"
           },
           "error": "异常",
+          "standbyHintLabel": "备用是什么意思",
+          "standbyHint": "这个来源是健康的。当网关模式下的某个后端通过它供给一条路由时，它就会显示为使用中。",
           "listUpdated": "· 型号列表更新于 {{time}}"
         },
         "summary_one": "{{host}} · {{count}} 个型号",
@@ -1536,7 +1538,9 @@
           "addFirst": "+ 添加档位",
           "add": "+ 档位",
           "inputHint": "回车添加 · 任意文本",
-          "remove": "移除 {{tier}}"
+          "remove": "移除 {{tier}}",
+          "suggest": "添加 {{tier}}",
+          "note": "档位按你输入的原样发送。没有档位的型号照样可以路由，只是请求不带 effort 参数。"
         },
         "addRow": {
           "hint": "拉取不到、或只想接入其中一个时用"
