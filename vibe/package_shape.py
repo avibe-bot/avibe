@@ -290,13 +290,11 @@ def capture_package_shape(
     installed_core_providers = tuple(
         provider for provider in relevant if provider.name in CORE_DISTRIBUTION_NAMES
     )
-    if len(installed_core_providers) > 1:
-        raise DuplicateDistributionProviderError(
-            "multiple canonical core distribution providers are installed"
-        )
     if not installed_core_providers:
         raise PackageShapeError("running core has no canonical distribution provider")
 
+    # A rename or rollback can leave one provider for each published core name.
+    # The running version still has to identify exactly one of those providers.
     core_candidates = tuple(
         provider
         for provider in installed_core_providers

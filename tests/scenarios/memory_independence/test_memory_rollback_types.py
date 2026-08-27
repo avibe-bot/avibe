@@ -265,14 +265,43 @@ def test_memory_indep_019_duplicate_canonical_providers_fail_before_shape() -> N
         )
 
 
-def test_memory_indep_019_alternate_core_providers_fail_before_shape() -> None:
+@pytest.mark.parametrize(
+    ("core_version", "expected_provider", "expected_family"),
+    [
+        ("3.0.13", "vibe-remote", ReleaseFamily.PRE_SPLIT),
+        ("3.0.14", "avibe-os", ReleaseFamily.OPTIONAL_SPLIT),
+    ],
+)
+def test_memory_indep_019_alternate_core_providers_select_running_version(
+    core_version: str,
+    expected_provider: str,
+    expected_family: ReleaseFamily,
+) -> None:
     providers = (
-        _provider("avibe-os", "3.0.14"),
         _provider("vibe-remote", "3.0.13"),
+        _provider(
+            "avibe-os",
+            "3.0.14",
+            requires_dist=(OPTIONAL_MEMORY_REQUIREMENT,),
+        ),
     )
-    with pytest.raises(DuplicateDistributionProviderError):
+    shape = capture_package_shape(
+        core_version=core_version,
+        launcher=LAUNCHER,
+        providers=providers,
+    )
+    assert shape.core_distribution == expected_provider
+    assert shape.release_family is expected_family
+
+
+def test_memory_indep_019_alternate_core_providers_reject_ambiguous_version() -> None:
+    providers = (
+        _provider("vibe-remote", "3.0.13"),
+        _provider("avibe-os", "3.0.13"),
+    )
+    with pytest.raises(PackageShapeError, match="exactly one"):
         capture_package_shape(
-            core_version="3.0.14",
+            core_version="3.0.13",
             launcher=LAUNCHER,
             providers=providers,
         )
@@ -436,14 +465,16 @@ def test_memory_indep_019_no_resolved_target_has_presence_without_version(tmp_pa
     assert plan.captured.memory_version is None
 
 
-def test_memory_indep_019_legacy_target_rejects_presence_without_version() -> None:
+def test_memory_indep_019_legacy_target_marks_presence_without_version_unavailable() -> None:
     from vibe.upgrade import RollbackTarget
 
-    with pytest.raises(PackageShapeError, match="requires one exact version"):
-        RollbackTarget(
-            version="3.0.14",
-            package="avibe-os",
-            launcher=LAUNCHER,
-            memory_package=True,
-            memory_version=None,
-        )
+    target = RollbackTarget(
+        version="3.0.14",
+        package="avibe-os",
+        launcher=LAUNCHER,
+        memory_package=True,
+        memory_version=None,
+    )
+    assert not target
+    assert target.memory_package is False
+    assert target.memory_version is None

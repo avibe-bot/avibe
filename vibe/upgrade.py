@@ -12,7 +12,7 @@ import tempfile
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
@@ -34,7 +34,6 @@ from vibe.package_shape import (
     CapturedPackageShape,
     DistributionProvider,
     DuplicateDistributionProviderError,
-    PackageShapeError,
     ReleaseFamily,
     ResolvedRollbackPlan,
     RollbackResolutionError,
@@ -815,7 +814,9 @@ class RollbackTarget:
     So the rule is that nothing about the replaced install is looked up again
     later. Anything a rollback needs to know about it is measured here, once, in
     the only process that can still see it, and carried. There is no constructor
-    that reads one field.
+    that reads one field. The one compatibility exception is argv emitted by a
+    released scheduler before it carried an exact Memory version: that form is
+    normalized to a falsey, rollback-unavailable target so restart still runs.
     """
 
     version: str
@@ -823,19 +824,28 @@ class RollbackTarget:
     launcher: runtime_mod.ServiceLauncher
     memory_package: bool = False
     memory_version: str | None = None
+    _rollback_available: bool = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        if self.memory_package != (self.memory_version is not None):
-            raise PackageShapeError(
-                "legacy rollback target Memory presence requires one exact version"
-            )
-        if self.memory_version is not None:
+        rollback_available = self.memory_package == (self.memory_version is not None)
+        normalized_memory_version = self.memory_version
+        if rollback_available and normalized_memory_version is not None:
             try:
-                object.__setattr__(self, "memory_version", str(Version(self.memory_version)))
-            except InvalidVersion as exc:
-                raise PackageShapeError(
-                    "legacy rollback target Memory version is invalid"
-                ) from exc
+                normalized_memory_version = str(Version(normalized_memory_version))
+            except InvalidVersion:
+                rollback_available = False
+
+        # Released schedulers could emit Memory presence without its version.
+        # Keep their restart job runnable, but make the incomplete target falsey
+        # so no rollback path can consume or persist it as restorable evidence.
+        if not rollback_available:
+            object.__setattr__(self, "memory_package", False)
+            normalized_memory_version = None
+        object.__setattr__(self, "memory_version", normalized_memory_version)
+        object.__setattr__(self, "_rollback_available", rollback_available)
+
+    def __bool__(self) -> bool:
+        return self._rollback_available
 
 
 def _names_a_published_release(version: str) -> bool:
