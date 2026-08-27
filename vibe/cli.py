@@ -62,13 +62,14 @@ from core.watches import (
 )
 from vibe import __version__, api, runtime
 from vibe.i18n import normalize_language, t as i18n_t
-from vibe.restart_supervisor import schedule_restart
+from vibe.restart_supervisor import schedule_restart, schedule_upgrade_transaction
 from vibe.screenshot import ScreenshotError, capture_screenshot
 from vibe.upgrade import (
     CURRENT_VIBE_EXECUTABLE_ENV,
     LEGACY_PACKAGE_NAME,
     PACKAGE_NAME,
-    build_upgrade_plan,
+    build_upgrade_transaction,
+    configured_memory_enabled,
     cache_running_vibe_path,
     get_latest_version_info,
     get_safe_cwd,
@@ -14396,46 +14397,25 @@ def cmd_upgrade():
     print("\nUpgrading...")
 
     current_vibe_path = cache_running_vibe_path()
-    plan = build_upgrade_plan(vibe_path=current_vibe_path)
-    print(f"Using {plan.method}: {' '.join(plan.command)}")
-    runtime_was_running = _runtime_process_was_running()
-
-    # Use a stable directory as cwd to avoid issues when running from a
-    # directory that uv may delete during upgrade (e.g. inside the uv tool venv).
-    safe_cwd = get_safe_cwd()
-
     try:
-        result = subprocess.run(plan.command, capture_output=True, text=True, env=plan.env, cwd=safe_cwd)
-        if result.returncode == 0:
-            print("\033[32mUpgrade successful!\033[0m")
-            if runtime_was_running:
-                try:
-                    restart = schedule_restart(
-                        delay_seconds=0.0,
-                        vibe_path=current_vibe_path,
-                        trigger="upgrade",
-                        prepare_show_runtime=not should_skip_show_runtime_prepare(),
-                        rollback_to=plan.rollback_to,
-                    )
-                except Exception as exc:
-                    print("\033[33mUpgrade installed, but restart scheduling failed.\033[0m")
-                    print(f"Restart error: {exc}")
-                    print("Run `vibe restart` to use the new version.")
-                    return 2
-                else:
-                    print("Restart scheduled to use the new version.")
-                    print(f"Job ID: {restart['job_id']}")
-                    print("Run `vibe status` to inspect the restart result.")
-            else:
-                _prepare_show_runtime_after_install(current_vibe_path)
-                print("Avibe was not running; the new version will be used next time you start it.")
-            return 0
-        else:
-            print(f"\033[31mUpgrade failed:\033[0m\n{result.stderr}")
-            return 1
-    except Exception as e:
-        print(f"\033[31mUpgrade failed: {e}\033[0m")
+        transaction = build_upgrade_transaction(
+            vibe_path=current_vibe_path,
+            memory_enabled=configured_memory_enabled(),
+        )
+        restart = schedule_upgrade_transaction(
+            transaction,
+            delay_seconds=0.0,
+            vibe_path=current_vibe_path,
+            trigger="upgrade",
+            prepare_show_runtime=not should_skip_show_runtime_prepare(),
+        )
+    except Exception as exc:
+        print(f"\033[31mUpgrade failed: {exc}\033[0m")
         return 1
+    print("\033[32mUpgrade scheduled; the supervisor will replace the package and restart Avibe.\033[0m")
+    print(f"Job ID: {restart['job_id']}")
+    print("Run `vibe status` to inspect the transaction result.")
+    return 0
 
 
 def _show_runtime_manager_from_args(args):

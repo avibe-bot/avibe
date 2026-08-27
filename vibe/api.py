@@ -60,13 +60,13 @@ from vibe.opencode_config import (
 )
 from vibe.build_identity import get_build_identity
 from vibe.upgrade import (
-    build_upgrade_plan,
+    build_upgrade_transaction,
+    configured_memory_enabled,
     get_latest_version_info,
     get_running_vibe_path,
-    get_safe_cwd,
     should_skip_show_runtime_prepare,
 )
-from vibe.restart_supervisor import schedule_restart
+from vibe.restart_supervisor import schedule_upgrade_transaction
 from vibe import backend_model_catalog
 from vibe.i18n import t as backend_t
 from modules.agents.catalog import (
@@ -6126,71 +6126,28 @@ def do_upgrade(auto_restart: bool = True) -> dict:
         {"ok": bool, "message": str, "output": str | None, "restarting": bool}
     """
     current_vibe_path = get_running_vibe_path()
-    plan = build_upgrade_plan(vibe_path=current_vibe_path)
-    runtime_was_running = _runtime_process_was_running()
-
-    # Use a stable directory as cwd to avoid "Current directory does not exist"
-    # errors.  The vibe service process cwd may be inside the uv tool venv
-    # directory, which uv deletes and recreates during upgrade.
-    safe_cwd = get_safe_cwd()
-
     try:
-        result = subprocess.run(
-            plan.command,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            env=plan.env,
-            cwd=safe_cwd,
+        transaction = build_upgrade_transaction(
+            vibe_path=current_vibe_path,
+            memory_enabled=configured_memory_enabled(),
+            activate_runtime="restart_if_running" if auto_restart else "none",
         )
-        if result.returncode == 0:
-            restarting = False
-            restart_failed = False
-            runtime_output = None
-            if auto_restart and runtime_was_running:
-                try:
-                    schedule_restart(
-                        delay_seconds=2.0,
-                        vibe_path=current_vibe_path,
-                        trigger="upgrade",
-                        prepare_show_runtime=not should_skip_show_runtime_prepare(),
-                        rollback_to=plan.rollback_to,
-                    )
-                    restarting = True
-                except Exception as exc:
-                    restart_failed = True
-                    runtime_output = f"Restart scheduling failed; run `vibe restart` to use the new version.\n{exc}"
-            else:
-                runtime_output = _prepare_show_runtime_after_upgrade(current_vibe_path, safe_cwd)
-            if restarting:
-                message = "Upgrade successful. Restarting..."
-            elif restart_failed:
-                message = "Upgrade successful, but restart scheduling failed. Please restart vibe."
-            else:
-                message = "Upgrade successful. Please restart vibe."
-
-            return {
-                "ok": True,
-                "message": message,
-                "output": _append_upgrade_output(result.stdout, runtime_output),
-                "restarting": restarting,
-            }
-        else:
-            return {
-                "ok": False,
-                "message": "Upgrade failed",
-                "output": result.stderr or result.stdout,
-                "restarting": False,
-            }
-    except subprocess.TimeoutExpired:
-        return {
-            "ok": False,
-            "message": "Upgrade timed out",
-            "output": None,
-            "restarting": False,
-        }
-    except Exception as e:
-        return {"ok": False, "message": str(e), "output": None, "restarting": False}
+        restart = schedule_upgrade_transaction(
+            transaction,
+            delay_seconds=2.0,
+            vibe_path=current_vibe_path,
+            trigger="upgrade",
+            prepare_show_runtime=not should_skip_show_runtime_prepare(),
+        )
+    except Exception as exc:
+        return {"ok": False, "message": str(exc), "output": None, "restarting": False}
+    return {
+        "ok": True,
+        "message": "Upgrade scheduled; the supervisor will replace the package and restart Avibe.",
+        "output": None,
+        "restarting": bool(restart.get("job_id")),
+        "job_id": restart.get("job_id"),
+    }
 
 
 def _append_upgrade_output(output: str | None, runtime_output: str | None) -> str | None:
