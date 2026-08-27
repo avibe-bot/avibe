@@ -10608,6 +10608,54 @@ def test_show_runtime_manager_rejects_noncanonical_manifest_entrypoint(
 
 
 @pytest.mark.parametrize(
+    ("selection_error", "expected_reason"),
+    (
+        ("missing_platform", "runtime_platform_unsupported"),
+        ("noncanonical_entrypoint", "runtime_manifest_invalid"),
+    ),
+)
+def test_show_runtime_status_reports_selected_manifest_archive_error_with_installed_runtime(
+    monkeypatch,
+    tmp_path,
+    selection_error,
+    expected_reason,
+):
+    archive_path = _write_runtime_archive(tmp_path)
+    manifest_path = _write_runtime_manifest(tmp_path, archive_path)
+    runtime_dir = tmp_path / "runtime"
+    monkeypatch.setattr(
+        "core.show_runtime._resolve_command",
+        lambda command: ["/bin/node"] if command == "node" else None,
+    )
+    installed = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        manifest_path=manifest_path,
+    ).prepare()
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    platform_tag = _runtime_platform_tag()
+    if selection_error == "missing_platform":
+        payload["archives"]["fixture-unsupported"] = payload["archives"].pop(platform_tag)
+    else:
+        payload["archives"][platform_tag]["bin_path"] = (
+            "node_modules/@avibe/show-runtime/dist/alternate.js"
+        )
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        manifest_path=manifest_path,
+    )
+
+    status = manager.status()
+
+    assert status["install"]["state"] == "installed"
+    assert status["install"]["runtime_version"] == "runtime-test-ref"
+    assert status["command"] == installed["command"]
+    assert status["reason"] == expected_reason
+
+
+@pytest.mark.parametrize(
     "minimum_node",
     (20, [">=22.12.0"], {"range": ">=22.12.0"}),
     ids=("number", "list", "object"),

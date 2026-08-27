@@ -1952,6 +1952,11 @@ class ShowRuntimeManager:
             if manifest_manager is not None
             else None
         )
+        archive: ManagedRuntimeArchive | ShowRuntimeArchive | None = (
+            manifest_manager.archive_for_platform(manifest)
+            if manifest_manager is not None and manifest is not None
+            else None
+        )
         manifest_reason = manifest_manager._install_reason if manifest_manager is not None else None
         manifest_download_error = (
             manifest_manager._download_error if manifest_manager is not None else None
@@ -1970,7 +1975,6 @@ class ShowRuntimeManager:
         node_supported = _node_satisfies_requirement(node_version, minimum_node) if manifest else None
         installed_command: list[str] | None = configured_command
         installed_dir: Path | None = None
-        archive: ManagedRuntimeArchive | ShowRuntimeArchive | None = None
         archive_status: dict[str, Any] | None = None
         installed_runtime_version: str | None = None
         installed_matches: bool | None = None
@@ -1988,8 +1992,6 @@ class ShowRuntimeManager:
                 if manifest_status is None:
                     manifest_status = _persisted_manifest_status_payload(disk_install.metadata)
                     archive_status = _persisted_archive_status_payload(disk_install.metadata)
-            if manifest:
-                archive = manifest_manager.archive_for_platform(manifest)
             if archive:
                 for candidate in manifest_manager.install_candidates(manifest, archive):
                     entrypoint = manifest_manager.verified_entrypoint(candidate, manifest, archive)
