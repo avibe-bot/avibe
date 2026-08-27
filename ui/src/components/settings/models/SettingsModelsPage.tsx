@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { ArrowLeft, Gauge, LoaderCircle, Power, Route, ScrollText } from 'lucide-react';
+import { ArrowLeft, Gauge, LoaderCircle, Power, RefreshCw, Route, ScrollText } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Badge } from '@/components/ui/badge';
@@ -262,8 +262,8 @@ const ModelHubShell: React.FC<{ actions?: React.ReactNode; detailBack?: () => vo
           : <span className="flex items-center gap-[9px]">
               <h1>{t('settings.models.shell.title')}</h1>
               <ModelHubInfoHint
-                label={t('settings.models.shell.gatewayInfo.label')}
-                content={t('settings.models.shell.gatewayInfo.body')}
+                label={t('settings.models.shell.modelsInfo.label')}
+                content={t('settings.models.shell.modelsInfo.body')}
                 className="model-hub-shell-info"
               />
             </span>}
@@ -399,6 +399,7 @@ export const SettingsModelsPage: React.FC = () => {
   const [sourceIntentAuthority] = React.useState(createIntentAuthority);
   const [sourceCollectionReads] = React.useState(() => createSourceCollectionReadAuthority(modelsApi));
   const [agentCollectionReads] = React.useState(() => createAgentCollectionReadAuthority(modelsApi));
+  const [presenceRefreshing, setPresenceRefreshing] = React.useState(false);
   const sourceMutationReport = useSourceMutationReport();
   const overviewRef = React.useRef<HTMLDivElement>(null);
   const pageRef = React.useRef<HTMLDivElement>(null);
@@ -729,9 +730,27 @@ export const SettingsModelsPage: React.FC = () => {
     return result;
   }, [refresh, sourceCollectionReads, sourceEntityAuthority, sourceWriteRegistry]);
 
+  const refreshAgentPresence = React.useCallback(async () => {
+    setPresenceRefreshing(true);
+    try {
+      const result = await agentCollectionReads.refresh();
+      if (!aliveRef.current || result.kind === 'stale') return;
+      setSupplyRead(readyRegion(result.value));
+    } finally {
+      if (aliveRef.current) setPresenceRefreshing(false);
+    }
+  }, [agentCollectionReads]);
+
   React.useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    let current = true;
+    void refresh().then(() => {
+      if (!current) return;
+      void refreshAgentPresence().catch(() => {
+        // The fast snapshot remains authoritative if optional deep discovery fails.
+      });
+    });
+    return () => { current = false; };
+  }, [refresh, refreshAgentPresence]);
 
   const retrySources = React.useCallback(async () => {
     setSourcesRead(beginRegionRead);
@@ -739,9 +758,13 @@ export const SettingsModelsPage: React.FC = () => {
   }, [refresh]);
 
   const retrySupply = React.useCallback(async () => {
-    setSupplyRead(beginRegionRead);
-    await refresh();
-  }, [refresh]);
+    if (presenceRefreshing) return;
+    try {
+      await refreshAgentPresence();
+    } catch {
+      if (aliveRef.current) setSupplyRead(failRegionRead);
+    }
+  }, [presenceRefreshing, refreshAgentPresence]);
 
   const retryEvents = React.useCallback(async () => {
     await refreshEventHead();
@@ -854,6 +877,7 @@ export const SettingsModelsPage: React.FC = () => {
   const directEmpty = modelsSurfaceKindFromReads(supplyRead, sourcesRead) === 'direct_empty';
   const installedAgents = agents.filter((agent) => agent.cli_present);
   const hubBackends = agents.filter((agent) => agent.mode === 'hub').map((agent) => agent.backend);
+  const activeBackends = supplyRead.kind === 'ready' ? new Set(hubBackends) : undefined;
   const stopBlocked = runtimeEnabled && (supplyRead.kind !== 'ready' || hubBackends.length > 0);
   const runtimeSwitchUnsupported = !runtimeEnabled
     && runtimeHealth === 'not_installed'
@@ -1152,6 +1176,16 @@ export const SettingsModelsPage: React.FC = () => {
                 directCount={directEmpty ? installedAgents.length : undefined}
               />
               {runtimeConfigurationVisible && !directEmpty && <TakeoverPill count={takeoverCount} />}
+              {runtimeConfigurationVisible && <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="size-8"
+                disabled={presenceRefreshing}
+                aria-label={t('settings.models.direct.action.refreshAgents')}
+                title={t('settings.models.direct.action.refreshAgents')}
+                onClick={() => void retrySupply()}
+              ><RefreshCw aria-hidden className={cn('size-3.5', presenceRefreshing && 'animate-spin')} /></Button>}
               <span title={runtimeSwitchLabel}>
                 <ToggleSwitch
                   enabled={runtimeEnabled}
@@ -1168,8 +1202,9 @@ export const SettingsModelsPage: React.FC = () => {
           ? <RuntimeClosedState read={runtimeRead} runtime={retainedRuntime} starting={startingRuntime} stopping={stoppingRuntime} />
         : selectedSourceId
           ? selectedSource
-            ? <SourceDetailPanel
+              ? <SourceDetailPanel
                 source={selectedSource}
+                activeBackends={activeBackends}
                 headingRef={sourceDetailHeadingRef}
                 trackMutation={trackSourceMutation(selectedSource.id)}
                 onReauth={setReauthSource}
@@ -1194,7 +1229,7 @@ export const SettingsModelsPage: React.FC = () => {
                           onOpenChange={(open) => { if (!open) closeSubscriptionPicker(); }}
                         >
                           <PopoverAnchor virtualRef={subscriptionAnchorRef} />
-                          <SourcesCard read={sourcesRead} readFailureCopy={routeCommitStatus?.failed.has('sources') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} onRetry={() => routeCommitStatus?.failed.has('sources') ? retryRouteCommit() : void retrySources()} onOpenSource={(source) => selectSource(source.id)} onAddApiKey={() => setApiKeyOpen(true)} onAddSubscription={toggleSubscriptionPicker} subscriptionPickerOpen={subscriptionPickerOpen} subscriptionTriggerRef={subscriptionTriggerRef} />
+                          <SourcesCard read={sourcesRead} activeBackends={activeBackends} readFailureCopy={routeCommitStatus?.failed.has('sources') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} onRetry={() => routeCommitStatus?.failed.has('sources') ? retryRouteCommit() : void retrySources()} onOpenSource={(source) => selectSource(source.id)} onAddApiKey={() => setApiKeyOpen(true)} onAddSubscription={toggleSubscriptionPicker} subscriptionPickerOpen={subscriptionPickerOpen} subscriptionTriggerRef={subscriptionTriggerRef} />
                           <PopoverContent
                             role="menu"
                             aria-label={t('settings.models.upstream.addSubscription')}

@@ -638,7 +638,7 @@ export type ApiContextType = {
     options?: { model?: string },
   ) => Promise<BackendAuthTestResult>;
   getOpencodeProviders: () => Promise<OpencodeProviderListResult>;
-  readOpencodeProvidersForModelPicker: () => Promise<OpencodeProviderListResult>;
+  readOpencodeOptionsForModelPicker: () => Promise<OpencodeOptionsResult>;
   saveOpencodeCustomProvider: (
     payload: OpencodeCustomProviderPayload,
   ) => Promise<OpencodeMutationResult>;
@@ -2478,6 +2478,15 @@ export type OpencodeProviderListResult = {
   permission_allowed?: boolean;
 };
 
+export type OpencodeOptionsResult = {
+  ok: boolean;
+  data?: {
+    models?: { providers?: unknown[] };
+    reasoning_options?: Record<string, { value: string; label: string }[]>;
+    [key: string]: unknown;
+  };
+};
+
 export type OpencodeMutationResult = {
   ok: boolean;
   message?: string;
@@ -3336,11 +3345,19 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     path: string,
     init: RequestInit,
     errorPath = path,
-    { clearCache = true, handleError = true }: { clearCache?: boolean; handleError?: boolean } = {},
+    {
+      clearCache = true,
+      handleError = true,
+      expectedCodes,
+    }: {
+      clearCache?: boolean;
+      handleError?: boolean;
+      expectedCodes?: readonly string[];
+    } = {},
   ) => {
     const res = await apiFetch(path, init);
     if (!res.ok && handleError) {
-      await handleApiError(res, errorPath);
+      await handleApiError(res, errorPath, { expectedCodes });
     }
     const payloadJson = await res.json().catch(() => ({}));
     if (res.ok && clearCache) {
@@ -3438,7 +3455,11 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     void sessionDraftPersistence.retryAll(writeSessionDraft);
   };
 
-  const postJson = async (path: string, payload: any, opts?: { handleError?: boolean }) => {
+  const postJson = async (
+    path: string,
+    payload: any,
+    opts?: { handleError?: boolean; expectedCodes?: readonly string[] },
+  ) => {
     const { payloadJson } = await requestJson(
       path,
       {
@@ -3784,18 +3805,11 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ...(options?.model ? { model: options.model } : {}),
       }),
     getOpencodeProviders: () => getJson('/api/backend/opencode/providers'),
-    // The same endpoint, read by the model pickers instead of by Settings, where
-    // a refusal is an answer rather than an incident. OpenCode's only catalog is
-    // this Settings one — it carries provider base URLs, masked keys, and auth
-    // state, and reaching it starts the daemon — so it stays Owner-only while the
-    // pickers render for every rank that may configure an Agent. Those ranks get
-    // no OpenCode suggestions and type the model id, which is what they already
-    // did before the member rank existed; announcing that as an error would put a
-    // toast on a page load the user did nothing wrong on. Declared here rather
-    // than at the three call sites so one of them cannot forget it, and kept off
-    // ``getOpencodeProviders`` so Settings still reports its own 403 loudly.
-    readOpencodeProvidersForModelPicker: () =>
-      getJson('/api/backend/opencode/providers', {
+    // Model pickers absorb the expected Owner-only refusal and retain typed-value
+    // fallback. Keep that policy on this dedicated reader so direct options calls
+    // still report access failures and no picker can forget the suppression.
+    readOpencodeOptionsForModelPicker: () =>
+      postJson('/api/opencode/options', { cwd: '~' }, {
         expectedCodes: ['instance_access_forbidden'],
       }),
     saveOpencodeCustomProvider: (payload) =>

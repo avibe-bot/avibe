@@ -367,10 +367,9 @@
 
 .model-hub-overview-chevron,
 .model-hub-overview-info { color: var(--model-hub-ink-40); }
-/* The agent group head is a fixed 66px band holding a 36px action row and a
-   16px status row with a 7px gap; the frame's 59px of content is centred in it,
-   so the inset is the half-pixel 3.5 rather than a round number. Both rows have
-   to be pinned, because inherited line-height alone grows them past that. */
+/* The agent group head keeps a 66px minimum while holding a 36px action row and a
+   16px status row with a 7px gap. Its height may grow when compact layouts wrap
+   the action row, while the row and status line dimensions stay pinned. */
 .model-hub-agent-head-action {
   height: var(--model-hub-agent-head-action-height, 36px);
   padding-block: 0;
@@ -1008,6 +1007,45 @@
   border-color: var(--model-hub-wash-24);
   color: var(--muted);
 }
+/* A suggestion is a value this source has not declared, so it is drawn as the
+   absence of one: the saved chip's box with a hairline outline instead of a
+   fill. It is never a vocabulary — clicking one types it, and typing anything
+   else remains equally valid. */
+.model-hub-source-tier-suggest {
+  padding: var(--model-hub-source-chip-padding-y) var(--model-hub-source-chip-padding-x);
+  border-color: var(--model-hub-wash-24);
+  border-style: dashed;
+  color: var(--model-hub-ink-73);
+}
+.model-hub-source-tier-suggest:hover { border-color: var(--model-hub-wash-33); color: var(--foreground); }
+.model-hub-source-tier-note {
+  color: var(--model-hub-source-footnote-ink);
+  font-size: var(--model-hub-source-tier-size);
+  line-height: 15px;
+}
+/* The cell is the way into the editor, so its box is the row's band rather than
+   whatever its contents happen to measure — a model with no tiers offers only a
+   10.5px caption, and a touch device is shown no pill at all. Owned here, once,
+   outside both hover branches: the target a tap has to find cannot be decided by
+   what the row is currently drawing. */
+.model-hub-source-tier-cell {
+  min-height: calc(var(--model-hub-source-table-row-height) - 2 * var(--model-hub-source-table-padding-y));
+}
+/* The row's add affordance is drawn only while a pointer is on the row. It keeps
+   the box it reserves either way, so revealing it moves no chip and changes no
+   row height — the row answers a hover with fill alone. A keyboard reaches the
+   cell by focus and gets the same reveal; a touch device has no hover to answer
+   with, so the pill is removed there rather than left as a blank gap, which the
+   cell can afford because the tappable box is the cell's own, not the pill's. */
+@media (hover: hover) {
+  .model-hub-source-table-row:hover { background: var(--model-hub-wash-0a); }
+  .model-hub-source-tier-reveal { opacity: 0; transition: opacity 120ms ease; }
+  .model-hub-source-table-row:hover .model-hub-source-tier-reveal,
+  .model-hub-source-tier-cell:focus-visible .model-hub-source-tier-reveal { opacity: 1; }
+}
+@media (hover: none) {
+  .model-hub-source-tier-reveal { display: none; }
+}
 .model-hub-source-tier-empty {
   color: var(--model-hub-ink-59);
   font-size: var(--model-hub-source-age-size);
@@ -1282,6 +1320,24 @@
   font-weight: 600;
   letter-spacing: 0;
   line-height: normal;
+}
+.model-hub-order-section-head--held-out {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+.model-hub-order-section-head--held-out > .model-hub-order-section-explanation {
+  display: block;
+  flex: 1 1 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--model-hub-order-meta-size);
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 15px;
 }
 .model-hub-order-row {
   height: var(--model-hub-order-row-height);

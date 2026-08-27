@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { ChevronDown, ChevronRight, ChevronUp, RefreshCw } from 'lucide-react';
+import { ArrowDownUp, ChevronDown, ChevronRight, ChevronUp, PlugZap, PowerOff, RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Badge } from '@/components/ui/badge';
@@ -134,9 +134,9 @@ const AgentModelCard: React.FC<{
       <div
         tabIndex={-1}
         data-agent-group-head={agent.backend}
-        className="flex min-h-[66px] flex-col justify-center gap-[7px] border-b border-border px-3.5 py-3 sm:h-[66px] sm:py-0"
+        className="flex min-h-[66px] flex-col justify-center gap-[7px] border-b border-border px-3.5 py-3 sm:min-h-[66px] sm:py-1"
       >
-        <div className="flex min-w-0 flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
+        <div className="flex min-w-0 flex-col items-stretch gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-3">
           <div className="flex min-w-0 items-center gap-[9px]">
             <span className={cn('flex size-[30px] shrink-0 items-center justify-center rounded-[9px]', ACCENT_TILE[accent])}><Icon className={cn('size-[15px]', ACCENT_ICON[accent])} /></span>
             <span className="flex min-w-0 items-center gap-[7px]">
@@ -146,7 +146,7 @@ const AgentModelCard: React.FC<{
               </Badge>
             </span>
           </div>
-          {agent.mode === 'hub' ? <div className="flex shrink-0 flex-wrap gap-2"><Button variant="secondary" size="sm" className="model-hub-agent-head-action rounded-md px-3 text-[11.5px] font-bold" onClick={() => onOpenOrder(agent)} disabled={pending}>{t('settings.models.gateway.sourceOrder')}</Button><Button variant="outline" size="sm" className="model-hub-agent-head-action rounded-md px-3 text-[11.5px] font-bold" onClick={() => onSwitchDirect(agent)} disabled={pending}>{t(switchFailed ? 'settings.models.gateway.retry' : 'settings.models.gateway.switchToDirect')}</Button></div> : <Button variant="secondary" size="sm" className="model-hub-agent-head-action shrink-0 self-start rounded-md px-3 text-[11.5px] font-bold sm:self-auto" onClick={() => onConnectHub(agent)} disabled={connecting}>{t('settings.models.gateway.switchToGateway')}</Button>}
+          {agent.mode === 'hub' ? <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2"><Button variant="secondary" size="sm" className="model-hub-agent-head-action rounded-md px-3 text-[11.5px] font-bold" onClick={() => onOpenOrder(agent)} disabled={pending}><ArrowDownUp aria-hidden="true" />{t('settings.models.gateway.sourceOrder')}</Button><Button variant="outline" size="sm" className="model-hub-agent-head-action rounded-md px-3 text-[11.5px] font-bold" onClick={() => onSwitchDirect(agent)} disabled={pending}><PowerOff aria-hidden="true" />{t(switchFailed ? 'settings.models.gateway.retry' : 'settings.models.gateway.switchToDirect')}</Button></div> : <Button variant="default" size="sm" className="model-hub-agent-head-action shrink-0 self-start rounded-md px-3 text-[11.5px] font-bold sm:self-auto" onClick={() => onConnectHub(agent)} disabled={connecting}><PlugZap aria-hidden="true" />{t('settings.models.gateway.switchToGateway')}</Button>}
         </div>
         <span className={cn('model-hub-agent-head-status flex items-center gap-1.5 text-[11px] font-semibold sm:ml-[42px]', statusClass)}>
           <span className={cn('size-[5px] shrink-0 rounded-full', statusDot)} />

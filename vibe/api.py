@@ -12,6 +12,7 @@ import socket
 import ssl
 import stat
 import subprocess
+import sys
 import threading
 import time
 import urllib.parse
@@ -52,6 +53,7 @@ from config.v2_settings import (
 from config.v2_sessions import SessionsStore
 from config.platform_registry import get_platform_descriptor
 from core import latest_version_cache
+from core.install_integrity import verify_python_environment
 from core.memory.operation_lock import MemoryOperationBusy, MemoryOperationLease
 from vibe.opencode_config import (
     get_opencode_config_paths,
@@ -60,11 +62,22 @@ from vibe.opencode_config import (
 )
 from vibe.build_identity import get_build_identity
 from vibe.upgrade import (
+    AtomicActivation,
+    _candidate_python,
+    activation_block_reason,
+    activate_upgrade_candidate,
+    atomic_upgrade_lock,
     build_upgrade_plan,
+    defer_upgrade_activation,
+    discard_atomic_uv_install_generation,
     get_latest_version_info,
     get_running_vibe_path,
     get_safe_cwd,
+    launcher_is_current_process,
+    restart_is_pending,
     should_skip_show_runtime_prepare,
+    UPGRADE_INSTALL_TIMEOUT_SECONDS,
+    verify_upgrade_candidate,
 )
 from vibe.restart_supervisor import schedule_restart
 from vibe import backend_model_catalog
@@ -237,28 +250,35 @@ def _npm_global_binary_candidates(binary: str) -> list[Path]:
     if not binary or binary == "npm":
         return []
 
-    npm_paths: list[Path] = []
-    for candidate in _candidate_cli_paths("npm"):
-        if _is_executable_file(candidate) and candidate not in npm_paths:
-            npm_paths.append(candidate)
-
-    which_npm = shutil.which("npm")
-    if which_npm:
-        npm_candidate = Path(which_npm)
-        if npm_candidate not in npm_paths:
-            npm_paths.append(npm_candidate)
-
     candidates: list[Path] = []
-    for npm_path in npm_paths:
-        prefix_path = _npm_prefix_for(npm_path)
-        if prefix_path is None:
-            continue
-
+    for prefix_path in _npm_global_prefixes():
         for candidate in _npm_binary_candidates_for_prefix(prefix_path, binary):
             if candidate not in candidates:
                 candidates.append(candidate)
 
     return candidates
+
+
+def _npm_global_prefixes() -> list[Path]:
+    # Global packages belong to the npm selected by the current environment.
+    # Querying every historical NVM installation makes one missing CLI cost up
+    # to five seconds per Node version without improving that answer.
+    which_npm = shutil.which("npm")
+    npm_path = Path(which_npm) if which_npm else next(
+        (
+            candidate
+            for candidate in _candidate_cli_paths(
+                "npm",
+                include_npm_global=False,
+            )
+            if _is_executable_file(candidate)
+        ),
+        None,
+    )
+    if npm_path is None:
+        return []
+    prefix_path = _npm_prefix_for(npm_path)
+    return [prefix_path] if prefix_path is not None else []
 
 
 def _npm_prefix_for(npm_path: str | Path) -> Path | None:
@@ -314,7 +334,11 @@ def _windows_executable_candidates(candidates: list[Path]) -> list[Path]:
     return result
 
 
-def _candidate_cli_paths(binary: str) -> list[Path]:
+def _candidate_cli_paths(
+    binary: str,
+    *,
+    include_npm_global: bool = True,
+) -> list[Path]:
     if not binary:
         return []
 
@@ -343,19 +367,46 @@ def _candidate_cli_paths(binary: str) -> list[Path]:
     ]
     if os.name == "nt":
         common_candidates = _windows_executable_candidates(common_candidates)
-    for candidate in common_candidates + _nvm_binary_candidates(binary) + _npm_global_binary_candidates(binary):
+    for candidate in common_candidates + _nvm_binary_candidates(binary):
         if candidate not in candidates:
             candidates.append(candidate)
+    if include_npm_global:
+        for candidate in _npm_global_binary_candidates(binary):
+            if candidate not in candidates:
+                candidates.append(candidate)
 
     return candidates
 
 
-def resolve_cli_path(binary: str) -> str | None:
-    for candidate in _candidate_cli_paths(binary):
+def _resolve_cli_path_once(
+    binary: str,
+    *,
+    include_npm_global: bool,
+) -> str | None:
+    for candidate in _candidate_cli_paths(binary, include_npm_global=False):
         if _is_executable_file(candidate):
             return str(candidate)
 
     path = shutil.which(os.path.expanduser(binary)) if binary else None
+    if path:
+        return path
+
+    if include_npm_global:
+        for candidate in _npm_global_binary_candidates(binary):
+            if _is_executable_file(candidate):
+                return str(candidate)
+    return None
+
+
+def resolve_cli_path(
+    binary: str,
+    *,
+    include_npm_global: bool = True,
+) -> str | None:
+    path = _resolve_cli_path_once(
+        binary,
+        include_npm_global=include_npm_global,
+    )
     if path:
         return path
 
@@ -380,15 +431,75 @@ def resolve_cli_path(binary: str) -> str | None:
     if expanded.is_absolute() or has_path_separator:
         basename = expanded.name
         if basename and basename != binary:
-            for candidate in _candidate_cli_paths(basename):
-                if _is_executable_file(candidate):
-                    logger.info(
-                        "resolve_cli_path: stored path %s missing; falling back to %s",
-                        binary,
-                        candidate,
-                    )
-                    return str(candidate)
+            fallback = _resolve_cli_path_once(
+                basename,
+                include_npm_global=include_npm_global,
+            )
+            if fallback:
+                logger.info(
+                    "resolve_cli_path: stored path %s missing; falling back to %s",
+                    binary,
+                    fallback,
+                )
+                return fallback
     return None
+
+
+def resolve_cli_paths(
+    binaries: list[str],
+    *,
+    include_npm_global: bool = True,
+) -> dict[str, str | None]:
+    """Resolve a CLI batch while querying each npm installation only once."""
+
+    resolved: dict[str, str | None] = {}
+    for binary in binaries:
+        try:
+            resolved[binary] = resolve_cli_path(
+                binary,
+                include_npm_global=False,
+            )
+        except Exception:
+            logger.warning("CLI path probe failed for %s", binary, exc_info=True)
+            resolved[binary] = None
+    if not include_npm_global or all(path is not None for path in resolved.values()):
+        return resolved
+
+    try:
+        prefixes = _npm_global_prefixes()
+    except Exception:
+        logger.warning("npm global prefix probe failed", exc_info=True)
+        return resolved
+    for binary, path in resolved.items():
+        if path is not None or not binary:
+            continue
+        expanded = Path(os.path.expanduser(binary))
+        has_path_separator = os.sep in binary or (
+            os.altsep is not None and os.altsep in binary
+        )
+        lookup_name = (
+            expanded.name if expanded.is_absolute() or has_path_separator else binary
+        )
+        for prefix in prefixes:
+            npm_path = next(
+                (
+                    str(candidate)
+                    for candidate in _npm_binary_candidates_for_prefix(prefix, lookup_name)
+                    if _is_executable_file(candidate)
+                ),
+                None,
+            )
+            if npm_path is None:
+                continue
+            resolved[binary] = npm_path
+            if lookup_name != binary:
+                logger.info(
+                    "resolve_cli_paths: stored path %s missing; falling back to %s",
+                    binary,
+                    npm_path,
+                )
+            break
+    return resolved
 
 
 def _command_env_for(binary_path: str | None) -> dict[str, str]:
@@ -5625,10 +5736,16 @@ def discord_list_channels_live(bot_token: str, guild_id: str) -> dict:
 
 
 def opencode_options(cwd: str) -> dict:
+    from core.handlers.model_hub import load_opencode_public_models
     from vibe.async_bridge import run_coroutine_blocking
 
     try:
-        return run_coroutine_blocking(opencode_options_async(cwd))
+        return run_coroutine_blocking(
+            opencode_options_async(
+                cwd,
+                model_hub_models=load_opencode_public_models(),
+            )
+        )
     except Exception as exc:
         logger.warning("OpenCode options fetch failed: %s", exc, exc_info=True)
         return {"ok": False, "error": str(exc)}
@@ -5814,7 +5931,11 @@ async def _telegram_get_me(bot_token: str, proxy_url: str | None = None) -> dict
     return result.get("result") or {}
 
 
-async def opencode_options_async(cwd: str) -> dict:
+async def opencode_options_async(
+    cwd: str,
+    *,
+    model_hub_models: dict[str, Any] | None = None,
+) -> dict:
     # Expand ~ to user home directory
     request_loop = asyncio.get_running_loop()
     expanded_cwd = os.path.expanduser(cwd)
@@ -5822,7 +5943,20 @@ async def opencode_options_async(cwd: str) -> dict:
     cache_data = cache_entry.get("data")
     updated_at = cache_entry.get("updated_at", 0.0)
     cache_age = time.monotonic() - updated_at
-    if cache_data and cache_age < _OPENCODE_OPTIONS_TTL_SECONDS:
+    projection_key = json.dumps(
+        model_hub_models or {},
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    cache_projection_matches = (
+        cache_entry.get("model_hub_projection") == projection_key
+    )
+    if (
+        cache_data
+        and cache_age < _OPENCODE_OPTIONS_TTL_SECONDS
+        and cache_projection_matches
+    ):
         return {"ok": True, "data": cache_data, "cached": True}
 
     server = None
@@ -5871,7 +6005,15 @@ async def opencode_options_async(cwd: str) -> dict:
         )
         await asyncio.wait_for(server.ensure_running(), timeout=timeout_seconds)
         agents = await asyncio.wait_for(server.get_available_agents(expanded_cwd), timeout=timeout_seconds)
-        models = await asyncio.wait_for(server.get_available_models(expanded_cwd), timeout=timeout_seconds)
+        model_request = (
+            server.get_available_models(expanded_cwd)
+            if model_hub_models is None
+            else server.get_available_models(
+                expanded_cwd,
+                model_hub_models=model_hub_models,
+            )
+        )
+        models = await asyncio.wait_for(model_request, timeout=timeout_seconds)
         provider_catalog_available = True
         try:
             providers_raw = await asyncio.wait_for(server.get_providers(), timeout=timeout_seconds)
@@ -5922,11 +6064,12 @@ async def opencode_options_async(cwd: str) -> dict:
         _OPENCODE_OPTIONS_CACHE[expanded_cwd] = {
             "data": data,
             "updated_at": time.monotonic(),
+            "model_hub_projection": projection_key,
         }
         return {"ok": True, "data": data}
     except Exception as exc:
         logger.warning("OpenCode options fetch failed: %s", exc, exc_info=True)
-        if cache_data:
+        if cache_data and cache_projection_matches:
             return {"ok": True, "data": cache_data, "cached": True, "warning": str(exc)}
         return {"ok": False, "error": str(exc)}
     finally:
@@ -6121,27 +6264,91 @@ def do_upgrade(auto_restart: bool = True) -> dict:
     """
     current_vibe_path = get_running_vibe_path()
     plan = build_upgrade_plan(vibe_path=current_vibe_path)
+    if plan.preflight_error:
+        return {
+            "ok": False,
+            "message": "Upgrade cannot be activated safely",
+            "output": plan.preflight_error,
+            "restarting": False,
+        }
     runtime_was_running = _runtime_process_was_running()
 
     # Use a stable directory as cwd to avoid "Current directory does not exist"
     # errors.  The vibe service process cwd may be inside the uv tool venv
     # directory, which uv deletes and recreates during upgrade.
     safe_cwd = get_safe_cwd()
+    restarting = False
+    restart_failed = False
+    runtime_output = None
+    deferred_activation = False
+    restart_python = None
 
     try:
-        result = subprocess.run(
-            plan.command,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            env=plan.env,
-            cwd=safe_cwd,
-        )
-        if result.returncode == 0:
-            restarting = False
-            restart_failed = False
-            runtime_output = None
-            if auto_restart and runtime_was_running:
+        with atomic_upgrade_lock():
+            if restart_is_pending():
+                return {
+                    "ok": False,
+                    "message": "Upgrade already has a restart in progress",
+                    "output": "Wait for the pending restart to finish before starting another upgrade.",
+                    "restarting": False,
+                }
+            if plan.activation is not None and activation_block_reason(plan.activation) == "superseded":
+                return {
+                    "ok": False,
+                    "message": "Upgrade was superseded by another activation",
+                    "output": "The active Avibe generation changed while waiting for the upgrade lock; retry the upgrade.",
+                    "restarting": False,
+                }
+            result = subprocess.run(
+                plan.command,
+                capture_output=True,
+                text=True,
+                # A wheel install copies the complete candidate environment before
+                # it can be activated.  The old 120s bound interrupted that copy
+                # in-place and left metadata claiming a package tree that no longer
+                # existed.  The candidate is isolated now; this is only a bound for
+                # a genuinely hung resolver/download.
+                timeout=UPGRADE_INSTALL_TIMEOUT_SECONDS,
+                env=plan.env,
+                cwd=safe_cwd,
+            )
+            if result.returncode == 0 and plan.activation is not None:
+                try:
+                    if os.name == "nt" and launcher_is_current_process(plan.activation.launcher):
+                        candidate_result = verify_upgrade_candidate(plan.activation)
+                        if not candidate_result.ok:
+                            raise RuntimeError(candidate_result.detail)
+                        defer_upgrade_activation(
+                            plan.activation,
+                            parent_pid=os.getpid(),
+                            rollback_to=plan.rollback_to,
+                            restart_required=auto_restart and runtime_was_running,
+                            prepare_show_runtime=not should_skip_show_runtime_prepare(),
+                        )
+                        deferred_activation = True
+                    else:
+                        restart_python = _candidate_python(plan.activation.candidate_launcher)
+                        activate_upgrade_candidate(plan.activation)
+                except Exception as exc:  # noqa: BLE001
+                    discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
+                    return {
+                        "ok": False,
+                        "message": "Upgrade candidate failed integrity verification",
+                        "output": str(exc),
+                        "restarting": False,
+                    }
+            elif result.returncode != 0 and plan.activation is not None:
+                discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
+            if result.returncode == 0 and plan.activation is None and plan.method == "pip":
+                integrity = verify_python_environment(sys.executable)
+                if not integrity.ok:
+                    return {
+                        "ok": False,
+                        "message": "Upgrade installed an incomplete Python environment",
+                        "output": integrity.detail,
+                        "restarting": False,
+                    }
+            if result.returncode == 0 and auto_restart and runtime_was_running and not deferred_activation:
                 try:
                     schedule_restart(
                         delay_seconds=2.0,
@@ -6149,12 +6356,21 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                         trigger="upgrade",
                         prepare_show_runtime=not should_skip_show_runtime_prepare(),
                         rollback_to=plan.rollback_to,
+                        **({"python_executable": str(restart_python)} if restart_python else {}),
                     )
                     restarting = True
                 except Exception as exc:
                     restart_failed = True
                     runtime_output = f"Restart scheduling failed; run `vibe restart` to use the new version.\n{exc}"
-            else:
+        if result.returncode == 0:
+            if deferred_activation:
+                return {
+                    "ok": True,
+                    "message": "Upgrade successful. Activation will complete after this process exits.",
+                    "output": _append_upgrade_output(result.stdout, None),
+                    "restarting": auto_restart and runtime_was_running,
+                }
+            if not restarting and not restart_failed:
                 runtime_output = _prepare_show_runtime_after_upgrade(current_vibe_path, safe_cwd)
             if restarting:
                 message = "Upgrade successful. Restarting..."
@@ -6177,6 +6393,8 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                 "restarting": False,
             }
     except subprocess.TimeoutExpired:
+        if plan.activation is not None:
+            discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
         return {
             "ok": False,
             "message": "Upgrade timed out",
@@ -6184,6 +6402,8 @@ def do_upgrade(auto_restart: bool = True) -> dict:
             "restarting": False,
         }
     except Exception as e:
+        if plan.activation is not None:
+            discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
         return {"ok": False, "message": str(e), "output": None, "restarting": False}
 
 
@@ -10871,36 +11091,32 @@ def _filter_opencode_models_to_configured_providers(
 
     if not isinstance(models, dict):
         return models
+    from modules.agents.opencode.utils import (
+        filter_opencode_models_to_allowed_providers,
+    )
+
     allowed = _configured_opencode_provider_ids(
         providers_raw=providers_raw,
         auth_entries=auth_entries,
         config_api_key_provider_ids=config_api_key_provider_ids,
         custom_config_provider_ids=custom_config_provider_ids,
     )
-    if not allowed:
-        return {**models, "providers": [], "default": {}}
-
-    providers = []
+    filtered = filter_opencode_models_to_allowed_providers(models, allowed)
+    providers = list(filtered.get("providers", []) or [])
     seen: set[str] = set()
-    for provider in models.get("providers", []) or []:
+    for provider in providers:
         if not isinstance(provider, dict):
             continue
         pid = _opencode_provider_id(provider)
-        if isinstance(pid, str) and pid in allowed:
+        if isinstance(pid, str):
             seen.add(pid)
-            providers.append(provider)
 
     for pid in allowed:
         if pid in seen:
             continue
         providers.append({"id": pid, "models": {}})
 
-    defaults = models.get("default")
-    if isinstance(defaults, dict):
-        defaults = {pid: model_id for pid, model_id in defaults.items() if pid in allowed}
-    else:
-        defaults = {}
-    return {**models, "providers": providers, "default": defaults}
+    return {**filtered, "providers": providers}
 
 
 def _merge_opencode_user_models(
@@ -10917,26 +11133,14 @@ def _merge_opencode_user_models(
     if not isinstance(providers_raw, list):
         return models
     if allowed_provider_ids is not None:
-        filtered_providers = []
-        for provider in providers_raw:
-            if not isinstance(provider, dict):
-                continue
-            pid = _opencode_provider_id(provider)
-            if isinstance(pid, str) and pid in allowed_provider_ids:
-                filtered_providers.append(provider)
-        raw_defaults = models.get("default")
-        filtered_defaults = {}
-        if isinstance(raw_defaults, dict):
-            filtered_defaults = {
-                pid: model_id
-                for pid, model_id in raw_defaults.items()
-                if pid in allowed_provider_ids
-            }
-        models = {
-            **models,
-            "providers": filtered_providers,
-            "default": filtered_defaults,
-        }
+        from modules.agents.opencode.utils import (
+            filter_opencode_models_to_allowed_providers,
+        )
+
+        models = filter_opencode_models_to_allowed_providers(
+            models,
+            allowed_provider_ids,
+        )
         providers_raw = models.get("providers", [])
     if not user_model_index:
         return models
@@ -11152,7 +11356,7 @@ async def _get_opencode_providers_async() -> dict:
         providers_raw, auth_raw, config_raw = await asyncio.gather(
             server.get_providers(),
             server.get_provider_auth(),
-            server.get_available_models(os.path.expanduser("~")),
+            server.get_native_available_models(os.path.expanduser("~")),
             return_exceptions=False,
         )
     finally:
@@ -11737,7 +11941,7 @@ async def save_opencode_provider_model_async(provider_id: str, payload: dict) ->
     try:
         if server is not None:
             try:
-                config_raw = await server.get_available_models(os.path.expanduser("~"))
+                config_raw = await server.get_native_available_models(os.path.expanduser("~"))
             except Exception as exc:
                 logger.warning(
                     "OpenCode provider model catalog fetch failed for %s/%s: %s",

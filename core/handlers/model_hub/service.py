@@ -115,6 +115,7 @@ from .usage import USAGE_DEFAULT_WINDOW_DAYS, BoundedUsageLedger, SourceIdentity
 CONTRACT_VERSION = 6
 AGENT_CHAIN_CONTRACT_VERSION = 6
 PROBE_RESULT_CONTRACT_VERSION = 6
+_REORDER_ORDER_UNSET = object()
 # Settlement generations are minted per attempt start and live only in this
 # runtime's ledger, which restarts with the process. Every generation this
 # runtime mints is therefore strictly greater than this pre-attempt value, and
@@ -122,6 +123,42 @@ PROBE_RESULT_CONTRACT_VERSION = 6
 # than any attempt this runtime can start, yet still able to settle a Source that
 # this runtime has not attempted again.
 PRE_ATTEMPT_SETTLEMENT_GENERATION = 0
+
+
+def project_opencode_public_model(
+    identifier: str,
+    resolution: ModelHubTurnResolution,
+) -> dict[str, Any] | None:
+    """Project one persisted OpenCode route without transport credentials."""
+
+    inspection = (
+        resolution.candidate_hops[0]
+        if resolution.candidate_hops
+        else resolution.projectable_hops[0]
+        if resolution.projectable_hops
+        else None
+    )
+    if inspection is None or inspection.source is None or inspection.model_id is None:
+        return None
+    model = next(
+        (item for item in inspection.source.models if item.id == inspection.model_id),
+        None,
+    )
+    projected: dict[str, Any] = {
+        "id": identifier,
+        "name": (
+            model.display_name
+            if model is not None and model.display_name
+            else identifier
+        ),
+    }
+    variants = {
+        effort: {"reasoningEffort": effort}
+        for effort in (model.reasoning_efforts if model is not None else ())
+    }
+    if variants:
+        projected["variants"] = variants
+    return projected
 logger = logging.getLogger(__name__)
 
 _NATIVE_VENDOR_BACKENDS = {"anthropic": "claude", "openai": "codex"}
@@ -327,6 +364,40 @@ def _same_json_value(left: object, right: object) -> bool:
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _project_opencode_public_models(
+    config: ModelHubConfig,
+    *,
+    now: datetime,
+    unavailable_source_ids: frozenset[str] = frozenset(),
+) -> dict[str, dict[str, Any]]:
+    agent = config.agents["opencode"]
+    if agent.mode == "direct" or agent.menu is None:
+        return {}
+    projected: dict[str, dict[str, Any]] = {}
+    for identifier in dict.fromkeys(agent.menu.checked):
+        resolution = resolve_model_hub_turn(
+            config,
+            "opencode",
+            identifier,
+            now=now,
+            unavailable_source_ids=unavailable_source_ids,
+            supply_channel="hub",
+        )
+        model = project_opencode_public_model(identifier, resolution)
+        if model is not None:
+            projected[identifier] = model
+    return projected
+
+
+def load_opencode_public_models() -> dict[str, dict[str, Any]]:
+    """Load the persisted, credential-free OpenCode projection for local callers."""
+
+    return _project_opencode_public_models(
+        V2ModelHubConfigStore().load(),
+        now=_utc_now(),
+    )
 
 
 def _source_id() -> str:
@@ -583,7 +654,7 @@ class ModelHubService:
             Callable[[BackendName], list[tuple[str, Optional[str]]]]
         ] = None,
         cli_present_override: Optional[Callable[[BackendName], bool]] = None,
-        cli_presence_refresh: Optional[Callable[[], None]] = None,
+        cli_presence_refresh: Optional[Callable[[bool], None]] = None,
         now: Callable[[], datetime] = _utc_now,
     ):
         self.store = store
@@ -1589,6 +1660,7 @@ class ModelHubService:
         result = [
             {"backend": backend, "menu_model": menu_model}
             for backend in MODEL_HUB_BACKENDS
+            if config.agents[backend].mode == "hub"
             for menu_model, route in config.agents[backend].routes.items()
             if any(hop.source_id == source_id for hop in route.hops)
         ]
@@ -3171,32 +3243,43 @@ class ModelHubService:
             ),
         )
 
+    def _validate_agent_source_order(
+        self,
+        config: ModelHubConfig,
+        backend: str,
+        order: object,
+    ) -> list[str]:
+        if not isinstance(order, list):
+            raise self._invalid_source_order()
+        seen: set[str] = set()
+        by_id = {source.id: source for source in config.sources}
+        for source_id in order:
+            if (
+                not isinstance(source_id, str)
+                or source_id in seen
+                or source_id not in by_id
+                or not self._eligible_for_agent(by_id[source_id], backend)
+            ):
+                raise self._invalid_source_order()
+            seen.add(source_id)
+        return list(order)
+
     async def set_agent_sources(self, backend: str, payload: object) -> dict:
         if backend not in MODEL_HUB_BACKENDS or not isinstance(payload, dict):
             raise self._invalid_source_order()
         if set(payload) != {"order"}:
             rejected = sorted(set(payload) - {"order"})
             raise self._invalid_source_order(rejected_keys=rejected)
-        order = payload.get("order")
-        if not isinstance(order, list):
-            raise self._invalid_source_order()
 
         async with self._mutation_lock:
             previous = self.store.load()
             config = self._clone_config(previous)
             agent = self._agent(config, backend)
-            seen: set[str] = set()
-            by_id = {source.id: source for source in config.sources}
-            for source_id in order:
-                if (
-                    not isinstance(source_id, str)
-                    or source_id in seen
-                    or source_id not in by_id
-                    or not self._eligible_for_agent(by_id[source_id], backend)
-                ):
-                    raise self._invalid_source_order()
-                seen.add(source_id)
-            agent.sources.order = list(order)
+            agent.sources.order = self._validate_agent_source_order(
+                config,
+                backend,
+                payload.get("order"),
+            )
             await self._commit_synced(previous, config)
             return self._agent_payload(config, agent)
 
@@ -3420,15 +3503,14 @@ class ModelHubService:
         }
 
     def list_agents(self) -> list[dict]:
-        self.refresh_cli_presence()
         config = self.store.load()
         return [self._agent_payload(config, config.agents[backend]) for backend in ("claude", "codex", "opencode")]
 
-    def refresh_cli_presence(self) -> None:
+    def refresh_cli_presence(self, *, include_npm_global: bool = False) -> None:
         if self.cli_presence_refresh is None:
             return
         try:
-            self.cli_presence_refresh()
+            self.cli_presence_refresh(include_npm_global)
         except Exception:
             logger.warning("Model Hub CLI presence refresh failed", exc_info=True)
 
@@ -3479,11 +3561,23 @@ class ModelHubService:
             committed = self.store.load()
             return self._agent_payload(committed, self._agent(committed, backend))
 
-    async def reorder_agent_chains(self, backend: str) -> dict:
+    async def reorder_agent_chains(
+        self,
+        backend: str,
+        order: object = _REORDER_ORDER_UNSET,
+    ) -> dict:
         async with self._mutation_lock:
             previous = self.store.load()
             config = self._clone_config(previous)
             agent = self._agent(config, backend)
+            if order is not _REORDER_ORDER_UNSET:
+                # The optional order lets the UI commit the persisted priority and
+                # its application to existing routes in one mutation.
+                agent.sources.order = self._validate_agent_source_order(
+                    config,
+                    backend,
+                    order,
+                )
             source_positions = {
                 source_id: position
                 for position, source_id in enumerate(agent.sources.order)
@@ -3841,6 +3935,19 @@ class ModelHubService:
             )
             for model_id in self._agent_model_ids(agent, requested_model)
         ]
+
+    def opencode_public_models(self) -> dict[str, dict[str, Any]]:
+        """Return the safe public projection owned by persisted Hub config."""
+
+        config = self.store.load()
+        return _project_opencode_public_models(
+            config,
+            now=self.now(),
+            unavailable_source_ids=self._unavailable_native_sources(
+                config,
+                "opencode",
+            ),
+        )
 
     @staticmethod
     def _probe_request(
@@ -5477,7 +5584,7 @@ def create_default_service(
         Callable[[BackendName], list[tuple[str, Optional[str]]]]
     ] = None,
     cli_present_override: Optional[Callable[[BackendName], bool]] = None,
-    cli_presence_refresh: Optional[Callable[[], None]] = None,
+    cli_presence_refresh: Optional[Callable[[bool], None]] = None,
 ) -> ModelHubService:
     if adapter is None:
         from vibe.model_hub_runtime import get_model_hub_engine_adapter

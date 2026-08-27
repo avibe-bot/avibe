@@ -110,10 +110,14 @@ export type ModelsApi = {
    *  status/submit response as `OAuthResult.repaired`. */
   reauthSource(id: string): Promise<OAuthFlow>;
   listAgents(): Promise<AgentSupply[]>;
+  /** Deep CLI discovery used after the fast Agent snapshot has painted. */
+  refreshAgentPresence(): Promise<AgentSupply[]>;
   /** Per-backend enabled subset + order (the 来源顺序 drawer's read). */
   getAgentSources(backend: AgentBackend): Promise<AgentSupply>;
   /** Total write of the exact stored source order. */
   putAgentSources(backend: AgentBackend, body: AgentSourcesPut): Promise<AgentSupply>;
+  /** Store an optional source order and apply it to every existing route atomically. */
+  reorderAgentChains(backend: AgentBackend, order?: string[]): Promise<AgentSupply>;
   /** Resolution chain for one model. Hub mode only — direct answers `direct_mode`. */
   getAgentChain(backend: AgentBackend, model: string): Promise<AgentChain>;
   /** Complete overview chain projection for one Hub backend. */
@@ -448,10 +452,15 @@ export const modelsApi: ModelsApi = {
   // supply consent: guarded inventory mutations separately echo the server plan.
   reauthSource: (id) => call<{ flow?: OAuthFlow } & OAuthFlow>(`/api/models/sources/${encodeURIComponent(id)}/reauth`, jsonInit('POST', { acknowledge_irreversible: true })).then((r) => (r.flow ?? r) as OAuthFlow),
   listAgents: () => call<{ agents: AgentSupply[] }>('/api/models/agents').then((r) => r.agents),
+  refreshAgentPresence: () => call<{ agents: AgentSupply[] }>('/api/models/agents?refresh_cli_presence=1').then((r) => r.agents),
   getAgentSources: (backend) => call<{ agent: AgentSupply }>(`/api/models/agents/${backend}/sources`).then((r) => r.agent),
   // The body is TOTAL and closed: the route rejects unknown keys, so
   // `contract_version` is deliberately absent (unlike every other write here).
   putAgentSources: (backend, body) => call<{ agent: AgentSupply }>(`/api/models/agents/${backend}/sources`, jsonInit('PUT', body)).then((r) => r.agent),
+  reorderAgentChains: (backend, order) => call<{ agent: AgentSupply }>(
+    `/api/models/agents/${backend}/chains/reorder`,
+    jsonInit('POST', order === undefined ? undefined : { order }),
+  ).then((r) => r.agent),
   getAgentChain: (backend, model) => call<{ chain: AgentChain }>(`/api/models/agents/${backend}/chain?model=${encodeURIComponent(model)}`).then((r) => r.chain),
   getAgentChains: (backend) => call<{ chains: AgentChain[] }>(`/api/models/agents/${backend}/chains`).then((r) => r.chains),
   putAgentChain: (backend, model, body) => call<AgentChainMutation>(`/api/models/agents/${backend}/chain?model=${encodeURIComponent(model)}`, jsonInit('PUT', body)),

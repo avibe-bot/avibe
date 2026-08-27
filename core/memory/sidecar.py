@@ -25,10 +25,13 @@ from core.memory.project_ids import (
 from core.memory.secret_scrubber import install_error_scrubbers
 from core.memory.modality import SUPPORTED_ATTACHMENT_EXTENSIONS
 from core.memory.store import is_memory_owner_id
-from core.memory.types import MAX_AGENTIC_TIMEOUT_SECONDS
+from core.memory.types import (
+    MAX_AGENTIC_TIMEOUT_SECONDS,
+    MAX_MEMORY_LIST_PAGE_SIZE,
+    MAX_MEMORY_SEARCH_RESULTS,
+)
 
 
-_MAX_BODY_BYTES = 64 * 1024
 _APP_ID = "avibe"
 _AGENTIC_TIMEOUT_HEADER = "X-Avibe-Memory-Agentic-Timeout-Seconds"
 _AGENTIC_ROUND_HEADER = "X-Avibe-Memory-Agentic-Round"
@@ -256,8 +259,6 @@ def _request_rejection(
         "/api/v2/memory/get",
     }:
         return "route"
-    if len(body) > _MAX_BODY_BYTES:
-        return "body"
     try:
         payload = json.loads(body)
     except (TypeError, ValueError):
@@ -430,7 +431,7 @@ def _validate_search(payload: dict[str, Any]) -> str | None:
         or payload.get("method") not in {"keyword", "vector", "hybrid", "agentic"}
         or not isinstance(payload.get("top_k"), int)
         or isinstance(payload.get("top_k"), bool)
-        or not 1 <= payload["top_k"] <= 20
+        or not 1 <= payload["top_k"] <= MAX_MEMORY_SEARCH_RESULTS
         or type(payload.get("include_profile")) is not bool
         or payload.get("enable_llm_rerank") is not False
     ):
@@ -473,7 +474,7 @@ def _validate_get(payload: dict[str, Any]) -> str | None:
         or page < 1
         or isinstance(page_size, bool)
         or not isinstance(page_size, int)
-        or not 1 <= page_size <= 20
+        or not 1 <= page_size <= MAX_MEMORY_LIST_PAGE_SIZE
         or payload.get("sort_by") != "timestamp"
         or payload.get("sort_order") != "desc"
     ):

@@ -47,7 +47,7 @@ describe('GatewayModule region failure treatment', () => {
       </I18nextProvider>,
     );
 
-    const panel = screen.getByRole('heading', { name: /Gateway|网关/i }).closest('section');
+    const panel = screen.getByRole('heading', { name: /Gateway routes|网关路由/i }).closest('section');
     expect(panel?.className).toContain('w-full');
     expect(panel?.className).toContain('min-w-0');
   });

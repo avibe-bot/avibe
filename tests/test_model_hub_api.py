@@ -1117,6 +1117,22 @@ def test_runtime_install_crosses_the_controller_rpc_boundary(monkeypatch):
     assert calls == [("runtime_install", None)]
 
 
+def test_reorder_client_preserves_explicit_null_order(monkeypatch):
+    from vibe import model_hub_client
+
+    calls = []
+
+    async def rpc(operation, payload=None):
+        calls.append((operation, payload))
+        return {"sources": {"order": []}, "routes": {}}
+
+    monkeypatch.setattr(model_hub_client, "_rpc", rpc)
+
+    asyncio.run(ModelHubRemoteService().reorder_agent_chains("claude", None))
+
+    assert calls == [("reorder_agent_chains", {"backend": "claude", "order": None})]
+
+
 def test_runtime_start_is_allowlisted_by_controller_rpc(tmp_path):
     from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
 
@@ -1875,6 +1891,20 @@ def test_agents_endpoint_projects_cli_presence_from_runtime(tmp_path):
     }
 
 
+def test_agents_collection_reads_cli_presence_without_running_discovery(tmp_path):
+    service, _store, _adapter = _service(tmp_path)
+    calls = []
+    service.cli_presence_refresh = lambda include_npm_global: calls.append(
+        include_npm_global
+    )
+    service.cli_present_override = lambda backend: backend == "codex"
+
+    agents = {agent["backend"]: agent for agent in service.list_agents()}
+
+    assert agents["codex"]["cli_present"] is True
+    assert calls == []
+
+
 def test_agents_endpoint_projects_exact_chain_runnability(tmp_path):
     service, store, _adapter = _service(tmp_path)
     model_id = "claude-opus-4-6"
@@ -1972,24 +2002,166 @@ def test_agents_endpoint_cli_presence_probe_errors_fail_closed(tmp_path):
     assert all(agent["cli_present"] is False for agent in agents.values())
 
 
-def test_agent_supply_rpc_refreshes_cli_presence_before_first_response(tmp_path):
+def test_agent_supply_mutation_rpc_refreshes_cli_presence_before_writing(tmp_path):
     from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
 
-    service, _store, _adapter = _service(tmp_path)
+    service, store, _adapter = _service(tmp_path)
     calls = []
-    service.cli_presence_refresh = lambda: calls.append("refresh")
+    service.cli_presence_refresh = lambda include_npm_global: calls.append(
+        include_npm_global
+    )
     service.cli_present_override = lambda backend: backend == "claude"
 
     payload = asyncio.run(
         dispatch_model_hub_rpc(
             service,
-            "get_agent_sources",
-            {"backend": "claude"},
+            "set_agent_sources",
+            {
+                "backend": "claude",
+                "sources": {
+                    "order": list(store.config.agents["claude"].sources.order),
+                },
+            },
         )
     )
 
     assert payload["cli_present"] is True
-    assert calls == ["refresh"]
+    assert calls == [True]
+
+
+def test_agent_supply_rpc_publishes_explicit_deep_discovery_after_fast_reads(
+    tmp_path,
+):
+    from core.handlers.model_hub import rpc as model_hub_rpc
+
+    service, _store, _adapter = _service(tmp_path)
+    calls: list[bool] = []
+    present = {"codex": False}
+    deep_started = threading.Event()
+    deep_release = threading.Event()
+
+    def refresh(include_npm_global: bool) -> None:
+        calls.append(include_npm_global)
+        deep_started.set()
+        deep_release.wait(timeout=2)
+        present["codex"] = True
+
+    service.cli_presence_refresh = refresh
+    service.cli_present_override = lambda backend: present.get(backend, False)
+
+    async def exercise() -> tuple[
+        list[dict],
+        list[dict],
+        list[dict],
+        list[dict],
+    ]:
+        first = await asyncio.wait_for(
+            model_hub_rpc.dispatch_model_hub_rpc(service, "list_agents", {}),
+            timeout=0.5,
+        )
+        assert calls == []
+
+        refreshed = asyncio.create_task(
+            model_hub_rpc.dispatch_model_hub_rpc(
+                service,
+                "list_agents",
+                {"refresh_cli_presence": True},
+            )
+        )
+        assert await asyncio.to_thread(deep_started.wait, 0.5)
+
+        joined = asyncio.create_task(
+            model_hub_rpc.dispatch_model_hub_rpc(
+                service,
+                "list_agents",
+                {"refresh_cli_presence": True},
+            )
+        )
+        second = await asyncio.wait_for(
+            model_hub_rpc.dispatch_model_hub_rpc(service, "list_agents", {}),
+            timeout=0.5,
+        )
+        deep_release.set()
+        return first, second, await refreshed, await joined
+
+    try:
+        payloads = asyncio.run(exercise())
+    finally:
+        deep_release.set()
+
+    first, second, refreshed, joined = payloads
+    assert (
+        next(agent for agent in first if agent["backend"] == "codex")["cli_present"]
+        is False
+    )
+    assert (
+        next(agent for agent in second if agent["backend"] == "codex")["cli_present"]
+        is False
+    )
+    assert (
+        next(agent for agent in refreshed if agent["backend"] == "codex")[
+            "cli_present"
+        ]
+        is True
+    )
+    assert (
+        next(agent for agent in joined if agent["backend"] == "codex")["cli_present"]
+        is True
+    )
+    assert calls == [True]
+
+
+def test_agent_presence_refresh_crosses_the_controller_rpc_boundary(monkeypatch):
+    from vibe import model_hub_client
+
+    calls = []
+
+    def rpc(operation, payload=None):
+        calls.append((operation, payload))
+        return []
+
+    monkeypatch.setattr(model_hub_client, "_rpc_sync", rpc)
+
+    agents = ModelHubRemoteService().list_agents(refresh_cli_presence=True)
+
+    assert agents == []
+    assert calls == [("list_agents", {"refresh_cli_presence": True})]
+
+
+def test_opencode_public_models_cross_the_controller_rpc_boundary(monkeypatch):
+    from vibe import model_hub_client
+
+    calls = []
+
+    def rpc(operation, payload=None):
+        calls.append((operation, payload))
+        return {"custom/current-model": {"id": "custom/current-model"}}
+
+    monkeypatch.setattr(model_hub_client, "_rpc_sync", rpc)
+
+    models = ModelHubRemoteService().opencode_public_models()
+
+    assert models == {"custom/current-model": {"id": "custom/current-model"}}
+    assert calls == [("get_opencode_public_models", None)]
+
+
+def test_agents_route_requests_deep_presence_only_when_explicit(monkeypatch):
+    calls = []
+
+    class AgentService:
+        def list_agents(self, *, refresh_cli_presence=False):
+            calls.append(refresh_cli_presence)
+            return []
+
+    monkeypatch.setattr(ui_server, "_model_hub_service", AgentService)
+    client = app.test_client()
+
+    assert client.get("/api/models/agents").status_code == 200
+    assert (
+        client.get("/api/models/agents?refresh_cli_presence=1").status_code
+        == 200
+    )
+    assert calls == [False, True]
 
 
 def test_usage_summary_rpc_reads_the_ledger_off_the_controller_loop(tmp_path):
@@ -2265,6 +2437,31 @@ def test_source_adoption_projection_is_sorted_by_backend_and_menu_model(tmp_path
     ]
 
 
+def test_source_adoption_projection_ignores_routes_for_direct_backends(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_direct_adopted",
+        kind="api_key",
+        vendor="anthropic",
+        display_name="Direct source",
+        protocol="anthropic",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id="claude-opus-4-6", provenance="discovered")],
+        credential_ref="cred_direct_adopted",
+    )
+    store.config.sources = [source]
+    store.config.agents["claude"].routes = {
+        "claude-opus-4-6": ModelHubRouteConfig(
+            hops=(ModelHubRouteHopConfig(source.id, "claude-opus-4-6"),)
+        )
+    }
+    store.config.agents["claude"].mode = "direct"
+
+    assert service.list_sources()[0]["adopted_by"] == []
+
+
 def test_direct_to_hub_adoption_does_not_leak_partial_state_on_save_failure(tmp_path):
     class FailingStore(MemoryStore):
         def save(self, config):
@@ -2323,6 +2520,197 @@ def test_reorder_agent_chains_applies_source_order_without_changing_pairs(tmp_pa
     ]
 
 
+def test_reorder_agent_chains_commits_source_order_with_route_reorder(tmp_path):
+    service, store, _ = _service(tmp_path)
+    model_id = "claude-opus-4-6"
+    _set_claude_route_fixture(
+        store,
+        ("src_first0001", "src_second001"),
+        model_id,
+    )
+
+    agent = asyncio.run(
+        service.reorder_agent_chains(
+            "claude",
+            ["src_second001", "src_first0001"],
+        )
+    )
+
+    assert store.config.agents["claude"].sources.order == [
+        "src_second001",
+        "src_first0001",
+    ]
+    assert agent["sources"]["order"] == ["src_second001", "src_first0001"]
+    assert [hop["source_id"] for hop in agent["routes"][model_id]["hops"]] == [
+        "src_second001",
+        "src_first0001",
+    ]
+
+
+def test_new_source_is_appended_to_route_hops(tmp_path):
+    service, store, _ = _service(tmp_path)
+    model_id = "claude-opus-4-6"
+    _set_claude_route_fixture(store, ("src_listed01", "src_heldout1"), model_id)
+    store.config.agents["claude"].sources.order = ["src_listed01"]
+    new_source = ModelHubSourceConfig(
+        id="src_new0001",
+        kind="api_key",
+        vendor="anthropic",
+        display_name="src_new0001",
+        protocol="anthropic",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id=model_id, provenance="discovered")],
+        credential_ref="cred_src_new0001",
+    )
+    config = service._clone_config(store.config)
+
+    service._apply_source_placement(config, new_source)
+
+    agent = config.agents["claude"]
+    assert agent.sources.order == ["src_listed01", "src_new0001"]
+    assert [hop.source_id for hop in agent.routes[model_id].hops] == [
+        "src_listed01",
+        "src_heldout1",
+        "src_new0001",
+    ]
+
+
+def test_new_source_preserves_explicit_route_order(tmp_path):
+    service, store, _ = _service(tmp_path)
+    model_id = "claude-opus-4-6"
+    _set_claude_route_fixture(store, ("src_explicit01", "src_listed01"), model_id)
+    store.config.agents["claude"].sources.order = ["src_listed01"]
+    store.config.agents["claude"].routes[model_id] = ModelHubRouteConfig(
+        hops=(
+            ModelHubRouteHopConfig("src_explicit01", model_id),
+            ModelHubRouteHopConfig("src_listed01", model_id),
+        )
+    )
+    new_source = ModelHubSourceConfig(
+        id="src_new0001",
+        kind="api_key",
+        vendor="anthropic",
+        display_name="src_new0001",
+        protocol="anthropic",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id=model_id, provenance="discovered")],
+        credential_ref="cred_src_new0001",
+    )
+    config = service._clone_config(store.config)
+
+    service._apply_source_placement(config, new_source)
+
+    agent = config.agents["claude"]
+    assert agent.sources.order == ["src_listed01", "src_new0001"]
+    assert [hop.source_id for hop in agent.routes[model_id].hops] == [
+        "src_explicit01",
+        "src_listed01",
+        "src_new0001",
+    ]
+
+
+def test_reorder_route_accepts_source_order_atomically(monkeypatch, tmp_path):
+    service, store, _ = _service(tmp_path)
+    model_id = "claude-opus-4-6"
+    _set_claude_route_fixture(
+        store,
+        ("src_first0001", "src_second001"),
+        model_id,
+    )
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+
+    response = client.post(
+        "/api/models/agents/claude/chains/reorder",
+        json={"order": ["src_second001", "src_first0001"]},
+        headers=csrf_headers(client, base_url),
+        base_url=base_url,
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    _assert_envelope(payload)
+    assert payload["agent"]["sources"]["order"] == [
+        "src_second001",
+        "src_first0001",
+    ]
+    assert [hop["source_id"] for hop in payload["agent"]["routes"][model_id]["hops"]] == [
+        "src_second001",
+        "src_first0001",
+    ]
+
+
+def test_reorder_route_rejects_explicit_null_order(monkeypatch, tmp_path):
+    service, _, _ = _service(tmp_path)
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+
+    response = client.post(
+        "/api/models/agents/claude/chains/reorder",
+        json={"order": None},
+        headers=csrf_headers(client, base_url),
+        base_url=base_url,
+    )
+
+    assert response.status_code == 400
+    payload = response.get_json()
+    _assert_envelope(payload, ok=False)
+    assert payload["error"] == "invalid_source_order"
+
+
+@pytest.mark.parametrize(
+    ("body", "content_type"),
+    [(b"null", "application/json"), (b"null", "text/plain")],
+)
+def test_reorder_route_rejects_non_object_body(monkeypatch, tmp_path, body, content_type):
+    service, _, _ = _service(tmp_path)
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+    headers = {**csrf_headers(client, base_url), "content-type": content_type}
+
+    response = client.post(
+        "/api/models/agents/claude/chains/reorder",
+        content=body,
+        headers=headers,
+        base_url=base_url,
+    )
+
+    assert response.status_code == 400
+    payload = response.get_json()
+    _assert_envelope(payload, ok=False)
+    assert payload["error"] == "invalid_source_order"
+
+
+def test_reorder_route_rejects_malformed_json(monkeypatch, tmp_path):
+    service, _, _ = _service(tmp_path)
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+    headers = {
+        **csrf_headers(client, base_url),
+        "content-type": "application/json",
+    }
+
+    response = client.post(
+        "/api/models/agents/claude/chains/reorder",
+        content=b'{"order":',
+        headers=headers,
+        base_url=base_url,
+    )
+
+    assert response.status_code == 400
+    payload = response.get_json()
+    _assert_envelope(payload, ok=False)
+    assert payload["error"] == "invalid_source_order"
+
+
 def test_ui_model_hub_default_is_controller_rpc_client(monkeypatch):
     monkeypatch.setattr(ui_server, "_MODEL_HUB_SERVICE", None)
 
@@ -2330,6 +2718,65 @@ def test_ui_model_hub_default_is_controller_rpc_client(monkeypatch):
 
     assert isinstance(service, ModelHubRemoteService)
     assert not hasattr(service, "adapter")
+
+
+def test_opencode_options_route_passes_controller_projection(monkeypatch):
+    from vibe import api
+
+    projection = {
+        "custom/current-model": {"id": "custom/current-model"},
+    }
+    calls = []
+
+    class RemoteService:
+        def opencode_public_models(self):
+            return projection
+
+    async def options(cwd, *, model_hub_models=None):
+        calls.append((cwd, model_hub_models))
+        return {"ok": True, "data": {"models": {}}}
+
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: RemoteService())
+    monkeypatch.setattr(api, "opencode_options_async", options)
+
+    with app.test_request_context(
+        "/api/opencode/options",
+        method="POST",
+        json={"cwd": "/tmp/workspace"},
+    ):
+        response = asyncio.run(ui_server.opencode_options())
+
+    assert response.status_code == 200
+    assert calls == [("/tmp/workspace", projection)]
+
+
+def test_opencode_options_route_keeps_native_catalog_when_projection_is_unavailable(
+    monkeypatch,
+):
+    from vibe import api
+
+    calls = []
+
+    class UnavailableService:
+        def opencode_public_models(self):
+            raise ModelHubError("engine_down", status=503)
+
+    async def options(cwd, *, model_hub_models=None):
+        calls.append((cwd, model_hub_models))
+        return {"ok": True, "data": {"models": {}}}
+
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: UnavailableService())
+    monkeypatch.setattr(api, "opencode_options_async", options)
+
+    with app.test_request_context(
+        "/api/opencode/options",
+        method="POST",
+        json={"cwd": "/tmp/workspace"},
+    ):
+        response = asyncio.run(ui_server.opencode_options())
+
+    assert response.status_code == 200
+    assert calls == [("/tmp/workspace", {})]
 
 
 def test_ui_model_hub_rpc_preserves_controller_error_contract():

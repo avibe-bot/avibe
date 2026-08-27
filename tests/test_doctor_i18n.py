@@ -10,7 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from core.tmux_runtime import TmuxFailureReason, TmuxRuntimeManager
+from core.install_integrity import IntegrityResult
+from core.tmux_runtime import TmuxRuntimeManager
 from vibe import cli
 from vibe.i18n import get_supported_languages, t
 from vibe.restart_supervisor import RestartState
@@ -20,7 +21,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 I18N_DIR = REPO_ROOT / "vibe" / "i18n"
 DOCTOR_SOURCE = REPO_ROOT / "vibe" / "cli.py"
 RESTART_SOURCE = REPO_ROOT / "vibe" / "restart_supervisor.py"
-TMUX_SOURCE = REPO_ROOT / "core" / "tmux_runtime.py"
 
 
 def _flatten(value: object, prefix: str = "") -> dict[str, str]:
@@ -168,70 +168,102 @@ def test_restart_producer_cannot_bypass_owned_state_vocabulary() -> None:
     assert not bypasses, f"restart state literal bypassed RestartState at lines {bypasses}"
 
 
-def test_tmux_failure_reasons_are_producer_owned_and_doctor_projected() -> None:
-    source = TMUX_SOURCE.read_text(encoding="utf-8")
-    tree = ast.parse(source, filename=str(TMUX_SOURCE))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "_failure":
-            assert node.args and not isinstance(node.args[0], ast.Constant), (
-                f"tmux failure at line {node.lineno} bypassed TmuxFailureReason"
-            )
-        if isinstance(node, ast.Assign) and any(
-            isinstance(target, ast.Attribute) and target.attr == "_install_reason" for target in node.targets
-        ):
-            assert not (isinstance(node.value, ast.Constant) and node.value.value is not None), (
-                f"tmux install reason at line {node.lineno} bypassed TmuxFailureReason"
-            )
+def test_tmux_failure_reasons_are_producer_owned_and_doctor_projected(tmp_path: Path) -> None:
+    manager = TmuxRuntimeManager(runtime_dir=tmp_path / "tmux")
+    reasons = manager.install_failure_reasons()
+    assert "tmux_install_missing_binary" in reasons
+    assert "xattr_failed" in reasons
 
-    for reason in TmuxFailureReason:
-        key = cli._doctor_managed_reason_key(reason.value)
-        assert key is not None, f"Doctor has no display projection for {reason.value}"
+    for reason in reasons:
+        key = cli._doctor_managed_reason_key(reason)
+        assert key is not None, f"Doctor has no display projection for {reason}"
         for language in ("en", "zh"):
-            detail = cli._doctor_managed_failure_detail("tmux", {"reason": reason.value}, language)
+            detail = cli._doctor_managed_failure_detail("tmux", {"reason": reason}, language)
             assert detail
-            assert reason.value not in detail
+            assert reason not in detail
 
 
 @pytest.mark.parametrize(
     ("reason", "english_marker", "chinese_marker"),
     [
         (
-            TmuxFailureReason.INSTALL_MISSING_BIN,
+            "tmux_install_missing_binary",
             "archive did not contain its binary",
             "归档不包含其二进制文件",
         ),
         (
-            TmuxFailureReason.CODESIGN_MISSING,
-            "codesign is unavailable",
-            "codesign 不可用",
-        ),
-        (
-            TmuxFailureReason.CODESIGN_FAILED,
-            "could not be code-signed",
-            "无法为 tmux 二进制签名",
-        ),
-        (
-            TmuxFailureReason.CODESIGN_VERIFY_FAILED,
-            "could not be code-signed",
-            "无法为 tmux 二进制签名",
+            "xattr_failed",
+            "metadata could not be updated",
+            "无法更新 tmux 二进制元数据",
         ),
     ],
 )
 def test_tmux_actual_failure_spellings_render_in_both_languages(
-    reason: TmuxFailureReason,
+    reason: str,
     english_marker: str,
     chinese_marker: str,
 ) -> None:
-    result = {"ok": False, "reason": reason.value}
+    result = {"ok": False, "reason": reason}
 
     english = cli._doctor_managed_failure_detail("tmux", result, "en")
     chinese = cli._doctor_managed_failure_detail("tmux", result, "zh")
 
     assert english_marker in english
     assert chinese_marker in chinese
-    assert reason.value not in english
-    assert reason.value not in chinese
-    assert result["reason"] == reason.value
+    assert reason not in english
+    assert reason not in chinese
+    assert result["reason"] == reason
+
+
+@pytest.mark.parametrize(
+    ("language", "integrity", "message_marker", "action_marker"),
+    [
+        ("en", IntegrityResult(ok=True, checked_files=7), "files are intact (7 checked)", None),
+        ("zh", IntegrityResult(ok=True, checked_files=7), "文件完整（已检查 7 个）", None),
+        (
+            "en",
+            IntegrityResult(ok=False, checked_files=7, failures=("bad/path.py",)),
+            "integrity check failed: bad/path.py",
+            "Rerun the Avibe installer",
+        ),
+        (
+            "zh",
+            IntegrityResult(ok=False, checked_files=7, failures=("bad/path.py",)),
+            "完整性检查失败：bad/path.py",
+            "重新运行 Avibe 安装器",
+        ),
+    ],
+)
+def test_package_integrity_doctor_items_are_localized(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    language: str,
+    integrity: IntegrityResult,
+    message_marker: str,
+    action_marker: str | None,
+) -> None:
+    site_packages = tmp_path / "site-packages"
+    (site_packages / "avibe_os-1.0.dist-info").mkdir(parents=True)
+    active_vibe = (Path.home() / ".local" / "bin" / "vibe").resolve()
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
+    monkeypatch.setattr(cli, "_path_entries_for_executable", lambda _name: [active_vibe])
+    monkeypatch.setattr(cli, "_uv_tool_site_packages_for_vibe", lambda _path: [site_packages])
+    monkeypatch.setattr(cli, "_is_uv_tool_editable", lambda _path: False)
+    monkeypatch.setattr(cli, "_current_sqlite_revision", lambda: None)
+    monkeypatch.setattr(cli, "verify_site_packages", lambda _path: integrity)
+
+    item = next(
+        item
+        for item in cli._local_cli_installation_items()
+        if item.get("code") == "installation.package_integrity"
+    )
+
+    assert item["status"] == ("pass" if integrity.ok else "fail")
+    assert message_marker in item["message"]
+    if action_marker is None:
+        assert "action" not in item
+    else:
+        assert action_marker in item["action"]
 
 
 @pytest.mark.parametrize(
@@ -660,7 +692,7 @@ def test_managed_repair_failure_contract_has_structured_identity(
     producer_failures.update(
         {
             "tmux": TmuxRuntimeManager(runtime_dir=tmp_path / "tmux")._failure(
-                TmuxFailureReason.ARCHIVE_UNAVAILABLE
+                "tmux_archive_unavailable"
             ),
             "git-runtime": GitRuntimeManager(runtime_dir=tmp_path / "git")._failure("git_archive_unavailable"),
         }

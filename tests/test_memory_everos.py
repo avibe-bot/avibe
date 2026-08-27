@@ -732,7 +732,7 @@ def test_search_uses_public_search_only_and_maps_episode_and_nested_fact() -> No
             PRINCIPAL,
             PROJECT,
             "language",
-            2,
+            100,
             session_ref=SESSION_REF,
         )
 
@@ -748,7 +748,7 @@ def test_search_uses_public_search_only_and_maps_episode_and_nested_fact() -> No
                 "project_id": PROJECT,
                 "query": "language",
                 "method": "hybrid",
-                "top_k": 2,
+                "top_k": 100,
                 "include_profile": True,
                 "enable_llm_rerank": False,
                 "filters": {"session_id": WIRE_SESSION_ID},
@@ -1107,6 +1107,40 @@ def test_list_episodes_uses_exact_get_shape_and_projects_a_bounded_page() -> Non
     )
 
 
+def test_list_episodes_accepts_everos_max_page_size() -> None:
+    requests: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "request_id": "empty-page",
+                "data": {
+                    "episodes": [],
+                    "profiles": [],
+                    "agent_cases": [],
+                    "agent_skills": [],
+                    "total_count": 0,
+                    "count": 0,
+                },
+            },
+        )
+
+    with _sidecar_transport(handler):
+        result = asyncio.run(
+            EverOSPort(Path("/tmp/everos.sock")).list_episodes(
+                PRINCIPAL,
+                PROJECT,
+                1,
+                100,
+            )
+        )
+
+    assert requests[0]["page_size"] == 100
+    assert result.page_size == 100
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -1283,6 +1317,78 @@ def test_profile_canonicalizes_structured_profile() -> None:
     assert items[0].kind == "profile"
     assert items[0].text == '{"language":"Python","timezone":"UTC"}'
     assert items[0].profile is None
+
+
+@pytest.mark.parametrize(
+    "owner_id",
+    ["u-11111111111111111111111111111111", "u-11111111111111111111111111111111-agent"],
+)
+def test_profile_accepts_large_everos_payloads(owner_id: str) -> None:
+    summary = "profile " * 10_000
+    padding = "x" * (2 * 1024 * 1024)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        response = {
+            "data": {
+                "profiles": [
+                    {"user_id": owner_id, "profile_data": {"summary": summary}}
+                ],
+                "provider_metadata": padding,
+            }
+        }
+        assert len(json.dumps(response).encode()) > 2 * 1024 * 1024
+        return httpx.Response(200, json=response)
+
+    with _sidecar_transport(handler):
+        items = asyncio.run(
+            EverOSPort(Path("/tmp/everos.sock")).profile(owner_id, PROJECT)
+        )
+
+    assert len(summary.encode()) > 64 * 1024
+    assert items[0].profile is not None
+    assert items[0].profile.summary == summary.strip()
+
+
+def test_profile_accepts_everos_structures_beyond_legacy_avibe_limits() -> None:
+    """MEMORY-SEARCH-018: profile structure is governed by EverOS."""
+
+    nested: object = "value"
+    for _index in range(12):
+        nested = {"nested": nested}
+    long_key = "k" * 129
+    profile_data = {
+        "summary": "Complete profile",
+        "explicit_info": [
+            {"description": f"fact-{index}"} for index in range(201)
+        ],
+        "implicit_traits": [
+            {"description": f"trait-{index}"} for index in range(201)
+        ],
+        long_key: nested,
+    }
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "profiles": [
+                        {"user_id": "owner-1", "profile_data": profile_data}
+                    ],
+                    "provider_metadata": list(range(201)),
+                }
+            },
+        )
+
+    with _sidecar_transport(handler):
+        items = asyncio.run(
+            EverOSPort(Path("/tmp/everos.sock")).profile("owner-1", PROJECT)
+        )
+
+    assert items[0].profile is not None
+    assert len(items[0].profile.explicit_info) == 201
+    assert len(items[0].profile.implicit_traits) == 201
+    assert json.loads(items[0].text)[long_key] == nested
 
 
 def test_profile_maps_known_fields_without_collapsing_basis_and_evidence() -> None:
@@ -2299,6 +2405,71 @@ def test_processing_preflight_accepts_large_bounded_embedding_vectors() -> None:
         )
         result = asyncio.run(run())
     assert result.ok is True
+
+
+def test_processing_preflight_rejects_response_above_two_mibibytes() -> None:
+    large_content = "x" * (2 * 1024 * 1024)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/chat/completions"):
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": large_content}}]},
+            )
+        return httpx.Response(200, json={"data": [{"embedding": [0.1]}]})
+
+    async def run():
+        return await EverOSPort(
+            Path("/tmp/everos.sock"),
+            llm_base_url="https://llm.example.test/v1",
+            llm_model="chat",
+            llm_api_key="secret",
+            embedding_base_url="https://embed.example.test/v1",
+            embedding_model="embed",
+            embedding_api_key="secret",
+        ).preflight()
+
+    real_async_client = httpx.AsyncClient
+    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+        client_type.side_effect = lambda **kwargs: real_async_client(
+            transport=httpx.MockTransport(handler), **kwargs
+        )
+        result = asyncio.run(run())
+
+    assert result.ok is False
+    assert result.failure is not None
+    assert result.failure.error == "memory_llm_unavailable"
+    assert result.failure.diagnostic.message == "provider_response_too_large"
+
+
+def test_processing_health_rejects_response_above_two_mibibytes() -> None:
+    large_content = "x" * (2 * 1024 * 1024)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/chat/completions"):
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": large_content}}]},
+            )
+        return httpx.Response(200, json={"data": [{"embedding": [0.1]}]})
+
+    async def run() -> bool:
+        return await EverOSPort(
+            Path("/tmp/everos.sock"),
+            llm_base_url="https://llm.example.test/v1",
+            llm_model="chat",
+            llm_api_key="secret",
+            embedding_base_url="https://embed.example.test/v1",
+            embedding_model="embed",
+            embedding_api_key="secret",
+        ).processing_healthy()
+
+    real_async_client = httpx.AsyncClient
+    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+        client_type.side_effect = lambda **kwargs: real_async_client(
+            transport=httpx.MockTransport(handler), **kwargs
+        )
+        assert asyncio.run(run()) is False
 
 
 def test_processing_health_rejects_llm_probe_without_completion_content() -> None:

@@ -4,15 +4,48 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
+from weakref import WeakKeyDictionary
 
 from .service import ModelHubError, ModelHubService
 from .usage import USAGE_DEFAULT_WINDOW_DAYS
+
+_cli_presence_refresh_tasks: WeakKeyDictionary[
+    ModelHubService,
+    asyncio.Task[None],
+] = WeakKeyDictionary()
 
 
 async def _refresh_agent_presence(service: ModelHubService) -> None:
     """Refresh host CLI facts without blocking the controller event loop."""
 
-    await asyncio.to_thread(service.refresh_cli_presence)
+    current = _cli_presence_refresh_tasks.get(service)
+    if current is not None and not current.done():
+        await asyncio.shield(current)
+        return
+
+    task = _start_agent_presence_refresh(service)
+    await asyncio.shield(task)
+
+
+async def _run_agent_presence_refresh(service: ModelHubService) -> None:
+    try:
+        await asyncio.to_thread(
+            service.refresh_cli_presence,
+            include_npm_global=True,
+        )
+    finally:
+        current = asyncio.current_task()
+        if _cli_presence_refresh_tasks.get(service) is current:
+            _cli_presence_refresh_tasks.pop(service, None)
+
+
+def _start_agent_presence_refresh(service: ModelHubService) -> asyncio.Task[None]:
+    task = asyncio.create_task(
+        _run_agent_presence_refresh(service),
+        name="model-hub-cli-presence-refresh",
+    )
+    _cli_presence_refresh_tasks[service] = task
+    return task
 
 
 async def dispatch_model_hub_rpc(
@@ -53,10 +86,14 @@ async def dispatch_model_hub_rpc(
             confirmed_interruptions=payload.get("would_interrupt"),
         )
     if operation == "list_agents":
+        if payload.get("refresh_cli_presence") is True:
+            await _refresh_agent_presence(service)
         return await asyncio.to_thread(service.list_agents)
     if operation == "get_agent_sources":
-        await _refresh_agent_presence(service)
-        return service.get_agent_sources(payload.get("backend"))
+        return await asyncio.to_thread(
+            service.get_agent_sources,
+            payload.get("backend"),
+        )
     if operation == "set_agent_sources":
         await _refresh_agent_presence(service)
         return await service.set_agent_sources(
@@ -65,6 +102,11 @@ async def dispatch_model_hub_rpc(
         )
     if operation == "reorder_agent_chains":
         await _refresh_agent_presence(service)
+        if "order" in payload:
+            return await service.reorder_agent_chains(
+                payload.get("backend"),
+                payload.get("order"),
+            )
         return await service.reorder_agent_chains(payload.get("backend"))
     if operation == "set_agent_mode":
         await _refresh_agent_presence(service)
@@ -108,6 +150,8 @@ async def dispatch_model_hub_rpc(
         return service.agent_chain(payload.get("backend"), payload.get("model_id"))
     if operation == "get_agent_chains":
         return service.agent_chains(payload.get("backend"))
+    if operation == "get_opencode_public_models":
+        return service.opencode_public_models()
     if operation == "probe_agent":
         return await service.probe_agent(
             payload.get("backend"),

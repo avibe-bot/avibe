@@ -458,6 +458,7 @@ class _RoutingSettingsManager:
 class _FakeOpenCodeServer:
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.model_hub_models: list[dict | None] = []
 
     async def ensure_running(self) -> None:
         self.calls.append("ensure_running")
@@ -466,8 +467,14 @@ class _FakeOpenCodeServer:
         self.calls.append(f"agents:{directory}")
         return [{"name": "build"}]
 
-    async def get_available_models(self, directory: str) -> dict:
+    async def get_available_models(
+        self,
+        directory: str,
+        *,
+        model_hub_models: dict | None = None,
+    ) -> dict:
         self.calls.append(f"models:{directory}")
+        self.model_hub_models.append(model_hub_models)
         return {"providers": []}
 
     async def get_default_config(self, directory: str) -> dict:
@@ -529,6 +536,25 @@ def test_gather_routing_modal_data_only_fetches_current_backend() -> None:
         "models:/tmp/workspace",
         "config:/tmp/workspace",
     ]
+
+
+def test_gather_routing_modal_data_uses_current_model_hub_projection() -> None:
+    handler, server = _make_routing_handler()
+    projection = {
+        "custom/current-model": {"id": "custom/current-model"},
+    }
+    handler.controller.model_hub_service = SimpleNamespace(
+        opencode_public_models=lambda: projection,
+    )
+    context = MessageContext(
+        user_id="U1",
+        channel_id="D0APS47LPU2",
+        platform="slack",
+    )
+
+    asyncio.run(handler._gather_routing_modal_data(context))
+
+    assert server.model_hub_models == [projection]
 
 
 def test_gather_routing_modal_data_fetches_selected_backend_on_modal_update() -> None:

@@ -288,7 +288,9 @@
       "access": "访问"
     },
     "navigationLabel": "设置分区",
+    "backToWorkbench": "返回工作台",
     "backToSections": "全部设置",
+    "backToSection": "返回{{section}}",
     "close": "关闭设置",
     "shortcuts": {
       "title": "快捷键",
@@ -774,9 +776,9 @@
             "body": "确认运行状态前不会显示网关配置。"
           }
         },
-        "gatewayInfo": {
-          "label": "什么是网关",
-          "body": "网关是本机的一层调度：它持有你添加的来源，按你配置的顺序供给各个 Agent。"
+        "modelsInfo": {
+          "label": "什么是模型",
+          "body": "模型是 Agent 使用的型号。你可以查看每个型号现在能否运行、由谁供给，需要时为单个型号指定路由。"
         },
         "tab": {
           "hub": "来源与网关",
@@ -804,7 +806,8 @@
           }
         },
         "action": {
-          "switchToGateway": "切换到网关"
+          "switchToGateway": "切换到网关",
+          "refreshAgents": "重新检测 Agent 后端"
         },
         "benefits": {
           "title": "切换到网关，你会多出三件事",
@@ -846,7 +849,7 @@
         },
         "undo": {
           "1": "随时可以切换回直连",
-          "2": "回退入口：这一页的 {{backend}} 卡片 → 切换到直连",
+          "2": "回退入口：这一页的 {{backend}} 卡片 → 切到直连",
           "3": "切回后，你添加的来源会留着，只是不再供给 {{backend}}"
         },
         "cancel": "取消",
@@ -885,10 +888,12 @@
         "retry": "重试"
       },
       "gateway": {
-        "heading": "网关",
-        "sourceOrder": "来源顺序",
+        "heading": "网关路由",
+        "infoLabel": "什么是网关路由",
+        "info": "网关路由决定每个 Agent 的型号在已有路由中的来源里先使用哪个上游来源；当额度不足、触发限流、服务端、认证或网络出错导致请求无法完成时，自动切换下一优先级。",
+        "sourceOrder": "调整优先级",
         "switchToGateway": "切换到网关",
-        "switchToDirect": "切换到直连",
+        "switchToDirect": "切到直连",
         "fail": {
           "switchToDirect": "没能切回直连"
         },
@@ -903,8 +908,8 @@
           "unread": "后端供给情况没读到 · 网关本身正常"
         },
         "row": {
-          "current": "当前 {{source}}",
-          "currentTakeover": "当前 {{source}}（接管）"
+          "current": "来自 {{source}}",
+          "currentTakeover": "来自 {{source}}（接管）"
         },
         "group": {
           "subtitle": {
@@ -959,12 +964,14 @@
         "andMore_other": "另有 {{count}} 个来源"
       },
       "upstream": {
-        "heading": "来源",
+        "heading": "上游来源",
+        "infoLabel": "什么是上游来源",
+        "info": "上游来源是账号或 API Key。网关从这里获取型号，再按路由供给 Agent。",
         "count_one": "{{count}} 个",
         "count_other": "{{count}} 个",
         "group": {
           "native": "本机原生",
-          "hub": "网关持有"
+          "hub": "接入网关"
         },
         "kind": {
           "nativeCredential": "原生 · 本机凭据",
@@ -983,7 +990,7 @@
         "state": {
           "supplyingNative": "正在供给 {{backend}}（原生）",
           "supplying": "正在供给 {{backends}}",
-          "standby": "备用",
+          "standby": "可用 · 当前未供给",
           "unavailableRetry": "暂不可用 · {{delay}} 后自动重试",
           "unavailableDue": "暂不可用 · 已到重试时间"
         }
@@ -1005,7 +1012,7 @@
         "count_other": "{{count}} 个",
         "group": {
           "native": "本机原生",
-          "hub": "网关持有"
+          "hub": "接入网关"
         },
         "subtitle": "管理全局共用的账号和型号清单；来源顺序在各 Agent 卡片中调整",
         "modelCount_one": "{{count}} 个型号",
@@ -1026,13 +1033,15 @@
         "oauthSignedOut": "CLI 订阅未登录"
       },
       "order": {
-        "title": "{{backend}} · 来源顺序",
-        "subtitle": "这个后端存下来的来源顺序。改动它不会改动任何已配置的路由链。",
+        "title": "{{backend}} · 全局路由优先级",
+        "subtitle": "在每个型号已有路由中的来源里，排在前面的上游将优先被使用。当额度不足、触发限流、服务端、认证或网络出错导致请求无法完成时，自动切换下一优先级。",
+        "infoLabel": "什么是全局路由优先级",
         "reorder": "调整来源顺序",
         "section": {
           "ordered": "排在这条顺序里",
           "ordered.note": "拖动排序",
-          "heldOut": "未排入这条顺序"
+          "heldOut": "未排入这条顺序",
+          "heldOut.note": "这些来源仍保留在已有路由里，排在这条顺序之后。要从路由中移除，请编辑对应型号的网关路由。"
         },
         "action": {
           "include": "排进来",
@@ -1215,7 +1224,7 @@
         "retry": "重试",
         "empty": "这条路由链是空的。添加一跳,或保持为空配置。",
         "impact": { "title": "路由链已保存", "detail": "以下是这次保存实际移除或中断的项目。", "refreshFail": "路由链已保存,但模型页面暂时无法刷新。", "done": "完成" },
-        "hint": "这条链是写下来的配置。以后来源顺序怎么变,它都不变。"
+        "hint": "这条链是写下来的配置。以后调整来源顺序时,其中的来源会按新的顺序重排。"
       },
       "recent": {
         "title": "最近切换",
@@ -1266,7 +1275,7 @@
         "retry": "重试",
         "undetermined": {
           "title": "连上了、也通过了鉴权 —— 但认不出它说哪种接口",
-          "detail": "返回结构对不上任何一种已知接口，请选择一个明确类型后重试"
+          "detail": "这次返回结构对不上任何一种已知接口；手动选择只会缩小重试探测范围，仍要由该地址返回的响应把接口类型证明出来"
         },
         "protocol": {
           "auto": "自动探测",
@@ -1450,6 +1459,8 @@
             "accountBanned": "账号被限制"
           },
           "error": "异常",
+          "standbyHintLabel": "这个状态是什么意思",
+          "standbyHint": "这个来源是健康的。当网关模式下的某个后端通过它供给一条路由时，它就会显示为使用中。",
           "listUpdated": "· 型号列表更新于 {{time}}"
         },
         "summary_one": "{{host}} · {{count}} 个型号",
@@ -1535,7 +1546,9 @@
           "addFirst": "+ 添加档位",
           "add": "+ 档位",
           "inputHint": "回车添加 · 任意文本",
-          "remove": "移除 {{tier}}"
+          "remove": "移除 {{tier}}",
+          "suggest": "添加 {{tier}}",
+          "note": "档位按你输入的原样发送。没有档位的型号照样可以路由，只是请求不带 effort 参数。"
         },
         "addRow": {
           "hint": "拉取不到、或只想接入其中一个时用"

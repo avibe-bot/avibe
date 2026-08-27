@@ -32,9 +32,22 @@ describe('SourcesCard footer', () => {
       </I18nextProvider>,
     );
 
-    const panel = screen.getByRole('heading', { name: /Sources|来源/i }).closest('section');
+    const panel = screen.getByRole('heading', { name: /Upstream sources|上游来源/i }).closest('section');
     expect(panel?.className).toContain('w-full');
     expect(panel?.className).toContain('min-w-0');
+  });
+
+  it('keeps the source title on its own line above the interface and kind tags', () => {
+    render(
+      <I18nextProvider i18n={i18n}>
+        <SourcesCard read={readyRegion([retained])} onRetry={vi.fn()} onOpenSource={vi.fn()} onAddApiKey={vi.fn()} onAddSubscription={vi.fn()} />
+      </I18nextProvider>,
+    );
+
+    const title = screen.getByText('Retained source');
+    expect(title.className).toContain('block');
+    expect(title.nextElementSibling?.className).toContain('flex');
+    expect(title.closest('button')?.className).toContain('min-h-[96px]');
   });
 
   it('exposes the upstream info note to keyboard activation and Escape dismissal', async () => {
@@ -45,13 +58,13 @@ describe('SourcesCard footer', () => {
       </I18nextProvider>,
     );
 
-    const info = screen.getByRole('button', { name: /What the gateway is|什么是网关/i });
+    const info = screen.getByRole('button', { name: /What upstream sources are|什么是上游来源/i });
     await user.tab();
     expect(document.activeElement).toBe(info);
     await user.keyboard('[Enter]');
-    expect(await screen.findByText(/dispatch layer|调度/i)).toBeTruthy();
+    expect(await screen.findByText(/account or API key|账号或 API Key/i)).toBeTruthy();
     await user.keyboard('[Escape]');
-    await waitFor(() => expect(screen.queryByText(/dispatch layer|调度/i)).toBeNull());
+    await waitFor(() => expect(screen.queryByText(/account or API key|账号或 API Key/i)).toBeNull());
   });
 
   it('draws the two Frame 01 commands and dispatches each action', async () => {

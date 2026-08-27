@@ -85,6 +85,7 @@ from core.memory.project_ids import (
 )
 from core.memory.store import MemoryStore, is_principal_id
 from core.memory.types import (
+    MAX_MEMORY_LIST_PAGE_SIZE,
     MemoryFailureLogEntry,
     MemoryItem,
     MemoryItems,
@@ -1291,7 +1292,7 @@ class MemoryRuntime:
             not is_principal_id(principal_id)
             or isinstance(limit, bool)
             or not isinstance(limit, int)
-            or not 1 <= limit <= _MEMORY_LIST_PROVIDER_PAGE_SIZE
+            or not 1 <= limit <= MAX_MEMORY_LIST_PAGE_SIZE
             or origin not in ("user", "agent")
         ):
             return {"status": "failed", "error": "memory_invalid_input"}

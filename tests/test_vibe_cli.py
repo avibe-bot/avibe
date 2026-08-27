@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import os
 import pytest
@@ -2726,6 +2727,427 @@ def test_runtime_prepare_force_does_not_report_explicit_command_as_replaced(monk
     assert exit_code == 1
     assert "Show Runtime ready" not in captured.out
     assert "VIBE_SHOW_RUNTIME_BIN" in captured.err
+
+
+@pytest.mark.parametrize("consumer", ["memory", "model-hub", "tmux"])
+def test_runtime_clean_reclaims_each_shared_consumer_in_preview_and_real_run(
+    monkeypatch,
+    capsys,
+    tmp_path,
+    consumer,
+):
+    if consumer == "memory":
+        from core.memory.artifact import MemoryArtifactManager
+
+        manager = MemoryArtifactManager(
+            runtime_dir=tmp_path / "memory-runtime",
+            provider_root=tmp_path / "memory-provider",
+            offline=True,
+        )
+    elif consumer == "model-hub":
+        from vibe.model_hub_runtime.installer import EngineRuntimeManager
+
+        manager = EngineRuntimeManager(
+            runtime_dir=tmp_path / "model-hub-runtime",
+            offline=True,
+        )
+    else:
+        from core.tmux_runtime import TmuxRuntimeManager
+
+        manager = TmuxRuntimeManager(
+            runtime_dir=tmp_path / "tmux-runtime",
+            offline=True,
+        )
+
+    from core.managed_runtime import runtime_platform_tag
+
+    versions_dir = manager.runtime_dir / "versions"
+    current_install = versions_dir / "current"
+    stale_install = versions_dir / "stale"
+    current_install.mkdir(parents=True)
+    stale_install.mkdir()
+    manifest_sha = "a" * 64
+    current_archive_sha = "b" * 64
+    stale_archive_sha = "c" * 64
+    binary_sha = hashlib.sha256(b"fixture").hexdigest()
+    for install_dir, version, archive_sha in (
+        (current_install, "current", current_archive_sha),
+        (stale_install, "stale", stale_archive_sha),
+    ):
+        binary = install_dir / manager.spec.default_bin_path
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        binary.write_text("fixture", encoding="utf-8")
+        binary.chmod(0o755)
+        (install_dir / manager.spec.metadata_filename).write_text(
+            json.dumps(
+                {
+                    "provider": "manifest",
+                    "runtime_id": manager.spec.runtime_id,
+                    "runtime_version": version,
+                    "platform": runtime_platform_tag(),
+                    "manifest_sha256": manifest_sha,
+                    "manifest_source": "package:tests/runtime-manifest.json",
+                    "archive_name": f"fixture-{version}.tar.gz",
+                    "archive_sha256": archive_sha,
+                    "binary_sha256": binary_sha,
+                    "bin_path": manager.spec.default_bin_path,
+                }
+            ),
+            encoding="utf-8",
+        )
+    (manager.runtime_dir / "current.json").write_text(
+        json.dumps(
+            {
+                "provider": "manifest",
+                "runtime_id": manager.spec.runtime_id,
+                "runtime_version": "current",
+                "platform": runtime_platform_tag(),
+                "install_dir": str(current_install),
+                "manifest_sha256": manifest_sha,
+                "archive_sha256": current_archive_sha,
+                "bin_path": manager.spec.default_bin_path,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeShowRuntimeManager:
+        def clean(self, *, keep_previous=1, dry_run=False):
+            return {
+                "ok": True,
+                "removed": [],
+                "archives": {"removed_count": 0, "candidate_count": 0},
+            }
+
+    def clean_consumer(*, keep_previous, dry_run):
+        assert keep_previous == 0
+        return manager.clean(keep_previous=keep_previous, dry_run=dry_run)
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: FakeShowRuntimeManager())
+    monkeypatch.setattr(
+        cli,
+        "_managed_runtime_cleaners",
+        lambda: ((manager.spec.runtime_id, clean_consumer),),
+    )
+    parser = cli.build_parser()
+
+    preview_args = parser.parse_args(
+        ["runtime", "clean", "--keep-previous", "0", "--dry-run", "--json"]
+    )
+    assert cli.cmd_runtime(preview_args) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert str(stale_install) in preview[manager.spec.runtime_id]["removed"]
+    assert current_install.is_dir()
+    assert stale_install.is_dir()
+
+    real_args = parser.parse_args(
+        ["runtime", "clean", "--keep-previous", "0", "--json"]
+    )
+    assert cli.cmd_runtime(real_args) == 0
+    cleaned = json.loads(capsys.readouterr().out)
+    assert str(stale_install) in cleaned[manager.spec.runtime_id]["removed"]
+    assert current_install.is_dir()
+    assert not stale_install.exists()
+
+
+def test_runtime_clean_registry_invokes_every_current_shared_consumer(monkeypatch):
+    from core import tmux_runtime
+    from core.memory import artifact as memory_artifact
+    from vibe.model_hub_runtime import installer as model_hub_installer
+
+    calls = []
+
+    def clean_git(*, keep_previous, dry_run):
+        calls.append(("git", keep_previous, dry_run))
+        return {"ok": True, "removed": []}
+
+    class FakeManager:
+        def __init__(self, runtime_id):
+            self.runtime_id = runtime_id
+
+        def clean(self, *, keep_previous, dry_run):
+            calls.append((self.runtime_id, keep_previous, dry_run))
+            return {"ok": True, "removed": []}
+
+    monkeypatch.setattr(cli, "_clean_git_runtime", clean_git)
+    monkeypatch.setattr(
+        memory_artifact,
+        "get_memory_artifact_manager",
+        lambda: FakeManager("memory-runtime"),
+    )
+    monkeypatch.setattr(
+        model_hub_installer,
+        "EngineRuntimeManager",
+        lambda: FakeManager("model_hub_engine"),
+    )
+    monkeypatch.setattr(
+        tmux_runtime,
+        "get_tmux_runtime_manager",
+        lambda: FakeManager("tmux"),
+    )
+
+    results = cli._clean_managed_runtime_consumers(keep_previous=2, dry_run=True)
+
+    assert list(results) == [
+        "git",
+        "memory-runtime",
+        "model_hub_engine",
+        "tmux",
+    ]
+    assert calls == [
+        ("git", 2, True),
+        ("memory-runtime", 2, True),
+        ("model_hub_engine", 2, True),
+        ("tmux", 2, True),
+    ]
+
+
+def test_runtime_clean_returns_nonzero_and_reports_git_exception_reason(monkeypatch, capsys):
+    from core import git_runtime
+
+    class FakeShowRuntimeManager:
+        def clean(self, *, keep_previous=1, dry_run=False):
+            return {"ok": True, "removed": [], "archives": {"removed_count": 0}}
+
+    def fail_git_manager():
+        raise OSError("git runtime directory unreadable")
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: FakeShowRuntimeManager())
+    monkeypatch.setattr(git_runtime, "get_git_runtime_manager", fail_git_manager)
+    monkeypatch.setattr(cli, "_managed_runtime_cleaners", lambda: (("git", cli._clean_git_runtime),))
+    args = cli.build_parser().parse_args(["runtime", "clean"])
+
+    assert cli.cmd_runtime(args) == 1
+    captured = capsys.readouterr()
+    assert "git_clean_failed" in captured.err
+    assert "Git Runtime" in captured.err
+
+
+def test_runtime_clean_returns_nonzero_for_show_failure_without_false_archive_success(monkeypatch, capsys):
+    class FailingShowRuntimeManager:
+        def clean(self, *, keep_previous=1, dry_run=False):
+            return {
+                "ok": False,
+                "removed": [],
+                "archives": {
+                    "outcome": "skipped",
+                    "skipped_reason": "archive_inspection_failed",
+                },
+            }
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: FailingShowRuntimeManager())
+    monkeypatch.setattr(cli, "_managed_runtime_cleaners", lambda: ())
+    args = cli.build_parser().parse_args(["runtime", "clean"])
+
+    assert cli.cmd_runtime(args) == 1
+    captured = capsys.readouterr()
+    assert "archive_inspection_failed" in captured.err
+    assert "unknown" not in captured.err
+    assert "downloaded Show Runtime archive" not in captured.out
+
+
+@pytest.mark.parametrize(
+    ("archives", "expected_reason", "prints_partial_summary"),
+    [
+        (
+            {
+                "outcome": "skipped",
+                "skipped_reason": "archive_inspection_failed",
+                "failed_count": 0,
+            },
+            "archive_inspection_failed",
+            False,
+        ),
+        ({"outcome": "skipped", "failed_count": 1}, "archive_removal_failed", False),
+        ({"outcome": "partial", "failed_count": 0}, "archive_removal_failed", True),
+    ],
+)
+def test_runtime_clean_nested_show_archive_failure_controls_output_and_exit(
+    monkeypatch,
+    capsys,
+    archives,
+    expected_reason,
+    prints_partial_summary,
+):
+    class ShowRuntimeManager:
+        def clean(self, *, keep_previous=1, dry_run=False):
+            return {"ok": True, "removed": [], "archives": archives}
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: ShowRuntimeManager())
+    monkeypatch.setattr(cli, "_managed_runtime_cleaners", lambda: ())
+    args = cli.build_parser().parse_args(["runtime", "clean"])
+
+    assert cli.cmd_runtime(args) == 1
+    captured = capsys.readouterr()
+    assert expected_reason in captured.err
+    if prints_partial_summary:
+        assert "archive(s) could not be removed" in captured.err
+    else:
+        assert "downloaded Show Runtime archive(s) (0 B)" not in captured.out
+
+
+def test_runtime_clean_dry_run_partial_archive_preview_is_success(monkeypatch, capsys):
+    class ShowRuntimeManager:
+        def clean(self, *, keep_previous=1, dry_run=False):
+            return {
+                "ok": True,
+                "removed": [],
+                "archives": {
+                    "outcome": "partial",
+                    "candidate_count": 1,
+                    "candidate_bytes": 1024,
+                    "failed_count": 0,
+                },
+            }
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: ShowRuntimeManager())
+    monkeypatch.setattr(cli, "_managed_runtime_cleaners", lambda: ())
+    args = cli.build_parser().parse_args(["runtime", "clean", "--dry-run"])
+
+    assert cli.cmd_runtime(args) == 0
+    captured = capsys.readouterr()
+    assert "Would remove 1 downloaded Show Runtime archive(s) (1.0 KiB)." in captured.out
+    assert captured.err == ""
+
+
+def test_runtime_clean_json_keeps_nested_failure_payload_and_exits_nonzero(monkeypatch, capsys):
+    archives = {
+        "outcome": "skipped",
+        "skipped_reason": "archive_inspection_failed",
+        "failed_count": 0,
+    }
+
+    class ShowRuntimeManager:
+        def clean(self, *, keep_previous=1, dry_run=False):
+            return {"ok": True, "removed": [], "archives": archives}
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: ShowRuntimeManager())
+    monkeypatch.setattr(cli, "_managed_runtime_cleaners", lambda: ())
+    args = cli.build_parser().parse_args(["runtime", "clean", "--json"])
+
+    assert cli.cmd_runtime(args) == 1
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["archives"] == archives
+    assert captured.err == ""
+
+
+def test_runtime_clean_success_reports_every_consumer_and_exits_zero(monkeypatch, capsys):
+    class FakeShowRuntimeManager:
+        def clean(self, *, keep_previous=1, dry_run=False):
+            return {"ok": True, "removed": ["show-old"], "archives": {"removed_count": 0}}
+
+    def cleaner(count):
+        return lambda **_kwargs: {"ok": True, "removed": [f"old-{index}" for index in range(count)]}
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: FakeShowRuntimeManager())
+    monkeypatch.setattr(
+        cli,
+        "_managed_runtime_cleaners",
+        lambda: (
+            ("git", cleaner(1)),
+            ("memory-runtime", cleaner(2)),
+            ("model_hub_engine", cleaner(3)),
+            ("tmux", cleaner(4)),
+        ),
+    )
+    args = cli.build_parser().parse_args(["runtime", "clean"])
+
+    assert cli.cmd_runtime(args) == 0
+    captured = capsys.readouterr()
+    assert "Removed 1 Git Runtime cache item(s)." in captured.out
+    assert "Removed 2 Memory Runtime cache item(s)." in captured.out
+    assert "Removed 3 Model Hub Runtime cache item(s)." in captured.out
+    assert "Removed 4 tmux Runtime cache item(s)." in captured.out
+    assert captured.err == ""
+
+
+def test_runtime_clean_previews_shared_consumer_archive_candidates(monkeypatch, capsys):
+    class FakeShowRuntimeManager:
+        def clean(self, *, keep_previous=1, dry_run=False):
+            return {"ok": True, "removed": [], "archives": {"candidate_count": 0}}
+
+    def clean_memory(**_kwargs):
+        return {
+            "ok": True,
+            "removed": [],
+            "archives": {
+                "candidate_count": 2,
+                "candidate_bytes": 2048,
+            },
+        }
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: FakeShowRuntimeManager())
+    monkeypatch.setattr(
+        cli,
+        "_managed_runtime_cleaners",
+        lambda: (("memory-runtime", clean_memory),),
+    )
+    args = cli.build_parser().parse_args(["runtime", "clean", "--dry-run"])
+
+    assert cli.cmd_runtime(args) == 0
+    captured = capsys.readouterr()
+    assert "Would remove 2 downloaded Memory Runtime archive(s) (2.0 KiB)." in captured.out
+    assert captured.err == ""
+
+
+def test_runtime_clean_does_not_render_shared_archive_failure_as_zero_success(monkeypatch, capsys):
+    class FakeShowRuntimeManager:
+        def clean(self, *, keep_previous=1, dry_run=False):
+            return {"ok": True, "removed": [], "archives": {"removed_count": 0}}
+
+    def clean_memory(**_kwargs):
+        return {
+            "ok": True,
+            "removed": [],
+            "archives": {
+                "outcome": "skipped",
+                "skipped_reason": "archive_inspection_failed",
+            },
+        }
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: FakeShowRuntimeManager())
+    monkeypatch.setattr(
+        cli,
+        "_managed_runtime_cleaners",
+        lambda: (("memory-runtime", clean_memory),),
+    )
+    args = cli.build_parser().parse_args(["runtime", "clean"])
+
+    assert cli.cmd_runtime(args) == 1
+    captured = capsys.readouterr()
+    assert "Memory Runtime cleanup failed (archive_inspection_failed)" in captured.err
+    assert "archive_inspection_failed" in captured.err
+    assert "downloaded Memory Runtime archive" not in captured.out
+
+
+@pytest.mark.parametrize("help_args", [("runtime", "--help"), ("runtime", "clean", "--help")])
+@pytest.mark.parametrize(
+    ("language", "consumer_scope", "failure_contract"),
+    [
+        ("en", "Show, Git, Memory, Model Hub, and tmux", "exit nonzero if any cleanup fails"),
+        ("zh", "Show、Git、Memory、Model Hub 和 tmux", "任一清理失败时以非零状态退出"),
+    ],
+)
+def test_runtime_clean_help_names_consumers_and_failure_exit(
+    monkeypatch,
+    capsys,
+    help_args,
+    language,
+    consumer_scope,
+    failure_contract,
+):
+    monkeypatch.setenv("COLUMNS", "240")
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
+    parser = cli.build_parser()
+
+    with pytest.raises(SystemExit) as exc_info:
+        parser.parse_args(help_args)
+
+    assert exc_info.value.code == 0
+    output = capsys.readouterr().out
+    assert cli.i18n_t("runtime.clean.commandHelp", language) in output
+    assert consumer_scope in output
+    assert failure_contract in output
 
 
 @pytest.mark.parametrize("legacy_source", ["github", "github-source", "GitHub-Source"])

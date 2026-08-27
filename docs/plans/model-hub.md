@@ -143,7 +143,7 @@ apply to UI nouns, not precise technical prose in this specification.
 | Provider (as a UI noun) | **Banned** | The UI manages concrete Sources; vendor may appear as metadata, and “upstream provider” remains valid architecture prose |
 | 账号池 / account pool | **Banned** | It implies operator tooling and multi-tenant pooling that Avibe does not ship |
 | 中转站 / relay station as a category | **Banned** | It is an API Key Source with a custom Base URL; helper copy may use it as an example |
-| 优先级 / priority as a standalone global noun | **Banned** | Name the owning model Route chain; ordinal copy such as “first upstream” is allowed |
+| 优先级 / priority as a standalone global noun | **Banned**, except in the backend-scoped UI title “全局路由优先级” / “Global route priority” | The title names one backend's shared Source order; otherwise name the owning model Route chain and use ordinal copy such as “first upstream” |
 
 **Copy-density rule (owner-approved interaction baseline, 2026-08-07 afternoon).**
 Use the glossary nouns in controls and status. Put explanations behind a compact info
@@ -167,9 +167,11 @@ model entries), billing type (包月 | 按量 ¥), state (§4.5), and usage
 (subscription cycle % / monthly spend). Existing `last_discovered_at` records the last
 successful full inventory replacement; it is not a connectivity-check timestamp.
 Every Source read also carries the server-derived
-`adopted_by: [{backend, menu_model}]` projection of its persisted Route references.
-That unique projection is sorted by backend then menu model. It is reloadable Source-
-card data, not persisted Source state, and clients never reconstruct it from live chains.
+`adopted_by: [{backend, menu_model}]` projection of persisted Route references for
+backends currently in Hub mode. That unique projection is sorted by backend then menu
+model. It is reloadable Source-card data, not persisted Source state, and clients never
+reconstruct it from live chains. Routes retained while a backend is in Direct mode are
+not included because that backend bypasses the gateway.
 
 The Source workflow is complete at both entry points:
 
@@ -406,13 +408,14 @@ the user later places an already-added Source in a cross-vendor chain.
 The same model may be supplied by multiple Sources; §4.3 alone executes the exact
 stored route for that model.
 
-### 4.2 Gateway strategy — add-time defaults, then explicit configuration
+### 4.2 Gateway strategy — add-time defaults, global priority, then explicit configuration
 
 One record per Agent backend owns `mode`, its menu, one stored Source order, and one
-stored Route chain for each menu model. The Source order is a visible Gateway default
-for Add-time placement, not a runtime capability filter. There is no backend
-Source-order policy discriminator and no per-model route policy. The only order runtime
-can execute is the exact hop order stored for that model.
+stored Route chain for each menu model. The Source order is the visible Gateway priority
+and the Add-time placement input. Saving that priority atomically stores the complete
+order and applies it to existing Routes without changing their hop membership or
+mappings. There is no backend Source-order policy discriminator
+and no per-model route policy. Runtime executes the exact hop order stored for each model.
 
 Matching is an **Add Source write-time operation**. After connectivity, protocol, and
 inventory have been observed, the add transaction proposes exact Source/model matches,
@@ -451,7 +454,9 @@ metadata for audit/display; routing and placement never read or mutate it.
 
 The explicit `POST /api/models/agents/<backend>/chains/reorder` operation is the sole
 server-side post-creation operation that implicitly applies the stored Source-order
-sequence to existing Routes. It reorders existing hops only, preserves every exact
+sequence to existing Routes. When the UI supplies an `order` body, persisting that
+order and applying it to existing Routes are one mutation; an omitted body applies the
+already stored order. It reorders existing hops only, preserves every exact
 `(source_id, model_id)` member and mapping, and never reruns matching. Its complete stable
 order is defined in §4.6. A user-authored per-model `hops` PUT carries only the submitted
 explicit hop order, and its server handler never reads `sources.order`; an editor may use
@@ -571,7 +576,7 @@ repairs or rewrites configuration.
 singleton local login; a `hub` hop uses the local Gateway and may be cross-vendor. The
 system never prepends native supply or chooses a model. If the requested reasoning
 effort exactly appears in the configured hop model's `reasoning_efforts`, pass that one
-value; otherwise pass `null`, with no approximation or downgrade.
+value; otherwise omit the effort field, with no approximation or downgrade.
 
 Parameter, protocol, and tool-compatibility failures are terminal without fallthrough.
 A local Gateway start, listener, or process loss at **any** request phase is terminal
@@ -804,8 +809,8 @@ Three classes, because the action owed by the user differs in each.
 
 | Status | zh (UI) | Heals itself | Meaning |
 | --- | --- | --- | --- |
-| `active` | 使用中 | — | currently serving |
-| `standby` | 备用 | — | healthy, but not currently serving any configured route |
+| `active` | 正常 | — | healthy source; route use is shown by the persisted reference projection |
+| `standby` | 正常 | — | healthy source; when `adopted_by` is non-empty it is shown as supplying the configured route |
 | `cooldown` | 暂不可用 (gold) | **yes** | shaped quota/rate/server result; persisted `retry_at` known; recovers unattended |
 | `needs_action` | 需处理 (rose) | **no** | OAuth expired, balance exhausted, key revoked/banned — dead until the user acts |
 | `error` | 异常 | **no** | unclassified failure — no `retry_at`, so nothing clears it unattended |
@@ -1230,9 +1235,11 @@ present even when empty.
 The request carrier shown in each row is the only one. The final `api.md`, server/client
 envelopes, confirmation UI, and route tests mirror this matrix row-for-row.
 `PUT /api/models/agents/<backend>/sources` is intentionally outside the matrix: it
-changes only the Add-time Source-order sequence, never a Route chain or its members, and
-must not gain a guarded `409` branch. This is the G-9 behavioral tombstone; a guard here
-would imply the forbidden behavior of rewriting Routes during Source-order storage.
+changes only the persisted Source-order sequence, never a Route chain or its members, and
+must not gain a guarded `409` branch. The UI uses the explicit
+`POST /api/models/agents/<backend>/chains/reorder` operation with the complete order;
+that operation stores the order and applies it to existing Routes in one mutation while
+preserving the PUT's storage-only contract.
 Automatic background discovery never performs this cascade: when neither literal
 inventory nor sanctioned-alias evidence remains, it records the model as
 `model_unsupported`, keeps the configured hop visible and non-runnable, and waits for
@@ -1344,7 +1351,8 @@ Source deletion removes its id from every backend order in the same transaction 
 preserves the relative order of survivors. Serialization/reload rejects a dangling id.
 
 `POST /api/models/agents/<backend>/chains/reorder` applies that sequence to every
-existing Route without changing Route membership or mappings. For an original hop at
+existing Route without changing Route membership or mappings. When its optional `order`
+body is present, it stores that sequence in the same mutation. For an original hop at
 index `i`, use stable key `(0, source_order_index, i)` when its Source appears in the
 current order and `(1, i, i)` otherwise, then sort lexicographically. Thus all listed
 Sources come first in configured order, hops sharing a listed Source retain their
@@ -1432,8 +1440,8 @@ drag handle, or persisted policy. Configuration lives at one of the two real own
 the Source or the Gateway chain.
 
 A Source card's “Supplying …” line consumes the existing
-`adopted_by: [{backend, menu_model}]` projection: group its configured rows
-by backend, de-duplicate backend names, and combine them with the current §4.3
+`adopted_by: [{backend, menu_model}]` projection for Hub-mode backends: group its
+configured rows by backend, de-duplicate backend names, and combine them with the current §4.3
 runnability projection. No parallel “supplying backends” field is stored. If this
 projection proves insufficient in implementation, the lane reports the exact missing
 fact for a targeted expansion of `adopted_by`; it does not add a sibling field.
@@ -1542,8 +1550,8 @@ through explicit OAuth add, not native-file import. The import entry points are 
 open after upgrade, the setup wizard, and the backend-page banner.
 - **Add-source closing loop (v3).** Creating a Source returns
   `added_to: [{backend, menu_model, source_id, model_id, position}]` for every exact hop
-  written by the one-time match. `adopted_by: [{backend, menu_model}]` is the stable
-  Source-card projection of those persisted references; transient health and process
+written by the one-time match. `adopted_by: [{backend, menu_model}]` is the stable
+Source-card projection of those persisted Hub-mode references; transient health and process
   availability do not change it. A Source with no automatic match reports an empty
   `added_to` and remains available for an explicit route edit, without a separate “not
   enabled” state.
@@ -1599,8 +1607,9 @@ one pinned hop it receives.
 
 ## 9. Explicit non-goals (v3)
 
-- **No product-global or backend-wide priority list.** Execution ordering exists only
-  inside one `(backend, menu model)` Route chain.
+- **No product-global priority list.** The backend-scoped Source order is explicitly in
+  scope, and execution ordering remains configurable inside each `(backend, menu model)`
+  Route chain.
 - **Per-model ordering is explicitly in scope.** Owner ruling 2026-08-07
   supersedes v2's “No per-model ordering” non-goal. The scope is exactly §4.3 and
   §4.6's stored configured-chain input;
@@ -1701,7 +1710,7 @@ directions into questions that later lanes must answer before writing mechanical
       attribution reuses `adopted_by`, and saved Source details has only guarded
       「重新拉取」 with no latency or “last checked” copy.
 - [ ] §6 reports the exact hops Add Source wrote through `added_to`, and Source-card
-      `adopted_by` reflects only persisted route references.
+      `adopted_by` reflects only persisted Hub-mode route references.
 - [ ] §6 reserves Direct for `mode: direct`, labels a `native_cli` Gateway hop Native,
       and defines a visible, reversible Direct ↔ Gateway action for every backend.
 - [ ] §9 explicitly supersedes the old no-per-model-ordering non-goal and states that

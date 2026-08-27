@@ -2,6 +2,7 @@
 
 import asyncio
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,7 @@ from core.memory.everos import ProviderHealthSnapshot
 from core.memory.processing_record import RuntimeHealthProjection, SourceObservation
 from core.memory.runtime import MemoryConfig, MemoryRuntime
 from core.memory.store import MemoryStore
-from core.memory.types import MemoryItems
+from core.memory.types import MemoryItems, MemoryListItem, MemoryListPage
 
 
 def _runtime(tmp_path: Path) -> MemoryRuntime:
@@ -55,6 +56,66 @@ async def test_profile_payload_only_labels_confirmed_empty_results(
         "warnings": list(warnings),
         "profile_warning": expected_warning,
     }
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_all_project_list_accepts_everos_maximum_page_size(
+    tmp_path: Path,
+) -> None:
+    """MEMORY-LIST-009: the aggregate route accepts EverOS's 100-item maximum."""
+
+    runtime = _runtime(tmp_path)
+    calls: list[tuple[int, int]] = []
+    items = tuple(
+        MemoryListItem(
+            id=f"episode-{index:03d}",
+            subject=f"subject-{index}",
+            summary=f"summary-{index}",
+            body=f"body-{index}",
+            timestamp=(
+                datetime(2026, 8, 27, tzinfo=timezone.utc) - timedelta(minutes=index)
+            ).isoformat(),
+            project="default",
+        )
+        for index in range(100)
+    )
+
+    runtime.list_memory_projects = lambda _principal_id: ("default",)
+
+    async def list_episodes(**kwargs: object) -> MemoryListPage:
+        page = int(kwargs["page"])
+        page_size = int(kwargs["page_size"])
+        calls.append((page, page_size))
+        start = (page - 1) * page_size
+        page_items = items[start : start + page_size]
+        return MemoryListPage(
+            items=page_items,
+            page=page,
+            page_size=page_size,
+            count=len(page_items),
+            total_count=len(items),
+        )
+
+    runtime.module.list_episodes = list_episodes
+    runtime.module.concurrent_episode_lists = None
+    principal_id = "u-11111111111111111111111111111111"
+
+    payload = await runtime.list_all_episodes_payload(
+        principal_id,
+        cursor=None,
+        limit=100,
+    )
+
+    assert payload["status"] == "ok"
+    assert payload["count"] == 100
+    assert {page for page, _page_size in calls} == set(range(1, 6))
+    assert all(page_size == 20 for _page, page_size in calls)
+    assert await runtime.list_all_episodes_payload(
+        principal_id,
+        cursor=None,
+        limit=101,
+    ) == {"status": "failed", "error": "memory_invalid_input"}
     await runtime.close()
 
 

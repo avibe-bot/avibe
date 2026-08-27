@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from core.show_runtime import ShowRuntimeManager
+from core.show_runtime import ShowRuntimeManager, _ShowManifestRuntimeManager
 
 
 def _make_manager(tmp_path: Path) -> ShowRuntimeManager:
@@ -38,12 +38,19 @@ def _sha(index: int) -> str:
 
 def _write_current_pointer(manager: ShowRuntimeManager, sha256: str, install_dir: Path | None = None) -> None:
     manager.runtime_dir.mkdir(parents=True, exist_ok=True)
+    if install_dir is None:
+        install_dir = _write_install_metadata(
+            manager,
+            version="v1",
+            sha256=sha256,
+            mtime=0,
+        )
     pointer = {
         "provider": "manifest-cache",
         "runtime_version": "v1",
         "platform": "test",
-        "install_dir": str(install_dir or manager.runtime_dir / "versions" / "v1" / "test" / "abc123"),
-        "manifest_sha256": "m" * 64,
+        "install_dir": str(install_dir),
+        "manifest_sha256": "a" * 64,
         "archive_sha256": sha256,
     }
     (manager.runtime_dir / "current.json").write_text(json.dumps(pointer), encoding="utf-8")
@@ -54,7 +61,7 @@ def _write_install_metadata(manager: ShowRuntimeManager, *, version: str, sha256
     install_dir.mkdir(parents=True, exist_ok=True)
     metadata = {
         "provider": "manifest-cache",
-        "manifest_sha256": "m" * 64,
+        "manifest_sha256": "a" * 64,
         "runtime_version": version,
         "platform": "test",
         "archive_name": "vibe-show-runtime-node-test.tgz",
@@ -158,14 +165,14 @@ def test_clean_is_idempotent_for_archives(tmp_path: Path) -> None:
     assert second["archives"]["candidate_count"] == 0
 
 
-def test_clean_after_managed_install_prunes_stale_archives(tmp_path: Path) -> None:
+def test_shared_post_install_cleanup_prunes_stale_archives(tmp_path: Path) -> None:
     manager = ShowRuntimeManager(runtime_dir=tmp_path / "show-runtime", offline=True, runtime_source="manifest-cache")
     current_install = _write_install_metadata(manager, version="v2", sha256=_sha(1), mtime=0)
     _write_current_pointer(manager, _sha(1), install_dir=current_install)
     current_archive = _write_archive(manager, _sha(1), b"current")
     stale = _write_archive(manager, _sha(2), b"stale")
 
-    manager._clean_after_managed_install(["node", str(current_install / "cli.js")])
+    manager._shared_manifest_manager(offline=True)._clean_after_successful_install()
 
     assert current_archive.exists()  # current archive intact
     assert not stale.exists()
@@ -197,7 +204,7 @@ def test_clean_after_custom_manifest_install_prunes_stale_installs(tmp_path: Pat
     rollback_archive = _write_archive(manager, _sha(8), b"rollback")
     stale_archive = _write_archive(manager, _sha(9), b"stale-custom")
 
-    manager._clean_after_managed_install(["node", str(current_install / "cli.js")])
+    manager._shared_manifest_manager(offline=True)._clean_after_successful_install()
 
     assert current_archive.exists() and current_install.exists()
     assert rollback_archive.exists() and rollback_install.exists()
@@ -233,7 +240,7 @@ def test_clean_after_custom_manifest_prunes_obsolete_sources(tmp_path: Path) -> 
     rollback_archive = _write_archive(manager, _sha(8), b"rollback")
     stale_archive = _write_archive(manager, _sha(9), b"stale-old-source")
 
-    manager._clean_after_managed_install(["node", str(current_install / "cli.js")])
+    manager._shared_manifest_manager(offline=True)._clean_after_successful_install()
 
     assert current_archive.exists() and current_install.exists()
     assert rollback_archive.exists() and rollback_install.exists()
@@ -319,7 +326,7 @@ def test_cli_clean_dry_run_is_read_only_for_git_runtime(monkeypatch, capsys) -> 
 
 
 def test_cleanup_reuses_install_guard_without_deadlock(tmp_path: Path) -> None:
-    """The post-install cleanup runs inside the installer's guard.
+    """Direct-provider cleanup can reuse Show's installer guard.
 
     ``flock`` is not re-entrant across file handles, so this exercises the
     depth-counted reuse: cleaning while the guard is held must complete and
@@ -484,7 +491,8 @@ def test_install_guard_unavailable_falls_back_to_verified_install(tmp_path: Path
     """A read-only runtime dir must not turn a verified install into a failure."""
     from core import show_runtime as module
 
-    monkeypatch.setattr(module, "_runtime_platform_tag", lambda: "test")
+    monkeypatch.setattr(module, "runtime_platform_tag", lambda: "test")
+    monkeypatch.setattr("core.managed_runtime.runtime_platform_tag", lambda: "test")
     monkeypatch.setattr(module, "_resolve_node_command", lambda: ["node"])
     manifest_payload = {
         "schema_version": 1,
@@ -505,10 +513,12 @@ def test_install_guard_unavailable_falls_back_to_verified_install(tmp_path: Path
         runtime_source="manifest-cache",
         manifest_path=manifest_path,
     )
-    manifest = manager._load_runtime_manifest()
+    shared_manager = manager._shared_manifest_manager(offline=True)
+    manifest = shared_manager.load_manifest(allow_network=False)
     assert manifest is not None
-    archive = manifest.archives["test"]
-    install_dir = manager._manifest_install_dir(manifest, archive)
+    archive = shared_manager.archive_for_platform(manifest)
+    assert archive is not None
+    install_dir = shared_manager._manifest_install_dir(manifest, archive)
     install_dir.mkdir(parents=True, exist_ok=True)
     (install_dir / ".vibe-show-runtime.json").write_text(
         json.dumps(
@@ -574,7 +584,7 @@ def test_partial_removal_reports_removed_and_failed_counts(monkeypatch, capsys) 
         lambda *, keep_previous, dry_run=False: {"ok": True, "removed": []},
     )
 
-    assert vibe_cli.cmd_runtime(args) == 0
+    assert vibe_cli.cmd_runtime(args) == 1
     captured = capsys.readouterr()
     assert "2" in captured.out  # successful removal total still reported
     assert "1" in captured.err  # failed count reported as a warning
@@ -623,7 +633,7 @@ def test_archive_cache_status_reports_stale_plan_failure(tmp_path: Path, monkeyp
     def _boom(*args, **kwargs):
         raise OSError("directory disappeared")
 
-    monkeypatch.setattr(manager, "_clean_manifest_install_dirs", _boom)
+    monkeypatch.setattr(_ShowManifestRuntimeManager, "_read_managed_install_records", _boom)
     report = manager.archive_cache_status()
 
     assert report.get("skipped_reason") == "archive_inspection_failed"
@@ -634,12 +644,10 @@ def test_candidate_stat_failure_is_an_inspection_failure(tmp_path: Path, monkeyp
     _write_current_pointer(manager, _sha(1))
     _write_archive(manager, _sha(2), b"stale")
 
-    import errno
+    def _stat_boom(self, **_kwargs):
+        raise OSError("archive stat failed")
 
-    def _stat_boom(self):
-        raise OSError(errno.EIO, "I/O error")
-
-    monkeypatch.setattr(Path, "lstat", _stat_boom)
+    monkeypatch.setattr(_ShowManifestRuntimeManager, "_clean_downloaded_archives", _stat_boom)
     result = manager.clean()
 
     assert result["archives"].get("skipped_reason") == "archive_inspection_failed"
@@ -648,7 +656,8 @@ def test_candidate_stat_failure_is_an_inspection_failure(tmp_path: Path, monkeyp
 def test_forced_prepare_fails_structured_when_guard_unavailable(tmp_path: Path, monkeypatch) -> None:
     from core import show_runtime as module
 
-    monkeypatch.setattr(module, "_runtime_platform_tag", lambda: "test")
+    monkeypatch.setattr(module, "runtime_platform_tag", lambda: "test")
+    monkeypatch.setattr("core.managed_runtime.runtime_platform_tag", lambda: "test")
     monkeypatch.setattr(module, "_resolve_node_command", lambda: ["node"])
     manifest_payload = {
         "schema_version": 1,
@@ -691,9 +700,10 @@ def test_forced_prepare_fails_structured_when_guard_unavailable(tmp_path: Path, 
 def test_installed_manifest_command_enforces_node_requirement(tmp_path: Path, monkeypatch) -> None:
     from core import show_runtime as module
 
-    monkeypatch.setattr(module, "_runtime_platform_tag", lambda: "test")
+    monkeypatch.setattr(module, "runtime_platform_tag", lambda: "test")
+    monkeypatch.setattr("core.managed_runtime.runtime_platform_tag", lambda: "test")
     monkeypatch.setattr(module, "_resolve_node_command", lambda: ["node"])
-    monkeypatch.setattr(module, "_node_version", lambda _command: "18.0.0")
+    monkeypatch.setattr(module, "_node_version", lambda _command: (18, 0, 0))
     manifest_payload = {
         "schema_version": 1,
         "runtime_version": "v2",
@@ -708,10 +718,12 @@ def test_installed_manifest_command_enforces_node_requirement(tmp_path: Path, mo
         runtime_source="manifest-cache",
         manifest_path=manifest_path,
     )
-    manifest = manager._load_runtime_manifest()
+    shared_manager = manager._shared_manifest_manager(offline=True)
+    manifest = shared_manager.load_manifest(allow_network=False)
     assert manifest is not None
-    archive = manifest.archives["test"]
-    install_dir = manager._manifest_install_dir(manifest, archive)
+    archive = shared_manager.archive_for_platform(manifest)
+    assert archive is not None
+    install_dir = shared_manager._manifest_install_dir(manifest, archive)
     install_dir.mkdir(parents=True, exist_ok=True)
     (install_dir / ".vibe-show-runtime.json").write_text(
         json.dumps(
@@ -767,7 +779,7 @@ def test_dry_run_planning_failure_returns_structured_report(tmp_path: Path, monk
     def _boom(*args, **kwargs):
         raise OSError("install dir vanished during scan")
 
-    monkeypatch.setattr(manager, "_clean_manifest_install_dirs", _boom)
+    monkeypatch.setattr(_ShowManifestRuntimeManager, "_read_managed_install_records", _boom)
     result = manager.clean(dry_run=True)
 
     assert result["archives"].get("skipped_reason") == "archive_inspection_failed"
@@ -798,7 +810,7 @@ def test_skipped_archives_do_not_hide_other_cleanup_results(monkeypatch, capsys)
         lambda *, keep_previous, dry_run=False: {"ok": True, "removed": ["git-old"]},
     )
 
-    assert vibe_cli.cmd_runtime(args) == 0
+    assert vibe_cli.cmd_runtime(args) == 1
     captured = capsys.readouterr()
     assert "runtime_install_already_running" in captured.err  # archive skip reason surfaced
     assert "1" in captured.out  # Show Runtime install result still reported
@@ -915,7 +927,7 @@ def test_cli_clean_reports_skipped_archives_without_zero_counts(monkeypatch, cap
         lambda *, keep_previous, dry_run=False: {"ok": True, "removed": []},
     )
 
-    assert vibe_cli.cmd_runtime(args) == 0
+    assert vibe_cli.cmd_runtime(args) == 1
     captured = capsys.readouterr()
     assert "runtime_install_already_running" in captured.err
     # The archive skip is reported as a warning; Show/Git results still render
@@ -971,7 +983,7 @@ def test_retained_metadata_without_valid_digest_fails_closed(tmp_path: Path, dig
     assert rollback_archive.exists()
 
 
-def test_preview_guard_covers_archive_planning(tmp_path: Path) -> None:
+def test_preview_guard_covers_archive_planning(tmp_path: Path, monkeypatch) -> None:
     manager = _make_manager(tmp_path)
     manager.runtime_dir.mkdir(parents=True, exist_ok=True)
     (manager.runtime_dir / ".install.lock").write_text("", encoding="utf-8")
@@ -979,13 +991,14 @@ def test_preview_guard_covers_archive_planning(tmp_path: Path) -> None:
     _write_archive(manager, _sha(1), b"current")
     stale = _write_archive(manager, _sha(2), b"stale")
     seen: dict[str, object] = {}
-    real_clean = manager._clean_downloaded_archives
+    real_clean = _ShowManifestRuntimeManager._clean_downloaded_archives
 
-    def _observe(*, dry_run=False, skip_metadata_under=None):
-        seen["fd"] = getattr(manager, "_preview_guard_fd", None)
-        return real_clean(dry_run=dry_run, skip_metadata_under=skip_metadata_under)
+    def _observe(shared_manager, **kwargs):
+        seen["manager"] = shared_manager
+        seen["fd"] = getattr(shared_manager, "_preview_guard_fd", None)
+        return real_clean(shared_manager, **kwargs)
 
-    manager._clean_downloaded_archives = _observe
+    monkeypatch.setattr(_ShowManifestRuntimeManager, "_clean_downloaded_archives", _observe)
     result = manager.clean(dry_run=True)
 
     assert result["dry_run"] is True
@@ -993,7 +1006,7 @@ def test_preview_guard_covers_archive_planning(tmp_path: Path) -> None:
     assert result["archives"]["candidate_count"] == 1
     if os.name != "nt":
         assert seen["fd"] is not None
-    assert getattr(manager, "_preview_guard_fd", None) is None
+    assert getattr(seen["manager"], "_preview_guard_fd", None) is None
 
 
 def _stat_with_ino(info: os.stat_result, ino: int) -> os.stat_result:
@@ -1007,6 +1020,8 @@ def test_windows_downloads_identity_mismatch_fails_closed(tmp_path: Path, monkey
     _write_current_pointer(manager, _sha(1))
     _write_archive(manager, _sha(2), b"stale")
     monkeypatch.setattr("os.name", "nt")
+    monkeypatch.setattr(_ShowManifestRuntimeManager, "_acquire_mutation_lock", lambda _self: object())
+    monkeypatch.setattr(_ShowManifestRuntimeManager, "_release_mutation_lock", lambda _self, _lock: None)
     real_lstat = Path.lstat
     calls = {"n": 0}
 
@@ -1071,18 +1086,18 @@ def test_install_guard_refuses_swap_after_lock_acquisition(tmp_path: Path, monke
         assert reason == "runtime_install_guard_unavailable"
 
 
-def test_preview_discards_plan_when_lock_appears_mid_scan(tmp_path: Path) -> None:
+def test_preview_discards_plan_when_lock_appears_mid_scan(tmp_path: Path, monkeypatch) -> None:
     manager = _make_manager(tmp_path)
     _write_current_pointer(manager, _sha(1))
     _write_archive(manager, _sha(2), b"stale")
-    real_clean = manager._clean_downloaded_archives
+    real_clean = _ShowManifestRuntimeManager._clean_downloaded_archives
 
-    def _observe(*, dry_run=False, skip_metadata_under=None):
-        (manager.runtime_dir / "manifest-live").mkdir(parents=True, exist_ok=True)
-        (manager.runtime_dir / ".install.lock").write_text("busy", encoding="utf-8")
-        return real_clean(dry_run=dry_run, skip_metadata_under=skip_metadata_under)
+    def _observe(shared_manager, **kwargs):
+        (shared_manager.runtime_dir / "manifest-live").mkdir(parents=True, exist_ok=True)
+        (shared_manager.runtime_dir / ".install.lock").write_text("busy", encoding="utf-8")
+        return real_clean(shared_manager, **kwargs)
 
-    manager._clean_downloaded_archives = _observe
+    monkeypatch.setattr(_ShowManifestRuntimeManager, "_clean_downloaded_archives", _observe)
     result = manager.clean(dry_run=True)
     assert result["ok"] is False
     assert result["archives"]["skipped_reason"] == "runtime_install_already_running"
@@ -1135,25 +1150,26 @@ def test_dry_run_includes_abandoned_claims(tmp_path: Path) -> None:
     assert claim.exists()
 
 
-def test_archive_cache_status_uses_preview_guard(tmp_path: Path) -> None:
+def test_archive_cache_status_uses_preview_guard(tmp_path: Path, monkeypatch) -> None:
     manager = _make_manager(tmp_path)
     manager.runtime_dir.mkdir(parents=True, exist_ok=True)
     (manager.runtime_dir / ".install.lock").write_text("", encoding="utf-8")
     _write_current_pointer(manager, _sha(1))
     _write_archive(manager, _sha(2), b"stale")
     seen: dict[str, object] = {}
-    real_clean = manager._clean_downloaded_archives
+    real_clean = _ShowManifestRuntimeManager._clean_downloaded_archives
 
-    def _observe(*, dry_run=False, skip_metadata_under=None):
-        seen["fd"] = getattr(manager, "_preview_guard_fd", None)
-        return real_clean(dry_run=dry_run, skip_metadata_under=skip_metadata_under)
+    def _observe(shared_manager, **kwargs):
+        seen["manager"] = shared_manager
+        seen["fd"] = getattr(shared_manager, "_preview_guard_fd", None)
+        return real_clean(shared_manager, **kwargs)
 
-    manager._clean_downloaded_archives = _observe
+    monkeypatch.setattr(_ShowManifestRuntimeManager, "_clean_downloaded_archives", _observe)
     report = manager.archive_cache_status()
     assert report["candidate_count"] == 1
     if os.name != "nt":
         assert seen["fd"] is not None
-    assert getattr(manager, "_preview_guard_fd", None) is None
+    assert getattr(seen["manager"], "_preview_guard_fd", None) is None
 
 
 def test_windows_preview_ignores_persistent_lock_file(tmp_path: Path, monkeypatch) -> None:
@@ -1162,8 +1178,8 @@ def test_windows_preview_ignores_persistent_lock_file(tmp_path: Path, monkeypatc
     (manager.runtime_dir / ".install.lock").write_text("", encoding="utf-8")
     _write_current_pointer(manager, _sha(1))
     stale = _write_archive(manager, _sha(2), b"stale")
-    monkeypatch.setattr("core.show_runtime.fcntl_available", lambda: False)
-    monkeypatch.setattr("core.show_runtime.try_windows_exclusive_lock", lambda fd: True)
+    monkeypatch.setattr("core.managed_runtime.fcntl_available", lambda: False)
+    monkeypatch.setattr("core.managed_runtime.try_windows_exclusive_lock", lambda fd: True)
     result = manager.clean(dry_run=True)
     assert result["ok"] is True
     assert result["archives"]["candidate_count"] == 1
@@ -1176,8 +1192,8 @@ def test_windows_preview_detects_held_lock_before_staging(tmp_path: Path, monkey
     (manager.runtime_dir / ".install.lock").write_text("", encoding="utf-8")
     _write_current_pointer(manager, _sha(1))
     stale = _write_archive(manager, _sha(2), b"stale")
-    monkeypatch.setattr("core.show_runtime.fcntl_available", lambda: False)
-    monkeypatch.setattr("core.show_runtime.try_windows_exclusive_lock", lambda fd: False)
+    monkeypatch.setattr("core.managed_runtime.fcntl_available", lambda: False)
+    monkeypatch.setattr("core.managed_runtime.try_windows_exclusive_lock", lambda fd: False)
     result = manager.clean(dry_run=True)
     assert result["ok"] is False
     assert result["archives"]["skipped_reason"] == "runtime_install_already_running"
@@ -1204,7 +1220,7 @@ def test_clean_keeps_completed_staging_removals_on_later_failure(tmp_path: Path,
     def _boom(*, keep_previous, dry_run=False, removed=None, **kwargs):
         raise OSError("versions unreadable")
 
-    monkeypatch.setattr(manager, "_clean_manifest_install_dirs", _boom)
+    monkeypatch.setattr(_ShowManifestRuntimeManager, "_read_managed_install_records", _boom)
     result = manager.clean()
     assert result["ok"] is False
     assert str(staging) in result["removed"]
@@ -1222,7 +1238,7 @@ def test_clean_keeps_completed_install_removals_when_prune_fails(tmp_path: Path,
     def _boom(self, versions_dir):
         raise OSError("parent became nonempty")
 
-    monkeypatch.setattr(ShowRuntimeManager, "_prune_empty_manifest_version_dirs", _boom)
+    monkeypatch.setattr(_ShowManifestRuntimeManager, "_prune_empty_version_dirs", _boom)
     result = manager.clean()
     assert result["ok"] is False
     assert str(stale_install) in result["removed"]

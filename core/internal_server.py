@@ -1691,6 +1691,7 @@ def create_app(
             parse_ui_search_project,
         )
         from core.memory.runtime import MEMORY_LIST_CURSOR_MAX_BYTES
+        from core.memory.types import MAX_MEMORY_LIST_PAGE_SIZE
 
         is_ui = bool(str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip())
         limit = payload.get("limit", 20)
@@ -1711,7 +1712,7 @@ def create_app(
         if (
             isinstance(limit, bool)
             or not isinstance(limit, int)
-            or not 1 <= limit <= 20
+            or not 1 <= limit <= MAX_MEMORY_LIST_PAGE_SIZE
             or origin not in ("user", "agent")
             or ("origin" in payload and not is_ui)
         ):
@@ -1826,7 +1827,6 @@ def create_app(
             or set(payload) - {"text", "project"}
             or not isinstance(payload.get("text"), str)
             or not payload["text"].strip()
-            or len(payload["text"]) > 4_000
         ):
             return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
         from core.memory.project_ids import omitted_project_to_default, parse_writable_memory_project

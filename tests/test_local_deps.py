@@ -89,7 +89,7 @@ def _installable_avault_release(
         raise AssertionError(f"unexpected url: {url}")
 
     monkeypatch.setattr(api.urllib.request, "urlopen", fake_urlopen)
-    def fake_candidate_cli_paths(binary: str):
+    def fake_candidate_cli_paths(binary: str, *, include_npm_global: bool = True):
         expanded = api.Path(api.os.path.expanduser(binary))
         has_path_separator = api.os.sep in binary or (api.os.altsep is not None and api.os.altsep in binary)
         if expanded.is_absolute() or has_path_separator:

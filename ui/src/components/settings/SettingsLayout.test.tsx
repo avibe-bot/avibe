@@ -12,6 +12,7 @@ const api = vi.hoisted(() => {
   return {
     configChangedHandlers,
     getConfig: vi.fn(),
+    getVersion: vi.fn(),
     getMemorySettings: vi.fn(),
     onConfigChanged: vi.fn((handler: (config: unknown) => void) => {
       configChangedHandlers.add(handler);
@@ -68,6 +69,8 @@ const renderLayout = (path: string) => render(
   <MemoryRouter initialEntries={[path]}>
     <Routes>
       <Route path="/settings" element={<SettingsLayoutHarness />}>
+        <Route path="backends" element={<div>backends-body</div>} />
+        <Route path="backends/claude" element={<div>claude-body</div>} />
         <Route path="models" element={<div>models-body</div>} />
         <Route path="replies" element={<div>replies-body</div>} />
         <Route path="shortcuts" element={<div>shortcuts-body</div>} />
@@ -87,6 +90,13 @@ beforeEach(() => {
   media.listeners.clear();
   api.configChangedHandlers.clear();
   api.getConfig.mockResolvedValue({ capabilities: { model_hub: { enabled: true } } });
+  api.getVersion.mockResolvedValue({
+    current: '3.1.4',
+    latest: '3.1.4',
+    has_update: false,
+    error: null,
+    build: { kind: 'package' },
+  });
   api.getMemorySettings.mockResolvedValue({ status: 'ok', enabled: true });
   vi.stubGlobal('matchMedia', vi.fn().mockReturnValue({
     get matches() {
@@ -264,6 +274,7 @@ describe('SettingsLayout', () => {
     expect(screen.getByRole('link', { name: 'settings.sections.shortcuts' })).toBeTruthy();
     expect(screen.getByRole('link', { name: 'settings.sections.access' })).toBeTruthy();
     expect(screen.queryByRole('link', { name: 'settings.sections.service' })).toBeNull();
+    expect(api.getVersion).not.toHaveBeenCalled();
     expect(api.getConfig).not.toHaveBeenCalled();
   });
 
@@ -299,6 +310,30 @@ describe('SettingsLayout', () => {
     expect(screen.getByRole('banner').className).toContain('pt-[env(safe-area-inset-top)]');
   });
 
+  it('keeps mobile navigation and the Back action touch-sized', () => {
+    renderLayout('/settings');
+
+    expect(screen.getByRole('link', { name: 'settings.sections.replies' }).className).toContain('min-h-11');
+    const back = screen.getByRole('link', { name: 'settings.backToWorkbench' });
+    expect(back.getAttribute('href')).toBe('/');
+    expect(back.className).toContain('size-11');
+  });
+
+  it('shows a touch-sized current version with a safe-area-aware mobile popup', async () => {
+    const user = userEvent.setup();
+    renderLayout('/settings');
+
+    const version = await screen.findByTitle('v3.1.4');
+    expect(version.className).toContain('min-h-11');
+    expect(version.className).toContain('min-w-11');
+    expect(version.parentElement?.parentElement?.className).toContain('md:hidden');
+
+    await user.click(version);
+    const popup = screen.getByText('dashboard.versionAndUpdate').closest('.fixed');
+    expect(popup?.className).toContain('top-[calc(4.5rem+env(safe-area-inset-top))]');
+    expect(popup?.className).toContain('max-h-[calc(100dvh-5.5rem-env(safe-area-inset-top))]');
+  });
+
   it('keeps mobile navigation and detail controls above the bottom safe-area inset', () => {
     renderLayout('/settings/replies');
 
@@ -308,5 +343,25 @@ describe('SettingsLayout', () => {
     expect(screen.getByText('replies-body').closest('section')?.firstElementChild?.className).toContain(
       'env(safe-area-inset-bottom)',
     );
+  });
+
+  it.each([
+    ['/settings/replies', '/settings', 'settings.backToSections'],
+    ['/settings/platforms/groups', '/settings', 'settings.backToSections'],
+    ['/settings/backends/claude', '/settings/backends', 'settings.backToSection'],
+  ])('returns one mobile level from %s', (path, target, label) => {
+    renderLayout(path);
+
+    const back = screen.getByRole('link', { name: label });
+    expect(back.getAttribute('href')).toBe(target);
+    expect(back.className).toContain('md:hidden');
+  });
+
+  it('animates a mobile detail screen without carrying that motion onto desktop', () => {
+    renderLayout('/settings/replies');
+
+    const frame = screen.getByText('replies-body').parentElement;
+    expect(frame?.className).toContain('slide-in-from-right-4');
+    expect(frame?.className).toContain('md:animate-none');
   });
 });

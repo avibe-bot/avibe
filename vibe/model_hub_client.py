@@ -13,6 +13,7 @@ from vibe.internal_client import default_socket_path
 
 _TRANSPORT_ERRORS = (httpx.ConnectError, httpx.TimeoutException, OSError)
 _RPC_TIMEOUT_SECONDS = 300.0
+_REORDER_ORDER_UNSET = object()
 
 
 def _decode(response: httpx.Response) -> Any:
@@ -140,8 +141,11 @@ class ModelHubRemoteService:
             },
         )
 
-    def list_agents(self) -> list[dict]:
-        return _rpc_sync("list_agents")
+    def list_agents(self, *, refresh_cli_presence: bool = False) -> list[dict]:
+        return _rpc_sync(
+            "list_agents",
+            {"refresh_cli_presence": True} if refresh_cli_presence else None,
+        )
 
     def get_agent_sources(self, backend: str) -> dict:
         return _rpc_sync("get_agent_sources", {"backend": backend})
@@ -152,8 +156,11 @@ class ModelHubRemoteService:
             {"backend": backend, "sources": sources},
         )
 
-    async def reorder_agent_chains(self, backend: str) -> dict:
-        return await _rpc("reorder_agent_chains", {"backend": backend})
+    async def reorder_agent_chains(self, backend: str, order: object = _REORDER_ORDER_UNSET) -> dict:
+        payload = {"backend": backend}
+        if order is not _REORDER_ORDER_UNSET:
+            payload["order"] = order
+        return await _rpc("reorder_agent_chains", payload)
 
     async def set_agent_mode(self, backend: str, mode: object) -> dict:
         return await _rpc("set_agent_mode", {"backend": backend, "mode": mode})
@@ -221,6 +228,9 @@ class ModelHubRemoteService:
 
     def agent_chains(self, backend: str) -> list[dict]:
         return _rpc_sync("get_agent_chains", {"backend": backend})
+
+    def opencode_public_models(self) -> dict[str, dict[str, Any]]:
+        return _rpc_sync("get_opencode_public_models")
 
     async def probe_agent(
         self,

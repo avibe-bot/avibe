@@ -1,10 +1,11 @@
 {
   "schema_version": 1,
-  "tmux_version": "3.6b",
-  "source": "tmux/tmux-builds",
-  "source_url": "https://github.com/tmux/tmux-builds/releases/tag/v3.6b",
-  "requires_utf8proc": true,
-  "terminfo": "bundled-or-system",
+  "release": {
+    "tag": "v3.6b",
+    "tmux_version": "3.6b",
+    "manifest_name": "v3.6b-released-manifest.json",
+    "manifest_sha256": "ee2826f881c236718ff18b2d1f939afb9417c584df5f29b796129c80691d2e63"
+  },
   "archives": {
     "darwin-arm64": {
       "name": "tmux-3.6b-macos-arm64.tar.gz",

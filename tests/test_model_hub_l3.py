@@ -86,6 +86,7 @@ from modules.agents.model_hub import (
     _localized_launch_error,
     bind_launch,
     bind_turn_mode,
+    opencode_model_catalog_for_overlay,
 )
 from storage.models import agent_sessions, messages, metadata
 from vibe.i18n import t as i18n_t
@@ -96,6 +97,7 @@ from vibe.model_hub_runtime.adapter import (
     _probe_protocol_response,
     _PROTOCOL_OBSERVATION_TAXONOMY,
     _ProtocolEvidence,
+    _ProtocolObservationShape,
     _ProtocolProof,
 )
 from vibe.model_hub_runtime.client import EngineClientError, probe_models
@@ -3774,6 +3776,81 @@ def test_gateway_uses_persisted_exact_hops_for_failover(
     asyncio.run(exercise())
 
 
+def test_gateway_keeps_prepared_route_during_overlapping_turns(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        requested_model = "claude-opus-4-8"
+        target_model = "gpt-5.6-luna"
+        source = _source(
+            "src_gptrelay01",
+            "GPT relay",
+            model_id=target_model,
+        )
+        outcome = _outcome(
+            RawOutcomeKind.SUCCESS,
+            status=200,
+            source_id=source.id,
+        )
+        response_body = (
+            b'{"id":"msg_fixture","type":"message","role":"assistant",'
+            b'"content":[{"type":"text","text":"ok"}],'
+            b'"model":"gpt-5.6-luna","stop_reason":"end_turn",'
+            b'"usage":{"input_tokens":1,"output_tokens":1}}'
+        )
+        service = _service(
+            tmp_path,
+            sources=[source],
+            live_handles=[LiveInvokeHandle(outcome, (response_body,))],
+        )
+        _canonicalize_fixed_test_routes(service)
+        service.store.config.agents["claude"].routes[requested_model] = ModelHubRouteConfig(
+            hops=(ModelHubRouteHopConfig(source.id, target_model),)
+        )
+        gateway = ModelHubTurnGateway(service)
+        first_base_url, first_token = await gateway.endpoint(
+            "claude",
+            process_scope="session:shared-claude",
+            turn_id="turn_overlap_first",
+            requested_model_id=requested_model,
+            resolved_model_id=target_model,
+            source_id=source.id,
+        )
+        second_base_url, second_token = await gateway.endpoint(
+            "claude",
+            process_scope="session:shared-claude",
+            turn_id="turn_overlap_second",
+            requested_model_id=requested_model,
+            resolved_model_id=target_model,
+            source_id=source.id,
+        )
+        assert first_base_url == second_base_url
+        assert first_token == second_token
+
+        try:
+            async with aiohttp.ClientSession(trust_env=False) as client:
+                response = await client.post(
+                    f"{second_base_url}/v1/messages",
+                    json={
+                        "model": target_model,
+                        "max_tokens": 1,
+                        "messages": [{"role": "user", "content": "ping"}],
+                        "stream": False,
+                    },
+                    headers={"x-api-key": second_token},
+                )
+                assert response.status == 200
+                await response.read()
+        finally:
+            await gateway.close()
+
+        assert service.adapter.invocations == [
+            (source.id, target_model, "claude"),
+        ]
+
+    asyncio.run(exercise())
+
+
 def test_gateway_model_outside_prepared_turn_fails_closed(
     tmp_path: Path,
 ) -> None:
@@ -4143,6 +4220,7 @@ def test_settlement_retires_correlation_when_mode_persistence_fails(
 
 def test_opencode_overlay_projects_menu_identity_to_exact_hop_model(tmp_path: Path) -> None:
     source = _source("src_overlay01", "Overlay", model_id="upstream-model")
+    source.models[0].reasoning_efforts = ["low", "high"]
     config = _config([source])
     agent = config.agents["opencode"]
     agent.routes.pop("openai/shared-model")
@@ -4163,8 +4241,83 @@ def test_opencode_overlay_projects_menu_identity_to_exact_hop_model(tmp_path: Pa
 
     assert overlay is not None
     payload = json.loads(overlay.content)
-    assert payload["provider"]["openai"]["models"]["menu-model"]["id"] == ("openai/menu-model")
+    assert overlay.provider_id.startswith("avibe-model-hub-")
+    assert overlay.provider_id != "avibe-model-hub"
+    provider = payload["provider"][overlay.provider_id]
+    assert provider["models"]["openai/menu-model"]["id"] == "openai/menu-model"
+    assert provider["models"]["openai/menu-model"]["variants"] == {
+        "high": {"reasoningEffort": "high"},
+        "low": {"reasoningEffort": "low"},
+    }
     assert overlay.launches[0].target_model == "upstream-model"
+    assert opencode_model_catalog_for_overlay(overlay) == {
+        "providers": [
+            {
+                "id": overlay.provider_id,
+                "models": provider["models"],
+            }
+        ],
+        "default": {},
+    }
+
+
+def test_opencode_public_models_follow_persisted_config_without_overlay(
+    tmp_path: Path,
+) -> None:
+    source = _source("src_catalog01", "Catalog", model_id="upstream-model")
+    source.models[0].display_name = "Current model"
+    source.models[0].reasoning_efforts = ["low", "high"]
+    config = _config([source])
+    agent = config.agents["opencode"]
+    agent.routes = {
+        "custom/current-model": ModelHubRouteConfig(
+            hops=(ModelHubRouteHopConfig(source.id, "upstream-model"),)
+        )
+    }
+    agent.menu.checked = ["custom/current-model"]
+    service = _service(tmp_path, sources=[source])
+    service.store.config = config
+
+    assert service.opencode_public_models() == {
+        "custom/current-model": {
+            "id": "custom/current-model",
+            "name": "Current model",
+            "variants": {
+                "low": {"reasoningEffort": "low"},
+                "high": {"reasoningEffort": "high"},
+            },
+        }
+    }
+
+    service.store.config.agents["opencode"].mode = "direct"
+    assert service.opencode_public_models() == {}
+
+
+def test_opencode_overlay_private_provider_id_is_credential_scoped(
+    tmp_path: Path,
+) -> None:
+    source = _source("src_overlay10", "Overlay")
+    service = _service(tmp_path, sources=[source])
+    endpoint = AsyncMock(
+        side_effect=(
+            ("http://127.0.0.1:19000/opencode", "gateway-token-one"),
+            ("http://127.0.0.1:19000/opencode", "gateway-token-two"),
+        )
+    )
+    router = ModelHubRuntimeRouter(
+        service=service,
+        turn_gateway=SimpleNamespace(endpoint=endpoint),
+        overlay_path=tmp_path / "overlay.json",
+    )
+
+    first = asyncio.run(router.prepare_opencode_overlay())
+    second = asyncio.run(router.prepare_opencode_overlay())
+
+    assert first is not None
+    assert second is not None
+    assert first.provider_id != second.provider_id
+    assert set(json.loads(first.content)["provider"]) == {first.provider_id}
+    assert set(json.loads(second.content)["provider"]) == {second.provider_id}
 
 
 def test_opencode_overlay_supports_mixed_protocols_under_one_provider(tmp_path: Path) -> None:
@@ -4202,10 +4355,15 @@ def test_opencode_overlay_supports_mixed_protocols_under_one_provider(tmp_path: 
     overlay = asyncio.run(router.prepare_opencode_overlay())
 
     assert overlay is not None
-    provider = json.loads(overlay.content)["provider"]["custom"]
+    payload = json.loads(overlay.content)
+    assert set(payload["provider"]) == {overlay.provider_id}
+    provider = payload["provider"][overlay.provider_id]
     assert provider["npm"] == "@ai-sdk/openai-compatible"
     assert provider["options"]["baseURL"] == "http://127.0.0.1:19000/opencode/v1"
-    assert set(provider["models"]) == {"first-model", "second-model"}
+    assert set(provider["models"]) == {
+        "custom/first-model",
+        "custom/second-model",
+    }
     assert {launch.target_model for launch in overlay.launches} == {
         "first-model",
         "second-model",
@@ -4270,11 +4428,11 @@ def test_opencode_overlay_preserves_checked_route_with_stale_exact_hop(
     overlay = asyncio.run(router.prepare_opencode_overlay())
 
     assert overlay is not None
-    provider = json.loads(overlay.content)["provider"]["openai"]
+    provider = json.loads(overlay.content)["provider"][overlay.provider_id]
     assert provider["models"] == {
-        "menu-model": {
+        "openai/menu-model": {
             "id": "openai/menu-model",
-            "name": "menu-model",
+            "name": "openai/menu-model",
         }
     }
     assert overlay.checked_identifiers == ("openai/menu-model",)
@@ -4353,9 +4511,24 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         protocol=_ProtocolProof.PROVEN,
         authentication=_AuthenticationEvidence.UNKNOWN,
     )
+    generic_request_accepted = _ProtocolEvidence(
+        protocol=_ProtocolProof.UNPROVEN,
+        authentication=_AuthenticationEvidence.ACCEPTED,
+        shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
+    )
     unproven_unknown = _ProtocolEvidence(
         protocol=_ProtocolProof.UNPROVEN,
         authentication=_AuthenticationEvidence.UNKNOWN,
+    )
+    excluded_404 = _ProtocolEvidence(
+        protocol=_ProtocolProof.UNPROVEN,
+        authentication=_AuthenticationEvidence.UNKNOWN,
+        shape=_ProtocolObservationShape.HTTP_404,
+    )
+    non_json = _ProtocolEvidence(
+        protocol=_ProtocolProof.UNPROVEN,
+        authentication=_AuthenticationEvidence.UNKNOWN,
+        shape=_ProtocolObservationShape.NON_JSON,
     )
 
     hinted_order = tuple(reversed(SOURCE_PROTOCOLS))
@@ -4413,6 +4586,469 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     assert ambiguous.protocol is None
     assert ambiguous.authenticated is None
     assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(hinted_order)
+    inventory_probe.assert_not_awaited()
+
+    pairwise_order = ("openai_chat", "openai_responses")
+
+    async def openai_pairwise_elimination(**kwargs) -> _ProtocolEvidence:
+        if kwargs["protocol"] == "openai_chat":
+            return generic_request_accepted
+        if kwargs["protocol"] == "openai_responses":
+            return excluded_404
+        raise AssertionError(kwargs["protocol"])
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(side_effect=openai_pairwise_elimination),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=("deepseek-chat",)),
+        ) as inventory_probe,
+    ):
+        observed = asyncio.run(
+            adapter.observe_source(
+                "openai",
+                base_url,
+                credential_ref,
+                pairwise_order,
+            )
+        )
+
+    assert observed.outcome.value == "observed"
+    assert observed.protocol == "openai_chat"
+    assert observed.model_ids == ("deepseek-chat",)
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(pairwise_order)
+    assert inventory_probe.await_args.kwargs["protocol"] == "openai_chat"
+
+    openai_family = {"openai_responses", "openai_chat"}
+
+    async def indistinguishable_openai_family(**kwargs) -> _ProtocolEvidence:
+        if kwargs["protocol"] in openai_family:
+            return generic_request_accepted
+        return unproven_unknown
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(side_effect=indistinguishable_openai_family),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=("should-not-discover",)),
+        ) as inventory_probe,
+    ):
+        ambiguous = asyncio.run(
+            adapter.observe_source(
+                "openai",
+                base_url,
+                credential_ref,
+                SOURCE_PROTOCOLS,
+            )
+        )
+
+    assert ambiguous.outcome.value == "ambiguous"
+    assert ambiguous.protocol is None
+    assert ambiguous.authenticated is True
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    inventory_probe.assert_not_awaited()
+
+    async def structured_unknown_sibling(**kwargs) -> _ProtocolEvidence:
+        if kwargs["protocol"] == "openai_chat":
+            return generic_request_accepted
+        if kwargs["protocol"] == "openai_responses":
+            return unproven_unknown
+        return unproven_unknown
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(side_effect=structured_unknown_sibling),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=("should-not-discover",)),
+        ) as inventory_probe,
+    ):
+        ambiguous = asyncio.run(
+            adapter.observe_source(
+                "openai",
+                base_url,
+                credential_ref,
+                SOURCE_PROTOCOLS,
+            )
+        )
+
+    assert ambiguous.outcome.value == "ambiguous"
+    assert ambiguous.protocol is None
+    assert ambiguous.authenticated is True
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    inventory_probe.assert_not_awaited()
+
+    async def anthropic_server_error_blocks_openai_pairwise(**kwargs) -> _ProtocolEvidence:
+        if kwargs["protocol"] == "anthropic":
+            return proven_unknown
+        if kwargs["protocol"] == "openai_responses":
+            return generic_request_accepted
+        if kwargs["protocol"] == "openai_chat":
+            return excluded_404
+        raise AssertionError(kwargs["protocol"])
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(side_effect=anthropic_server_error_blocks_openai_pairwise),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=("should-not-discover",)),
+        ) as inventory_probe,
+    ):
+        ambiguous = asyncio.run(
+            adapter.observe_source(
+                "openai",
+                base_url,
+                credential_ref,
+                SOURCE_PROTOCOLS,
+            )
+        )
+
+    assert ambiguous.outcome.value == "ambiguous"
+    assert ambiguous.protocol is None
+    assert ambiguous.authenticated is True
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    inventory_probe.assert_not_awaited()
+
+    timeout = EngineClientError("protocol observation timed out", error_type="timeout")
+
+    async def anthropic_timeout_blocks_openai_pairwise(**kwargs) -> _ProtocolEvidence:
+        if kwargs["protocol"] == "anthropic":
+            raise timeout
+        if kwargs["protocol"] == "openai_responses":
+            return generic_request_accepted
+        if kwargs["protocol"] == "openai_chat":
+            return excluded_404
+        raise AssertionError(kwargs["protocol"])
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(side_effect=anthropic_timeout_blocks_openai_pairwise),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=("should-not-discover",)),
+        ) as inventory_probe,
+    ):
+        ambiguous = asyncio.run(
+            adapter.observe_source(
+                "openai",
+                base_url,
+                credential_ref,
+                SOURCE_PROTOCOLS,
+            )
+        )
+
+    assert ambiguous.outcome.value == "ambiguous"
+    assert ambiguous.protocol is None
+    assert ambiguous.authenticated is True
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    inventory_probe.assert_not_awaited()
+
+    async def anthropic_competes_with_openai_pairwise(**kwargs) -> _ProtocolEvidence:
+        if kwargs["protocol"] == "anthropic":
+            return generic_request_accepted
+        if kwargs["protocol"] == "openai_responses":
+            return generic_request_accepted
+        if kwargs["protocol"] == "openai_chat":
+            return excluded_404
+        raise AssertionError(kwargs["protocol"])
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(side_effect=anthropic_competes_with_openai_pairwise),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=("should-not-discover",)),
+        ) as inventory_probe,
+    ):
+        ambiguous = asyncio.run(
+            adapter.observe_source(
+                "openai",
+                base_url,
+                credential_ref,
+                SOURCE_PROTOCOLS,
+            )
+        )
+
+    assert ambiguous.outcome.value == "ambiguous"
+    assert ambiguous.protocol is None
+    assert ambiguous.authenticated is True
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    inventory_probe.assert_not_awaited()
+
+    unproven_rejected = _ProtocolEvidence(
+        protocol=_ProtocolProof.UNPROVEN,
+        authentication=_AuthenticationEvidence.REJECTED,
+    )
+
+    async def accepted_then_rejected_without_proof(**kwargs) -> _ProtocolEvidence:
+        if kwargs["protocol"] == "anthropic":
+            return generic_request_accepted
+        if kwargs["protocol"] == "openai_responses":
+            return unproven_rejected
+        if kwargs["protocol"] == "openai_chat":
+            return unproven_unknown
+        raise AssertionError(kwargs["protocol"])
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(side_effect=accepted_then_rejected_without_proof),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=("should-not-discover",)),
+        ) as inventory_probe,
+    ):
+        ambiguous = asyncio.run(
+            adapter.observe_source(
+                "openai",
+                base_url,
+                credential_ref,
+                SOURCE_PROTOCOLS,
+            )
+        )
+
+    assert ambiguous.outcome.value == "ambiguous"
+    assert ambiguous.protocol is None
+    assert ambiguous.authenticated is True
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    inventory_probe.assert_not_awaited()
+
+    async def rejected_anthropic_allows_openai_pairwise(**kwargs) -> _ProtocolEvidence:
+        if kwargs["protocol"] == "anthropic":
+            return unproven_rejected
+        if kwargs["protocol"] == "openai_responses":
+            return excluded_404
+        if kwargs["protocol"] == "openai_chat":
+            return generic_request_accepted
+        raise AssertionError(kwargs["protocol"])
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(side_effect=rejected_anthropic_allows_openai_pairwise),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=("chat-only-model",)),
+        ) as inventory_probe,
+    ):
+        observed = asyncio.run(
+            adapter.observe_source(
+                "openai",
+                base_url,
+                credential_ref,
+                SOURCE_PROTOCOLS,
+            )
+        )
+
+    assert observed.outcome.value == "observed"
+    assert observed.protocol == "openai_chat"
+    assert observed.authenticated is True
+    assert observed.model_ids == ("chat-only-model",)
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    assert inventory_probe.await_args.kwargs["protocol"] == "openai_chat"
+
+    transient_non_json = _parse_protocol_authenticated_evidence(
+        "openai_chat",
+        502,
+        "<html>bad gateway</html>",
+    )
+    assert transient_non_json == _ProtocolEvidence(
+        protocol=_ProtocolProof.UNPROVEN,
+        authentication=_AuthenticationEvidence.UNKNOWN,
+    )
+
+    async def transient_non_json_sibling_blocks_pairwise(**kwargs) -> _ProtocolEvidence:
+        if kwargs["protocol"] == "anthropic":
+            return excluded_404
+        if kwargs["protocol"] == "openai_responses":
+            return generic_request_accepted
+        if kwargs["protocol"] == "openai_chat":
+            return transient_non_json
+        raise AssertionError(kwargs["protocol"])
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(side_effect=transient_non_json_sibling_blocks_pairwise),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=("should-not-discover",)),
+        ) as inventory_probe,
+    ):
+        ambiguous = asyncio.run(
+            adapter.observe_source(
+                "openai",
+                base_url,
+                credential_ref,
+                SOURCE_PROTOCOLS,
+            )
+        )
+
+    assert ambiguous.outcome.value == "ambiguous"
+    assert ambiguous.protocol is None
+    assert ambiguous.authenticated is True
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    inventory_probe.assert_not_awaited()
+
+    async def anthropic_wrapperless_then_absent_openai(**kwargs) -> _ProtocolEvidence:
+        if kwargs["protocol"] == "anthropic":
+            return generic_request_accepted
+        if kwargs["protocol"] == "openai_responses":
+            return excluded_404
+        if kwargs["protocol"] == "openai_chat":
+            return non_json
+        raise AssertionError(kwargs["protocol"])
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(side_effect=anthropic_wrapperless_then_absent_openai),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=("relay-model",)),
+        ) as inventory_probe,
+    ):
+        observed = asyncio.run(
+            adapter.observe_source(
+                "openai",
+                base_url,
+                credential_ref,
+                SOURCE_PROTOCOLS,
+            )
+        )
+
+    assert observed.outcome.value == "observed"
+    assert observed.protocol == "anthropic"
+    assert observed.model_ids == ("relay-model",)
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    assert inventory_probe.await_args.kwargs["protocol"] == "anthropic"
+
+    async def anthropic_wrapperless_with_rejected_openai(**kwargs) -> _ProtocolEvidence:
+        if kwargs["protocol"] == "anthropic":
+            return generic_request_accepted
+        if kwargs["protocol"] in openai_family:
+            return unproven_rejected
+        raise AssertionError(kwargs["protocol"])
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(side_effect=anthropic_wrapperless_with_rejected_openai),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=("anthropic-relay-model",)),
+        ) as inventory_probe,
+    ):
+        observed = asyncio.run(
+            adapter.observe_source(
+                "openai",
+                base_url,
+                credential_ref,
+                SOURCE_PROTOCOLS,
+            )
+        )
+
+    assert observed.outcome.value == "observed"
+    assert observed.protocol == "anthropic"
+    assert observed.authenticated is True
+    assert observed.model_ids == ("anthropic-relay-model",)
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    assert inventory_probe.await_args.kwargs["protocol"] == "anthropic"
+
+    credential_param_rejected = _parse_protocol_authenticated_evidence(
+        "openai_responses",
+        400,
+        json.dumps(
+            {
+                "error": {
+                    "type": "invalid_request_error",
+                    "param": "api_key",
+                }
+            }
+        ),
+    )
+    assert credential_param_rejected == _ProtocolEvidence(
+        protocol=_ProtocolProof.UNPROVEN,
+        authentication=_AuthenticationEvidence.REJECTED,
+    )
+
+    async def credential_param_rejection_blocks_pairwise_proof(**kwargs) -> _ProtocolEvidence:
+        if kwargs["protocol"] == "anthropic":
+            return unproven_rejected
+        if kwargs["protocol"] == "openai_responses":
+            return credential_param_rejected
+        if kwargs["protocol"] == "openai_chat":
+            return excluded_404
+        raise AssertionError(kwargs["protocol"])
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(side_effect=credential_param_rejection_blocks_pairwise_proof),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=("should-not-discover",)),
+        ) as inventory_probe,
+    ):
+        rejected = asyncio.run(
+            adapter.observe_source(
+                "openai",
+                base_url,
+                credential_ref,
+                SOURCE_PROTOCOLS,
+            )
+        )
+
+    assert rejected.outcome.value == "authentication_failed"
+    assert rejected.protocol is None
+    assert rejected.authenticated is False
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    inventory_probe.assert_not_awaited()
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(return_value=generic_request_accepted),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=("should-not-discover",)),
+        ) as inventory_probe,
+    ):
+        ambiguous = asyncio.run(
+            adapter.observe_source(
+                "openai",
+                base_url,
+                credential_ref,
+                ("anthropic",),
+            )
+        )
+
+    assert ambiguous.outcome.value == "ambiguous"
+    assert ambiguous.protocol is None
+    assert ambiguous.authenticated is True
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == ["anthropic"]
     inventory_probe.assert_not_awaited()
 
     async def shaped_server_failure(**kwargs) -> _ProtocolEvidence:
@@ -4672,6 +5308,29 @@ def test_oauth_observation_uses_the_bound_auth_index_and_requires_response_proof
     assert ambiguous.authenticated is None
 
 
+DEEPSEEK_AUTHENTICATION_ERROR_PAYLOAD = {
+    "error": {
+        "message": "Authentication Fails, Your api key: **** is invalid",
+        "type": "authentication_error",
+        "param": None,
+        "code": "invalid_request_error",
+    }
+}
+DEEPSEEK_MODEL_NOT_FOUND_PAYLOAD = {
+    "error": {
+        "type": "invalid_request_error",
+        "param": None,
+        "code": "model_not_found",
+    }
+}
+ANTHROPIC_RELAY_REQUEST_ERROR_PAYLOAD = {
+    "error": {
+        "message": "model is required",
+        "type": "invalid_request_error",
+    }
+}
+
+
 @pytest.mark.parametrize(
     ("protocol", "success_body", "request_error_body", "auth_error_body"),
     [
@@ -4744,7 +5403,50 @@ def test_protocol_evidence_parser_requires_candidate_specific_response_shapes(
     ) == _ProtocolEvidence(
         protocol=_ProtocolProof.UNPROVEN,
         authentication=_AuthenticationEvidence.UNKNOWN,
+        shape=_ProtocolObservationShape.UNSTRUCTURED,
     )
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "expected"),
+    [
+        (
+            400,
+            ANTHROPIC_RELAY_REQUEST_ERROR_PAYLOAD,
+            _ProtocolEvidence(
+                protocol=_ProtocolProof.UNPROVEN,
+                authentication=_AuthenticationEvidence.ACCEPTED,
+                shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
+            ),
+        ),
+        (
+            401,
+            {"error": {"type": "authentication_error"}},
+            _ProtocolEvidence(
+                protocol=_ProtocolProof.UNPROVEN,
+                authentication=_AuthenticationEvidence.REJECTED,
+            ),
+        ),
+        (
+            400,
+            {"error": {"type": "future_error"}},
+            _ProtocolEvidence(
+                protocol=_ProtocolProof.UNPROVEN,
+                authentication=_AuthenticationEvidence.UNKNOWN,
+            ),
+        ),
+    ],
+)
+def test_anthropic_relay_openai_style_error_wrapper_preserves_canonical_semantics(
+    status: int,
+    body: dict,
+    expected: _ProtocolEvidence,
+) -> None:
+    assert _parse_protocol_authenticated_evidence(
+        "anthropic",
+        status,
+        json.dumps(body),
+    ) == expected
 
 
 @pytest.mark.parametrize(
@@ -4813,33 +5515,123 @@ def test_protocol_evidence_table_defaults_shaped_non_auth_rows_to_unknown(
 
 
 @pytest.mark.parametrize(
-    ("protocol", "body"),
+    ("protocol", "status", "body"),
     [
         (
             "anthropic",
+            404,
             {"type": "error", "error": {"type": "not_found_error"}},
-        ),
-        (
-            "openai_responses",
-            {"error": {"type": "invalid_request_error", "code": "model_not_found"}},
-        ),
-        (
-            "openai_chat",
-            {"error": {"type": "invalid_request_error", "code": "model_not_found"}},
         ),
     ],
 )
-def test_protocol_evidence_table_accepts_authenticated_model_errors(
+def test_anthropic_protocol_evidence_table_accepts_authenticated_model_errors(
     protocol: str,
+    status: int,
     body: dict,
 ) -> None:
     assert _parse_protocol_authenticated_evidence(
         protocol,
-        404,
+        status,
         json.dumps(body),
     ) == _ProtocolEvidence(
         protocol=_ProtocolProof.PROVEN,
         authentication=_AuthenticationEvidence.ACCEPTED,
+    )
+
+
+@pytest.mark.parametrize(
+    ("protocol", "status", "body"),
+    [
+        (
+            "openai_responses",
+            404,
+            {"error": {"type": "invalid_request_error", "code": "model_not_found"}},
+        ),
+        (
+            "openai_chat",
+            404,
+            {"error": {"type": "invalid_request_error", "code": "model_not_found"}},
+        ),
+        (
+            "openai_responses",
+            400,
+            DEEPSEEK_MODEL_NOT_FOUND_PAYLOAD,
+        ),
+        (
+            "openai_chat",
+            400,
+            DEEPSEEK_MODEL_NOT_FOUND_PAYLOAD,
+        ),
+        (
+            "openai_responses",
+            422,
+            DEEPSEEK_MODEL_NOT_FOUND_PAYLOAD,
+        ),
+        (
+            "openai_chat",
+            422,
+            DEEPSEEK_MODEL_NOT_FOUND_PAYLOAD,
+        ),
+    ],
+)
+def test_openai_model_errors_without_family_param_record_accepted_but_unproven_evidence(
+    protocol: str,
+    status: int,
+    body: dict,
+) -> None:
+    assert _parse_protocol_authenticated_evidence(
+        protocol,
+        status,
+        json.dumps(body),
+    ) == _ProtocolEvidence(
+        protocol=_ProtocolProof.UNPROVEN,
+        authentication=_AuthenticationEvidence.ACCEPTED,
+        shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
+    )
+
+
+@pytest.mark.parametrize("protocol", ("openai_responses", "openai_chat"))
+def test_openai_request_error_without_family_param_records_accepted_but_unproven_evidence(
+    protocol: str,
+) -> None:
+    assert _parse_protocol_authenticated_evidence(
+        protocol,
+        400,
+        json.dumps(
+            {
+                "error": {
+                    "type": "invalid_request_error",
+                    "param": None,
+                }
+            }
+        ),
+    ) == _ProtocolEvidence(
+        protocol=_ProtocolProof.UNPROVEN,
+        authentication=_AuthenticationEvidence.ACCEPTED,
+        shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
+    )
+
+
+@pytest.mark.parametrize("protocol", SOURCE_PROTOCOLS)
+@pytest.mark.parametrize("status", (400, 422))
+def test_request_error_with_credential_param_is_rejected(
+    protocol: str,
+    status: int,
+) -> None:
+    assert _parse_protocol_authenticated_evidence(
+        protocol,
+        status,
+        json.dumps(
+            {
+                "error": {
+                    "type": "invalid_request_error",
+                    "param": "api_key",
+                }
+            }
+        ),
+    ) == _ProtocolEvidence(
+        protocol=_ProtocolProof.UNPROVEN,
+        authentication=_AuthenticationEvidence.REJECTED,
     )
 
 
@@ -4863,6 +5655,60 @@ def test_shared_openai_authentication_rejection_does_not_prove_a_protocol() -> N
             protocol=_ProtocolProof.UNPROVEN,
             authentication=_AuthenticationEvidence.REJECTED,
         )
+
+
+@pytest.mark.parametrize("protocol", ("openai_responses", "openai_chat"))
+def test_deepseek_authentication_rejection_with_null_param_stays_unproven(
+    protocol: str,
+) -> None:
+    assert _parse_protocol_authenticated_evidence(
+        protocol,
+        401,
+        json.dumps(DEEPSEEK_AUTHENTICATION_ERROR_PAYLOAD),
+    ) == _ProtocolEvidence(
+        protocol=_ProtocolProof.UNPROVEN,
+        authentication=_AuthenticationEvidence.REJECTED,
+    )
+
+
+def test_structured_but_unrecognized_openai_error_is_not_exclusion_evidence() -> None:
+    assert _parse_protocol_authenticated_evidence(
+        "openai_chat",
+        400,
+        json.dumps({"error": {"type": "future_error"}}),
+    ) == _ProtocolEvidence(
+        protocol=_ProtocolProof.UNPROVEN,
+        authentication=_AuthenticationEvidence.UNKNOWN,
+    )
+
+
+def test_request_error_404_and_non_json_responses_are_pairwise_exclusion_shapes() -> None:
+    assert _parse_protocol_authenticated_evidence(
+        "openai_responses",
+        404,
+        json.dumps({}),
+    ) == _ProtocolEvidence(
+        protocol=_ProtocolProof.UNPROVEN,
+        authentication=_AuthenticationEvidence.UNKNOWN,
+        shape=_ProtocolObservationShape.HTTP_404,
+    )
+    assert _parse_protocol_authenticated_evidence(
+        "openai_responses",
+        400,
+        "<html>route not found</html>",
+    ) == _ProtocolEvidence(
+        protocol=_ProtocolProof.UNPROVEN,
+        authentication=_AuthenticationEvidence.UNKNOWN,
+        shape=_ProtocolObservationShape.NON_JSON,
+    )
+    assert _parse_protocol_authenticated_evidence(
+        "openai_responses",
+        502,
+        "<html>bad gateway</html>",
+    ) == _ProtocolEvidence(
+        protocol=_ProtocolProof.UNPROVEN,
+        authentication=_AuthenticationEvidence.UNKNOWN,
+    )
 
 
 def test_top_level_authentication_rejection_is_classified_without_forging_protocol() -> None:

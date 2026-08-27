@@ -29,6 +29,11 @@ describe('SourceRow', () => {
     expect(screen.getByText('Anthropic · Anthropic Messages')).toBeTruthy();
   });
 
+  it('explains that a healthy source is not currently supplying a route', () => {
+    render(<I18nextProvider i18n={i18n}><SourceRow source={source} onOpen={vi.fn()} /></I18nextProvider>);
+    expect(screen.getByText(/Available · not currently supplying|可用 · 当前未供给/i)).toBeTruthy();
+  });
+
   it('labels a custom upstream by host and protocol', () => {
     render(
       <I18nextProvider i18n={i18n}>
@@ -54,8 +59,22 @@ describe('SourceRow', () => {
   });
 
   it('consumes persisted adoption when the source projection carries it', () => {
-    render(<I18nextProvider i18n={i18n}><SourceRow source={{ ...source, state: { ...source.state, status: 'active' }, adopted_by: [{ backend: 'codex', menu_model: 'gpt-5' }] }} onOpen={vi.fn()} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><SourceRow source={{ ...source, state: { ...source.state, status: 'standby' }, adopted_by: [{ backend: 'codex', menu_model: 'gpt-5' }] }} onOpen={vi.fn()} /></I18nextProvider>);
     expect(screen.getByText(/Supplying Codex|正在供给 Codex/i)).toBeTruthy();
+  });
+
+  it('does not show a cached adoption after that backend switches to direct mode', () => {
+    render(
+      <I18nextProvider i18n={i18n}>
+        <SourceRow
+          source={{ ...source, state: { ...source.state, status: 'standby' }, adopted_by: [{ backend: 'codex', menu_model: 'gpt-5' }] }}
+          activeBackends={new Set(['claude'])}
+          onOpen={vi.fn()}
+        />
+      </I18nextProvider>,
+    );
+    expect(screen.queryByText(/Supplying Codex|正在供给 Codex/i)).toBeNull();
+    expect(screen.getByText(/Available · not currently supplying|可用 · 当前未供给/i)).toBeTruthy();
   });
 
   it('advances cooldown copy when its retry deadline passes', () => {

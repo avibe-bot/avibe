@@ -51,7 +51,7 @@ from core.scheduled_tasks import (
 )
 from core.caller_context import caller_context_from_env, caller_resource_user_context
 from core.command_runner import command_line_preview
-from core.tmux_runtime import TmuxFailureReason
+from core.install_integrity import verify_python_environment, verify_site_packages
 from core.vibe_agents import AgentArchivedEditError, AgentArchiveError, AgentNameValidationError, AgentReferenceRewriteError, VibeAgent, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
 from core.watches import (
     DEFAULT_RETRY_EXIT_CODE,
@@ -69,11 +69,28 @@ from vibe.upgrade import (
     CURRENT_VIBE_EXECUTABLE_ENV,
     LEGACY_PACKAGE_NAME,
     PACKAGE_NAME,
+    AtomicActivation,
+    DEFERRED_ACTIVATION_TIMEOUT_SECONDS,
+    RollbackTarget,
+    activate_installer_candidate,
+    activate_upgrade_candidate,
+    activation_block_reason,
+    atomic_uv_install_root,
+    atomic_upgrade_lock,
     build_upgrade_plan,
     cache_running_vibe_path,
+    defer_upgrade_activation,
     get_latest_version_info,
     get_safe_cwd,
+    _launcher_generation,
+    _candidate_python,
+    launcher_is_current_process,
+    restart_is_pending,
+    restart_record_is_pending,
+    discard_atomic_uv_install_generation,
     should_skip_show_runtime_prepare,
+    UPGRADE_INSTALL_TIMEOUT_SECONDS,
+    verify_upgrade_candidate,
 )
 from storage.db import create_sqlite_engine
 from storage.background import (
@@ -170,10 +187,6 @@ DOCTOR_DISPLAY_PROJECTIONS = {
         "avault_download_failed": "doctor.repair.dependencyArchiveDownloadFailed",
         "avault_p2_release_unavailable": "doctor.repair.avaultReleaseUnavailable",
         "git_runtime_unpublished": "doctor.repair.dependencyManifestUnavailable",
-        TmuxFailureReason.INSTALL_MISSING_BIN.value: "doctor.repair.dependencyInstallMissingBinary",
-        TmuxFailureReason.CODESIGN_MISSING.value: "doctor.repair.dependencyCodeSignMissing",
-        TmuxFailureReason.CODESIGN_FAILED.value: "doctor.repair.dependencyCodeSignFailed",
-        TmuxFailureReason.CODESIGN_VERIFY_FAILED.value: "doctor.repair.dependencyCodeSignFailed",
     },
     "repair_suffix": {
         "install_already_running": "doctor.repair.dependencyAlreadyRunning",
@@ -706,6 +719,10 @@ def cmd_memory(args) -> int:
 
     from vibe import internal_client
     from core.caller_context import caller_context_from_env
+    from core.memory.types import (
+        MAX_MEMORY_LIST_PAGE_SIZE,
+        MAX_MEMORY_SEARCH_RESULTS,
+    )
 
     operation = args.memory_command
     as_json = bool(getattr(args, "json", False))
@@ -717,10 +734,9 @@ def cmd_memory(args) -> int:
         query = args.query.strip() if isinstance(args.query, str) else ""
         if (
             not query
-            or len(query.encode("utf-8")) > 8 * 1024
             or not isinstance(args.limit, int)
             or isinstance(args.limit, bool)
-            or not 1 <= args.limit <= 20
+            or not 1 <= args.limit <= MAX_MEMORY_SEARCH_RESULTS
         ):
             return _print_memory_cli_error(operation, "memory_invalid_input", as_json=as_json, language=language)
     if operation == "list" and (
@@ -729,12 +745,12 @@ def cmd_memory(args) -> int:
         or args.page < 1
         or not isinstance(args.limit, int)
         or isinstance(args.limit, bool)
-        or not 1 <= args.limit <= 20
+        or not 1 <= args.limit <= MAX_MEMORY_LIST_PAGE_SIZE
     ):
         return _print_memory_cli_error(operation, "memory_invalid_input", as_json=as_json, language=language)
     if operation == "remember":
         query = args.text if isinstance(args.text, str) else ""
-        if not query.strip() or len(query) > 4_000:
+        if not query.strip():
             return _print_memory_cli_error(operation, "memory_invalid_input", as_json=as_json, language=language)
     try:
         caller = caller_context_from_env()
@@ -1335,17 +1351,7 @@ def _restart_status_is_stale(payload: dict, path: Path) -> bool:
         return False
 
     if state.retention == "seed":
-        supervisor_pid = payload.get("supervisor_pid")
-        if isinstance(supervisor_pid, int) and runtime.pid_alive(supervisor_pid):
-            started_at = payload.get("supervisor_started_at")
-            if started_at is not None:
-                current_started_at = runtime.process_create_time(supervisor_pid)
-                return current_started_at is not None and current_started_at != started_at
-        try:
-            age = time.time() - path.stat().st_mtime
-        except OSError:
-            return False
-        return age > DOCTOR_RESTART_SEED_GRACE_SECONDS
+        return not restart_record_is_pending(payload, path, grace_seconds=DOCTOR_RESTART_SEED_GRACE_SECONDS)
 
     if state.retention == "result":
         try:
@@ -12099,6 +12105,16 @@ def _uv_tool_site_packages_for_vibe(vibe_path: Path) -> list[Path]:
             seen_roots.add(key)
             tool_roots.append(resolved)
 
+    # Atomic upgrades keep each validated uv environment in a durable
+    # generation directory and switch only the stable PATH launcher.  Resolve
+    # that generation directly so doctor inspects the active candidate just as
+    # it inspects a conventional ``~/.local/share/uv/tools/<package>`` root.
+    generation_root = atomic_uv_install_root().expanduser().resolve()
+    generation = _launcher_generation(vibe_path, generation_root)
+    if generation:
+        for package_name in UV_TOOL_PACKAGE_NAMES:
+            add_tool_root(generation / "tools" / package_name)
+
     parts = vibe_path.parts
     try:
         tools_index = parts.index("tools")
@@ -12274,6 +12290,44 @@ def _local_cli_installation_items() -> list[dict]:
                 i18n_t("doctor.item.cliNotEditable", language, path=site_packages),
             )
 
+        # A successful package-manager exit only proves that its metadata was
+        # written.  RECORD is the wheel-level evidence that every installed
+        # file is still present and unchanged; this is what catches an
+        # interrupted dependency copy such as a half-written lark-oapi tree.
+        if any(site_packages.glob("*.dist-info")):
+            integrity = verify_site_packages(site_packages)
+            if integrity.ok:
+                _add_doctor_item(
+                    items,
+                    "pass",
+                    i18n_t(
+                        "doctor.item.packageIntegrityOk",
+                        language,
+                        count=integrity.checked_files,
+                    ),
+                    code="installation.package_integrity",
+                )
+            else:
+                failure_detail = ", ".join(integrity.failures[:5]) or i18n_t(
+                    "doctor.value.unknownError",
+                    language,
+                )
+                remaining = max(0, len(integrity.failures) - 5)
+                _add_doctor_item(
+                    items,
+                    "fail",
+                    i18n_t(
+                        "doctor.item.packageIntegrityFailedMore"
+                        if remaining
+                        else "doctor.item.packageIntegrityFailed",
+                        language,
+                        detail=failure_detail,
+                        count=remaining,
+                    ),
+                    i18n_t("doctor.action.packageIntegrityFailed", language),
+                    code="installation.package_integrity",
+                )
+
         alembic_dir = site_packages / "storage" / "alembic"
         versions_dir = alembic_dir / "versions"
         if not alembic_dir.exists() or not versions_dir.exists():
@@ -12343,7 +12397,7 @@ def _doctor_managed_reason_key(reason: str) -> str | None:
         key=lambda entry: len(entry[0]),
         reverse=True,
     ):
-        if reason.endswith(f"_{suffix}"):
+        if reason == suffix or reason.endswith(f"_{suffix}"):
             return suffix_key
     return None
 
@@ -14827,18 +14881,65 @@ def cmd_upgrade():
 
     current_vibe_path = cache_running_vibe_path()
     plan = build_upgrade_plan(vibe_path=current_vibe_path)
+    if plan.preflight_error:
+        print(f"\033[31mUpgrade cannot be activated safely: {plan.preflight_error}\033[0m")
+        return 1
     print(f"Using {plan.method}: {' '.join(plan.command)}")
     runtime_was_running = _runtime_process_was_running()
 
     # Use a stable directory as cwd to avoid issues when running from a
     # directory that uv may delete during upgrade (e.g. inside the uv tool venv).
     safe_cwd = get_safe_cwd()
+    restart = None
+    restart_error = None
+    deferred_activation = False
+    restart_python = None
 
     try:
-        result = subprocess.run(plan.command, capture_output=True, text=True, env=plan.env, cwd=safe_cwd)
-        if result.returncode == 0:
-            print("\033[32mUpgrade successful!\033[0m")
-            if runtime_was_running:
+        with atomic_upgrade_lock():
+            if restart_is_pending():
+                print("\033[31mUpgrade already has a restart in progress; wait for it to finish.\033[0m")
+                return 1
+            if plan.activation is not None and activation_block_reason(plan.activation) == "superseded":
+                print("\033[31mUpgrade was superseded by another activation; retry the upgrade.\033[0m")
+                return 1
+            result = subprocess.run(
+                plan.command,
+                capture_output=True,
+                text=True,
+                env=plan.env,
+                cwd=safe_cwd,
+                timeout=UPGRADE_INSTALL_TIMEOUT_SECONDS,
+            )
+            if result.returncode == 0 and plan.activation is not None:
+                try:
+                    if os.name == "nt" and launcher_is_current_process(plan.activation.launcher):
+                        candidate_result = verify_upgrade_candidate(plan.activation)
+                        if not candidate_result.ok:
+                            raise RuntimeError(candidate_result.detail)
+                        defer_upgrade_activation(
+                            plan.activation,
+                            parent_pid=os.getpid(),
+                            rollback_to=plan.rollback_to,
+                            restart_required=runtime_was_running,
+                            prepare_show_runtime=not should_skip_show_runtime_prepare(),
+                        )
+                        deferred_activation = True
+                    else:
+                        restart_python = _candidate_python(plan.activation.candidate_launcher)
+                        activate_upgrade_candidate(plan.activation)
+                except Exception as exc:  # noqa: BLE001
+                    discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
+                    print(f"\033[31mUpgrade candidate failed integrity verification: {exc}\033[0m")
+                    return 1
+            elif result.returncode != 0 and plan.activation is not None:
+                discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
+            if result.returncode == 0 and plan.activation is None and plan.method == "pip":
+                integrity = verify_python_environment(sys.executable)
+                if not integrity.ok:
+                    print(f"\033[31mUpgrade installed an incomplete Python environment: {integrity.detail}\033[0m")
+                    return 1
+            if result.returncode == 0 and runtime_was_running and not deferred_activation:
                 try:
                     restart = schedule_restart(
                         delay_seconds=0.0,
@@ -14846,16 +14947,26 @@ def cmd_upgrade():
                         trigger="upgrade",
                         prepare_show_runtime=not should_skip_show_runtime_prepare(),
                         rollback_to=plan.rollback_to,
+                        **({"python_executable": str(restart_python)} if restart_python else {}),
                     )
                 except Exception as exc:
-                    print("\033[33mUpgrade installed, but restart scheduling failed.\033[0m")
-                    print(f"Restart error: {exc}")
-                    print("Run `vibe restart` to use the new version.")
-                    return 2
-                else:
-                    print("Restart scheduled to use the new version.")
-                    print(f"Job ID: {restart['job_id']}")
-                    print("Run `vibe status` to inspect the restart result.")
+                    restart_error = exc
+        if result.returncode == 0:
+            print("\033[32mUpgrade successful!\033[0m")
+            if deferred_activation:
+                print("Upgrade validated; launcher activation will complete after this command exits.")
+                if runtime_was_running:
+                    print("Restart will be scheduled by the activation helper.")
+                return 0
+            if restart_error is not None:
+                print("\033[33mUpgrade installed, but restart scheduling failed.\033[0m")
+                print(f"Restart error: {restart_error}")
+                print("Run `vibe restart` to use the new version.")
+                return 2
+            if restart is not None:
+                print("Restart scheduled to use the new version.")
+                print(f"Job ID: {restart['job_id']}")
+                print("Run `vibe status` to inspect the restart result.")
             else:
                 _prepare_show_runtime_after_install(current_vibe_path)
                 print("Avibe was not running; the new version will be used next time you start it.")
@@ -14864,6 +14975,8 @@ def cmd_upgrade():
             print(f"\033[31mUpgrade failed:\033[0m\n{result.stderr}")
             return 1
     except Exception as e:
+        if plan.activation is not None:
+            discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
         print(f"\033[31mUpgrade failed: {e}\033[0m")
         return 1
 
@@ -15030,25 +15143,42 @@ def cmd_runtime(args) -> int:
         return 1 if getattr(args, "strict", False) and not strict_ok else 0
     if command == "clean":
         dry_run = bool(getattr(args, "dry_run", False))
+        keep_previous = getattr(args, "keep_previous", 1)
         payload = manager.clean(
-            keep_previous=getattr(args, "keep_previous", 1),
+            keep_previous=keep_previous,
             dry_run=dry_run,
         )
-        git = _clean_git_runtime(keep_previous=getattr(args, "keep_previous", 1), dry_run=dry_run)
-        payload["git"] = git
+        managed_runtimes = _clean_managed_runtime_consumers(
+            keep_previous=keep_previous,
+            dry_run=dry_run,
+        )
+        payload.update(managed_runtimes)
+        show_verdict = _runtime_clean_verdict(payload, dry_run=dry_run)
+        managed_verdicts = {
+            runtime_id: _runtime_clean_verdict(result, dry_run=dry_run)
+            for runtime_id, result in managed_runtimes.items()
+        }
         if getattr(args, "json", False):
             print(json.dumps(payload, indent=2))
         else:
             language = _configured_cli_language()
-            archives = payload.get("archives") or {}
+            archives_value = payload.get("archives")
+            archives = archives_value if isinstance(archives_value, Mapping) else {}
             skipped_reason = str(archives.get("skipped_reason") or "")
             outcome = str(archives.get("outcome") or "")
-            # Show/Git results are reported independently of the archive
+            # Consumer results are reported independently of the Show archive
             # outcome: a skipped archive pass must not hide what the rest of
             # the cleanup actually reclaimed (or would reclaim).
             prefix_key = "runtime.clean.wouldRemove" if dry_run else "runtime.clean.removed"
             removed = payload.get("removed") or []
             print(i18n_t(f"{prefix_key}Items", language, count=len(removed)))
+            if show_verdict.failed:
+                _print_runtime_clean_failure(
+                    consumer="Show Runtime",
+                    reason=show_verdict.reason,
+                    dry_run=dry_run,
+                    language=language,
+                )
             is_partial_run = outcome == "partial" and not dry_run
             if is_partial_run:
                 print(
@@ -15083,7 +15213,7 @@ def cmd_runtime(args) -> int:
                         else "runtime.clean.skipped"
                     )
                     print(i18n_t(skip_key, language, reason=skipped_reason), file=sys.stderr)
-            else:
+            elif not show_verdict.archives_failed and (archives or not show_verdict.failed):
                 archive_count = int(archives.get("candidate_count") or 0) if dry_run else int(archives.get("removed_count") or 0)
                 archive_bytes = int(archives.get("candidate_bytes") or 0) if dry_run else int(archives.get("removed_bytes") or 0)
                 print(
@@ -15094,12 +15224,16 @@ def cmd_runtime(args) -> int:
                         size=_format_byte_size(archive_bytes),
                     )
                 )
-            if git.get("ok") is False and git.get("reason"):
-                git_skip_key = "runtime.clean.gitSkippedPreview" if dry_run else "runtime.clean.gitSkipped"
-                print(i18n_t(git_skip_key, language, reason=git["reason"]), file=sys.stderr)
-            else:
-                print(i18n_t(f"{prefix_key}Git", language, count=len(git.get("removed") or [])))
-        return 0
+            for runtime_id, result in managed_runtimes.items():
+                _print_managed_runtime_clean_result(
+                    runtime_id=runtime_id,
+                    result=result,
+                    dry_run=dry_run,
+                    language=language,
+                    verdict=managed_verdicts[runtime_id],
+                )
+        failed = show_verdict.failed or any(verdict.failed for verdict in managed_verdicts.values())
+        return 1 if failed else 0
     raise TaskCliError("runtime command is required", code="invalid_arguments", help_command="vibe runtime --help")
 
 
@@ -15239,13 +15373,207 @@ def _format_byte_size(size: int) -> str:
     return f"{size:.1f} PiB"
 
 
+def _managed_runtime_cleaners() -> tuple[tuple[str, Callable[..., dict[str, Any]]], ...]:
+    """Return the shared-runtime cleanup passes in stable output order."""
+
+    from core.memory.artifact import get_memory_artifact_manager
+    from core.tmux_runtime import get_tmux_runtime_manager
+    from vibe.model_hub_runtime.installer import EngineRuntimeManager
+
+    def clean_memory(*, keep_previous: int, dry_run: bool) -> dict[str, Any]:
+        return get_memory_artifact_manager().clean(
+            keep_previous=keep_previous,
+            dry_run=dry_run,
+        )
+
+    def clean_model_hub(*, keep_previous: int, dry_run: bool) -> dict[str, Any]:
+        return EngineRuntimeManager().clean(
+            keep_previous=keep_previous,
+            dry_run=dry_run,
+        )
+
+    def clean_tmux(*, keep_previous: int, dry_run: bool) -> dict[str, Any]:
+        return get_tmux_runtime_manager().clean(
+            keep_previous=keep_previous,
+            dry_run=dry_run,
+        )
+
+    return (
+        ("git", _clean_git_runtime),
+        ("memory-runtime", clean_memory),
+        ("model_hub_engine", clean_model_hub),
+        ("tmux", clean_tmux),
+    )
+
+
+def _clean_managed_runtime_consumers(*, keep_previous: int, dry_run: bool = False) -> dict[str, dict[str, Any]]:
+    results: dict[str, dict[str, Any]] = {}
+    for runtime_id, cleaner in _managed_runtime_cleaners():
+        try:
+            result = cleaner(keep_previous=keep_previous, dry_run=dry_run)
+            if not isinstance(result, Mapping):
+                raise TypeError("runtime cleanup returned a non-mapping result")
+            results[runtime_id] = dict(result)
+        except Exception as exc:  # noqa: BLE001
+            results[runtime_id] = {
+                "ok": False,
+                "removed": [],
+                "reason": f"{runtime_id}_clean_failed",
+                "message": str(exc),
+            }
+    return results
+
+
+@dataclass(frozen=True)
+class _RuntimeCleanVerdict:
+    reason: str | None
+    archives_failed: bool
+
+    @property
+    def failed(self) -> bool:
+        return self.reason is not None
+
+
+def _runtime_clean_verdict(result: Mapping[str, Any], *, dry_run: bool) -> _RuntimeCleanVerdict:
+    archives_value = result.get("archives")
+    archives = archives_value if isinstance(archives_value, Mapping) else {}
+    archive_reason = archives.get("skipped_reason")
+    failed_count = archives.get("failed_count")
+    archives_failed = bool(archive_reason) or (
+        not dry_run
+        and (
+            archives.get("outcome") == "partial"
+            or (isinstance(failed_count, (int, float)) and failed_count > 0)
+        )
+    )
+    nested_reason = archive_reason or ("archive_removal_failed" if archives_failed else None)
+    ok = result.get("ok")
+    reason = result.get("reason")
+    top_level_failed = ok is False or (ok is not True and bool(reason))
+    if not top_level_failed and not archives_failed:
+        return _RuntimeCleanVerdict(reason=None, archives_failed=False)
+    return _RuntimeCleanVerdict(
+        reason=str(reason or nested_reason or "unknown"),
+        archives_failed=archives_failed,
+    )
+
+
+def _managed_runtime_label(runtime_id: str) -> str:
+    labels = {
+        "git": "Git Runtime",
+        "memory-runtime": "Memory Runtime",
+        "model_hub_engine": "Model Hub Runtime",
+        "tmux": "tmux Runtime",
+    }
+    return labels.get(runtime_id, runtime_id.replace("-", " ").replace("_", " ").title())
+
+
+def _print_runtime_clean_failure(
+    *,
+    consumer: str,
+    reason: str | None,
+    dry_run: bool,
+    language: str,
+) -> None:
+    key = "runtime.clean.consumerPreviewFailed" if dry_run else "runtime.clean.consumerFailed"
+    print(
+        i18n_t(
+            key,
+            language,
+            consumer=consumer,
+            reason=reason or "unknown",
+        ),
+        file=sys.stderr,
+    )
+
+
+def _print_managed_runtime_clean_result(
+    *,
+    runtime_id: str,
+    result: Mapping[str, Any],
+    dry_run: bool,
+    language: str,
+    verdict: _RuntimeCleanVerdict,
+) -> None:
+    consumer = _managed_runtime_label(runtime_id)
+    prefix_key = "runtime.clean.consumerWouldRemove" if dry_run else "runtime.clean.consumerRemoved"
+    removed = result.get("removed")
+    removed_count = len(removed) if isinstance(removed, list) else 0
+    print(i18n_t(f"{prefix_key}Items", language, consumer=consumer, count=removed_count))
+
+    if verdict.failed:
+        _print_runtime_clean_failure(
+            consumer=consumer,
+            reason=verdict.reason,
+            dry_run=dry_run,
+            language=language,
+        )
+
+    archives_value = result.get("archives")
+    if not isinstance(archives_value, Mapping) or not archives_value:
+        return
+    archives = archives_value
+    skipped_reason = str(archives.get("skipped_reason") or "")
+    outcome = str(archives.get("outcome") or "")
+    if outcome == "partial" and not dry_run:
+        print(
+            i18n_t(
+                "runtime.clean.consumerRemovedArchives",
+                language,
+                consumer=consumer,
+                count=int(archives.get("removed_count") or 0),
+                size=_format_byte_size(int(archives.get("removed_bytes") or 0)),
+            )
+        )
+        print(
+            i18n_t(
+                "runtime.clean.consumerArchivesPartial",
+                language,
+                consumer=consumer,
+                reason=skipped_reason or "archive_removal_failed",
+                failed=int(archives.get("failed_count") or 0),
+            ),
+            file=sys.stderr,
+        )
+        return
+    if skipped_reason:
+        print(
+            i18n_t(
+                "runtime.clean.consumerArchivesSkipped",
+                language,
+                consumer=consumer,
+                reason=skipped_reason,
+            ),
+            file=sys.stderr,
+        )
+        return
+    if verdict.archives_failed:
+        return
+    count_key = "candidate_count" if dry_run else "removed_count"
+    bytes_key = "candidate_bytes" if dry_run else "removed_bytes"
+    print(
+        i18n_t(
+            f"{prefix_key}Archives",
+            language,
+            consumer=consumer,
+            count=int(archives.get(count_key) or 0),
+            size=_format_byte_size(int(archives.get(bytes_key) or 0)),
+        )
+    )
+
+
 def _clean_git_runtime(*, keep_previous: int, dry_run: bool = False) -> dict:
     try:
         from core.git_runtime import get_git_runtime_manager
 
         return get_git_runtime_manager().clean(keep_previous=keep_previous, dry_run=dry_run)
     except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "removed": [], "message": str(exc)}
+        return {
+            "ok": False,
+            "removed": [],
+            "reason": "git_clean_failed",
+            "message": str(exc),
+        }
 
 
 def _ensure_avault_during_prepare(offline: bool = False, force: bool = False) -> dict:
@@ -15501,12 +15829,18 @@ def build_parser():
     runtime_prepare_parser.add_argument("--strict", action="store_true", help="Return a non-zero exit code when preparation fails.")
     runtime_prepare_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
 
-    runtime_clean_parser = runtime_subparsers.add_parser("clean", help="Clean stale managed runtime cache entries")
+    runtime_clean_language = _configured_cli_language()
+    runtime_clean_help = i18n_t("runtime.clean.commandHelp", runtime_clean_language)
+    runtime_clean_parser = runtime_subparsers.add_parser(
+        "clean",
+        help=runtime_clean_help,
+        description=runtime_clean_help,
+    )
     runtime_clean_parser.add_argument("--keep-previous", type=int, default=1, help="Number of previous runtime versions to keep.")
     runtime_clean_parser.add_argument(
         "--dry-run",
         action="store_true",
-        help=i18n_t("runtime.clean.dryRunHelp", _configured_cli_language()),
+        help=i18n_t("runtime.clean.dryRunHelp", runtime_clean_language),
     )
     runtime_clean_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
     remote_parser = subparsers.add_parser(
@@ -17076,11 +17410,130 @@ def _dispatch_restart_supervisor(argv: list[str]) -> int:
     return restart_supervisor_main(argv)
 
 
+def _dispatch_deferred_upgrade_activation(argv: list[str]) -> int:
+    """Activate a Windows CLI upgrade after the parent launcher exits."""
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--parent-pid", type=int, required=True)
+    parser.add_argument("--parent-started-at", type=float)
+    parser.add_argument("--launcher", required=True)
+    parser.add_argument("--candidate", required=True)
+    parser.add_argument("--source-generation")
+    parser.add_argument("--restart", action="store_true")
+    parser.add_argument("--prepare-show-runtime", action="store_true")
+    parser.add_argument("--rollback-to")
+    parser.add_argument("--rollback-package")
+    parser.add_argument("--rollback-python")
+    parser.add_argument("--rollback-main")
+    args = parser.parse_args(argv)
+
+    deadline = time.monotonic() + DEFERRED_ACTIVATION_TIMEOUT_SECONDS
+    while runtime.pid_alive(args.parent_pid):
+        if args.parent_started_at is not None:
+            observed = runtime.process_create_time(args.parent_pid)
+            if observed is not None and observed != args.parent_started_at:
+                break
+        if time.monotonic() >= deadline:
+            print("deferred upgrade activation timed out waiting for the parent launcher", file=sys.stderr)
+            return 1
+        time.sleep(0.1)
+
+    source_generation = Path(args.source_generation) if args.source_generation else None
+    activation = AtomicActivation(
+        launcher=Path(args.launcher),
+        candidate_launcher=Path(args.candidate),
+        source_generation=source_generation,
+    )
+    if args.restart and args.rollback_to and (not args.rollback_python or not args.rollback_main):
+        print("deferred upgrade restart is missing its rollback launcher", file=sys.stderr)
+        return 1
+    rollback_to = (
+        RollbackTarget(
+            version=args.rollback_to,
+            package=args.rollback_package,
+            launcher=runtime.ServiceLauncher(python=args.rollback_python, main=args.rollback_main),
+        )
+        if args.rollback_to
+        else None
+    )
+    activated = False
+    try:
+        with atomic_upgrade_lock():
+            reason = activation_block_reason(activation)
+            if reason == "restart_pending":
+                discard_atomic_uv_install_generation(activation.candidate_launcher)
+                print("deferred upgrade activation found another restart in progress", file=sys.stderr)
+                return 1
+            if reason == "superseded":
+                discard_atomic_uv_install_generation(activation.candidate_launcher)
+                print("deferred upgrade activation was superseded by another activation", file=sys.stderr)
+                return 1
+            activate_upgrade_candidate(activation)
+            activated = True
+            if args.restart:
+                schedule_restart(
+                    delay_seconds=0.0,
+                    vibe_path=args.launcher,
+                    trigger="upgrade",
+                    prepare_show_runtime=args.prepare_show_runtime,
+                    rollback_to=rollback_to,
+                    python_executable=sys.executable,
+                )
+    except Exception as exc:
+        if not activated:
+            discard_atomic_uv_install_generation(activation.candidate_launcher)
+            print(f"deferred upgrade activation failed: {exc}", file=sys.stderr)
+        else:
+            print(f"deferred upgrade restart scheduling failed: {exc}", file=sys.stderr)
+        return 1
+
+    if not args.restart and args.prepare_show_runtime:
+        _prepare_show_runtime_after_install(args.launcher)
+    return 0
+
+
+def _dispatch_installer_activation(argv: list[str]) -> int:
+    """Activate a staged one-command install through the shared Python owner."""
+
+    if argv == ["--protocol-version"]:
+        print("2")
+        return 0
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--snapshot", action="store_true")
+    parser.add_argument("--launcher", required=True)
+    parser.add_argument("--candidate")
+    parser.add_argument("--source-generation")
+    args = parser.parse_args(argv)
+    if args.snapshot:
+        generation = _launcher_generation(Path(args.launcher), atomic_uv_install_root())
+        if generation is not None:
+            print(generation)
+        return 0
+    if not args.candidate:
+        parser.error("--candidate is required unless --snapshot is used")
+    activation = AtomicActivation(
+        launcher=Path(args.launcher),
+        candidate_launcher=Path(args.candidate),
+        source_generation=Path(args.source_generation) if args.source_generation else None,
+    )
+    try:
+        activate_installer_candidate(activation)
+    except Exception as exc:
+        discard_atomic_uv_install_generation(activation.candidate_launcher)
+        print(f"installer activation failed: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main():
     cache_running_vibe_path()
     argv = sys.argv[1:]
     if argv and argv[0] == "__restart-supervisor":
         sys.exit(_dispatch_restart_supervisor(argv[1:]))
+    if argv and argv[0] == "__activate-upgrade":
+        sys.exit(_dispatch_deferred_upgrade_activation(argv[1:]))
+    if argv and argv[0] == "__activate-install":
+        sys.exit(_dispatch_installer_activation(argv[1:]))
     parser = build_parser()
     args = parser.parse_args()
 

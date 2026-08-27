@@ -35,10 +35,10 @@ compatibility path.
 | POST `/api/models/sources/<source_id>/models` | `{model_id, display_name?, reasoning_efforts}` → `{source: Source}` | Creates one user-authored model entry. The Source identity comes only from the path. |
 | PATCH `/api/models/sources/<source_id>/models/<model_id>` | `{reasoning_efforts}` → `{source: Source}` | Replaces the complete capability list on either model origin without changing identity, origin, or Routes. |
 | DELETE `/api/models/sources/<source_id>/models/<model_id>` | `{force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409` or Source-mutation success | Deletes a manual entry; for a discovered entry it persists `retired: true` without deleting the row. Both outcomes use the same exact-hop and supply guards. |
-| GET `/api/models/agents` | → `{agents: AgentSupply[]}` | Backend records include server-authoritative `cli_present` and `named_agents`, the enabled named-Agent live projection. |
+| GET `/api/models/agents` | → `{agents: AgentSupply[]}` | Backend records include server-authoritative `cli_present` and `named_agents`, the enabled named-Agent live projection. The default read returns the current presence snapshot; `?refresh_cli_presence=1` first refreshes deep npm-only discovery and returns the resulting snapshot. |
 | GET `/api/models/agents/<backend>/sources` | → `{agent: AgentSupply}` | Returns the authoritative effective order and eligibility. |
 | PUT `/api/models/agents/<backend>/sources` | `{order: string[]}` → `{agent: AgentSupply}` | Stores and re-echoes the complete canonical order; no policy state exists. This route never touches a Route chain and has no guarded `409` branch. |
-| POST `/api/models/agents/<backend>/chains/reorder` | → `{agent: AgentSupply}` | Idempotently reorders every stored Route by the current Source order without adding, removing, remapping, matching, or guarding. The total order is defined below. |
+| POST `/api/models/agents/<backend>/chains/reorder` | `{order?: string[]}` → `{agent: AgentSupply}` | With `order`, atomically stores the complete Source order and idempotently reorders every stored Route by it; with no body, applies the already stored order. In either form it adds, removes, remaps, matches, and guards nothing. The total order is defined below. |
 | PATCH `/api/models/agents/<backend>/mode` | `{mode}` → `{agent: AgentSupply}` | Explicit `hub` / `direct` switch. A qualifying Direct → Gateway switch atomically adopts the recognized CLI login as the first native Source; other switches create nothing. |
 | PUT `/api/models/agents/opencode/menu` | `{menu}` → `{agent: AgentSupply}` | Open-menu configuration. |
 | GET `/api/models/agents/<backend>/chains` | → `{chains: AgentChain[]}` | Hub only. Returns the complete Overview model set in menu order, followed by a selected model or configured Route not already present. All members share one config snapshot and observation time. Direct returns the documented `direct_mode` error. |
@@ -59,9 +59,10 @@ compatibility path.
 | POST `/api/models/runtime/start` | → `{runtime: RuntimeDependency}` | Persists `enabled: true` and explicitly starts the managed engine. Service startup restores this intent. Uses the existing mutation authentication and CSRF guards; status reads never start it. |
 | POST `/api/models/runtime/stop` | → `{runtime: RuntimeDependency}` | Explicitly stops the managed engine, persists `enabled: false`, and returns it to `not_started`. The mutation is rejected with `runtime_in_use` while any Agent backend is configured for Hub mode, so disabling the shared runtime cannot strand a configured route. |
 
-The removed global route `PUT /api/models/priority` has no replacement. Backend Source
-order is explicit configuration through the sources route; exact per-model order is
-explicit configuration through the chain route.
+The removed product-global route `PUT /api/models/priority` has no replacement. Backend
+Source order has two explicit operations: the sources route stores it without touching
+Routes, while `chains/reorder` can store the same order and apply it to existing Routes
+atomically. Exact per-model order is explicit configuration through the chain route.
 
 ## Unsaved Source observation
 
@@ -216,7 +217,7 @@ every other existing field and enum meaning remains unchanged.
 | --- | --- | --- | --- |
 | `Source.client_nonce` | Source create commit | lost-create reconciliation | Exact optional echo of `SourceCreate.client_nonce`, written only at commit; unique across live Sources and live-process reservations, and never used for routing. |
 | `Source.models[].retired` | discovered-model DELETE | Source detail inventory | Omission means false; only a discovered row may be true; true rows remain readable and never supply. |
-| `Source.adopted_by` | Source read assembler | Source cards and Source detail status | Complete unique persisted-reference projection sorted by backend then menu model; clients do not derive it from `hops`. |
+| `Source.adopted_by` | Source read assembler | Source cards and Source detail status | Complete unique persisted-reference projection for backends currently in Hub mode, sorted by backend then menu model; clients do not derive it from `hops`. Routes retained by Direct-mode backends are excluded because they bypass the gateway. |
 | `AgentSupply.cli_present` | backend CLI detector | zero-installed-backend state | Boolean installation fact only; it does not imply login or process readiness. |
 | `AgentSupply.model_supply[].has_runnable_hop` | exact-chain live annotator | backend-group collapse predicate | Uses the AgentChain runnability axiom rather than inferring liveness from configured membership. `chain_length: 0` forces false; a nonzero length may carry either value. |
 | `RuntimeDependency.enabled` | explicit runtime start/stop mutation | Gateway switch and service-start recovery | Persisted user intent, independent of observed process health. Missing in older config defaults to false; an older response without the field falls back to observed health in the UI. |
@@ -353,7 +354,8 @@ its process availability but carries `in_current_model_chain: null`.
 
 ## Per-backend source order
 
-The request is total:
+The storage-only PUT requires, and the atomic reorder POST may accept, the same total
+order body:
 
 ```json
 {"order": ["src_anthkey01", "src_relay9c1x"]}
@@ -365,13 +367,16 @@ The request is total:
 - Add Source and native import invoke `placement-v1` once and persist its chosen
   position. Refresh, restart, health changes, and turns never recompute this order.
 
-The whole-order PUT is intentionally outside the §4.5 Source-mutation envelope matrix.
+The storage-only PUT is intentionally outside the §4.5 Source-mutation envelope matrix.
 It stores only `sources.order`, never reads or writes a Route chain, and therefore never
-returns a guarded `409`. This is the G-9 tombstone: adding a guard branch would imply an
-order save is allowed to mutate supply, which violates S-1.
+returns a guarded `409`. This is the G-9 tombstone: adding a guard branch would imply
+that this storage-only route can remove supply, which violates S-1.
 
 `POST /api/models/agents/<backend>/chains/reorder` is the only server-side post-creation
 operation that implicitly reads and applies the stored Source order to existing Routes.
+When the optional `order` body is present, storing that complete order and applying it
+to existing Routes happen under the same mutation lock and persistence boundary; an
+omitted body preserves the stored-order-only form for internal callers.
 For each Route, give every hop its original zero-based index `i` and sort by this total key:
 
 ```text

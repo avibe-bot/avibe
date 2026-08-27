@@ -52,6 +52,8 @@ from modules.agents.model_hub import (
     bind_launch,
     bind_turn_mode,
     opencode_model_for_overlay,
+    opencode_model_catalog_for_overlay,
+    opencode_requested_model_for_overlay,
     persisted_launch_identity,
     resolve_opencode_overlay_launch,
 )
@@ -79,6 +81,7 @@ from .utils import resolve_opencode_model_id, resolve_opencode_reasoning_effort
 
 logger = logging.getLogger(__name__)
 _STEERING_SNAPSHOT_KEY = "opencode_native_steering"
+_MODEL_HUB_DISPLAY_MODEL_KEY = "model_hub_display_model"
 _STATUS_RECONCILIATION_FAILURE_LIMIT = 3
 # OpenCode returns 204 after forking prompt work, before that worker necessarily
 # registers the session as busy.
@@ -1182,20 +1185,31 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             if not model_str:
                 model_str = server.get_agent_model_from_config(agent_to_use)
             opencode_cfg = getattr(self.controller.config, "opencode", None)
-            model_str = opencode_model_for_overlay(model_str, model_hub_overlay)
-            if model_hub_runtime is not None and model_str:
+            requested_model_str = opencode_requested_model_for_overlay(
+                model_str,
+                model_hub_overlay,
+            )
+            if model_hub_runtime is not None and requested_model_str:
                 model_hub_launch = await resolve_opencode_overlay_launch(
                     self.controller,
-                    model_str,
+                    requested_model_str,
                     model_hub_overlay,
                 )
                 bind_launch(request.context, model_hub_launch)
+            model_str = opencode_model_for_overlay(
+                requested_model_str,
+                model_hub_overlay,
+            )
             # Bare model id (no ``provider/`` prefix): only inject ``providerID``
             # when the user has explicitly chosen a default provider in Settings.
             # Otherwise leave ``model_dict`` unset so OpenCode keeps using its own
             # routing for legacy installs.
             default_provider = getattr(opencode_cfg, "default_provider", None)
             model_dict = resolve_opencode_model_dict(model_str, default_provider)
+            display_model_dict = resolve_opencode_model_dict(
+                requested_model_str,
+                default_provider,
+            )
 
             reasoning_effort = override_reasoning
             if not reasoning_effort:
@@ -1204,7 +1218,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 reasoning_effort = getattr(opencode_cfg, "default_reasoning_effort", None)
             if model_dict:
                 try:
-                    model_catalog = await server.get_available_models(request.working_path)
+                    model_catalog = (
+                        opencode_model_catalog_for_overlay(model_hub_overlay)
+                        if model_hub_overlay is not None
+                        else await server.get_available_models(request.working_path)
+                    )
                     resolved_model_id = resolve_opencode_model_id(
                         model_catalog,
                         model_dict.get("providerID"),
@@ -1318,6 +1336,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             launch_identity = persisted_launch_identity(model_hub_launch)
             if launch_identity is not None:
                 processing_indicator["model_hub_launch"] = launch_identity
+            if display_model_dict is not None:
+                processing_indicator[_MODEL_HUB_DISPLAY_MODEL_KEY] = display_model_dict
 
             if model_hub_overlay_reservation is None:
                 await server.mark_run_active(session_id)
@@ -1412,7 +1432,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     + _ASYNC_PROMPT_START_CONFIRMATION_TIMEOUT_SECONDS
                 ),
                 idle_reconciliation_message=self._idle_reconciliation_message(
-                    model_dict,
+                    display_model_dict,
                     reasoning_effort,
                 ),
             )
@@ -2348,6 +2368,13 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 else ""
             )
             has_steering_identity = bool(target_session_id and logical_turn_id)
+            display_model_dict = (
+                poll_info.processing_indicator.get(_MODEL_HUB_DISPLAY_MODEL_KEY)
+                if isinstance(poll_info.processing_indicator, dict)
+                else None
+            )
+            if not isinstance(display_model_dict, dict):
+                display_model_dict = poll_info.model_dict
             if current_task is not None and (
                 has_steering_identity
                 or reconcile_initial_status
@@ -2381,7 +2408,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                         else None
                     ),
                     idle_reconciliation_message=self._idle_reconciliation_message(
-                        poll_info.model_dict,
+                        display_model_dict,
                         poll_info.reasoning_effort,
                     ),
                     restored=True,
