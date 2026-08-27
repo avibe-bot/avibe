@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -21,6 +22,7 @@ _CUSTOM_PROVIDER_LABELS = {
     "openai-compatible": "OpenAI compatible",
     "anthropic-compatible": "Anthropic compatible",
 }
+MODEL_HUB_RUNTIME_PROVIDER_PREFIX = "avibe-model-hub-"
 _RESERVED_PROVIDER_IDS = {
     "alibaba-cn",
     "anthropic",
@@ -500,7 +502,7 @@ def _normalize_custom_provider_id(provider_id: str, *, reject_reserved: bool = F
         raise ValueError("provider_id is too long")
     if not re.fullmatch(r"[a-z0-9][a-z0-9_.-]*", candidate):
         raise ValueError("provider_id must use lowercase letters, numbers, dot, hyphen, or underscore")
-    if reject_reserved and candidate in _RESERVED_PROVIDER_IDS:
+    if reject_reserved and is_reserved_opencode_provider_id(candidate):
         raise ValueError("provider_id already exists")
     return candidate
 
@@ -509,6 +511,13 @@ def is_reserved_opencode_provider_id(provider_id: str) -> bool:
     if not isinstance(provider_id, str):
         return False
     return provider_id.strip().lower() in _RESERVED_PROVIDER_IDS
+
+
+def model_hub_runtime_provider_id(gateway_token: str) -> str:
+    """Derive the private OpenCode provider namespace for one gateway process."""
+
+    digest = hashlib.sha256(gateway_token.encode()).hexdigest()[:24]
+    return f"{MODEL_HUB_RUNTIME_PROVIDER_PREFIX}{digest}"
 
 
 def get_opencode_custom_provider_adapter(

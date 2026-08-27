@@ -78,6 +78,8 @@ class _FakeServer:
     async def get_available_models(self, directory):
         return {"providers": [{"id": "openai", "models": {"gpt-5": {}}}]}
 
+    get_native_available_models = get_available_models
+
     async def get_available_agents(self, directory):
         return []
 
@@ -106,6 +108,8 @@ class _FakeModelServer:
         if self.models_error is not None:
             raise self.models_error
         return self.models
+
+    get_native_available_models = get_available_models
 
     async def close_http_session(self, loop) -> None:  # type: ignore[override]
         pass

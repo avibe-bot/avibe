@@ -122,6 +122,42 @@ PROBE_RESULT_CONTRACT_VERSION = 6
 # than any attempt this runtime can start, yet still able to settle a Source that
 # this runtime has not attempted again.
 PRE_ATTEMPT_SETTLEMENT_GENERATION = 0
+
+
+def project_opencode_public_model(
+    identifier: str,
+    resolution: ModelHubTurnResolution,
+) -> dict[str, Any] | None:
+    """Project one persisted OpenCode route without transport credentials."""
+
+    inspection = (
+        resolution.candidate_hops[0]
+        if resolution.candidate_hops
+        else resolution.projectable_hops[0]
+        if resolution.projectable_hops
+        else None
+    )
+    if inspection is None or inspection.source is None or inspection.model_id is None:
+        return None
+    model = next(
+        (item for item in inspection.source.models if item.id == inspection.model_id),
+        None,
+    )
+    projected: dict[str, Any] = {
+        "id": identifier,
+        "name": (
+            model.display_name
+            if model is not None and model.display_name
+            else identifier
+        ),
+    }
+    variants = {
+        effort: {"reasoningEffort": effort}
+        for effort in (model.reasoning_efforts if model is not None else ())
+    }
+    if variants:
+        projected["variants"] = variants
+    return projected
 logger = logging.getLogger(__name__)
 
 _NATIVE_VENDOR_BACKENDS = {"anthropic": "claude", "openai": "codex"}
@@ -327,6 +363,40 @@ def _same_json_value(left: object, right: object) -> bool:
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _project_opencode_public_models(
+    config: ModelHubConfig,
+    *,
+    now: datetime,
+    unavailable_source_ids: frozenset[str] = frozenset(),
+) -> dict[str, dict[str, Any]]:
+    agent = config.agents["opencode"]
+    if agent.mode == "direct" or agent.menu is None:
+        return {}
+    projected: dict[str, dict[str, Any]] = {}
+    for identifier in dict.fromkeys(agent.menu.checked):
+        resolution = resolve_model_hub_turn(
+            config,
+            "opencode",
+            identifier,
+            now=now,
+            unavailable_source_ids=unavailable_source_ids,
+            supply_channel="hub",
+        )
+        model = project_opencode_public_model(identifier, resolution)
+        if model is not None:
+            projected[identifier] = model
+    return projected
+
+
+def load_opencode_public_models() -> dict[str, dict[str, Any]]:
+    """Load the persisted, credential-free OpenCode projection for local callers."""
+
+    return _project_opencode_public_models(
+        V2ModelHubConfigStore().load(),
+        now=_utc_now(),
+    )
 
 
 def _source_id() -> str:
@@ -3840,6 +3910,19 @@ class ModelHubService:
             )
             for model_id in self._agent_model_ids(agent, requested_model)
         ]
+
+    def opencode_public_models(self) -> dict[str, dict[str, Any]]:
+        """Return the safe public projection owned by persisted Hub config."""
+
+        config = self.store.load()
+        return _project_opencode_public_models(
+            config,
+            now=self.now(),
+            unavailable_source_ids=self._unavailable_native_sources(
+                config,
+                "opencode",
+            ),
+        )
 
     @staticmethod
     def _probe_request(

@@ -5723,10 +5723,16 @@ def discord_list_channels_live(bot_token: str, guild_id: str) -> dict:
 
 
 def opencode_options(cwd: str) -> dict:
+    from core.handlers.model_hub import load_opencode_public_models
     from vibe.async_bridge import run_coroutine_blocking
 
     try:
-        return run_coroutine_blocking(opencode_options_async(cwd))
+        return run_coroutine_blocking(
+            opencode_options_async(
+                cwd,
+                model_hub_models=load_opencode_public_models(),
+            )
+        )
     except Exception as exc:
         logger.warning("OpenCode options fetch failed: %s", exc, exc_info=True)
         return {"ok": False, "error": str(exc)}
@@ -5912,7 +5918,11 @@ async def _telegram_get_me(bot_token: str, proxy_url: str | None = None) -> dict
     return result.get("result") or {}
 
 
-async def opencode_options_async(cwd: str) -> dict:
+async def opencode_options_async(
+    cwd: str,
+    *,
+    model_hub_models: dict[str, Any] | None = None,
+) -> dict:
     # Expand ~ to user home directory
     request_loop = asyncio.get_running_loop()
     expanded_cwd = os.path.expanduser(cwd)
@@ -5920,7 +5930,20 @@ async def opencode_options_async(cwd: str) -> dict:
     cache_data = cache_entry.get("data")
     updated_at = cache_entry.get("updated_at", 0.0)
     cache_age = time.monotonic() - updated_at
-    if cache_data and cache_age < _OPENCODE_OPTIONS_TTL_SECONDS:
+    projection_key = json.dumps(
+        model_hub_models or {},
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    cache_projection_matches = (
+        cache_entry.get("model_hub_projection") == projection_key
+    )
+    if (
+        cache_data
+        and cache_age < _OPENCODE_OPTIONS_TTL_SECONDS
+        and cache_projection_matches
+    ):
         return {"ok": True, "data": cache_data, "cached": True}
 
     server = None
@@ -5969,7 +5992,15 @@ async def opencode_options_async(cwd: str) -> dict:
         )
         await asyncio.wait_for(server.ensure_running(), timeout=timeout_seconds)
         agents = await asyncio.wait_for(server.get_available_agents(expanded_cwd), timeout=timeout_seconds)
-        models = await asyncio.wait_for(server.get_available_models(expanded_cwd), timeout=timeout_seconds)
+        model_request = (
+            server.get_available_models(expanded_cwd)
+            if model_hub_models is None
+            else server.get_available_models(
+                expanded_cwd,
+                model_hub_models=model_hub_models,
+            )
+        )
+        models = await asyncio.wait_for(model_request, timeout=timeout_seconds)
         provider_catalog_available = True
         try:
             providers_raw = await asyncio.wait_for(server.get_providers(), timeout=timeout_seconds)
@@ -6020,11 +6051,12 @@ async def opencode_options_async(cwd: str) -> dict:
         _OPENCODE_OPTIONS_CACHE[expanded_cwd] = {
             "data": data,
             "updated_at": time.monotonic(),
+            "model_hub_projection": projection_key,
         }
         return {"ok": True, "data": data}
     except Exception as exc:
         logger.warning("OpenCode options fetch failed: %s", exc, exc_info=True)
-        if cache_data:
+        if cache_data and cache_projection_matches:
             return {"ok": True, "data": cache_data, "cached": True, "warning": str(exc)}
         return {"ok": False, "error": str(exc)}
     finally:
@@ -10936,36 +10968,32 @@ def _filter_opencode_models_to_configured_providers(
 
     if not isinstance(models, dict):
         return models
+    from modules.agents.opencode.utils import (
+        filter_opencode_models_to_allowed_providers,
+    )
+
     allowed = _configured_opencode_provider_ids(
         providers_raw=providers_raw,
         auth_entries=auth_entries,
         config_api_key_provider_ids=config_api_key_provider_ids,
         custom_config_provider_ids=custom_config_provider_ids,
     )
-    if not allowed:
-        return {**models, "providers": [], "default": {}}
-
-    providers = []
+    filtered = filter_opencode_models_to_allowed_providers(models, allowed)
+    providers = list(filtered.get("providers", []) or [])
     seen: set[str] = set()
-    for provider in models.get("providers", []) or []:
+    for provider in providers:
         if not isinstance(provider, dict):
             continue
         pid = _opencode_provider_id(provider)
-        if isinstance(pid, str) and pid in allowed:
+        if isinstance(pid, str):
             seen.add(pid)
-            providers.append(provider)
 
     for pid in allowed:
         if pid in seen:
             continue
         providers.append({"id": pid, "models": {}})
 
-    defaults = models.get("default")
-    if isinstance(defaults, dict):
-        defaults = {pid: model_id for pid, model_id in defaults.items() if pid in allowed}
-    else:
-        defaults = {}
-    return {**models, "providers": providers, "default": defaults}
+    return {**filtered, "providers": providers}
 
 
 def _merge_opencode_user_models(
@@ -10982,26 +11010,14 @@ def _merge_opencode_user_models(
     if not isinstance(providers_raw, list):
         return models
     if allowed_provider_ids is not None:
-        filtered_providers = []
-        for provider in providers_raw:
-            if not isinstance(provider, dict):
-                continue
-            pid = _opencode_provider_id(provider)
-            if isinstance(pid, str) and pid in allowed_provider_ids:
-                filtered_providers.append(provider)
-        raw_defaults = models.get("default")
-        filtered_defaults = {}
-        if isinstance(raw_defaults, dict):
-            filtered_defaults = {
-                pid: model_id
-                for pid, model_id in raw_defaults.items()
-                if pid in allowed_provider_ids
-            }
-        models = {
-            **models,
-            "providers": filtered_providers,
-            "default": filtered_defaults,
-        }
+        from modules.agents.opencode.utils import (
+            filter_opencode_models_to_allowed_providers,
+        )
+
+        models = filter_opencode_models_to_allowed_providers(
+            models,
+            allowed_provider_ids,
+        )
         providers_raw = models.get("providers", [])
     if not user_model_index:
         return models
@@ -11217,7 +11233,7 @@ async def _get_opencode_providers_async() -> dict:
         providers_raw, auth_raw, config_raw = await asyncio.gather(
             server.get_providers(),
             server.get_provider_auth(),
-            server.get_available_models(os.path.expanduser("~")),
+            server.get_native_available_models(os.path.expanduser("~")),
             return_exceptions=False,
         )
     finally:
@@ -11802,7 +11818,7 @@ async def save_opencode_provider_model_async(provider_id: str, payload: dict) ->
     try:
         if server is not None:
             try:
-                config_raw = await server.get_available_models(os.path.expanduser("~"))
+                config_raw = await server.get_native_available_models(os.path.expanduser("~"))
             except Exception as exc:
                 logger.warning(
                     "OpenCode provider model catalog fetch failed for %s/%s: %s",

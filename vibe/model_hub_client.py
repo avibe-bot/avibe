@@ -225,6 +225,9 @@ class ModelHubRemoteService:
     def agent_chains(self, backend: str) -> list[dict]:
         return _rpc_sync("get_agent_chains", {"backend": backend})
 
+    def opencode_public_models(self) -> dict[str, dict[str, Any]]:
+        return _rpc_sync("get_opencode_public_models")
+
     async def probe_agent(
         self,
         backend: str,

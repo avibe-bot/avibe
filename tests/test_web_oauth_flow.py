@@ -796,6 +796,8 @@ class _FakeOpencodeServer:
     async def get_available_models(self, _directory):
         return self.catalog
 
+    get_native_available_models = get_available_models
+
     async def create_session(self, _directory, *, title):
         return self.created_session
 
@@ -1091,6 +1093,53 @@ def test_opencode_provider_test_prefers_runtime_agent_model(
     assert fake.prompt_calls[-1]["model"] == {
         "providerID": "openai",
         "modelID": "gpt-5.4-runtime",
+    }
+
+
+def test_opencode_provider_test_rejects_hub_only_runtime_agent_model(
+    service: AgentAuthService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeOpencodeServer()
+    fake.agent_model = "openai/custom-model"
+    fake.catalog = {
+        "providers": [
+            {
+                "id": "openai",
+                "models": {
+                    "gpt-5.3-chat-latest": {},
+                    "gpt-5.4": {},
+                },
+            }
+        ],
+        "default": {"openai": "gpt-5.3-chat-latest"},
+    }
+    fake.messages = [
+        {
+            "info": {
+                "id": "msg_assistant",
+                "role": "assistant",
+                "time": {"completed": 123},
+                "finish": "stop",
+            },
+            "parts": [{"type": "text", "text": "OK"}],
+        }
+    ]
+    monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=fake))
+    monkeypatch.setattr(
+        service,
+        "_resolve_backend_config",
+        lambda backend: SimpleNamespace(default_provider="openai")
+        if backend == "opencode"
+        else None,
+    )
+
+    result = _run(service.test_opencode_provider("openai"))
+
+    assert result["ok"] is True
+    assert result["model"] == "gpt-5.3-chat-latest"
+    assert fake.prompt_calls[-1]["model"] == {
+        "providerID": "openai",
+        "modelID": "gpt-5.3-chat-latest",
     }
 
 

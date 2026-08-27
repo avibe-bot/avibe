@@ -86,6 +86,7 @@ from modules.agents.model_hub import (
     _localized_launch_error,
     bind_launch,
     bind_turn_mode,
+    opencode_model_catalog_for_overlay,
 )
 from storage.models import agent_sessions, messages, metadata
 from vibe.i18n import t as i18n_t
@@ -4218,6 +4219,7 @@ def test_settlement_retires_correlation_when_mode_persistence_fails(
 
 def test_opencode_overlay_projects_menu_identity_to_exact_hop_model(tmp_path: Path) -> None:
     source = _source("src_overlay01", "Overlay", model_id="upstream-model")
+    source.models[0].reasoning_efforts = ["low", "high"]
     config = _config([source])
     agent = config.agents["opencode"]
     agent.routes.pop("openai/shared-model")
@@ -4238,8 +4240,83 @@ def test_opencode_overlay_projects_menu_identity_to_exact_hop_model(tmp_path: Pa
 
     assert overlay is not None
     payload = json.loads(overlay.content)
-    assert payload["provider"]["openai"]["models"]["menu-model"]["id"] == ("openai/menu-model")
+    assert overlay.provider_id.startswith("avibe-model-hub-")
+    assert overlay.provider_id != "avibe-model-hub"
+    provider = payload["provider"][overlay.provider_id]
+    assert provider["models"]["openai/menu-model"]["id"] == "openai/menu-model"
+    assert provider["models"]["openai/menu-model"]["variants"] == {
+        "high": {"reasoningEffort": "high"},
+        "low": {"reasoningEffort": "low"},
+    }
     assert overlay.launches[0].target_model == "upstream-model"
+    assert opencode_model_catalog_for_overlay(overlay) == {
+        "providers": [
+            {
+                "id": overlay.provider_id,
+                "models": provider["models"],
+            }
+        ],
+        "default": {},
+    }
+
+
+def test_opencode_public_models_follow_persisted_config_without_overlay(
+    tmp_path: Path,
+) -> None:
+    source = _source("src_catalog01", "Catalog", model_id="upstream-model")
+    source.models[0].display_name = "Current model"
+    source.models[0].reasoning_efforts = ["low", "high"]
+    config = _config([source])
+    agent = config.agents["opencode"]
+    agent.routes = {
+        "custom/current-model": ModelHubRouteConfig(
+            hops=(ModelHubRouteHopConfig(source.id, "upstream-model"),)
+        )
+    }
+    agent.menu.checked = ["custom/current-model"]
+    service = _service(tmp_path, sources=[source])
+    service.store.config = config
+
+    assert service.opencode_public_models() == {
+        "custom/current-model": {
+            "id": "custom/current-model",
+            "name": "Current model",
+            "variants": {
+                "low": {"reasoningEffort": "low"},
+                "high": {"reasoningEffort": "high"},
+            },
+        }
+    }
+
+    service.store.config.agents["opencode"].mode = "direct"
+    assert service.opencode_public_models() == {}
+
+
+def test_opencode_overlay_private_provider_id_is_credential_scoped(
+    tmp_path: Path,
+) -> None:
+    source = _source("src_overlay10", "Overlay")
+    service = _service(tmp_path, sources=[source])
+    endpoint = AsyncMock(
+        side_effect=(
+            ("http://127.0.0.1:19000/opencode", "gateway-token-one"),
+            ("http://127.0.0.1:19000/opencode", "gateway-token-two"),
+        )
+    )
+    router = ModelHubRuntimeRouter(
+        service=service,
+        turn_gateway=SimpleNamespace(endpoint=endpoint),
+        overlay_path=tmp_path / "overlay.json",
+    )
+
+    first = asyncio.run(router.prepare_opencode_overlay())
+    second = asyncio.run(router.prepare_opencode_overlay())
+
+    assert first is not None
+    assert second is not None
+    assert first.provider_id != second.provider_id
+    assert set(json.loads(first.content)["provider"]) == {first.provider_id}
+    assert set(json.loads(second.content)["provider"]) == {second.provider_id}
 
 
 def test_opencode_overlay_supports_mixed_protocols_under_one_provider(tmp_path: Path) -> None:
@@ -4277,10 +4354,15 @@ def test_opencode_overlay_supports_mixed_protocols_under_one_provider(tmp_path: 
     overlay = asyncio.run(router.prepare_opencode_overlay())
 
     assert overlay is not None
-    provider = json.loads(overlay.content)["provider"]["custom"]
+    payload = json.loads(overlay.content)
+    assert set(payload["provider"]) == {overlay.provider_id}
+    provider = payload["provider"][overlay.provider_id]
     assert provider["npm"] == "@ai-sdk/openai-compatible"
     assert provider["options"]["baseURL"] == "http://127.0.0.1:19000/opencode/v1"
-    assert set(provider["models"]) == {"first-model", "second-model"}
+    assert set(provider["models"]) == {
+        "custom/first-model",
+        "custom/second-model",
+    }
     assert {launch.target_model for launch in overlay.launches} == {
         "first-model",
         "second-model",
@@ -4345,11 +4427,11 @@ def test_opencode_overlay_preserves_checked_route_with_stale_exact_hop(
     overlay = asyncio.run(router.prepare_opencode_overlay())
 
     assert overlay is not None
-    provider = json.loads(overlay.content)["provider"]["openai"]
+    provider = json.loads(overlay.content)["provider"][overlay.provider_id]
     assert provider["models"] == {
-        "menu-model": {
+        "openai/menu-model": {
             "id": "openai/menu-model",
-            "name": "menu-model",
+            "name": "openai/menu-model",
         }
     }
     assert overlay.checked_identifiers == ("openai/menu-model",)
