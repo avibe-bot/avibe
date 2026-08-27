@@ -275,12 +275,14 @@ Each backend entry on `GET /api/models/agents` carries the v5 API-boundary keys:
     {
       "name": "pm",
       "effective_model_id": "claude-opus-4-6",
-      "supply_status": "degraded"
+      "supply_status": "degraded",
+      "route_reason": null
     },
     {
       "name": "reviewer",
       "effective_model_id": "claude-haiku-4-5",
-      "supply_status": "interrupted"
+      "supply_status": "interrupted",
+      "route_reason": "route_unconfigured"
     }
   ]
 }
@@ -288,7 +290,8 @@ Each backend entry on `GET /api/models/agents` carries the v5 API-boundary keys:
 
 `named_agents` lists every enabled named Vibe Agent whose backend matches this
 record. `effective_model_id` is the Agent's explicit model. `supply_status` is
-derived independently for that effective model. The
+derived independently for that effective model. `route_reason` distinguishes a
+missing route from a configured route whose Sources are unavailable. The
 list name and object shape are intentionally distinct from `SupplyGap.agents`,
 which is a list of bare names inside a mutation result.
 
@@ -1151,7 +1154,7 @@ contract harness and API-boundary tests enforce:
 | probe `source_id` names an existing source | probe assembler |
 | non-null event endpoints name existing sources at emission time | event emitter |
 | `channel_switch.from_source == channel_switch.to_source` | event emitter |
-| API AgentSupply includes `cli_present`, `selected_by_agent`, `selected_model_id`, `selected_model_explicit`, policy-free `sources.order`, `supply_status`, `model_supply[].has_runnable_hop`, and `named_agents`; every Source includes persisted `last_discovered_at`, optional persisted `client_nonce`, derived `adopted_by`, and model retirement tombstones; source creation returns `added_to` and top-level `adopted_by` equal to `source.adopted_by`; saved refresh and discovered-model retirement use the guarded Source envelope | API payload test |
+| API AgentSupply includes `cli_present`, `selected_by_agent`, `selected_model_id`, `selected_model_explicit`, policy-free `sources.order`, `supply_status`, `model_supply[].has_runnable_hop`, and `named_agents[].route_reason`; every Source includes persisted `last_discovered_at`, optional persisted `client_nonce`, derived `adopted_by`, and model retirement tombstones; source creation returns `added_to` and top-level `adopted_by` equal to `source.adopted_by`; saved refresh and discovered-model retirement use the guarded Source envelope | API payload test |
 | every OAuthFlow response includes `intent` | API payload test |
 | Hub OAuth and native CLI `POST /sources/<id>/reauth` requests with missing or false `acknowledge_irreversible` return `reauth_confirmation_required` before the OAuth adapter is called; true acknowledgement is the only start path, while transactional API-key PUT is unaffected | API route negative/positive fixtures |
 | OAuth start claims `(client_nonce, vendor, channel)` before provider work; a blocked first call plus concurrent same-tuple retry coalesces to one pending result and exactly one provider start; pending-start failure/task cancellation releases after cleanup; success atomically exposes one echoed-nonce flow; explicit cancellation retains that nonce-bearing flow as `cancelled` so a same-tuple retry starts no provider, while existing expiry releases it for exactly one fresh start; no-nonce cancellation forgets | OAuth registry totality, clocked expiry, API payload, and auth-setup closed-loop tests |

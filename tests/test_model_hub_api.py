@@ -1894,8 +1894,8 @@ def test_agents_endpoint_projects_cli_presence_from_runtime(tmp_path):
 def test_agents_collection_reads_cli_presence_without_running_discovery(tmp_path):
     service, _store, _adapter = _service(tmp_path)
     calls = []
-    service.cli_presence_refresh = lambda include_npm_global: calls.append(
-        include_npm_global
+    service.cli_presence_refresh = lambda include_npm_global, backends: calls.append(
+        (include_npm_global, backends)
     )
     service.cli_present_override = lambda backend: backend == "codex"
 
@@ -2007,8 +2007,8 @@ def test_agent_supply_mutation_rpc_refreshes_cli_presence_before_writing(tmp_pat
 
     service, store, _adapter = _service(tmp_path)
     calls = []
-    service.cli_presence_refresh = lambda include_npm_global: calls.append(
-        include_npm_global
+    service.cli_presence_refresh = lambda include_npm_global, backends: calls.append(
+        (include_npm_global, backends)
     )
     service.cli_present_override = lambda backend: backend == "claude"
 
@@ -2026,7 +2026,7 @@ def test_agent_supply_mutation_rpc_refreshes_cli_presence_before_writing(tmp_pat
     )
 
     assert payload["cli_present"] is True
-    assert calls == [True]
+    assert calls == [(True, ("claude",))]
 
 
 def test_agent_supply_rpc_publishes_explicit_deep_discovery_after_fast_reads(
@@ -2035,13 +2035,16 @@ def test_agent_supply_rpc_publishes_explicit_deep_discovery_after_fast_reads(
     from core.handlers.model_hub import rpc as model_hub_rpc
 
     service, _store, _adapter = _service(tmp_path)
-    calls: list[bool] = []
+    calls: list[tuple[bool, tuple[str, ...] | None]] = []
     present = {"codex": False}
     deep_started = threading.Event()
     deep_release = threading.Event()
 
-    def refresh(include_npm_global: bool) -> None:
-        calls.append(include_npm_global)
+    def refresh(
+        include_npm_global: bool,
+        backends: tuple[str, ...] | None,
+    ) -> None:
+        calls.append((include_npm_global, backends))
         deep_started.set()
         deep_release.wait(timeout=2)
         present["codex"] = True
@@ -2108,7 +2111,46 @@ def test_agent_supply_rpc_publishes_explicit_deep_discovery_after_fast_reads(
         next(agent for agent in joined if agent["backend"] == "codex")["cli_present"]
         is True
     )
-    assert calls == [True]
+    assert calls == [(True, None)]
+
+
+def test_targeted_cli_refresh_does_not_wait_for_unrelated_full_inventory(tmp_path):
+    from core.handlers.model_hub import rpc as model_hub_rpc
+
+    service, _store, _adapter = _service(tmp_path)
+    calls: list[tuple[bool, tuple[str, ...] | None]] = []
+    full_started = threading.Event()
+    full_release = threading.Event()
+
+    def refresh(
+        include_npm_global: bool,
+        backends: tuple[str, ...] | None,
+    ) -> None:
+        calls.append((include_npm_global, backends))
+        if backends is None:
+            full_started.set()
+            full_release.wait(timeout=2)
+
+    service.cli_presence_refresh = refresh
+
+    async def exercise() -> None:
+        full = asyncio.create_task(
+            model_hub_rpc._refresh_agent_presence(service)
+        )
+        assert await asyncio.to_thread(full_started.wait, 0.5)
+        await asyncio.wait_for(
+            model_hub_rpc._refresh_agent_presence(service, ("opencode",)),
+            timeout=0.5,
+        )
+        full_release.set()
+        await full
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        full_release.set()
+
+    assert calls == [(True, None), (True, ("opencode",))]
 
 
 def test_agent_presence_refresh_crosses_the_controller_rpc_boundary(monkeypatch):
@@ -2206,6 +2248,14 @@ def test_agents_endpoint_projects_each_enabled_named_agent_live(tmp_path):
         "codex": [("codex", "gpt-5.3-codex")],
         "opencode": [],
     }[backend]
+    store.config.agents["claude"].routes["claude-sonnet-4-6"] = ModelHubRouteConfig(
+        hops=[
+            ModelHubRouteHopConfig(
+                source_id="src_missing01",
+                model_id="claude-sonnet-4-6",
+            )
+        ]
+    )
 
     agents = {agent["backend"]: agent for agent in service.list_agents()}
 
@@ -2214,11 +2264,13 @@ def test_agents_endpoint_projects_each_enabled_named_agent_live(tmp_path):
             "name": "pm",
             "effective_model_id": "claude-sonnet-4-6",
             "supply_status": "interrupted",
+            "route_reason": None,
         },
         {
             "name": "reviewer",
             "effective_model_id": "claude-opus-4-6",
             "supply_status": "interrupted",
+            "route_reason": "route_unconfigured",
         },
     ]
     assert agents["codex"]["named_agents"] == [
@@ -2226,6 +2278,7 @@ def test_agents_endpoint_projects_each_enabled_named_agent_live(tmp_path):
             "name": "codex",
             "effective_model_id": "gpt-5.3-codex",
             "supply_status": "interrupted",
+            "route_reason": "route_unconfigured",
         }
     ]
     assert agents["opencode"]["named_agents"] == []
@@ -2236,6 +2289,7 @@ def test_agents_endpoint_projects_each_enabled_named_agent_live(tmp_path):
         "name": "pm",
         "effective_model_id": "claude-sonnet-4-6",
         "supply_status": None,
+        "route_reason": None,
     }
 
 

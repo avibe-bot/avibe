@@ -452,14 +452,26 @@ class Controller:
             ]
 
         cli_presence: dict[str, bool] = {}
+        cli_presence_lock = threading.Lock()
+        cli_presence_generation: dict[str, int] = {}
+        next_cli_presence_generation = 0
 
         def cli_present(backend: str) -> bool:
             # Payload assembly runs on the controller loop. Read only the last
             # complete worker-produced snapshot here.
             return cli_presence.get(backend, False)
 
-        def refresh_cli_presence(include_npm_global: bool) -> None:
-            nonlocal cli_presence
+        def refresh_cli_presence(
+            include_npm_global: bool,
+            backends: tuple[str, ...] | None = None,
+        ) -> None:
+            nonlocal cli_presence, next_cli_presence_generation
+            selected_backends = backends or ("claude", "codex", "opencode")
+            with cli_presence_lock:
+                next_cli_presence_generation += 1
+                generation = next_cli_presence_generation
+                for backend in selected_backends:
+                    cli_presence_generation[backend] = generation
             try:
                 v2_config = V2Config.load()
             except FileNotFoundError:
@@ -468,7 +480,7 @@ class Controller:
                 logger.warning("Model Hub CLI config probe failed", exc_info=True)
                 v2_config = None
             configured_paths: dict[str, str] = {}
-            for backend in ("claude", "codex", "opencode"):
+            for backend in selected_backends:
                 backend_config = getattr(getattr(v2_config, "agents", None), backend, None)
                 configured_paths[backend] = str(
                     getattr(backend_config, "cli_path", None) or backend
@@ -485,12 +497,20 @@ class Controller:
                 backend: resolved_paths.get(configured_path) is not None
                 for backend, configured_path in configured_paths.items()
             }
-            cli_presence = refreshed
+            with cli_presence_lock:
+                cli_presence = {
+                    **cli_presence,
+                    **{
+                        backend: present
+                        for backend, present in refreshed.items()
+                        if cli_presence_generation.get(backend) == generation
+                    },
+                }
 
         # Seed only filesystem and PATH facts before the internal RPC surface
         # exists. The page publishes npm-only installs through an explicit
         # post-paint refresh, so controller readiness never waits on npm.
-        refresh_cli_presence(False)
+        refresh_cli_presence(False, None)
 
         self.model_hub_service = create_default_service(
             requested_model_override=default_vibe_agent_model,

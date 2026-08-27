@@ -6,46 +6,68 @@ import asyncio
 from typing import Any
 from weakref import WeakKeyDictionary
 
-from .service import ModelHubError, ModelHubService
+from .service import BackendName, ModelHubError, ModelHubService
 from .usage import USAGE_DEFAULT_WINDOW_DAYS
 
 _cli_presence_refresh_tasks: WeakKeyDictionary[
     ModelHubService,
-    asyncio.Task[None],
+    dict[tuple[BackendName, ...] | None, asyncio.Task[None]],
 ] = WeakKeyDictionary()
 
 
-async def _refresh_agent_presence(service: ModelHubService) -> None:
+async def _refresh_agent_presence(
+    service: ModelHubService,
+    backends: tuple[BackendName, ...] | None = None,
+) -> None:
     """Refresh host CLI facts without blocking the controller event loop."""
 
-    current = _cli_presence_refresh_tasks.get(service)
+    tasks = _cli_presence_refresh_tasks.setdefault(service, {})
+    current = tasks.get(backends)
     if current is not None and not current.done():
         await asyncio.shield(current)
         return
 
-    task = _start_agent_presence_refresh(service)
+    task = _start_agent_presence_refresh(service, backends)
     await asyncio.shield(task)
 
 
-async def _run_agent_presence_refresh(service: ModelHubService) -> None:
+async def _run_agent_presence_refresh(
+    service: ModelHubService,
+    backends: tuple[BackendName, ...] | None,
+) -> None:
     try:
         await asyncio.to_thread(
             service.refresh_cli_presence,
             include_npm_global=True,
+            backends=backends,
         )
     finally:
         current = asyncio.current_task()
-        if _cli_presence_refresh_tasks.get(service) is current:
-            _cli_presence_refresh_tasks.pop(service, None)
+        tasks = _cli_presence_refresh_tasks.get(service)
+        if tasks is not None and tasks.get(backends) is current:
+            tasks.pop(backends, None)
+            if not tasks:
+                _cli_presence_refresh_tasks.pop(service, None)
 
 
-def _start_agent_presence_refresh(service: ModelHubService) -> asyncio.Task[None]:
+def _start_agent_presence_refresh(
+    service: ModelHubService,
+    backends: tuple[BackendName, ...] | None,
+) -> asyncio.Task[None]:
     task = asyncio.create_task(
-        _run_agent_presence_refresh(service),
+        _run_agent_presence_refresh(service, backends),
         name="model-hub-cli-presence-refresh",
     )
-    _cli_presence_refresh_tasks[service] = task
+    _cli_presence_refresh_tasks.setdefault(service, {})[backends] = task
     return task
+
+
+async def _refresh_payload_backend(
+    service: ModelHubService,
+    backend: object,
+) -> None:
+    if backend in ("claude", "codex", "opencode"):
+        await _refresh_agent_presence(service, (backend,))
 
 
 async def dispatch_model_hub_rpc(
@@ -95,13 +117,13 @@ async def dispatch_model_hub_rpc(
             payload.get("backend"),
         )
     if operation == "set_agent_sources":
-        await _refresh_agent_presence(service)
+        await _refresh_payload_backend(service, payload.get("backend"))
         return await service.set_agent_sources(
             payload.get("backend"),
             payload.get("sources"),
         )
     if operation == "reorder_agent_chains":
-        await _refresh_agent_presence(service)
+        await _refresh_payload_backend(service, payload.get("backend"))
         if "order" in payload:
             return await service.reorder_agent_chains(
                 payload.get("backend"),
@@ -109,7 +131,7 @@ async def dispatch_model_hub_rpc(
             )
         return await service.reorder_agent_chains(payload.get("backend"))
     if operation == "set_agent_mode":
-        await _refresh_agent_presence(service)
+        await _refresh_payload_backend(service, payload.get("backend"))
         return await service.set_agent_mode(payload.get("backend"), payload.get("mode"))
     if operation == "set_agent_chain":
         return await service.set_agent_chain(
@@ -118,7 +140,7 @@ async def dispatch_model_hub_rpc(
             payload.get("chain"),
         )
     if operation == "set_opencode_menu":
-        await _refresh_agent_presence(service)
+        await _refresh_agent_presence(service, ("opencode",))
         return await service.set_opencode_menu(payload.get("menu"))
     if operation == "add_custom_model":
         return await service.add_custom_model(payload.get("source_id"), payload.get("model"))

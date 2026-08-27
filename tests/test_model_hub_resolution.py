@@ -1103,6 +1103,7 @@ def test_explicit_opencode_selection_outside_menu_remains_visible(tmp_path):
             "name": "researcher",
             "effective_model_id": "custom/hidden-model",
             "supply_status": "interrupted",
+            "route_reason": "route_unconfigured",
         }
     ]
     assert resolution.requested_model == "custom/hidden-model"

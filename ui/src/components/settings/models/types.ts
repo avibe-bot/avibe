@@ -210,6 +210,9 @@ export type NamedAgentSupply = {
   /** null exactly when `effective_model_id` is null — no model, no capability
    *  to report. */
   supply_status: SupplyStatus | null;
+  /** A configuration gap is distinct from a configured Route whose Sources
+   *  are unavailable. */
+  route_reason?: 'route_unconfigured' | null;
 };
 
 /** How many sources can currently serve a selectable model. `chain_length: 0`

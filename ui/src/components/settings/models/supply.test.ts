@@ -98,6 +98,29 @@ describe('agentGroupStatus', () => {
     expect(agentGroupStatus([])).toBe('unused');
   });
 
+  it('reports a configuration gap separately from unavailable configured sources', () => {
+    expect(agentGroupStatus([
+      {
+        name: 'opencode',
+        effective_model_id: 'openai/gpt-5.6-terra',
+        supply_status: 'interrupted',
+        route_reason: 'route_unconfigured',
+      },
+    ])).toBe('unconfigured');
+    expect(agentGroupStatus([
+      {
+        name: 'opencode',
+        effective_model_id: 'openai/gpt-5.6-terra',
+        supply_status: 'interrupted',
+        route_reason: null,
+      },
+    ])).toBe('interrupted');
+  });
+
+  it('reports an Agent without a model as unconfigured', () => {
+    expect(agentGroupStatus(statuses(null))).toBe('unconfigured');
+  });
+
   it('reports healthy only when every enabled Agent is healthy', () => {
     expect(agentGroupStatus(statuses('ok', 'ok'))).toBe('ok');
   });
