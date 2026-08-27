@@ -258,6 +258,85 @@ def test_opencode_options_cache_tracks_current_model_hub_projection(monkeypatch)
     assert projections == [first, second]
 
 
+def test_opencode_options_does_not_fall_back_across_model_hub_projections(
+    monkeypatch,
+):
+    import config.v2_compat as v2_compat
+    import modules.agents.opencode as opencode_module
+
+    class _FakeManager:
+        async def ensure_running(self):
+            raise RuntimeError("daemon unavailable")
+
+        async def close_http_session(self, *, loop=None):
+            pass
+
+    class _FakeServerManager:
+        @staticmethod
+        async def get_instance(**kwargs):
+            return _FakeManager()
+
+    stale_projection = {"custom/old": {"id": "custom/old"}}
+    current_projection = {"custom/new": {"id": "custom/new"}}
+    monkeypatch.setattr(
+        api,
+        "_OPENCODE_OPTIONS_CACHE",
+        {
+            "/tmp/workspace": {
+                "data": {"models": {"providers": []}},
+                "updated_at": time.monotonic(),
+                "model_hub_projection": json.dumps(
+                    stale_projection,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            }
+        },
+    )
+    monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: object()))
+    monkeypatch.setattr(
+        v2_compat,
+        "to_app_config",
+        lambda config: SimpleNamespace(
+            opencode=SimpleNamespace(
+                binary="opencode",
+                port=4096,
+                request_timeout_seconds=10,
+            )
+        ),
+    )
+    monkeypatch.setattr(opencode_module, "OpenCodeServerManager", _FakeServerManager)
+
+    result = asyncio.run(
+        api.opencode_options_async(
+            "/tmp/workspace",
+            model_hub_models=current_projection,
+        )
+    )
+
+    assert result == {"ok": False, "error": "daemon unavailable"}
+
+
+def test_sync_opencode_options_loads_persisted_model_hub_projection(monkeypatch):
+    from core.handlers import model_hub
+
+    projection = {"custom/current": {"id": "custom/current"}}
+    calls = []
+
+    async def options(cwd, *, model_hub_models=None):
+        calls.append((cwd, model_hub_models))
+        return {"ok": True, "data": {"models": {"providers": []}}}
+
+    monkeypatch.setattr(model_hub, "load_opencode_public_models", lambda: projection)
+    monkeypatch.setattr(api, "opencode_options_async", options)
+
+    result = api.opencode_options("/tmp/workspace")
+
+    assert result["ok"] is True
+    assert calls == [("/tmp/workspace", projection)]
+
+
 def test_opencode_get_server_passes_resource_governor_from_v2_runtime(monkeypatch):
     import config.v2_compat as v2_compat
     import modules.agents.opencode as opencode_module

@@ -22,8 +22,8 @@ export function modelOptionLabel(model: string, labels?: Record<string, string>)
 // shared by ChatPage, the Agents detail panel, and the New Agent dialog so a
 // new backend (or a fix like OpenCode's provider-prefixing) lands in one place.
 //
-// claude / codex expose flat model arrays. OpenCode's catalog is per-provider
-// and the provider endpoint returns RAW model ids (never provider-prefixed), so
+// claude / codex expose flat model arrays. OpenCode's public options catalog is
+// per-provider and returns RAW model ids (never provider-prefixed), so
 // we flatten it into ``providerId/modelId`` keys — ALWAYS provider-prefixed,
 // even when the raw id itself contains "/" (e.g. OpenRouter's
 // ``anthropic/claude-*`` must become ``openrouter/anthropic/claude-*``). The
@@ -54,20 +54,33 @@ export async function fetchBackendModels(
     };
   }
   if (backend === 'opencode') {
-    // Best-effort: OpenCode's catalog lives behind the Owner-only Settings
-    // endpoint, so a rank that may configure an Agent but not the instance gets
-    // no suggestions and types the model id. ``allowCustomValue`` on every
-    // caller's Combobox is what makes that a degraded list rather than a dead
-    // field. See ``readOpencodeProvidersForModelPicker``.
-    const res = await api.readOpencodeProvidersForModelPicker().catch((err) => {
+    // Best-effort: this live catalog remains Owner-only because reading it may
+    // start OpenCode. Lower ranks keep the existing typed-value fallback.
+    const res = await api.opencodeOptions('~').catch((err) => {
       if (err instanceof ApiError && err.code === 'instance_access_forbidden') return null;
       throw err;
     });
     if (!res) return { models: [] };
-    const models = (res.providers ?? []).filter((p) => p.configured).flatMap((p) =>
-      (p.models ?? []).map((m) => `${p.id}/${m}`),
-    );
-    return { models };
+    const providers = res.ok && Array.isArray(res.data?.models?.providers)
+      ? res.data.models.providers
+      : [];
+    const models = providers.flatMap((provider: any) => {
+      const providerId = typeof provider?.id === 'string' ? provider.id : '';
+      if (!providerId) return [];
+      const rawModels = provider.models;
+      const modelIds = Array.isArray(rawModels)
+        ? rawModels.map((model: any) => typeof model === 'string' ? model : model?.id)
+        : rawModels && typeof rawModels === 'object'
+          ? Object.keys(rawModels)
+          : [];
+      return modelIds
+        .filter((modelId: unknown): modelId is string => typeof modelId === 'string' && Boolean(modelId))
+        .map((modelId: string) => `${providerId}/${modelId}`);
+    });
+    return {
+      models,
+      reasoningOptions: res.data?.reasoning_options,
+    };
   }
   return { models: [] };
 }

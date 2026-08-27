@@ -4,31 +4,43 @@ import { ApiError, type ApiContextType } from '../context/ApiContext';
 import { fetchBackendModels, loadBackendModelsWithRefresh } from './backendModels';
 
 describe('fetchBackendModels for OpenCode', () => {
-  it('reads the provider catalog through the picker helper, never the Settings one', async () => {
-    const readOpencodeProvidersForModelPicker = vi.fn().mockResolvedValue({
+  it('reads the public options catalog without borrowing the native Settings surface', async () => {
+    const opencodeOptions = vi.fn().mockResolvedValue({
       ok: true,
-      providers: [
-        { id: 'openrouter', configured: true, models: ['anthropic/claude-x'] },
-        { id: 'openai', configured: false, models: ['gpt-5'] },
-      ],
+      data: {
+        models: {
+          providers: [
+            { id: 'openrouter', models: { 'anthropic/claude-x': {} } },
+            { id: 'custom', models: [{ id: 'hub-only' }] },
+          ],
+        },
+        reasoning_options: {
+          'custom/hub-only': [{ value: 'high', label: 'High' }],
+        },
+      },
     });
     const getOpencodeProviders = vi.fn();
     const api = {
-      readOpencodeProvidersForModelPicker,
+      opencodeOptions,
       getOpencodeProviders,
     } as unknown as ApiContextType;
 
     const result = await fetchBackendModels(api, 'opencode');
 
-    // Settings owns the toast-on-403 read; the picker must not borrow it, or a
-    // member's page load announces a refusal it is expected to absorb.
     expect(getOpencodeProviders).not.toHaveBeenCalled();
-    expect(result.models).toEqual(['openrouter/anthropic/claude-x']);
+    expect(opencodeOptions).toHaveBeenCalledWith('~');
+    expect(result.models).toEqual([
+      'openrouter/anthropic/claude-x',
+      'custom/hub-only',
+    ]);
+    expect(result.reasoningOptions).toEqual({
+      'custom/hub-only': [{ value: 'high', label: 'High' }],
+    });
   });
 
-  it('degrades to an empty catalog when the rank may not read the Settings endpoint', async () => {
+  it('degrades to an empty catalog when the rank may not read the live options endpoint', async () => {
     const api = {
-      readOpencodeProvidersForModelPicker: vi
+      opencodeOptions: vi
         .fn()
         .mockRejectedValue(new ApiError('forbidden', 403, 'instance_access_forbidden')),
     } as unknown as ApiContextType;
@@ -38,7 +50,7 @@ describe('fetchBackendModels for OpenCode', () => {
 
   it('still propagates a failure that is not the expected refusal', async () => {
     const api = {
-      readOpencodeProvidersForModelPicker: vi
+      opencodeOptions: vi
         .fn()
         .mockRejectedValue(new ApiError('boom', 500, null)),
     } as unknown as ApiContextType;

@@ -5723,10 +5723,16 @@ def discord_list_channels_live(bot_token: str, guild_id: str) -> dict:
 
 
 def opencode_options(cwd: str) -> dict:
+    from core.handlers.model_hub import load_opencode_public_models
     from vibe.async_bridge import run_coroutine_blocking
 
     try:
-        return run_coroutine_blocking(opencode_options_async(cwd))
+        return run_coroutine_blocking(
+            opencode_options_async(
+                cwd,
+                model_hub_models=load_opencode_public_models(),
+            )
+        )
     except Exception as exc:
         logger.warning("OpenCode options fetch failed: %s", exc, exc_info=True)
         return {"ok": False, "error": str(exc)}
@@ -5930,10 +5936,13 @@ async def opencode_options_async(
         sort_keys=True,
         separators=(",", ":"),
     )
+    cache_projection_matches = (
+        cache_entry.get("model_hub_projection") == projection_key
+    )
     if (
         cache_data
         and cache_age < _OPENCODE_OPTIONS_TTL_SECONDS
-        and cache_entry.get("model_hub_projection") == projection_key
+        and cache_projection_matches
     ):
         return {"ok": True, "data": cache_data, "cached": True}
 
@@ -6047,7 +6056,7 @@ async def opencode_options_async(
         return {"ok": True, "data": data}
     except Exception as exc:
         logger.warning("OpenCode options fetch failed: %s", exc, exc_info=True)
-        if cache_data:
+        if cache_data and cache_projection_matches:
             return {"ok": True, "data": cache_data, "cached": True, "warning": str(exc)}
         return {"ok": False, "error": str(exc)}
     finally:

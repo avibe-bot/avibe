@@ -365,6 +365,40 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _project_opencode_public_models(
+    config: ModelHubConfig,
+    *,
+    now: datetime,
+    unavailable_source_ids: frozenset[str] = frozenset(),
+) -> dict[str, dict[str, Any]]:
+    agent = config.agents["opencode"]
+    if agent.mode == "direct" or agent.menu is None:
+        return {}
+    projected: dict[str, dict[str, Any]] = {}
+    for identifier in dict.fromkeys(agent.menu.checked):
+        resolution = resolve_model_hub_turn(
+            config,
+            "opencode",
+            identifier,
+            now=now,
+            unavailable_source_ids=unavailable_source_ids,
+            supply_channel="hub",
+        )
+        model = project_opencode_public_model(identifier, resolution)
+        if model is not None:
+            projected[identifier] = model
+    return projected
+
+
+def load_opencode_public_models() -> dict[str, dict[str, Any]]:
+    """Load the persisted, credential-free OpenCode projection for local callers."""
+
+    return _project_opencode_public_models(
+        V2ModelHubConfigStore().load(),
+        now=_utc_now(),
+    )
+
+
 def _source_id() -> str:
     return f"src_{uuid.uuid4().hex[:12]}"
 
@@ -3881,25 +3915,14 @@ class ModelHubService:
         """Return the safe public projection owned by persisted Hub config."""
 
         config = self.store.load()
-        agent = config.agents["opencode"]
-        if agent.mode == "direct" or agent.menu is None:
-            return {}
-        now = self.now()
-        unavailable_source_ids = self._unavailable_native_sources(config, "opencode")
-        projected: dict[str, dict[str, Any]] = {}
-        for identifier in dict.fromkeys(agent.menu.checked):
-            resolution = resolve_model_hub_turn(
+        return _project_opencode_public_models(
+            config,
+            now=self.now(),
+            unavailable_source_ids=self._unavailable_native_sources(
                 config,
                 "opencode",
-                identifier,
-                now=now,
-                unavailable_source_ids=unavailable_source_ids,
-                supply_channel="hub",
-            )
-            model = project_opencode_public_model(identifier, resolution)
-            if model is not None:
-                projected[identifier] = model
-        return projected
+            ),
+        )
 
     @staticmethod
     def _probe_request(
