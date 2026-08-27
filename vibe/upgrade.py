@@ -875,7 +875,8 @@ def _with_memory_extra(package_spec: str) -> str:
 
         requirement = Requirement(package_spec)
     except InvalidRequirement:
-        return f"{package_spec}[{MEMORY_EXTRA_NAME}]"
+        artifact_uri = Path(package_spec).expanduser().resolve().as_uri()
+        return f"{PACKAGE_NAME}[{MEMORY_EXTRA_NAME}] @ {artifact_uri}"
 
     extras = sorted({*requirement.extras, MEMORY_EXTRA_NAME})
     rendered = f"{requirement.name}[{','.join(extras)}]"

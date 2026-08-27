@@ -6,6 +6,7 @@ import hashlib
 import io
 import os
 import re
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -101,10 +102,14 @@ def _venv(path: Path) -> Path:
     return _python(path)
 
 
-def _install_initial(python: Path, wheelhouse: Path, *, memory: bool) -> None:
-    wheels = [next(wheelhouse.glob("avibe_os-3.0.14-*.whl"))]
-    if memory:
-        wheels.append(next(wheelhouse.glob("avibe_memory-3.0.14-*.whl")))
+@pytest.fixture(scope="module")
+def packaged_dependency_seed(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    seed_root = tmp_path_factory.mktemp("packaged-dependency-seed")
+    source_wheelhouse = seed_root / "source"
+    source_wheelhouse.mkdir()
+    _build_release_wheels("3.0.14", source_wheelhouse)
+    dependency_seed = seed_root / "dependencies"
+    dependency_seed.mkdir()
     seed = subprocess.run(
         [
             sys.executable,
@@ -112,18 +117,30 @@ def _install_initial(python: Path, wheelhouse: Path, *, memory: bool) -> None:
             "pip",
             "download",
             "--dest",
-            str(wheelhouse),
+            str(dependency_seed),
             "setuptools",
             "wheel",
-            *(str(wheel) for wheel in wheels),
+            str(next(source_wheelhouse.glob("avibe_os-3.0.14-*.whl"))),
+            str(next(source_wheelhouse.glob("avibe_memory-3.0.14-*.whl"))),
         ],
-        env={**os.environ, "PIP_FIND_LINKS": str(wheelhouse)},
+        env={**os.environ, "PIP_FIND_LINKS": str(source_wheelhouse)},
         capture_output=True,
         text=True,
         check=False,
         timeout=600,
     )
     assert seed.returncode == 0, seed.stdout + seed.stderr
+    return dependency_seed
+
+
+def _install_initial(python: Path, wheelhouse: Path, *, memory: bool, dependency_seed: Path) -> None:
+    for artifact in dependency_seed.iterdir():
+        if artifact.name.lower().startswith(("avibe_os-", "avibe_memory-")):
+            continue
+        shutil.copy2(artifact, wheelhouse / artifact.name)
+    wheels = [next(wheelhouse.glob("avibe_os-3.0.14-*.whl"))]
+    if memory:
+        wheels.append(next(wheelhouse.glob("avibe_memory-3.0.14-*.whl")))
     env = {**os.environ, "PIP_NO_INDEX": "1", "PIP_FIND_LINKS": str(wheelhouse)}
     result = subprocess.run(
         [str(python), "-m", "pip", "install", *(str(wheel) for wheel in wheels)],
@@ -145,7 +162,9 @@ def _plan_env(wheelhouse: Path) -> dict[str, str]:
 
 @pytest.mark.integration
 def test_packaged_memory_shape_survives_synchronous_upgrade_and_supervisor_rollback(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    packaged_dependency_seed: Path,
 ) -> None:
     """Run the public planner/executor, then the existing supervisor rollback path."""
 
@@ -159,7 +178,7 @@ def test_packaged_memory_shape_survives_synchronous_upgrade_and_supervisor_rollb
 
     environment = tmp_path / "memory-venv"
     python = _venv(environment)
-    _install_initial(python, wheelhouse, memory=True)
+    _install_initial(python, wheelhouse, memory=True, dependency_seed=packaged_dependency_seed)
     env = _plan_env(wheelhouse)
     assert _installed_versions(python)["avibe-os"] == "3.0.14"
     assert _installed_versions(python)["avibe-memory"] == "3.0.14"
@@ -217,13 +236,15 @@ def test_packaged_memory_shape_survives_synchronous_upgrade_and_supervisor_rollb
 
 
 @pytest.mark.integration
-def test_packaged_core_only_upgrade_preserves_core_only_shape(tmp_path: Path) -> None:
+def test_packaged_core_only_upgrade_preserves_core_only_shape(
+    tmp_path: Path, packaged_dependency_seed: Path
+) -> None:
     wheelhouse = tmp_path / "wheelhouse"
     wheelhouse.mkdir()
     for version in ("3.0.14", "3.0.15"):
         _build_release_wheels(version, wheelhouse)
     python = _venv(tmp_path / "core-only-venv")
-    _install_initial(python, wheelhouse, memory=False)
+    _install_initial(python, wheelhouse, memory=False, dependency_seed=packaged_dependency_seed)
     plan = build_upgrade_plan(
         python_executable=str(python),
         base_env=_plan_env(wheelhouse),
@@ -239,13 +260,13 @@ def test_packaged_core_only_upgrade_preserves_core_only_shape(tmp_path: Path) ->
 
 
 @pytest.mark.integration
-def test_packaged_missing_memory_fails_before_install(tmp_path: Path) -> None:
+def test_packaged_missing_memory_fails_before_install(tmp_path: Path, packaged_dependency_seed: Path) -> None:
     wheelhouse = tmp_path / "wheelhouse"
     wheelhouse.mkdir()
     _build_release_wheels("3.0.14", wheelhouse)
     _build_release_wheels("3.0.15", wheelhouse)
     python = _venv(tmp_path / "missing-memory-venv")
-    _install_initial(python, wheelhouse, memory=True)
+    _install_initial(python, wheelhouse, memory=True, dependency_seed=packaged_dependency_seed)
     for wheel in wheelhouse.glob("avibe_memory-*.whl"):
         wheel.unlink()
     plan = build_upgrade_plan(

@@ -1478,7 +1478,7 @@ def test_pinned_rollback_keeps_exact_memory_version(monkeypatch):
     assert "avibe-memory==3.0.14" in plan.preflight_command
 
 
-def test_with_memory_extra_preserves_vcs_and_url_specs():
+def test_with_memory_extra_preserves_vcs_url_and_local_specs(tmp_path, monkeypatch):
     from vibe.upgrade import _with_memory_extra
 
     assert _with_memory_extra("git+https://example.test/avibe.git@abc123#subdirectory=src") == (
@@ -1486,7 +1486,13 @@ def test_with_memory_extra_preserves_vcs_and_url_specs():
     )
     assert _with_memory_extra("https://example.test/avibe.whl") == "avibe-os[memory] @ https://example.test/avibe.whl"
     assert _with_memory_extra("file:///tmp/avibe.whl") == "avibe-os[memory] @ file:///tmp/avibe.whl"
-    assert _with_memory_extra("/tmp/avibe.whl") == "/tmp/avibe.whl[memory]"
+    assert _with_memory_extra("/fixtures/avibe.whl") == "avibe-os[memory] @ file:///fixtures/avibe.whl"
+
+    monkeypatch.chdir(tmp_path)
+    relative_artifact = Path("dist/avibe.whl")
+    assert _with_memory_extra(str(relative_artifact)) == (
+        f"avibe-os[memory] @ {(tmp_path / relative_artifact).resolve().as_uri()}"
+    )
 
 
 def test_get_safe_cwd_returns_absolute_existing_dir():
