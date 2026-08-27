@@ -16,7 +16,9 @@ CLI, and Settings submit an immutable intent with a caller-generated
 `intent_id`; none of them acquires a package lock, executes an install plan,
 owns a pending marker, or schedules a follow-up restart. Before mutation the
 supervisor resolves one in-process execution bundle containing every command and
-datum needed for forward execution, activation, verification, and rollback.
+datum needed for forward execution, activation, verification, and rollback. The
+lifecycle owner is the sole writer of a schema-versioned, package-specific
+transaction record; ordinary restarts retain their separate existing status.
 
 Rollback for a split release will install the exact base core distribution
 without the `memory` extra and, when present in the captured shape, install an
@@ -57,9 +59,15 @@ Wave 3c owns:
 Non-goals:
 
 - no `PluginHost`, plugin discovery, UDS/RPC service, or second Memory process;
-- no generic lifecycle lock for start/stop, UI reload, QR, or Doctor;
+- no generic lifecycle lock for start/stop, UI reload, QR, or Doctor; the only
+  bounded exception is the ordinary `schedule_restart` entrypoint's one
+  nonblocking, non-owning reservation-active probe before it touches restart
+  state or processes;
 - no caller-local package lock, pending-restart marker, acknowledgement handoff,
   or durable UI job protocol;
+- no retained intent index or second transaction record; the one dedicated
+  package record and the existing ten retained audit logs are the complete
+  idempotency window;
 - no installation during Avibe startup;
 - no Memory data/config migration or product workflow redesign; and
 - no product, test, catalog, workflow, release, manifest, or config change in
@@ -214,9 +222,10 @@ Failure semantics are closed:
 - install failure after mutation begins runs the already-resolved exact rollback;
 - activation or health failure restores the exact package shape, database
   recovery point, and captured launcher through the supervisor's existing path;
-- a killed supervisor leaves its last state and resolved target in the existing
-  restart status/audit record; the next lifecycle owner reconciles that record
-  and current installed metadata before admitting a new forward mutation; and
+- a killed supervisor leaves its last state and resolved target in the dedicated
+  package transaction record and existing audit log; a same-intent recovery
+  owner reconciles that record and current installed metadata before any later
+  forward mutation can be admitted; and
 - no recovery step substitutes an unpinned install or recomputes captured facts
   from the replacement release.
 
@@ -238,28 +247,81 @@ repair generate `intent_id` before their first request and submit it with an
 intent such as `upgrade` or `repair_memory_package`. They do not build or execute
 an install plan. The supervisor process starts from the pre-mutation launcher,
 acquires the single package-lifecycle OS reservation, and records the admitted
-identity in the existing restart status/audit record before returning its
-one-shot admission receipt. The supervisor, not the caller, then captures shape,
-resolves both directions, mutates packages, stops and starts the runtime when
-required, verifies the result, and releases the reservation. Concurrent
+identity in `package_lifecycle_transaction.json` under the Avibe runtime
+directory before returning its one-shot admission receipt. That file is
+exclusive to package transactions and has one writer, the lifecycle owner;
+ordinary `schedule_restart` continues to own `restart_status.json` and cannot
+overwrite the package projection. The supervisor, not the caller, then captures
+shape, resolves both directions, mutates packages, stops and starts the runtime
+when required, verifies the result, and releases the reservation. Concurrent
 supervisors can be spawned, but exactly one can be admitted; losers return a
 stable busy result without touching packages.
 
+### Transaction Record And Bounded Idempotency
+
+The canonical package transaction record starts at `schema_version: 1`. Its
+loader obeys these compatibility rules before interpreting any transition:
+
+- a released `restart_status.json` or package record with no schema version, or
+  a supported older schema, loads as read-only legacy recovery input; missing
+  `intent_id`, captured-shape, or resolved-plan fields never make the record
+  unloadable and the loader never rewrites that legacy source in place;
+- recognized legacy facts are reconciled with current installed metadata and
+  reservation liveness before a version-1 record may be created for a later new
+  intent; and
+- a record with an unknown higher schema version loads only as fail-closed
+  recovery input with reason `transaction_record_version_unsupported`. It is
+  never overwritten, and every new forward admission is rejected until code
+  that understands the schema can reconcile it.
+
+`MEMORY-INDEP-020` includes released `restart_status.json` fixtures with no
+`schema_version`, `intent_id`, captured shape, or resolved rollback identity, and
+proves they load without rejection while remaining read-only recovery input.
+
 `intent_id` is an opaque, collision-resistant transaction identity and
-idempotency key. Re-submitting the same identity and canonical intent payload
-returns the existing owner's current projection, whether active or terminal; it
-neither starts another supervisor nor reacquires the reservation. Reusing an
-identity with different intent content is rejected as an identity conflict. The
-identity and projection live only in the existing restart status/audit record.
-There is no new database, job store, pending file, acknowledgement record, or
-caller-owned coordination state.
+idempotency key. The guarantee is deliberately finite: an identity is resolvable
+only while it is present in the dedicated current transaction record or one of
+the existing ten retained transaction audit logs. Those audit entries retain
+the schema version, identity, canonical-intent digest, and terminal projection
+needed for lookup; there is no separate retained index. Re-submitting a
+resolvable identity and the same canonical intent returns its active or terminal
+projection and cannot repeat forward mutation. Reusing it with different intent
+content is rejected as an identity conflict.
+
+An identity outside that retention window returns stable `intent_unknown`; it is
+never interpreted as a new request and cannot mutate packages. The caller first
+reads current dependency and owner state, then mints a new identity for an
+explicit retry only when no active transaction remains. There is no new
+database, job store, pending file, acknowledgement record, or caller-owned
+coordination state.
+
+### Same-Intent Recovery Election
+
+A same-intent resubmission is also the only recovery-election request. When its
+record is nonterminal and the reservation is live, it returns the current
+projection. When the recorded supervisor and reservation are no longer live,
+resubmission of that same identity makes one nonblocking attempt on the existing
+package reservation. Exactly one contender can become recovery owner; losers
+return the current nonterminal/busy projection. This is the same reservation,
+not a lease, token, or second coordination primitive.
+
+The elected owner must not execute forward mutation. It first reconciles current
+installed metadata against the recorded `CapturedPackageShape` and
+`ResolvedRollbackPlan`. If the resolved bundle and staged artifacts remain
+complete, it executes only the recorded exact rollback and ends `restored`. If
+required staging is missing or invalid, it fails closed as terminal `failed`
+with reason `recovery_staging_unavailable`; it never resolves an unpinned
+replacement from the network. This preserves at-most-once forward mutation. A
+new forward request is admissible only after the recovered record is terminal,
+and it must carry a newly minted identity.
 
 The reservation is held by the supervisor from `admitted` through a terminal
 state and is inherited by its package-manager child so a supervisor crash cannot
-make a still-running mutation appear unlocked. The existing restart status and
-audit log carry `intent_id`, captured shape, resolved rollback identity, and last
-transition for crash recovery. They are written only by the lifecycle
-owner. This is not a second UI job store or a caller-visible pending protocol.
+make a still-running mutation appear unlocked. The dedicated package record and
+existing audit log carry `schema_version`, `intent_id`, captured shape, resolved
+rollback identity, and last transition for crash recovery. They are written only
+by the lifecycle owner. This is not a UI job store or a caller-visible pending
+protocol.
 
 ### Pre-Mutation Execution Bundle
 
@@ -270,6 +332,18 @@ checks, stop/start commands and environments, captured launcher, health targets,
 timeouts, and all data needed to project a terminal result. The supervisor also
 imports every internal helper and standard-library module that bundle execution
 can call before entering `mutating`.
+
+Every external command in the resolved bundle carries an immutable
+`execution_timeout_seconds` enforced by its child-side deadline runner, not only
+by the supervisor waiting for it. The staged runner owns the package-manager
+process group on Unix or Job Object on Windows, inherits the one reservation
+descriptor/handle, terminates its command tree at the recorded deadline, and
+then exits so the operating system releases the reservation even when the
+supervisor has died. It cannot renew the deadline, start recovery, or write the
+transaction record. The deadline runner is only a command executor already
+captured in the bundle, not an external lifecycle bootstrap or owner. There is
+no external reaper, heartbeat, lease, or second coordination primitive; after
+release, the next same-intent submission follows the recovery election above.
 
 From `mutating` onward, the process may execute only bundle-held commands and
 data plus standard-library code imported before mutation. A fail-loud guard
@@ -312,13 +386,15 @@ requested
   -> admitted -> captured -> resolved -> mutating
   -> activating -> verifying -> succeeded
   -> rolling_back -> restored | failed
+stale nonterminal + same-intent election -> recovering -> restored | failed
 ```
 
 `rejected`, `busy`, `succeeded`, `restored`, and `failed` are terminal. Failures
 before `mutating` leave the installation untouched. Failures from `mutating`
 onward cannot release the reservation until exact rollback reaches a terminal
 state. Stale status with no live reservation is recovery input, never proof of
-success and never permission to overwrite it with a new forward request.
+success and never permission to overwrite it with a new forward request. It can
+be advanced only by same-intent recovery election.
 
 Admission is also the server-side policy boundary:
 
@@ -338,18 +414,28 @@ Admission is also the server-side policy boundary:
 This replaces `MEMORY-INDEP-018-KBD-10`. Operators do not overlap package
 mutations during rollout; after an active transaction settles they may retry the
 same intent. The implementation must not reproduce PR #1710's spread: no lock
-acquisition in callers, no pending marker, no UI-reload handoff, and no QR,
-Doctor, or ordinary lifecycle command taught to coordinate package ownership.
-Their existing behavior is outside this contract; only a package transaction's
-own restart belongs to this supervisor state machine.
+acquisition in callers, no pending marker, no UI-reload handoff, and no QR or
+Doctor coordination.
+
+Ordinary restarts have one bounded safety check at their existing single
+`schedule_restart` server entrypoint. Before writing `restart_status.json` or
+touching a process, that entrypoint performs one nonblocking, read-only
+reservation-active probe. Contention returns structured `busy` immediately. A
+free probe is released immediately and ordinary restart behavior proceeds; the
+restart path never becomes package owner, holds no reservation, waits for none,
+and never reads or writes the dedicated package transaction record. Package
+transactions likewise never write `restart_status.json`. This record separation
+and one-shot probe are the complete exception; ordinary lifecycle commands do
+not join the package state machine.
 
 `MEMORY-INDEP-020` reserves multiprocess admission evidence: simultaneous
 requests from all four entrypoint classes admit exactly one owner through
 restart, same-`intent_id` resubmissions are idempotent while conflicting reuse is
-rejected, source deployments reject server-side, the post-mutation import and
-resource-read guard covers forward/activation/rollback execution, and owner death
-either recovers the recorded transaction or fails closed before another
-mutation.
+rejected within the finite retention window, expired identities return
+`intent_unknown`, source deployments reject server-side, the post-mutation
+import and resource-read guard covers forward/activation/rollback execution,
+and owner death either recovers the recorded transaction or fails closed before
+another mutation.
 
 ## Invariant 4: UI Recovery Is State-Derived
 
@@ -363,16 +449,22 @@ whole Settings action. No restart acknowledgement or grace delay is required.
 
 When the replacement UI is reachable, the dependency-specific adapter first
 returns a live in-memory job unchanged. Otherwise it uses `intent_id` to read the
-lifecycle owner's projection from the existing restart status/audit record. An
-active projection returns nonterminal `status=in_progress` with the same
-dependency and intent identity; a terminal projection returns the owner's exact
-result. Only if neither exists does `memory-package` re-run the offline/read-only
-dependency status. It returns synthetic terminal success with the same identity
-only when the complete required readiness invariant above is currently true;
-otherwise it preserves `job_not_found` and the current non-ready reason. Other
-dependencies do not gain readiness-based recovery. The adapter is read-only and
-does not acquire the reservation, acknowledge a restart, or write transaction
-state.
+lifecycle owner's projection from the dedicated package transaction record and
+retained audit window. An active projection returns nonterminal
+`status=in_progress` with the same dependency and intent identity; a terminal
+projection returns the owner's exact result. Only if neither exists does
+`memory-package` re-run the offline/read-only dependency status. It returns
+synthetic terminal success with the same identity only when the complete
+required readiness invariant above is currently true; otherwise it preserves
+`job_not_found` and the current non-ready reason. Other dependencies do not gain
+readiness-based recovery. The adapter is read-only and does not acquire the
+reservation, acknowledge a restart, or write transaction state.
+
+If lookup returns `intent_unknown`, the adapter preserves that machine reason
+and performs the same read-only owner/dependency refresh. It never silently
+reuses the expired identity as a new install. The caller may mint a new identity
+only after that refresh proves there is no active transaction; the subsequent
+submission is an explicit new attempt.
 
 The deadline bounds one polling session, not the lifecycle transaction. At the
 deadline the adapter performs one final owner-projection read and one final
@@ -414,6 +506,24 @@ Scenario IDs must be visible in their executable test names and in the Memory
 independence catalog when implementation begins. Release/migration guards must
 scan the shipped tree and published artifact set rather than a curated file list.
 
+`MEMORY-INDEP-020` additionally requires these four executable cases:
+
+1. A released legacy `restart_status.json` fixture with no version-1 fields
+   loads as read-only recovery input and does not reject-load.
+2. An identity pruned from both the current record and ten-log audit window
+   returns `intent_unknown`; status refresh precedes a newly minted retry.
+3. Killing the owner while a package child hangs proves the child-side deadline
+   terminates the command tree and releases the reservation, after which one
+   same-intent contender reconciles to `restored` or fail-closed `failed` without
+   repeating forward mutation.
+4. An ordinary restart concurrent with a live package reservation returns
+   structured `busy` before writing `restart_status.json` or touching a process,
+   while the package projection remains unchanged.
+
+The release guard also verifies the complete staged Draft asset set, hashes,
+distribution metadata, and local resolver closure before finalization, then
+checks public Memory and core availability at their ordered publication gates.
+
 ## Migration And Release Ordering
 
 The first release whose core wheel no longer bundles Memory is a transition
@@ -422,19 +532,31 @@ release. Its base `avibe-os` metadata has an exact hard dependency on the matche
 is required because a pre-Wave-3c upgrader cannot submit the new transaction or
 preserve optional package shape. No startup path installs a package.
 
-Publication order is fixed:
+Publication uses the existing release identity and one asset-complete finalizer;
+it does not introduce a Memory-only tag, release, or second finalizer. The order
+is fixed:
 
-1. Build and verify the `avibe-memory` wheel/sdist and its Memory-owned EverOS
-   manifest/assets.
-2. Publish those artifacts and prove their public URLs, hashes, and resolver
-   availability.
-3. Build the transition `avibe-os` artifacts with the exact hard dependency and
-   with no Memory implementation or EverOS manifest in the core wheel.
-4. Publish core only after the Memory availability gate passes.
-5. Keep the transition gate until packaged upgrade and rollback evidence covers
-   every supported pre-split and split origin.
-6. In a later release, remove the base hard dependency and retain the matched
-   `avibe-os[memory]` extra after owner approval of the gate evidence.
+1. Build the `avibe-memory` wheel/sdist and its Memory-owned EverOS
+   manifest/assets, then stage them in the official release Draft and workflow
+   artifacts without making a public availability claim.
+2. Verify staged Memory hashes and distribution metadata, and prove the exact
+   transition core requirement resolves locally from the staged wheelhouse.
+3. Build and stage the transition `avibe-os` artifacts with the exact hard
+   dependency, no Memory implementation, and no EverOS manifest in the core
+   wheel. Verify hashes, metadata, local resolver closure, and the complete
+   asset set while the GitHub Release remains Draft.
+4. The single finalizer publishes the asset-complete GitHub Release, uploads the
+   Memory distributions to their package index before any core distribution,
+   and verifies the exact Memory release is publicly resolvable and its public
+   manifest URLs and hashes match the staged bytes.
+5. Only after that public Memory check passes may the same finalizer upload core.
+   It then resolves and downloads both public distributions together and repeats
+   the manifest/hash availability checks before declaring success or allowing
+   the transition release gate to be removed.
+6. Keep the transition gate until packaged upgrade and rollback evidence covers
+   every supported pre-split and split origin. In a later release, remove the
+   base hard dependency and retain the matched `avibe-os[memory]` extra only
+   after owner approval of the post-publication evidence.
 
 This retires `KBD-1` through the hard transition dependency, `KBD-5` through
 fully staged legacy rollback, and `KBD-6` through transition availability plus
@@ -447,9 +569,11 @@ Compatibility is one-way during the transition: old releases can upgrade
 because the hard dependency is ordinary package metadata; the Wave 3c
 transaction can roll back because it captures the old distribution name,
 launcher, release family, and exact Memory provider cardinality/version before
-mutation. Memory data and V2 config formats do not change. The existing
-restart status/audit projection gains `intent_id`; no new persistence surface is
-introduced.
+mutation. Memory data and V2 config formats do not change. Wave 3c introduces
+one schema-versioned, package-specific transaction record so ordinary restart
+status cannot overwrite package recovery state; the record is not a UI job
+protocol and gains no retained identity index. Released `restart_status.json`
+shapes remain accepted as read-only legacy recovery input under the rules above.
 
 ## Recovery Inventory From PR #1739
 
@@ -472,13 +596,15 @@ behavior is re-derived from this contract and current `origin/dev`.
 2. **Contract owners:** land loader readiness and captured/resolved rollback
    types with `MEMORY-INDEP-019` and `021`; no caller-local coordination.
 3. **Lifecycle owner:** move all four mutation entrypoint classes behind
-   `PackageLifecycleTransaction`, idempotent intent projection, and the frozen
-   execution bundle in one bounded vertical delivery with `MEMORY-INDEP-020`.
+   `PackageLifecycleTransaction`, the dedicated versioned record, bounded
+   intent projection and recovery election, and the frozen self-bounded
+   execution bundle in one vertical delivery with `MEMORY-INDEP-020`.
 4. **Recovery:** land the dependency-specific UI/API convergence and packaged
    `MEMORY-INDEP-018` closed loop.
-5. **Release transition:** move manifest ownership, publish Memory first, ship
-   the hard-dependency transition core, then remove the release gate only after
-   all packaged matrices and migration guards pass.
+5. **Release transition:** move manifest ownership, stage and verify the complete
+   release, publish Memory before core inside the single finalizer, then remove
+   the release gate only after public availability, all packaged matrices, and
+   migration guards pass.
 
 Each implementation PR must use exact packaged artifacts where package shape is
 the behavior, keep the local Avibe service untouched, and stop if ownership
