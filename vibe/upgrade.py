@@ -15,6 +15,7 @@ import time
 import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import NamedTuple, cast
 from uuid import uuid4
@@ -74,6 +75,25 @@ _PRE_ORDER = {
     "pre": 2,
     "preview": 2,
 }
+
+
+class RestartState(str, Enum):
+    """Closed restart-state vocabulary and its retention policy."""
+
+    def __new__(cls, value: str, retention: str | None):
+        member = str.__new__(cls, value)
+        member._value_ = value
+        member.retention = retention
+        return member
+
+    SCHEDULED = ("scheduled", "seed")
+    RUNNING = ("running", "seed")
+    SUCCEEDED = ("succeeded", "result")
+    FAILED = ("failed", "result")
+    ERROR = ("error", "result")
+    CANCELLED = ("cancelled", "result")
+    SKIPPED = ("skipped", "result")
+    UNKNOWN = ("unknown", None)
 
 
 @dataclass(frozen=True)
@@ -146,7 +166,11 @@ def restart_record_is_pending(
 ) -> bool:
     """Apply the restart ownership policy to one persisted status record."""
 
-    if payload.get("state") not in {"scheduled", "running"}:
+    try:
+        state = RestartState(payload.get("state"))
+    except (TypeError, ValueError):
+        return False
+    if state.retention != "seed":
         return False
     supervisor_pid = payload.get("supervisor_pid")
     if isinstance(supervisor_pid, int) and supervisor_pid > 0 and runtime_mod.pid_alive(supervisor_pid):

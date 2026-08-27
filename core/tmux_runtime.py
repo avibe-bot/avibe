@@ -55,6 +55,7 @@ _TMUX_SPEC = ManagedRuntimeSpec(
     replace_invalid_target_on_repair=True,
     include_manifest_digest_in_install_fingerprint=True,
 )
+TMUX_BINARY_PREPARATION_FAILURE_REASONS = frozenset({"xattr_failed"})
 
 
 class TmuxRuntimeManager(ManagedRuntimeManager):
@@ -83,6 +84,11 @@ class TmuxRuntimeManager(ManagedRuntimeManager):
             manifest_url=manifest_url if manifest_url is not None else os.environ.get("VIBE_TMUX_MANIFEST_URL"),
             offline=env_flag_enabled("VIBE_TMUX_OFFLINE") if offline is None else offline,
         )
+
+    def install_failure_reasons(self) -> frozenset[str]:
+        """Return every failure identity emitted by the tmux installer."""
+
+        return self._base_install_failure_reasons() | TMUX_BINARY_PREPARATION_FAILURE_REASONS
 
     def _parse_manifest(self, payload: bytes, *, loaded_from: str) -> ManagedRuntimeManifest | None:
         """Read released schema-1 manifests that predate binary digests."""
