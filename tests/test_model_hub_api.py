@@ -1117,6 +1117,22 @@ def test_runtime_install_crosses_the_controller_rpc_boundary(monkeypatch):
     assert calls == [("runtime_install", None)]
 
 
+def test_reorder_client_preserves_explicit_null_order(monkeypatch):
+    from vibe import model_hub_client
+
+    calls = []
+
+    async def rpc(operation, payload=None):
+        calls.append((operation, payload))
+        return {"sources": {"order": []}, "routes": {}}
+
+    monkeypatch.setattr(model_hub_client, "_rpc", rpc)
+
+    asyncio.run(ModelHubRemoteService().reorder_agent_chains("claude", None))
+
+    assert calls == [("reorder_agent_chains", {"backend": "claude", "order": None})]
+
+
 def test_runtime_start_is_allowlisted_by_controller_rpc(tmp_path):
     from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
 
@@ -2421,6 +2437,31 @@ def test_source_adoption_projection_is_sorted_by_backend_and_menu_model(tmp_path
     ]
 
 
+def test_source_adoption_projection_ignores_routes_for_direct_backends(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_direct_adopted",
+        kind="api_key",
+        vendor="anthropic",
+        display_name="Direct source",
+        protocol="anthropic",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id="claude-opus-4-6", provenance="discovered")],
+        credential_ref="cred_direct_adopted",
+    )
+    store.config.sources = [source]
+    store.config.agents["claude"].routes = {
+        "claude-opus-4-6": ModelHubRouteConfig(
+            hops=(ModelHubRouteHopConfig(source.id, "claude-opus-4-6"),)
+        )
+    }
+    store.config.agents["claude"].mode = "direct"
+
+    assert service.list_sources()[0]["adopted_by"] == []
+
+
 def test_direct_to_hub_adoption_does_not_leak_partial_state_on_save_failure(tmp_path):
     class FailingStore(MemoryStore):
         def save(self, config):
@@ -2477,6 +2518,197 @@ def test_reorder_agent_chains_applies_source_order_without_changing_pairs(tmp_pa
         {"source_id": "src_second001", "model_id": model_id},
         {"source_id": "src_first0001", "model_id": model_id},
     ]
+
+
+def test_reorder_agent_chains_commits_source_order_with_route_reorder(tmp_path):
+    service, store, _ = _service(tmp_path)
+    model_id = "claude-opus-4-6"
+    _set_claude_route_fixture(
+        store,
+        ("src_first0001", "src_second001"),
+        model_id,
+    )
+
+    agent = asyncio.run(
+        service.reorder_agent_chains(
+            "claude",
+            ["src_second001", "src_first0001"],
+        )
+    )
+
+    assert store.config.agents["claude"].sources.order == [
+        "src_second001",
+        "src_first0001",
+    ]
+    assert agent["sources"]["order"] == ["src_second001", "src_first0001"]
+    assert [hop["source_id"] for hop in agent["routes"][model_id]["hops"]] == [
+        "src_second001",
+        "src_first0001",
+    ]
+
+
+def test_new_source_is_appended_to_route_hops(tmp_path):
+    service, store, _ = _service(tmp_path)
+    model_id = "claude-opus-4-6"
+    _set_claude_route_fixture(store, ("src_listed01", "src_heldout1"), model_id)
+    store.config.agents["claude"].sources.order = ["src_listed01"]
+    new_source = ModelHubSourceConfig(
+        id="src_new0001",
+        kind="api_key",
+        vendor="anthropic",
+        display_name="src_new0001",
+        protocol="anthropic",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id=model_id, provenance="discovered")],
+        credential_ref="cred_src_new0001",
+    )
+    config = service._clone_config(store.config)
+
+    service._apply_source_placement(config, new_source)
+
+    agent = config.agents["claude"]
+    assert agent.sources.order == ["src_listed01", "src_new0001"]
+    assert [hop.source_id for hop in agent.routes[model_id].hops] == [
+        "src_listed01",
+        "src_heldout1",
+        "src_new0001",
+    ]
+
+
+def test_new_source_preserves_explicit_route_order(tmp_path):
+    service, store, _ = _service(tmp_path)
+    model_id = "claude-opus-4-6"
+    _set_claude_route_fixture(store, ("src_explicit01", "src_listed01"), model_id)
+    store.config.agents["claude"].sources.order = ["src_listed01"]
+    store.config.agents["claude"].routes[model_id] = ModelHubRouteConfig(
+        hops=(
+            ModelHubRouteHopConfig("src_explicit01", model_id),
+            ModelHubRouteHopConfig("src_listed01", model_id),
+        )
+    )
+    new_source = ModelHubSourceConfig(
+        id="src_new0001",
+        kind="api_key",
+        vendor="anthropic",
+        display_name="src_new0001",
+        protocol="anthropic",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id=model_id, provenance="discovered")],
+        credential_ref="cred_src_new0001",
+    )
+    config = service._clone_config(store.config)
+
+    service._apply_source_placement(config, new_source)
+
+    agent = config.agents["claude"]
+    assert agent.sources.order == ["src_listed01", "src_new0001"]
+    assert [hop.source_id for hop in agent.routes[model_id].hops] == [
+        "src_explicit01",
+        "src_listed01",
+        "src_new0001",
+    ]
+
+
+def test_reorder_route_accepts_source_order_atomically(monkeypatch, tmp_path):
+    service, store, _ = _service(tmp_path)
+    model_id = "claude-opus-4-6"
+    _set_claude_route_fixture(
+        store,
+        ("src_first0001", "src_second001"),
+        model_id,
+    )
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+
+    response = client.post(
+        "/api/models/agents/claude/chains/reorder",
+        json={"order": ["src_second001", "src_first0001"]},
+        headers=csrf_headers(client, base_url),
+        base_url=base_url,
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    _assert_envelope(payload)
+    assert payload["agent"]["sources"]["order"] == [
+        "src_second001",
+        "src_first0001",
+    ]
+    assert [hop["source_id"] for hop in payload["agent"]["routes"][model_id]["hops"]] == [
+        "src_second001",
+        "src_first0001",
+    ]
+
+
+def test_reorder_route_rejects_explicit_null_order(monkeypatch, tmp_path):
+    service, _, _ = _service(tmp_path)
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+
+    response = client.post(
+        "/api/models/agents/claude/chains/reorder",
+        json={"order": None},
+        headers=csrf_headers(client, base_url),
+        base_url=base_url,
+    )
+
+    assert response.status_code == 400
+    payload = response.get_json()
+    _assert_envelope(payload, ok=False)
+    assert payload["error"] == "invalid_source_order"
+
+
+@pytest.mark.parametrize(
+    ("body", "content_type"),
+    [(b"null", "application/json"), (b"null", "text/plain")],
+)
+def test_reorder_route_rejects_non_object_body(monkeypatch, tmp_path, body, content_type):
+    service, _, _ = _service(tmp_path)
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+    headers = {**csrf_headers(client, base_url), "content-type": content_type}
+
+    response = client.post(
+        "/api/models/agents/claude/chains/reorder",
+        content=body,
+        headers=headers,
+        base_url=base_url,
+    )
+
+    assert response.status_code == 400
+    payload = response.get_json()
+    _assert_envelope(payload, ok=False)
+    assert payload["error"] == "invalid_source_order"
+
+
+def test_reorder_route_rejects_malformed_json(monkeypatch, tmp_path):
+    service, _, _ = _service(tmp_path)
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+    headers = {
+        **csrf_headers(client, base_url),
+        "content-type": "application/json",
+    }
+
+    response = client.post(
+        "/api/models/agents/claude/chains/reorder",
+        content=b'{"order":',
+        headers=headers,
+        base_url=base_url,
+    )
+
+    assert response.status_code == 400
+    payload = response.get_json()
+    _assert_envelope(payload, ok=False)
+    assert payload["error"] == "invalid_source_order"
 
 
 def test_ui_model_hub_default_is_controller_rpc_client(monkeypatch):

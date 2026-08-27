@@ -1,4 +1,4 @@
-import type { NeedsActionDetailKey, SourceState, SourceStatus } from './types';
+import type { AgentBackend, AdoptedBy, NeedsActionDetailKey, SourceState, SourceStatus } from './types';
 
 export type SourceStateSurface = 'card' | 'detail';
 
@@ -16,6 +16,18 @@ export type SourceStatePresentation = {
   textClass: string;
   dotClass: string;
 };
+
+/**
+ * Keep the cached Source adoption projection readable while removing backends
+ * that the authoritative Agent projection has already switched to direct mode.
+ * An omitted active-backend set means the Agent read is not authoritative yet.
+ */
+export const activeSourceAdoption = (
+  adoptedBy: AdoptedBy[] | undefined,
+  activeBackends?: ReadonlySet<AgentBackend>,
+): AdoptedBy[] | undefined => activeBackends && adoptedBy
+  ? adoptedBy.filter(({ backend }) => activeBackends.has(backend))
+  : adoptedBy;
 
 /**
  * A healthy source that no route currently reaches. It is the state a source
@@ -90,7 +102,7 @@ export const sourceStatePresentation = (
   if (state.status === 'active' && !adoption.known) {
     return { key: null, textClass: 'text-muted', dotClass: 'bg-muted' };
   }
-  if (state.status === 'active' && adoption.backends.length > 0) {
+  if ((state.status === 'active' || state.status === 'standby') && adoption.backends.length > 0) {
     if (surface === 'detail') {
       return {
         key: 'settings.models.sourceDetail.status.inUse',

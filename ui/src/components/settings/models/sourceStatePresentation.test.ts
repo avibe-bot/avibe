@@ -48,6 +48,18 @@ describe('sourceStatePresentation', () => {
     })).toMatchObject({ key: 'settings.models.sourceDetail.status.inUse', dotClass: 'bg-mint' });
   });
 
+  it('uses persisted route adoption for healthy gateway sources in standby', () => {
+    expect(sourceStatePresentation(state('standby'), 'card', 'zh', 0, {
+      known: true,
+      backends: ['Claude Code', 'Codex'],
+      native: false,
+    })).toMatchObject({
+      key: 'settings.models.upstream.state.supplying',
+      values: { backends: 'Claude Code、Codex' },
+      dotClass: 'bg-mint',
+    });
+  });
+
   it('renders a future cooldown as a localized duration', () => {
     const view = sourceStatePresentation(
       state('cooldown', { retry_at: '2026-08-11T10:05:00Z' }),

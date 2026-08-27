@@ -367,10 +367,9 @@
 
 .model-hub-overview-chevron,
 .model-hub-overview-info { color: var(--model-hub-ink-40); }
-/* The agent group head is a fixed 66px band holding a 36px action row and a
-   16px status row with a 7px gap; the frame's 59px of content is centred in it,
-   so the inset is the half-pixel 3.5 rather than a round number. Both rows have
-   to be pinned, because inherited line-height alone grows them past that. */
+/* The agent group head keeps a 66px minimum while holding a 36px action row and a
+   16px status row with a 7px gap. Its height may grow when compact layouts wrap
+   the action row, while the row and status line dimensions stay pinned. */
 .model-hub-agent-head-action {
   height: var(--model-hub-agent-head-action-height, 36px);
   padding-block: 0;
@@ -1321,6 +1320,24 @@
   font-weight: 600;
   letter-spacing: 0;
   line-height: normal;
+}
+.model-hub-order-section-head--held-out {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+.model-hub-order-section-head--held-out > .model-hub-order-section-explanation {
+  display: block;
+  flex: 1 1 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--model-hub-order-meta-size);
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 15px;
 }
 .model-hub-order-row {
   height: var(--model-hub-order-row-height);

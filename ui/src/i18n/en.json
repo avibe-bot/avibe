@@ -774,9 +774,9 @@
             "body": "Configuration stays hidden until the runtime state can be confirmed."
           }
         },
-        "gatewayInfo": {
-          "label": "What the gateway is",
-          "body": "The gateway is a dispatch layer on this machine: it holds the sources you add and supplies them to your Agents in the order you configure."
+        "modelsInfo": {
+          "label": "What a model is",
+          "body": "A model is what an Agent uses to generate a response. You can see whether each model can run, which source supplies it, and set a route for one when needed."
         },
         "tab": {
           "hub": "Sources & gateway",
@@ -886,8 +886,10 @@
         "retry": "Try again"
       },
       "gateway": {
-        "heading": "Gateway",
-        "sourceOrder": "Source order",
+        "heading": "Gateway routes",
+        "infoLabel": "What gateway routes are",
+        "info": "Gateway routes decide which upstream source each Agent's model uses first among the sources already configured in its route. When quota, rate-limit, server, authentication, or network failures prevent a request, the next priority is used automatically.",
+        "sourceOrder": "Adjust priority",
         "switchToGateway": "Switch to gateway",
         "switchToDirect": "Switch to direct",
         "fail": {
@@ -904,8 +906,8 @@
           "unread": "Could not read this backend's supply · the gateway itself is fine"
         },
         "row": {
-          "current": "Now: {{source}}",
-          "currentTakeover": "Now: {{source}} (takeover)"
+          "current": "From: {{source}}",
+          "currentTakeover": "From: {{source}} (takeover)"
         },
         "group": {
           "subtitle": {
@@ -960,12 +962,14 @@
         "andMore_other": "{{count}} more"
       },
       "upstream": {
-        "heading": "Sources",
+        "heading": "Upstream sources",
+        "infoLabel": "What upstream sources are",
+        "info": "An upstream source is an account or API key. The gateway gets models from it and supplies them to Agents through routes.",
         "count_one": "{{count}} source",
         "count_other": "{{count}} sources",
         "group": {
           "native": "Native · on this machine",
-          "hub": "Held by the gateway"
+          "hub": "Connected to gateway"
         },
         "kind": {
           "nativeCredential": "Native · local credential",
@@ -984,7 +988,7 @@
         "state": {
           "supplyingNative": "Supplying {{backend}} (native)",
           "supplying": "Supplying {{backends}}",
-          "standby": "Standby",
+          "standby": "Available · not currently supplying",
           "unavailableRetry": "Unavailable · retrying automatically after {{delay}}",
           "unavailableDue": "Unavailable · the retry is due"
         }
@@ -1006,7 +1010,7 @@
         "count_other": "{{count}} sources",
         "group": {
           "native": "Native · on this machine",
-          "hub": "Held by the gateway"
+          "hub": "Connected to gateway"
         },
         "subtitle": "Manage shared accounts and model inventories; source order is set on each agent card",
         "modelCount_one": "{{count}} model",
@@ -1027,13 +1031,15 @@
         "oauthSignedOut": "CLI subscription is signed out"
       },
       "order": {
-        "title": "{{backend}} · Source order",
-        "subtitle": "The Source order this backend stores. Changing it changes no configured Route chain.",
+        "title": "{{backend}} · Global route priority",
+        "subtitle": "Among sources already configured in each model's route, those at the top are used first. When quota, rate-limit, server, authentication, or network failures prevent a request, the next priority is used automatically.",
+        "infoLabel": "What global route priority is",
         "reorder": "Reorder source",
         "section": {
           "ordered": "In this order",
           "ordered.note": "Drag to reorder",
-          "heldOut": "Not in this order"
+          "heldOut": "Not in this order",
+          "heldOut.note": "These sources remain in existing routes after the ordered sources. To remove one from a route, edit that model's gateway route."
         },
         "action": {
           "include": "Add to order",
@@ -1216,7 +1222,7 @@
         "retry": "Retry",
         "empty": "This route chain is empty. Add a hop, or leave it unconfigured.",
         "impact": { "title": "The route chain was saved", "detail": "These are the items this save actually removed or interrupted.", "refreshFail": "The route chain was saved, but the model surface could not be refreshed.", "done": "Done" },
-        "hint": "This chain is stored configuration. Later source-order changes do not change it."
+        "hint": "This chain is stored configuration. Later Source order changes reorder its hops to match."
       },
       "recent": {
         "title": "Recent switches",
@@ -1451,7 +1457,7 @@
             "accountBanned": "Account restricted"
           },
           "error": "Error",
-          "standbyHintLabel": "What standby means",
+          "standbyHintLabel": "What this status means",
           "standbyHint": "This source is healthy. It reads as in use once a backend in Gateway mode serves a route through it.",
           "listUpdated": "· model list updated {{time}}"
         },

@@ -115,6 +115,7 @@ from .usage import USAGE_DEFAULT_WINDOW_DAYS, BoundedUsageLedger, SourceIdentity
 CONTRACT_VERSION = 6
 AGENT_CHAIN_CONTRACT_VERSION = 6
 PROBE_RESULT_CONTRACT_VERSION = 6
+_REORDER_ORDER_UNSET = object()
 # Settlement generations are minted per attempt start and live only in this
 # runtime's ledger, which restarts with the process. Every generation this
 # runtime mints is therefore strictly greater than this pre-attempt value, and
@@ -1659,6 +1660,7 @@ class ModelHubService:
         result = [
             {"backend": backend, "menu_model": menu_model}
             for backend in MODEL_HUB_BACKENDS
+            if config.agents[backend].mode == "hub"
             for menu_model, route in config.agents[backend].routes.items()
             if any(hop.source_id == source_id for hop in route.hops)
         ]
@@ -3241,32 +3243,43 @@ class ModelHubService:
             ),
         )
 
+    def _validate_agent_source_order(
+        self,
+        config: ModelHubConfig,
+        backend: str,
+        order: object,
+    ) -> list[str]:
+        if not isinstance(order, list):
+            raise self._invalid_source_order()
+        seen: set[str] = set()
+        by_id = {source.id: source for source in config.sources}
+        for source_id in order:
+            if (
+                not isinstance(source_id, str)
+                or source_id in seen
+                or source_id not in by_id
+                or not self._eligible_for_agent(by_id[source_id], backend)
+            ):
+                raise self._invalid_source_order()
+            seen.add(source_id)
+        return list(order)
+
     async def set_agent_sources(self, backend: str, payload: object) -> dict:
         if backend not in MODEL_HUB_BACKENDS or not isinstance(payload, dict):
             raise self._invalid_source_order()
         if set(payload) != {"order"}:
             rejected = sorted(set(payload) - {"order"})
             raise self._invalid_source_order(rejected_keys=rejected)
-        order = payload.get("order")
-        if not isinstance(order, list):
-            raise self._invalid_source_order()
 
         async with self._mutation_lock:
             previous = self.store.load()
             config = self._clone_config(previous)
             agent = self._agent(config, backend)
-            seen: set[str] = set()
-            by_id = {source.id: source for source in config.sources}
-            for source_id in order:
-                if (
-                    not isinstance(source_id, str)
-                    or source_id in seen
-                    or source_id not in by_id
-                    or not self._eligible_for_agent(by_id[source_id], backend)
-                ):
-                    raise self._invalid_source_order()
-                seen.add(source_id)
-            agent.sources.order = list(order)
+            agent.sources.order = self._validate_agent_source_order(
+                config,
+                backend,
+                payload.get("order"),
+            )
             await self._commit_synced(previous, config)
             return self._agent_payload(config, agent)
 
@@ -3548,11 +3561,23 @@ class ModelHubService:
             committed = self.store.load()
             return self._agent_payload(committed, self._agent(committed, backend))
 
-    async def reorder_agent_chains(self, backend: str) -> dict:
+    async def reorder_agent_chains(
+        self,
+        backend: str,
+        order: object = _REORDER_ORDER_UNSET,
+    ) -> dict:
         async with self._mutation_lock:
             previous = self.store.load()
             config = self._clone_config(previous)
             agent = self._agent(config, backend)
+            if order is not _REORDER_ORDER_UNSET:
+                # The optional order lets the UI commit the persisted priority and
+                # its application to existing routes in one mutation.
+                agent.sources.order = self._validate_agent_source_order(
+                    config,
+                    backend,
+                    order,
+                )
             source_positions = {
                 source_id: position
                 for position, source_id in enumerate(agent.sources.order)

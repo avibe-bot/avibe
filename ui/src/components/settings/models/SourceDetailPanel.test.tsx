@@ -1176,11 +1176,11 @@ describe('SourceDetailPanel', () => {
 
   it('explains standby beside the label rather than in a place the reader must find', async () => {
     renderPanel([]);
-    expect(screen.getByText(/^Standby$|^备用$/i)).toBeTruthy();
+    expect(screen.getByText(i18n.t('settings.models.upstream.state.standby'))).toBeTruthy();
 
     // Reached by keyboard, not by hover alone: the sentence is the only thing on
     // the bar that says a just-added source is fine, so it cannot be pointer-only.
-    const hint = screen.getByRole('button', { name: /What standby means|备用是什么意思/i });
+    const hint = screen.getByRole('button', { name: /What this status means|这个状态是什么意思/i });
     hint.focus();
     await userEvent.keyboard('{Enter}');
     expect(await screen.findByText(/serves a route through it|它就会显示为使用中/i)).toBeTruthy();

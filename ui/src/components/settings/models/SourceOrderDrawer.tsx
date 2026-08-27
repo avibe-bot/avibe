@@ -67,7 +67,7 @@ const OrderedRow: React.FC<{
         disabled={busy || inert}
         onPointerDown={(event) => !inert && controls.start(event)}
         onKeyDown={onKeyDown}
-        className={cn('model-hub-order-grip', grabbed && 'is-grabbed')}
+        className={cn('model-hub-order-grip cursor-grab active:cursor-grabbing disabled:cursor-not-allowed', grabbed && 'is-grabbed')}
       >
         <GripVertical />
       </button>
@@ -94,7 +94,6 @@ export const SourceOrderDrawer: React.FC<{
   const [viewSources, setViewSources] = React.useState(sources);
   const [readState, setReadState] = React.useState<ReadState>('loading');
   const [order, setOrder] = React.useState<string[]>([]);
-  const [dirty, setDirty] = React.useState(false);
   const [saveFailed, setSaveFailed] = React.useState(false);
   const [grabbedId, setGrabbedId] = React.useState<string | null>(null);
   const [announcement, setAnnouncement] = React.useState<OrderAnnouncement>(null);
@@ -111,7 +110,6 @@ export const SourceOrderDrawer: React.FC<{
     setViewSources(nextSources);
     saved.current = nextOrder;
     setOrder(nextOrder);
-    setDirty(false);
     setSaveFailed(false);
     setGrabbedId(null);
     setAnnouncement(null);
@@ -160,7 +158,6 @@ export const SourceOrderDrawer: React.FC<{
   const persist = (next: string[]) => {
     if (sameIds(next, order)) return;
     setOrder(next);
-    setDirty(!sameIds(next, saved.current));
     setSaveFailed(false);
   };
   const focusHandle = (sourceId: string) => handles.current.get(sourceId)?.focus();
@@ -191,7 +188,6 @@ export const SourceOrderDrawer: React.FC<{
     const sourceId = grabbedId;
     const restored = grabbedFrom.current;
     setOrder(restored);
-    setDirty(!sameIds(restored, saved.current));
     setAnnouncement({ key: 'grabCancelled', source: byId.get(sourceId)?.display_name ?? sourceId });
     setGrabbedId(null);
     requestAnimationFrame(() => focusHandle(sourceId));
@@ -234,10 +230,9 @@ export const SourceOrderDrawer: React.FC<{
     if (saving || readState !== 'ready' || available.length === 0) return;
     void orderWrite.track(async () => {
       try {
-        const echoed = await modelsApi.putAgentSources(agent.backend, { order });
+        const echoed = await modelsApi.reorderAgentChains(agent.backend, order);
         saved.current = echoed.sources?.order ?? order;
         setOrder(saved.current);
-        setDirty(false);
         setSaveFailed(false);
         await Promise.resolve(onSaved(echoed)).catch(() => {});
         onClose();
@@ -252,7 +247,9 @@ export const SourceOrderDrawer: React.FC<{
   const backend = t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend });
   const title = t('settings.models.order.title', { backend });
   const announcementText = announcement ? t(`settings.models.order.${announcement.key}`, announcement) : '';
-  const saveEnabled = readState === 'ready' && available.length > 0 && (dirty || order.length === 0);
+  // Saving is also the explicit action for reapplying the stored priority to
+  // routes that may have been edited independently since the last save.
+  const saveEnabled = readState === 'ready' && available.length > 0;
 
   return (
     <DialogPrimitive.Root open={open} onOpenChange={(next) => !next && !saving && onClose()}>
@@ -272,7 +269,7 @@ export const SourceOrderDrawer: React.FC<{
               <div className="flex min-w-0 items-center gap-[7px]">
                 <DialogPrimitive.Title className="model-hub-order-title truncate font-bold text-foreground">{title}</DialogPrimitive.Title>
                 <ModelHubInfoHint
-                  label={t('settings.models.order.subtitle')}
+                  label={t('settings.models.order.infoLabel')}
                   content={t('settings.models.order.subtitle')}
                   className="model-hub-order-info"
                 />
@@ -354,7 +351,10 @@ export const SourceOrderDrawer: React.FC<{
                     </Reorder.Group>}
                 </section>
                 <section className="model-hub-order-section">
-                  <div className="model-hub-order-section-head"><h3>{t('settings.models.order.section.heldOut')}</h3></div>
+                  <div className="model-hub-order-section-head model-hub-order-section-head--held-out">
+                    <h3>{t('settings.models.order.section.heldOut')}</h3>
+                    <span className="model-hub-order-section-explanation">{t('settings.models.order.section.heldOut.note')}</span>
+                  </div>
                   <div className="flex flex-col gap-2">
                     {heldOut.map((source) => (
                       <div key={source.id} className="model-hub-order-row model-hub-order-row--held">
