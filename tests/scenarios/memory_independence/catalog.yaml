@@ -14,6 +14,7 @@ capability:
     - tests/test_core_services_dispatch.py
     - tests/test_admin_notifications.py
     - tests/test_memory_disabled_isolation.py
+    - tests/test_memory_upgrade_packaged.py
 contract:
   dispatch: capture_must_not_fence_turn_start
   destructive_ops: new_and_archive_fail_open_on_capture_timeout
@@ -129,3 +130,9 @@ scenarios:
     kind: guardrail
     layer: scenario
     test: tests/test_memory_disabled_isolation.py::test_memory_indep_017_core_workflows_run_without_avibe_memory
+  - id: MEMORY-INDEP-018
+    name: Settings repair installs the exact optional Memory package without changing the core release
+    status: covered
+    kind: correctness
+    layer: scenario
+    test: tests/test_memory_upgrade_packaged.py::test_memory_indep_018_packaged_settings_repair_adds_memory_without_changing_core

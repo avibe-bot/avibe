@@ -266,7 +266,7 @@ def test_packaged_core_only_upgrade_preserves_core_only_shape(
 
 
 @pytest.mark.integration
-def test_packaged_settings_repair_adds_memory_without_changing_core(
+def test_memory_indep_018_packaged_settings_repair_adds_memory_without_changing_core(
     tmp_path: Path, packaged_dependency_seed: Path
 ) -> None:
     wheelhouse = tmp_path / "wheelhouse"
