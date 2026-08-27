@@ -7,7 +7,7 @@ never back. So editing a released revision's parentage does not change what thos
 databases have already done -- it changes what they will do next, silently, with no error
 at the moment of the edit and no error at the moment of the upgrade.
 
-Seven properties, one primitive: the graph as a released tag actually shipped it, read
+Eight properties, one primitive: the graph as a released tag actually shipped it, read
 straight out of git. Nothing here is an allowlist of known-bad cases that outlives its
 reason, and nothing needs an old Python environment -- ``env.py`` reads
 ``target_metadata`` only during autogenerate, so today's runtime can drive an older
@@ -27,6 +27,8 @@ reason, and nothing needs an old Python environment -- ``env.py`` reads
                                   upgrades it
     releases_with_state_but_no   every release that wrote a database is inside the
     _graph()                      window the property above walks
+    migration_safety_problems()   each post-baseline tightening has one finite, explicit
+                                  safety declaration, checked against SQLite's observed delta
 
 Readiness is not this module's opinion. ``unrepairable_releases`` drives
 ``run_migrations`` and asks ``background_tables_ready``, so it covers the repair and
@@ -72,6 +74,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from alembic.script.base import _only_source_rev_file
 from alembic.util import to_tuple
 from packaging.version import InvalidVersion, Version
@@ -338,6 +341,13 @@ GRAPH_FIELDS = {
 
 GRAPH_EDGES = tuple(field for field in GRAPH_FIELDS if field != "revision")
 
+# A migration may acknowledge one bounded data-safety mechanism. The guard deliberately
+# does not inspect the mechanism: doing so would recreate the Python/SQL interpreter this
+# contract replaces. The observed SQLite delta is the obligation; this literal is the
+# migration author's explicit ownership of how its data establishes that obligation.
+MIGRATION_SAFETY_FIELD = "MIGRATION_SAFETY"
+MIGRATION_SAFETY_KINDS = frozenset({"deduplicate", "backfill", "copy"})
+
 
 def declared_graph_fields(source: str) -> dict[str, object]:
     """The graph declarations a migration module makes, in either form Python allows.
@@ -367,6 +377,43 @@ def declared_graph_fields(source: str) -> dict[str, object]:
             continue
         declared[target.id] = literal if target.id == "revision" else to_tuple(literal, default=())
     return declared
+
+
+def declared_migration_safety(source: str) -> tuple[str, ...] | _ComputedMetadata | None:
+    """Read one finite top-level safety declaration without evaluating migration code.
+
+    Only a literal string or tuple/list of strings is part of the contract. A call,
+    comprehension, import-derived value, duplicate assignment, or unsupported value is
+    ``COMPUTED`` and therefore fails closed. This is intentionally the same tiny AST
+    literal reader used for Alembic graph metadata, not a model of Python control flow.
+    """
+    values: list[object] = []
+    try:
+        nodes = ast.parse(source).body
+    except SyntaxError:
+        return COMPUTED
+    for node in nodes:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target, value = node.targets[0], node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            target, value = node.target, node.value
+        else:
+            continue
+        if isinstance(target, ast.Name) and target.id == MIGRATION_SAFETY_FIELD:
+            try:
+                values.append(ast.literal_eval(value))
+            except (ValueError, TypeError, SyntaxError):
+                return COMPUTED
+    if not values:
+        return None
+    if len(values) != 1:
+        return COMPUTED
+    literal = values[0]
+    if isinstance(literal, str):
+        return (literal,)
+    if isinstance(literal, (tuple, list)) and all(isinstance(item, str) for item in literal):
+        return tuple(literal)
+    return COMPUTED
 
 
 def revision_claims(sources: dict[str, str]) -> dict[str, list[tuple[str, dict[str, object]]]]:
@@ -666,6 +713,285 @@ def table_names(db_path: Path) -> set[str]:
         return {str(row[0]) for row in connection.execute("select name from sqlite_master where type = 'table'")}
     finally:
         connection.close()
+
+
+@dataclass(frozen=True)
+class _ColumnShape:
+    name: str
+    declared_type: str
+    not_null: bool
+    default: str | None
+    primary_key: int
+
+
+@dataclass(frozen=True)
+class _TableShape:
+    columns: tuple[_ColumnShape, ...]
+    check_count: int
+    ddl: str = ""
+
+
+@dataclass(frozen=True)
+class _UniqueShape:
+    table: str
+    columns: tuple[str | None, ...]
+    partial: bool
+
+
+@dataclass(frozen=True)
+class _SchemaShape:
+    tables: dict[str, _TableShape]
+    unique_indexes: frozenset[_UniqueShape]
+
+
+@dataclass(frozen=True)
+class SchemaTightening:
+    """One structural obligation observed between two SQLite schema snapshots."""
+
+    kind: str
+    table: str
+    detail: str
+
+
+def _quote_identifier(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def sqlite_schema_shape(connection: sqlite3.Connection) -> _SchemaShape:
+    """Capture only SQLite's structural facts needed by the safety contract.
+
+    The DDL text is used for a count of newly present ``CHECK`` tokens, never evaluated.
+    Column and unique-index facts come from SQLite PRAGMAs, so this function carries no
+    SQL expression or migration-source semantics of its own.
+    """
+    rows = connection.execute(
+        "select name, sql from sqlite_master "
+        "where type = 'table' and name not like 'sqlite_%' and name != ?",
+        (ALEMBIC_BOOKKEEPING_TABLE,),
+    ).fetchall()
+    tables: dict[str, _TableShape] = {}
+    unique_indexes: set[_UniqueShape] = set()
+    for raw_name, raw_sql in rows:
+        table = str(raw_name)
+        table_sql = str(raw_sql or "")
+        columns = tuple(
+            _ColumnShape(
+                name=str(row[1]),
+                declared_type=str(row[2] or ""),
+                not_null=bool(row[3]),
+                default=None if row[4] is None else str(row[4]),
+                primary_key=int(row[5]),
+            )
+            for row in connection.execute(f"pragma table_info({_quote_identifier(table)})")
+        )
+        tables[table] = _TableShape(
+            columns=columns,
+            check_count=len(re.findall(r"\bcheck\b", table_sql, re.IGNORECASE)),
+            ddl=table_sql,
+        )
+        for index_row in connection.execute(f"pragma index_list({_quote_identifier(table)})"):
+            index_name = str(index_row[1])
+            if not bool(index_row[2]):
+                continue
+            columns_for_index = tuple(
+                None if info[2] is None else str(info[2])
+                for info in connection.execute(f"pragma index_info({_quote_identifier(index_name)})")
+            )
+            unique_indexes.add(
+                _UniqueShape(
+                    table=table,
+                    columns=columns_for_index,
+                    partial=bool(index_row[4]),
+                )
+            )
+    return _SchemaShape(tables=tables, unique_indexes=frozenset(unique_indexes))
+
+
+def _default_is_non_null(default: str | None) -> bool:
+    if default is None:
+        return False
+    value = default.strip()
+    while value.startswith("(") and value.endswith(")"):
+        value = value[1:-1].strip()
+    if value.upper() == "NULL":
+        return False
+    # SQLite's literal defaults and its three timestamp keywords are the only values
+    # whose non-NULL result is decidable here. An expression that merely looks unlike
+    # NULL may still evaluate to NULL, so it is deliberately refused.
+    return bool(
+        re.fullmatch(r"[-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)", value)
+        or re.fullmatch(r"(?:'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\")", value)
+        or re.fullmatch(r"X'[0-9A-Fa-f]*'", value)
+        or value.upper() in {"CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME"}
+    )
+
+
+def schema_tightenings(before: _SchemaShape, after: _SchemaShape) -> tuple[SchemaTightening, ...]:
+    """Classify only finite, structural tightenings; unknown semantics are not inferred."""
+    obligations: list[SchemaTightening] = []
+    before_tables = set(before.tables)
+    after_tables = set(after.tables)
+
+    for table in sorted(before_tables - after_tables):
+        obligations.append(SchemaTightening("copy", table, f"table {table} was removed"))
+
+    rebuilt_tables: set[str] = set()
+    for table in sorted(before_tables & after_tables):
+        old = {column.name: column for column in before.tables[table].columns}
+        new = {column.name: column for column in after.tables[table].columns}
+        removed = set(old) - set(new)
+        changed = {
+            name
+            for name in set(old) & set(new)
+            if old[name] != new[name]
+        }
+        check_added = after.tables[table].check_count > before.tables[table].check_count
+        added = set(new) - set(old)
+        added_only = bool(added) and not removed and not changed
+        ddl_changed = before.tables[table].ddl != after.tables[table].ddl
+        if removed or changed or check_added or (ddl_changed and not added_only):
+            rebuilt_tables.add(table)
+            reason = []
+            if removed:
+                reason.append(f"removed columns {', '.join(sorted(removed))}")
+            if changed:
+                reason.append(f"changed columns {', '.join(sorted(changed))}")
+            if check_added:
+                reason.append("added CHECK constraint")
+            if ddl_changed and not (removed or changed or check_added):
+                reason.append("changed table definition")
+            obligations.append(SchemaTightening("copy", table, "; ".join(reason)))
+            continue
+
+        for name in sorted(set(new) - set(old)):
+            column = new[name]
+            if column.not_null and not _default_is_non_null(column.default):
+                obligations.append(SchemaTightening("backfill", table, f"new NOT NULL column {table}.{name}"))
+
+    for index in sorted(after.unique_indexes - before.unique_indexes, key=repr):
+        if index.table not in before_tables or index.table in rebuilt_tables:
+            continue
+        columns = ", ".join(column or "<expression>" for column in index.columns)
+        predicate = " partial" if index.partial else ""
+        obligations.append(SchemaTightening("deduplicate", index.table, f"new{predicate} unique key ({columns})"))
+
+    return tuple(obligations)
+
+
+def _migration_safety_declaration_error(
+    revision: str, declaration: tuple[str, ...] | _ComputedMetadata | None, expected: set[str]
+) -> str | None:
+    if declaration is None:
+        return f"{revision} has {', '.join(sorted(expected))} obligations but no MIGRATION_SAFETY declaration"
+    if declaration is COMPUTED:
+        return f"{revision} MIGRATION_SAFETY is computed or malformed; only a literal is supported"
+    if not declaration or len(set(declaration)) != len(declaration):
+        return f"{revision} MIGRATION_SAFETY must contain each mechanism exactly once"
+    unsupported = set(declaration) - MIGRATION_SAFETY_KINDS
+    if unsupported:
+        return f"{revision} MIGRATION_SAFETY contains unsupported kinds: {', '.join(sorted(unsupported))}"
+    if set(declaration) != expected:
+        return (
+            f"{revision} MIGRATION_SAFETY names {', '.join(declaration)}, "
+            f"but observed obligations are {', '.join(sorted(expected))}"
+        )
+    return None
+
+
+def _planned_revisions(config: Config, shipped_heads: set[str]) -> list[str]:
+    """Return Alembic's ordered upgrade revisions from a released graph to today's head."""
+    script = ScriptDirectory.from_config(config)
+    return [step.revision.revision for step in script._upgrade_revs("head", tuple(sorted(shipped_heads)))]
+
+
+def migration_safety_problems(baseline: str | None = None) -> list[str]:
+    """Check new revisions using SQLite deltas and the finite declaration contract.
+
+    The latest released graph is the grandfather boundary. Each distinct released graph is
+    materialized once, then today's actual Alembic plan is applied one revision at a time so
+    the before/after facts come from the runtime database rather than a source interpreter.
+    """
+    baseline = baseline or latest_released_tag()
+    baseline_graph = revision_graph(released_sources(baseline))
+    current_sources = working_tree_sources()
+    current_graph = revision_graph(current_sources)
+    new_revisions = set(current_graph) - set(baseline_graph)
+    if not new_revisions:
+        return []
+
+    planned: set[tuple[str, str]] = set()
+    analyzed: set[tuple[str, str]] = set()
+    observed: dict[tuple[str, str], tuple[SchemaTightening, ...]] = {}
+    problems: list[str] = []
+
+    for tag in released_graphs():
+        try:
+            with tempfile.TemporaryDirectory() as workspace:
+                root = Path(workspace)
+                db_path = root / "vibe.sqlite"
+                released = extract_released_versions(tag, root / "released")
+                shipped_heads = shipped_head_revisions(released_sources(tag))
+                released_config = _alembic_config(db_path, released)
+                command.upgrade(released_config, "head")
+                current_config = _alembic_config(db_path)
+                revisions = _planned_revisions(current_config, shipped_heads)
+                tag_plan = [(tag, revision) for revision in revisions if revision in new_revisions]
+                planned.update(tag_plan)
+                with sqlite3.connect(db_path) as connection:
+                    # Apply every step in Alembic's plan so a snapshot for a new revision is
+                    # not polluted by earlier post-release steps. Only new revisions are
+                    # obligations; released steps are replayed to reach each one's boundary
+                    # and then discarded under the baseline grandfather rule.
+                    for revision in revisions:
+                        before = sqlite_schema_shape(connection)
+                        try:
+                            command.upgrade(current_config, revision)
+                        except Exception as exc:  # noqa: BLE001 - an unanalyzable plan fails closed
+                            problems.append(
+                                f"{tag}: {revision} could not be analyzed after its released schema: "
+                                f"{type(exc).__name__}: {str(exc).splitlines()[0]}"
+                            )
+                            break
+                        after = sqlite_schema_shape(connection)
+                        if revision not in new_revisions:
+                            continue
+                        pair = (tag, revision)
+                        analyzed.add(pair)
+                        observed[pair] = schema_tightenings(before, after)
+        except Exception as exc:  # noqa: BLE001 - plan/setup failure is a closed-gate result
+            problems.append(
+                f"{tag}: migration safety plan could not be analyzed: "
+                f"{type(exc).__name__}: {str(exc).splitlines()[0]}"
+            )
+
+    for tag, revision in sorted(planned - analyzed):
+        problems.append(f"{tag}: planned revision {revision} was not analyzed")
+    for tag, revision in sorted(analyzed - planned):
+        problems.append(f"{tag}: unplanned revision {revision} was analyzed")
+
+    declarations = {
+        revision: declared_migration_safety(current_sources[name])
+        for revision, (name, _) in current_graph.items()
+        if revision in new_revisions
+    }
+    for pair, obligations in sorted(observed.items()):
+        if not obligations:
+            continue
+        expected = {obligation.kind for obligation in obligations}
+        error = _migration_safety_declaration_error(pair[1], declarations.get(pair[1]), expected)
+        if error:
+            details = "; ".join(obligation.detail for obligation in obligations)
+            problems.append(f"{pair[0]}: {error} ({details})")
+
+    observed_revisions = {revision for _, revision in observed}
+    for revision, declaration in sorted(declarations.items()):
+        if revision in observed_revisions:
+            continue
+        if declaration is not None:
+            detail = "computed or malformed" if declaration is COMPUTED else ", ".join(declaration)
+            problems.append(f"{revision} declares MIGRATION_SAFETY ({detail}) but has no structural obligation")
+
+    return problems
 
 
 def fresh_install_tables() -> set[str]:
@@ -1509,6 +1835,7 @@ def collect_problems(
     problems.extend(spent_body_edit_declarations(baseline))
 
     if include_upgrade:
+        problems.extend(migration_safety_problems(baseline))
         failures, refused = unrepairable_releases()
         for tag, reasons in sorted(failures.items(), key=lambda item: version_key(item[0])):
             problems.extend(f"{tag}: {reason}" for reason in reasons)
@@ -1525,7 +1852,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--skip-upgrade",
         action="store_true",
-        help="check only the metadata properties, skipping the per-release upgrade",
+        help="check only metadata, skipping per-release upgrades and migration-safety analysis",
     )
     return parser
 
