@@ -392,6 +392,26 @@ def test_status_uses_one_remote_manifest_snapshot_against_cached_install(
     assert cached_manifest.read_bytes() == cached_payload
 
 
+def test_status_preserves_admitted_current_install_without_manifest(tmp_path: Path) -> None:
+    bin_path = "usr/local/bin/tmux"
+    archive = _write_tmux_archive(tmp_path, bin_path=bin_path)
+    manifest = _write_manifest(tmp_path, archive, bin_path=bin_path)
+    manager = TmuxRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+    manifest.unlink()
+
+    resolved = manager.resolve_binary()
+    status = manager.status()
+
+    assert resolved == Path(installed["path"])
+    assert status["installed"] is True
+    assert status["status"] == "ready"
+    assert status["path"] == str(resolved)
+    assert status["install_dir"] == installed["install_dir"]
+    assert status["manifest"] is None
+
+
 def test_exact_released_packaged_install_is_adopted_without_archive_resolution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -199,7 +199,25 @@ class TmuxRuntimeManager(ManagedRuntimeManager):
         binary: Path | None = None
         version: str | None = None
         install_dir: str | None = None
-        if manifest is not None and archive is not None:
+        if manifest is None:
+            try:
+                before = self._current_install_dir(self.runtime_dir / "versions")
+                admitted = super().resolve_binary()
+                after = self._current_install_dir(self.runtime_dir / "versions")
+            except OSError:
+                before = after = admitted = None
+                self._install_reason = self._reason("install_inspection_failed")
+            admitted_version = _tmux_binary_version(admitted) if admitted is not None else None
+            if before is not None and before == after and admitted_version is not None:
+                binary = admitted
+                version = admitted_version
+                install_dir = str(before)
+                self._install_reason = None
+            elif before != after:
+                self._install_reason = self._reason("install_inspection_failed")
+            elif admitted is not None and admitted_version is None:
+                self._install_reason = self._reason("binary_not_runnable")
+        elif archive is not None:
             candidates: list[Path] = []
             try:
                 current = self._current_install_dir(self.runtime_dir / "versions")
