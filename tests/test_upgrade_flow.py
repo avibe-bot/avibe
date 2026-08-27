@@ -1797,7 +1797,12 @@ def test_pip_preflight_does_not_fallback_on_resolver_failure():
 @pytest.mark.parametrize("memory_installed", [False, True])
 def test_unreadable_memory_config_preserves_only_an_installed_package(monkeypatch, memory_installed):
     monkeypatch.setattr("config.v2_config.V2Config.load", lambda: (_ for _ in ()).throw(ValueError("bad config")))
+    monkeypatch.setattr("vibe.__version__", "3.0.14", raising=False)
     monkeypatch.setattr("vibe.upgrade.memory_package_installed", lambda: memory_installed)
+    monkeypatch.setattr(
+        "vibe.upgrade.installed_memory_package_version",
+        lambda: "3.0.14" if memory_installed else None,
+    )
     monkeypatch.setattr("vibe.upgrade.find_uv_binary", lambda **kwargs: None)
     monkeypatch.setattr("vibe.upgrade.installed_metadata_describes_running_code", lambda: True)
 
