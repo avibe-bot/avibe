@@ -137,6 +137,7 @@ export const RouteChainDialog: React.FC<{
     params?: Record<string, unknown>;
   } | null>(null);
   const gripRefs = React.useRef<Array<HTMLButtonElement | null>>([]);
+  const editRefs = React.useRef<Array<HTMLButtonElement | null>>([]);
   const removeRefs = React.useRef<Array<HTMLButtonElement | null>>([]);
   const addButtonRef = React.useRef<HTMLButtonElement | null>(null);
   const reseedButtonRef = React.useRef<HTMLButtonElement | null>(null);
@@ -726,6 +727,7 @@ export const RouteChainDialog: React.FC<{
             initialHop={hop}
             label={t("settings.models.routeDialog.editHop") as string}
             width="route"
+            onReturnFocus={() => editRefs.current[index]?.focus()}
             onApply={(nextCandidate) => {
               const next = advanceInteraction({
                 type: "replace",
@@ -741,6 +743,9 @@ export const RouteChainDialog: React.FC<{
             }}
             trigger={
               <button
+                ref={(node) => {
+                  editRefs.current[index] = node;
+                }}
                 type="button"
                 aria-label={t("settings.models.routeDialog.editHop") as string}
                 title={t("settings.models.routeDialog.editHop") as string}
@@ -948,6 +953,7 @@ export const RouteChainDialog: React.FC<{
             label={t("settings.models.routeDialog.addHop") as string}
             width="trigger"
             onApply={addCandidate}
+            onReturnFocus={() => addButtonRef.current?.focus()}
             trigger={
               <button
                 ref={addButtonRef}

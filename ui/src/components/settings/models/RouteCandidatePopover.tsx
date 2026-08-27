@@ -28,6 +28,7 @@ export const RouteCandidatePopover: React.FC<{
   initialHop?: RouteHop;
   label: string;
   onApply: (candidate: RouteCandidate) => void;
+  onReturnFocus?: () => void;
   trigger: React.ReactElement;
   width: "route" | "trigger";
 }> = ({
@@ -36,6 +37,7 @@ export const RouteCandidatePopover: React.FC<{
   initialHop,
   label,
   onApply,
+  onReturnFocus,
   trigger,
   width,
 }) => {
@@ -44,14 +46,19 @@ export const RouteCandidatePopover: React.FC<{
   const [query, setQuery] = React.useState("");
   const [candidate, setCandidate] = React.useState<RouteCandidate | null>(null);
   const searchRef = React.useRef<HTMLInputElement | null>(null);
+  const pendingCandidateRef = React.useRef<RouteCandidate | null>(null);
   const term = query.trim().toLowerCase();
-  const matched = term
-    ? candidates.filter((item) =>
-        `${item.source.display_name}\n${item.hop.model_id}`
-          .toLowerCase()
-          .includes(term),
-      )
-    : candidates;
+  const matched = React.useMemo(
+    () =>
+      term
+        ? candidates.filter((item) =>
+            `${item.source.display_name}\n${item.hop.model_id}`
+              .toLowerCase()
+              .includes(term),
+          )
+        : candidates,
+    [candidates, term],
+  );
   const groups = matched.reduce<
     Array<{ source: Source; items: RouteCandidate[] }>
   >((result, item) => {
@@ -60,9 +67,6 @@ export const RouteCandidatePopover: React.FC<{
     else result.push({ source: item.source, items: [item] });
     return result;
   }, []);
-  const matchedRef = React.useRef(matched);
-  matchedRef.current = matched;
-  const matchedKeys = matched.map((item) => candidateKey(item.hop)).join("\n");
   const unchanged =
     candidate !== null &&
     initialHop !== undefined &&
@@ -71,16 +75,21 @@ export const RouteCandidatePopover: React.FC<{
   React.useEffect(() => {
     if (!open) return;
     setCandidate((current) => {
-      const keys = matchedKeys ? matchedKeys.split("\n") : [];
-      if (current && keys.includes(candidateKey(current.hop))) return current;
-      return matchedRef.current[0] ?? null;
+      if (
+        current &&
+        matched.some(
+          (item) => candidateKey(item.hop) === candidateKey(current.hop),
+        )
+      ) {
+        return current;
+      }
+      return matched[0] ?? null;
     });
-  }, [matchedKeys, open]);
+  }, [matched, open]);
 
   const chooseCandidate = (next: string) => {
     setCandidate(
-      matchedRef.current.find((item) => candidateKey(item.hop) === next) ??
-        null,
+      matched.find((item) => candidateKey(item.hop) === next) ?? null,
     );
   };
 
@@ -101,6 +110,7 @@ export const RouteCandidatePopover: React.FC<{
               null,
           );
         } else {
+          pendingCandidateRef.current = null;
           setQuery("");
           setCandidate(null);
         }
@@ -126,6 +136,13 @@ export const RouteCandidatePopover: React.FC<{
         onOpenAutoFocus={(event) => {
           event.preventDefault();
           searchRef.current?.focus();
+        }}
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          const pendingCandidate = pendingCandidateRef.current;
+          pendingCandidateRef.current = null;
+          if (pendingCandidate) onApply(pendingCandidate);
+          else onReturnFocus?.();
         }}
       >
         <Command
@@ -186,7 +203,7 @@ export const RouteCandidatePopover: React.FC<{
               disabled={!candidate || unchanged}
               onClick={() => {
                 if (!candidate || unchanged) return;
-                onApply(candidate);
+                pendingCandidateRef.current = candidate;
                 setOpen(false);
                 setQuery("");
                 setCandidate(null);

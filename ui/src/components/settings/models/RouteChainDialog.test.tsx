@@ -279,11 +279,13 @@ describe("RouteChainDialog", () => {
     );
     await user.click(screen.getByRole("button", { name: "Replace" }));
 
-    expect(
-      [...document.querySelectorAll(".model-hub-route-hop-model")].map(
-        (element) => element.textContent,
-      ),
-    ).toEqual(["claude-sonnet-5", "opus-5"]);
+    await waitFor(() =>
+      expect(
+        [...document.querySelectorAll(".model-hub-route-hop-model")].map(
+          (element) => element.textContent,
+        ),
+      ).toEqual(["claude-sonnet-5", "opus-5"]),
+    );
     await user.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() =>
       expect(put).toHaveBeenCalledWith("claude", "opus-5", {
