@@ -341,7 +341,6 @@
   --model-hub-upstream-track: 384px;
   --model-hub-rail-track: 72px;
   --model-hub-track-gap: 16px;
-  --model-hub-track-height: 806px;
   --model-hub-legend-height: 34px;
   --model-hub-wire-active-width: 1.75px;
   --model-hub-wire-muted-width: 1px;
@@ -1741,21 +1740,11 @@
 
 @media (min-width: 1024px) {
   .model-hub-shell { padding-top: 4px; }
-  .model-hub-overview-body { height: 854px; }
   .model-hub-overview-grid {
     display: grid;
     grid-template-columns: var(--model-hub-upstream-track) var(--model-hub-rail-track) minmax(0, 1fr);
     gap: var(--model-hub-track-gap);
-    height: var(--model-hub-track-height);
     align-items: start;
-  }
-  .model-hub-legend {
-    position: absolute;
-    top: 820px;
-    left: 0;
-    width: 100%;
-    height: var(--model-hub-legend-height);
-    padding-block: 0;
   }
 }
 

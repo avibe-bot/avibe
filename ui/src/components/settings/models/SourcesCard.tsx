@@ -30,12 +30,10 @@ export const SourcesCard: React.FC<{
     { id: 'native', sources: (sources ?? []).filter((source) => source.supply_channel === 'native_cli') },
     { id: 'hub', sources: (sources ?? []).filter((source) => source.supply_channel === 'hub') },
   ].filter((group) => group.sources.length > 0);
-  // No height floor: the frame sizes this panel to its cards, so a fixture with
-  // fewer sources than the design draws should end below the footer rather than
-  // leave ~100px of void above it. `max-h-full` still hands overflow to the
-  // scroll region when there are more.
+  // The settings route pane owns vertical scrolling. This card grows with its
+  // sources so users never have to coordinate a second scroll area here.
   return (
-    <section className="relative z-20 flex max-h-full w-full min-w-0 flex-col self-start overflow-hidden rounded-[14px] border border-border bg-surface">
+    <section className="relative z-20 flex w-full min-w-0 flex-col self-start overflow-hidden rounded-[14px] border border-border bg-surface">
       <div className="flex h-14 shrink-0 items-center justify-between border-b border-border px-3.5">
         <span className="flex items-center gap-[7px]">
           <h2 className="text-[16px] font-bold leading-[23px] text-foreground">{t('settings.models.upstream.heading')}</h2>
@@ -47,7 +45,7 @@ export const SourcesCard: React.FC<{
         </span>
         {sources !== undefined && <span className="model-hub-pill model-hub-upstream-count border">{t('settings.models.upstream.count', { count: sources.length })}</span>}
       </div>
-      <div className="min-h-0 flex-1 space-y-2.5 overflow-y-auto p-3">
+      <div className="flex-1 space-y-2.5 p-3">
         {read.kind === 'loading' && sources === undefined
           ? <div className="flex h-full min-h-36 items-center justify-center"><LoaderCircle className="size-4 animate-spin text-muted" /></div>
           : read.kind === 'unread'

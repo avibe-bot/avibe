@@ -1057,8 +1057,8 @@ sections. §1.8 states the direct-only body condition.
 | `tabs` | 1120×39, `gap: 4`, `border-bottom: 1 $--border` |
 | tab | `padding: [10,14]`, `gap: 7`; label 13 / 600 |
 | active tab | `border-bottom: 2 $--mint` |
-| `body` | 1120×854, `layout: none` (children positioned absolutely) |
-| `cols` | 1120×806, `gap: 16` → upstream 384 + rail 72 + gateway 632 |
+| `body` | 1120 wide, height follows its content; the enclosing settings route pane is the sole page scroll owner |
+| `cols` | 1120 wide, natural height, `gap: 16` → upstream 384 + rail 72 + gateway 632 |
 | Module card | `$--surface`, `border 1 $--border`, `radius 14` |
 | Legend row | 1120×34, `gap: 18`, `space_between`, swatch 20×2, label 11 / 500 `$--muted` |
 
@@ -1795,11 +1795,12 @@ Claude Code's head has no order button, because a direct backend consults no sou
 order and an editor there would edit a list nothing reads. D-9a states the rule, and it
 is a set equality over the three groups.
 
-**Track metrics** `[frame]`: `cols` 1120×806, `gap 16`; upstream module 384 wide,
-rail 72, gateway module takes the rest. Everything inside those tracks is
-`fill_container`, so this file records the three track widths and the fixed heights
-and never a derived row width — a literal there is a number that goes stale the first
-time a track moves.
+**Track metrics** `[frame]` `[derived]`: `cols` is 1120 wide with `gap 16`; upstream
+module is 384 wide, rail is 72, and the gateway module takes the rest. The frame's
+806px column is an instance, not a height cap: both modules grow with their content,
+the legend follows the taller module, and the enclosing settings route pane owns the
+only page scroll. This file records the three track widths and never a derived row
+width — a literal there is a number that goes stale the first time a track moves.
 
 **Card and row metrics** `[frame]`: upstream card `fill_container`×96 minimum, auto height,
 `padding [8,12]`, `gap 10`, `radius 10`; tile 34×34 `radius 9`; name 12.5/700 Inter
@@ -1900,10 +1901,10 @@ Other limits `[derived]`:
 | Long source name | Single line, ellipsis at the card's inner width — `upstream module 384 − border 2 − upContent padding 24 − card padding 24 − tile 34 − gap 10 = 290` at the frame's track width, and derived from the live track everywhere else. `title` attribute carries the full value. |
 | Long base URL / masked key | Mono line truncates **from the middle**, keeping scheme+host and the last 4 key chars — the two ends are what identifies it. |
 | Long model id | Mono, ellipsis at the `a` column; full value in `title`. |
-| Many sources (> 6) | Upstream module grows to the `cols` track height (806) and then `upContent` scrolls; the head and footer stay pinned. Group labels scroll with the content. |
-| Many backends (> 3) | `gwContent` scrolls; the rail line keeps spanning the visible track. |
+| Many sources (> 6) | The upstream module grows with every source; the enclosing settings route pane scrolls, so the head, groups and footer remain in one reading flow. |
+| Many backends (> 3) | The gateway module grows with every backend; the enclosing settings route pane scrolls and no nested gateway scrollbar appears. |
 | Zero supply relations | The wire layer renders nothing — no placeholder path. |
-| Wires | Generated from the supply-relation set, never hand-placed; the frame's four paths are an instance of that generator, not a fixed asset. The SVG is clipped to the 806px `cols` track and cannot paint into the legend or following page sections. |
+| Wires | Generated from the supply-relation set, never hand-placed; the frame's four paths are an instance of that generator, not a fixed asset. The SVG follows the natural-height `cols` track and remains clipped before the legend and following page sections. |
 
 ---
 
