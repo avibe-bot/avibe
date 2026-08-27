@@ -99,6 +99,7 @@ class _ProtocolEvidenceRule:
     statuses: frozenset[int]
     protocol: _ProtocolProof
     authentication: _AuthenticationEvidence
+    shape: _ProtocolObservationShape = _ProtocolObservationShape.NONE
     top_level_field: str | None = None
     top_level_values: frozenset[str] = frozenset()
     error_identifiers: frozenset[str] = frozenset()
@@ -216,8 +217,9 @@ def _openai_evidence_rules(
         _ProtocolEvidenceRule(
             statuses=_REQUEST_ERROR_STATUSES,
             error_identifiers=_MODEL_ERROR_IDENTIFIERS,
-            protocol=_ProtocolProof.PROVEN,
+            protocol=_ProtocolProof.UNPROVEN,
             authentication=_AuthenticationEvidence.ACCEPTED,
+            shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
         ),
         _ProtocolEvidenceRule(
             statuses=_AUTHENTICATION_ERROR_STATUSES,
@@ -448,6 +450,7 @@ def _parse_protocol_authenticated_evidence(
             return _ProtocolEvidence(
                 protocol=rule.protocol,
                 authentication=rule.authentication,
+                shape=rule.shape,
             )
     if protocol in _OPENAI_FAMILY_PROTOCOLS and status in _REQUEST_ERROR_STATUSES:
         error = payload.get("error")
@@ -574,8 +577,19 @@ def _openai_family_elimination_proof(
     ``param`` proves only that one endpoint parsed the synthetic request with
     authentication accepted. The sibling protocol becomes excluded only when its
     own endpoint answers the same source with an unproven shape, so the proof is
-    carried by the response pair rather than by either request path alone.
+    carried by the response pair rather than by either request path alone. That
+    pairwise proof is valid only when no other protocol still has accepted-but-
+    generic evidence for the same source.
     """
+
+    if any(
+        protocol not in _OPENAI_FAMILY_PROTOCOLS
+        and evidence.protocol is _ProtocolProof.UNPROVEN
+        and evidence.authentication is _AuthenticationEvidence.ACCEPTED
+        and evidence.shape is _ProtocolObservationShape.GENERIC_REQUEST_ERROR
+        for protocol, evidence in responses.items()
+    ):
+        return None
 
     candidate = responses.get("openai_responses")
     sibling = responses.get("openai_chat")
@@ -1394,6 +1408,7 @@ class CLIProxyEngineAdapter:
         received_rejection = False
         received_proven_unknown = False
         received_unproven_response = False
+        received_accepted_unproven_response = False
         response_evidence_by_protocol: dict[str, _ProtocolEvidence] = {}
         for protocol in protocol_order:
             if protocol not in SOURCE_PROTOCOLS:
@@ -1429,6 +1444,8 @@ class CLIProxyEngineAdapter:
                 proved_protocol = protocol
             else:
                 received_unproven_response = True
+                if evidence.authentication is _AuthenticationEvidence.ACCEPTED:
+                    received_accepted_unproven_response = True
                 response_evidence_by_protocol[protocol] = evidence
                 proved_protocol = _openai_family_elimination_proof(
                     response_evidence_by_protocol,
@@ -1466,6 +1483,18 @@ class CLIProxyEngineAdapter:
                 model_ids=tuple(models),
             )
 
+        if received_accepted_unproven_response:
+            # A shaped request error already proved the credential was accepted
+            # even when the response family never narrowed to one persisted
+            # protocol.
+            return make_source_observation(
+                outcome=ObservationOutcome.AMBIGUOUS,
+                reachable=True,
+                authenticated=True,
+                protocol=None,
+                discovery=ObservationDiscovery.NOT_ATTEMPTED,
+                model_ids=(),
+            )
         if received_rejection:
             return make_source_observation(
                 outcome=ObservationOutcome.AUTHENTICATION_FAILED,

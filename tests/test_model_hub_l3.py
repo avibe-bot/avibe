@@ -4568,7 +4568,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
 
     assert ambiguous.outcome.value == "ambiguous"
     assert ambiguous.protocol is None
-    assert ambiguous.authenticated is None
+    assert ambiguous.authenticated is True
     assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
     inventory_probe.assert_not_awaited()
 
@@ -4600,7 +4600,80 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
 
     assert ambiguous.outcome.value == "ambiguous"
     assert ambiguous.protocol is None
-    assert ambiguous.authenticated is None
+    assert ambiguous.authenticated is True
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    inventory_probe.assert_not_awaited()
+
+    async def anthropic_competes_with_openai_pairwise(**kwargs) -> _ProtocolEvidence:
+        if kwargs["protocol"] == "anthropic":
+            return generic_request_accepted
+        if kwargs["protocol"] == "openai_responses":
+            return generic_request_accepted
+        if kwargs["protocol"] == "openai_chat":
+            return excluded_404
+        raise AssertionError(kwargs["protocol"])
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(side_effect=anthropic_competes_with_openai_pairwise),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=("should-not-discover",)),
+        ) as inventory_probe,
+    ):
+        ambiguous = asyncio.run(
+            adapter.observe_source(
+                "openai",
+                base_url,
+                credential_ref,
+                SOURCE_PROTOCOLS,
+            )
+        )
+
+    assert ambiguous.outcome.value == "ambiguous"
+    assert ambiguous.protocol is None
+    assert ambiguous.authenticated is True
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    inventory_probe.assert_not_awaited()
+
+    unproven_rejected = _ProtocolEvidence(
+        protocol=_ProtocolProof.UNPROVEN,
+        authentication=_AuthenticationEvidence.REJECTED,
+    )
+
+    async def accepted_then_rejected_without_proof(**kwargs) -> _ProtocolEvidence:
+        if kwargs["protocol"] == "anthropic":
+            return generic_request_accepted
+        if kwargs["protocol"] == "openai_responses":
+            return unproven_rejected
+        if kwargs["protocol"] == "openai_chat":
+            return unproven_unknown
+        raise AssertionError(kwargs["protocol"])
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(side_effect=accepted_then_rejected_without_proof),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=("should-not-discover",)),
+        ) as inventory_probe,
+    ):
+        ambiguous = asyncio.run(
+            adapter.observe_source(
+                "openai",
+                base_url,
+                credential_ref,
+                SOURCE_PROTOCOLS,
+            )
+        )
+
+    assert ambiguous.outcome.value == "ambiguous"
+    assert ambiguous.protocol is None
+    assert ambiguous.authenticated is True
     assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
     inventory_probe.assert_not_awaited()
 
@@ -5109,29 +5182,9 @@ def test_protocol_evidence_table_defaults_shaped_non_auth_rows_to_unknown(
             404,
             {"type": "error", "error": {"type": "not_found_error"}},
         ),
-        (
-            "openai_responses",
-            404,
-            {"error": {"type": "invalid_request_error", "code": "model_not_found"}},
-        ),
-        (
-            "openai_chat",
-            404,
-            {"error": {"type": "invalid_request_error", "code": "model_not_found"}},
-        ),
-        (
-            "openai_responses",
-            400,
-            DEEPSEEK_MODEL_NOT_FOUND_PAYLOAD,
-        ),
-        (
-            "openai_chat",
-            400,
-            DEEPSEEK_MODEL_NOT_FOUND_PAYLOAD,
-        ),
     ],
 )
-def test_protocol_evidence_table_accepts_authenticated_model_errors(
+def test_anthropic_protocol_evidence_table_accepts_authenticated_model_errors(
     protocol: str,
     status: int,
     body: dict,
@@ -5143,6 +5196,57 @@ def test_protocol_evidence_table_accepts_authenticated_model_errors(
     ) == _ProtocolEvidence(
         protocol=_ProtocolProof.PROVEN,
         authentication=_AuthenticationEvidence.ACCEPTED,
+    )
+
+
+@pytest.mark.parametrize(
+    ("protocol", "status", "body"),
+    [
+        (
+            "openai_responses",
+            404,
+            {"error": {"type": "invalid_request_error", "code": "model_not_found"}},
+        ),
+        (
+            "openai_chat",
+            404,
+            {"error": {"type": "invalid_request_error", "code": "model_not_found"}},
+        ),
+        (
+            "openai_responses",
+            400,
+            DEEPSEEK_MODEL_NOT_FOUND_PAYLOAD,
+        ),
+        (
+            "openai_chat",
+            400,
+            DEEPSEEK_MODEL_NOT_FOUND_PAYLOAD,
+        ),
+        (
+            "openai_responses",
+            422,
+            DEEPSEEK_MODEL_NOT_FOUND_PAYLOAD,
+        ),
+        (
+            "openai_chat",
+            422,
+            DEEPSEEK_MODEL_NOT_FOUND_PAYLOAD,
+        ),
+    ],
+)
+def test_openai_model_errors_without_family_param_record_accepted_but_unproven_evidence(
+    protocol: str,
+    status: int,
+    body: dict,
+) -> None:
+    assert _parse_protocol_authenticated_evidence(
+        protocol,
+        status,
+        json.dumps(body),
+    ) == _ProtocolEvidence(
+        protocol=_ProtocolProof.UNPROVEN,
+        authentication=_AuthenticationEvidence.ACCEPTED,
+        shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
     )
 
 
