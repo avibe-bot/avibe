@@ -308,9 +308,10 @@ supervisor with the immutable nonce, type, and payload. The supervisor:
    subprocess work;
 5. mints a collision-resistant `intent_id`;
 6. atomically and durably writes `schema_version`, `intent_id`, `client_nonce`,
-   type, payload digest, and `state=admitted` to the dedicated transaction
-   record by writing and syncing a temporary file, replacing the record, and
-   syncing its parent directory (or the Windows durability equivalent); and
+   reservation acquisition ID, type, payload digest, and `state=admitted` to
+   the dedicated transaction record by writing and syncing a temporary file,
+   replacing the record, and syncing its parent directory (or the Windows
+   durability equivalent); and
 7. only after that write is durable, returns the receipt through a one-shot
    inherited pipe to the adapter.
 
@@ -335,14 +336,16 @@ owner-specific outcomes only after publication is consistent:
 - if bounded publication rereads are exhausted before consistency, the server
   returns generic retryable `busy`; it never guesses an owner-specific result.
 
-The server returns a matching projection before any busy outcome. Before its
-nonblocking acquisition attempt, a contender snapshots the published
-acquisition ID. After contention, an owner-specific result is allowed only when
-a bounded reread observes a different acquisition ID and the holder type agrees
-with the current transaction record: a package holder's record carries the same
-reservation acquisition ID, while an ordinary restart has no live package
-record. Until then the result stays retry-neutral. The client never invents or
-persists an `intent_id` before the server returns it.
+The server returns a matching projection before any busy outcome. After its
+nonblocking acquisition fails, a contender boundedly rereads the publication
+and lock liveness. An owner-specific result is allowed only when the published
+acquisition ID still names the live holder responsible for that failed
+acquisition and the holder type is cross-consistent with the current transaction
+record: a package holder's record carries the same reservation acquisition ID,
+while an ordinary restart has no live package record. Whether the ID equals or
+differs from a pre-attempt snapshot is irrelevant; consistency, not change, is
+the criterion. Until those checks agree the result stays retry-neutral. The
+client never invents or persists an `intent_id` before the server returns it.
 
 Every API that accepts an `intent_id` is lookup or recovery only. An ID absent
 from the current record and retained terminal audit returns stable
