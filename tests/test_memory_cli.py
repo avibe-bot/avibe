@@ -258,6 +258,15 @@ def test_memory_list_parser_defaults_match_everos_page_semantics() -> None:
     assert args.json is False
 
 
+@pytest.mark.parametrize("filename", ["CLI.md", "CLI_ZH.md"])
+def test_checked_in_memory_cli_references_match_everos_limits(filename: str) -> None:
+    reference = (Path(__file__).parents[1] / "docs" / filename).read_text()
+    memory_section = reference.split("### `vibe memory`", 1)[1].split("\n### ", 1)[0]
+
+    assert memory_section.count("[--limit 1..100]") == 2
+    assert "[--limit 1..20]" not in memory_section
+
+
 @pytest.mark.parametrize(
     "arguments",
     [

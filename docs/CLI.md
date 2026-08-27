@@ -130,8 +130,8 @@ context; running them from a normal terminal returns `memory_access_denied`.
 ```bash
 vibe memory status [--json]
 vibe memory profile [--json]
-vibe memory list [--project <slug>] [--page N] [--limit 1..20] [--json]
-vibe memory search <query> [--project <slug>] [--mode {hybrid|keyword|vector|agentic}] [--limit 1..20] [--json]
+vibe memory list [--project <slug>] [--page N] [--limit 1..100] [--json]
+vibe memory search <query> [--project <slug>] [--mode {hybrid|keyword|vector|agentic}] [--limit 1..100] [--json]
 vibe memory remember <text> [--project <slug>] [--json]
 ```
 

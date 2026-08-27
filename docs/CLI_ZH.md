@@ -111,8 +111,8 @@ Avibe 已注入当前 Session 上下文的合规 Agent shell 中运行；从普�
 ```bash
 vibe memory status [--json]
 vibe memory profile [--json]
-vibe memory list [--project <slug>] [--page N] [--limit 1..20] [--json]
-vibe memory search <查询> [--project <slug>] [--limit 1..20] [--json]
+vibe memory list [--project <slug>] [--page N] [--limit 1..100] [--json]
+vibe memory search <查询> [--project <slug>] [--limit 1..100] [--json]
 vibe memory remember <文本> [--project <slug>] [--json]
 ```
 
