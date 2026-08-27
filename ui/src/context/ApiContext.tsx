@@ -1859,8 +1859,9 @@ export type InstallResult = {
   output: string | null;
   path?: string | null;
   job_id?: string;
-  status?: 'running' | 'succeeded' | 'failed';
+  status?: 'running' | 'succeeded' | 'failed' | 'rejected';
   reason?: string | null;
+  action_class?: 'operator_only';
   download_error?: DependencyDownloadError | null;
 };
 

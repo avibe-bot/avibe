@@ -1,6 +1,13 @@
 import type { DependencyItem, MemoryStatusResult } from '@/context/ApiContext';
 
-const INSTALLABLE_DEPENDENCIES = new Set(['askill', 'avault', 'show-runtime', 'memory-runtime', 'tmux']);
+const INSTALLABLE_DEPENDENCIES = new Set([
+  'askill',
+  'avault',
+  'show-runtime',
+  'memory-package',
+  'memory-runtime',
+  'tmux',
+]);
 
 export const dependencyHasInstallAction = (
   dependency: Pick<DependencyItem, 'id' | 'status' | 'action_class'>,

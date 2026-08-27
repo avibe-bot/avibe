@@ -62,6 +62,7 @@ from vibe.opencode_config import (
 from vibe.build_identity import get_build_identity
 from vibe.upgrade import (
     MEMORY_PACKAGE_NAME,
+    PACKAGE_NAME,
     MemoryRequirementUnreadableError,
     build_upgrade_plan,
     configured_memory_enabled,
@@ -8408,10 +8409,17 @@ def reconcile_askill_auto_update() -> dict:
 
 
 # =============================================================================
-# Dependencies aggregate + manual install jobs (askill / show runtime)
+# Dependencies aggregate + explicit manual install jobs
 # =============================================================================
 
-_ALLOWED_DEP_INSTALLS = {"askill", "avault", "show-runtime", "memory-runtime", "tmux"}
+_ALLOWED_DEP_INSTALLS = {
+    "askill",
+    "avault",
+    "show-runtime",
+    "memory-package",
+    "memory-runtime",
+    "tmux",
+}
 _STARTUP_DEPENDENCY_RECONCILE_LOCK = threading.Lock()
 _DEFAULT_STARTUP_SHOW_PAGE_PREWARM_LIMIT = 3
 _MAX_STARTUP_SHOW_PAGE_PREWARM_LIMIT = 10
@@ -8960,6 +8968,115 @@ def _prepare_memory_runtime_job() -> dict:
     }
 
 
+def _memory_package_repair_rejection() -> dict | None:
+    """Recheck the status-owned package repair contract before mutation."""
+
+    try:
+        package, _runtime = _memory_dependencies_status(offline=True)
+    except Exception:  # noqa: BLE001
+        logger.warning("Memory package repair admission could not project readiness", exc_info=True)
+        reason = "memory_package_admission_unavailable"
+        return {
+            "ok": False,
+            "status": "rejected",
+            "message": reason,
+            "output": None,
+            "reason": reason,
+            "action_class": "operator_only",
+        }
+
+    provider_count = package.get("provider_count")
+    version = package.get("version")
+    metadata_readable = provider_count == 0 or (
+        provider_count == 1 and isinstance(version, str) and bool(version)
+    )
+    if (
+        package.get("required") is True
+        and package.get("action_class") == "repairable"
+        and metadata_readable
+    ):
+        return None
+
+    reason = package.get("reason")
+    if not isinstance(reason, str) or not reason:
+        if package.get("required") is False:
+            reason = "memory_not_required"
+        elif package.get("required") is not True:
+            reason = "memory_requirement_unreadable"
+        elif package.get("action_class") == "none":
+            reason = "memory_package_not_repairable"
+        else:
+            reason = "memory_package_admission_unavailable"
+    return {
+        "ok": False,
+        "status": "rejected",
+        "message": reason,
+        "output": None,
+        "reason": reason,
+        "action_class": "operator_only",
+    }
+
+
+def _prepare_memory_package_job() -> dict:
+    """Install the matching optional package through the existing dependency job."""
+
+    rejection = _memory_package_repair_rejection()
+    if rejection is not None:
+        return rejection
+
+    current_version = _published_running_version()
+    if current_version is None:
+        reason = "memory_package_unpublished_build"
+        return {
+            "ok": False,
+            "message": reason,
+            "output": None,
+            "reason": reason,
+            "action_class": "operator_only",
+        }
+    try:
+        plan = build_upgrade_plan(
+            version=current_version,
+            package_name=PACKAGE_NAME,
+            memory_package=True,
+            memory_version=current_version,
+            vibe_path=get_running_vibe_path(),
+        )
+        result = execute_upgrade_plan(
+            plan,
+            run=subprocess.run,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            cwd=get_safe_cwd(),
+        )
+    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+        logger.warning("Memory package repair failed before completion: %s", exc)
+        return {
+            "ok": False,
+            "message": "memory_package_install_failed",
+            "output": str(exc),
+            "reason": "memory_package_install_failed",
+        }
+
+    output = _truncate_install_output(
+        ((result.stdout or "") + (f"\n{result.stderr}" if result.stderr else "")).strip()
+    )
+    if result.returncode != 0:
+        return {
+            "ok": False,
+            "message": "memory_package_install_failed",
+            "output": output or None,
+            "reason": "memory_package_install_failed",
+        }
+    return {
+        "ok": True,
+        "message": "memory_package_ready",
+        "output": output or None,
+        "reason": None,
+    }
+
+
 def _prepare_tmux_job() -> dict:
     try:
         from core.tmux_runtime import ensure_tmux_installed
@@ -9154,6 +9271,10 @@ def start_dependency_install_job(dep: str) -> dict:
     """
     if dep not in _ALLOWED_DEP_INSTALLS:
         return {"ok": False, "message": f"Unknown dependency: {dep}"}
+    if dep == "memory-package":
+        rejection = _memory_package_repair_rejection()
+        if rejection is not None:
+            return rejection
 
     job_id = uuid.uuid4().hex
     now = time.time()
@@ -9185,6 +9306,8 @@ def start_dependency_install_job(dep: str) -> dict:
                 result = ensure_avault_installed(force=True)
             elif dep == "show-runtime":
                 result = _prepare_show_runtime_job()
+            elif dep == "memory-package":
+                result = _prepare_memory_package_job()
             elif dep == "memory-runtime":
                 result = _prepare_memory_runtime_job()
             elif dep == "tmux":
