@@ -520,6 +520,39 @@ def test_mh_protocol_003_manual_selection_requires_matching_response_proof(
     assert mismatch_store.load().sources == []
     assert mismatch_adapter.revoked == mismatch_adapter.provisioned_transient
 
+    ambiguous_store = MemoryModelHubStore(config_with_sources([]))
+    ambiguous_adapter = ModelHubScenarioAdapter(
+        observation=SourceObservation(
+            outcome=ObservationOutcome.AMBIGUOUS,
+            reachable=True,
+            authenticated=True,
+            protocol=None,
+            discovery=ObservationDiscovery.NOT_ATTEMPTED,
+            model_ids=(),
+        )
+    )
+    ambiguous_service = service_for(
+        tmp_path / "manual-ambiguous",
+        ambiguous_store,
+        ambiguous_adapter,
+    )
+    with pytest.raises(ModelHubError) as ambiguous:
+        asyncio.run(
+            ambiguous_service.create_source(
+                {
+                    "kind": "api_key",
+                    "vendor": "custom",
+                    "display_name": "still-unproven",
+                    "base_url": "https://relay.example/v1",
+                    "key": "sk-scenario-unproven-manual",
+                    "protocol": "openai_responses",
+                }
+            )
+        )
+    assert ambiguous.value.code == "discovery_failed"
+    assert ambiguous_store.load().sources == []
+    assert ambiguous_adapter.revoked == ambiguous_adapter.provisioned_transient
+
 
 def test_mh_ac29_001_persisted_source_payload_round_trips_through_the_canonical_validator(
     monkeypatch: pytest.MonkeyPatch,
