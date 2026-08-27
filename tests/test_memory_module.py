@@ -24,7 +24,11 @@ from core.memory.types import (
     CaptureSkipped,
     MemoryItem,
     MemoryItems,
+    MemoryListItem,
+    MemoryListPage,
     MemoryProfile,
+    MemoryProfileExplicitInfo,
+    MemoryProfileTrait,
     OperationFailed,
     ProviderSearchItem,
 )
@@ -151,14 +155,72 @@ async def test_agent_remember_round_trips_through_dual_owner_search(
 
 
 @pytest.mark.asyncio
+async def test_capture_and_search_delegate_payload_size_to_everos(
+    tmp_path: Path,
+) -> None:
+    """MEMORY-SEARCH-018: Avibe adds no smaller text or query byte cap."""
+
+    class RecordingProvider(FakeMemoryProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.queries: list[tuple[str, str, int]] = []
+
+        async def search(self, principal_id, project_id, query, limit, **options):
+            self.queries.append((principal_id, query, limit))
+            return await super().search(
+                principal_id,
+                project_id,
+                query,
+                limit,
+                **options,
+            )
+
+    provider = RecordingProvider()
+    module, _store, _provider = _module(tmp_path, provider=provider)
+    capture_text = "remember this detail " * 2_000
+    query = "find this detail " * 700
+
+    assert len(capture_text.encode()) > 32 * 1024
+    assert len(query.encode()) > 8 * 1024
+    assert await module.capture(_request(text=capture_text)) == CaptureAccepted()
+    await module.wait_writer_idle_for_tests()
+    result = await module.search(
+        query,
+        principal_id=PRINCIPAL,
+        project_id="default",
+        limit=100,
+    )
+
+    assert provider.captures[0].text == capture_text
+    assert provider.queries == [
+        (PRINCIPAL, query, 100),
+        (f"{PRINCIPAL}-agent", query, 100),
+    ]
+    assert result == MemoryItems()
+
+
+@pytest.mark.asyncio
 async def test_profile_accepts_large_items_from_both_everos_owners(
     tmp_path: Path,
 ) -> None:
     summary = "profile " * 40_000
+    explicit_info = tuple(
+        MemoryProfileExplicitInfo(description=f"fact-{index}")
+        for index in range(201)
+    )
+    implicit_traits = tuple(
+        MemoryProfileTrait(description=f"trait-{index}")
+        for index in range(201)
+    )
+    profile = MemoryProfile(
+        summary=summary,
+        explicit_info=explicit_info,
+        implicit_traits=implicit_traits,
+    )
     item = MemoryItem(
         kind="profile",
         text=summary,
-        profile=MemoryProfile(summary=summary),
+        profile=profile,
     )
     provider = FakeMemoryProvider(
         profile_items_by_owner={
@@ -176,28 +238,64 @@ async def test_profile_accepts_large_items_from_both_everos_owners(
             MemoryItem(
                 kind="profile",
                 text=summary,
-                profile=MemoryProfile(summary=summary),
+                profile=profile,
                 origin="user",
             ),
             MemoryItem(
                 kind="profile",
                 text=summary,
-                profile=MemoryProfile(summary=summary),
+                profile=profile,
                 origin="agent",
             ),
         )
     )
 
 
-def test_non_profile_items_keep_provider_aggregate_cap(tmp_path: Path) -> None:
+def test_non_profile_items_accept_payloads_larger_than_legacy_aggregate_cap(
+    tmp_path: Path,
+) -> None:
+    """MEMORY-SEARCH-018: EverOS owns result payload sizing."""
+
     module, _store, _provider = _module(tmp_path)
+    item = MemoryItem(kind="fact", text="x" * (256 * 1024 + 1))
 
     result = module._bounded_items(
-        (MemoryItem(kind="fact", text="x" * (256 * 1024)),),
-        limit=20,
+        (item,),
+        limit=100,
     )
 
-    assert result == OperationFailed(error="memory_provider_response_invalid")
+    assert result == MemoryItems(items=(item,))
+
+
+def test_list_page_accepts_payloads_larger_than_legacy_aggregate_cap(
+    tmp_path: Path,
+) -> None:
+    """MEMORY-LIST-009: list payload sizing follows EverOS."""
+
+    module, _store, _provider = _module(tmp_path)
+    page = MemoryListPage(
+        items=(
+            MemoryListItem(
+                id="episode-1",
+                subject="subject",
+                summary="summary",
+                body="x" * (256 * 1024 + 1),
+                timestamp="2026-08-27T00:00:00Z",
+                project="default",
+            ),
+        ),
+        page=1,
+        page_size=100,
+        count=1,
+        total_count=1,
+    )
+
+    assert module._bounded_list_page(
+        page,
+        project_id="default",
+        page=1,
+        page_size=100,
+    ) == page
 
 
 @pytest.mark.asyncio

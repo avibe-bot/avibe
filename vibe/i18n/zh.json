@@ -758,10 +758,10 @@
         "query": "搜索内容",
         "project": "记忆项目：default，或 billing 这类小写 slug",
         "page": "页码（从 1 开始）",
-        "pageLimit": "每页记忆片段数（1-20）",
-        "limit": "最大结果数（1-20）",
+        "pageLimit": "每页记忆片段数（1-100）",
+        "limit": "最大结果数（1-100）",
         "mode": "召回模式（默认：hybrid）",
-        "text": "要记住的文本（最多 4,000 个字符）",
+        "text": "要记住的文本",
         "json": "输出机器可读格式"
       },
       "error": "记忆 {operation} 失败：{code}",

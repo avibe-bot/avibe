@@ -618,6 +618,10 @@ def cmd_memory(args) -> int:
 
     from vibe import internal_client
     from core.caller_context import caller_context_from_env
+    from core.memory.types import (
+        MAX_MEMORY_LIST_PAGE_SIZE,
+        MAX_MEMORY_SEARCH_RESULTS,
+    )
 
     operation = args.memory_command
     as_json = bool(getattr(args, "json", False))
@@ -629,10 +633,9 @@ def cmd_memory(args) -> int:
         query = args.query.strip() if isinstance(args.query, str) else ""
         if (
             not query
-            or len(query.encode("utf-8")) > 8 * 1024
             or not isinstance(args.limit, int)
             or isinstance(args.limit, bool)
-            or not 1 <= args.limit <= 20
+            or not 1 <= args.limit <= MAX_MEMORY_SEARCH_RESULTS
         ):
             return _print_memory_cli_error(operation, "memory_invalid_input", as_json=as_json, language=language)
     if operation == "list" and (
@@ -641,12 +644,12 @@ def cmd_memory(args) -> int:
         or args.page < 1
         or not isinstance(args.limit, int)
         or isinstance(args.limit, bool)
-        or not 1 <= args.limit <= 20
+        or not 1 <= args.limit <= MAX_MEMORY_LIST_PAGE_SIZE
     ):
         return _print_memory_cli_error(operation, "memory_invalid_input", as_json=as_json, language=language)
     if operation == "remember":
         query = args.text if isinstance(args.text, str) else ""
-        if not query.strip() or len(query) > 4_000:
+        if not query.strip():
             return _print_memory_cli_error(operation, "memory_invalid_input", as_json=as_json, language=language)
     try:
         caller = caller_context_from_env()

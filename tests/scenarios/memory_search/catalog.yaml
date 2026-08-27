@@ -116,3 +116,9 @@ scenarios:
     kind: lifecycle
     layer: contract
     test: tests/test_memory_module.py::test_lifecycle_barrier_does_not_wait_for_writer
+  - id: MEMORY-SEARCH-018
+    name: Memory payload sizing and result limits follow the pinned EverOS contract
+    status: covered
+    kind: boundary
+    layer: contract
+    test: tests/test_memory_module.py::test_capture_and_search_delegate_payload_size_to_everos

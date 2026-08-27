@@ -676,7 +676,9 @@ def test_memory_search_accepts_bounded_agentic_policy_from_cli_session() -> None
     assert current_session_id == "ses-memory"
 
 
-def test_memory_list_binds_cli_session_and_uses_exact_provider_page() -> None:
+def test_memory_list_accepts_everos_maximum_at_controller_boundary() -> None:
+    """MEMORY-LIST-009: the internal socket accepts the EverOS maximum."""
+
     from core.memory.http_headers import CALLER_SESSION_HEADER
 
     runtime = SimpleNamespace(
@@ -699,7 +701,7 @@ def test_memory_list_binds_cli_session_and_uses_exact_provider_page() -> None:
             return await client.post(
                 "/internal/memory/list",
                 headers={CALLER_SESSION_HEADER: "ses-memory-list"},
-                json={"project": "notes", "page": 2, "limit": 5},
+                json={"project": "notes", "page": 2, "limit": 100},
             )
 
     response = asyncio.run(_exercise())
@@ -714,7 +716,7 @@ def test_memory_list_binds_cli_session_and_uses_exact_provider_page() -> None:
         "u-11111111111111111111111111111111",
         "notes",
         page=2,
-        page_size=5,
+        page_size=100,
     )
 
 
@@ -1598,6 +1600,43 @@ def test_memory_remember_route_rejects_capture_queued_across_runtime_replacement
     }
     assert old_module.calls == 0
     assert fresh_module.calls == 0
+
+
+def test_memory_remember_accepts_text_over_legacy_controller_limit() -> None:
+    """MEMORY-SEARCH-018: the internal socket delegates large remember text."""
+
+    from core.memory import CaptureAccepted
+    from core.memory.http_headers import CALLER_SESSION_HEADER
+
+    text = "remember this detail " * 300
+    controller = _build_controller_double()
+    controller.memory_scope_for_cli_session.return_value = (
+        "u-11111111111111111111111111111111",
+        "default",
+    )
+    controller.memory_runtime = SimpleNamespace()
+    controller.capture_memory = AsyncMock(return_value=CaptureAccepted())
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.post(
+                "/internal/memory/remember",
+                json={"text": text},
+                headers={CALLER_SESSION_HEADER: "session-1"},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert len(text) > 4_000
+    assert response.status_code == 200
+    assert response.json() == {"status": "accepted"}
+    request = controller.capture_memory.await_args.args[0]
+    assert request.text == text
 
 
 # ---------------------------------------------------------------------

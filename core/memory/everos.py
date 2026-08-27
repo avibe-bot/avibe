@@ -20,6 +20,7 @@ import httpx
 
 from core.memory.types import (
     CaptureAttachment,
+    MAX_MEMORY_LIST_PAGE_SIZE,
     MemoryErrorCode,
     MemoryItem,
     MemoryListItem,
@@ -48,8 +49,6 @@ from core.memory.observations import (
 logger = logging.getLogger(__name__)
 
 _APP_ID = "avibe"
-_MAX_RESPONSE_DEPTH = 8
-_MAX_RESPONSE_COLLECTION = 200
 _SIDECAR_TIMEOUT_SECONDS = 20.0
 _AGENTIC_TIMEOUT_HEADER = "X-Avibe-Memory-Agentic-Timeout-Seconds"
 _AGENTIC_ROUND_HEADER = "X-Avibe-Memory-Agentic-Round"
@@ -65,6 +64,7 @@ PROCESSING_PROBE_MAX_DEADLINE_SECONDS = (
 )
 _PROCESSING_TIMEOUT_SECONDS = PROCESSING_PROBE_REQUEST_TIMEOUT_SECONDS
 _MAX_PROCESSING_PROBE_RESPONSE_BYTES = 2 * 1024 * 1024
+_MAX_PROCESSING_PROBE_VECTOR_ITEMS = 200_000
 _PREFLIGHT_TIMEOUT_SECONDS = 30.0
 _CHAT_PROBE_MAX_TOKENS = 8
 _CHAT_PROBE_TERMINAL_FINISH_REASONS = frozenset(
@@ -82,7 +82,6 @@ MemoryRerankProvider = Literal["deepinfra", "vllm", "dashscope"]
 DEFAULT_MEMORY_RERANK_PROVIDER: MemoryRerankProvider = "deepinfra"
 DASHSCOPE_RERANK_PATH = "api/v1/services/rerank/text-rerank/text-rerank"
 
-_MAX_LIST_PAGE_SIZE = 20
 _EVEROS_EXACT_SORT_WINDOW = 20_000
 _MAX_PROFILE_TIMESTAMP_MS = 4_102_444_800_000
 # The pinned EverOS 1.2.3 `/add` route emits these only while ingesting attachment
@@ -535,7 +534,7 @@ class EverOSPort:
             require_json=True,
         )
         data = body.get("data") if isinstance(body, dict) else None
-        if not isinstance(data, dict) or not _is_bounded_json_value(data):
+        if not isinstance(data, dict) or not _is_json_value(data):
             raise MemoryProviderFailure("memory_provider_response_invalid")
         profile = _map_profile_item(data, principal_id=principal_id)
         # "Valid response, no profile payload" is exactly "zero items returned",
@@ -558,7 +557,7 @@ class EverOSPort:
             or page < 1
             or isinstance(page_size, bool)
             or not isinstance(page_size, int)
-            or not 1 <= page_size <= _MAX_LIST_PAGE_SIZE
+            or not 1 <= page_size <= MAX_MEMORY_LIST_PAGE_SIZE
         ):
             raise MemoryProviderFailure("memory_invalid_input", retryable=False)
         body = await self._sidecar_request(
@@ -824,7 +823,7 @@ class EverOSPort:
             if not isinstance(body, dict):
                 raise MemoryProviderFailure("memory_provider_response_invalid")
             data = body.get("data")
-            if not isinstance(data, dict) or not _is_bounded_json_value(data):
+            if not isinstance(data, dict) or not _is_json_value(data):
                 raise MemoryProviderFailure("memory_provider_response_invalid")
         except asyncio.TimeoutError as exc:
             raise MemoryProviderFailure("memory_provider_timeout") from exc
@@ -1078,8 +1077,6 @@ def _map_search_items(
     episodes = data.get("episodes", [])
     if not isinstance(episodes, list):
         raise MemoryProviderFailure("memory_provider_response_invalid")
-    if len(episodes) > _MAX_RESPONSE_COLLECTION:
-        raise MemoryProviderFailure("memory_provider_response_invalid")
 
     items: list[ProviderSearchItem] = []
     for episode in episodes:
@@ -1109,7 +1106,7 @@ def _map_search_items(
         facts = episode.get("atomic_facts", [])
         if facts is None:
             facts = []
-        if not isinstance(facts, list) or len(facts) > _MAX_RESPONSE_COLLECTION:
+        if not isinstance(facts, list):
             raise MemoryProviderFailure("memory_provider_response_invalid")
         for fact in facts:
             if len(items) >= limit:
@@ -1175,7 +1172,7 @@ def _map_episode_page(
         not request_id
         or not isinstance(data, dict)
         or set(data) != data_keys
-        or not _is_bounded_json_value(data)
+        or not _is_json_value(data)
     ):
         raise MemoryProviderFailure("memory_provider_response_invalid")
     episodes = data.get("episodes")
@@ -1269,7 +1266,6 @@ def _map_list_episode(
         or value.get("project_id") != project_id
         or value.get("type") != "Conversation"
         or not isinstance(sender_ids, list)
-        or len(sender_ids) > _MAX_RESPONSE_COLLECTION
         or any(not _strict_receipt_id(sender_id) for sender_id in sender_ids)
         or subject is None
         or summary is None
@@ -1289,7 +1285,7 @@ def _map_list_episode(
 
 def _map_profile_item(data: dict[str, Any], *, principal_id: str) -> MemoryItem | None:
     profiles = data.get("profiles", [])
-    if not isinstance(profiles, list) or len(profiles) > _MAX_RESPONSE_COLLECTION:
+    if not isinstance(profiles, list):
         raise MemoryProviderFailure("memory_provider_response_invalid")
     for profile in profiles:
         if not isinstance(profile, dict) or profile.get("user_id") != principal_id:
@@ -1362,7 +1358,7 @@ def _structured_explicit_info(value: dict[str, Any]) -> tuple[MemoryProfileExpli
     if "explicit_info" not in value:
         return ()
     entries = value["explicit_info"]
-    if not isinstance(entries, list) or len(entries) > _MAX_RESPONSE_COLLECTION:
+    if not isinstance(entries, list):
         raise MemoryProviderFailure("memory_provider_response_invalid")
     mapped: list[MemoryProfileExplicitInfo] = []
     for entry in entries:
@@ -1385,7 +1381,7 @@ def _structured_implicit_traits(value: dict[str, Any]) -> tuple[MemoryProfileTra
     if "implicit_traits" not in value:
         return ()
     entries = value["implicit_traits"]
-    if not isinstance(entries, list) or len(entries) > _MAX_RESPONSE_COLLECTION:
+    if not isinstance(entries, list):
         raise MemoryProviderFailure("memory_provider_response_invalid")
     mapped: list[MemoryProfileTrait] = []
     for entry in entries:
@@ -1429,11 +1425,11 @@ def _episode_text(episode: dict[str, Any]) -> str | None:
 def _canonical_profile_text(value: Any) -> str | None:
     if isinstance(value, str):
         return _safe_text(value)
-    if not isinstance(value, (dict, list)) or not _is_bounded_json_value(value):
+    if not isinstance(value, (dict, list)) or not _is_json_value(value):
         return None
     try:
         rendered = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    except (TypeError, ValueError):
+    except (RecursionError, TypeError, ValueError):
         return None
     return _safe_text(rendered)
 
@@ -1506,28 +1502,33 @@ def _record_timestamp(value: Any) -> str | None:
     return instant.isoformat().replace("+00:00", "Z")
 
 
-def _is_bounded_json_value(value: Any, *, depth: int = 0) -> bool:
-    if depth > _MAX_RESPONSE_DEPTH:
+def _is_json_value(value: Any) -> bool:
+    """Validate JSON value types without imposing Avibe payload limits."""
+
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if item is None or isinstance(item, bool):
+            continue
+        if isinstance(item, str):
+            if _utf8_bytes(item) is None:
+                return False
+            continue
+        if isinstance(item, (int, float)):
+            if isinstance(item, float) and not math.isfinite(item):
+                return False
+            continue
+        if isinstance(item, list):
+            pending.extend(item)
+            continue
+        if isinstance(item, dict):
+            for key, nested in item.items():
+                if not isinstance(key, str) or _utf8_bytes(key) is None:
+                    return False
+                pending.append(nested)
+            continue
         return False
-    if value is None or isinstance(value, bool):
-        return True
-    if isinstance(value, str):
-        return _utf8_bytes(value) is not None
-    if isinstance(value, (int, float)):
-        return not isinstance(value, float) or math.isfinite(value)
-    if isinstance(value, list):
-        return len(value) <= _MAX_RESPONSE_COLLECTION and all(
-            _is_bounded_json_value(item, depth=depth + 1) for item in value
-        )
-    if isinstance(value, dict):
-        return len(value) <= _MAX_RESPONSE_COLLECTION and all(
-            isinstance(key, str)
-            and (raw := _utf8_bytes(key)) is not None
-            and len(raw) <= 128
-            and _is_bounded_json_value(item, depth=depth + 1)
-            for key, item in value.items()
-        )
-    return False
+    return True
 
 
 def _valid_chat_probe_response(value: Any) -> bool:
@@ -1578,7 +1579,7 @@ def _valid_embedding_probe_response(value: Any) -> bool:
     return (
         isinstance(vector, list)
         and bool(vector)
-        and len(vector) <= _MAX_RESPONSE_COLLECTION * 1000
+        and len(vector) <= _MAX_PROCESSING_PROBE_VECTOR_ITEMS
         and all(isinstance(item, (int, float)) and not isinstance(item, bool) and math.isfinite(item) for item in vector)
     )
 
@@ -1744,7 +1745,7 @@ def _optional_json_object(raw: bytes | None) -> dict[str, Any] | None:
         value = json.loads(raw)
     except (TypeError, ValueError):
         return None
-    return value if isinstance(value, dict) and _is_bounded_json_value(value) else None
+    return value if isinstance(value, dict) and _is_json_value(value) else None
 
 
 def _provider_health_snapshot(payload: dict[str, Any] | None) -> ProviderHealthSnapshot | None:
@@ -1933,7 +1934,7 @@ class FakeMemoryProvider:
         default_factory=lambda: MemoryListPage(
             items=(),
             page=1,
-            page_size=_MAX_LIST_PAGE_SIZE,
+            page_size=20,
             count=0,
             total_count=0,
         )
