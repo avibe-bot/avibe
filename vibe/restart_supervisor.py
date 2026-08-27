@@ -7,12 +7,10 @@ import logging
 import os
 import shlex
 import subprocess
-import sys
 import time
 import urllib.error
 import urllib.request
 import uuid
-from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import NamedTuple
@@ -26,24 +24,21 @@ from config import paths
 # load makes every later use a `sys.modules` hit that touches no file. The module
 # is pure stdlib, so paying for it on every restart costs nothing.
 from storage.backups import find_restorable_backup, next_backup_sequence, restore_sqlite_backup
-from storage.lock import MigrationFileLock, MigrationLockTimeout
 from vibe import runtime
 from vibe.build_identity import get_build_identity
 from vibe.upgrade import (
     LEGACY_PACKAGE_NAME,
+    MEMORY_PACKAGE_NAME,
     PACKAGE_NAME,
     RollbackTarget,
-    UpgradePlan,
-    UpgradeTransaction,
     _names_a_published_release,
     build_upgrade_plan,
+    execute_upgrade_plan,
     get_restart_command,
     get_restart_environment,
     get_restart_invocation_command,
     get_safe_cwd,
     installed_package_name,
-    execute_upgrade_plan,
-    preflight_upgrade_plan,
 )
 
 
@@ -60,18 +55,6 @@ _ROLLBACK_INSTALL_TIMEOUT_SECONDS = 600.0
 # next to an already-warm CLI -- is not the right bound here. This one is only
 # ever paid in full when the UI is genuinely not coming.
 _ROLLBACK_UI_READY_TIMEOUT_SECONDS = 60.0
-_UPGRADE_TRANSACTION_LOCK_TIMEOUT_SECONDS = 30.0
-_RESTART_SEED_GRACE_SECONDS = 60.0
-
-
-@contextmanager
-def _upgrade_transaction_lock(*, timeout_seconds: float | None = _UPGRADE_TRANSACTION_LOCK_TIMEOUT_SECONDS):
-    """Private lease held by the supervisor across package replacement."""
-
-    lock_path = paths.get_runtime_dir() / "upgrade-transaction.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with MigrationFileLock(lock_path, timeout_seconds=timeout_seconds):
-        yield
 
 
 class StartedRuntime(NamedTuple):
@@ -228,7 +211,7 @@ def _launcher_dist_metadata(launcher: runtime.ServiceLauncher) -> list[tuple[str
             payload = email.parser.Parser().parsestr(metadata_path.read_text(encoding="utf-8"))
             name = str(payload.get("Name") or "").strip()
             version = str(payload.get("Version") or "").strip()
-            if name in {PACKAGE_NAME, LEGACY_PACKAGE_NAME} and version:
+            if name in {PACKAGE_NAME, LEGACY_PACKAGE_NAME, MEMORY_PACKAGE_NAME} and version:
                 entries.append((name, version))
     except (OSError, UnicodeError, ValueError):
         return []
@@ -297,7 +280,17 @@ def _discover_legacy_upgrade_target(*, trigger: str, vibe_path: str | None) -> R
         if metadata is None:
             return None
         version, package = metadata
-    return RollbackTarget(version=version, package=package, launcher=launcher)
+    memory_version = next(
+        (candidate_version for candidate_name, candidate_version in _launcher_dist_metadata(launcher) if candidate_name == MEMORY_PACKAGE_NAME),
+        None,
+    )
+    return RollbackTarget(
+        version=version,
+        package=package,
+        launcher=launcher,
+        memory_package=memory_version is not None,
+        memory_version=memory_version,
+    )
 
 
 def _now_iso() -> str:
@@ -372,37 +365,6 @@ def _write_status(payload: dict) -> None:
     path = runtime.get_restart_status_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     runtime.write_json(path, status)
-
-
-def _upgrade_transaction_active() -> bool:
-    status = runtime.read_json(runtime.get_restart_status_path())
-    return _restart_status_in_flight(status) and status.get("transaction") == "upgrade-v1"
-
-
-def _restart_job_active() -> bool:
-    status = runtime.read_json(runtime.get_restart_status_path())
-    return _restart_status_in_flight(status)
-
-
-def _restart_status_in_flight(status: object) -> bool:
-    """Validate restart ownership from the live supervisor identity, not a stale marker."""
-
-    if not isinstance(status, dict) or status.get("state") not in {"scheduled", "running"}:
-        return False
-    supervisor_pid = status.get("supervisor_pid")
-    if isinstance(supervisor_pid, int):
-        if supervisor_pid <= 0 or not runtime.pid_alive(supervisor_pid):
-            return False
-        started_at = status.get("supervisor_started_at")
-        if started_at is None:
-            return True
-        current_started_at = runtime.process_create_time(supervisor_pid)
-        return current_started_at is None or current_started_at == started_at
-    try:
-        age = time.time() - runtime.get_restart_status_path().stat().st_mtime
-    except OSError:
-        return False
-    return age < _RESTART_SEED_GRACE_SECONDS
 
 
 def _read_recorded_pid() -> int | None:
@@ -816,217 +778,6 @@ def _wait_for_service_lock_release(timeout: float = _SERVICE_LOCK_RELEASE_TIMEOU
     return available
 
 
-def _prepare_show_runtime_nonfatal(vibe_path: str | None, cwd: str, write) -> None:
-    """Preserve the upgrade-era Show Runtime prepare step without failing install."""
-
-    try:
-        from vibe.api import _prepare_show_runtime_after_upgrade
-
-        detail = _prepare_show_runtime_after_upgrade(vibe_path, cwd)
-    except Exception as exc:  # pragma: no cover - defensive import boundary
-        detail = f"Show Runtime preparation skipped: {exc}"
-    if detail:
-        write(detail)
-
-
-def _run_upgrade_transaction(
-    *,
-    job_id: str,
-    delay_seconds: float,
-    vibe_path: str | None,
-    trigger: str,
-    scope: str,
-    prepare_show_runtime: bool,
-    transaction: UpgradeTransaction,
-) -> int:
-    """Execute one declarative package transaction under the supervisor lease."""
-
-    transaction.validate()
-    log_path = _restart_log_path(job_id)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    safe_cwd = get_safe_cwd()
-    start_ui = scope != "service"
-    payload = {
-        "ok": None,
-        "job_id": job_id,
-        "state": "running",
-        "trigger": trigger,
-        "scope": scope,
-        "delay_seconds": delay_seconds,
-        "supervisor_pid": os.getpid(),
-        "supervisor_started_at": runtime.process_create_time(os.getpid()),
-        "old_pid": _read_recorded_pid(),
-        "new_pid": None,
-        "log_path": str(log_path),
-        "error": None,
-        "created_at": _now_iso(),
-        "transaction": "upgrade-v1",
-    }
-
-    with log_path.open("a", encoding="utf-8") as log:
-        def write(message: str) -> None:
-            log.write(f"{_now_iso()} {message}\n")
-            log.flush()
-
-        def fail(message: str, code: int = 2) -> int:
-            payload.update(ok=False, state="failed", error=message)
-            _write_status(payload)
-            write(message)
-            return code
-
-        _write_status(payload)
-        if delay_seconds > 0:
-            time.sleep(delay_seconds)
-            payload["state"] = "running"
-            _write_status(payload)
-
-        rollback_to = transaction.rollback_to
-        with _upgrade_transaction_lock():
-            running_before = runtime.verified_service_running()
-            if running_before and transaction.activate_runtime == "none":
-                return fail("upgrade transaction requires lifecycle activation while Avibe is running")
-
-            def rollback_after_failure(message: str, code: int) -> int:
-                if rollback_to and running_before:
-                    try:
-                        rollback = _roll_back_failed_upgrade(
-                            rollback_to=rollback_to,
-                            vibe_path=vibe_path,
-                            start_ui=start_ui,
-                            backup_watermark=None,
-                            write=write,
-                            record=lambda value: payload.update(rollback=value) or _write_status(payload),
-                        )
-                        payload["rollback"] = rollback
-                    except Exception as exc:
-                        write(f"rollback failed: {exc}")
-                return fail(message, code)
-
-            try:
-                plan = build_upgrade_plan(
-                    python_executable=sys.executable,
-                    vibe_path=vibe_path,
-                    version=None,
-                    memory_enabled=transaction.include_memory,
-                    memory_package=transaction.include_memory,
-                    memory_requirement=transaction.memory_requirement,
-                    package_spec=transaction.forward_spec,
-                )
-            except Exception as exc:
-                return fail(f"cannot build upgrade transaction: {exc}")
-            if plan.method != transaction.installer:
-                return fail("upgrade transaction installer does not match current runtime")
-
-            write("preflighting upgrade transaction")
-            try:
-                preflight = preflight_upgrade_plan(
-                    plan,
-                    cwd=safe_cwd,
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    check=False,
-                    timeout=_ROLLBACK_INSTALL_TIMEOUT_SECONDS,
-                )
-            except Exception as exc:
-                return fail(f"upgrade preflight failed: {exc}")
-            if preflight is not None and preflight.returncode != 0:
-                detail = (preflight.stderr or preflight.stdout or "").strip()[-2000:]
-                return fail(f"upgrade preflight failed with exit code {preflight.returncode}: {detail}")
-
-            if running_before:
-                write("stopping runtime before package transaction")
-                try:
-                    ui_stopped, _ui_timings, _stop_ui_seconds, stopped_ui_pid, service_stopped, _stop_service_seconds = (
-                        _stop_runtime_for_restart(stop_ui=start_ui)
-                    )
-                except Exception as exc:
-                    return fail(f"stop runtime failed: {exc}")
-                ui_pid_live = bool(stopped_ui_pid and runtime.pid_alive(stopped_ui_pid))
-                ui_identity_live = runtime.ui_pid_file_points_to_running_ui() if start_ui else False
-                if start_ui and (ui_stopped is False or ui_pid_live or ui_identity_live):
-                    write(f"UI pid {stopped_ui_pid} did not stop before package mutation")
-                    if service_stopped:
-                        try:
-                            recovered = _start_runtime_processes(start_ui=False)
-                            recovered_pid = runtime.wait_for_service_ready(
-                                recovered.service_pid,
-                                timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS,
-                            )
-                            if recovered_pid is not None:
-                                runtime.write_status(
-                                    "running",
-                                    f"pid={recovered_pid}",
-                                    recovered_pid,
-                                    _live_ui_pid(stopped_ui_pid),
-                                )
-                        except Exception as exc:
-                            write(f"failed to recover runtime after UI stop failure: {exc}")
-                    return fail(f"UI pid {stopped_ui_pid} did not stop before package mutation")
-                if not _wait_for_service_lock_release():
-                    return fail("service lock did not release after stopping runtime")
-
-            install_plan = UpgradePlan(
-                command=plan.command,
-                env=plan.env,
-                method=plan.method,
-                rollback_to=plan.rollback_to,
-                preflight_command=None,
-                cleanup_command=plan.cleanup_command,
-                cleanup_after_command=plan.cleanup_after_command,
-            )
-            write("installing upgrade transaction")
-            try:
-                result = execute_upgrade_plan(
-                    install_plan,
-                    cwd=safe_cwd,
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    check=False,
-                    timeout=_ROLLBACK_INSTALL_TIMEOUT_SECONDS,
-                )
-            except Exception as exc:
-                result = None
-                install_error = str(exc)
-            else:
-                install_error = ""
-            if result is None or result.returncode != 0:
-                detail = install_error or ((result.stderr or result.stdout or "").strip()[-2000:] if result else "")
-                return rollback_after_failure(f"upgrade install failed: {detail}", 2)
-
-            if running_before and transaction.activate_runtime == "restart_if_running":
-                write("starting runtime after package transaction")
-                try:
-                    started = _start_runtime_processes(start_ui=start_ui)
-                except Exception as exc:
-                    return rollback_after_failure(f"start runtime failed: {exc}", 1)
-                if not started.service_pid or not runtime.pid_alive(started.service_pid):
-                    return rollback_after_failure(
-                        f"started service pid {started.service_pid} is not alive",
-                        3,
-                    )
-                try:
-                    ready_pid = runtime.wait_for_service_ready(
-                        started.service_pid,
-                        timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS,
-                    )
-                except Exception as exc:
-                    return rollback_after_failure(f"service readiness check failed: {exc}", 3)
-                if ready_pid is None:
-                    return rollback_after_failure("service did not become ready after package transaction", 3)
-                payload["new_pid"] = ready_pid
-                runtime.write_status("running", f"pid={ready_pid}", ready_pid, _live_ui_pid(started.ui_pid))
-
-            if prepare_show_runtime:
-                _prepare_show_runtime_nonfatal(vibe_path, safe_cwd, write)
-
-            payload.update(ok=True, state="succeeded", error=None)
-            _write_status(payload)
-            write("upgrade transaction succeeded")
-            return 0
-
-
 def _run_restart_job(
     *,
     job_id: str,
@@ -1036,31 +787,7 @@ def _run_restart_job(
     scope: str = "all",
     prepare_show_runtime: bool = False,
     rollback_to: RollbackTarget | None = None,
-    upgrade_transaction: UpgradeTransaction | None = None,
 ) -> int:
-    if upgrade_transaction is not None:
-        try:
-            return _run_upgrade_transaction(
-                job_id=job_id,
-                delay_seconds=delay_seconds,
-                vibe_path=vibe_path,
-                trigger=trigger,
-                scope=scope,
-                prepare_show_runtime=prepare_show_runtime,
-                transaction=upgrade_transaction,
-            )
-        except MigrationLockTimeout as exc:
-            payload = {
-                "ok": False,
-                "job_id": job_id,
-                "state": "failed",
-                "trigger": trigger,
-                "scope": scope,
-                "transaction": "upgrade-v1",
-                "error": f"upgrade transaction busy: {exc}",
-            }
-            _write_status(payload)
-            return 2
     # "service": restart only the service process, leaving the Web UI process
     # running (a config change shouldn't tear down the open Web UI). "all"
     # (default, e.g. CLI `vibe restart` / upgrades) restarts both.
@@ -1169,6 +896,8 @@ def _run_restart_job(
             "rollback_to": rollback_to.version if rollback_to else None,
             "rollback_package": rollback_to.package if rollback_to else None,
             "rollback_launcher": rollback_to.launcher._asdict() if rollback_to else None,
+            "rollback_memory_package": rollback_to.memory_package if rollback_to else False,
+            "rollback_memory_version": rollback_to.memory_version if rollback_to else None,
             "rollback_target_source": rollback_target_source,
             "rollback_discovery_error": rollback_discovery_error,
             "old_pid": old_pid,
@@ -1344,161 +1073,6 @@ def schedule_restart(
     memory_ui_secret: str | None = None,
     rollback_to: RollbackTarget | None = None,
 ) -> dict:
-    """Admit and spawn an ordinary restart under the transaction gate."""
-
-    from storage.migrations import guard_source_checkout_default_state_bootstrap
-
-    # Validate source-checkout state before the lock helper creates any runtime
-    # files. This keeps the migration guard side-effect free on a rejected call.
-    guard_source_checkout_default_state_bootstrap()
-    # The same private lease serializes admission with a package transaction.
-    # Holding it through status seeding and Popen closes the gap where each side
-    # could observe the other as idle and then spawn competing supervisors.
-    with _upgrade_transaction_lock(timeout_seconds=0):
-        return _schedule_restart_locked(
-            delay_seconds=delay_seconds,
-            vibe_path=vibe_path,
-            trigger=trigger,
-            scope=scope,
-            prepare_show_runtime=prepare_show_runtime,
-            memory_ui_secret=memory_ui_secret,
-            rollback_to=rollback_to,
-        )
-
-
-def _supervisor_command(
-    *,
-    vibe_path: str | None,
-    job_id: str,
-    delay_seconds: float,
-    trigger: str,
-    scope: str,
-    prepare_show_runtime: bool,
-    extra_args: list[str] | None = None,
-) -> list[str]:
-    """Build the one detached-supervisor invocation envelope."""
-
-    invocation = get_restart_invocation_command(vibe_path=vibe_path)
-    command = [*invocation[:-1], "__restart-supervisor"] if invocation and invocation[-1] == "restart" else [
-        *(invocation or ["vibe"]),
-        "__restart-supervisor",
-    ]
-    command.extend(["--job-id", job_id, "--delay-seconds", str(delay_seconds), "--trigger", trigger])
-    if scope != "all":
-        command.extend(["--scope", scope])
-    if vibe_path:
-        command.extend(["--vibe-path", vibe_path])
-    if prepare_show_runtime:
-        command.append("--prepare-show-runtime")
-    command.extend(extra_args or [])
-    return command
-
-
-def _spawn_supervisor_process(
-    *,
-    command: list[str],
-    env: dict[str, str] | None,
-    log_path: Path,
-    memory_ui_secret: str | None,
-):
-    """Spawn a detached supervisor using the shared process envelope."""
-
-    with log_path.open("a", encoding="utf-8") as log:
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.PIPE if memory_ui_secret is not None else None,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            close_fds=True,
-            cwd=get_safe_cwd(),
-            env=runtime._memory_ui_child_env(env, memory_ui_secret=memory_ui_secret),
-        )
-        runtime._spawn_stdin(process, memory_ui_secret=memory_ui_secret)
-    return process
-
-
-def _supervisor_status_payload(
-    *,
-    job_id: str,
-    trigger: str,
-    scope: str,
-    delay_seconds: float,
-    log_path: Path,
-    transaction: bool = False,
-) -> dict:
-    payload = {
-        "ok": None,
-        "job_id": job_id,
-        "state": "scheduled",
-        "trigger": trigger,
-        "scope": scope,
-        "delay_seconds": delay_seconds,
-        "supervisor_pid": None,
-        "old_pid": _read_recorded_pid(),
-        "new_pid": None,
-        "log_path": str(log_path),
-        "error": None,
-        "created_at": _now_iso(),
-    }
-    if transaction:
-        payload["transaction"] = "upgrade-v1"
-    return payload
-
-
-def _write_upgrade_transaction_file(transaction: UpgradeTransaction, job_id: str) -> Path:
-    """Atomically publish a 0600, single-use declarative transaction payload."""
-
-    runtime_dir = paths.get_runtime_dir()
-    runtime_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(runtime_dir, 0o700)
-    path = runtime_dir / f"upgrade-transaction-{job_id}.json"
-    temporary = runtime_dir / f".{path.name}.{os.getpid()}.tmp"
-    payload = json.dumps(transaction.to_payload(), separators=(",", ":"), sort_keys=True)
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            descriptor = -1
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        os.chmod(path, 0o600)
-    finally:
-        if descriptor != -1:
-            os.close(descriptor)
-        temporary.unlink(missing_ok=True)
-    return path
-
-
-def _read_upgrade_transaction_file(path: str) -> UpgradeTransaction:
-    """Consume and validate the supervisor payload before any lifecycle action."""
-
-    payload_path = Path(path)
-    runtime_dir = paths.get_runtime_dir().resolve()
-    try:
-        if payload_path.resolve().parent != runtime_dir:
-            raise ValueError("upgrade transaction payload path is outside the runtime directory")
-    except OSError as exc:
-        raise ValueError("invalid upgrade transaction payload path") from exc
-    try:
-        with payload_path.open(encoding="utf-8") as handle:
-            payload = json.load(handle)
-    finally:
-        payload_path.unlink(missing_ok=True)
-    return UpgradeTransaction.from_payload(payload)
-
-
-def _schedule_restart_locked(
-    *,
-    delay_seconds: float = 0.0,
-    vibe_path: str | None = None,
-    trigger: str = "cli",
-    scope: str = "all",
-    prepare_show_runtime: bool = False,
-    memory_ui_secret: str | None = None,
-    rollback_to: RollbackTarget | None = None,
-) -> dict:
     """Spawn the detached restart job.
 
     `rollback_to` is the install currently on the machine, and passing it is what
@@ -1520,29 +1094,43 @@ def _schedule_restart_locked(
     from vibe.memory_ui_access import process_ui_read_secret
     from storage.migrations import guard_source_checkout_default_state_bootstrap
 
-    if _upgrade_transaction_active():
-        raise RuntimeError("an upgrade transaction is already in progress")
     memory_ui_secret = memory_ui_secret or process_ui_read_secret()
     guard_source_checkout_default_state_bootstrap()
     job_id = uuid.uuid4().hex[:12]
-    extra_args: list[str] = []
+    invocation = get_restart_invocation_command(vibe_path=vibe_path)
+    command = [*invocation[:-1], "__restart-supervisor"] if invocation and invocation[-1] == "restart" else [
+        *(invocation or ["vibe"]),
+        "__restart-supervisor",
+    ]
+    command.extend(["--job-id", job_id, "--delay-seconds", str(delay_seconds), "--trigger", trigger])
+    if scope != "all":
+        command.extend(["--scope", scope])
+    if vibe_path:
+        command.extend(["--vibe-path", vibe_path])
+    if prepare_show_runtime:
+        command.append("--prepare-show-runtime")
     if rollback_to:
-        extra_args.extend(["--rollback-to", rollback_to.version])
-        extra_args.extend(["--rollback-python", rollback_to.launcher.python, "--rollback-main", rollback_to.launcher.main])
+        command.extend(
+            [
+                "--rollback-to",
+                rollback_to.version,
+                # Not optional the way the package name is. A missing package
+                # name still leaves `build_upgrade_plan` a defensible default,
+                # while a missing launcher leaves the job with only its own --
+                # which, in the case this exists for, is the release being
+                # undone.
+                "--rollback-python",
+                rollback_to.launcher.python,
+                "--rollback-main",
+                rollback_to.launcher.main,
+            ]
+        )
         if rollback_to.package:
-            extra_args.extend(["--rollback-package", rollback_to.package])
-        extra_args.extend(["--rollback-memory-package", "1" if rollback_to.memory_package else "0"])
-        if rollback_to.memory_version:
-            extra_args.extend(["--rollback-memory-version", rollback_to.memory_version])
-    command = _supervisor_command(
-        vibe_path=vibe_path,
-        job_id=job_id,
-        delay_seconds=delay_seconds,
-        trigger=trigger,
-        scope=scope,
-        prepare_show_runtime=prepare_show_runtime,
-        extra_args=extra_args,
-    )
+            command.extend(["--rollback-package", rollback_to.package])
+        if rollback_to.memory_package:
+            command.append("--rollback-memory-package")
+            if rollback_to.memory_version:
+                command.extend(["--rollback-memory-version", rollback_to.memory_version])
     env = get_restart_environment(vibe_path=vibe_path)
     log_path = _restart_log_path(job_id)
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1552,21 +1140,39 @@ def _schedule_restart_locked(
     # "scheduled" write on top of the child's "running" write, hiding the active
     # restart from the supervisor and making it treat the stopped service as a
     # crash. The job records its real supervisor_pid once it starts.
-    payload = _supervisor_status_payload(
-        job_id=job_id,
-        trigger=trigger,
-        scope=scope,
-        delay_seconds=delay_seconds,
-        log_path=log_path,
-    )
+    payload = {
+        "ok": None,
+        "job_id": job_id,
+        "state": "scheduled",
+        "trigger": trigger,
+        "scope": scope,
+        "delay_seconds": delay_seconds,
+        "supervisor_pid": None,
+        "old_pid": _read_recorded_pid(),
+        "new_pid": None,
+        "log_path": str(log_path),
+        "error": None,
+        "created_at": _now_iso(),
+    }
     _write_status(payload)
     try:
-        process = _spawn_supervisor_process(
-            command=command,
-            env=env,
-            log_path=log_path,
-            memory_ui_secret=memory_ui_secret,
-        )
+        with log_path.open("a", encoding="utf-8") as log:
+            log.write(f"{_now_iso()} spawning restart supervisor job_id={job_id} delay_seconds={delay_seconds!r}\n")
+            log.flush()
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE if memory_ui_secret is not None else None,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                close_fds=True,
+                cwd=get_safe_cwd(),
+                env=runtime._memory_ui_child_env(
+                    env,
+                    memory_ui_secret=memory_ui_secret,
+                ),
+            )
+            runtime._spawn_stdin(process, memory_ui_secret=memory_ui_secret)
     except OSError as exc:
         # The seed status above is now "scheduled"; if the job can't be spawned
         # (bad cached vibe path, missing executable, permission/log-open error) no
@@ -1583,67 +1189,6 @@ def _schedule_restart_locked(
     return payload
 
 
-def schedule_upgrade_transaction(
-    transaction: UpgradeTransaction,
-    *,
-    delay_seconds: float = 0.0,
-    vibe_path: str | None = None,
-    trigger: str = "upgrade",
-    scope: str = "all",
-    prepare_show_runtime: bool = False,
-    memory_ui_secret: str | None = None,
-) -> dict:
-    """Spawn the supervisor-owned package transaction."""
-
-    from vibe.memory_ui_access import process_ui_read_secret
-    from storage.migrations import guard_source_checkout_default_state_bootstrap
-
-    transaction.validate()
-    guard_source_checkout_default_state_bootstrap()
-    memory_ui_secret = memory_ui_secret or process_ui_read_secret()
-    job_id = uuid.uuid4().hex[:12]
-    transaction_path = _write_upgrade_transaction_file(transaction, job_id)
-    command = _supervisor_command(
-        vibe_path=vibe_path,
-        job_id=job_id,
-        delay_seconds=delay_seconds,
-        trigger=trigger,
-        scope=scope,
-        prepare_show_runtime=prepare_show_runtime,
-        extra_args=["--upgrade-transaction-file", str(transaction_path)],
-    )
-    env = get_restart_environment(vibe_path=vibe_path)
-    log_path = _restart_log_path(job_id)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = _supervisor_status_payload(
-        job_id=job_id,
-        trigger=trigger,
-        scope=scope,
-        delay_seconds=delay_seconds,
-        log_path=log_path,
-        transaction=True,
-    )
-    try:
-        with _upgrade_transaction_lock(timeout_seconds=0):
-            if _restart_job_active():
-                raise RuntimeError("a restart is already in progress")
-            _write_status(payload)
-            process = _spawn_supervisor_process(
-                command=command,
-                env=env,
-                log_path=log_path,
-                memory_ui_secret=memory_ui_secret,
-            )
-    except Exception as exc:
-        transaction_path.unlink(missing_ok=True)
-        if isinstance(exc, OSError):
-            payload.update(ok=False, state="failed", error=f"failed to spawn upgrade supervisor: {exc}")
-            _write_status(payload)
-        raise
-    payload["supervisor_pid"] = process.pid
-    return payload
-
-
 def main(argv: list[str] | None = None) -> int:
     from vibe.memory_ui_access import initialize_process_ui_read_secret
 
@@ -1657,11 +1202,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prepare-show-runtime", action="store_true")
     parser.add_argument("--rollback-to")
     parser.add_argument("--rollback-package")
+    parser.add_argument("--rollback-memory-package", action="store_true")
+    parser.add_argument("--rollback-memory-version")
     parser.add_argument("--rollback-python")
     parser.add_argument("--rollback-main")
-    parser.add_argument("--rollback-memory-package", choices=("0", "1"))
-    parser.add_argument("--rollback-memory-version")
-    parser.add_argument("--upgrade-transaction-file")
     args = parser.parse_args(argv)
     # The one place a rollback target is apart, and so the one place it is put
     # back together. Reassembling here rather than passing four values inward
@@ -1676,26 +1220,9 @@ def main(argv: list[str] | None = None) -> int:
             version=args.rollback_to,
             package=args.rollback_package,
             launcher=runtime.ServiceLauncher(python=args.rollback_python, main=args.rollback_main),
-            memory_package=args.rollback_memory_package == "1",
+            memory_package=args.rollback_memory_package,
             memory_version=args.rollback_memory_version,
         )
-    upgrade_transaction = None
-    if args.upgrade_transaction_file:
-        try:
-            upgrade_transaction = _read_upgrade_transaction_file(args.upgrade_transaction_file)
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
-            _write_status(
-                {
-                    "ok": False,
-                    "job_id": args.job_id,
-                    "state": "failed",
-                    "trigger": args.trigger,
-                    "scope": args.scope,
-                    "transaction": "upgrade-v1",
-                    "error": f"invalid upgrade transaction: {exc}",
-                }
-            )
-            return 2
     return _run_restart_job(
         job_id=args.job_id,
         delay_seconds=max(0.0, args.delay_seconds),
@@ -1704,7 +1231,6 @@ def main(argv: list[str] | None = None) -> int:
         scope=args.scope,
         prepare_show_runtime=args.prepare_show_runtime,
         rollback_to=rollback_to,
-        upgrade_transaction=upgrade_transaction,
     )
 
 

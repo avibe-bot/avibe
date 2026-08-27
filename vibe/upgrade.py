@@ -13,7 +13,7 @@ import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, NamedTuple, cast
+from typing import NamedTuple, cast
 
 from packaging.version import InvalidVersion, Version
 
@@ -98,145 +98,6 @@ class UpgradePlan:
     cleanup_after_command: bool = False
 
 
-@dataclass(frozen=True)
-class UpgradeTransaction:
-    """Declarative package transaction passed to the restart supervisor."""
-
-    schema_version: int
-    installer: Literal["pip", "uv"]
-    forward_spec: str
-    include_memory: bool
-    memory_requirement: str | None
-    rollback_to: "RollbackTarget | None"
-    activate_runtime: Literal["restart_if_running", "none"] = "restart_if_running"
-
-    def to_payload(self) -> dict[str, object]:
-        """Return the closed, declarative wire shape consumed by the supervisor."""
-
-        rollback = self.rollback_to
-        return {
-            "schema_version": self.schema_version,
-            "installer": self.installer,
-            "forward_spec": self.forward_spec,
-            "include_memory": self.include_memory,
-            "memory_requirement": self.memory_requirement,
-            "rollback_to": (
-                {
-                    "version": rollback.version,
-                    "package": rollback.package,
-                    "launcher": {"python": rollback.launcher.python, "main": rollback.launcher.main},
-                    "memory_package": rollback.memory_package,
-                    "memory_version": rollback.memory_version,
-                }
-                if rollback
-                else None
-            ),
-            "activate_runtime": self.activate_runtime,
-        }
-
-    @classmethod
-    def from_payload(cls, payload: object) -> "UpgradeTransaction":
-        """Parse only the v1 transaction fields; unknown shape fails closed."""
-
-        if not isinstance(payload, dict):
-            raise ValueError("upgrade transaction payload must be an object")
-        expected = {
-            "schema_version",
-            "installer",
-            "forward_spec",
-            "include_memory",
-            "memory_requirement",
-            "rollback_to",
-            "activate_runtime",
-        }
-        if set(payload) != expected:
-            raise ValueError("upgrade transaction payload has unknown or missing fields")
-        if (
-            type(payload["schema_version"]) is not int
-            or payload["installer"] not in {"pip", "uv"}
-            or not isinstance(payload["forward_spec"], str)
-            or type(payload["include_memory"]) is not bool
-            or payload["memory_requirement"] is not None
-            and not isinstance(payload["memory_requirement"], str)
-            or payload["activate_runtime"] not in {"restart_if_running", "none"}
-        ):
-            raise ValueError("invalid upgrade transaction scalar fields")
-        rollback_payload = payload["rollback_to"]
-        rollback = None
-        if rollback_payload is not None:
-            if not isinstance(rollback_payload, dict) or set(rollback_payload) != {
-                "version",
-                "package",
-                "launcher",
-                "memory_package",
-                "memory_version",
-            }:
-                raise ValueError("invalid rollback target payload")
-            launcher_payload = rollback_payload["launcher"]
-            if not isinstance(launcher_payload, dict) or set(launcher_payload) != {"python", "main"}:
-                raise ValueError("invalid rollback launcher payload")
-            if (
-                not isinstance(rollback_payload["version"], str)
-                or rollback_payload["package"] is not None
-                and not isinstance(rollback_payload["package"], str)
-                or type(rollback_payload["memory_package"]) is not bool
-                or rollback_payload["memory_version"] is not None
-                and not isinstance(rollback_payload["memory_version"], str)
-                or not isinstance(launcher_payload["python"], str)
-                or not isinstance(launcher_payload["main"], str)
-            ):
-                raise ValueError("invalid rollback scalar fields")
-            rollback = RollbackTarget(
-                version=rollback_payload["version"],
-                package=rollback_payload["package"],
-                launcher=runtime_mod.ServiceLauncher(
-                    python=launcher_payload["python"],
-                    main=launcher_payload["main"],
-                ),
-                memory_package=rollback_payload["memory_package"],
-                memory_version=rollback_payload["memory_version"],
-            )
-        transaction = cls(
-            schema_version=payload["schema_version"],
-            installer=payload["installer"],
-            forward_spec=payload["forward_spec"],
-            include_memory=payload["include_memory"],
-            memory_requirement=payload["memory_requirement"],
-            rollback_to=rollback,
-            activate_runtime=payload["activate_runtime"],
-        )
-        transaction.validate()
-        return transaction
-
-    def validate(self) -> None:
-        if self.schema_version != 1:
-            raise ValueError("unsupported upgrade transaction schema")
-        if self.installer not in {"pip", "uv"}:
-            raise ValueError("unsupported upgrade transaction installer")
-        if not self.forward_spec or any(value in self.forward_spec for value in ("\x00", "\n", "\r")):
-            raise ValueError("invalid upgrade transaction package spec")
-        if self.include_memory and not self.memory_requirement:
-            raise ValueError("Memory requirement is required when Memory is included")
-        if not self.include_memory and self.memory_requirement is not None:
-            raise ValueError("Memory requirement must be omitted when Memory is not included")
-        if self.include_memory and self.memory_requirement != MEMORY_PACKAGE_REQUIREMENT:
-            prefix = f"{MEMORY_PACKAGE_NAME}=="
-            if not self.memory_requirement.startswith(prefix):
-                raise ValueError("invalid Memory requirement")
-            try:
-                Version(self.memory_requirement[len(prefix) :])
-            except InvalidVersion as exc:
-                raise ValueError("invalid Memory requirement") from exc
-        if self.rollback_to:
-            target = self.rollback_to
-            if not target.version or not target.launcher.python or not target.launcher.main:
-                raise ValueError("incomplete rollback target")
-            if target.memory_package != bool(target.memory_version):
-                raise ValueError("incomplete rollback Memory shape")
-        if self.activate_runtime not in {"restart_if_running", "none"}:
-            raise ValueError("unsupported upgrade transaction activation")
-
-
 def execute_upgrade_plan(
     plan: UpgradePlan,
     *,
@@ -245,9 +106,9 @@ def execute_upgrade_plan(
 ) -> subprocess.CompletedProcess[str]:
     """Run a validated plan in its recorded preflight/cleanup order.
 
-    The caller owns the package transaction lease. This helper deliberately does
-    not acquire one so the supervisor can hold the same lease across stop,
-    mutation, and start/rollback.
+    The caller owns package mutation sequencing. This helper deliberately does
+    not acquire a lifecycle lock: callers can run the plan synchronously while
+    the existing restart supervisor owns any later activation or rollback.
     """
 
     preflight = preflight_upgrade_plan(plan, run=run, **run_kwargs)
@@ -1165,7 +1026,11 @@ def build_upgrade_plan(
         except InvalidVersion:
             pass
     preflight_command = None
-    if not version or include_memory or cleanup_command is not None:
+    # Preflight only when the optional package shape is part of the operation.
+    # Core-only forward installs retain the origin/dev synchronous behavior: the
+    # service is still running while pip resolves, so a second resolver pass is
+    # unnecessary general-updater machinery.
+    if include_memory or cleanup_command is not None:
         preflight_command = [
             executable,
             "-m",
@@ -1238,41 +1103,6 @@ def build_memory_add_plan(
         requirement,
     ]
     return UpgradePlan(command, env, "pip", preflight_command=preflight)
-
-
-def build_upgrade_transaction(
-    *,
-    python_executable: str | None = None,
-    uv_path: str | None = None,
-    vibe_path: str | None = None,
-    base_env: dict[str, str] | None = None,
-    memory_enabled: bool = False,
-    activate_runtime: Literal["restart_if_running", "none"] = "restart_if_running",
-) -> UpgradeTransaction:
-    """Capture all mutable install facts before handing work to the supervisor."""
-
-    executable = python_executable or sys.executable
-    include_memory = bool(memory_enabled or memory_package_installed())
-    plan = build_upgrade_plan(
-        python_executable=executable,
-        uv_path=uv_path,
-        vibe_path=vibe_path,
-        base_env=base_env,
-        memory_enabled=memory_enabled,
-        memory_requirement=MEMORY_PACKAGE_REQUIREMENT if include_memory else None,
-    )
-    installer = plan.method
-    transaction = UpgradeTransaction(
-        schema_version=1,
-        installer=cast(Literal["pip", "uv"], installer),
-        forward_spec=get_upgrade_package_spec(),
-        include_memory=include_memory,
-        memory_requirement=MEMORY_PACKAGE_REQUIREMENT if include_memory else None,
-        rollback_to=plan.rollback_to,
-        activate_runtime=activate_runtime,
-    )
-    transaction.validate()
-    return transaction
 
 
 def get_safe_cwd() -> str:

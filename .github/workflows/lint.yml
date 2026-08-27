@@ -274,7 +274,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: python scripts/prepare_local_show_runtime_manifest.py
 
-      - name: Run packaged Memory upgrade transaction smoke
+      - name: Run packaged Memory package-shape smoke
         run: |
           set -o pipefail
           test -f vibe/show_runtime_manifest.json
