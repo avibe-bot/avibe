@@ -582,23 +582,58 @@ def test_safety_attestation_shape_fails_closed(declaration, expected_fragment):
         assert expected_fragment in error
 
 
-def test_new_revisions_are_enrolled_in_each_released_graph(monkeypatch):
-    """The graph, not a migration allowlist, supplies every attestation subject."""
+def test_attestation_is_metadata_only_and_does_not_execute_alembic(monkeypatch):
+    """The graph supplies every subject without a second migration executor."""
     revision = "20260105_0005"
     shipped = dict(SHIPPED_GRAPH)
     current = dict(shipped)
     current[f"{revision}_new.py"] = _revision_file(revision, '"20260104_0004"') + 'MIGRATION_SAFETY = "additive"\n'
     _graphs(monkeypatch, shipped, current)
     monkeypatch.setattr(guard, "latest_released_tag", lambda: "v0.0.0")
-    monkeypatch.setattr(guard, "released_graphs", lambda: ["v0.0.0", "v0.0.1"])
-    monkeypatch.setattr(guard, "extract_released_versions", lambda tag, destination: destination)
-    monkeypatch.setattr(guard, "shipped_head_revisions", lambda sources: {"20260104_0004"})
-    monkeypatch.setattr(guard, "_planned_revisions", lambda config, heads: [revision])
-    upgrade_calls = []
-    monkeypatch.setattr(guard.command, "upgrade", lambda *args, **kwargs: upgrade_calls.append((args, kwargs)))
+    monkeypatch.setattr(guard, "released_graphs", lambda: pytest.fail("attestation must not enumerate upgrade graphs"))
+    monkeypatch.setattr(guard.command, "upgrade", lambda *args, **kwargs: pytest.fail("attestation must not execute Alembic"))
 
-    assert guard.migration_safety_problems("v0.0.0") == []
-    assert len(upgrade_calls) == 4
+    assert guard.migration_safety_problems() == []
+
+
+def test_attestation_boundary_uses_latest_release_not_comparison_baseline(monkeypatch):
+    """An older metadata comparison cannot re-enroll revisions already released later."""
+    released_revision = "20260105_0005"
+    latest = dict(SHIPPED_GRAPH)
+    latest[f"{released_revision}_released.py"] = _revision_file(released_revision, '"20260104_0004"')
+    current = dict(latest)
+    monkeypatch.setattr(guard, "latest_released_tag", lambda: "v0.0.1")
+    monkeypatch.setattr(guard, "released_sources", lambda tag: SHIPPED_GRAPH if tag == "v0.0.0" else latest)
+    monkeypatch.setattr(guard, "working_tree_sources", lambda: current)
+    monkeypatch.setattr(guard, "releases_with_state_but_no_graph", lambda: [])
+    monkeypatch.setattr(guard, "fresh_install_tables", lambda: guard.HEAD_TABLES)
+    monkeypatch.setattr(guard, "new_slot_collisions", lambda baseline: {})
+    monkeypatch.setattr(guard, "rechained_revisions", lambda baseline: [])
+    monkeypatch.setattr(guard, "edited_released_bodies", lambda baseline: [])
+    monkeypatch.setattr(guard, "spent_body_edit_declarations", lambda baseline: [])
+    monkeypatch.setattr(guard, "unrepairable_releases", lambda: pytest.fail("--skip-upgrade must skip runtime upgrades"))
+
+    _, problems, refused = guard.collect_problems("v0.0.0", include_upgrade=False)
+
+    assert problems == []
+    assert refused == {}
+
+
+def test_only_revisions_after_latest_release_require_attestation(monkeypatch):
+    """A missing declaration is reported for a new revision, never for grandfathered history."""
+    released_revision = "20260105_0005"
+    new_revision = "20260106_0006"
+    latest = dict(SHIPPED_GRAPH)
+    latest[f"{released_revision}_released.py"] = _revision_file(released_revision, '"20260104_0004"')
+    current = dict(latest)
+    current[f"{new_revision}_new.py"] = _revision_file(new_revision, f'"{released_revision}"')
+    monkeypatch.setattr(guard, "latest_released_tag", lambda: "v0.0.1")
+    monkeypatch.setattr(guard, "released_sources", lambda tag: latest)
+    monkeypatch.setattr(guard, "working_tree_sources", lambda: current)
+
+    problems = guard.migration_safety_problems()
+
+    assert problems == [f"{new_revision} has no MIGRATION_SAFETY declaration"]
 
 
 @pytest.mark.parametrize(
@@ -618,13 +653,8 @@ def test_new_revision_requires_exact_attestation(monkeypatch, declaration, expec
     current[f"{revision}_new.py"] = _revision_file(revision, '"20260104_0004"') + declaration
     _graphs(monkeypatch, shipped, current)
     monkeypatch.setattr(guard, "latest_released_tag", lambda: "v0.0.0")
-    monkeypatch.setattr(guard, "released_graphs", lambda: ["v0.0.0"])
-    monkeypatch.setattr(guard, "extract_released_versions", lambda tag, destination: destination)
-    monkeypatch.setattr(guard, "shipped_head_revisions", lambda sources: {"20260104_0004"})
-    monkeypatch.setattr(guard, "_planned_revisions", lambda config, heads: [revision])
-    monkeypatch.setattr(guard.command, "upgrade", lambda *args, **kwargs: None)
 
-    problems = guard.migration_safety_problems("v0.0.0")
+    problems = guard.migration_safety_problems()
     if expected_fragment is None:
         assert problems == []
     else:

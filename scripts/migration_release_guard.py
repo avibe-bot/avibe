@@ -27,7 +27,7 @@ reason, and nothing needs an old Python environment -- ``env.py`` reads
                                   upgrades it
     releases_with_state_but_no   every release that wrote a database is inside the
     _graph()                      window the property above walks
-    migration_safety_problems()   each post-baseline revision has one finite, explicit
+    migration_safety_problems()   each post-latest-release revision has one finite, explicit
                                   migration-safety attestation
 
 Readiness is not this module's opinion. ``unrepairable_releases`` drives
@@ -74,7 +74,6 @@ if str(REPO_ROOT) not in sys.path:
 
 from alembic import command
 from alembic.config import Config
-from alembic.script import ScriptDirectory
 from alembic.script.base import _only_source_rev_file
 from alembic.util import to_tuple
 from packaging.version import InvalidVersion, Version
@@ -703,12 +702,6 @@ def table_names(db_path: Path) -> set[str]:
         connection.close()
 
 
-def _planned_revisions(config: Config, shipped_heads: set[str]) -> list[str]:
-    """Return Alembic's ordered upgrade revisions from a released graph to today's head."""
-    script = ScriptDirectory.from_config(config)
-    return [step.revision.revision for step in script._upgrade_revs("head", tuple(sorted(shipped_heads)))]
-
-
 def _migration_safety_declaration_error(
     revision: str, declaration: str | _ComputedMetadata | None
 ) -> str | None:
@@ -723,15 +716,15 @@ def _migration_safety_declaration_error(
     return None
 
 
-def migration_safety_problems(baseline: str | None = None) -> list[str]:
-    """Require one explicit attestation for every post-baseline revision.
+def migration_safety_problems() -> list[str]:
+    """Require one explicit attestation for every revision after the latest release.
 
-    The latest released graph is the grandfather boundary. The actual Alembic plan is still
-    executed from each released graph as independent behavioral evidence, but this gate does
-    not infer data guarantees from the resulting database or from migration source effects.
+    This is deliberately a metadata-only gate. ``unrepairable_releases`` owns real upgrade
+    execution and readiness evidence; duplicating that executor here would make the
+    attestation boundary both slow and a second source of migration behavior.
     """
-    baseline = baseline or latest_released_tag()
-    baseline_graph = revision_graph(released_sources(baseline))
+    latest_release = latest_released_tag()
+    baseline_graph = revision_graph(released_sources(latest_release))
     current_sources = working_tree_sources()
     current_graph = revision_graph(current_sources)
     new_revisions = set(current_graph) - set(baseline_graph)
@@ -747,41 +740,6 @@ def migration_safety_problems(baseline: str | None = None) -> list[str]:
         ))
     ]
 
-    planned: set[tuple[str, str]] = set()
-    analyzed: set[tuple[str, str]] = set()
-    for tag in released_graphs():
-        try:
-            with tempfile.TemporaryDirectory() as workspace:
-                root = Path(workspace)
-                db_path = root / "vibe.sqlite"
-                released = extract_released_versions(tag, root / "released")
-                shipped_heads = shipped_head_revisions(released_sources(tag))
-                released_config = _alembic_config(db_path, released)
-                command.upgrade(released_config, "head")
-                current_config = _alembic_config(db_path)
-                revisions = _planned_revisions(current_config, shipped_heads)
-                planned.update((tag, revision) for revision in revisions if revision in new_revisions)
-                for revision in revisions:
-                    try:
-                        command.upgrade(current_config, revision)
-                    except Exception as exc:  # noqa: BLE001 - an unanalyzable plan fails closed
-                        problems.append(
-                            f"{tag}: {revision} could not be executed from its released schema: "
-                            f"{type(exc).__name__}: {str(exc).splitlines()[0]}"
-                        )
-                        break
-                    if revision in new_revisions:
-                        analyzed.add((tag, revision))
-        except Exception as exc:  # noqa: BLE001 - plan/setup failure is a closed-gate result
-            problems.append(
-                f"{tag}: migration safety plan could not be executed: "
-                f"{type(exc).__name__}: {str(exc).splitlines()[0]}"
-            )
-
-    for tag, revision in sorted(planned - analyzed):
-        problems.append(f"{tag}: planned revision {revision} was not executed")
-    for tag, revision in sorted(analyzed - planned):
-        problems.append(f"{tag}: unplanned revision {revision} was executed")
     return problems
 
 
@@ -1625,8 +1583,9 @@ def collect_problems(
     problems.extend(edited_released_bodies(baseline))
     problems.extend(spent_body_edit_declarations(baseline))
 
+    problems.extend(migration_safety_problems())
+
     if include_upgrade:
-        problems.extend(migration_safety_problems(baseline))
         failures, refused = unrepairable_releases()
         for tag, reasons in sorted(failures.items(), key=lambda item: version_key(item[0])):
             problems.extend(f"{tag}: {reason}" for reason in reasons)
@@ -1643,7 +1602,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--skip-upgrade",
         action="store_true",
-        help="check only metadata, skipping per-release upgrades and migration-safety analysis",
+        help="skip per-release upgrade evidence while retaining metadata and attestation checks",
     )
     return parser
 
