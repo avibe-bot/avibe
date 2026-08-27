@@ -5,7 +5,7 @@ import { fetchBackendModels, loadBackendModelsWithRefresh } from './backendModel
 
 describe('fetchBackendModels for OpenCode', () => {
   it('reads the public options catalog without borrowing the native Settings surface', async () => {
-    const opencodeOptions = vi.fn().mockResolvedValue({
+    const readOpencodeOptionsForModelPicker = vi.fn().mockResolvedValue({
       ok: true,
       data: {
         models: {
@@ -21,14 +21,14 @@ describe('fetchBackendModels for OpenCode', () => {
     });
     const getOpencodeProviders = vi.fn();
     const api = {
-      opencodeOptions,
+      readOpencodeOptionsForModelPicker,
       getOpencodeProviders,
     } as unknown as ApiContextType;
 
     const result = await fetchBackendModels(api, 'opencode');
 
     expect(getOpencodeProviders).not.toHaveBeenCalled();
-    expect(opencodeOptions).toHaveBeenCalledWith('~');
+    expect(readOpencodeOptionsForModelPicker).toHaveBeenCalledOnce();
     expect(result.models).toEqual([
       'openrouter/anthropic/claude-x',
       'custom/hub-only',
@@ -40,7 +40,7 @@ describe('fetchBackendModels for OpenCode', () => {
 
   it('degrades to an empty catalog when the rank may not read the live options endpoint', async () => {
     const api = {
-      opencodeOptions: vi
+      readOpencodeOptionsForModelPicker: vi
         .fn()
         .mockRejectedValue(new ApiError('forbidden', 403, 'instance_access_forbidden')),
     } as unknown as ApiContextType;
@@ -50,7 +50,7 @@ describe('fetchBackendModels for OpenCode', () => {
 
   it('still propagates a failure that is not the expected refusal', async () => {
     const api = {
-      opencodeOptions: vi
+      readOpencodeOptionsForModelPicker: vi
         .fn()
         .mockRejectedValue(new ApiError('boom', 500, null)),
     } as unknown as ApiContextType;

@@ -56,7 +56,7 @@ export async function fetchBackendModels(
   if (backend === 'opencode') {
     // Best-effort: this live catalog remains Owner-only because reading it may
     // start OpenCode. Lower ranks keep the existing typed-value fallback.
-    const res = await api.opencodeOptions('~').catch((err) => {
+    const res = await api.readOpencodeOptionsForModelPicker().catch((err) => {
       if (err instanceof ApiError && err.code === 'instance_access_forbidden') return null;
       throw err;
     });
