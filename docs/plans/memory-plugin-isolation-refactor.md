@@ -469,8 +469,12 @@ Exit gate: both package matrices pass CI; local Incus `master` regression passes
 Workbench and Slack/Discord/Telegram/Feishu/WeChat capture; service health is
 verified; no temporary fallback implementation remains.
 
-Rollback: the recorded package shape and compatible unchanged data/config allow
-one pinned install operation to restore both core and Memory implementation.
+Rollback (superseded by the Wave 3c Doc A contract): this legacy one-operation
+statement is lineage only. Active rollback follows
+[`memory-wave3c-lifecycle-contract.md`](memory-wave3c-lifecycle-contract.md):
+core-only cleanup uninstalls Memory introduced by the forward mutation, while
+split-package rollback restores independent exact core and Memory pins with
+provider verification.
 
 Wave 3c scenario ownership is now explicit: Doc A
 (`docs/plans/memory-wave3c-lifecycle-contract.md`) owns `MEMORY-INDEP-018`

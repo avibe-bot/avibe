@@ -207,6 +207,13 @@ re-enumerates canonical providers and requires the resolved cardinality and
 version. A family whose dependency metadata makes the captured pins
 inconsistent has no plan and rejects before mutation.
 
+`restored` is a shape result, independent of readiness. It is true only when
+installed distribution presence, exact versions, and canonical Memory provider
+cardinality are exactly equivalent to the `ResolvedRollbackPlan` target. A
+valid optional-era captured mismatch may therefore finish `restored` while the
+current readiness projection remains non-ready and repairable; that family is
+not rejected before mutation solely because its captured versions differ.
+
 At `resolved`, the owner holds one immutable execution bundle containing:
 
 - fully resolved forward and rollback package commands;
@@ -246,8 +253,9 @@ Failure semantics are closed:
   the terminal audit entry, releases the reservation, and never enters
   quarantine;
 - failure after mutation begins executes the staged exact rollback;
-- successful rollback proves package shape, provider cardinality, launcher,
-  database recovery point, activation, and readiness before `restored`;
+- successful rollback proves the exact target package shape, provider
+  cardinality, launcher, database recovery point, and activation before
+  `restored`; readiness is a separate projection and is not a prerequisite;
 - a dead owner leaves its record and bundle identity for same-intent recovery;
   and
 - if exact rollback cannot run or cannot prove restoration, the record becomes
@@ -270,30 +278,37 @@ The adapter first performs read-only nonce lookup:
 
 - a match in the nonterminal current record returns its projection;
 - a match in retained terminal audit returns its terminal projection;
-- absence on a new-attempt request may proceed to admission; and
-- absence on the separate recovery-by-nonce read returns `nonce_unknown` and
-  can never execute mutation.
+- a miss is eligible for a new admission; and
+- a recovery-by-nonce miss returns `nonce_unknown` and cannot execute
+  mutation unless the caller has first confirmed that no current/audit
+  projection and no publication holder exist, in which case one replay of the
+  same nonce is allowed.
 
-After an initial POST loses transport, the caller uses only recovery-by-nonce;
-it never repeats the new-attempt POST. Nonce idempotency is bounded to the
-current record plus retained terminal audit. Once a terminal audit entry is
-pruned, recovery returns `nonce_unknown`; a later explicit attempt uses a new
-nonce.
+After an initial POST loses transport, the caller first uses recovery-by-nonce.
+If that read confirms absence of a current/audit projection and no lock-holder
+publication, it may replay the same nonce once within the existing boundary;
+once any server identity or projection is observed, it never submits a new
+attempt. Nonce idempotency is bounded to the current record plus retained
+terminal audit. Once a terminal audit entry is pruned, recovery returns
+`nonce_unknown`; a later explicit attempt uses a new nonce. No unadmitted
+outcome is persisted or projected.
 
 For an eligible new attempt, the adapter spawns the existing detached
 supervisor with the immutable nonce, type, and payload. The supervisor:
 
 1. acquires `package-lifecycle.lock` nonblockingly;
-2. rechecks the current record under that reservation;
-3. rejects source builds, unreadable global configuration, active transactions,
+2. immediately writes holder type, PID, and acquisition timestamp into the lock
+   file itself;
+3. rechecks the current record under that reservation;
+4. rejects source builds, unreadable global configuration, active transactions,
    quarantine, and operator-only package states before package capture or
    subprocess work;
-4. mints a collision-resistant `intent_id`;
-5. atomically and durably writes `schema_version`, `intent_id`, `client_nonce`,
+5. mints a collision-resistant `intent_id`;
+6. atomically and durably writes `schema_version`, `intent_id`, `client_nonce`,
    type, payload digest, and `state=admitted` to the dedicated transaction
    record by writing and syncing a temporary file, replacing the record, and
    syncing its parent directory (or the Windows durability equivalent); and
-6. only after that write is durable, returns the receipt through a one-shot
+7. only after that write is durable, returns the receipt through a one-shot
    inherited pipe to the adapter.
 
 The pipe is response transport, not a coordination primitive or durable
@@ -343,9 +358,10 @@ Nonterminal current transactions are never rotated, pruned, overwritten, or
 replaced by a new intent. When a later intent is durably admitted, only
 terminal `succeeded`, `restored`, `reconciled`, or admitted pre-mutation
 `failed` current records are appended to `terminal_audit`; the oldest terminal
-entry is evicted beyond ten. `rejected`, `busy`, and
-`busy_pending_publication` are unadmitted responses, so none creates or rotates
-a transaction record. `restart-*.log` files remain human audit logs only; they
+entry is evicted beyond ten. `rejected`, `busy_package_transaction`,
+`busy_restart`, and `busy_pending_publication` are unadmitted responses, so none
+creates or rotates a transaction record. `restart-*.log` files remain human
+audit logs only; they
 have no nonce/identity semantics and are not migration input.
 
 Compatibility rules are:
@@ -367,9 +383,14 @@ Windows the equivalent exclusive file lock is held on one inheritable handle.
 Package-manager children inherit that exact descriptor/handle. Unrelated
 children do not.
 
-The only liveness test is a nonblocking acquisition attempt on that lock.
-Status, PID, timestamp, and audit fields are recovery evidence, not ownership.
-No second lock, heartbeat, token, or lease is allowed.
+The only liveness test is a nonblocking acquisition attempt on that lock. The
+first action by a holder after acquisition is a write-ahead publication in the
+lock file itself containing holder type (`package` or `ordinary_restart`), PID,
+and acquisition timestamp. Contenders read that publication: an empty or
+unreadable lock file is `busy_pending_publication`, while a readable holder
+drives the appropriate structured busy result. Ordinary restart publishes the
+same fields before spawning its child. No second lock, heartbeat, token, lease,
+or durable ownership channel is allowed.
 
 The package supervisor holds the reservation from `admitted` through active
 forward, activation, verification, and rollback work. If it enters quarantine
@@ -378,14 +399,22 @@ reservation; the nonterminal record, not a stale lock, continues to block
 forward admission.
 
 Ordinary `schedule_restart` uses the same reservation at its single server
-entrypoint. It attempts acquisition once and returns structured `busy` on
-contention. On success, the entrypoint passes that same descriptor/handle to the
-existing detached ordinary-restart supervisor, closes only its parent duplicate
-after a successful spawn, and the child holds it continuously from before
-writing restart status through its complete stop, start, and readiness work.
-The child exits and thereby releases the reservation after that bounded work.
-It does not write the package transaction record or become a package
-transaction. Package admission while it holds the reservation returns `busy`.
+entrypoint. It attempts acquisition once and returns structured `busy_restart`
+on contention. Immediately after acquisition, it publishes the holder metadata
+described above, then reads the package transaction record once before spawning
+the existing detached ordinary-restart supervisor. If it finds nonterminal
+`inactive`, `interrupted`, `mutating` residue, or `quarantined` without a live
+package recovery owner, it releases the reservation and returns structured
+`blocked_interrupted_transaction` pointing to recovery; it never starts a
+partial ordinary stop/start. A restart explicitly owned by the elected
+recovery transaction is exempt and uses that transaction's reservation. The
+entrypoint then passes that same descriptor/handle to the child, closes only
+its parent duplicate after a successful spawn, and the child holds it
+continuously from before writing restart status through its complete stop,
+start, and readiness work. The child exits and thereby releases the
+reservation after that bounded work. It does not write the package transaction
+record or become a package transaction. Package admission while it holds the
+reservation returns `busy_restart`.
 There is no check-release-proceed window, reacquisition, queue, or wait.
 
 QR, Doctor, UI reload, and direct start/stop flows do not independently join
@@ -433,21 +462,23 @@ cannot bless it as a baseline.
 Quarantine clears through exactly one of two owner actions:
 
 1. Same-intent exact recovery restores the original captured shape and proves
-   provider cardinality, launcher, activation, and full required readiness,
-   ending `restored`.
+   provider cardinality, launcher, and activation, ending `restored` under the
+   shape rule above; readiness is projected separately.
 2. An explicit `repair_quarantine` request reuses the ordinary transaction
-   admission path: the caller supplies a nonce and exact target payload, the
-   server mints an `intent_id`, and the transaction record durably binds that
-   identity to the repair attempt before returning it. It acquires the same
-   reservation and names the expected supported release family and exact
-   core/Memory target. That exact target shape replaces the captured baseline
-   for this repair attempt. The resolved repair bundle, target digest, and
-   rollback data are durably recorded before `repairing` or any package
+   admission path in the current record: the caller supplies a nonce and exact
+   target payload, the server mints a new `intent_id`, and the record
+   transitions `quarantined -> admitted (repair)` while retaining the
+   `quarantined_baseline` and without a nested repair slot or second record.
+   It acquires the same reservation and names the expected supported release
+   family and exact core/Memory target. That exact target shape replaces the
+   captured baseline for this repair attempt, while the quarantined baseline
+   remains available for recovery. The resolved repair bundle, target digest,
+   and rollback data are durably recorded before `repairing` or any package
    mutation. The owner must capture the observed state, prove family match,
-   resolve and execute the exact repair, prove full readiness and canonical
-   Memory provider cardinality zero or one as required by that family, and
-   record the confirmed new baseline before ending `reconciled`. Any failure to
-   resolve, mutate, or prove the new baseline leaves the record `quarantined`.
+   resolve and execute the exact repair, prove canonical Memory provider
+   cardinality zero or one as required by that family, and record the confirmed
+   new baseline before ending `reconciled`. Any failure to resolve, mutate, or
+   prove the new baseline transitions the same record back to `quarantined`.
 
 There is no automatic clear, metadata-only acceptance, caller acknowledgement,
 or overwrite by an unrelated newly minted forward intent; the server-issued
@@ -536,10 +567,13 @@ owner read and dependency refresh, it returns exactly one machine shape:
 - owner terminal success/failure or readiness-derived success;
 - retryable `in_progress` for an active transaction, including when the last
   read failed after an earlier active projection;
+- retryable `in_progress` for an interrupted nonterminal transaction with a
+  recovery affordance; interrupted is never classified as transport
+  exhaustion;
 - structured `quarantined`; or
 - terminal `dependency_poll_transport_exhausted` with sanitized
   `last_transport_error` only when transport exhausted without any structured
-  terminal, active, or quarantined projection.
+  terminal, active, interrupted, or quarantined projection.
 
 A reachable structured failure is returned unchanged. Active work is never
 reclassified as failed because one polling session expired. A caller resumes by
