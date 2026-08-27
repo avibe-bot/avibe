@@ -12,6 +12,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from vibe import api, cli
+from vibe.package_shape import (
+    CapturedPackageShape,
+    DistributionProvider,
+    ReleaseFamily,
+)
 from vibe.runtime import ServiceLauncher
 from vibe.upgrade import (
     UpgradePlan,
@@ -55,6 +60,30 @@ def _tree_is_not_an_installed_distribution(monkeypatch):
 
     monkeypatch.setattr("vibe.upgrade._distributions_providing_this_package", lambda: [])
     monkeypatch.setattr("vibe.upgrade.memory_package_installed", lambda: False)
+    # Installer-command tests describe synthetic machines. Exact package capture
+    # has its own provider-backed tests below and in MEMORY-INDEP-019; opting out
+    # here prevents the developer or CI environment from becoming test evidence.
+    monkeypatch.setattr("vibe.upgrade.rollback_target", lambda: None)
+
+
+def _captured_shape(
+    version: str,
+    *,
+    package: str,
+    launcher: ServiceLauncher,
+) -> CapturedPackageShape:
+    return CapturedPackageShape(
+        core_provider=DistributionProvider(
+            name=package,
+            version=version,
+            provider_id=f"/{package}-{version}.dist-info",
+        ),
+        launcher=launcher,
+        release_family=ReleaseFamily.PRE_SPLIT,
+        memory_providers=(),
+        transition_memory_version=None,
+        residual_memory=False,
+    )
 
 
 def test_build_upgrade_plan_uses_uv_and_preserves_tool_bin_dir(monkeypatch):
@@ -386,6 +415,10 @@ def test_the_rename_pair_still_names_the_distribution_that_describes_the_code(mo
     # failed upgrade rolls back to names a release that exists.
     launcher = ServiceLauncher(python="/uv/tools/vibe-remote/bin/python", main="/uv/tools/vibe-remote/service_main.py")
     monkeypatch.setattr("vibe.runtime.current_service_launcher", lambda: launcher)
+    monkeypatch.setattr(
+        "vibe.upgrade.capture_installed_package_shape",
+        lambda **kwargs: _captured_shape("2.9.0", package="vibe-remote", launcher=launcher),
+    )
     target = rollback_target()
     assert target is not None and target.package == "vibe-remote"
     assert pinned_package_spec(target.version, package_name=target.package) == "vibe-remote==2.9.0"
@@ -459,9 +492,13 @@ def test_a_tree_with_no_published_release_has_no_rollback_target(monkeypatch):
     # restored correctly and then started from the wrong generation.
     launcher = ServiceLauncher(python="/uv/tools/vibe-remote/bin/python", main="/uv/tools/vibe-remote/service_main.py")
     monkeypatch.setattr("vibe.__version__", "3.0.10", raising=False)
-    monkeypatch.setattr("vibe.upgrade.installed_package_name", lambda *args, **kwargs: "vibe-remote")
     monkeypatch.setattr("vibe.runtime.current_service_launcher", lambda: launcher)
-    assert rollback_target() == RollbackTarget(version="3.0.10", package="vibe-remote", launcher=launcher)
+    captured = _captured_shape("3.0.10", package="vibe-remote", launcher=launcher)
+    monkeypatch.setattr(
+        "vibe.upgrade.capture_installed_package_shape",
+        lambda **kwargs: captured,
+    )
+    assert rollback_target() == captured
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -510,11 +547,12 @@ def test_the_plan_that_installs_carries_what_it_is_replacing(monkeypatch):
     # target, which is the shape of every way this has gone wrong so far.
     launcher = ServiceLauncher(python="/uv/tools/vibe-remote/bin/python", main="/uv/tools/vibe-remote/service_main.py")
     monkeypatch.setattr("vibe.__version__", "3.0.10", raising=False)
-    monkeypatch.setattr("vibe.upgrade.installed_package_name", lambda *args, **kwargs: "vibe-remote")
     monkeypatch.setattr("vibe.runtime.current_service_launcher", lambda: launcher)
+    captured = _captured_shape("3.0.10", package="vibe-remote", launcher=launcher)
+    monkeypatch.setattr("vibe.upgrade.rollback_target", lambda: captured)
 
     forward = build_upgrade_plan(python_executable="/usr/bin/python3", uv_path=None, base_env={"PATH": "/usr/bin"})
-    assert forward.rollback_to == RollbackTarget(version="3.0.10", package="vibe-remote", launcher=launcher)
+    assert forward.rollback_to == captured
 
     pinned = build_upgrade_plan(
         python_executable="/usr/bin/python3", uv_path=None, base_env={"PATH": "/usr/bin"}, version="3.0.9"
@@ -1750,7 +1788,8 @@ def test_pinned_rollback_keeps_exact_memory_version(monkeypatch):
         memory_version="3.0.14",
     )
 
-    assert "avibe-os[memory]==3.0.14" in plan.command
+    assert "avibe-os==3.0.14" in plan.command
+    assert "avibe-os[memory]" not in " ".join(plan.command)
     assert "avibe-memory==3.0.14" in plan.command
     assert plan.preflight_command is not None
     assert "avibe-memory==3.0.14" in plan.preflight_command

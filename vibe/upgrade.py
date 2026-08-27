@@ -14,7 +14,7 @@ import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NamedTuple, cast
+from typing import cast
 
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import (
@@ -26,15 +26,32 @@ from packaging.utils import (
 from packaging.version import InvalidVersion, Version
 
 from vibe import runtime as runtime_mod
+from vibe.package_shape import (
+    CORE_PACKAGE_NAME,
+    LEGACY_CORE_PACKAGE_NAME,
+    MEMORY_PACKAGE_NAME as SHAPE_MEMORY_PACKAGE_NAME,
+    MEMORY_SPLIT_MIN_VERSION,
+    CapturedPackageShape,
+    DistributionProvider,
+    DuplicateDistributionProviderError,
+    PackageShapeError,
+    ReleaseFamily,
+    ResolvedRollbackPlan,
+    RollbackResolutionError,
+    capture_installed_package_shape,
+    capture_package_shape,
+    inspect_installed_distribution_providers,
+    resolve_rollback_plan,
+)
 
 
 logger = logging.getLogger(__name__)
 
-PACKAGE_NAME = "avibe-os"
-LEGACY_PACKAGE_NAME = "vibe-remote"
-MEMORY_PACKAGE_NAME = "avibe-memory"
+PACKAGE_NAME = CORE_PACKAGE_NAME
+LEGACY_PACKAGE_NAME = LEGACY_CORE_PACKAGE_NAME
+MEMORY_PACKAGE_NAME = SHAPE_MEMORY_PACKAGE_NAME
 MEMORY_EXTRA_NAME = "memory"
-_MEMORY_SPLIT_MIN_VERSION = Version("3.0.14.dev0")
+_MEMORY_SPLIT_MIN_VERSION = MEMORY_SPLIT_MIN_VERSION
 PIP_DOWNLOAD_DEST_PLACEHOLDER = "{avibe-pip-download-destination}"
 DEFAULT_UPDATE_METADATA_URL = f"https://pypi.org/pypi/{PACKAGE_NAME}/json"
 CURRENT_VIBE_EXECUTABLE_ENV = "VIBE_CURRENT_EXECUTABLE"
@@ -98,7 +115,7 @@ class UpgradePlan:
     command: list[str]
     env: dict[str, str] | None
     method: str
-    rollback_to: RollbackTarget | None = None
+    rollback_to: CapturedPackageShape | RollbackTarget | None = None
     preflight_command: list[str] | None = None
     preflight_fallback_command: list[str] | None = None
     cleanup_command: list[str] | None = None
@@ -781,7 +798,8 @@ def get_current_vibe_bin_dir(vibe_path: str | None = None) -> str | None:
     return get_launcher_bin_dir(current_vibe)
 
 
-class RollbackTarget(NamedTuple):
+@dataclass(frozen=True)
+class RollbackTarget:
     """The install being replaced, described completely enough to restore it.
 
     Every field travels with the others because they are one measurement, and
@@ -805,6 +823,19 @@ class RollbackTarget(NamedTuple):
     launcher: runtime_mod.ServiceLauncher
     memory_package: bool = False
     memory_version: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.memory_package != (self.memory_version is not None):
+            raise PackageShapeError(
+                "legacy rollback target Memory presence requires one exact version"
+            )
+        if self.memory_version is not None:
+            try:
+                object.__setattr__(self, "memory_version", str(Version(self.memory_version)))
+            except InvalidVersion as exc:
+                raise PackageShapeError(
+                    "legacy rollback target Memory version is invalid"
+                ) from exc
 
 
 def _names_a_published_release(version: str) -> bool:
@@ -830,7 +861,7 @@ def _names_a_published_release(version: str) -> bool:
     return not (match.group("dev") or match.group("local"))
 
 
-def rollback_target() -> RollbackTarget | None:
+def rollback_target() -> CapturedPackageShape | None:
     """The install a failed restart of THIS process could be put back on.
 
     Everything here is measured from the running process, and that is the whole
@@ -863,13 +894,9 @@ def rollback_target() -> RollbackTarget | None:
 
     if not _names_a_published_release(__version__):
         return None
-    memory_package = memory_package_installed()
-    return RollbackTarget(
-        version=__version__,
-        package=installed_package_name(),
+    return capture_installed_package_shape(
+        core_version=__version__,
         launcher=runtime_mod.current_service_launcher(),
-        memory_package=memory_package,
-        memory_version=installed_memory_package_version() if memory_package else None,
     )
 
 
@@ -973,13 +1000,20 @@ def pinned_package_spec(
 
     The message never quotes the spec. An operator-supplied spec can be an index
     URL carrying credentials, and this error is written to a restart log.
+
+    `memory_package` remains a compatibility argument for existing callers. It
+    never changes the core requirement: rollback Memory is always a separate
+    exact pin.
     """
 
     spec = package_name or installed_package_name(python_executable) or get_upgrade_package_spec()
     if _BARE_PACKAGE_NAME_RE.fullmatch(spec) is None:
         raise ValueError("The configured upgrade package spec cannot carry a version pin")
-    pinned = f"{spec}=={version}"
-    return _with_memory_extra(pinned) if memory_package else pinned
+    # Rollback requirements are independent exact pins. An extra couples the
+    # core pin back to whichever Memory constraint that historical core happens
+    # to declare, which cannot express optional-era mismatches or residual
+    # Memory next to a bundled pre-split core.
+    return f"{spec}=={version}"
 
 
 def build_upgrade_plan(
