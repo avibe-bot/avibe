@@ -370,6 +370,8 @@ def _default_unproven_shape(
 ) -> _ProtocolObservationShape:
     if status == 404:
         return _ProtocolObservationShape.HTTP_404
+    if status not in _REQUEST_ERROR_STATUSES:
+        return _ProtocolObservationShape.NONE
     if non_json:
         return _ProtocolObservationShape.NON_JSON
     if payload is None or not _payload_is_structured(payload):
@@ -572,7 +574,7 @@ def _openai_family_elimination_proof(
     responses: Mapping[str, _ProtocolEvidence],
     *,
     considered_protocols: frozenset[str],
-    positively_excluded_protocols: frozenset[str],
+    ruled_out_protocols: frozenset[str],
 ) -> str | None:
     """Prove one OpenAI-family protocol from the pair of responses, not from the URL.
 
@@ -581,13 +583,15 @@ def _openai_family_elimination_proof(
     authentication accepted. The sibling protocol becomes excluded only when its
     own endpoint answers the same source with an unproven shape, so the proof is
     carried by the response pair rather than by either request path alone. That
-    pairwise proof is valid only when every other probed protocol was
-    positively excluded by its own response.
+    pairwise proof is valid only when every other probed protocol was already
+    ruled out for this source. A competing protocol can be ruled out by an
+    explicit authentication rejection or by a definitive request-error-shaped
+    exclusion. Transient upstream failures do not qualify.
     """
 
     if not {
         protocol for protocol in considered_protocols if protocol not in _OPENAI_FAMILY_PROTOCOLS
-    }.issubset(positively_excluded_protocols):
+    }.issubset(ruled_out_protocols):
         return None
 
     candidate = responses.get("openai_responses")
@@ -1417,7 +1421,7 @@ class CLIProxyEngineAdapter:
         received_unproven_response = False
         received_accepted_unproven_response = False
         response_evidence_by_protocol: dict[str, _ProtocolEvidence] = {}
-        positively_excluded_protocols: set[str] = set()
+        ruled_out_protocols: set[str] = set()
         for protocol in protocol_order:
             if protocol not in SOURCE_PROTOCOLS:
                 raise EngineStateError("unsupported source protocol")
@@ -1443,6 +1447,7 @@ class CLIProxyEngineAdapter:
                 continue
             if evidence.authentication is _AuthenticationEvidence.REJECTED:
                 received_rejection = True
+                ruled_out_protocols.add(protocol)
                 continue
             proved_protocol: str | None = None
             if evidence.protocol is _ProtocolProof.PROVEN:
@@ -1455,7 +1460,7 @@ class CLIProxyEngineAdapter:
                 if evidence.authentication is _AuthenticationEvidence.ACCEPTED:
                     received_accepted_unproven_response = True
                 if _pairwise_positive_exclusion(evidence):
-                    positively_excluded_protocols.add(protocol)
+                    ruled_out_protocols.add(protocol)
                 response_evidence_by_protocol[protocol] = evidence
                 continue
             try:
@@ -1491,7 +1496,7 @@ class CLIProxyEngineAdapter:
         proved_protocol = _openai_family_elimination_proof(
             response_evidence_by_protocol,
             considered_protocols=considered_protocols,
-            positively_excluded_protocols=frozenset(positively_excluded_protocols),
+            ruled_out_protocols=frozenset(ruled_out_protocols),
         ) or _anthropic_wrapperless_elimination_proof(
             response_evidence_by_protocol,
         )
