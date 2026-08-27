@@ -39,6 +39,7 @@ from modules.agents.opencode.message_processor import (
     is_empty_terminal_opencode_message,
 )
 from modules.agents.opencode.utils import (
+    find_opencode_model_info,
     resolve_opencode_configured_default_model,
     resolve_opencode_model_id,
     resolve_opencode_reasoning_effort,
@@ -2811,7 +2812,8 @@ class AgentAuthService:
 
         ``model`` is the model id (e.g. ``"gpt-4o-mini"``); we wrap it
         into the ``{providerID, modelID}`` shape OpenCode expects. When
-        ``None``, the probe resolves Avibe's effective Agent default first.
+        ``None``, the probe prefers Avibe's effective Agent default only
+        when the provider's native catalog confirms that model.
         """
         provider_id = (provider_id or "").strip()
         if not provider_id:
@@ -2821,8 +2823,15 @@ class AgentAuthService:
         if server is None:
             return {"ok": False, "error": "opencode_server_unavailable"}
 
-        # Match normal OpenCode turns: caller override, the selected OpenCode
-        # Agent's model, then the provider catalog.
+        directory = os.path.expanduser("~")
+        try:
+            catalog = await server.get_native_available_models(directory)
+        except Exception:  # noqa: BLE001
+            catalog = None
+
+        # A provider probe tests native connectivity, so its inferred model
+        # must come from the native catalog even when the selected Agent uses
+        # a public model projected by Model Hub.
         chosen_model = (model or "").strip()
         backend_config = self._resolve_backend_config("opencode")
         default_provider = getattr(backend_config, "default_provider", None)
@@ -2832,7 +2841,7 @@ class AgentAuthService:
                 runtime_agent_model = server.get_agent_model_from_config(default_agent)
             except Exception:  # noqa: BLE001
                 runtime_agent_model = None
-            chosen_model = (
+            inferred_model = (
                 resolve_opencode_configured_default_model(
                     runtime_agent_model,
                     default_provider=default_provider,
@@ -2840,17 +2849,43 @@ class AgentAuthService:
                 )
                 or ""
             )
+            if inferred_model and isinstance(catalog, dict):
+                resolved_inferred_model = resolve_opencode_model_id(
+                    catalog,
+                    provider_id,
+                    inferred_model,
+                )
+                if (
+                    resolved_inferred_model
+                    and find_opencode_model_info(
+                        catalog,
+                        provider_id,
+                        resolved_inferred_model,
+                    )
+                    is not None
+                ):
+                    chosen_model = resolved_inferred_model
         if not chosen_model:
-            try:
-                catalog = await server.get_native_available_models(os.path.expanduser("~"))
-            except Exception:  # noqa: BLE001
-                catalog = None
             if isinstance(catalog, dict):
                 default_map = catalog.get("default") or {}
                 if isinstance(default_map, dict):
                     raw_default = default_map.get(provider_id)
                     if isinstance(raw_default, str) and raw_default.strip():
-                        chosen_model = raw_default.strip()
+                        resolved_default = resolve_opencode_model_id(
+                            catalog,
+                            provider_id,
+                            raw_default.strip(),
+                        )
+                        if (
+                            resolved_default
+                            and find_opencode_model_info(
+                                catalog,
+                                provider_id,
+                                resolved_default,
+                            )
+                            is not None
+                        ):
+                            chosen_model = resolved_default
                 if not chosen_model:
                     providers = catalog.get("providers") or []
                     if isinstance(providers, list):
@@ -2879,7 +2914,6 @@ class AgentAuthService:
         # OpenCode picks a workdir per request; the probe doesn't touch
         # files so the home dir is fine and matches what the IM /setup
         # flow uses.
-        directory = os.path.expanduser("~")
         started = time.monotonic()
         session_id: str | None = None
         active_registered = False
@@ -2915,10 +2949,6 @@ class AgentAuthService:
             except Exception:  # noqa: BLE001
                 pass
 
-            try:
-                catalog = await server.get_native_available_models(directory)
-            except Exception:  # noqa: BLE001
-                catalog = None
             model_dict = {"providerID": provider_id, "modelID": chosen_model}
             if isinstance(catalog, dict):
                 resolved_model_id = resolve_opencode_model_id(catalog, provider_id, chosen_model)
