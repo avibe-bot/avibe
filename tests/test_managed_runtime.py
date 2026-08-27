@@ -11,6 +11,7 @@ import tarfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -382,9 +383,87 @@ def _install_fixture_runtime_release(
         version=version,
         archive_name=archive_name,
     )
-    installed = manager.ensure()
+    with patch.object(manager, "_clean_after_successful_install"):
+        installed = manager.ensure()
     assert installed["ok"] is True
     return Path(installed["install_dir"]), manager.runtime_dir / "downloads" / source_archive.name
+
+
+def test_ensure_invokes_cleanup_only_after_publishing_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    _write_fixture_runtime_release(
+        tmp_path,
+        manifest_path,
+        label="published",
+        version="1.0.0",
+    )
+    manager = _fixture_runtime_manager(tmp_path / "runtime", manifest_path=manifest_path)
+    observed_install_dirs: list[str] = []
+
+    def observe_cleanup() -> None:
+        pointer = json.loads((manager.runtime_dir / "current.json").read_text(encoding="utf-8"))
+        observed_install_dirs.append(pointer["install_dir"])
+
+    monkeypatch.setattr(manager, "_clean_after_successful_install", observe_cleanup)
+
+    result = manager.ensure()
+
+    assert result["ok"] is True
+    assert result["changed"] is True
+    assert observed_install_dirs == [result["install_dir"]]
+
+    reused = manager.ensure()
+
+    assert reused["ok"] is True
+    assert reused["changed"] is False
+    assert observed_install_dirs == [result["install_dir"]]
+
+    failed_manager = _fixture_runtime_manager(
+        tmp_path / "failed-runtime",
+        manifest_path=tmp_path / "missing.json",
+        offline=True,
+    )
+    failed_calls: list[None] = []
+    monkeypatch.setattr(
+        failed_manager,
+        "_clean_after_successful_install",
+        lambda: failed_calls.append(None),
+    )
+
+    failed = failed_manager.ensure()
+
+    assert failed["ok"] is False
+    assert failed_calls == []
+
+
+def test_ensure_keeps_published_success_when_cleanup_raises(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    _write_fixture_runtime_release(
+        tmp_path,
+        manifest_path,
+        label="cleanup-failure",
+        version="1.0.0",
+    )
+    manager = _fixture_runtime_manager(tmp_path / "runtime", manifest_path=manifest_path)
+
+    def fail_cleanup() -> None:
+        raise OSError("cleanup failed")
+
+    monkeypatch.setattr(manager, "_clean_after_successful_install", fail_cleanup)
+
+    result = manager.ensure()
+
+    assert result["ok"] is True
+    assert result["changed"] is True
+    assert Path(result["path"]).is_file()
+    pointer = json.loads((manager.runtime_dir / "current.json").read_text(encoding="utf-8"))
+    assert pointer["install_dir"] == result["install_dir"]
 
 
 def _age_path(path: Path) -> None:
@@ -2298,6 +2377,8 @@ def test_shared_ensure_failure_vocabulary_matches_reachable_reason_literals() ->
         for node in manager.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
+    # This post-publish call is exception-isolated and cannot contribute an ensure failure.
+    non_failure_calls = {"_clean_after_successful_install"}
     reachable = {"ensure"}
     pending = ["ensure"]
     while pending:
@@ -2311,6 +2392,7 @@ def test_shared_ensure_failure_vocabulary_matches_reachable_reason_literals() ->
                 and isinstance(function.value, ast.Name)
                 and function.value.id == "self"
                 and function.attr in methods
+                and function.attr not in non_failure_calls
                 and function.attr not in reachable
             ):
                 continue

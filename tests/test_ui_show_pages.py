@@ -61,10 +61,9 @@ from core.show_runtime import (
     ShowRuntimeUnavailableError,
     ShowRuntimeWebSocketTarget,
     _runtime_download_error,
-    _runtime_platform_tag,
-    _safe_extract_tar,
     set_show_runtime_manager_for_tests,
 )
+from core.managed_runtime import runtime_platform_tag, safe_extract_tar
 from core.show_runtime_failures import (
     SHOW_RUNTIME_FAILURE_DECLARATIONS,
     ShowRuntimeFailureClass,
@@ -480,7 +479,7 @@ def _write_runtime_manifest(
                 "runtime_version": runtime_version,
                 "minimum_node": "^20.19.0 || >=22.12.0",
                 "archives": {
-                    _runtime_platform_tag(): {
+                    runtime_platform_tag(): {
                         "name": archive_path.name,
                         "url": url or archive_path.resolve().as_uri(),
                         "sha256": sha256 or _sha256(archive_path),
@@ -528,7 +527,7 @@ def _write_cached_runtime_install(
     manifest_source: str = "package:show_runtime_manifest.json",
     mtime: float,
 ) -> tuple[Path, Path]:
-    install_dir = runtime_dir / "versions" / name / _runtime_platform_tag() / f"fingerprint-{name}"
+    install_dir = runtime_dir / "versions" / name / runtime_platform_tag() / f"fingerprint-{name}"
     return _write_cached_runtime_install_at(install_dir, name, manifest_source=manifest_source, mtime=mtime)
 
 
@@ -551,7 +550,7 @@ def _write_cached_runtime_install_at(
                 "manifest_source": manifest_source,
                 "manifest_sha256": manifest_sha256,
                 "runtime_version": name,
-                "platform": _runtime_platform_tag(),
+                "platform": runtime_platform_tag(),
                 "archive_name": f"{archive_sha256}.tgz",
                 "archive_sha256": archive_sha256,
             }
@@ -579,6 +578,16 @@ def _write_cached_runtime_pointer(runtime_dir: Path, install_dir: Path) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def _complete_mock_manifest_install(
+    manager: ShowRuntimeManager,
+    command: list[str],
+    *,
+    offline: bool,
+) -> list[str]:
+    manager._shared_manifest_manager(offline=offline)._clean_after_successful_install()
+    return command
 
 
 def test_private_show_page_requires_remote_login(monkeypatch, tmp_path):
@@ -9261,10 +9270,10 @@ def test_show_runtime_manager_uses_managed_runtime_bin(tmp_path):
 
 
 def test_show_runtime_archive_platform_tag_maps_macos_universal2_to_machine(monkeypatch):
-    monkeypatch.setattr("core.show_runtime.get_platform", lambda: "macosx-14.0-universal2")
-    monkeypatch.setattr("core.show_runtime.platform.machine", lambda: "arm64")
+    monkeypatch.setattr("core.managed_runtime.get_platform", lambda: "macosx-14.0-universal2")
+    monkeypatch.setattr("core.managed_runtime.platform.machine", lambda: "arm64")
 
-    assert _runtime_platform_tag() == "darwin-arm64"
+    assert runtime_platform_tag() == "darwin-arm64"
 
 
 def test_show_runtime_manager_installs_from_prebuilt_archive(monkeypatch, tmp_path):
@@ -9336,8 +9345,8 @@ def test_show_runtime_safe_extract_rejects_external_symlink(tmp_path):
         tar.add(archive_root / "escape", arcname="escape")
 
     with tarfile.open(archive_path, "r:gz") as tar:
-        with pytest.raises(ValueError, match="Unsafe archive link target"):
-            _safe_extract_tar(tar, tmp_path / "destination")
+        with pytest.raises(ValueError, match="Unsafe managed runtime archive link target"):
+            safe_extract_tar(tar, tmp_path / "destination")
 
 
 def test_show_runtime_safe_extract_rejects_external_hardlink(tmp_path):
@@ -9353,8 +9362,8 @@ def test_show_runtime_safe_extract_rejects_external_hardlink(tmp_path):
         tar.addfile(hardlink)
 
     with tarfile.open(archive_path, "r:gz") as tar:
-        with pytest.raises(ValueError, match="Unsafe archive link target"):
-            _safe_extract_tar(tar, tmp_path / "destination")
+        with pytest.raises(ValueError, match="Unsafe managed runtime archive link target"):
+            safe_extract_tar(tar, tmp_path / "destination")
 
 
 def test_show_runtime_manager_reuses_installed_prebuilt_runtime_without_archive(monkeypatch, tmp_path):
@@ -9530,11 +9539,10 @@ def test_show_runtime_manager_installs_from_manifest_cache(monkeypatch, tmp_path
     monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: ["/bin/node"] if command == "node" else None)
 
     result = manager.prepare()
-    manifest = manager._load_runtime_manifest()
+    shared_manager = manager._shared_manifest_manager(offline=True)
+    manifest = shared_manager.load_manifest(allow_network=False)
     assert manifest is not None
-    archive = manager._manifest_archive_for_platform(manifest)
-    assert archive is not None
-    installed_cli = Path(manager._manifest_runtime_command(manager._manifest_install_dir(manifest, archive), ["/bin/node"])[1])
+    installed_cli = Path(result["command"][1])
 
     assert result["ok"] is True
     assert result["command"] == ["/bin/node", str(installed_cli)]
@@ -10054,7 +10062,8 @@ def test_show_runtime_manager_manifest_install_identity_ignores_other_platform_e
         manifest_path=manifest_path,
     )
     initial_result = initial_manager.prepare()
-    initial_manifest = initial_manager._load_runtime_manifest()
+    initial_shared_manager = initial_manager._shared_manifest_manager(offline=True)
+    initial_manifest = initial_shared_manager.load_manifest(allow_network=False)
     assert initial_manifest is not None
 
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -10071,14 +10080,18 @@ def test_show_runtime_manager_manifest_install_identity_ignores_other_platform_e
         manifest_path=manifest_path,
         offline=True,
     )
-    edited_manifest = edited_manager._load_runtime_manifest()
+    edited_shared_manager = edited_manager._shared_manifest_manager(offline=True)
+    edited_manifest = edited_shared_manager.load_manifest(allow_network=False)
     assert edited_manifest is not None
     assert edited_manifest.digest != initial_manifest.digest
 
-    def _unexpected_archive_resolution(_archive):
+    def _unexpected_archive_resolution(_shared_manager, _archive):
         raise AssertionError("an unrelated platform edit must not trigger archive resolution")
 
-    monkeypatch.setattr(edited_manager, "_resolve_manifest_archive", _unexpected_archive_resolution)
+    monkeypatch.setattr(
+        "core.show_runtime._ShowManifestRuntimeManager._resolve_manifest_archive",
+        _unexpected_archive_resolution,
+    )
     edited_result = edited_manager.prepare()
 
     assert edited_result["ok"] is True
@@ -10097,18 +10110,24 @@ def test_show_runtime_manager_adopts_previous_fingerprint_and_preserves_gc_prote
         runtime_dir=runtime_dir,
         manifest_path=manifest_path,
     )
-    previous_manifest = previous_manager._load_runtime_manifest()
+    previous_shared_manager = previous_manager._shared_manifest_manager(offline=True)
+    previous_manifest = previous_shared_manager.load_manifest(allow_network=False)
     assert previous_manifest is not None
-    archive = previous_manager._manifest_archive_for_platform(previous_manifest)
+    archive = previous_shared_manager.archive_for_platform(previous_manifest)
     assert archive is not None
     previous_fingerprint = hashlib.sha256(
         f"{previous_manifest.digest}:{archive.sha256}".encode("utf-8")
     ).hexdigest()[:16]
-    previous_install_dir = previous_manager._legacy_manifest_install_dir(previous_manifest, archive) / previous_fingerprint
+    previous_install_dir = previous_shared_manager._manifest_install_dir(previous_manifest, archive).parent / previous_fingerprint
     previous_cli = previous_install_dir / "node_modules" / "@avibe" / "show-runtime" / "dist" / "cli.js"
     previous_cli.parent.mkdir(parents=True)
     previous_cli.write_text("previous fingerprint runtime\n", encoding="utf-8")
-    previous_manager._write_manifest_install_metadata(previous_install_dir, previous_manifest, archive)
+    previous_shared_manager._write_manifest_install_metadata(
+        previous_install_dir,
+        previous_manifest,
+        archive,
+        binary_sha256=None,
+    )
 
     downloads_dir = runtime_dir / "downloads"
     downloads_dir.mkdir(parents=True)
@@ -10163,21 +10182,26 @@ def test_show_runtime_manager_adopts_previous_fingerprint_and_preserves_gc_prote
         manifest_path=manifest_path,
         offline=True,
     )
-    current_manifest = manager._load_runtime_manifest()
+    shared_manager = manager._shared_manifest_manager(offline=True)
+    current_manifest = shared_manager.load_manifest(allow_network=False)
     assert current_manifest is not None
-    assert manager._manifest_install_dir(current_manifest, archive) != previous_install_dir
+    current_install_dir = shared_manager._manifest_install_dir(current_manifest, archive)
+    assert current_install_dir != previous_install_dir
 
-    def _unexpected_archive_resolution(_archive):
+    def _unexpected_archive_resolution(_shared_manager, _archive):
         raise AssertionError("a previous-fingerprint install must be adopted without a download")
 
-    monkeypatch.setattr(manager, "_resolve_manifest_archive", _unexpected_archive_resolution)
+    monkeypatch.setattr(
+        "core.show_runtime._ShowManifestRuntimeManager._resolve_manifest_archive",
+        _unexpected_archive_resolution,
+    )
     result = manager.prepare()
 
     assert result["ok"] is True
     assert result["command"] == ["/bin/node", str(previous_cli)]
     assert previous_install_dir.exists() is True
-    assert manager._manifest_install_dir(current_manifest, archive).exists() is False
-    assert archive.sha256 in manager._protected_archive_sha256s()
+    assert current_install_dir.exists() is False
+    assert archive.sha256 == shared_manager._current_archive_sha256()
     current_pointer = json.loads((runtime_dir / "current.json").read_text(encoding="utf-8"))
     assert current_pointer["runtime_version"] == current_manifest.runtime_version
     assert current_pointer["install_dir"] == str(previous_install_dir)
@@ -10263,7 +10287,11 @@ def test_show_runtime_prepare_prunes_old_packaged_installs_and_keeps_rollback(mo
     monkeypatch.setattr(
         manager,
         "_install_manifest_runtime_locked",
-        lambda *, force, offline: ["/bin/node", str(current_cli)],
+        lambda *, force, offline: _complete_mock_manifest_install(
+            manager,
+            ["/bin/node", str(current_cli)],
+            offline=offline,
+        ),
     )
     monkeypatch.setattr(manager, "status", lambda **_kwargs: {})
 
@@ -10284,7 +10312,7 @@ def test_show_runtime_prepare_preserves_nested_retained_rollback(monkeypatch, tm
     old_install, _old_cli = _write_cached_runtime_install(runtime_dir, "old", mtime=10)
     current_install, current_cli = _write_cached_runtime_install(runtime_dir, "current", mtime=300)
     _write_cached_runtime_pointer(runtime_dir, current_install)
-    rollback_parent = runtime_dir / "versions" / "rollback" / _runtime_platform_tag()
+    rollback_parent = runtime_dir / "versions" / "rollback" / runtime_platform_tag()
     _rollback_parent, rollback_parent_cli = _write_cached_runtime_install_at(
         rollback_parent,
         "rollback-legacy",
@@ -10309,7 +10337,11 @@ def test_show_runtime_prepare_preserves_nested_retained_rollback(monkeypatch, tm
     monkeypatch.setattr(
         manager,
         "_install_manifest_runtime_locked",
-        lambda *, force, offline: ["/bin/node", str(current_cli)],
+        lambda *, force, offline: _complete_mock_manifest_install(
+            manager,
+            ["/bin/node", str(current_cli)],
+            offline=offline,
+        ),
     )
     monkeypatch.setattr(manager, "status", lambda **_kwargs: {})
 
@@ -10329,7 +10361,7 @@ def test_show_runtime_prepare_prunes_siblings_under_current_legacy_parent(monkey
     runtime_dir = tmp_path / "runtime"
     old_install, _old_cli = _write_cached_runtime_install(runtime_dir, "old", mtime=100)
     previous_install, _previous_cli = _write_cached_runtime_install(runtime_dir, "previous", mtime=250)
-    current_parent = runtime_dir / "versions" / "current" / _runtime_platform_tag()
+    current_parent = runtime_dir / "versions" / "current" / runtime_platform_tag()
     _parent_install, parent_cli = _write_cached_runtime_install_at(current_parent, "current-legacy", mtime=400)
     current_install, current_cli = _write_cached_runtime_install_at(
         current_parent / "current-fingerprint",
@@ -10351,7 +10383,11 @@ def test_show_runtime_prepare_prunes_siblings_under_current_legacy_parent(monkey
     monkeypatch.setattr(
         manager,
         "_install_manifest_runtime_locked",
-        lambda *, force, offline: ["/bin/node", str(current_cli)],
+        lambda *, force, offline: _complete_mock_manifest_install(
+            manager,
+            ["/bin/node", str(current_cli)],
+            offline=offline,
+        ),
     )
     monkeypatch.setattr(manager, "status", lambda **_kwargs: {})
 
@@ -10371,7 +10407,7 @@ def test_show_runtime_prepare_preserves_descendants_of_current_legacy_parent(mon
     runtime_dir = tmp_path / "runtime"
     old_install, _old_cli = _write_cached_runtime_install(runtime_dir, "old", mtime=100)
     previous_install, _previous_cli = _write_cached_runtime_install(runtime_dir, "previous", mtime=250)
-    current_parent = runtime_dir / "versions" / "current" / _runtime_platform_tag()
+    current_parent = runtime_dir / "versions" / "current" / runtime_platform_tag()
     _parent_install, parent_cli = _write_cached_runtime_install_at(current_parent, "current-legacy", mtime=400)
     _write_cached_runtime_pointer(runtime_dir, current_parent)
     current_child, current_child_cli = _write_cached_runtime_install_at(
@@ -10388,7 +10424,11 @@ def test_show_runtime_prepare_preserves_descendants_of_current_legacy_parent(mon
     monkeypatch.setattr(
         manager,
         "_install_manifest_runtime_locked",
-        lambda *, force, offline: ["/bin/node", str(parent_cli)],
+        lambda *, force, offline: _complete_mock_manifest_install(
+            manager,
+            ["/bin/node", str(parent_cli)],
+            offline=offline,
+        ),
     )
     monkeypatch.setattr(manager, "status", lambda **_kwargs: {})
 
@@ -10409,7 +10449,7 @@ def test_show_runtime_prepare_preserves_custom_child_under_stale_packaged_parent
     previous_install, _previous_cli = _write_cached_runtime_install(runtime_dir, "previous", mtime=250)
     current_install, current_cli = _write_cached_runtime_install(runtime_dir, "current", mtime=300)
     _write_cached_runtime_pointer(runtime_dir, current_install)
-    stale_parent = runtime_dir / "versions" / "stale-parent" / _runtime_platform_tag()
+    stale_parent = runtime_dir / "versions" / "stale-parent" / runtime_platform_tag()
     _parent_install, parent_cli = _write_cached_runtime_install_at(stale_parent, "stale-parent", mtime=80)
     custom_child, custom_cli = _write_cached_runtime_install_at(
         stale_parent / "custom-fingerprint",
@@ -10431,7 +10471,11 @@ def test_show_runtime_prepare_preserves_custom_child_under_stale_packaged_parent
     monkeypatch.setattr(
         manager,
         "_install_manifest_runtime_locked",
-        lambda *, force, offline: ["/bin/node", str(current_cli)],
+        lambda *, force, offline: _complete_mock_manifest_install(
+            manager,
+            ["/bin/node", str(current_cli)],
+            offline=offline,
+        ),
     )
     monkeypatch.setattr(manager, "status", lambda **_kwargs: {})
 
@@ -10533,15 +10577,21 @@ def test_show_runtime_manager_reuses_legacy_manifest_install_offline(monkeypatch
         offline=True,
     )
     monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: ["/bin/node"] if command == "node" else None)
-    manifest = manager._load_runtime_manifest()
+    shared_manager = manager._shared_manifest_manager(offline=True)
+    manifest = shared_manager.load_manifest(allow_network=False)
     assert manifest is not None
-    archive = manager._manifest_archive_for_platform(manifest)
+    archive = shared_manager.archive_for_platform(manifest)
     assert archive is not None
-    legacy_install_dir = manager._legacy_manifest_install_dir(manifest, archive)
+    legacy_install_dir = shared_manager._manifest_install_dir(manifest, archive).parent
     legacy_cli = legacy_install_dir / "node_modules" / "@avibe" / "show-runtime" / "dist" / "cli.js"
     legacy_cli.parent.mkdir(parents=True)
     legacy_cli.write_text("legacy runtime\n", encoding="utf-8")
-    manager._write_manifest_install_metadata(legacy_install_dir, manifest, archive)
+    shared_manager._write_manifest_install_metadata(
+        legacy_install_dir,
+        manifest,
+        archive,
+        binary_sha256=None,
+    )
 
     result = manager.prepare()
 
@@ -10562,11 +10612,17 @@ def test_show_runtime_clean_skips_legacy_parent_of_current_fingerprint(monkeypat
     result = manager.prepare()
     current_install_dir = Path(result["command"][1]).parents[4]
     legacy_parent = current_install_dir.parent
-    manifest = manager._load_runtime_manifest()
+    shared_manager = manager._shared_manifest_manager(offline=True)
+    manifest = shared_manager.load_manifest(allow_network=False)
     assert manifest is not None
-    archive = manager._manifest_archive_for_platform(manifest)
+    archive = shared_manager.archive_for_platform(manifest)
     assert archive is not None
-    manager._write_manifest_install_metadata(legacy_parent, manifest, archive)
+    shared_manager._write_manifest_install_metadata(
+        legacy_parent,
+        manifest,
+        archive,
+        binary_sha256=None,
+    )
 
     clean_result = manager.clean(keep_previous=0)
 
@@ -10587,7 +10643,7 @@ def test_show_runtime_manager_rejects_noncanonical_manifest_entrypoint(
     archive_path = _write_runtime_archive_with_entrypoints(tmp_path, entrypoints)
     manifest_path = _write_runtime_manifest(tmp_path, archive_path)
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    payload["archives"][_runtime_platform_tag()]["bin_path"] = alternate
+    payload["archives"][runtime_platform_tag()]["bin_path"] = alternate
     manifest_path.write_text(json.dumps(payload), encoding="utf-8")
     manager = ShowRuntimeManager(
         workspace_root=tmp_path / "show",
@@ -10633,7 +10689,7 @@ def test_show_runtime_status_reports_selected_manifest_archive_error_with_instal
         manifest_path=manifest_path,
     ).prepare()
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    platform_tag = _runtime_platform_tag()
+    platform_tag = runtime_platform_tag()
     if selection_error == "missing_platform":
         payload["archives"]["fixture-unsupported"] = payload["archives"].pop(platform_tag)
     else:
@@ -10793,7 +10849,7 @@ def test_show_runtime_manager_installs_manifest_archive_from_verified_offline_ca
     cached.parent.mkdir(parents=True)
     cached.write_bytes(archive_path.read_bytes())
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["archives"][_runtime_platform_tag()]["url"] = "https://example.invalid/runtime.tgz"
+    manifest["archives"][runtime_platform_tag()]["url"] = "https://example.invalid/runtime.tgz"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     manager = ShowRuntimeManager(
         workspace_root=tmp_path / "show",
@@ -10974,7 +11030,7 @@ def test_show_runtime_automatic_opt_out_does_not_fetch_remote_manifest(monkeypat
         auto_install=False,
     )
     monkeypatch.setattr(
-        "core.show_runtime.fetch_bytes",
+        "core.managed_runtime.fetch_bytes",
         lambda *_args, **_kwargs: pytest.fail("automatic opt-out must not access the network"),
     )
 
@@ -10993,7 +11049,7 @@ def test_show_runtime_remote_manifest_install_remains_installed_when_source_is_u
         auto_install=False,
     )
     monkeypatch.setattr(
-        "core.show_runtime.fetch_bytes",
+        "core.managed_runtime.fetch_bytes",
         lambda *_args, **_kwargs: pytest.fail("policy skip must derive install state from disk"),
     )
 
@@ -11096,7 +11152,7 @@ def test_show_runtime_status_keeps_installed_identity_separate_from_selected_man
         auto_install=False,
     )
     monkeypatch.setattr(
-        "core.show_runtime.fetch_bytes",
+        "core.managed_runtime.fetch_bytes",
         lambda url, **_kwargs: selected_manifest.read_bytes()
         if url == manifest_url
         else pytest.fail(f"unexpected fetch: {url}"),
@@ -11130,7 +11186,7 @@ def test_show_runtime_disk_install_fact_does_not_require_node(monkeypatch, tmp_p
         auto_install=False,
     )
     monkeypatch.setattr(
-        "core.show_runtime.fetch_bytes",
+        "core.managed_runtime.fetch_bytes",
         lambda *_args, **_kwargs: pytest.fail("policy skip must not fetch the manifest"),
     )
 
@@ -11194,7 +11250,7 @@ def test_show_runtime_disk_install_pointer_fails_closed(monkeypatch, tmp_path, c
         auto_install=False,
     )
     monkeypatch.setattr(
-        "core.show_runtime.fetch_bytes",
+        "core.managed_runtime.fetch_bytes",
         lambda *_args, **_kwargs: pytest.fail("policy skip must not fetch the manifest"),
     )
 

@@ -21,7 +21,6 @@ ESBUILD_PAYLOAD = b"fixture-esbuild\n"
 Extractor = Callable[[tarfile.TarFile, Path], None]
 EXTRACTORS: tuple[tuple[str, Extractor], ...] = (
     ("shared", managed_runtime.safe_extract_tar),
-    ("show", show_runtime._safe_extract_tar),
     ("tmux", tmux_runtime._safe_extract_tar),
 )
 
@@ -234,7 +233,7 @@ def test_released_show_composite_shape_installs_through_production_adapter(
         encoding="utf-8",
     )
     monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: platform)
-    monkeypatch.setattr(show_runtime, "_runtime_platform_tag", lambda: platform)
+    monkeypatch.setattr(show_runtime, "runtime_platform_tag", lambda: platform)
     monkeypatch.setattr(
         show_runtime,
         "_resolve_command",
@@ -509,7 +508,6 @@ def test_shared_fallback_keeps_order_dependent_links_confined(
     ("_name", "extractor"),
     (
         ("shared", managed_runtime.safe_extract_tar),
-        ("show", show_runtime._safe_extract_tar),
         ("tarfile", lambda archive, destination: archive.extractall(destination, filter="data")),
     ),
 )
@@ -556,7 +554,6 @@ def test_order_dependent_link_target_stays_confined(
     ("_name", "extractor", "detects_before_extract"),
     (
         ("shared", managed_runtime.safe_extract_tar, True),
-        ("show", show_runtime._safe_extract_tar, False),
         ("tmux", tmux_runtime._safe_extract_tar, True),
     ),
 )
