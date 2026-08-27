@@ -9,12 +9,20 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple, cast
 
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import (
+    InvalidSdistFilename,
+    InvalidWheelFilename,
+    parse_sdist_filename,
+    parse_wheel_filename,
+)
 from packaging.version import InvalidVersion, Version
 
 from vibe import runtime as runtime_mod
@@ -871,8 +879,6 @@ def _with_memory_extra(package_spec: str) -> str:
     if package_spec.startswith(("git+", "hg+", "svn+", "bz+", "http://", "https://", "file://")):
         return f"{PACKAGE_NAME}[{MEMORY_EXTRA_NAME}] @ {package_spec}"
     try:
-        from packaging.requirements import InvalidRequirement, Requirement
-
         requirement = Requirement(package_spec)
     except InvalidRequirement:
         artifact_uri = Path(package_spec).expanduser().resolve().as_uri()
@@ -887,6 +893,43 @@ def _with_memory_extra(package_spec: str) -> str:
     if requirement.marker:
         rendered += f"; {requirement.marker}"
     return rendered
+
+
+def _target_version_from_package_spec(package_spec: str) -> str | None:
+    """Read an exact release only from an already-versioned package spec."""
+
+    try:
+        requirement = Requirement(package_spec)
+    except InvalidRequirement:
+        artifact = package_spec
+    else:
+        if requirement.url is None:
+            specifiers = list(requirement.specifier)
+            if len(specifiers) != 1 or specifiers[0].operator != "==" or "*" in specifiers[0].version:
+                return None
+            try:
+                version = str(Version(specifiers[0].version))
+            except InvalidVersion:
+                return None
+            return version if _names_a_published_release(version) else None
+        artifact = requirement.url
+
+    if artifact.startswith(("git+", "hg+", "svn+", "bz+")):
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(artifact)
+    except ValueError:
+        return None
+    filename = Path(urllib.parse.unquote(parsed.path if parsed.scheme else artifact)).name
+    try:
+        _, version, _, _ = parse_wheel_filename(filename)
+    except InvalidWheelFilename:
+        try:
+            _, version = parse_sdist_filename(filename)
+        except InvalidSdistFilename:
+            return None
+    rendered = str(version)
+    return rendered if _names_a_published_release(rendered) else None
 
 
 def pinned_package_spec(
@@ -969,11 +1012,6 @@ def build_upgrade_plan(
         if version or memory_package is not None
         else bool(memory_enabled or memory_package_installed())
     )
-    if not version and include_memory and (
-        not isinstance(target_version, str) or not _names_a_published_release(target_version)
-    ):
-        raise ValueError("A Memory-preserving upgrade requires a target release version")
-    uv_binary = find_uv_binary(uv_path=uv_path, base_env=base_env)
     package_spec = (
         pinned_package_spec(
             version,
@@ -984,6 +1022,12 @@ def build_upgrade_plan(
         if version
         else (package_spec or get_upgrade_package_spec())
     )
+    if not version and include_memory:
+        if target_version is None:
+            target_version = _target_version_from_package_spec(package_spec)
+        if not isinstance(target_version, str) or not _names_a_published_release(target_version):
+            raise ValueError("A Memory-preserving upgrade requires a target release version")
+    uv_binary = find_uv_binary(uv_path=uv_path, base_env=base_env)
     if not version and include_memory and f"[{MEMORY_EXTRA_NAME}]" not in package_spec:
         package_spec = _with_memory_extra(package_spec)
     memory_target = memory_version if version else target_version

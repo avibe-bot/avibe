@@ -14388,14 +14388,11 @@ def cmd_upgrade():
 
     if info["error"]:
         print(f"\033[33mFailed to check for updates: {info['error']}\033[0m")
-        print("Attempting upgrade anyway...")
     elif not info["has_update"]:
         print("\033[32mYou are already using the latest version.\033[0m")
         return 0
     else:
         print(f"New version available: {info['latest']}")
-
-    print("\nUpgrading...")
 
     current_vibe_path = cache_running_vibe_path()
     try:
@@ -14407,6 +14404,9 @@ def cmd_upgrade():
     except ValueError as exc:
         print(f"\033[31mUpgrade failed: {exc}\033[0m")
         return 1
+    if info["error"]:
+        print("Attempting upgrade anyway...")
+    print("\nUpgrading...")
     print(f"Using {plan.method}: {' '.join(plan.command)}")
     runtime_was_running = _runtime_process_was_running()
 
