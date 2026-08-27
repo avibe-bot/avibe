@@ -132,11 +132,14 @@ class ManagedRuntimeSpec:
     archive_size_field: str = "size"
     platform_aliases: tuple[tuple[str, str], ...] = ()
     binary_artifact: bool = True
+    allow_missing_binary_sha256: bool = False
     record_provider: str = "manifest"
     metadata_filename_override: str | None = None
     allow_legacy_missing_runtime_id: bool = False
     staging_prefixes: tuple[str, ...] = ("install-",)
     replace_target_on_force: bool = False
+    replace_invalid_target_on_repair: bool = False
+    include_manifest_digest_in_install_fingerprint: bool = False
 
     @property
     def metadata_filename(self) -> str:
@@ -207,7 +210,11 @@ class ManagedRuntimeManager:
                     manifest=manifest,
                 )
             target = self._install_target_identity(manifest, archive)
-            if expected_target is not None and self._normalized_install_target(expected_target) != target:
+            if (
+                expected_target is not None
+                and self._normalized_install_target(expected_target)
+                != self._normalized_install_target(target)
+            ):
                 return self._failure(
                     self._reason("install_target_changed"),
                     manifest=manifest,
@@ -243,8 +250,11 @@ class ManagedRuntimeManager:
             unique_install_dirs = list(dict.fromkeys(candidate_install_dirs))
             existing_install_dir = unique_install_dirs[0]
             existing: Path | None = None
+            canonical_target_was_rejected = False
             for candidate_install_dir in unique_install_dirs:
                 candidate = self._verified_manifest_binary(candidate_install_dir, manifest, archive)
+                if candidate_install_dir == install_dir and candidate is None:
+                    canonical_target_was_rejected = True
                 if candidate is not None:
                     existing_install_dir = candidate_install_dir
                     existing = candidate
@@ -296,7 +306,11 @@ class ManagedRuntimeManager:
                         archive=archive,
                     )
                 binary_sha256 = file_sha256(staged_binary) if self.spec.binary_artifact else None
-                if self.spec.binary_artifact and binary_sha256 != archive.binary_sha256:
+                if (
+                    self.spec.binary_artifact
+                    and archive.binary_sha256 is not None
+                    and binary_sha256 != archive.binary_sha256
+                ):
                     return self._failure(
                         self._reason("binary_checksum_mismatch"),
                         manifest=manifest,
@@ -311,7 +325,13 @@ class ManagedRuntimeManager:
 
                 install_dir.parent.mkdir(parents=True, exist_ok=True)
                 if install_dir.exists():
-                    if force and self.spec.replace_target_on_force:
+                    replace_target = (
+                        force and self.spec.replace_target_on_force
+                    ) or (
+                        canonical_target_was_rejected
+                        and self.spec.replace_invalid_target_on_repair
+                    )
+                    if replace_target:
                         if not self._remove_install_target_for_replacement(install_dir):
                             return self._failure(
                                 self._reason("install_failed"),
@@ -456,7 +476,16 @@ class ManagedRuntimeManager:
             metadata_bin_path = metadata.get("bin_path", self.spec.default_bin_path)
             binary_sha256 = metadata.get("binary_sha256")
             binary_integrity_valid = (
-                isinstance(binary_sha256, str) and bool(_SHA256_RE.fullmatch(binary_sha256))
+                (
+                    isinstance(binary_sha256, str)
+                    and bool(_SHA256_RE.fullmatch(binary_sha256))
+                )
+                or (
+                    binary_sha256 is None
+                    and self.spec.allow_missing_binary_sha256
+                    and self.spec.allow_legacy_missing_runtime_id
+                    and metadata.get("runtime_id") is None
+                )
                 if self.spec.binary_artifact
                 else (
                     binary_sha256 is None
@@ -1490,7 +1519,10 @@ class ManagedRuntimeManager:
         return True
 
     def _install_dir_is_protected(self, install_dir: Path, protected: set[Path]) -> bool:
-        return install_dir in protected
+        return any(
+            install_dir == item or install_dir in item.parents or item in install_dir.parents
+            for item in protected
+        )
 
     def _retention_ranked_installs(
         self,
@@ -1639,7 +1671,14 @@ class ManagedRuntimeManager:
                 if not _SHA256_RE.fullmatch(sha256):
                     raise ValueError("invalid archive sha256")
                 if self.spec.binary_artifact and (
-                    binary_sha256 is None or not _SHA256_RE.fullmatch(binary_sha256)
+                    (
+                        binary_sha256 is None
+                        and not self.spec.allow_missing_binary_sha256
+                    )
+                    or (
+                        binary_sha256 is not None
+                        and not _SHA256_RE.fullmatch(binary_sha256)
+                    )
                 ):
                     raise ValueError("invalid binary sha256")
                 if binary_sha256 is not None and not _SHA256_RE.fullmatch(binary_sha256):
@@ -1742,7 +1781,11 @@ class ManagedRuntimeManager:
         manifest: ManagedRuntimeManifest,
         archive: ManagedRuntimeArchive,
     ) -> Path:
-        fingerprint = hashlib.sha256(f"{manifest.runtime_version}:{archive.platform}:{archive.sha256}".encode()).hexdigest()[:16]
+        if self.spec.include_manifest_digest_in_install_fingerprint:
+            fingerprint_input = f"{manifest.digest}:{archive.sha256}"
+        else:
+            fingerprint_input = f"{manifest.runtime_version}:{archive.platform}:{archive.sha256}"
+        fingerprint = hashlib.sha256(fingerprint_input.encode("utf-8")).hexdigest()[:16]
         return (
             self.runtime_dir
             / "versions"
@@ -1799,6 +1842,23 @@ class ManagedRuntimeManager:
         target_platform = target.pop("platform")
         metadata_platform = metadata.get("platform")
         aliases = dict(self.spec.platform_aliases)
+        expected_binary_sha256 = archive.binary_sha256
+        legacy_without_binary_digest = (
+            self.spec.binary_artifact
+            and expected_binary_sha256 is None
+            and metadata.get("binary_sha256") is None
+            and self.spec.allow_missing_binary_sha256
+            and self.spec.allow_legacy_missing_runtime_id
+            and metadata.get("runtime_id") is None
+        )
+        if self.spec.binary_artifact and expected_binary_sha256 is None:
+            persisted_binary_sha256 = metadata.get("binary_sha256")
+            if isinstance(persisted_binary_sha256, str) and _SHA256_RE.fullmatch(
+                persisted_binary_sha256
+            ):
+                expected_binary_sha256 = persisted_binary_sha256
+            elif not legacy_without_binary_digest:
+                return None
         if not (
             self._record_provider_matches(metadata.get("provider"))
             and self._record_runtime_id_matches(metadata.get("runtime_id"))
@@ -1809,9 +1869,13 @@ class ManagedRuntimeManager:
             and bin_path == archive.bin_path
             and (
                 not self.spec.binary_artifact
-                or file_sha256(binary) == archive.binary_sha256
+                or expected_binary_sha256 is None
+                or file_sha256(binary) == expected_binary_sha256
             )
         ):
+            return None
+        if not self._binary_matches_manifest(binary, manifest):
+            self._install_reason = self._reason("binary_not_runnable")
             return None
         return binary
 
@@ -1943,7 +2007,7 @@ class ManagedRuntimeManager:
         *,
         reason: str | None = None,
     ) -> dict[str, Any]:
-        if self.resolve_binary() != binary:
+        if ManagedRuntimeManager.resolve_binary(self) != binary:
             try:
                 self._write_current_pointer(install_dir, manifest, archive)
             except Exception as exc:  # noqa: BLE001

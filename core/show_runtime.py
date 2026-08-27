@@ -696,12 +696,6 @@ class _ShowManifestRuntimeManager(ManagedRuntimeManager):
         ).hexdigest()[:16]
         return parts[2] in {current_fingerprint, previous_fingerprint}
 
-    def _install_dir_is_protected(self, install_dir: Path, protected: set[Path]) -> bool:
-        return any(
-            install_dir == item or install_dir in item.parents or item in install_dir.parents
-            for item in protected
-        )
-
     def _retention_ranked_installs(self, installs, protected):
         resolved_by_path = {install.path: install.path.resolve() for install in installs}
         return [
