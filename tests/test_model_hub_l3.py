@@ -4893,6 +4893,57 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
     assert inventory_probe.await_args.kwargs["protocol"] == "anthropic"
 
+    credential_param_rejected = _parse_protocol_authenticated_evidence(
+        "openai_responses",
+        400,
+        json.dumps(
+            {
+                "error": {
+                    "type": "invalid_request_error",
+                    "param": "api_key",
+                }
+            }
+        ),
+    )
+    assert credential_param_rejected == _ProtocolEvidence(
+        protocol=_ProtocolProof.UNPROVEN,
+        authentication=_AuthenticationEvidence.REJECTED,
+    )
+
+    async def credential_param_rejection_blocks_pairwise_proof(**kwargs) -> _ProtocolEvidence:
+        if kwargs["protocol"] == "anthropic":
+            return unproven_rejected
+        if kwargs["protocol"] == "openai_responses":
+            return credential_param_rejected
+        if kwargs["protocol"] == "openai_chat":
+            return excluded_404
+        raise AssertionError(kwargs["protocol"])
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(side_effect=credential_param_rejection_blocks_pairwise_proof),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=("should-not-discover",)),
+        ) as inventory_probe,
+    ):
+        rejected = asyncio.run(
+            adapter.observe_source(
+                "openai",
+                base_url,
+                credential_ref,
+                SOURCE_PROTOCOLS,
+            )
+        )
+
+    assert rejected.outcome.value == "authentication_failed"
+    assert rejected.protocol is None
+    assert rejected.authenticated is False
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    inventory_probe.assert_not_awaited()
+
     with (
         patch(
             "vibe.model_hub_runtime.adapter._probe_protocol_response",
@@ -5476,6 +5527,29 @@ def test_openai_request_error_without_family_param_records_accepted_but_unproven
         protocol=_ProtocolProof.UNPROVEN,
         authentication=_AuthenticationEvidence.ACCEPTED,
         shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
+    )
+
+
+@pytest.mark.parametrize("protocol", SOURCE_PROTOCOLS)
+@pytest.mark.parametrize("status", (400, 422))
+def test_request_error_with_credential_param_is_rejected(
+    protocol: str,
+    status: int,
+) -> None:
+    assert _parse_protocol_authenticated_evidence(
+        protocol,
+        status,
+        json.dumps(
+            {
+                "error": {
+                    "type": "invalid_request_error",
+                    "param": "api_key",
+                }
+            }
+        ),
+    ) == _ProtocolEvidence(
+        protocol=_ProtocolProof.UNPROVEN,
+        authentication=_AuthenticationEvidence.REJECTED,
     )
 
 

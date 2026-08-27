@@ -186,6 +186,26 @@ _OPENAI_CHAT_PARAMS = frozenset(
 )
 _OPENAI_FAMILY_PROTOCOLS = frozenset({"openai_responses", "openai_chat"})
 _OPENAI_FAMILY_PARAMS = _OPENAI_RESPONSES_PARAMS | _OPENAI_CHAT_PARAMS
+_CREDENTIAL_ERROR_PARAMS = frozenset(
+    {
+        "api_key",
+        "api-key",
+        "access_token",
+        "access-token",
+        "authorization",
+        "auth",
+        "auth_token",
+        "auth-token",
+        "bearer_token",
+        "bearer-token",
+        "token",
+        "x-api-key",
+        "x_api_key",
+        "x-auth-token",
+        "x_auth_token",
+        "x-token",
+    }
+)
 _PAIRWISE_EXCLUSION_SHAPES = frozenset(
     {
         _ProtocolObservationShape.HTTP_404,
@@ -330,6 +350,25 @@ def _error_identifiers(error: Mapping[str, Any]) -> frozenset[str]:
     )
 
 
+def _error_param_name(error: Mapping[str, Any]) -> str | None:
+    value = error.get("param")
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    return normalized or None
+
+
+def _request_error_rejects_credential(
+    status: int,
+    error: Mapping[str, Any] | None,
+) -> bool:
+    return (
+        status in _REQUEST_ERROR_STATUSES
+        and isinstance(error, dict)
+        and _error_param_name(error) in _CREDENTIAL_ERROR_PARAMS
+    )
+
+
 def _payload_is_structured(payload: Mapping[str, Any]) -> bool:
     return (
         isinstance(payload.get("error"), dict)
@@ -348,6 +387,8 @@ def _anthropic_wrapperless_error_kind(
     error = payload.get("error")
     if not isinstance(error, dict):
         return None
+    if _request_error_rejects_credential(status, error):
+        return "rejected"
     identifiers = _error_identifiers(error)
     if status in _REQUEST_ERROR_STATUSES and not (
         _REQUEST_ERROR_IDENTIFIERS | _MODEL_ERROR_IDENTIFIERS
@@ -426,6 +467,12 @@ def _parse_protocol_authenticated_evidence(
             protocol=_ProtocolProof.UNPROVEN,
             authentication=_AuthenticationEvidence.REJECTED,
         )
+    error = payload.get("error")
+    if _request_error_rejects_credential(status, error):
+        return _ProtocolEvidence(
+            protocol=_ProtocolProof.UNPROVEN,
+            authentication=_AuthenticationEvidence.REJECTED,
+        )
 
     if protocol == "anthropic":
         wrapperless = _anthropic_wrapperless_error_kind(status, payload)
@@ -455,13 +502,12 @@ def _parse_protocol_authenticated_evidence(
                 shape=rule.shape,
             )
     if protocol in _OPENAI_FAMILY_PROTOCOLS and status in _REQUEST_ERROR_STATUSES:
-        error = payload.get("error")
         if isinstance(error, dict):
             identifiers = _error_identifiers(error)
             if (
                 not _REQUEST_ERROR_IDENTIFIERS.isdisjoint(identifiers)
                 and _AUTHENTICATION_ERROR_IDENTIFIERS.isdisjoint(identifiers)
-                and error.get("param") not in _OPENAI_FAMILY_PARAMS
+                and _error_param_name(error) not in _OPENAI_FAMILY_PARAMS
             ):
                 return _ProtocolEvidence(
                     protocol=_ProtocolProof.UNPROVEN,
