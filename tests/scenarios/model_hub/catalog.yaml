@@ -15,6 +15,7 @@ capability:
     # properties can be observed, so the catalog checker resolves both shapes.
     - ui/src/components/settings/models/UsageTab.test.tsx
     - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx
+    - ui/src/components/settings/models/RouteChainDialog.test.tsx
     # The gate that resolves those rows against vitest's own collection, and
     # its own evidence.
     - ui/scripts/scenarioCatalog.test.mjs
