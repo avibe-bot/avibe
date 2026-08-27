@@ -32,7 +32,7 @@ export const SettingsPageShell: React.FC<SettingsPageShellProps> = ({
       </div>
 
       {/* Provider/platform detail remains within the active Settings section. */}
-      {breadcrumb && <div className="font-mono text-[11px] text-muted">{breadcrumb}</div>}
+      {breadcrumb && <div className="hidden font-mono text-[11px] text-muted md:block">{breadcrumb}</div>}
 
       <div className="flex flex-col gap-4">{children}</div>
     </div>

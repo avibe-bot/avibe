@@ -68,6 +68,8 @@ const renderLayout = (path: string) => render(
   <MemoryRouter initialEntries={[path]}>
     <Routes>
       <Route path="/settings" element={<SettingsLayoutHarness />}>
+        <Route path="backends" element={<div>backends-body</div>} />
+        <Route path="backends/claude" element={<div>claude-body</div>} />
         <Route path="models" element={<div>models-body</div>} />
         <Route path="replies" element={<div>replies-body</div>} />
         <Route path="shortcuts" element={<div>shortcuts-body</div>} />
@@ -299,6 +301,13 @@ describe('SettingsLayout', () => {
     expect(screen.getByRole('banner').className).toContain('pt-[env(safe-area-inset-top)]');
   });
 
+  it('keeps mobile navigation and header actions touch-sized', () => {
+    renderLayout('/settings');
+
+    expect(screen.getByRole('link', { name: 'settings.sections.replies' }).className).toContain('min-h-11');
+    expect(screen.getByRole('link', { name: 'settings.close' }).className).toContain('size-10');
+  });
+
   it('keeps mobile navigation and detail controls above the bottom safe-area inset', () => {
     renderLayout('/settings/replies');
 
@@ -308,5 +317,25 @@ describe('SettingsLayout', () => {
     expect(screen.getByText('replies-body').closest('section')?.firstElementChild?.className).toContain(
       'env(safe-area-inset-bottom)',
     );
+  });
+
+  it.each([
+    ['/settings/replies', '/settings', 'settings.backToSections'],
+    ['/settings/platforms/groups', '/settings', 'settings.backToSections'],
+    ['/settings/backends/claude', '/settings/backends', 'settings.backToSection'],
+  ])('returns one mobile level from %s', (path, target, label) => {
+    renderLayout(path);
+
+    const back = screen.getByRole('link', { name: label });
+    expect(back.getAttribute('href')).toBe(target);
+    expect(back.className).toContain('md:hidden');
+  });
+
+  it('animates a mobile detail screen without carrying that motion onto desktop', () => {
+    renderLayout('/settings/replies');
+
+    const frame = screen.getByText('replies-body').parentElement;
+    expect(frame?.className).toContain('slide-in-from-right-4');
+    expect(frame?.className).toContain('md:animate-none');
   });
 });

@@ -289,6 +289,7 @@
     },
     "navigationLabel": "设置分区",
     "backToSections": "全部设置",
+    "backToSection": "返回{{section}}",
     "close": "关闭设置",
     "shortcuts": {
       "title": "快捷键",
