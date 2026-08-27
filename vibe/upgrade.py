@@ -895,8 +895,18 @@ def _with_memory_extra(package_spec: str) -> str:
     return rendered
 
 
-def _target_version_from_package_spec(package_spec: str) -> str | None:
-    """Read an exact release only from an already-versioned package spec."""
+def _published_version(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        version = str(Version(value))
+    except InvalidVersion:
+        return None
+    return version if _names_a_published_release(version) else None
+
+
+def _memory_target_version(package_spec: str, target_version: str | None) -> str | None:
+    """Choose the Memory pin from the artifact being installed or valid metadata."""
 
     try:
         requirement = Requirement(package_spec)
@@ -905,13 +915,16 @@ def _target_version_from_package_spec(package_spec: str) -> str | None:
     else:
         if requirement.url is None:
             specifiers = list(requirement.specifier)
-            if len(specifiers) != 1 or specifiers[0].operator != "==" or "*" in specifiers[0].version:
-                return None
-            try:
-                version = str(Version(specifiers[0].version))
-            except InvalidVersion:
-                return None
-            return version if _names_a_published_release(version) else None
+            if (
+                len(specifiers) == 1
+                and specifiers[0].operator == "=="
+                and "*" not in specifiers[0].version
+            ):
+                return _published_version(specifiers[0].version)
+            candidate = _published_version(target_version)
+            if candidate is not None and requirement.specifier.contains(candidate, prereleases=True):
+                return candidate
+            return None
         artifact = requirement.url
 
     if artifact.startswith(("git+", "hg+", "svn+", "bz+")):
@@ -928,8 +941,7 @@ def _target_version_from_package_spec(package_spec: str) -> str | None:
             _, version = parse_sdist_filename(filename)
         except InvalidSdistFilename:
             return None
-    rendered = str(version)
-    return rendered if _names_a_published_release(rendered) else None
+    return _published_version(str(version))
 
 
 def pinned_package_spec(
@@ -1023,9 +1035,8 @@ def build_upgrade_plan(
         else (package_spec or get_upgrade_package_spec())
     )
     if not version and include_memory:
+        target_version = _memory_target_version(package_spec, target_version)
         if target_version is None:
-            target_version = _target_version_from_package_spec(package_spec)
-        if not isinstance(target_version, str) or not _names_a_published_release(target_version):
             raise ValueError("A Memory-preserving upgrade requires a target release version")
     uv_binary = find_uv_binary(uv_path=uv_path, base_env=base_env)
     if not version and include_memory and f"[{MEMORY_EXTRA_NAME}]" not in package_spec:
