@@ -5497,13 +5497,15 @@ is cyan there.
 means different things in each.** Wires: cyan = 原生, mint = 网关供给, violet =
 接管, `#FFFFFF26` = 已启用 · 当前未被使用, gold = 供给已暂停. State text:
 mint = 使用中 / 正常, gold = 降级 / 暂不可用 / 冷却 / 供给暂不可用, rose = 需处理 /
-异常 / 无可用来源, muted = 可用 · 当前未供给 / 暂无 Agent 使用, cyan = 原生 provenance only, violet-tint
+异常 / 无可用来源, muted = 可用 · 当前未供给 / 未配置型号路由 / 暂无 Agent 使用,
+cyan = 原生 provenance only, violet-tint
 `#7C5BFFCC` = a takeover hop label. The group-status vocabulary (§1.1) is assigned here
 in full — 正常 mint, 降级 gold, 供给暂不可用 gold, 无可用来源 rose,
-暂无 Agent 使用 muted — and
+未配置型号路由 muted, 暂无 Agent 使用 muted — and
 the split worth stating is §4.5's: a wait that heals itself takes the same gold as every
-other wait, one that does not takes rose, and the fifth is not a fault at all, because
-no enabled Agent uses this backend.
+other wait, one that does not takes rose, and the last two are not Source faults at all:
+the fifth means enabled Agents lack a selected model or configured Route, while the sixth
+means no enabled Agent uses this backend.
 *Why:* a wire describes a *relation between two things*; state text describes *one
 thing's condition*. Collapsing them into one legend forces both to be wrong somewhere —
 gold as a relation means supply stopped, gold as a condition means degraded, and those
