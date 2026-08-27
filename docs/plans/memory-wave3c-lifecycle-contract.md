@@ -24,16 +24,20 @@ execute a transaction.
 The same package-lifecycle reservation also excludes an ordinary
 `schedule_restart`: that entrypoint acquires it nonblockingly and holds it through
 its complete stop/start process work. Contention returns structured `busy`; no
-path queues or waits. This is one shared primitive, not a second lifecycle lock.
+package-lifecycle path queues or waits. This is one shared primitive, not a
+second lifecycle lock.
 
 If a mutation cannot restore its captured shape, the record enters persistent
 nonterminal `quarantined`. Quarantine rejects every forward mutation and cannot
 be overwritten or aged out. It clears only after exact recovery or an explicit
 repair proves a valid new baseline.
 
-This document owns `MEMORY-INDEP-018` through `MEMORY-INDEP-021`. It has no
-dependency on the release/migration contract. That later contract may add
-release-family rules, but it cannot weaken these lifecycle invariants.
+This document owns `MEMORY-INDEP-018` through `MEMORY-INDEP-021`. Its lifecycle
+interfaces are normative for the release/migration contract, while the initial
+release-family policy is supplied by the companion
+[`memory-wave3c-release-migration-contract.md`](memory-wave3c-release-migration-contract.md).
+That later contract may add family cases, but neither document may weaken the
+other contract's fail-closed invariants.
 
 ## Background And Lineage
 
@@ -51,6 +55,13 @@ threads are split as follows:
   this document;
 - legacy first-hop and transition-family rollback rules belong to the separate
   release/migration document.
+
+The earlier plan's Wave 3 `MEMORY-INDEP-018` package-shape assignment is
+superseded by this split. Doc A owns `MEMORY-INDEP-018` UI/Settings recovery,
+`019` rollback, `020` admission, and `021` import fencing; the companion Doc B
+owns `022` and `023`. The main plan carries the same supersession note and links
+both documents so implementation evidence has one unambiguous ownership
+matrix.
 
 The retained #1739 and #1741 branches are evidence, not implementation bases. No
 code is cherry-picked from either one.
@@ -75,8 +86,9 @@ Non-goals:
 
 - no `PluginHost`, plugin discovery, UDS/RPC service, or second Memory process;
 - no second lock, heartbeat, lease, ownership token, external reaper, durable UI
-  job, pending-restart marker, acknowledgement record, or retained identity
-  index;
+  job, new package-lifecycle pending-restart marker, acknowledgement record, or
+  retained identity index; the existing ordinary restart/reload marker remains
+  outside this transaction as described below;
 - no coordination added to QR, Doctor, UI reload, or direct global lifecycle
   commands outside the existing `schedule_restart` entrypoint;
 - no caller-local lock, install plan, restart handoff, or recovery owner;
@@ -133,8 +145,17 @@ Zero providers means missing. More than one is non-ready
 Version mismatch takes precedence over import failure. Missing distribution and
 unreadable metadata retain distinct machine reasons. A later artifact-manager
 or EverOS status failure affects only `memory-runtime`, not the importable Python
-distribution. A required non-ready package remains eligible for centrally
-admitted repair.
+distribution. Required non-ready states have an explicit action class:
+
+- `missing`, version mismatch, and runtime/artifact probe failure are
+  `repairable`; status exposes the existing centrally admitted repair action;
+- duplicate canonical providers, unreadable metadata, quarantine, and source or
+  unpublished builds are `operator_only`; status exposes no repair action and a
+  direct repair intent is rejected before mutation with its structured reason.
+
+The repairable action is an admission path, not a promise that every repair can
+be planned: a later owner preflight may still return the same structured
+pre-mutation failure without mutating packages.
 
 Source/unpublished builds never advertise package mutation. They may use the
 loader when Memory is enabled, but status cannot imply that a source tree is
@@ -191,6 +212,13 @@ At `resolved`, the owner holds one immutable execution bundle containing:
 - captured launcher, stop/start commands and environments, health targets, and
   bounded timeouts; and
 - all data needed to project a terminal or quarantined result.
+
+Immediately before the first package-mutating child command, the owner performs
+a write-ahead transition to `state=mutating` in the same transaction record and
+durably syncs it (temporary file, atomic replace, and parent-directory sync, or
+the Windows equivalent). No package command may start before that marker is
+durable. The marker is the recovery boundary: `admitted`, `captured`, and
+`resolved` prove that no package mutation was started.
 
 The supervisor imports every internal helper and standard-library module the
 bundle can call before `mutating`. From `mutating` onward it executes only
@@ -251,7 +279,8 @@ supervisor with the immutable nonce, type, and payload. The supervisor:
 1. acquires `package-lifecycle.lock` nonblockingly;
 2. rechecks the current record under that reservation;
 3. rejects source builds, unreadable global configuration, active transactions,
-   and quarantine before package capture or subprocess work;
+   quarantine, and operator-only package states before package capture or
+   subprocess work;
 4. mints a collision-resistant `intent_id`;
 5. atomically and durably writes `schema_version`, `intent_id`, `client_nonce`,
    type, payload digest, and `state=admitted` to the dedicated transaction
@@ -264,10 +293,14 @@ The pipe is response transport, not a coordination primitive or durable
 acknowledgement. A lost receipt is reconstructed by nonce lookup. Concurrent
 same-nonce requests converge on the recorded identity: a contender that loses
 the reservation rereads the current record and returns its identity/projection
-when the nonce and canonical intent digest match; otherwise it returns
-structured `busy`. A different nonce also sees `busy`. The client never
-invents, retries as new, or persists an `intent_id` before the server returns
-it.
+when the nonce and canonical intent digest match. If the lock is busy but no
+matching projection is visible because the winner is between lock acquisition
+and its durable `admitted` write, it returns retryable, nonterminal
+`busy_pending_publication`; the caller briefly retries read-only nonce
+projection until the record appears or the existing request deadline expires.
+Any other mismatch returns structured `busy`. A different nonce also sees
+`busy`. The client never invents, retries as new, or persists an `intent_id`
+before the server returns it.
 
 Every API that accepts an `intent_id` is lookup or recovery only. An ID absent
 from the current record and retained terminal audit returns stable
@@ -278,16 +311,24 @@ or executes a package command.
 
 `package_lifecycle_transaction.json` is separate from ordinary
 `restart_status.json`. The lifecycle owner is its sole writer. The canonical
-record starts at `schema_version: 1` and contains identity, canonical intent
-digest, captured shape, resolved bundle identity, current transition, recovery
-facts, and the exact projection needed by read-only adapters.
+record starts at `schema_version: 1` and contains the current transaction
+(identity, canonical intent digest, captured shape, resolved bundle identity,
+current transition, recovery facts, mutation-boundary marker, and the exact
+projection needed by read-only adapters) plus an atomically updated
+`terminal_audit` array containing at most ten structured terminal projections.
+This is the fixed `N=10` retention window.
+Each update writes and syncs a temporary file, atomically replaces the record,
+and syncs its parent directory (or the Windows durability equivalent) before a
+receipt or next admission is returned.
 
-Nonterminal records are never rotated, pruned, overwritten, or replaced by a
-new intent. Only terminal `succeeded`, `restored`, `reconciled`, or admitted
-pre-mutation `failed` records move into the existing ten-entry audit rotation
-when a later intent is durably admitted. Audit rotates terminal records only.
-`rejected` and `busy` are unadmitted responses, so neither creates or rotates a
-transaction record.
+Nonterminal current transactions are never rotated, pruned, overwritten, or
+replaced by a new intent. When a later intent is durably admitted, only
+terminal `succeeded`, `restored`, `reconciled`, or admitted pre-mutation
+`failed` current records are appended to `terminal_audit`; the oldest terminal
+entry is evicted beyond ten. `rejected`, `busy`, and
+`busy_pending_publication` are unadmitted responses, so none creates or rotates
+a transaction record. `restart-*.log` files remain human audit logs only; they
+have no nonce/identity semantics and are not migration input.
 
 Compatibility rules are:
 
@@ -329,9 +370,20 @@ It does not write the package transaction record or become a package
 transaction. Package admission while it holds the reservation returns `busy`.
 There is no check-release-proceed window, reacquisition, queue, or wait.
 
-QR, Doctor, UI reload, and direct start/stop flows do not join this contract.
-Adding them requires a separate owner decision rather than spreading lock calls
-through callers.
+QR, Doctor, UI reload, and direct start/stop flows do not independently join
+this contract. Any existing caller that invokes the shared `schedule_restart`
+entrypoint, including WeChat QR login, automatically inherits its short
+reservation hold and structured `busy` response; that is shared-entrypoint
+behavior, not caller-local coordination. New callers remain excluded and
+require a separate owner decision rather than spreading lock calls through
+callers.
+
+The existing `pending_restart.json` path remains owned by ordinary restart and
+reload flows. Package lifecycle never reads or writes it, and a package-driven
+restart never uses it. If an ordinary pending follow-up reaches the shared
+entrypoint while a package reservation is active, it receives structured
+`busy` and retries through the existing ordinary path; preserving that retry is
+a gate-3 implementation note, not a Phase 0 product change.
 
 ### Crash Recovery And Quarantine
 
@@ -344,10 +396,15 @@ nonterminal/busy state. Recovery never repeats forward mutation.
 The elected owner reconciles installed metadata with `CapturedPackageShape` and
 the recorded `ResolvedRollbackPlan`:
 
+- if the current state is `admitted`, `captured`, or `resolved`, the durable
+  write-ahead marker proves no package command started; recovery records
+  terminal pre-mutation `failed` with the owner-loss reason and immediately
+  permits a new intent;
 - complete valid staging executes only recorded exact rollback;
 - proven exact restoration ends `restored`; and
-- missing/invalid staging, rollback failure, or unverifiable restored shape
-  enters persistent `quarantined` with an exact reason.
+- once `state=mutating` (or any later state) is durable, missing/invalid
+  staging, rollback failure, or unverifiable restored shape enters persistent
+  `quarantined` with an exact reason.
 
 `quarantined` is nonterminal. It remains the current record, survives restart,
 is never audit-pruned, and rejects every forward intent even when installed
@@ -375,7 +432,7 @@ State transitions are:
 ```text
 new attempt
   -> rejected | busy
-  -> admitted -> captured -> resolved -> mutating
+  -> admitted -> captured -> resolved -> failed (pre-mutation owner loss) | mutating
   -> activating -> verifying -> succeeded
   -> rolling_back -> restored | quarantined
 stale nonterminal + same-intent election
@@ -385,20 +442,28 @@ quarantined + explicit repair
 ```
 
 `succeeded`, `restored`, `reconciled`, and an admitted pre-mutation `failed` are
-terminal transaction states. `rejected` and `busy` are unadmitted responses.
-`quarantined` is persistent nonterminal and mutation-blocking.
+terminal transaction states. `rejected`, `busy`, and
+`busy_pending_publication` are unadmitted responses; the latter is retryable
+and never terminal. `quarantined` is persistent nonterminal and
+mutation-blocking.
 
 `MEMORY-INDEP-020` reserves multiprocess admission and recovery evidence across
 controller, Web, CLI, and Settings, including:
 
 - nonce recovery after a lost admission response and `intent_unknown` for an
   invented or expired server ID;
-- same-nonce convergence and different-nonce contention;
-- a nonterminal record surviving audit rotation and a released legacy record
+- same-nonce convergence, publication-window `busy_pending_publication`
+  retry, and different-nonce contention;
+- a nonterminal record surviving the embedded ten-entry terminal audit and a
+  released legacy record
   `restart_status.json` fixture loading read-only;
 - an ordinary restart's short, bounded hold of the one reservation through
   stop/start while a concurrent package request returns `busy`;
 - source and unreadable-config rejection before mutation;
+- operator-only duplicate-provider/unreadable-metadata server rejection before
+  mutation;
+- existing ordinary `pending_restart.json` follow-up receiving shared-entrypoint
+  `busy` while package work is active and retrying later;
 - child timeout, inherited-reservation behavior after owner death, and a
   nonblocking acquisition that succeeds once no live reservation remains; and
 - quarantine entry, forward rejection, exact recovery, and explicit verified
@@ -416,6 +481,9 @@ If the POST response is lost, the caller queries by nonce. Once the server-issue
 `intent_id` is known, the dependency adapter returns a live in-memory job when
 present; otherwise it reads the dedicated transaction record and terminal audit.
 It is read-only and never acquires the reservation or writes lifecycle state.
+During the short admission publication window, `busy_pending_publication` is a
+retryable nonterminal response: the caller re-reads by the same nonce and never
+repeats the new-attempt POST.
 
 Projection rules are:
 
@@ -444,7 +512,7 @@ owner read and dependency refresh, it returns exactly one machine shape:
 A reachable structured failure is returned unchanged. Active work is never
 reclassified as failed because one polling session expired. A caller resumes by
 nonce until identity is known, then by the same `intent_id`. No restart
-acknowledgement, delayed restart, durable UI job, or pending flag is added.
+acknowledgement, delayed restart, durable UI job, or new pending flag is added.
 
 `MEMORY-INDEP-018` reserves packaged Settings repair through initial-response
 loss, all-process restart, transport retry, over-deadline active work,
@@ -456,7 +524,7 @@ state-derived recovery, quarantine projection, and terminal convergence.
 | --- | --- | --- | --- |
 | `MEMORY-INDEP-018` | UI recovery follows nonce, server identity, owner state, and final readiness | POST-loss retry boundary; nonce/ID projection truth table; transport, active, quarantined, and terminal deadline results | Real wheels: Settings repair, response loss, all-process restart, over-deadline recovery, quarantine projection, convergence |
 | `MEMORY-INDEP-019` | Capture is exact and every constructed rollback is staged and executable | Provider-cardinality property; private plan construction; cleanup verification; resolution and rollback failure injection | Wheelhouse matrix for core-only and optional split shapes, duplicate providers, partial mutation, activation failure, exact restore, quarantine |
-| `MEMORY-INDEP-020` | One server owner and reservation cover admission through recovery and ordinary restart exclusion | Multiprocess nonce/identity contention; released `restart_status.json` fixture; nonterminal retention; ordinary restart short-hold busy; child timeout and no-live-reservation acquisition; quarantine enter/exit | Concurrent controller/Web/CLI/Settings requests, restart contention, killed-owner recovery, exact package and service health |
+| `MEMORY-INDEP-020` | One server owner and reservation cover admission through recovery and ordinary restart exclusion | Multiprocess nonce/identity contention; pre-mutation crash to terminal `failed` with immediate retry; publication-window `busy_pending_publication` retry; operator-only server rejection; released `restart_status.json` fixture; nonterminal retention; ordinary restart short-hold busy; child timeout and no-live-reservation acquisition; quarantine enter/exit | Concurrent controller/Web/CLI/Settings requests, restart contention, killed-owner recovery, exact package and service health |
 | `MEMORY-INDEP-021` | Not-required status imports no optional implementation | Subprocess import guard for disabled, safe-degraded optional config, and whole-config failure; non-constructing loader probe | Packaged core-only and malformed-config smoke with blocked optional imports |
 
 Scenario IDs must be visible in executable test names and in the Memory
@@ -486,17 +554,22 @@ Retained behavior is reconciled, not cherry-picked:
 
 1. **Phase 0, Doc A:** approve and merge this lifecycle contract. No product
    implementation occurs in this PR.
-2. **Contract owners:** implement loader readiness and captured/resolved rollback
-   types with `MEMORY-INDEP-019` and `021`.
-3. **Lifecycle owner:** implement server admission, one reservation, versioned
-   record, frozen bundle, crash recovery, quarantine, and
-   `MEMORY-INDEP-020`.
-4. **Recovery adapter:** implement nonce/identity UI convergence and packaged
-   `MEMORY-INDEP-018`.
+2. **Gate 2a, loader readiness:** after Doc A merges and with separate owner
+   approval, implement the loader-owned readiness probe, optional-import fence,
+   and `MEMORY-INDEP-021`. This is the only implementation gate Doc A alone
+   may unlock.
+3. **Gate 2b, rollback types:** after both documents merge, implement
+   captured/resolved rollback types and `MEMORY-INDEP-019` using the initial
+   release-family policy in Doc B.
+4. **Gate 3, lifecycle owner:** after both documents merge, implement server
+   admission, one reservation, versioned record, embedded terminal audit,
+   frozen bundle, crash recovery, quarantine, and `MEMORY-INDEP-020`.
+5. **Gate 4, recovery adapter:** after both documents merge, implement
+   nonce/identity UI convergence and packaged `MEMORY-INDEP-018`.
 
-Merging Doc A partially unlocks implementation gates 2 through 4 only after
-separate owner approval. It does not unlock release/migration gate 5. Each
-implementation PR must use exact packaged artifacts where package shape matters,
-must not restart the local Avibe service for verification, and must stop if
-ownership spreads beyond the loader, lifecycle transaction, or dependency
-adapter.
+Doc A approval alone authorizes only gate 2a. Rollback, lifecycle, and UI gates
+require the merged Doc A and Doc B contracts plus separate owner approval;
+release/migration gate 5 remains separately gated by Doc B. Each implementation
+PR must use exact packaged artifacts where package shape matters, must not
+restart the local Avibe service for verification, and must stop if ownership
+spreads beyond the loader, lifecycle transaction, or dependency adapter.
