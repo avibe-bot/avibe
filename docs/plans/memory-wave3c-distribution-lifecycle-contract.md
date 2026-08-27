@@ -80,13 +80,17 @@ the entrypoint name, protocol constant, or factory validation.
 Every status path follows this order:
 
 1. Read the persisted `memory_required` decision.
-2. If Memory is not required, return a `not_required` projection without
+2. If that decision is unreadable, return a distinct fail-closed
+   `memory_requirement_unreadable` error. It is neither `not_required` nor
+   `ready`, imports zero `avibe_memory` implementation modules, and prevents
+   every package-mutation intent until a readable decision is available.
+3. If Memory is not required, return a `not_required` projection without
    importing any `avibe_memory` implementation module. Distribution metadata
    may be inspected with metadata APIs, but it makes no runtime-readiness claim.
-3. If Memory is required on a packaged build, inspect distribution presence and
+4. If Memory is required on a packaged build, inspect distribution presence and
    version, call the loader-owned runtime probe, then import the separate
    `avibe_memory.artifact` contract.
-4. Only after the artifact import succeeds may the artifact manager be asked for
+5. Only after the artifact import succeeds may the artifact manager be asked for
    EverOS status.
 
 For a required packaged installation, `memory-package` is `ready` if and only if:
@@ -125,10 +129,17 @@ A split-release rollback has these requirement shapes:
 
 | Captured shape | Exact rollback requirements |
 | --- | --- |
-| Core only | base core pin; split Memory absent after install |
+| Core only | base core pin; explicitly uninstall any split Memory introduced by the forward mutation; verify it is absent |
 | Optional-era core plus Memory, matching versions | base core pin plus independent exact Memory pin |
 | Optional-era core plus Memory, mismatched versions | base core pin plus the independently captured exact Memory pin |
 | Hard-dependency transition core plus mismatched Memory | no plan; the captured shape is resolver-inconsistent and fails closed |
+
+Core-only rollback is an active cleanup operation, not merely omission of a
+Memory requirement. Its resolved plan installs the base core pin, explicitly
+uninstalls any `avibe-memory` distribution left by the forward mutation, and
+verifies that distribution metadata is absent. Cleanup or absence-verification
+failure makes rollback fail; residue may not be reported as restored because it
+would pollute later readiness and admission decisions.
 
 The core requirement deliberately has no `[memory]` extra. The extra expresses
 a forward matched-release policy and would constrain a mismatched rollback back
@@ -210,6 +221,24 @@ audit log carry the transaction id, captured shape, resolved rollback identity,
 and last transition for crash recovery. They are written only by the lifecycle
 owner. This is not a second UI job store or a caller-visible pending protocol.
 
+### Reservation Mechanism
+
+`PackageLifecycleTransaction` uses exactly one lock file,
+`package-lifecycle.lock`, under the Avibe runtime directory. On Unix the
+supervisor holds one advisory lock on its open file descriptor and the
+package-manager child inherits that same descriptor. On Windows the supervisor
+holds the equivalent exclusive file lock on one inheritable handle, which the
+package-manager child likewise inherits. Unrelated child processes inherit
+neither descriptor nor handle.
+
+The only test for "no live reservation" is a nonblocking acquisition attempt on
+that same lock file: success means no transaction owns it, while contention
+means a live transaction still owns it. PIDs, status timestamps, and audit
+records are recovery evidence, never reservation liveness. These platform
+implementations are the same single `PackageLifecycleTransaction` primitive.
+A second lock, heartbeat, ownership token, or lease/renewal protocol is
+forbidden.
+
 State transitions are:
 
 ```text
@@ -230,6 +259,9 @@ Admission is also the server-side policy boundary:
 
 - source/unpublished deployments reject every package-mutation intent before
   capture, resolution, or subprocess execution;
+- an unreadable persisted `memory_required` decision rejects every
+  package-mutation intent with `memory_requirement_unreadable` before optional
+  imports or subprocess execution;
 - repair of a running Memory installation is accepted only as a transaction
   whose supervisor owns quiescence, mutation, and restart, eliminating the
   frontend status-check TOCTOU; and
@@ -266,9 +298,15 @@ Otherwise it preserves `job_not_found` and the current non-ready reason. Other
 dependencies do not gain this recovery behavior.
 
 At the deadline, the UI performs one final read-only dependency refresh. A ready
-Memory package converges to recovered success; anything else returns the last
-structured failure. The UI never reads lifecycle status, never acknowledges a
-restart, and does not require a durable job, pending flag, or delayed restart.
+Memory package converges to recovered success. If the refresh remains non-ready
+and polling observed a structured terminal job failure, that result and its
+machine reason are returned unchanged. If the deadline was exhausted by
+transport failures without any structured terminal result, the UI returns
+`status=failed`, reason `dependency_poll_transport_exhausted`, and carries the
+sanitized last transport error in `last_transport_error`. A reachable
+`job_not_found` plus a non-ready state is a structured job failure, not transport
+exhaustion. The UI never reads lifecycle status, never acknowledges a restart,
+and does not require a durable job, pending flag, or delayed restart.
 
 This continues `MEMORY-INDEP-018`: packaged Settings repair remains observable
 through the all-process restart, poll transport failures are contained, and the
@@ -278,10 +316,10 @@ result converges on installed state rather than process-local job memory.
 
 | Scenario | Contract | Required automated evidence | Packaged/operational evidence |
 | --- | --- | --- | --- |
-| `MEMORY-INDEP-018` | Upgrade/repair preserves package shape; UI polling survives restart and recovers from current readiness | Poll transport/error truth table, dependency-specific recovery route, exact-head package planner/rollback tests | Real core and Memory wheels: Settings repair, enabled upgrade, all-process restart, recovery, and rollback |
-| `MEMORY-INDEP-019` | Every rollback plan is exact and resolver-satisfiable | Shape property table, private resolved-plan construction, full-tree caller inventory, failure injection | Wheelhouse matrix for core-only, matching, optional-era mismatch, rejected transition mismatch, pre-split, resolver failure, and activation rollback |
-| `MEMORY-INDEP-020` | One supervisor-owned admission/reservation spans mutation through restart | Real multiprocess contention across controller/Web/CLI/Settings adapters, source rejection, crash/recovery state transitions | Packaged concurrent requests admit one transaction; service health and exact package shape verified after success/rollback |
-| `MEMORY-INDEP-021` | Not-required status imports no optional implementation | Subprocess import guard for disabled/not-required status; loader probe contract and non-construction tests | Packaged disabled/core-only smoke with blocked `avibe_memory` imports |
+| `MEMORY-INDEP-018` | Upgrade/repair preserves package shape; UI polling survives restart and recovers from current readiness | Poll truth table distinguishes transport exhaustion from structured failure; dependency-specific recovery route; exact-head package planner/rollback tests | Real core and Memory wheels: Settings repair, enabled upgrade, all-process restart, recovery, and rollback |
+| `MEMORY-INDEP-019` | Every rollback plan is exact and resolver-satisfiable | Shape property table, explicit core-only residue cleanup, private resolved-plan construction, full-tree caller inventory, failure injection | Wheelhouse matrix for core-only, matching, optional-era mismatch, rejected transition mismatch, pre-split, resolver failure, and activation rollback |
+| `MEMORY-INDEP-020` | One supervisor-owned admission/reservation spans mutation through restart | Real multiprocess contention across controller/Web/CLI/Settings adapters, source rejection, cross-platform inherited-lock and nonblocking no-owner probes, crash/recovery state transitions | Packaged concurrent requests admit one transaction; service health and exact package shape verified after success/rollback |
+| `MEMORY-INDEP-021` | Not-required status imports no optional implementation | Subprocess import guard for disabled/not-required/unreadable-decision status; loader probe contract and non-construction tests | Packaged disabled/core-only smoke with blocked `avibe_memory` imports |
 
 Scenario IDs must be visible in their executable test names and in the Memory
 independence catalog when implementation begins. Release/migration guards must
