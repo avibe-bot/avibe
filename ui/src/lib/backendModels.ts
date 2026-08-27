@@ -61,15 +61,22 @@ export async function fetchBackendModels(
       throw err;
     });
     if (!res) return { models: [] };
-    const providers = res.ok && Array.isArray(res.data?.models?.providers)
+    const providers: unknown[] = res.ok && Array.isArray(res.data?.models?.providers)
       ? res.data.models.providers
       : [];
-    const models = providers.flatMap((provider: any) => {
-      const providerId = typeof provider?.id === 'string' ? provider.id : '';
+    const models = providers.flatMap((provider: unknown) => {
+      if (!provider || typeof provider !== 'object') return [];
+      const providerRecord = provider as Record<string, unknown>;
+      const providerId = typeof providerRecord.id === 'string' ? providerRecord.id : '';
       if (!providerId) return [];
-      const rawModels = provider.models;
+      const rawModels = providerRecord.models;
       const modelIds = Array.isArray(rawModels)
-        ? rawModels.map((model: any) => typeof model === 'string' ? model : model?.id)
+        ? rawModels.map((model: unknown) => {
+          if (typeof model === 'string') return model;
+          if (!model || typeof model !== 'object') return undefined;
+          const modelId = (model as Record<string, unknown>).id;
+          return typeof modelId === 'string' ? modelId : undefined;
+        })
         : rawModels && typeof rawModels === 'object'
           ? Object.keys(rawModels)
           : [];
