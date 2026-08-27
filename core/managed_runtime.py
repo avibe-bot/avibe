@@ -193,6 +193,7 @@ class ManagedRuntimeManager:
                 message=f"{self.spec.runtime_id} install or repair is already running; try again shortly.",
                 skipped=True,
             )
+        published_result: dict[str, Any] | None = None
         try:
             manifest = self._load_manifest(allow_network=not self.offline)
             if manifest is None:
@@ -249,7 +250,12 @@ class ManagedRuntimeManager:
                     existing = candidate
                     break
             if existing is not None and not force:
-                return self._reuse_existing_install(existing, existing_install_dir, manifest, archive)
+                return self._reuse_existing_install(
+                    existing,
+                    existing_install_dir,
+                    manifest,
+                    archive,
+                )
 
             archive_path = self._resolve_manifest_archive(archive)
             if archive_path is None:
@@ -330,7 +336,7 @@ class ManagedRuntimeManager:
                 self._write_current_pointer(install_dir, manifest, archive)
                 candidate_install_dir = None
                 self._install_reason = None
-                return {
+                published_result = {
                     **self._success_payload(
                         installed_binary,
                         install_dir,
@@ -340,6 +346,7 @@ class ManagedRuntimeManager:
                     ),
                     "preparation": preparation,
                 }
+                return published_result
             except Exception as exc:  # noqa: BLE001
                 if candidate_install_dir is not None:
                     shutil.rmtree(candidate_install_dir, ignore_errors=True)
@@ -354,6 +361,24 @@ class ManagedRuntimeManager:
                     shutil.rmtree(staging_dir, ignore_errors=True)
         finally:
             self._release_mutation_lock(file_lock)
+            if published_result is not None and published_result.get("ok"):
+                try:
+                    self._clean_after_successful_install()
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "Managed %s runtime post-install cleanup failed",
+                        self.spec.runtime_id,
+                        exc_info=True,
+                    )
+
+    def _clean_after_successful_install(self) -> None:
+        result = self.clean(keep_previous=1)
+        if not result.get("ok"):
+            logger.warning(
+                "Managed %s runtime post-install cleanup was incomplete: %s",
+                self.spec.runtime_id,
+                result.get("reason"),
+            )
 
     def _failure_for_install_exception(
         self,

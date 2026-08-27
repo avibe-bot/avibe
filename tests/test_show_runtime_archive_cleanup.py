@@ -165,14 +165,14 @@ def test_clean_is_idempotent_for_archives(tmp_path: Path) -> None:
     assert second["archives"]["candidate_count"] == 0
 
 
-def test_clean_after_managed_install_prunes_stale_archives(tmp_path: Path) -> None:
+def test_shared_post_install_cleanup_prunes_stale_archives(tmp_path: Path) -> None:
     manager = ShowRuntimeManager(runtime_dir=tmp_path / "show-runtime", offline=True, runtime_source="manifest-cache")
     current_install = _write_install_metadata(manager, version="v2", sha256=_sha(1), mtime=0)
     _write_current_pointer(manager, _sha(1), install_dir=current_install)
     current_archive = _write_archive(manager, _sha(1), b"current")
     stale = _write_archive(manager, _sha(2), b"stale")
 
-    manager._clean_after_managed_install(["node", str(current_install / "cli.js")])
+    manager._shared_manifest_manager(offline=True)._clean_after_successful_install()
 
     assert current_archive.exists()  # current archive intact
     assert not stale.exists()
@@ -204,7 +204,7 @@ def test_clean_after_custom_manifest_install_prunes_stale_installs(tmp_path: Pat
     rollback_archive = _write_archive(manager, _sha(8), b"rollback")
     stale_archive = _write_archive(manager, _sha(9), b"stale-custom")
 
-    manager._clean_after_managed_install(["node", str(current_install / "cli.js")])
+    manager._shared_manifest_manager(offline=True)._clean_after_successful_install()
 
     assert current_archive.exists() and current_install.exists()
     assert rollback_archive.exists() and rollback_install.exists()
@@ -240,7 +240,7 @@ def test_clean_after_custom_manifest_prunes_obsolete_sources(tmp_path: Path) -> 
     rollback_archive = _write_archive(manager, _sha(8), b"rollback")
     stale_archive = _write_archive(manager, _sha(9), b"stale-old-source")
 
-    manager._clean_after_managed_install(["node", str(current_install / "cli.js")])
+    manager._shared_manifest_manager(offline=True)._clean_after_successful_install()
 
     assert current_archive.exists() and current_install.exists()
     assert rollback_archive.exists() and rollback_install.exists()
@@ -326,7 +326,7 @@ def test_cli_clean_dry_run_is_read_only_for_git_runtime(monkeypatch, capsys) -> 
 
 
 def test_cleanup_reuses_install_guard_without_deadlock(tmp_path: Path) -> None:
-    """The post-install cleanup runs inside the installer's guard.
+    """Direct-provider cleanup can reuse Show's installer guard.
 
     ``flock`` is not re-entrant across file handles, so this exercises the
     depth-counted reuse: cleaning while the guard is held must complete and
@@ -491,7 +491,7 @@ def test_install_guard_unavailable_falls_back_to_verified_install(tmp_path: Path
     """A read-only runtime dir must not turn a verified install into a failure."""
     from core import show_runtime as module
 
-    monkeypatch.setattr(module, "_runtime_platform_tag", lambda: "test")
+    monkeypatch.setattr(module, "runtime_platform_tag", lambda: "test")
     monkeypatch.setattr("core.managed_runtime.runtime_platform_tag", lambda: "test")
     monkeypatch.setattr(module, "_resolve_node_command", lambda: ["node"])
     manifest_payload = {
@@ -513,10 +513,12 @@ def test_install_guard_unavailable_falls_back_to_verified_install(tmp_path: Path
         runtime_source="manifest-cache",
         manifest_path=manifest_path,
     )
-    manifest = manager._load_runtime_manifest()
+    shared_manager = manager._shared_manifest_manager(offline=True)
+    manifest = shared_manager.load_manifest(allow_network=False)
     assert manifest is not None
-    archive = manifest.archives["test"]
-    install_dir = manager._manifest_install_dir(manifest, archive)
+    archive = shared_manager.archive_for_platform(manifest)
+    assert archive is not None
+    install_dir = shared_manager._manifest_install_dir(manifest, archive)
     install_dir.mkdir(parents=True, exist_ok=True)
     (install_dir / ".vibe-show-runtime.json").write_text(
         json.dumps(
@@ -654,7 +656,8 @@ def test_candidate_stat_failure_is_an_inspection_failure(tmp_path: Path, monkeyp
 def test_forced_prepare_fails_structured_when_guard_unavailable(tmp_path: Path, monkeypatch) -> None:
     from core import show_runtime as module
 
-    monkeypatch.setattr(module, "_runtime_platform_tag", lambda: "test")
+    monkeypatch.setattr(module, "runtime_platform_tag", lambda: "test")
+    monkeypatch.setattr("core.managed_runtime.runtime_platform_tag", lambda: "test")
     monkeypatch.setattr(module, "_resolve_node_command", lambda: ["node"])
     manifest_payload = {
         "schema_version": 1,
@@ -697,9 +700,10 @@ def test_forced_prepare_fails_structured_when_guard_unavailable(tmp_path: Path, 
 def test_installed_manifest_command_enforces_node_requirement(tmp_path: Path, monkeypatch) -> None:
     from core import show_runtime as module
 
-    monkeypatch.setattr(module, "_runtime_platform_tag", lambda: "test")
+    monkeypatch.setattr(module, "runtime_platform_tag", lambda: "test")
+    monkeypatch.setattr("core.managed_runtime.runtime_platform_tag", lambda: "test")
     monkeypatch.setattr(module, "_resolve_node_command", lambda: ["node"])
-    monkeypatch.setattr(module, "_node_version", lambda _command: "18.0.0")
+    monkeypatch.setattr(module, "_node_version", lambda _command: (18, 0, 0))
     manifest_payload = {
         "schema_version": 1,
         "runtime_version": "v2",
@@ -714,10 +718,12 @@ def test_installed_manifest_command_enforces_node_requirement(tmp_path: Path, mo
         runtime_source="manifest-cache",
         manifest_path=manifest_path,
     )
-    manifest = manager._load_runtime_manifest()
+    shared_manager = manager._shared_manifest_manager(offline=True)
+    manifest = shared_manager.load_manifest(allow_network=False)
     assert manifest is not None
-    archive = manifest.archives["test"]
-    install_dir = manager._manifest_install_dir(manifest, archive)
+    archive = shared_manager.archive_for_platform(manifest)
+    assert archive is not None
+    install_dir = shared_manager._manifest_install_dir(manifest, archive)
     install_dir.mkdir(parents=True, exist_ok=True)
     (install_dir / ".vibe-show-runtime.json").write_text(
         json.dumps(
