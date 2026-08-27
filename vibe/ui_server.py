@@ -7940,7 +7940,7 @@ def dependency_install_status(dep, job_id):
 
     from vibe import api
 
-    result = api.get_agent_install_job(job_id, backend=dep)
+    result = api.get_dependency_install_job(dep, job_id)
     status = 404 if not result.get("ok") and result.get("error") == "job_not_found" else 200
     return jsonify(result), status
 

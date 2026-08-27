@@ -3,6 +3,8 @@ from __future__ import annotations
 import threading
 import time
 
+import pytest
+
 from config.v2_config import AgentsConfig, RuntimeConfig, SlackConfig, UiConfig, V2Config
 from vibe import api
 from vibe.ui_server import app
@@ -170,6 +172,63 @@ def test_dependency_install_route_allows_memory_package(monkeypatch, tmp_path):
 
     assert response.status_code == 200
     assert response.get_json()["backend"] == "memory-package"
+
+
+@pytest.mark.parametrize(
+    ("dep", "result", "expected_status"),
+    (
+        pytest.param(
+            "memory-package",
+            {
+                "ok": True,
+                "job_id": "job-restarted",
+                "backend": "memory-package",
+                "status": "succeeded",
+                "message": "memory_package_ready",
+                "recovered": True,
+            },
+            200,
+            id="recovered-memory-package",
+        ),
+        pytest.param(
+            "memory-package",
+            {"ok": False, "error": "job_not_found"},
+            404,
+            id="non-ready-memory-package",
+        ),
+        pytest.param(
+            "askill",
+            {"ok": False, "error": "job_not_found"},
+            404,
+            id="unrelated-dependency",
+        ),
+    ),
+)
+def test_dependency_install_status_uses_state_aware_poller(
+    monkeypatch,
+    tmp_path,
+    dep,
+    result,
+    expected_status,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        api,
+        "get_dependency_install_job",
+        lambda actual_dep, job_id: calls.append((actual_dep, job_id)) or result,
+    )
+
+    client = app.test_client()
+    response = client.get(
+        f"/api/dependencies/{dep}/install/job-restarted",
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+    )
+
+    assert response.status_code == expected_status
+    assert response.get_json() == result
+    assert calls == [(dep, "job-restarted")]
 
 
 def test_install_job_fails_when_runtime_refresh_fails(monkeypatch):

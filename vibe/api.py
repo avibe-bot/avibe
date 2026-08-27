@@ -70,6 +70,7 @@ from vibe.upgrade import (
     installed_memory_package_version,
     memory_package_installed,
     memory_package_repair_supported,
+    rollback_target,
     should_skip_show_runtime_prepare,
 )
 from vibe.restart_supervisor import schedule_restart
@@ -6894,6 +6895,40 @@ def get_agent_install_job(job_id: str | None = None, *, backend: str | None = No
         return dict(job)
 
 
+def get_dependency_install_job(dep: str, job_id: str | None) -> dict:
+    """Recover Memory repair completion from installed state after a restart."""
+
+    result = get_agent_install_job(job_id, backend=dep)
+    if result.get("error") != "job_not_found" or dep != "memory-package":
+        return result
+
+    try:
+        status = dependencies_status(offline=True)
+    except Exception:  # noqa: BLE001
+        return result
+    dependencies = status.get("deps") if isinstance(status, dict) else None
+    if not isinstance(dependencies, list):
+        return result
+    package = next(
+        (
+            item
+            for item in dependencies
+            if isinstance(item, dict) and item.get("id") == "memory-package"
+        ),
+        None,
+    )
+    if not isinstance(package, dict) or package.get("status") != "ready":
+        return result
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "backend": dep,
+        "status": "succeeded",
+        "message": "memory_package_ready",
+        "recovered": True,
+    }
+
+
 def install_agent(name: str) -> dict:
     """Install (or upgrade) an agent CLI tool.
 
@@ -8417,7 +8452,43 @@ _DEFAULT_STARTUP_SHOW_PAGE_PREWARM_LIMIT = 3
 _MAX_STARTUP_SHOW_PAGE_PREWARM_LIMIT = 10
 
 
-def _memory_package_dependency(*, required: bool, current_version: str) -> dict:
+def _memory_artifact_status(*, offline: bool) -> tuple[bool, dict]:
+    """Inspect the optional package separately from its managed EverOS runtime."""
+
+    failed = {
+        "installed": False,
+        "status": "missing",
+        "manifest": None,
+        "reason": "memory_runtime_install_failed",
+    }
+    try:
+        from avibe_memory.artifact import (
+            MemoryArtifactManager,
+            get_memory_artifact_manager,
+        )
+    except Exception:  # noqa: BLE001
+        return False, failed
+
+    try:
+        manager = (
+            MemoryArtifactManager(offline=True)
+            if offline
+            else get_memory_artifact_manager()
+        )
+        status = manager.status()
+        if not isinstance(status, dict):
+            raise TypeError("Memory artifact status must be a mapping")
+        return True, status
+    except Exception:  # noqa: BLE001
+        return True, failed
+
+
+def _memory_package_dependency(
+    *,
+    required: bool,
+    current_version: str,
+    importable: bool,
+) -> dict:
     """Describe whether the optional distribution matches this Avibe release."""
 
     installed = memory_package_installed()
@@ -8450,15 +8521,23 @@ def _memory_package_dependency(*, required: bool, current_version: str) -> dict:
         matches_running_release = Version(installed_version) == Version(current_version)
     except InvalidVersion:
         matches_running_release = False
-    if matches_running_release:
-        return {**dependency, "status": "ready", "reason": None}
-    return {
-        **dependency,
-        "latest_version": current_version,
-        "has_update": True,
-        "status": "error",
-        "reason": "memory_package_version_mismatch",
-    }
+    if not matches_running_release:
+        return {
+            **dependency,
+            "latest_version": current_version,
+            "has_update": True,
+            "status": "error",
+            "reason": "memory_package_version_mismatch",
+        }
+    if not importable:
+        return {
+            **dependency,
+            "latest_version": current_version,
+            "has_update": True,
+            "status": "error",
+            "reason": "memory_package_import_unavailable",
+        }
+    return {**dependency, "status": "ready", "reason": None}
 
 
 def dependencies_status(*, offline: bool = False) -> dict:
@@ -8530,18 +8609,9 @@ def dependencies_status(*, offline: bool = False) -> dict:
         }
     )
 
-    try:
-        from avibe_memory.artifact import MemoryArtifactManager, get_memory_artifact_manager
-
-        memory_manager = MemoryArtifactManager(offline=True) if offline else get_memory_artifact_manager()
-        memory_runtime = memory_manager.status()
-    except Exception:  # noqa: BLE001
-        memory_runtime = {
-            "installed": False,
-            "status": "missing",
-            "manifest": None,
-            "reason": "memory_runtime_install_failed",
-        }
+    memory_package_importable, memory_runtime = _memory_artifact_status(
+        offline=offline
+    )
     memory_manifest = memory_runtime.get("manifest") if isinstance(memory_runtime.get("manifest"), dict) else {}
     release_state = memory_manifest.get("release_state")
     try:
@@ -8558,6 +8628,7 @@ def dependencies_status(*, offline: bool = False) -> dict:
             _memory_package_dependency(
                 required=memory_required,
                 current_version=__version__,
+                importable=memory_package_importable,
             )
         )
     deps.append(
@@ -8710,6 +8781,24 @@ def _prepare_memory_package_job() -> dict:
 
     current_vibe_path = get_running_vibe_path()
     try:
+        repair_rollback_to = rollback_target()
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "ok": False,
+            "message": "memory_package_repair_unavailable",
+            "output": str(exc),
+            "reason": "memory_package_repair_unavailable",
+            "restarting": False,
+        }
+    if repair_rollback_to is None:
+        return {
+            "ok": False,
+            "message": "memory_package_repair_unavailable",
+            "output": "The running installation has no published rollback target",
+            "reason": "memory_package_repair_unavailable",
+            "restarting": False,
+        }
+    try:
         plan = build_memory_package_repair_plan(vibe_path=current_vibe_path)
     except ValueError as exc:
         return {
@@ -8753,6 +8842,7 @@ def _prepare_memory_package_job() -> dict:
                 vibe_path=current_vibe_path,
                 trigger="memory_package_repair",
                 prepare_show_runtime=False,
+                rollback_to=repair_rollback_to,
             )
             restarting = True
         except Exception as exc:  # noqa: BLE001

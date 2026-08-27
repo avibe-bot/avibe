@@ -1238,12 +1238,19 @@ def test_dependencies_status_shape(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("installed", "installed_version", "current_version", "expected"),
+    (
+        "installed",
+        "installed_version",
+        "current_version",
+        "importable",
+        "expected",
+    ),
     (
         pytest.param(
             True,
             "3.0.14",
             "3.0.14",
+            True,
             {"status": "ready", "reason": None, "latest_version": None, "has_update": False},
             id="exact-match",
         ),
@@ -1251,6 +1258,7 @@ def test_dependencies_status_shape(monkeypatch):
             True,
             "3.0.14.0",
             "3.0.14",
+            True,
             {"status": "ready", "reason": None, "latest_version": None, "has_update": False},
             id="normalized-equivalent",
         ),
@@ -1258,6 +1266,7 @@ def test_dependencies_status_shape(monkeypatch):
             True,
             "3.0.13",
             "3.0.14",
+            False,
             {
                 "status": "error",
                 "reason": "memory_package_version_mismatch",
@@ -1270,6 +1279,7 @@ def test_dependencies_status_shape(monkeypatch):
             True,
             "not-a-version",
             "3.0.14",
+            True,
             {
                 "status": "error",
                 "reason": "memory_package_version_mismatch",
@@ -1282,6 +1292,7 @@ def test_dependencies_status_shape(monkeypatch):
             True,
             None,
             "3.0.14",
+            True,
             {
                 "status": "error",
                 "reason": "memory_package_metadata_unreadable",
@@ -1294,6 +1305,7 @@ def test_dependencies_status_shape(monkeypatch):
             False,
             None,
             "3.0.14",
+            False,
             {
                 "status": "missing",
                 "reason": "memory_package_missing",
@@ -1302,6 +1314,19 @@ def test_dependencies_status_shape(monkeypatch):
             },
             id="absent-distribution",
         ),
+        pytest.param(
+            True,
+            "3.0.14",
+            "3.0.14",
+            False,
+            {
+                "status": "error",
+                "reason": "memory_package_import_unavailable",
+                "latest_version": "3.0.14",
+                "has_update": True,
+            },
+            id="matching-version-import-unavailable",
+        ),
     ),
 )
 def test_memory_package_dependency_requires_the_running_release(
@@ -1309,6 +1334,7 @@ def test_memory_package_dependency_requires_the_running_release(
     installed,
     installed_version,
     current_version,
+    importable,
     expected,
 ):
     monkeypatch.setattr(api, "memory_package_installed", lambda: installed)
@@ -1328,6 +1354,7 @@ def test_memory_package_dependency_requires_the_running_release(
     dependency = api._memory_package_dependency(
         required=True,
         current_version=current_version,
+        importable=importable,
     )
 
     assert dependency == {
@@ -1338,6 +1365,114 @@ def test_memory_package_dependency_requires_the_running_release(
         "version": installed_version,
         **expected,
     }
+
+
+def _patch_memory_dependency_status_shell(monkeypatch) -> None:
+    import core.show_runtime as show_runtime
+    import core.tmux_runtime as tmux_runtime
+    import vibe
+
+    monkeypatch.setattr(
+        api,
+        "askill_update_status",
+        lambda **_: {
+            "installed": True,
+            "version": "0.1.14",
+            "latest_version": None,
+            "has_update": False,
+            "status": "ready",
+        },
+    )
+    monkeypatch.setattr(
+        api,
+        "avault_status",
+        lambda: {"installed": True, "version": "0.0.1", "status": "ready"},
+    )
+    monkeypatch.setattr(
+        api.V2Config,
+        "load",
+        classmethod(lambda _cls: SimpleNamespace(memory=SimpleNamespace(enabled=True))),
+    )
+    monkeypatch.setattr(
+        api,
+        "get_build_identity",
+        lambda: SimpleNamespace(kind="package"),
+    )
+    monkeypatch.setattr(api, "memory_package_repair_supported", lambda: True)
+    monkeypatch.setattr(api, "memory_package_installed", lambda: True)
+    monkeypatch.setattr(api, "installed_memory_package_version", lambda: "3.0.14")
+    monkeypatch.setattr(vibe, "__version__", "3.0.14")
+
+    show_manager = Mock()
+    show_manager.status.return_value = {
+        "install": {"state": "installed", "runtime_version": "1.4.0", "matches_manifest": True},
+        "manifest": {"runtime_version": "1.4.0"},
+        "node_available": True,
+        "node_supported": True,
+        "node_version": "22.12.0",
+    }
+    monkeypatch.setattr(show_runtime, "get_show_runtime_manager", lambda: show_manager)
+    monkeypatch.setattr(
+        tmux_runtime,
+        "tmux_status",
+        lambda: {"installed": False, "version": None, "status": "missing"},
+    )
+
+
+def test_dependencies_status_marks_matching_package_import_failure_repairable(
+    monkeypatch,
+):
+    import builtins
+
+    _patch_memory_dependency_status_shell(monkeypatch)
+    real_import = builtins.__import__
+
+    def block_memory_artifact(name, *args, **kwargs):
+        if name == "avibe_memory.artifact":
+            raise ImportError("broken optional package")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", block_memory_artifact)
+
+    by_id = {
+        item["id"]: item
+        for item in api.dependencies_status()["deps"]
+    }
+
+    assert by_id["memory-package"] == {
+        "id": "memory-package",
+        "kind": "runtime",
+        "required": True,
+        "installed": True,
+        "version": "3.0.14",
+        "latest_version": "3.0.14",
+        "has_update": True,
+        "status": "error",
+        "reason": "memory_package_import_unavailable",
+    }
+
+
+def test_dependencies_status_keeps_importable_package_ready_when_runtime_probe_fails(
+    monkeypatch,
+):
+    import avibe_memory.artifact as memory_artifact
+
+    _patch_memory_dependency_status_shell(monkeypatch)
+    monkeypatch.setattr(
+        memory_artifact,
+        "get_memory_artifact_manager",
+        lambda: (_ for _ in ()).throw(RuntimeError("EverOS status failed")),
+    )
+
+    by_id = {
+        item["id"]: item
+        for item in api.dependencies_status()["deps"]
+    }
+
+    assert by_id["memory-package"]["status"] == "ready"
+    assert by_id["memory-package"]["reason"] is None
+    assert by_id["memory-runtime"]["status"] == "error"
+    assert by_id["memory-runtime"]["reason"] == "memory_runtime_install_failed"
 
 
 def test_source_version_does_not_advertise_python_package_repair(monkeypatch):
@@ -1475,21 +1610,39 @@ def test_memory_runtime_dependency_job_preserves_controller_closed_error(monkeyp
 
 def test_memory_package_dependency_job_uses_current_release_plan(monkeypatch):
     plan = SimpleNamespace(command=["repair"], rollback_to=None)
+    repair_rollback_to = object()
     calls: dict[str, object] = {}
+    order: list[str] = []
 
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/bin/vibe")
+
+    def capture_rollback_target():
+        order.append("rollback_target")
+        return repair_rollback_to
+
+    def build_plan(**kwargs):
+        order.append("plan")
+        calls["plan"] = kwargs
+        return plan
+
+    def execute_plan(actual, **kwargs):
+        order.append("execute")
+        calls["execute"] = (actual, kwargs)
+        return subprocess.CompletedProcess(
+            ["repair"],
+            0,
+            stdout="installed",
+            stderr="",
+        )
+
+    monkeypatch.setattr(api, "rollback_target", capture_rollback_target)
     monkeypatch.setattr(
         api,
         "build_memory_package_repair_plan",
-        lambda **kwargs: calls.setdefault("plan", kwargs) and plan,
+        build_plan,
     )
     monkeypatch.setattr(api, "get_safe_cwd", lambda: "/safe")
-    monkeypatch.setattr(
-        api,
-        "execute_upgrade_plan",
-        lambda actual, **kwargs: calls.setdefault("execute", (actual, kwargs))
-        and subprocess.CompletedProcess(["repair"], 0, stdout="installed", stderr=""),
-    )
+    monkeypatch.setattr(api, "execute_upgrade_plan", execute_plan)
     monkeypatch.setattr(api, "_runtime_process_was_running", lambda: True)
     monkeypatch.setattr(
         api,
@@ -1502,12 +1655,41 @@ def test_memory_package_dependency_job_uses_current_release_plan(monkeypatch):
     assert result["ok"] is True
     assert result["message"] == "memory_package_ready"
     assert result["restarting"] is True
+    assert order == ["rollback_target", "plan", "execute"]
     assert calls["plan"] == {"vibe_path": "/bin/vibe"}
     assert calls["restart"] == {
         "delay_seconds": 2.0,
         "vibe_path": "/bin/vibe",
         "trigger": "memory_package_repair",
         "prepare_show_runtime": False,
+        "rollback_to": repair_rollback_to,
+    }
+
+
+def test_memory_package_dependency_job_fails_before_install_without_rollback_target(
+    monkeypatch,
+):
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/bin/vibe")
+    monkeypatch.setattr(api, "rollback_target", lambda: None)
+    monkeypatch.setattr(
+        api,
+        "build_memory_package_repair_plan",
+        lambda **_: pytest.fail("a repair without rollback must not build an install plan"),
+    )
+    monkeypatch.setattr(
+        api,
+        "execute_upgrade_plan",
+        lambda *_args, **_kwargs: pytest.fail("a repair without rollback must not install"),
+    )
+
+    result = api._prepare_memory_package_job()
+
+    assert result == {
+        "ok": False,
+        "message": "memory_package_repair_unavailable",
+        "output": "The running installation has no published rollback target",
+        "reason": "memory_package_repair_unavailable",
+        "restarting": False,
     }
 
 
@@ -1690,6 +1872,82 @@ def test_startup_show_page_prewarm_limit_env(monkeypatch):
 
 def test_start_dependency_install_job_rejects_unknown():
     assert api.start_dependency_install_job("bogus")["ok"] is False
+
+
+def test_dependency_install_job_returns_live_state_unchanged(monkeypatch):
+    live = {
+        "ok": True,
+        "job_id": "job-live",
+        "backend": "memory-package",
+        "status": "running",
+    }
+    monkeypatch.setattr(api, "get_agent_install_job", lambda *_args, **_kwargs: live)
+    monkeypatch.setattr(
+        api,
+        "dependencies_status",
+        lambda **_: pytest.fail("a live job must not be reconstructed from state"),
+    )
+
+    assert api.get_dependency_install_job("memory-package", "job-live") is live
+
+
+def test_dependency_install_job_recovers_ready_memory_package(monkeypatch):
+    monkeypatch.setattr(
+        api,
+        "get_agent_install_job",
+        lambda *_args, **_kwargs: {"ok": False, "error": "job_not_found"},
+    )
+    monkeypatch.setattr(
+        api,
+        "dependencies_status",
+        lambda **kwargs: {
+            "ok": True,
+            "offline": kwargs["offline"],
+            "deps": [{"id": "memory-package", "status": "ready"}],
+        },
+    )
+
+    assert api.get_dependency_install_job("memory-package", "job-restarted") == {
+        "ok": True,
+        "job_id": "job-restarted",
+        "backend": "memory-package",
+        "status": "succeeded",
+        "message": "memory_package_ready",
+        "recovered": True,
+    }
+
+
+def test_dependency_install_job_keeps_missing_memory_repair_not_found(monkeypatch):
+    missing = {"ok": False, "error": "job_not_found"}
+    monkeypatch.setattr(api, "get_agent_install_job", lambda *_args, **_kwargs: missing)
+    monkeypatch.setattr(
+        api,
+        "dependencies_status",
+        lambda **_: {
+            "ok": True,
+            "deps": [
+                {
+                    "id": "memory-package",
+                    "status": "error",
+                    "reason": "memory_package_import_unavailable",
+                }
+            ],
+        },
+    )
+
+    assert api.get_dependency_install_job("memory-package", "job-failed") is missing
+
+
+def test_dependency_install_job_does_not_recover_unrelated_dependency(monkeypatch):
+    missing = {"ok": False, "error": "job_not_found"}
+    monkeypatch.setattr(api, "get_agent_install_job", lambda *_args, **_kwargs: missing)
+    monkeypatch.setattr(
+        api,
+        "dependencies_status",
+        lambda **_: pytest.fail("unrelated dependency polling stays unchanged"),
+    )
+
+    assert api.get_dependency_install_job("askill", "job-gone") is missing
 
 
 def test_prepare_show_runtime_job_surfaces_retry_diagnostics(monkeypatch):

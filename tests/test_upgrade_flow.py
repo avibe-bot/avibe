@@ -545,8 +545,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SHIPPED_SOURCE_ROOTS = ("main.py", "config", "core", "modules", "storage", "vibe")
 
 
-def test_only_the_plan_builder_can_ask_what_this_install_is():
-    """One caller, found by looking rather than by remembering.
+def test_only_pre_mutation_owners_can_ask_what_this_install_is():
+    """Two exact callers, found by looking rather than by remembering.
 
     The measurement has always been documented as something to take before the
     install and never after, and both upgrade paths took it after anyway --
@@ -554,11 +554,12 @@ def test_only_the_plan_builder_can_ask_what_this_install_is():
     already been overwritten. A rule that lives in a docstring is enforced by
     whoever happens to have read it.
 
-    Moving it into `UpgradePlan` removes the ordering from every caller: a plan
-    is what produces the command, so the measurement cannot happen later than the
-    install unless someone reaches past the plan. This counts over the whole
-    shipped tree so that reaching past it fails here, when it is written, rather
-    than on a machine that predates the rename months later.
+    The general forward-upgrade owner remains `build_upgrade_plan`, which captures
+    the target before it produces the mutating command. The explicit Settings
+    package-repair owner is `_prepare_memory_package_job`, which must capture its
+    repair-local rollback target before it executes the pinned repair plan. This
+    counts both exact owners over the whole shipped tree so any third caller or
+    count drift fails here, when it is written, rather than on a user's machine.
     """
 
     callers = {}
@@ -575,7 +576,7 @@ def test_only_the_plan_builder_can_ask_what_this_install_is():
             if calls:
                 callers[source.relative_to(REPO_ROOT).as_posix()] = calls
 
-    assert callers == {"vibe/upgrade.py": 1}
+    assert callers == {"vibe/api.py": 1, "vibe/upgrade.py": 1}
 
 
 def test_the_plan_that_installs_carries_what_it_is_replacing(monkeypatch):
