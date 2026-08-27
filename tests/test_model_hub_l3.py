@@ -4860,6 +4860,64 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
     assert inventory_probe.await_args.kwargs["protocol"] == "anthropic"
 
+    async def anthropic_wrapperless_with_rejected_openai(**kwargs) -> _ProtocolEvidence:
+        if kwargs["protocol"] == "anthropic":
+            return generic_request_accepted
+        if kwargs["protocol"] in openai_family:
+            return unproven_rejected
+        raise AssertionError(kwargs["protocol"])
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(side_effect=anthropic_wrapperless_with_rejected_openai),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=("anthropic-relay-model",)),
+        ) as inventory_probe,
+    ):
+        observed = asyncio.run(
+            adapter.observe_source(
+                "openai",
+                base_url,
+                credential_ref,
+                SOURCE_PROTOCOLS,
+            )
+        )
+
+    assert observed.outcome.value == "observed"
+    assert observed.protocol == "anthropic"
+    assert observed.authenticated is True
+    assert observed.model_ids == ("anthropic-relay-model",)
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    assert inventory_probe.await_args.kwargs["protocol"] == "anthropic"
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(return_value=generic_request_accepted),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=("should-not-discover",)),
+        ) as inventory_probe,
+    ):
+        ambiguous = asyncio.run(
+            adapter.observe_source(
+                "openai",
+                base_url,
+                credential_ref,
+                ("anthropic",),
+            )
+        )
+
+    assert ambiguous.outcome.value == "ambiguous"
+    assert ambiguous.protocol is None
+    assert ambiguous.authenticated is True
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == ["anthropic"]
+    inventory_probe.assert_not_awaited()
+
     async def shaped_server_failure(**kwargs) -> _ProtocolEvidence:
         if kwargs["protocol"] == "anthropic":
             body = {"type": "error", "error": {"type": "api_error"}}

@@ -631,23 +631,30 @@ def _pairwise_positive_exclusion(evidence: _ProtocolEvidence) -> bool:
 
 def _anthropic_wrapperless_elimination_proof(
     responses: Mapping[str, _ProtocolEvidence],
+    *,
+    considered_protocols: frozenset[str],
+    ruled_out_protocols: frozenset[str],
 ) -> str | None:
+    """Prove wrapperless Anthropic only from the complete response set.
+
+    A wrapperless ``{"error": {"type": ...}}`` request error still proves only
+    that the endpoint accepted the credential and parsed the synthetic request.
+    It becomes Anthropic evidence only when both OpenAI-family sibling probes
+    were actually part of this observation round and their own responses ruled
+    them out. The proof is therefore carried by the response set, not by the
+    ``/v1/messages`` path alone.
+    """
+
+    if not _OPENAI_FAMILY_PROTOCOLS.issubset(considered_protocols):
+        return None
+    if not _OPENAI_FAMILY_PROTOCOLS.issubset(ruled_out_protocols):
+        return None
     candidate = responses.get("anthropic")
-    openai_responses = responses.get("openai_responses")
-    openai_chat = responses.get("openai_chat")
     if (
         candidate is not None
-        and openai_responses is not None
-        and openai_chat is not None
         and candidate.protocol is _ProtocolProof.UNPROVEN
         and candidate.authentication is _AuthenticationEvidence.ACCEPTED
         and candidate.shape is _ProtocolObservationShape.GENERIC_REQUEST_ERROR
-        and openai_responses.protocol is _ProtocolProof.UNPROVEN
-        and openai_responses.authentication is _AuthenticationEvidence.UNKNOWN
-        and openai_responses.shape in _PAIRWISE_EXCLUSION_SHAPES
-        and openai_chat.protocol is _ProtocolProof.UNPROVEN
-        and openai_chat.authentication is _AuthenticationEvidence.UNKNOWN
-        and openai_chat.shape in _PAIRWISE_EXCLUSION_SHAPES
     ):
         return "anthropic"
     return None
@@ -1499,6 +1506,8 @@ class CLIProxyEngineAdapter:
             ruled_out_protocols=frozenset(ruled_out_protocols),
         ) or _anthropic_wrapperless_elimination_proof(
             response_evidence_by_protocol,
+            considered_protocols=considered_protocols,
+            ruled_out_protocols=frozenset(ruled_out_protocols),
         )
         if proved_protocol is not None:
             try:
