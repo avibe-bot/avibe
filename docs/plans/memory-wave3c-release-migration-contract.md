@@ -194,9 +194,12 @@ that one release identity:
    closed.
 7. Upload the core wheel and sdist to PyPI, record their checkpoint, then
    resolve/download both public distributions together and recheck metadata,
-   exact dependency closure, manifests, and hashes. Only after these checks pass
-   may the finalizer declare the transition release available and remove the
-   transition gate. Memory-before-core is enforced within PyPI.
+   exact dependency closure, manifests, and hashes. Immediately before gate
+   removal, re-download every public asset referenced by every manifest and
+   require every manifest URL, archive, and hash to pass full validation again;
+   this final result cannot be inherited from step 5. Only after these checks
+   pass may the finalizer declare the transition release available and remove
+   the transition gate. Memory-before-core is enforced within PyPI.
 
 No release manifest points at Draft/private assets or a differently-versioned
 distribution. A failed staged or public check leaves the gate in place and
@@ -332,7 +335,9 @@ specifications only; product changes require separate owner-approved PRs.
    recovery must be implemented and verified. Only then, after the transition
    wheelhouse, scenario 022/023, Doc A's 018-021 evidence, isolated sdist rebuild
    equivalence, and the single finalizer's staged/public-GitHub/package-index
-   checks pass, may the release gate be removed.
+   checks pass, including an immediate pre-gate re-download and hash verification
+   of every public asset referenced by every manifest, may the release gate be
+   removed.
 
 No Phase 1 product code begins from this draft. Any finding that challenges the
 no-bridge transition, single finalizer, Memory-before-core ordering, or
