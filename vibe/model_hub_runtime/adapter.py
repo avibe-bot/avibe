@@ -570,6 +570,9 @@ def _response_shape_proves_protocol(
 
 def _openai_family_elimination_proof(
     responses: Mapping[str, _ProtocolEvidence],
+    *,
+    considered_protocols: frozenset[str],
+    positively_excluded_protocols: frozenset[str],
 ) -> str | None:
     """Prove one OpenAI-family protocol from the pair of responses, not from the URL.
 
@@ -578,17 +581,13 @@ def _openai_family_elimination_proof(
     authentication accepted. The sibling protocol becomes excluded only when its
     own endpoint answers the same source with an unproven shape, so the proof is
     carried by the response pair rather than by either request path alone. That
-    pairwise proof is valid only when no other protocol still has accepted-but-
-    generic evidence for the same source.
+    pairwise proof is valid only when every other probed protocol was
+    positively excluded by its own response.
     """
 
-    if any(
-        protocol not in _OPENAI_FAMILY_PROTOCOLS
-        and evidence.protocol is _ProtocolProof.UNPROVEN
-        and evidence.authentication is _AuthenticationEvidence.ACCEPTED
-        and evidence.shape is _ProtocolObservationShape.GENERIC_REQUEST_ERROR
-        for protocol, evidence in responses.items()
-    ):
+    if not {
+        protocol for protocol in considered_protocols if protocol not in _OPENAI_FAMILY_PROTOCOLS
+    }.issubset(positively_excluded_protocols):
         return None
 
     candidate = responses.get("openai_responses")
@@ -616,6 +615,14 @@ def _openai_family_elimination_proof(
     ):
         return "openai_chat"
     return None
+
+
+def _pairwise_positive_exclusion(evidence: _ProtocolEvidence) -> bool:
+    return (
+        evidence.protocol is _ProtocolProof.UNPROVEN
+        and evidence.authentication is _AuthenticationEvidence.UNKNOWN
+        and evidence.shape in _PAIRWISE_EXCLUSION_SHAPES
+    )
 
 
 def _anthropic_wrapperless_elimination_proof(
@@ -1410,6 +1417,7 @@ class CLIProxyEngineAdapter:
         received_unproven_response = False
         received_accepted_unproven_response = False
         response_evidence_by_protocol: dict[str, _ProtocolEvidence] = {}
+        positively_excluded_protocols: set[str] = set()
         for protocol in protocol_order:
             if protocol not in SOURCE_PROTOCOLS:
                 raise EngineStateError("unsupported source protocol")
@@ -1446,14 +1454,48 @@ class CLIProxyEngineAdapter:
                 received_unproven_response = True
                 if evidence.authentication is _AuthenticationEvidence.ACCEPTED:
                     received_accepted_unproven_response = True
+                if _pairwise_positive_exclusion(evidence):
+                    positively_excluded_protocols.add(protocol)
                 response_evidence_by_protocol[protocol] = evidence
-                proved_protocol = _openai_family_elimination_proof(
-                    response_evidence_by_protocol,
-                ) or _anthropic_wrapperless_elimination_proof(
-                    response_evidence_by_protocol,
-                )
-                if proved_protocol is None:
-                    continue
+                continue
+            try:
+                if credential_kind == "api_key":
+                    models = await probe_models(
+                        vendor=normalized_vendor,
+                        protocol=proved_protocol,
+                        base_url=base_url,
+                        secret=secret or "",
+                    )
+                else:
+                    models = await self.discover_models(
+                        normalized_vendor,
+                        proved_protocol,
+                        None,
+                        credential_ref,
+                    )
+            except (EngineClientError, ModelDiscoveryError):
+                discovery = ObservationDiscovery.FAILED
+                models = ()
+            else:
+                discovery = ObservationDiscovery.SUCCEEDED
+            return make_source_observation(
+                outcome=ObservationOutcome.OBSERVED,
+                reachable=True,
+                authenticated=True,
+                protocol=proved_protocol,
+                discovery=discovery,
+                model_ids=tuple(models),
+            )
+
+        considered_protocols = frozenset(protocol_order)
+        proved_protocol = _openai_family_elimination_proof(
+            response_evidence_by_protocol,
+            considered_protocols=considered_protocols,
+            positively_excluded_protocols=frozenset(positively_excluded_protocols),
+        ) or _anthropic_wrapperless_elimination_proof(
+            response_evidence_by_protocol,
+        )
+        if proved_protocol is not None:
             try:
                 if credential_kind == "api_key":
                     models = await probe_models(

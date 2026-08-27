@@ -4604,6 +4604,76 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
     inventory_probe.assert_not_awaited()
 
+    async def anthropic_server_error_blocks_openai_pairwise(**kwargs) -> _ProtocolEvidence:
+        if kwargs["protocol"] == "anthropic":
+            return proven_unknown
+        if kwargs["protocol"] == "openai_responses":
+            return generic_request_accepted
+        if kwargs["protocol"] == "openai_chat":
+            return excluded_404
+        raise AssertionError(kwargs["protocol"])
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(side_effect=anthropic_server_error_blocks_openai_pairwise),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=("should-not-discover",)),
+        ) as inventory_probe,
+    ):
+        ambiguous = asyncio.run(
+            adapter.observe_source(
+                "openai",
+                base_url,
+                credential_ref,
+                SOURCE_PROTOCOLS,
+            )
+        )
+
+    assert ambiguous.outcome.value == "ambiguous"
+    assert ambiguous.protocol is None
+    assert ambiguous.authenticated is True
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    inventory_probe.assert_not_awaited()
+
+    timeout = EngineClientError("protocol observation timed out", error_type="timeout")
+
+    async def anthropic_timeout_blocks_openai_pairwise(**kwargs) -> _ProtocolEvidence:
+        if kwargs["protocol"] == "anthropic":
+            raise timeout
+        if kwargs["protocol"] == "openai_responses":
+            return generic_request_accepted
+        if kwargs["protocol"] == "openai_chat":
+            return excluded_404
+        raise AssertionError(kwargs["protocol"])
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(side_effect=anthropic_timeout_blocks_openai_pairwise),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=("should-not-discover",)),
+        ) as inventory_probe,
+    ):
+        ambiguous = asyncio.run(
+            adapter.observe_source(
+                "openai",
+                base_url,
+                credential_ref,
+                SOURCE_PROTOCOLS,
+            )
+        )
+
+    assert ambiguous.outcome.value == "ambiguous"
+    assert ambiguous.protocol is None
+    assert ambiguous.authenticated is True
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    inventory_probe.assert_not_awaited()
+
     async def anthropic_competes_with_openai_pairwise(**kwargs) -> _ProtocolEvidence:
         if kwargs["protocol"] == "anthropic":
             return generic_request_accepted
