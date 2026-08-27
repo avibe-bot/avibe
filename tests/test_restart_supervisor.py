@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import inspect
 import io
+import json
 import os
 import sqlite3
 import sys
@@ -10,6 +11,7 @@ import textwrap
 import threading
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -559,10 +561,42 @@ def test_schedule_upgrade_transaction_carries_only_typed_shape(monkeypatch, tmp_
     result = restart_supervisor.schedule_upgrade_transaction(_upgrade_transaction(), vibe_path="/bin/vibe")
     command = spawned["command"]
     assert result["transaction"] == "upgrade-v1"
-    assert "--upgrade-forward-spec" in command
-    assert "avibe-os[memory]" in command
-    assert "--upgrade-memory-requirement" in command
+    assert "--upgrade-transaction-file" in command
+    payload_path = Path(command[command.index("--upgrade-transaction-file") + 1])
+    assert payload_path.stat().st_mode & 0o777 == 0o600
+    assert payload_path.parent.stat().st_mode & 0o777 == 0o700
+    assert "avibe-os[memory]" not in command
+    assert MEMORY_PACKAGE_REQUIREMENT not in command
     assert not any(part in {"--command", "--env"} for part in command)
+    payload_path.unlink()
+
+
+def test_upgrade_transaction_payload_is_consumed_and_rejects_unknown_fields(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    path = restart_supervisor._write_upgrade_transaction_file(_upgrade_transaction(), "tx-payload")
+    payload = runtime.read_json(path)
+    assert payload["forward_spec"] == "avibe-os[memory]"
+    assert restart_supervisor._read_upgrade_transaction_file(str(path)).forward_spec == "avibe-os[memory]"
+    assert not path.exists()
+    path.write_text('{"schema_version":1,"unknown":true}', encoding="utf-8")
+    with pytest.raises(ValueError, match="unknown or missing"):
+        restart_supervisor._read_upgrade_transaction_file(str(path))
+    assert not path.exists()
+
+    malformed = _upgrade_transaction().to_payload()
+    malformed["include_memory"] = "true"
+    path = restart_supervisor._write_upgrade_transaction_file(_upgrade_transaction(), "tx-malformed")
+    path.write_text(json.dumps(malformed), encoding="utf-8")
+    with pytest.raises(ValueError, match="scalar fields"):
+        restart_supervisor._read_upgrade_transaction_file(str(path))
+    assert not path.exists()
+
+    package_optional = _upgrade_transaction().to_payload()
+    package_optional["rollback_to"]["package"] = None
+    path = restart_supervisor._write_upgrade_transaction_file(_upgrade_transaction(), "tx-optional-package")
+    path.write_text(json.dumps(package_optional), encoding="utf-8")
+    assert restart_supervisor._read_upgrade_transaction_file(str(path)).rollback_to.package is None
 
 
 def test_upgrade_transaction_refuses_when_ordinary_restart_is_active(monkeypatch, tmp_path):
@@ -574,6 +608,41 @@ def test_upgrade_transaction_refuses_when_ordinary_restart_is_active(monkeypatch
     )
     with pytest.raises(RuntimeError, match="restart is already in progress"):
         restart_supervisor.schedule_upgrade_transaction(_upgrade_transaction(), vibe_path="/bin/vibe")
+
+
+def test_restart_admission_ignores_dead_supervisor_status(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    runtime.write_json(
+        runtime.get_restart_status_path(),
+        {
+            "state": "running",
+            "supervisor_pid": 1234,
+            "supervisor_started_at": 1.0,
+            "transaction": "upgrade-v1",
+        },
+    )
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: False)
+    assert restart_supervisor._restart_job_active() is False
+    assert restart_supervisor._upgrade_transaction_active() is False
+
+
+def test_restart_admission_rejects_reused_supervisor_pid(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    runtime.write_json(
+        runtime.get_restart_status_path(),
+        {
+            "state": "running",
+            "supervisor_pid": 1234,
+            "supervisor_started_at": 1.0,
+            "transaction": "upgrade-v1",
+        },
+    )
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(runtime, "process_create_time", lambda pid: 2.0)
+    assert restart_supervisor._restart_job_active() is False
+    assert restart_supervisor._upgrade_transaction_active() is False
 
 
 def test_ordinary_restart_admission_uses_transaction_gate(monkeypatch, tmp_path):
@@ -620,6 +689,129 @@ def test_upgrade_transaction_preflight_failure_leaves_runtime_running(monkeypatc
     assert "preflight" in status["error"]
 
 
+@pytest.mark.parametrize("readiness", ["start", "ready", "exception", "dead"])
+def test_upgrade_transaction_activation_failure_rolls_back_exact_memory_shape(monkeypatch, tmp_path, readiness):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    target = _upgrade_transaction().rollback_to
+    rollback_calls = []
+    monkeypatch.setattr(restart_supervisor.runtime, "verified_service_running", lambda: True)
+    monkeypatch.setattr(
+        restart_supervisor,
+        "build_upgrade_plan",
+        lambda **kwargs: restart_supervisor.UpgradePlan(command=["install"], env={}, method="pip"),
+    )
+    monkeypatch.setattr(restart_supervisor, "preflight_upgrade_plan", lambda *args, **kwargs: SimpleNamespace(returncode=0))
+    monkeypatch.setattr(restart_supervisor, "_stop_runtime_for_restart", lambda **kwargs: (True, {}, 0, None, True, 0))
+    monkeypatch.setattr(restart_supervisor, "_wait_for_service_lock_release", lambda: True)
+    monkeypatch.setattr(
+        restart_supervisor,
+        "execute_upgrade_plan",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    if readiness == "start":
+        monkeypatch.setattr(restart_supervisor, "_start_runtime_processes", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+    elif readiness == "dead":
+        monkeypatch.setattr(restart_supervisor, "_start_runtime_processes", lambda **kwargs: restart_supervisor.StartedRuntime(222, None, None))
+        monkeypatch.setattr(restart_supervisor.runtime, "pid_alive", lambda pid: False)
+    elif readiness == "ready":
+        monkeypatch.setattr(restart_supervisor, "_start_runtime_processes", lambda **kwargs: restart_supervisor.StartedRuntime(222, None, None))
+        monkeypatch.setattr(restart_supervisor.runtime, "wait_for_service_ready", lambda *args, **kwargs: None)
+    else:
+        monkeypatch.setattr(restart_supervisor, "_start_runtime_processes", lambda **kwargs: restart_supervisor.StartedRuntime(222, None, None))
+        monkeypatch.setattr(
+            restart_supervisor.runtime,
+            "wait_for_service_ready",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("readiness probe failed")),
+        )
+    monkeypatch.setattr(
+        restart_supervisor,
+        "_roll_back_failed_upgrade",
+        lambda **kwargs: rollback_calls.append(kwargs["rollback_to"]) or {"state": "succeeded"},
+    )
+    result = restart_supervisor._run_restart_job(
+        job_id=f"tx-activation-{readiness}",
+        delay_seconds=0,
+        vibe_path="/bin/vibe",
+        trigger="upgrade",
+        scope="service",
+        upgrade_transaction=_upgrade_transaction(),
+    )
+    assert result in {1, 3}
+    assert rollback_calls == [target]
+    assert target.memory_package is True
+    assert target.memory_version == "3.0.14"
+
+
+def test_upgrade_transaction_aborts_when_ui_survives_stop(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    calls = []
+    monkeypatch.setattr(restart_supervisor.runtime, "verified_service_running", lambda: True)
+    monkeypatch.setattr(
+        restart_supervisor,
+        "build_upgrade_plan",
+        lambda **kwargs: restart_supervisor.UpgradePlan(command=["install"], env={}, method="pip"),
+    )
+    monkeypatch.setattr(restart_supervisor, "preflight_upgrade_plan", lambda *args, **kwargs: SimpleNamespace(returncode=0))
+    monkeypatch.setattr(
+        restart_supervisor,
+        "_stop_runtime_for_restart",
+        lambda **kwargs: (False, {}, 0, 333, True, 0),
+    )
+    monkeypatch.setattr(restart_supervisor.runtime, "pid_alive", lambda pid: pid == 333)
+    monkeypatch.setattr(restart_supervisor, "_start_runtime_processes", lambda **kwargs: calls.append("recover") or restart_supervisor.StartedRuntime(222, 333, None))
+    monkeypatch.setattr(restart_supervisor.runtime, "wait_for_service_ready", lambda *args, **kwargs: 222)
+    monkeypatch.setattr(
+        restart_supervisor,
+        "execute_upgrade_plan",
+        lambda *args, **kwargs: calls.append("install") or pytest.fail("UI stop failure must precede install"),
+    )
+    result = restart_supervisor._run_restart_job(
+        job_id="tx-ui-stop-fail",
+        delay_seconds=0,
+        vibe_path="/bin/vibe",
+        trigger="upgrade",
+        upgrade_transaction=_upgrade_transaction(),
+    )
+    assert result == 2
+    assert calls == ["recover"]
+
+
+def test_upgrade_transaction_checks_live_ui_identity_when_stop_has_no_pid(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    calls = []
+    monkeypatch.setattr(restart_supervisor.runtime, "verified_service_running", lambda: True)
+    monkeypatch.setattr(
+        restart_supervisor,
+        "build_upgrade_plan",
+        lambda **kwargs: restart_supervisor.UpgradePlan(command=["install"], env={}, method="pip"),
+    )
+    monkeypatch.setattr(restart_supervisor, "preflight_upgrade_plan", lambda *args, **kwargs: SimpleNamespace(returncode=0))
+    monkeypatch.setattr(
+        restart_supervisor,
+        "_stop_runtime_for_restart",
+        lambda **kwargs: (True, {}, 0, None, True, 0),
+    )
+    monkeypatch.setattr(restart_supervisor.runtime, "ui_pid_file_points_to_running_ui", lambda: True)
+    monkeypatch.setattr(restart_supervisor, "_start_runtime_processes", lambda **kwargs: calls.append("recover") or restart_supervisor.StartedRuntime(222, None, None))
+    monkeypatch.setattr(restart_supervisor.runtime, "wait_for_service_ready", lambda *args, **kwargs: 222)
+    monkeypatch.setattr(
+        restart_supervisor,
+        "execute_upgrade_plan",
+        lambda *args, **kwargs: calls.append("install") or pytest.fail("live UI must block package mutation"),
+    )
+    assert restart_supervisor._run_restart_job(
+        job_id="tx-ui-identity-stop-fail",
+        delay_seconds=0,
+        vibe_path="/bin/vibe",
+        trigger="upgrade",
+        upgrade_transaction=_upgrade_transaction(),
+    ) == 2
+    assert calls == ["recover"]
+
+
 def test_upgrade_transaction_lock_timeout_fails_before_mutation(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
@@ -647,6 +839,7 @@ def test_upgrade_transaction_keeps_lease_across_preflight_stop_install_start(mon
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     events = []
+    build_kwargs = {}
     plan = restart_supervisor.UpgradePlan(command=["install"], env={}, method="pip", preflight_command=["download"])
 
     @contextmanager
@@ -659,12 +852,13 @@ def test_upgrade_transaction_keeps_lease_across_preflight_stop_install_start(mon
 
     monkeypatch.setattr(restart_supervisor, "_upgrade_transaction_lock", lease)
     monkeypatch.setattr(restart_supervisor.runtime, "verified_service_running", lambda: True)
-    monkeypatch.setattr(restart_supervisor, "build_upgrade_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(restart_supervisor, "build_upgrade_plan", lambda **kwargs: build_kwargs.update(kwargs) or plan)
     monkeypatch.setattr(restart_supervisor, "preflight_upgrade_plan", lambda *args, **kwargs: events.append("preflight"))
     monkeypatch.setattr(restart_supervisor, "_stop_runtime_for_restart", lambda **kwargs: events.append("stop") or (True, {}, 0, None, True, 0))
     monkeypatch.setattr(restart_supervisor, "_wait_for_service_lock_release", lambda: events.append("wait") or True)
     monkeypatch.setattr(restart_supervisor, "execute_upgrade_plan", lambda *args, **kwargs: events.append("install") or SimpleNamespace(returncode=0, stdout="", stderr=""))
     monkeypatch.setattr(restart_supervisor, "_start_runtime_processes", lambda **kwargs: events.append("start") or restart_supervisor.StartedRuntime(222, None, None))
+    monkeypatch.setattr(restart_supervisor.runtime, "pid_alive", lambda pid: pid == 222)
     monkeypatch.setattr(restart_supervisor.runtime, "wait_for_service_ready", lambda *args, **kwargs: 222)
     monkeypatch.setattr(restart_supervisor.runtime, "write_status", lambda *args, **kwargs: None)
     monkeypatch.setattr(restart_supervisor, "_read_recorded_pid", lambda: 111)
@@ -677,10 +871,50 @@ def test_upgrade_transaction_keeps_lease_across_preflight_stop_install_start(mon
         upgrade_transaction=_upgrade_transaction(),
     ) == 0
     assert events.index("lease-enter") < events.index("preflight") < events.index("stop") < events.index("install") < events.index("start") < events.index("lease-exit")
+    assert build_kwargs["memory_requirement"] == _upgrade_transaction().memory_requirement
+    assert build_kwargs["memory_package"] is True
 
 
-def test_upgrade_transaction_main_reassembles_declared_fields(monkeypatch):
+def test_upgrade_transaction_prepares_show_runtime_nonfatally(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    events = []
+    monkeypatch.setattr(restart_supervisor.runtime, "verified_service_running", lambda: False)
+    monkeypatch.setattr(
+        restart_supervisor,
+        "build_upgrade_plan",
+        lambda **kwargs: restart_supervisor.UpgradePlan(command=["install"], env={}, method="pip"),
+    )
+    monkeypatch.setattr(restart_supervisor, "preflight_upgrade_plan", lambda *args, **kwargs: SimpleNamespace(returncode=0))
+    monkeypatch.setattr(
+        restart_supervisor,
+        "execute_upgrade_plan",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(
+        restart_supervisor,
+        "_prepare_show_runtime_nonfatal",
+        lambda *args, **kwargs: events.append("prepare"),
+    )
+    transaction = UpgradeTransaction(1, "pip", "avibe-os", False, None, None, "none")
+    assert restart_supervisor._run_restart_job(
+        job_id="tx-prepare",
+        delay_seconds=0,
+        vibe_path="/bin/vibe",
+        trigger="upgrade",
+        scope="service",
+        prepare_show_runtime=True,
+        upgrade_transaction=transaction,
+    ) == 0
+    assert events == ["prepare"]
+
+
+def test_upgrade_transaction_main_reassembles_declared_fields(monkeypatch, tmp_path):
     captured = {}
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    transaction = _upgrade_transaction()
+    payload_path = restart_supervisor._write_upgrade_transaction_file(transaction, "tx-1")
     monkeypatch.setattr("vibe.memory_ui_access.initialize_process_ui_read_secret", lambda: None)
     monkeypatch.setattr(
         restart_supervisor,
@@ -690,22 +924,16 @@ def test_upgrade_transaction_main_reassembles_declared_fields(monkeypatch):
     argv = [
         "--job-id",
         "tx-1",
-        "--upgrade-transaction-version",
-        "1",
-        "--upgrade-installer",
-        "pip",
-        "--upgrade-forward-spec",
-        "avibe-os[memory]",
-        "--upgrade-include-memory",
-        "--upgrade-memory-requirement",
-        MEMORY_PACKAGE_REQUIREMENT,
+        "--upgrade-transaction-file",
+        str(payload_path),
     ]
     assert restart_supervisor.main(argv) == 0
-    transaction = captured["upgrade_transaction"]
-    assert transaction.schema_version == 1
-    assert transaction.installer == "pip"
-    assert transaction.forward_spec == "avibe-os[memory]"
-    assert transaction.memory_requirement == MEMORY_PACKAGE_REQUIREMENT
+    captured_transaction = captured["upgrade_transaction"]
+    assert captured_transaction.schema_version == 1
+    assert captured_transaction.installer == "pip"
+    assert captured_transaction.forward_spec == "avibe-os[memory]"
+    assert captured_transaction.memory_requirement == MEMORY_PACKAGE_REQUIREMENT
+    assert not payload_path.exists()
 
 
 @pytest.mark.parametrize(

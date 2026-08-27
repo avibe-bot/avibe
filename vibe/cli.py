@@ -76,6 +76,7 @@ from vibe.upgrade import (
     should_skip_show_runtime_prepare,
 )
 from storage.db import create_sqlite_engine
+from storage.lock import MigrationLockTimeout
 from storage.background import (
     DefinitionWriteConflict,
     SQLiteBackgroundTaskStore,
@@ -14378,6 +14379,18 @@ def cmd_check_update():
     return 0
 
 
+def _wait_for_upgrade_job(job_id: str, timeout_seconds: float = 900.0) -> dict | None:
+    """Wait for the exact supervisor job so CLI callers see completed state."""
+
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        status = runtime.read_json(runtime.get_restart_status_path()) or {}
+        if status.get("job_id") == job_id and status.get("state") in {"succeeded", "failed", "error", "cancelled"}:
+            return status
+        time.sleep(0.25)
+    return None
+
+
 def cmd_upgrade():
     """Upgrade avibe-os to the latest version."""
     print(f"Current version: {__version__}")
@@ -14409,12 +14422,22 @@ def cmd_upgrade():
             trigger="upgrade",
             prepare_show_runtime=not should_skip_show_runtime_prepare(),
         )
+    except MigrationLockTimeout as exc:
+        print(f"\033[31mUpgrade could not start: {exc}\033[0m")
+        return 2
     except Exception as exc:
         print(f"\033[31mUpgrade failed: {exc}\033[0m")
         return 1
-    print("\033[32mUpgrade scheduled; the supervisor will replace the package and restart Avibe.\033[0m")
     print(f"Job ID: {restart['job_id']}")
-    print("Run `vibe status` to inspect the transaction result.")
+    status = _wait_for_upgrade_job(restart["job_id"])
+    if status is None:
+        print("\033[31mUpgrade did not finish before the supervisor wait timed out.\033[0m")
+        return 1
+    if status.get("state") != "succeeded":
+        print(f"\033[31mUpgrade failed: {status.get('error') or 'see restart log'}\033[0m")
+        return 1
+    print("\033[32mUpgrade successful!\033[0m")
+    print("Upgrade completed; Avibe restarted successfully.")
     return 0
 
 

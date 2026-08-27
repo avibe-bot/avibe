@@ -6126,6 +6126,14 @@ def do_upgrade(auto_restart: bool = True) -> dict:
         {"ok": bool, "message": str, "output": str | None, "restarting": bool}
     """
     current_vibe_path = get_running_vibe_path()
+    if not auto_restart and _runtime_process_was_running():
+        return {
+            "ok": False,
+            "message": "Upgrade requires a restart while Avibe is running.",
+            "output": None,
+            "restarting": False,
+            "code": "restart_required",
+        }
     try:
         transaction = build_upgrade_transaction(
             vibe_path=current_vibe_path,

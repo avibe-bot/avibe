@@ -110,6 +110,104 @@ class UpgradeTransaction:
     rollback_to: "RollbackTarget | None"
     activate_runtime: Literal["restart_if_running", "none"] = "restart_if_running"
 
+    def to_payload(self) -> dict[str, object]:
+        """Return the closed, declarative wire shape consumed by the supervisor."""
+
+        rollback = self.rollback_to
+        return {
+            "schema_version": self.schema_version,
+            "installer": self.installer,
+            "forward_spec": self.forward_spec,
+            "include_memory": self.include_memory,
+            "memory_requirement": self.memory_requirement,
+            "rollback_to": (
+                {
+                    "version": rollback.version,
+                    "package": rollback.package,
+                    "launcher": {"python": rollback.launcher.python, "main": rollback.launcher.main},
+                    "memory_package": rollback.memory_package,
+                    "memory_version": rollback.memory_version,
+                }
+                if rollback
+                else None
+            ),
+            "activate_runtime": self.activate_runtime,
+        }
+
+    @classmethod
+    def from_payload(cls, payload: object) -> "UpgradeTransaction":
+        """Parse only the v1 transaction fields; unknown shape fails closed."""
+
+        if not isinstance(payload, dict):
+            raise ValueError("upgrade transaction payload must be an object")
+        expected = {
+            "schema_version",
+            "installer",
+            "forward_spec",
+            "include_memory",
+            "memory_requirement",
+            "rollback_to",
+            "activate_runtime",
+        }
+        if set(payload) != expected:
+            raise ValueError("upgrade transaction payload has unknown or missing fields")
+        if (
+            type(payload["schema_version"]) is not int
+            or payload["installer"] not in {"pip", "uv"}
+            or not isinstance(payload["forward_spec"], str)
+            or type(payload["include_memory"]) is not bool
+            or payload["memory_requirement"] is not None
+            and not isinstance(payload["memory_requirement"], str)
+            or payload["activate_runtime"] not in {"restart_if_running", "none"}
+        ):
+            raise ValueError("invalid upgrade transaction scalar fields")
+        rollback_payload = payload["rollback_to"]
+        rollback = None
+        if rollback_payload is not None:
+            if not isinstance(rollback_payload, dict) or set(rollback_payload) != {
+                "version",
+                "package",
+                "launcher",
+                "memory_package",
+                "memory_version",
+            }:
+                raise ValueError("invalid rollback target payload")
+            launcher_payload = rollback_payload["launcher"]
+            if not isinstance(launcher_payload, dict) or set(launcher_payload) != {"python", "main"}:
+                raise ValueError("invalid rollback launcher payload")
+            if (
+                not isinstance(rollback_payload["version"], str)
+                or rollback_payload["package"] is not None
+                and not isinstance(rollback_payload["package"], str)
+                or type(rollback_payload["memory_package"]) is not bool
+                or rollback_payload["memory_version"] is not None
+                and not isinstance(rollback_payload["memory_version"], str)
+                or not isinstance(launcher_payload["python"], str)
+                or not isinstance(launcher_payload["main"], str)
+            ):
+                raise ValueError("invalid rollback scalar fields")
+            rollback = RollbackTarget(
+                version=rollback_payload["version"],
+                package=rollback_payload["package"],
+                launcher=runtime_mod.ServiceLauncher(
+                    python=launcher_payload["python"],
+                    main=launcher_payload["main"],
+                ),
+                memory_package=rollback_payload["memory_package"],
+                memory_version=rollback_payload["memory_version"],
+            )
+        transaction = cls(
+            schema_version=payload["schema_version"],
+            installer=payload["installer"],
+            forward_spec=payload["forward_spec"],
+            include_memory=payload["include_memory"],
+            memory_requirement=payload["memory_requirement"],
+            rollback_to=rollback,
+            activate_runtime=payload["activate_runtime"],
+        )
+        transaction.validate()
+        return transaction
+
     def validate(self) -> None:
         if self.schema_version != 1:
             raise ValueError("unsupported upgrade transaction schema")
@@ -119,6 +217,8 @@ class UpgradeTransaction:
             raise ValueError("invalid upgrade transaction package spec")
         if self.include_memory and not self.memory_requirement:
             raise ValueError("Memory requirement is required when Memory is included")
+        if not self.include_memory and self.memory_requirement is not None:
+            raise ValueError("Memory requirement must be omitted when Memory is not included")
         if self.include_memory and self.memory_requirement != MEMORY_PACKAGE_REQUIREMENT:
             prefix = f"{MEMORY_PACKAGE_NAME}=="
             if not self.memory_requirement.startswith(prefix):
@@ -958,6 +1058,7 @@ def build_upgrade_plan(
     memory_enabled: bool = False,
     memory_package: bool | None = None,
     memory_version: str | None = None,
+    memory_requirement: str | None = None,
     package_spec: str | None = None,
 ) -> UpgradePlan:
     """How to install avibe: the newest release, or `version` exactly.
@@ -1002,6 +1103,9 @@ def build_upgrade_plan(
     if not version and include_memory and f"[{MEMORY_EXTRA_NAME}]" not in package_spec:
         package_spec = _with_memory_extra(package_spec)
     pinned_memory_spec = f"{MEMORY_PACKAGE_NAME}=={memory_version}" if include_memory and memory_version else None
+    forward_memory_spec = (
+        (memory_requirement or MEMORY_PACKAGE_REQUIREMENT) if include_memory and not version else None
+    )
 
     if is_uv_tool_install(executable) and uv_binary:
         env = dict(base_env or os.environ)
@@ -1009,8 +1113,8 @@ def build_upgrade_plan(
         if vibe_bin_dir:
             env["UV_TOOL_BIN_DIR"] = vibe_bin_dir
         command = [uv_binary, "tool", "install", package_spec]
-        if pinned_memory_spec:
-            command.extend(["--with", pinned_memory_spec])
+        if pinned_memory_spec or forward_memory_spec:
+            command.extend(["--with", pinned_memory_spec or forward_memory_spec])
         if not version:
             command.append("--upgrade")
         if version or package_spec != PACKAGE_NAME or is_legacy_uv_tool_install(executable):
@@ -1021,8 +1125,8 @@ def build_upgrade_plan(
             if not version:
                 preflight_command.append("--upgrade")
             preflight_command.append(package_spec)
-            if pinned_memory_spec:
-                preflight_command.append(pinned_memory_spec)
+            if pinned_memory_spec or forward_memory_spec:
+                preflight_command.append(pinned_memory_spec or forward_memory_spec)
         return UpgradePlan(
             command=command,
             env=env,
@@ -1050,8 +1154,8 @@ def build_upgrade_plan(
     if version or not installed_metadata_describes_running_code():
         command.append("--force-reinstall")
     command.append(package_spec)
-    if pinned_memory_spec:
-        command.append(pinned_memory_spec)
+    if pinned_memory_spec or forward_memory_spec:
+        command.append(pinned_memory_spec or forward_memory_spec)
     cleanup_command = None
     cleanup_after_command = False
     if version and not include_memory and memory_package_installed():
@@ -1061,7 +1165,7 @@ def build_upgrade_plan(
         except InvalidVersion:
             pass
     preflight_command = None
-    if include_memory or cleanup_command is not None:
+    if not version or include_memory or cleanup_command is not None:
         preflight_command = [
             executable,
             "-m",
@@ -1069,11 +1173,10 @@ def build_upgrade_plan(
             "download",
             "--dest",
             PIP_DOWNLOAD_DEST_PLACEHOLDER,
-            "--no-deps",
-            package_spec,
         ]
-        if pinned_memory_spec:
-            preflight_command.append(pinned_memory_spec)
+        preflight_command.extend(["--no-deps", package_spec])
+        if pinned_memory_spec or forward_memory_spec:
+            preflight_command.append(pinned_memory_spec or forward_memory_spec)
     return UpgradePlan(
         command=command,
         env=dict(base_env or os.environ),
@@ -1156,6 +1259,7 @@ def build_upgrade_transaction(
         vibe_path=vibe_path,
         base_env=base_env,
         memory_enabled=memory_enabled,
+        memory_requirement=MEMORY_PACKAGE_REQUIREMENT if include_memory else None,
     )
     installer = plan.method
     transaction = UpgradeTransaction(

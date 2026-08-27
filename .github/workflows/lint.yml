@@ -274,6 +274,17 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: python scripts/prepare_local_show_runtime_manifest.py
 
+      - name: Run packaged Memory upgrade transaction smoke
+        run: |
+          set -o pipefail
+          test -f vibe/show_runtime_manifest.json
+          output="$RUNNER_TEMP/memory-upgrade-packaged.log"
+          pytest tests/test_memory_upgrade_packaged.py -m integration -v -ra | tee "$output"
+          if grep -Eq '(^|[[:space:]])[0-9]+ skipped|SKIPPED' "$output"; then
+            echo "Packaged Memory upgrade smoke must not skip."
+            exit 1
+          fi
+
       - name: Run install and upgrade regressions
         run: |
           docker info
