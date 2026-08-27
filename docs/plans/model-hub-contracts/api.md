@@ -59,9 +59,10 @@ compatibility path.
 | POST `/api/models/runtime/start` | → `{runtime: RuntimeDependency}` | Persists `enabled: true` and explicitly starts the managed engine. Service startup restores this intent. Uses the existing mutation authentication and CSRF guards; status reads never start it. |
 | POST `/api/models/runtime/stop` | → `{runtime: RuntimeDependency}` | Explicitly stops the managed engine, persists `enabled: false`, and returns it to `not_started`. The mutation is rejected with `runtime_in_use` while any Agent backend is configured for Hub mode, so disabling the shared runtime cannot strand a configured route. |
 
-The removed global route `PUT /api/models/priority` has no replacement. Backend Source
-order is explicit configuration through the sources route; exact per-model order is
-explicit configuration through the chain route.
+The removed product-global route `PUT /api/models/priority` has no replacement. Backend
+Source order has two explicit operations: the sources route stores it without touching
+Routes, while `chains/reorder` can store the same order and apply it to existing Routes
+atomically. Exact per-model order is explicit configuration through the chain route.
 
 ## Unsaved Source observation
 
@@ -353,7 +354,8 @@ its process availability but carries `in_current_model_chain: null`.
 
 ## Per-backend source order
 
-The request is total:
+The storage-only PUT requires, and the atomic reorder POST may accept, the same total
+order body:
 
 ```json
 {"order": ["src_anthkey01", "src_relay9c1x"]}
@@ -365,10 +367,10 @@ The request is total:
 - Add Source and native import invoke `placement-v1` once and persist its chosen
   position. Refresh, restart, health changes, and turns never recompute this order.
 
-The whole-order PUT is intentionally outside the §4.5 Source-mutation envelope matrix.
+The storage-only PUT is intentionally outside the §4.5 Source-mutation envelope matrix.
 It stores only `sources.order`, never reads or writes a Route chain, and therefore never
-returns a guarded `409`. This is the G-9 tombstone: adding a guard branch would imply an
-order save is allowed to mutate supply, which violates S-1.
+returns a guarded `409`. This is the G-9 tombstone: adding a guard branch would imply
+that this storage-only route can remove supply, which violates S-1.
 
 `POST /api/models/agents/<backend>/chains/reorder` is the only server-side post-creation
 operation that implicitly reads and applies the stored Source order to existing Routes.

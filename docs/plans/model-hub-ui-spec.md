@@ -1989,7 +1989,8 @@ under an explicit user gesture and produces only that one local draft: it never 
 placement or matching. The per-model write body remains only explicit `hops`; Source order
 is neither sent nor interpreted by that route. This control never calls
 `POST /api/models/agents/<backend>/chains/reorder`, because that route changes every
-stored Route and no frame here registers that broader action (G-13).
+stored Route. Frame 03's global-priority save owns that broader action (G-13); this
+control only sorts the one route draft held by frame 02.
 
 **Save sequencing is total** `[contract]` `[derived]`:
 
