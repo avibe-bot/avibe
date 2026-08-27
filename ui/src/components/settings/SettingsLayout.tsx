@@ -305,7 +305,7 @@ export const SettingsLayout: React.FC = () => {
             <NavLink
               to={mobileBackTarget}
               aria-label={mobileBackLabel}
-              className="-ml-2 grid size-10 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-foreground/[0.05] hover:text-foreground md:hidden"
+              className="-ml-2 grid size-11 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-foreground/[0.05] hover:text-foreground md:hidden"
             >
               <ChevronLeft className="size-5" />
             </NavLink>

@@ -309,7 +309,7 @@ describe('SettingsLayout', () => {
     expect(screen.getByRole('link', { name: 'settings.sections.replies' }).className).toContain('min-h-11');
     const back = screen.getByRole('link', { name: 'settings.backToWorkbench' });
     expect(back.getAttribute('href')).toBe('/');
-    expect(back.className).toContain('size-10');
+    expect(back.className).toContain('size-11');
     expect(screen.getByTestId('version-badge').parentElement?.className).toContain('md:hidden');
   });
 
