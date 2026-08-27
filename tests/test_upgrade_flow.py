@@ -1021,6 +1021,30 @@ def test_do_upgrade_uses_upgrade_plan_env_and_restarts(monkeypatch):
     }
 
 
+def test_do_upgrade_blocks_when_memory_rollback_metadata_is_unreadable(monkeypatch):
+    message = "The installed avibe-memory version cannot be determined for safe rollback"
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/custom/bin/vibe")
+    monkeypatch.setattr(api, "get_version_info", lambda: {"latest": "3.0.15"})
+    monkeypatch.setattr(
+        api,
+        "build_upgrade_plan",
+        lambda **kwargs: (_ for _ in ()).throw(MemoryRollbackTargetUnavailableError(message)),
+    )
+    monkeypatch.setattr(
+        api,
+        "execute_upgrade_plan",
+        lambda *args, **kwargs: pytest.fail("upgrade must not mutate without an exact rollback target"),
+    )
+
+    assert api.do_upgrade(auto_restart=True) == {
+        "ok": False,
+        "message": "memory_package_metadata_unreadable",
+        "output": message,
+        "reason": "memory_package_metadata_unreadable",
+        "restarting": False,
+    }
+
+
 def test_do_upgrade_auto_restart_does_not_block_on_runtime_prepare(monkeypatch):
     plan = UpgradePlan(
         command=["/usr/local/bin/uv", "tool", "install", "avibe-os", "--upgrade"],
@@ -1276,6 +1300,27 @@ def test_cmd_upgrade_uses_upgrade_plan_env(monkeypatch):
         # See the do_upgrade case: the restart is handed the install to fall back to.
         "rollback_to": LEGACY_INSTALL,
     }
+
+
+def test_cmd_upgrade_blocks_when_memory_rollback_metadata_is_unreadable(monkeypatch, capsys):
+    message = "The installed avibe-memory version cannot be determined for safe rollback"
+    monkeypatch.setattr(cli, "get_latest_version", lambda: {"error": None, "has_update": True, "latest": "3.0.15"})
+    monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/custom/bin/vibe")
+    monkeypatch.setattr(
+        cli,
+        "build_upgrade_plan",
+        lambda **kwargs: (_ for _ in ()).throw(MemoryRollbackTargetUnavailableError(message)),
+    )
+    monkeypatch.setattr(
+        cli,
+        "execute_upgrade_plan",
+        lambda *args, **kwargs: pytest.fail("upgrade must not mutate without an exact rollback target"),
+    )
+
+    assert cli.cmd_upgrade() == 1
+    output = capsys.readouterr().out
+    assert f"Upgrade failed: {message}" in output
+    assert "Traceback" not in output
 
 
 def test_cmd_upgrade_running_runtime_honors_show_runtime_skip_for_restart(monkeypatch):

@@ -808,7 +808,12 @@ class RollbackTarget(NamedTuple):
 
 
 class MemoryRollbackTargetUnavailableError(RuntimeError):
-    """The installed Memory package cannot be pinned for a safe rollback."""
+    """The installed Memory package cannot be pinned for a safe rollback.
+
+    Raised before mutation when the current package shape cannot be represented
+    by an exact rollback target. Upgrade and repair entrypoints must map this to
+    their normal structured failure instead of letting it escape to the user.
+    """
 
 
 def _names_a_published_release(version: str) -> bool:

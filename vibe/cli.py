@@ -74,6 +74,7 @@ from vibe.upgrade import (
     execute_upgrade_plan,
     get_latest_version_info,
     get_safe_cwd,
+    MemoryRollbackTargetUnavailableError,
     should_skip_show_runtime_prepare,
 )
 from storage.db import create_sqlite_engine
@@ -14415,6 +14416,9 @@ def cmd_upgrade():
             memory_enabled=configured_memory_enabled(),
             target_version=info.get("latest"),
         )
+    except MemoryRollbackTargetUnavailableError as exc:
+        print(f"\033[31mUpgrade failed: {exc}\033[0m")
+        return 1
     except ValueError as exc:
         print(f"\033[31mUpgrade failed: {exc}\033[0m")
         return 1

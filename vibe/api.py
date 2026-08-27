@@ -6141,6 +6141,14 @@ def do_upgrade(auto_restart: bool = True) -> dict:
             memory_enabled=configured_memory_enabled(),
             target_version=get_version_info().get("latest"),
         )
+    except MemoryRollbackTargetUnavailableError as exc:
+        return {
+            "ok": False,
+            "message": "memory_package_metadata_unreadable",
+            "output": str(exc),
+            "reason": "memory_package_metadata_unreadable",
+            "restarting": False,
+        }
     except ValueError as exc:
         return {"ok": False, "message": "Upgrade failed.", "output": str(exc), "restarting": False}
     runtime_was_running = _runtime_process_was_running()
