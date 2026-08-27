@@ -281,6 +281,7 @@
       "platforms": "Platforms",
       "platformConnections": "Platform Connections",
       "remoteAccess": "Remote Access",
+      "shortcuts": "Shortcuts",
       "service": "Service",
       "dependencies": "Dependencies",
       "diagnostics": "Diagnostics & Logs",
@@ -289,6 +290,58 @@
     "navigationLabel": "Settings sections",
     "backToSections": "All settings",
     "close": "Close Settings",
+    "shortcuts": {
+      "title": "Shortcuts",
+      "subtitle": "Choose the keyboard commands you use most often in Chat and Show Pages.",
+      "panelTitle": "Action shortcuts",
+      "panelDescription": "Changes apply immediately in this browser.",
+      "voiceInput": {
+        "title": "Chat voice input",
+        "description": "Start dictation in the chat composer, then finish it with the same shortcut."
+      },
+      "showPageAnnotation": {
+        "title": "Show Page annotation mode",
+        "description": "Enter annotation mode on the Show Page in front."
+      },
+      "change": "Change {{action}} shortcut",
+      "pressKeys": "Press shortcut",
+      "escapeToCancel": "Esc cancels",
+      "modifierRequired": "Include Option, Alt, Command, or Control.",
+      "reserved": "This shortcut is already used by Avibe.",
+      "conflict": "Already used by {{action}}.",
+      "saveFailed": "Couldn't save the shortcut in this browser.",
+      "modifierLabels": {
+        "control": "Control",
+        "option": "Option",
+        "command": "Command",
+        "ctrl": "Ctrl",
+        "alt": "Alt",
+        "shift": "Shift",
+        "meta": "Meta"
+      },
+      "keyLabels": {
+        "backspace": "Backspace",
+        "capsLock": "Caps Lock",
+        "contextMenu": "Context Menu",
+        "delete": "Delete",
+        "end": "End",
+        "enter": "Enter",
+        "escape": "Esc",
+        "home": "Home",
+        "insert": "Insert",
+        "numLock": "Num Lock",
+        "numpad": "Numpad {{key}}",
+        "numpadEnter": "Numpad Enter",
+        "pageDown": "Page Down",
+        "pageUp": "Page Up",
+        "pause": "Pause",
+        "printScreen": "Print Screen",
+        "scrollLock": "Scroll Lock",
+        "space": "Space",
+        "tab": "Tab"
+      },
+      "reset": "Restore defaults"
+    },
     "diagnosticsTab": "Diagnostics",
     "logsTab": "Logs",
     "diagnosticsNavigationLabel": "Diagnostics and logs",
@@ -751,7 +804,8 @@
           }
         },
         "action": {
-          "switchToGateway": "Switch to gateway"
+          "switchToGateway": "Switch to gateway",
+          "refreshAgents": "Detect Agent backends again"
         },
         "benefits": {
           "title": "Switch to the gateway and you gain three things",
@@ -1403,6 +1457,8 @@
             "accountBanned": "Account restricted"
           },
           "error": "Error",
+          "standbyHintLabel": "What this status means",
+          "standbyHint": "This source is healthy. It reads as in use once a backend in Gateway mode serves a route through it.",
           "listUpdated": "· model list updated {{time}}"
         },
         "summary_one": "{{host}} · {{count}} model",
@@ -1488,7 +1544,9 @@
           "addFirst": "+ Add tier",
           "add": "+ Tier",
           "inputHint": "Enter to add · any text",
-          "remove": "Remove {{tier}}"
+          "remove": "Remove {{tier}}",
+          "suggest": "Add {{tier}}",
+          "note": "Tiers are sent exactly as typed. A model with no tiers is still routable — its requests are sent without the effort parameter."
         },
         "addRow": {
           "hint": "Use this when a model is not discoverable, or when you only want one of them"
@@ -3683,6 +3741,7 @@
         "closeAnnotation": "Turn off annotation",
         "modeTitle": "Annotation mode",
         "rememberHint": "Remembers last choice",
+        "shortcutHint": "Press {{shortcut}} to enter annotation mode; press Esc to exit",
         "unavailable": "Annotation not available yet"
       },
       "title": "Show Page",
@@ -3821,6 +3880,7 @@
       "stop": "Stop",
       "attach": "Attach files",
       "voice": "Voice input",
+      "voiceShortcutHint": "Press {{shortcut}} for voice input, press it again to finish, or press Esc to cancel",
       "stopRecording": "Finish recording",
       "cancelRecording": "Cancel recording",
       "voicePreview": "Live transcription preview",
@@ -4511,8 +4571,8 @@
       "loading": "Loading profile…",
       "empty": "No profile yet — keep chatting, then check back once messages have been processed.",
       "loadFailed": "Couldn't load your profile.",
-      "partial": "One profile source could not be loaded. The profile shown here may be incomplete.",
-      "warningUnavailable": "A profile isn't available from this provider yet. This is expected, not an error — try Search instead, or check back later.",
+      "partial": "Some profile information could not be loaded. Refresh to try again.",
+      "warningEmpty": "Your profile hasn't been generated yet. Keep chatting with your Agent; once there's more content, Avibe will try to generate it. You can also search your existing memories.",
       "disabledHint": "Enable Memory to view your profile.",
       "refresh": "Refresh",
       "summary": "Summary",

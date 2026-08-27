@@ -973,19 +973,24 @@
       "unsupportedSource": "Show Runtime 准备失败：{reason}。请移除 VIBE_SHOW_RUNTIME_SOURCE 以使用随 Avibe 发布的运行时，或将 VIBE_SHOW_RUNTIME_BIN 指向你自行构建的运行时。"
     },
     "clean": {
+      "commandHelp": "清理过期的 Show、Git、Memory 和 Model Hub 运行时安装与归档；任一清理失败时以非零状态退出。",
       "dryRunHelp": "\u4ec5\u62a5\u544a\u53ef\u6e05\u7406\u7684\u5f52\u6863\u4e0e\u7f13\u5b58\u6761\u76ee\uff0c\u4e0d\u5220\u9664\u4efb\u4f55\u5185\u5bb9\u3002",
       "wouldRemoveItems": "\u5c06\u6e05\u7406 {count} \u9879 Show Runtime \u7f13\u5b58\u3002",
       "wouldRemoveArchives": "\u5c06\u6e05\u7406 {count} \u4e2a\u5df2\u4e0b\u8f7d\u7684 Show Runtime \u5f52\u6863\uff08{size}\uff09\u3002",
-      "wouldRemoveGit": "\u5c06\u6e05\u7406 {count} \u9879 Git Runtime \u7f13\u5b58\u3002",
+      "consumerWouldRemoveItems": "将清理 {count} 项 {consumer} 缓存。",
+      "consumerWouldRemoveArchives": "将清理 {count} 个已下载的 {consumer} 归档（{size}）。",
       "removedItems": "\u5df2\u6e05\u7406 {count} \u9879 Show Runtime \u7f13\u5b58\u3002",
       "removedArchives": "\u5df2\u6e05\u7406 {count} \u4e2a\u5df2\u4e0b\u8f7d\u7684 Show Runtime \u5f52\u6863\uff08{size}\uff09\u3002",
-      "removedGit": "\u5df2\u6e05\u7406 {count} \u9879 Git Runtime \u7f13\u5b58\u3002",
+      "consumerRemovedItems": "已清理 {count} 项 {consumer} 缓存。",
+      "consumerRemovedArchives": "已清理 {count} 个已下载的 {consumer} 归档（{size}）。",
+      "consumerPreviewFailed": "{consumer} 缓存预览失败（{reason}）；可能仍有过期条目。",
+      "consumerFailed": "{consumer} 清理失败（{reason}）；过期条目仍保留。",
+      "consumerArchivesPartial": "{consumer} 归档清理仅部分完成（{reason}）；有 {failed} 个归档无法清理。",
+      "consumerArchivesSkipped": "{consumer} 归档清理已跳过（{reason}）；可能仍有过期归档。",
       "partiallyRemoved": " \u6709 {failed} \u4e2a\u5f52\u6863\u65e0\u6cd5\u5220\u9664\uff1b\u8bf7\u68c0\u67e5\u6743\u9650\u4e0e Avibe \u65e5\u5fd7\u3002",
       "skipped": "\u5f52\u6863\u6e05\u7406\u5df2\u8df3\u8fc7\uff08{reason}\uff09\uff1b\u53ef\u80fd\u4ecd\u6709\u8fc7\u671f\u5f52\u6863\u3002\u8bf7\u5728\u6b63\u5728\u8fd0\u884c\u7684\u5b89\u88c5\u6216\u6e05\u7406\u7ed3\u675f\u540e\u91cd\u8bd5\u3002",
       "removalFailed": "\u6709 {failed} \u4e2a\u5f52\u6863\u65e0\u6cd5\u5220\u9664\uff1b\u8fc7\u671f\u5f52\u6863\u4ecd\u4fdd\u7559\u3002\u8bf7\u68c0\u67e5\u8fd0\u884c\u76ee\u5f55\u6743\u9650\u4e0e Avibe \u65e5\u5fd7\u3002",
-      "skippedInspection": "\u5f52\u6863\u6e05\u7406\u65e0\u6cd5\u68c0\u67e5\u7f13\u5b58\uff08{reason}\uff09\uff1b\u53ef\u80fd\u4ecd\u6709\u8fc7\u671f\u5f52\u6863\u3002\u8bf7\u68c0\u67e5\u8fd0\u884c\u76ee\u5f55\u6743\u9650\u4e0e Avibe \u65e5\u5fd7\u3002",
-      "gitSkipped": "Git Runtime \u6e05\u7406\u5df2\u8df3\u8fc7\uff08{reason}\uff09\uff1b\u8fc7\u671f\u6761\u76ee\u4ecd\u4fdd\u7559\u3002",
-      "gitSkippedPreview": "Git Runtime \u7f13\u5b58\u9884\u89c8\u5df2\u8df3\u8fc7\uff08{reason}\uff09\uff1b\u53ef\u80fd\u4ecd\u6709\u8fc7\u671f\u6761\u76ee\u3002"
+      "skippedInspection": "\u5f52\u6863\u6e05\u7406\u65e0\u6cd5\u68c0\u67e5\u7f13\u5b58\uff08{reason}\uff09\uff1b\u53ef\u80fd\u4ecd\u6709\u8fc7\u671f\u5f52\u6863\u3002\u8bf7\u68c0\u67e5\u8fd0\u884c\u76ee\u5f55\u6743\u9650\u4e0e Avibe \u65e5\u5fd7\u3002"
     },
     "doctor": {
       "archiveCacheReclaimable": "Show Runtime \u5f52\u6863\u7f13\u5b58\u4e2d\u6709 {count} \u4e2a\u53ef\u56de\u6536\u5f52\u6863\uff08{size}\uff09\uff1b\u5f53\u524d\u4e0e\u56de\u6eda\u5f52\u6863\u4f1a\u88ab\u4fdd\u7559\u3002",

@@ -2686,6 +2686,7 @@ export const ChatPage: React.FC = () => {
       <div
         ref={chatSurfaceRef}
         className="fixed inset-0 z-40 flex flex-col bg-background pt-[env(safe-area-inset-top)] md:relative md:inset-auto md:z-auto md:-mx-10 md:-my-8 md:h-[var(--app-vvh)] md:bg-transparent md:pt-0"
+        onKeyDown={annotation.handleShortcutKeyDown}
         onPointerDownCapture={focusCanvas}
         {...fileDropHandlers}
       >

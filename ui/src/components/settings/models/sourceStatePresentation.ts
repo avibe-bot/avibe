@@ -5,6 +5,14 @@ export type SourceStateSurface = 'card' | 'detail';
 export type SourceStatePresentation = {
   key: string | null;
   values?: Record<string, string>;
+  /**
+   * Copy that explains the label in place, for a reading whose plain meaning is
+   * not the meaning a first-time user takes from it. Both halves are named here
+   * because the affordance carrying them is a control: the body is what it says
+   * and the label is what it is called, and neither is a string a consumer may
+   * invent at the keyboard.
+   */
+  hint?: { labelKey: string; bodyKey: string };
   textClass: string;
   dotClass: string;
 };
@@ -21,6 +29,24 @@ export const activeSourceAdoption = (
   ? adoptedBy.filter(({ backend }) => activeBackends.has(backend))
   : adoptedBy;
 
+/**
+ * A healthy source that no route currently reaches. It is the state a source
+ * lands in the moment it is added, and 备用 next to a key just created reads as
+ * "the add failed" — so the authority that names the state also names the
+ * sentence that explains it, and every surface rendering the label can reach
+ * the same one. `active` without an adopting backend is the same reading and
+ * shares this presentation rather than restating it.
+ */
+const STANDBY: SourceStatePresentation = {
+  key: 'settings.models.upstream.state.standby',
+  hint: {
+    labelKey: 'settings.models.sourceDetail.status.standbyHintLabel',
+    bodyKey: 'settings.models.sourceDetail.status.standbyHint',
+  },
+  textClass: 'text-muted',
+  dotClass: 'bg-muted',
+};
+
 const NEEDS_ACTION_KEY: Readonly<Record<NeedsActionDetailKey, string>> = {
   'models.source.needs_action.oauth_expired': 'settings.models.sourceDetail.status.needsAction.oauthExpired',
   'models.source.needs_action.balance_exhausted': 'settings.models.sourceDetail.status.needsAction.balanceExhausted',
@@ -31,16 +57,8 @@ const NEEDS_ACTION_KEY: Readonly<Record<NeedsActionDetailKey, string>> = {
 type Rule = (state: SourceState, surface: SourceStateSurface, locale: string, now: number) => SourceStatePresentation;
 
 const STATUS_RULES: Readonly<Record<SourceStatus, Rule>> = {
-  active: () => ({
-    key: 'settings.models.upstream.state.standby',
-    textClass: 'text-muted',
-    dotClass: 'bg-muted',
-  }),
-  standby: () => ({
-    key: 'settings.models.upstream.state.standby',
-    textClass: 'text-muted',
-    dotClass: 'bg-muted',
-  }),
+  active: () => STANDBY,
+  standby: () => STANDBY,
   cooldown: (state, _surface, locale, now) => {
     const retryAt = state.retry_at ? new Date(state.retry_at).getTime() : Number.NaN;
     const remainingMinutes = Math.ceil((retryAt - now) / 60_000);

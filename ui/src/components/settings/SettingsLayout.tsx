@@ -8,6 +8,7 @@ import {
   Cpu,
   Globe,
   Hash,
+  Keyboard,
   MessageCircle,
   MessageSquare,
   Package,
@@ -89,6 +90,7 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
   {
     labelKey: 'settings.groups.system',
     items: [
+      { path: '/settings/shortcuts', labelKey: 'settings.sections.shortcuts', icon: Keyboard },
       { path: '/settings/service', labelKey: 'settings.sections.service', icon: Server, ownerOnly: true },
       { path: '/settings/dependencies', labelKey: 'settings.sections.dependencies', icon: Package, ownerOnly: true },
       { path: '/settings/diagnostics', labelKey: 'settings.sections.diagnostics', icon: Stethoscope, ownerOnly: true },
@@ -273,7 +275,7 @@ export const SettingsLayout: React.FC = () => {
   }, [atRoot, capabilities.can_manage_instance, isDesktop, navigate]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-background md:h-auto md:min-h-screen">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background md:h-[var(--app-shell-h)]">
       <header className="flex h-[calc(3.5rem+env(safe-area-inset-top))] shrink-0 items-center justify-between border-b border-border bg-surface px-4 pt-[env(safe-area-inset-top)] md:h-14 md:pt-0">
         <div className="flex min-w-0 items-center gap-2 text-[13px] font-semibold text-foreground">
           <Settings className="size-4 text-mint-ink" />

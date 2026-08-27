@@ -132,17 +132,19 @@ named revision, not a promise about a future implementation.
 | Tmux byte phases | Source-leaf verification occurs before preparation; macOS ad-hoc signing can change the installed binary bytes afterward. | `2c6fcbe88` |
 | **Step 1:** Online unrelated-platform edit | `_manifest_install_dir()` hashes the whole manifest digest with the selected archive digest. An online manifest edit for another platform therefore selects a new directory even when this host's archive bytes are unchanged. | `2c6fcbe88` |
 | **Step 1:** Model-hub platform alias | Model-hub maps host `linux-x64` to released artifact label `linux-amd64`; its released pointer, metadata, and claim can therefore carry a label different from the host tag. | `2c6fcbe88` |
-| Downloads namespace | Remote manifest caches use `downloads/manifest-<digest>.json` beside archives, so the namespace mixes durable manifest facts with disposable archive bytes. | `2c6fcbe88` |
+| **Step 4:** Downloads namespace | Remote manifest caches use `downloads/manifest-<digest>.json` beside archives, so the namespace mixes durable manifest facts with disposable archive bytes. | `2c6fcbe88` |
+| **Step 4:** Retention with a readable pointer | Shared and Show both protect the pointer's install unconditionally and rank the remaining installs by mtime, so a requested count of zero, one, or two preserves the current install plus that many previous installs whatever the current install's own mtime rank. Both bound the count by what exists rather than demanding it: retention stops at `kept_previous < keep_previous`, so a request for two against a single eligible previous install keeps that one and reports success. Show protects one thing more: `_install_dir_overlaps_protected()` matches ancestors and descendants of a protected path, so a legacy install root that contains the current fingerprint directory survives a requested count of zero and is not one of the counted previous installs. Shared protection is exact-membership only, and its consumers' versioned layouts do not nest, so no overlapping install exists on this layer to protect. | `343a6b4a50`; hermetic probes 2026-08-24; `test_show_runtime_clean_skips_legacy_parent_of_current_fingerprint` |
+| **Step 4:** Retention after pointer inspection failure | Shared `_current_install_dir()` and Show `_current_manifest_install_dir()` both catch every pointer read/parse/path exception and return `None`, which contributes nothing to the protected set and leaves the live install ranked by mtime alone. With a corrupt, unreadable, or absent pointer both managers plan the live install for deletion at a requested count of zero, and at every requested count once the live install is no longer among the newest that count retains; each case still reports success. Show's archive pass in the same call refuses only for a *present* pointer it cannot read or parse, raising `current.json is unreadable`; an absent pointer is not a refusal there, because `_protected_archive_sha256s()` catches `FileNotFoundError` and keeps collecting protected digests from the retained installs' metadata. | `343a6b4a50`; hermetic probes 2026-08-24 |
+| **Step 4:** Downloads reclamation | Shared cleanup enumerates staging directories and versioned installs only. At a requested count of zero, a real clean reclaims no bytes from `downloads/` — a superseded archive, the current archive, an orphaned `.tmp` staging file, and a manifest cache all survive — and the result carries only `ok` and `removed`, reporting neither those artifacts nor any size. Show already reclaims content-addressed archives against a protected digest set and reports counts and bytes. | `343a6b4a50`; hermetic probe 2026-08-24 |
+| **Step 4:** Removal failure reporting | Shared `_clean_locked()` deletes each staging directory and versioned install with `shutil.rmtree(..., ignore_errors=True)` and appends the path to `removed` unconditionally, then returns `ok: True`, so a removal blocked by permissions or an in-use file is reported as reclaimed. Show's archive pass instead unlinks each file under its own `except OSError`, increments `failed_count`, and adds to `removed_bytes` only after a successful unlink. In a real pass its outcome is three-way rather than binary: `cleaned` requires a zero `failed_count`, a nonzero `failed_count` with at least one successful unlink is `partial`, and a nonzero `failed_count` with no successful unlink is `skipped`; the latter two both carry `skipped_reason: archive_removal_failed`. The label alone does not identify a failure, because the dry-run branch reuses `partial` to mean only that reclaimable candidates exist, with `failed_count: 0` and no `skipped_reason`. Within this archive report a failure is a present `skipped_reason` or a nonzero `failed_count`; that vocabulary is Show's own and is not the cross-runtime failure test, since shared `clean()` reports its failures as `ok: False` with a `reason` and neither of those fields. | `343a6b4a50` |
+| **Step 4:** Archive protection for retained installs | Show's `_protected_archive_sha256s()` protects three kinds of input, and its own docstring names only the first two: the `current.json` pointer, every remaining install's metadata, and — omitted there but present in the body — the configured `archive_path` when that file is content-addressed, which is how a direct-archive source persisting no install metadata keeps its own input. A retained install whose metadata is unreadable or malformed raises `_ArchiveMetadataError` rather than leaving that archive unprotected, and an uninspectable versions tree fails closed for the same reason. Shared cleanup reclaims no archives at all today, so it has no protected set to lose and none to inherit. | `343a6b4a50`; `test_configured_prebuilt_archive_is_protected` |
+| **Step 4:** Cleanup safety wider than the protected set | Show's cleanup suite proves archive safety through three mechanisms, only one of which is digest membership. `test_archive_cleanup_never_touches_unknown_symlink_or_tmp_files` survives by candidate filtering: a symlink, a directory, a `.tmp` file, a non-content-addressed name, and a trailing-newline name are never candidates, so no protected set is consulted for them. `test_recent_unprotected_archive_survives_mtime_guard` preserves a deliberately *unprotected* archive through a maturity window, because another process may have finalized it moments ago and not yet written install metadata. Neither outcome can be expressed as an input admitted to a digest set. | `fe0170c70`; both named tests |
+| **Step 4:** Post-install cleanup lineage coverage | All three cases driving `_clean_after_managed_install()` were read: the first constructs the manager with no `manifest_path`, so every install carries the packaged lineage; the second retags all three installs to one custom manifest; the third uses two custom manifests, which both collapse into `_CUSTOM_MANIFEST_LINEAGE` and are ranked together. No case places a packaged and a custom lineage on one disk, so a successor that ranks installs by mtime across lineages passes all three while deleting the alternate lineage of a user who switches manifests. | `fe0170c70`; the three `test_clean_after_*` cases at `tests/test_show_runtime_archive_cleanup.py:160-239` |
+| **Step 4:** Archive cache is name-addressed | `ManagedRuntimeManager._resolve_manifest_archive()` both reads and writes `downloads/<archive.name>`, so every install this layer has already performed cached its archive under the manifest's own filename rather than its digest. A successor adopting Show's content-addressed archive layout looks for a digest-named file, misses, and on an offline host reports `archive_unavailable_offline` with the correct bytes present on disk; preserving `manifest-*.json` does not help, because it is the archive that becomes undiscoverable. A case for this reads a cache directory produced by the pre-change code path, not one laid out by hand. | `fe0170c70` |
 | Inspection versus absence | Shared versions-directory preview preserves traversal errors instead of treating them as proof of no install; Show status can still collapse a raised inspection into absent at its consumer boundary. | `2c6fcbe88` |
 | **Step 3:** Released Show links | Each v3.0.13 Darwin/Linux archive has 16 symlinks and one esbuild hard link; the four Unix archives have nine forward symlinks total, prior-target hard links, and no finally dangling symlink. Windows archives have no links. | `v3.0.13` manifests and archives; measured 2026-08-23 |
 | **Step 3:** Extractor behavior | Shared stops at the first link member. Show and tmux accept the benign regular/symlink/hard-link probe and raise on an escaping `linkname`. | `2c6fcbe88`; hermetic probe 2026-08-23 |
 | **Step 3:** Filter capability | The project supports Python 3.10+. Show capability-detects `filter="data"`; shared and tmux use a Python 3.12 version gate even though the filter is backported to 3.10.12 and 3.11.4. | `2c6fcbe88`; Python docs checked 2026-08-23 |
-
-### Measured Backlog Outside Step 1
-
-| Backlog item | Measured behavior | Unmeasured boundary | Measured at |
-| --- | --- | --- | --- |
-| Cleanup protection after pointer inspection failure | `_current_install_dir()` catches every pointer read/parse/path exception and returns `None`; that result feeds the protected set before version candidates reach `shutil.rmtree()`. This code is byte-identical on the measured baseline and the Step 1 implementation head. | The effective `keep_previous` value and the resulting deletion set were not measured; severity and remediation remain open pending that experiment. | `2c6fcbe88` |
 
 ## Step 1 Executable Acceptance
 
@@ -241,11 +243,71 @@ fallback and no explicit final-tree ownership or POSIX-mode normalization.
 installed versions, protected rollback state, and cleanup reporting under the
 Step 2 guard, exposed through `vibe runtime clean` for every on-layer consumer.
 
-**Gate:** For requested retention counts of zero, one, and more than one, dry-run
-and real cleanup preserve the current install plus exactly that many eligible
-previous installs. Stale owned artifacts become reclaimable, manifest-cache
-facts remain usable offline, and cleanup failure does not overturn a committed
-install; any git/Memory/model-hub loss stops rollout for that dependency.
+**Deliverable:** shared retention and archive reclamation for the on-layer
+consumers, exposed through `vibe runtime clean`, which gains Memory and model-hub
+cleanup beside the git pass and the Show pass it already runs.
+
+**Gate:** Every marked Step 4 census row has an executable case, plus every case in
+`tests/test_show_runtime_archive_cleanup.py` that a shared successor takes over,
+passing unweakened. Both are artifacts that already exist — measured rows with
+citations, and 51 cases holding behavior the shared layer must not lose — and this
+contract deliberately does not restate what they assert. The terseness is the
+result, not an omission: this section's review history is a record of restatements
+drifting from the behavior they copied while the direction below drew no findings
+at all. The suite is necessary and not sufficient, and the three marked rows naming
+its own coverage gaps are in the census above.
+
+What the step must not do is stated as outcomes, which is what this document can
+hold without drifting. Any on-layer consumer's loss stops rollout for that
+dependency. Where a bound stays imprecise, cleanup errs toward not deleting: an
+uncleaned directory costs disk space, while a deleted live install costs a
+redownload the user cannot undo. A cleanup reporting success while a removal did
+not happen, and a command exiting zero while a runtime it invoked failed, are both
+defects of this step whatever field carried the signal.
+
+**The one behavioral ruling this step makes** is on the protected set, because the
+census row above records both managers treating an unreadable pointer as though
+nothing were current. A pointer that is present but does not resolve to a confined
+current install is an inspection failure: cleanup plans no deletion and reports
+that failure instead of reporting success. Only a genuinely absent pointer means
+nothing claims to be current. Protection of the live install follows from this
+ruling and never from its mtime rank, so a requested retention count of zero
+protects it as strongly as any other count. Which pointer shapes fail inspection
+is the implementation's to enumerate and test, not this contract's to list.
+
+**Deferred, not dropped: automatic post-install retention.** This step delivers
+the command, so the shared `ensure()` gaining its own cleanup call is a separate
+decision and not a gate item here. That defers the work; it does not leave the
+behavior ownerless. Show runs `_clean_after_managed_install()` after every
+successful managed install today, and this contract does not enumerate what that
+method guarantees — its properties are held by
+`tests/test_show_runtime_archive_cleanup.py`, which is where the Step 6 successor
+must prove it inherited them. Step 6 deletes the method with the rest of Show's
+parallel installer, so the obligation to place automatic post-install cleanup on
+the shared layer transfers to the Step 6 gate rather than expiring here.
+
+**Sequencing within the step:** the protected-set correction lands before any
+reclamation is added, because reclamation widens what an empty protected set can
+delete.
+
+Show carries the same pointer-inspection defect today and is not patched
+separately for it: Step 6 deletes the Show cleanup that holds it, so a Show-side
+fix would be discarded at cutover, and the exposure until then is a redownload
+of a re-obtainable runtime behind a damaged pointer. Show's archive pass is the
+precedent the shared ruling adopts rather than a new policy.
+
+**Retention here is bounded by count, not by reference, and this step does not
+change that.** `show-runtime-availability.md` records that a cached
+`_managed_command` can still name an install directory after the pointer
+advances, that the runtime `require()`s modules lazily for its whole lifetime,
+and that `keep_previous` therefore bounds retention by count rather than by
+reference; W6 owns closing it. Show's own cleanup carries the identical count
+bound today, so putting Show on this layer at Step 5 neither closes nor widens
+the exposure, and no gate above should be read as closing it. The one bound this
+step does owe is negative: the reclamation it adds targets archives under
+`downloads/` and `install-*` staging directories, which no handed-out command
+names, so it must not extend the exposure from install directories to newly
+reclaimed bytes.
 
 ### Step 5: Cut Over Show's Manifest Provider
 
@@ -267,7 +329,30 @@ cleanup, persistence, and utility ownership while retaining product adapters.
 **Gate:** Deleted Show symbols have zero definitions and call-site hits in
 source and tests, focused suites for the four migrated consumers pass, and no
 private compatibility shim recreates a second installer; tmux remains the one
-temporary outlier.
+temporary outlier. Automatic post-install cleanup exists on the shared layer,
+inherited from Step 4, before `_clean_after_managed_install()` is deleted. Its
+acceptance is not a written property list — the first draft of this sentence named
+one property, never-fail-the-install, and thereby licensed a successor that would
+drop the manifest-lineage scoping the method also carries, letting a user who
+alternates between the packaged and a custom manifest lose the other lineage's
+installs. It is instead the existing suite: every case in
+`tests/test_show_runtime_archive_cleanup.py` that drives
+`_clean_after_managed_install()` passes against the shared successor, retargeted
+but not weakened, before the method is deleted.
+
+That binding covers the behavior and not its invocation, and today nothing covers
+the invocation: all three of those cases call the method directly, the tests that
+drive `_install_managed_runtime_locked()` assert nothing about cleanup, and no
+test anywhere proves that completing an install runs cleanup at all. Retargeting
+the three onto a shared helper would therefore pass while the post-success call
+site disappeared, and installs and archives would accumulate with nothing failing.
+So this step also owes one test that a completed install invokes the shared
+successor — either by driving a production install entrypoint and observing the
+cleanup, or by asserting the call edge in the manner
+`test_provider_install_entrypoints_converge_on_single_admission_owner` already
+uses for `_install_managed_runtime_locked`. Deleting the last caller of a
+behavior is the same defect as deleting the behavior, and neither a symbol count
+nor a retargeted unit test can see it.
 
 ### Step 7: Migrate Tmux And Enforce Sole Ownership
 
@@ -278,8 +363,13 @@ and runtime compatibility adapter.
 **Gate:** Released tmux inputs and prepared-binary tests pass through the shared
 path and the other four dependencies remain unchanged. The non-empty obsolete
 adapter-owned installer-symbol sets recorded at the Step 6 and Step 7 baselines
-have zero definitions and call-site hits; the end state has one declarative
-manifest installer owner for all five dependencies.
+have zero definitions and call-site hits. `vibe runtime clean` reaches tmux:
+the CLI branch invokes each manager by name rather than discovering on-layer
+consumers, so joining the layer does not wire the command up, and without this
+tmux versions and downloads accumulate with no way to reclaim them. Adding tmux
+to the command satisfies this; making the command enumerate on-layer consumers
+instead satisfies it and stops the next joiner from needing the same edit. The
+end state has one declarative manifest installer owner for all five dependencies.
 
 ## Measured Size And Concept Estimate
 

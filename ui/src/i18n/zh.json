@@ -281,6 +281,7 @@
       "platforms": "通讯平台",
       "platformConnections": "平台接入",
       "remoteAccess": "远程访问",
+      "shortcuts": "快捷键",
       "service": "服务",
       "dependencies": "依赖",
       "diagnostics": "诊断与日志",
@@ -289,6 +290,58 @@
     "navigationLabel": "设置分区",
     "backToSections": "全部设置",
     "close": "关闭设置",
+    "shortcuts": {
+      "title": "快捷键",
+      "subtitle": "设置你在聊天和 Show Page 中最常用的键盘操作。",
+      "panelTitle": "操作快捷键",
+      "panelDescription": "修改后会立即在当前浏览器生效。",
+      "voiceInput": {
+        "title": "Chat 聊天框语音输入",
+        "description": "在聊天框开始语音输入，再按同一快捷键完成。"
+      },
+      "showPageAnnotation": {
+        "title": "Show Page 标注模式",
+        "description": "进入当前 Show Page 的标注模式。"
+      },
+      "change": "修改{{action}}快捷键",
+      "pressKeys": "请按快捷键",
+      "escapeToCancel": "按 Esc 取消",
+      "modifierRequired": "请包含 Option、Alt、Command 或 Control。",
+      "reserved": "这个快捷键已被 Avibe 使用。",
+      "conflict": "已被{{action}}使用。",
+      "saveFailed": "无法在当前浏览器中保存快捷键。",
+      "modifierLabels": {
+        "control": "Control",
+        "option": "Option",
+        "command": "Command",
+        "ctrl": "Ctrl",
+        "alt": "Alt",
+        "shift": "Shift",
+        "meta": "Meta"
+      },
+      "keyLabels": {
+        "backspace": "退格",
+        "capsLock": "大写锁定",
+        "contextMenu": "菜单",
+        "delete": "删除",
+        "end": "行尾",
+        "enter": "回车",
+        "escape": "Esc",
+        "home": "行首",
+        "insert": "插入",
+        "numLock": "数字锁定",
+        "numpad": "数字键盘 {{key}}",
+        "numpadEnter": "数字键盘回车",
+        "pageDown": "下一页",
+        "pageUp": "上一页",
+        "pause": "暂停",
+        "printScreen": "截屏",
+        "scrollLock": "滚动锁定",
+        "space": "空格",
+        "tab": "Tab"
+      },
+      "reset": "恢复默认"
+    },
     "diagnosticsTab": "诊断",
     "logsTab": "日志",
     "diagnosticsNavigationLabel": "诊断与日志",
@@ -751,7 +804,8 @@
           }
         },
         "action": {
-          "switchToGateway": "切换到网关"
+          "switchToGateway": "切换到网关",
+          "refreshAgents": "重新检测 Agent 后端"
         },
         "benefits": {
           "title": "切换到网关，你会多出三件事",
@@ -1403,6 +1457,8 @@
             "accountBanned": "账号被限制"
           },
           "error": "异常",
+          "standbyHintLabel": "这个状态是什么意思",
+          "standbyHint": "这个来源是健康的。当网关模式下的某个后端通过它供给一条路由时，它就会显示为使用中。",
           "listUpdated": "· 型号列表更新于 {{time}}"
         },
         "summary_one": "{{host}} · {{count}} 个型号",
@@ -1488,7 +1544,9 @@
           "addFirst": "+ 添加档位",
           "add": "+ 档位",
           "inputHint": "回车添加 · 任意文本",
-          "remove": "移除 {{tier}}"
+          "remove": "移除 {{tier}}",
+          "suggest": "添加 {{tier}}",
+          "note": "档位按你输入的原样发送。没有档位的型号照样可以路由，只是请求不带 effort 参数。"
         },
         "addRow": {
           "hint": "拉取不到、或只想接入其中一个时用"
@@ -3683,6 +3741,7 @@
         "closeAnnotation": "关闭标注",
         "modeTitle": "标注模式",
         "rememberHint": "记住上次选择",
+        "shortcutHint": "按下{{shortcut}}进入标注模式，按 ESC 退出",
         "unavailable": "标注暂不可用"
       },
       "title": "Show Page",
@@ -3821,6 +3880,7 @@
       "stop": "停止",
       "attach": "添加附件",
       "voice": "语音输入",
+      "voiceShortcutHint": "按下{{shortcut}}进行语音输入，再按一下完成，按 ESC 取消",
       "stopRecording": "完成录音",
       "cancelRecording": "取消录音",
       "voicePreview": "实时转写预览",
@@ -4511,8 +4571,8 @@
       "loading": "正在加载画像…",
       "empty": "还没有画像——继续聊天，消息处理后再来看看。",
       "loadFailed": "无法加载你的画像。",
-      "partial": "有一个画像来源未能加载，当前显示的画像可能不完整。",
-      "warningUnavailable": "该提供方暂不支持画像。这是预期行为，不是错误——可以试试搜索，或稍后再来看看。",
+      "partial": "部分画像信息未能加载，请刷新重试。",
+      "warningEmpty": "画像尚未生成。继续与 Agent 对话，积累更多内容后，Avibe 会尝试为你生成画像；你也可以先搜索已有记忆。",
       "disabledHint": "启用记忆后即可查看画像。",
       "refresh": "刷新",
       "summary": "概览",

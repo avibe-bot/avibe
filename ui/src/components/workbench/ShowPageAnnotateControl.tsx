@@ -5,6 +5,7 @@ import { Camera, Check, type LucideIcon, MessageSquarePlus, MousePointerClick, X
 
 import { Button } from '../ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
+import { useActionShortcutLabel, useActionShortcuts } from '../../lib/actionShortcuts';
 import type { AnnotationMode, AnnotationState } from './useShowPageAnnotation';
 
 // Show Page annotation control rendered in the chat header (only in Show Page
@@ -75,6 +76,11 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
   ownerWindowId,
 }) => {
   const { t } = useTranslation();
+  const { showPageAnnotation: annotationShortcut } = useActionShortcuts();
+  const annotationShortcutLabel = useActionShortcutLabel(annotationShortcut);
+  const shortcutHint = t('chat.showPage.annotate.shortcutHint', {
+    shortcut: annotationShortcutLabel,
+  });
   const ready = state !== null;
   const available = state?.available === true;
   const enabled = state?.enabled === true;
@@ -197,7 +203,7 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
               className="size-7 shrink-0"
               onClick={() => onEnable()}
               aria-label={toggleLabel}
-              title={toggleLabel}
+              title={shortcutHint}
             >
               <MessageSquarePlus className="size-3.5" />
             </Button>
@@ -219,7 +225,7 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
                   : 'size-7 shrink-0',
               )}
               aria-label={toggleLabel}
-              title={toggleLabel}
+              title={enabled ? toggleLabel : shortcutHint}
             >
               <MessageSquarePlus className="size-3.5" />
             </Button>

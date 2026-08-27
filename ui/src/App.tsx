@@ -34,6 +34,7 @@ import { SettingsLogsPage } from './components/settings/SettingsLogsPage';
 import { SettingsMessagingPage } from './components/settings/SettingsMessagingPage';
 import { SettingsPlatformsPage } from './components/settings/SettingsPlatformsPage';
 import { SettingsServicePage } from './components/settings/SettingsServicePage';
+import { SettingsShortcutsPage } from './components/settings/SettingsShortcutsPage';
 import { SettingsLayout } from './components/settings/SettingsLayout';
 import { StatusProvider } from './context/StatusProvider';
 import { ApiProvider, useApi, ApiError } from './context/ApiContext';
@@ -751,6 +752,7 @@ const router = createBrowserRouter(
           <Route index element={null} />
           <Route path="appearance" element={<Navigate to="/settings/replies" replace />} />
           <Route path="account" element={<Navigate to="/settings/replies" replace />} />
+          <Route path="shortcuts" element={<SettingsShortcutsPage />} />
           <Route path="service" element={<SettingsServicePage />} />
           <Route path="platforms" element={<SettingsPlatformsPage />} />
           <Route path="platforms/groups" element={<ChannelList isPage />} />

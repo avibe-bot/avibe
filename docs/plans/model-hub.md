@@ -576,7 +576,7 @@ repairs or rewrites configuration.
 singleton local login; a `hub` hop uses the local Gateway and may be cross-vendor. The
 system never prepends native supply or chooses a model. If the requested reasoning
 effort exactly appears in the configured hop model's `reasoning_efforts`, pass that one
-value; otherwise pass `null`, with no approximation or downgrade.
+value; otherwise omit the effort field, with no approximation or downgrade.
 
 Parameter, protocol, and tool-compatibility failures are terminal without fallthrough.
 A local Gateway start, listener, or process loss at **any** request phase is terminal

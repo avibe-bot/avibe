@@ -70,6 +70,7 @@ const renderLayout = (path: string) => render(
       <Route path="/settings" element={<SettingsLayoutHarness />}>
         <Route path="models" element={<div>models-body</div>} />
         <Route path="replies" element={<div>replies-body</div>} />
+        <Route path="shortcuts" element={<div>shortcuts-body</div>} />
         <Route path="service" element={<div>service-body</div>} />
         <Route path="platforms" element={<div>platforms-body</div>} />
         <Route path="platforms/users" element={<div>users-body</div>} />
@@ -103,16 +104,21 @@ afterEach(() => {
 });
 
 describe('SettingsLayout', () => {
-  it('keeps the mobile shell constrained so the route pane owns vertical scrolling', () => {
+  it('keeps the settings rail fixed while the route pane owns vertical scrolling', () => {
     renderLayout('/settings/replies');
 
     const routePane = screen.getByText('replies-body').closest('section');
     const shell = routePane?.parentElement?.parentElement;
+    const navigation = screen.getByRole('navigation', { name: 'settings.navigationLabel' });
 
     expect(routePane?.className).toContain('overflow-y-auto');
+    expect(navigation.className).not.toContain('overflow-y-auto');
+    expect(navigation.firstElementChild?.className).toContain('overflow-y-auto');
     expect(shell?.className).toContain('h-full');
     expect(shell?.className).toContain('min-h-0');
-    expect(shell?.className).toContain('md:h-auto');
+    expect(shell?.className).toContain('overflow-hidden');
+    expect(shell?.className).toContain('md:h-[var(--app-shell-h)]');
+    expect(shell?.className).not.toContain('md:h-auto');
     expect(shell?.className).not.toContain('min-h-full');
   });
 
@@ -255,6 +261,7 @@ describe('SettingsLayout', () => {
 
     expect(screen.getByText('replies-body')).toBeTruthy();
     expect(screen.getByRole('link', { name: 'settings.sections.replies' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'settings.sections.shortcuts' })).toBeTruthy();
     expect(screen.getByRole('link', { name: 'settings.sections.access' })).toBeTruthy();
     expect(screen.queryByRole('link', { name: 'settings.sections.service' })).toBeNull();
     expect(api.getConfig).not.toHaveBeenCalled();

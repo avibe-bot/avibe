@@ -227,13 +227,19 @@ async def _post_turn(
     *,
     endpoint: str = "messages",
     stream: bool = False,
+    payload: dict[str, object] | None = None,
 ) -> tuple[int, bytes]:
     headers = {"Authorization": f"Bearer {launch.gateway_token}"}
+    request_payload = payload or {
+        "model": launch.runtime_model,
+        "messages": [],
+        "stream": stream,
+    }
     async with aiohttp.ClientSession(trust_env=False) as client:
         async with client.post(
             f"{launch.gateway_base_url}/v1/{endpoint}",
             headers=headers,
-            json={"model": launch.runtime_model, "messages": [], "stream": stream},
+            json=request_payload,
         ) as response:
             return response.status, await response.read()
 
@@ -489,6 +495,48 @@ def test_mh_res_live_003_started_stream_never_retries(tmp_path: Path) -> None:
             assert terminal_event["error"]["message"]
             assert [call[0] for call in adapter.invocations] == ["src_primary1"]
             assert store.load().sources[0].state.status == "cooldown"
+        finally:
+            await gateway.close()
+
+    asyncio.run(exercise())
+
+
+def test_mh_effort_001_undeclared_effort_is_omitted_and_turn_completes(
+    tmp_path: Path,
+) -> None:
+    """MH-EFFORT-001: an undeclared effort is omitted from the exact-hop request and the turn still completes."""
+
+    async def exercise() -> None:
+        adapter = AdapterBoundaryFake(
+            [AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"ok":true}')]
+        )
+        source = _source("src_codex001")
+        store = MemoryStore(_config(source))
+        service = _service(
+            tmp_path,
+            store,
+            adapter,
+            now=lambda: datetime(2026, 8, 26, tzinfo=timezone.utc),
+        )
+        gateway = ModelHubTurnGateway(service)
+        router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+        try:
+            launch = await router.resolve("codex", _requested_model("codex"))
+            status, body = await _post_turn(
+                launch,
+                endpoint="responses",
+                payload={
+                    "model": launch.runtime_model,
+                    "messages": [],
+                    "stream": False,
+                    "reasoning": {"effort": "low", "summary": "auto"},
+                },
+            )
+            assert status == 200
+            assert body == b'{"ok":true}'
+            assert len(adapter.requests) == 1
+            assert "reasoning_effort" not in adapter.requests[0]
+            assert adapter.requests[0]["reasoning"] == {"summary": "auto"}
         finally:
             await gateway.close()
 

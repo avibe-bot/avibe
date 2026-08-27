@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import type { ReactNode } from 'react';
@@ -98,7 +98,9 @@ vi.mock('./workbench/NewSessionSheet', () => ({
 vi.mock('./workbench/WorkbenchSidebar', () => ({
   WorkbenchSidebar: () => <div data-testid="workbench-sidebar" />,
 }));
-vi.mock('./workbench/search/SearchPalette', () => ({ SearchPalette: () => null }));
+vi.mock('./workbench/search/SearchPalette', () => ({
+  SearchPalette: ({ open }: { open: boolean }) => <div data-testid="search-palette" data-open={String(open)} />,
+}));
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: (key: string) => key,
@@ -144,6 +146,39 @@ describe('AppShell setup recovery', () => {
     expect(await screen.findByText('setup.remoteOwner.title')).toBeTruthy();
     expect(screen.getByRole('link', { name: 'setup.remoteOwner.action' }).getAttribute('href')).toBe('/settings/service');
     expect(screen.queryByTestId('wizard')).toBeNull();
+  });
+});
+
+describe('AppShell search shortcut ownership', () => {
+  it('yields a consumed search chord to the focused surface', async () => {
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route index element={<div data-testid="workbench-surface" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+    await screen.findByTestId('workbench-surface');
+
+    const consumed = new KeyboardEvent('keydown', {
+      key: 'k',
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    consumed.preventDefault();
+    act(() => window.dispatchEvent(consumed));
+    expect(screen.getByTestId('search-palette').getAttribute('data-open')).toBe('false');
+
+    act(() => window.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'k',
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    })));
+    expect(screen.getByTestId('search-palette').getAttribute('data-open')).toBe('true');
   });
 });
 

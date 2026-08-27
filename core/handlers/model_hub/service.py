@@ -584,7 +584,7 @@ class ModelHubService:
             Callable[[BackendName], list[tuple[str, Optional[str]]]]
         ] = None,
         cli_present_override: Optional[Callable[[BackendName], bool]] = None,
-        cli_presence_refresh: Optional[Callable[[], None]] = None,
+        cli_presence_refresh: Optional[Callable[[bool], None]] = None,
         now: Callable[[], datetime] = _utc_now,
     ):
         self.store = store
@@ -3433,15 +3433,14 @@ class ModelHubService:
         }
 
     def list_agents(self) -> list[dict]:
-        self.refresh_cli_presence()
         config = self.store.load()
         return [self._agent_payload(config, config.agents[backend]) for backend in ("claude", "codex", "opencode")]
 
-    def refresh_cli_presence(self) -> None:
+    def refresh_cli_presence(self, *, include_npm_global: bool = False) -> None:
         if self.cli_presence_refresh is None:
             return
         try:
-            self.cli_presence_refresh()
+            self.cli_presence_refresh(include_npm_global)
         except Exception:
             logger.warning("Model Hub CLI presence refresh failed", exc_info=True)
 
@@ -5502,7 +5501,7 @@ def create_default_service(
         Callable[[BackendName], list[tuple[str, Optional[str]]]]
     ] = None,
     cli_present_override: Optional[Callable[[BackendName], bool]] = None,
-    cli_presence_refresh: Optional[Callable[[], None]] = None,
+    cli_presence_refresh: Optional[Callable[[bool], None]] = None,
 ) -> ModelHubService:
     if adapter is None:
         from vibe.model_hub_runtime import get_model_hub_engine_adapter
