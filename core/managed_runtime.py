@@ -138,6 +138,7 @@ class ManagedRuntimeSpec:
     allow_legacy_missing_runtime_id: bool = False
     staging_prefixes: tuple[str, ...] = ("install-",)
     replace_target_on_force: bool = False
+    include_manifest_digest_in_install_fingerprint: bool = False
 
     @property
     def metadata_filename(self) -> str:
@@ -1766,7 +1767,11 @@ class ManagedRuntimeManager:
         manifest: ManagedRuntimeManifest,
         archive: ManagedRuntimeArchive,
     ) -> Path:
-        fingerprint = hashlib.sha256(f"{manifest.runtime_version}:{archive.platform}:{archive.sha256}".encode()).hexdigest()[:16]
+        if self.spec.include_manifest_digest_in_install_fingerprint:
+            fingerprint_input = f"{manifest.digest}:{archive.sha256}"
+        else:
+            fingerprint_input = f"{manifest.runtime_version}:{archive.platform}:{archive.sha256}"
+        fingerprint = hashlib.sha256(fingerprint_input.encode("utf-8")).hexdigest()[:16]
         return (
             self.runtime_dir
             / "versions"

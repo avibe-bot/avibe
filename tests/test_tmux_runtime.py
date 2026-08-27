@@ -453,6 +453,53 @@ def test_forced_repair_replaces_canonical_install_for_pointerless_recovery(
     assert manager.resolve_binary() == repaired_binary
 
 
+def test_updated_manifest_uses_discoverable_deterministic_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = _write_tmux_archive(tmp_path)
+    manifest = _write_manifest(tmp_path, archive)
+    archive_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+    manager = TmuxRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest)
+
+    first = manager.ensure()
+    first_dir = Path(first["install_dir"])
+    first_manifest_sha256 = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    first_fingerprint = hashlib.sha256(
+        f"{first_manifest_sha256}:{archive_sha256}".encode("utf-8")
+    ).hexdigest()[:16]
+
+    assert first["ok"] is True
+    assert first_dir.name == first_fingerprint
+
+    updated_manifest = json.loads(manifest.read_text(encoding="utf-8"))
+    updated_manifest["source_url"] = "file://updated-metadata"
+    manifest.write_text(json.dumps(updated_manifest), encoding="utf-8")
+    second_manifest_sha256 = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    second_fingerprint = hashlib.sha256(
+        f"{second_manifest_sha256}:{archive_sha256}".encode("utf-8")
+    ).hexdigest()[:16]
+
+    second = manager.ensure()
+    second_dir = Path(second["install_dir"])
+    second_binary = Path(second["path"])
+
+    assert second["ok"] is True
+    assert second["changed"] is True
+    assert second_dir.name == second_fingerprint
+    assert second_dir.parent == first_dir.parent
+    assert second_dir != first_dir
+    assert first_dir.is_dir()
+
+    (manager.runtime_dir / "current.json").unlink()
+    monkeypatch.setattr(
+        manager,
+        "_resolve_manifest_archive",
+        lambda _archive: pytest.fail("pointerless recovery accessed an archive"),
+    )
+    assert manager.resolve_binary() == second_binary
+
+
 def test_resolve_tmux_binary_returns_none_when_absent(tmp_path: Path) -> None:
     archive = _write_tmux_archive(tmp_path)
     manifest = _write_manifest(tmp_path, archive)
