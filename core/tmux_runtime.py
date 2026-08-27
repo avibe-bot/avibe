@@ -48,6 +48,7 @@ _TMUX_SPEC = ManagedRuntimeSpec(
     manifest_resource=_TMUX_MANIFEST_RESOURCE,
     version_field="tmux_version",
     default_bin_path="tmux",
+    allow_missing_binary_sha256=True,
     allow_legacy_missing_runtime_id=True,
     staging_prefixes=("install-", "manifest-"),
 )
@@ -148,6 +149,9 @@ class TmuxRuntimeManager(ManagedRuntimeManager):
         )
         yield from dict.fromkeys(candidates)
 
+    def _manifest_identity_fields(self, manifest: ManagedRuntimeManifest) -> dict[str, str]:
+        return {"manifest_sha256": manifest.digest}
+
     def _metadata_matches_install_target(
         self,
         metadata: Mapping[str, Any],
@@ -156,16 +160,21 @@ class TmuxRuntimeManager(ManagedRuntimeManager):
         if super()._metadata_matches_install_target(metadata, target):
             return True
         archive_sha256 = target.get("archive_sha256")
-        return (
-            metadata.get("runtime_id") is None
-            and metadata.get("provider") == self.spec.record_provider
-            and metadata.get("manifest_sha256") == _RELEASED_PACKAGED_MANIFEST_SHA256
-            and metadata.get("tmux_version") == target.get("runtime_version")
-            and metadata.get("archive_sha256") == archive_sha256
-            and metadata.get("bin_path") == self.spec.default_bin_path
+        exact_legacy_manifest = metadata.get("manifest_sha256") == target.get(
+            "manifest_sha256"
+        )
+        released_legacy_manifest = (
+            metadata.get("manifest_sha256") == _RELEASED_PACKAGED_MANIFEST_SHA256
             and archive_sha256 in _RELEASED_BINARY_SHA256_BY_ARCHIVE_SHA256
             and target.get("binary_sha256")
             == _RELEASED_BINARY_SHA256_BY_ARCHIVE_SHA256.get(archive_sha256)
+        )
+        return (
+            metadata.get("runtime_id") is None
+            and metadata.get("provider") == self.spec.record_provider
+            and metadata.get("tmux_version") == target.get("runtime_version")
+            and metadata.get("archive_sha256") == archive_sha256
+            and (exact_legacy_manifest or released_legacy_manifest)
         )
 
     def resolve_binary(self) -> Path | None:

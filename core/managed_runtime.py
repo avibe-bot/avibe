@@ -132,6 +132,7 @@ class ManagedRuntimeSpec:
     archive_size_field: str = "size"
     platform_aliases: tuple[tuple[str, str], ...] = ()
     binary_artifact: bool = True
+    allow_missing_binary_sha256: bool = False
     record_provider: str = "manifest"
     metadata_filename_override: str | None = None
     allow_legacy_missing_runtime_id: bool = False
@@ -296,7 +297,11 @@ class ManagedRuntimeManager:
                         archive=archive,
                     )
                 binary_sha256 = file_sha256(staged_binary) if self.spec.binary_artifact else None
-                if self.spec.binary_artifact and binary_sha256 != archive.binary_sha256:
+                if (
+                    self.spec.binary_artifact
+                    and archive.binary_sha256 is not None
+                    and binary_sha256 != archive.binary_sha256
+                ):
                     return self._failure(
                         self._reason("binary_checksum_mismatch"),
                         manifest=manifest,
@@ -456,7 +461,16 @@ class ManagedRuntimeManager:
             metadata_bin_path = metadata.get("bin_path", self.spec.default_bin_path)
             binary_sha256 = metadata.get("binary_sha256")
             binary_integrity_valid = (
-                isinstance(binary_sha256, str) and bool(_SHA256_RE.fullmatch(binary_sha256))
+                (
+                    isinstance(binary_sha256, str)
+                    and bool(_SHA256_RE.fullmatch(binary_sha256))
+                )
+                or (
+                    binary_sha256 is None
+                    and self.spec.allow_missing_binary_sha256
+                    and self.spec.allow_legacy_missing_runtime_id
+                    and metadata.get("runtime_id") is None
+                )
                 if self.spec.binary_artifact
                 else (
                     binary_sha256 is None
@@ -1642,7 +1656,14 @@ class ManagedRuntimeManager:
                 if not _SHA256_RE.fullmatch(sha256):
                     raise ValueError("invalid archive sha256")
                 if self.spec.binary_artifact and (
-                    binary_sha256 is None or not _SHA256_RE.fullmatch(binary_sha256)
+                    (
+                        binary_sha256 is None
+                        and not self.spec.allow_missing_binary_sha256
+                    )
+                    or (
+                        binary_sha256 is not None
+                        and not _SHA256_RE.fullmatch(binary_sha256)
+                    )
                 ):
                     raise ValueError("invalid binary sha256")
                 if binary_sha256 is not None and not _SHA256_RE.fullmatch(binary_sha256):
@@ -1802,6 +1823,23 @@ class ManagedRuntimeManager:
         target_platform = target.pop("platform")
         metadata_platform = metadata.get("platform")
         aliases = dict(self.spec.platform_aliases)
+        expected_binary_sha256 = archive.binary_sha256
+        legacy_without_binary_digest = (
+            self.spec.binary_artifact
+            and expected_binary_sha256 is None
+            and metadata.get("binary_sha256") is None
+            and self.spec.allow_missing_binary_sha256
+            and self.spec.allow_legacy_missing_runtime_id
+            and metadata.get("runtime_id") is None
+        )
+        if self.spec.binary_artifact and expected_binary_sha256 is None:
+            persisted_binary_sha256 = metadata.get("binary_sha256")
+            if isinstance(persisted_binary_sha256, str) and _SHA256_RE.fullmatch(
+                persisted_binary_sha256
+            ):
+                expected_binary_sha256 = persisted_binary_sha256
+            elif not legacy_without_binary_digest:
+                return None
         if not (
             self._record_provider_matches(metadata.get("provider"))
             and self._record_runtime_id_matches(metadata.get("runtime_id"))
@@ -1812,7 +1850,12 @@ class ManagedRuntimeManager:
             and bin_path == archive.bin_path
             and (
                 not self.spec.binary_artifact
-                or file_sha256(binary) == archive.binary_sha256
+                or expected_binary_sha256 is None
+                or file_sha256(binary) == expected_binary_sha256
+            )
+            and (
+                not legacy_without_binary_digest
+                or self._binary_matches_manifest(binary, manifest)
             )
         ):
             return None

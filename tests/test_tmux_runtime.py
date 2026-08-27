@@ -192,6 +192,112 @@ def test_released_manifest_without_binary_digest_installs_through_shared_owner(
     assert metadata["manifest_sha256"] == hashlib.sha256(manifest.read_bytes()).hexdigest()
 
 
+@pytest.mark.parametrize("manifest_source", ["path", "url"])
+def test_custom_manifest_without_binary_digest_persists_measured_digest_for_offline_resolution(
+    tmp_path: Path,
+    manifest_source: str,
+) -> None:
+    archive = _write_tmux_archive(tmp_path)
+    manifest = _write_manifest(tmp_path, archive, include_binary_sha256=False)
+    runtime_dir = tmp_path / "runtime"
+    source = (
+        {"manifest_path": manifest}
+        if manifest_source == "path"
+        else {"manifest_url": manifest.as_uri()}
+    )
+    manager = TmuxRuntimeManager(runtime_dir=runtime_dir, **source)
+
+    installed = manager.ensure()
+
+    assert installed["ok"] is True
+    installed_binary = Path(installed["path"])
+    measured_digest = hashlib.sha256(installed_binary.read_bytes()).hexdigest()
+    metadata = json.loads(
+        (Path(installed["install_dir"]) / manager.spec.metadata_filename).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert metadata["binary_sha256"] == measured_digest
+
+    manifest.unlink()
+    archive.unlink()
+    for cached in (runtime_dir / "downloads").iterdir():
+        cached.unlink()
+    offline = TmuxRuntimeManager(runtime_dir=runtime_dir, offline=True, **source)
+    assert offline.resolve_binary() == installed_binary
+
+    installed_binary.write_bytes(installed_binary.read_bytes() + b"# tampered\n")
+    installed_binary.chmod(0o755)
+    assert offline.resolve_binary() is None
+
+
+def test_custom_manifest_rejects_malformed_present_binary_digest(tmp_path: Path) -> None:
+    archive = _write_tmux_archive(tmp_path)
+    manifest = _write_manifest(tmp_path, archive)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["archives"][runtime_platform_tag()]["binary_sha256"] = "invalid"
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = TmuxRuntimeManager(
+        runtime_dir=tmp_path / "runtime",
+        manifest_path=manifest,
+    ).ensure()
+
+    assert result["ok"] is False
+    assert result["reason"] == "tmux_manifest_invalid"
+
+
+def test_pre_digest_custom_fingerprint_install_is_reused_without_archive_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = _write_tmux_archive(tmp_path)
+    manifest_path = _write_manifest(tmp_path, archive, include_binary_sha256=False)
+    manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    platform_tag = runtime_platform_tag()
+    archive_payload = manifest_payload["archives"][platform_tag]
+    manifest_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    fingerprint = hashlib.sha256(
+        f"{manifest_sha256}:{archive_payload['sha256']}".encode("utf-8")
+    ).hexdigest()[:16]
+    runtime_dir = tmp_path / "runtime"
+    install_dir = runtime_dir / "versions" / "3.6b" / platform_tag / fingerprint
+    install_dir.mkdir(parents=True)
+    binary = install_dir / "tmux"
+    binary.write_text("#!/bin/sh\necho tmux 3.6b\n", encoding="utf-8")
+    binary.chmod(0o755)
+    manager = TmuxRuntimeManager(runtime_dir=runtime_dir, manifest_path=manifest_path)
+    legacy_metadata = {
+        "provider": "manifest",
+        "manifest_sha256": manifest_sha256,
+        "tmux_version": "3.6b",
+        "platform": platform_tag,
+        "archive_name": archive_payload["name"],
+        "archive_sha256": archive_payload["sha256"],
+        "bin_path": archive_payload["bin_path"],
+        "manifest_source": str(manifest_path),
+        "source": manifest_payload["source"],
+        "requires_utf8proc": True,
+        "terminfo": "bundled-or-system",
+    }
+    metadata_path = install_dir / manager.spec.metadata_filename
+    metadata_path.write_text(json.dumps(legacy_metadata), encoding="utf-8")
+    metadata_before = metadata_path.read_bytes()
+    monkeypatch.setattr(
+        manager,
+        "_resolve_manifest_archive",
+        lambda _archive: pytest.fail("legacy install reuse accessed an archive"),
+    )
+
+    reused = manager.ensure()
+
+    assert reused["ok"] is True
+    assert reused["changed"] is False
+    assert Path(reused["path"]) == binary
+    assert manager.resolve_binary() == binary
+    assert metadata_path.read_bytes() == metadata_before
+
+
 def test_archive_download_retries_transient_network_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -221,7 +327,12 @@ def test_archive_download_retries_transient_network_failure(
 
 def test_bad_checksum_is_rejected(tmp_path: Path) -> None:
     archive = _write_tmux_archive(tmp_path)
-    manifest = _write_manifest(tmp_path, archive, sha256="0" * 64)
+    manifest = _write_manifest(
+        tmp_path,
+        archive,
+        sha256="0" * 64,
+        include_binary_sha256=False,
+    )
     manager = TmuxRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest)
 
     result = manager.ensure()
