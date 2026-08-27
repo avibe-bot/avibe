@@ -49,6 +49,7 @@ _TMUX_SPEC = ManagedRuntimeSpec(
     version_field="tmux_version",
     default_bin_path="tmux",
     allow_legacy_missing_runtime_id=True,
+    staging_prefixes=("install-", "manifest-"),
 )
 
 
@@ -169,37 +170,58 @@ class TmuxRuntimeManager(ManagedRuntimeManager):
 
     def resolve_binary(self) -> Path | None:
         binary = super().resolve_binary()
-        if binary is not None:
+        if binary is not None and _tmux_binary_runnable(binary):
             return binary
+        non_runnable = binary is not None
         manifest = self._load_manifest(allow_network=False)
         if manifest is None:
+            if non_runnable:
+                self._install_reason = self._reason("binary_not_runnable")
             return None
         archive = self._manifest_archive_for_platform(manifest)
         if archive is None:
+            if non_runnable:
+                self._install_reason = self._reason("binary_not_runnable")
             return None
         for install_dir in self._manifest_install_candidates(manifest, archive):
             binary = self._verified_manifest_binary(install_dir, manifest, archive)
-            if binary is not None:
+            if binary is not None and _tmux_binary_runnable(binary):
                 self._install_reason = None
                 return binary
+            non_runnable = non_runnable or binary is not None
+        if non_runnable:
+            self._install_reason = self._reason("binary_not_runnable")
         return None
 
     def status(self) -> dict[str, Any]:
         manifest = self.load_manifest_for_diagnostics()
         archive = self._manifest_archive_for_platform(manifest) if manifest else None
-        shared_status = super().status()
-        binary = Path(shared_status["path"]) if shared_status.get("path") else None
-        version = _tmux_binary_version(binary) if binary else None
+        binary: Path | None = None
+        version: str | None = None
         install_dir: str | None = None
-        if binary is not None and manifest is not None and archive is not None:
+        if manifest is not None and archive is not None:
             candidates: list[Path] = []
-            if isinstance(shared_status.get("install_dir"), str):
-                candidates.append(Path(shared_status["install_dir"]))
+            try:
+                current = self._current_install_dir(self.runtime_dir / "versions")
+            except OSError:
+                current = None
+                self._install_reason = self._reason("install_inspection_failed")
+            if current is not None:
+                candidates.append(current)
             candidates.extend(self._manifest_install_candidates(manifest, archive))
             for candidate in dict.fromkeys(candidates):
-                if self._verified_manifest_binary(candidate, manifest, archive) == binary:
-                    install_dir = str(candidate)
-                    break
+                admitted = self._verified_manifest_binary(candidate, manifest, archive)
+                if admitted is None:
+                    continue
+                admitted_version = _tmux_binary_version(admitted)
+                if admitted_version is None:
+                    self._install_reason = self._reason("binary_not_runnable")
+                    continue
+                binary = admitted
+                version = admitted_version
+                install_dir = str(candidate)
+                self._install_reason = None
+                break
         return {
             "id": self.spec.runtime_id,
             "provider": self.spec.record_provider,
@@ -232,27 +254,7 @@ class TmuxRuntimeManager(ManagedRuntimeManager):
     def _prepare_macos_binary(self, binary: Path) -> dict[str, Any]:
         if sys_platform() != "darwin":
             return {"ok": True, "skipped": True, "reason": "not_macos"}
-        quarantine = _strip_quarantine(binary)
-        if _codesign_valid(binary):
-            return {"ok": True, "changed": False, "quarantine": quarantine}
-        codesign = shutil.which("codesign")
-        if not codesign:
-            return {"ok": False, "reason": "codesign_missing", "quarantine": quarantine}
-        proc = subprocess.run(
-            [codesign, "-f", "-s", "-", str(binary)],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            **isolated_subprocess_kwargs(),
-        )
-        verified = proc.returncode == 0 and _codesign_valid(binary)
-        return {
-            "ok": verified,
-            "changed": proc.returncode == 0,
-            "reason": None if verified else ("codesign_failed" if proc.returncode != 0 else "codesign_verify_failed"),
-            "output": _truncate((proc.stdout or "") + (proc.stderr or "")),
-            "quarantine": quarantine,
-        }
+        return _strip_quarantine(binary)
 
     def _binary_version(self, binary: Path | None) -> str | None:
         return _tmux_binary_version(binary)
@@ -288,23 +290,6 @@ def tmux_status() -> dict[str, Any]:
 
 def sys_platform() -> str:
     return sys.platform
-
-
-def _codesign_valid(binary: Path) -> bool:
-    codesign = shutil.which("codesign")
-    if not codesign:
-        return False
-    try:
-        proc = subprocess.run(
-            [codesign, "-v", str(binary)],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            **isolated_subprocess_kwargs(),
-        )
-    except Exception:  # noqa: BLE001
-        return False
-    return proc.returncode == 0
 
 
 def _strip_quarantine(binary: Path) -> dict[str, Any]:

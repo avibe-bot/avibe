@@ -56,6 +56,7 @@ def _write_manifest(
     size: int | None = None,
     include_binary_sha256: bool = True,
     bin_path: str = "tmux",
+    version: str = "3.6b",
 ) -> Path:
     digest = sha256 or hashlib.sha256(archive.read_bytes()).hexdigest()
     archive_payload = {
@@ -69,7 +70,7 @@ def _write_manifest(
         archive_payload["binary_sha256"] = _archive_binary_sha256(archive, bin_path=bin_path)
     manifest = {
         "schema_version": 1,
-        "tmux_version": "3.6b",
+        "tmux_version": version,
         "source": "test",
         "source_url": "file://test",
         "requires_utf8proc": True,
@@ -291,12 +292,20 @@ def test_install_rejects_non_runnable_binary_without_replacing_current(
     install_dir = Path(installed["install_dir"])
     sentinel = install_dir / "old-install"
     sentinel.write_text("keep me", encoding="utf-8")
-    monkeypatch.setattr(tmux_runtime, "_tmux_binary_runnable", lambda _binary: False)
+    monkeypatch.setattr(tmux_runtime, "_tmux_binary_version", lambda _binary: None)
+    monkeypatch.setattr(tmux_runtime, "get_tmux_runtime_manager", lambda: manager)
 
-    result = manager.ensure(force=True)
+    result = tmux_runtime.ensure_tmux_installed(force=True)
+    status = manager.status()
 
     assert result["ok"] is False
     assert result["reason"] == "tmux_binary_not_runnable"
+    assert result["message"] == "tmux runtime binary could not be executed after installation."
+    assert manager.resolve_binary() is None
+    assert tmux_runtime.resolve_tmux_binary() is None
+    assert status["installed"] is False
+    assert status["status"] == "missing"
+    assert status["reason"] == "tmux_binary_not_runnable"
     assert sentinel.read_text(encoding="utf-8") == "keep me"
 
 
@@ -346,6 +355,41 @@ def test_status_reports_install_root_for_nested_binary_path(tmp_path: Path) -> N
     assert installed["ok"] is True
     assert status["path"] == str(Path(installed["install_dir"]) / bin_path)
     assert status["install_dir"] == installed["install_dir"]
+
+
+def test_status_uses_one_remote_manifest_snapshot_against_cached_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_archive = _write_tmux_archive(tmp_path, text="#!/bin/sh\necho tmux 3.6b\n")
+    remote_manifest = _write_manifest(tmp_path, old_archive, version="3.6b")
+    manager = TmuxRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_url=remote_manifest.as_uri())
+    installed = manager.ensure()
+    assert installed["ok"] is True
+    cached_manifest = manager._remote_manifest_cache_path()
+    cached_payload = cached_manifest.read_bytes()
+
+    new_release = tmp_path / "new-release"
+    new_release.mkdir()
+    new_archive = _write_tmux_archive(new_release, text="#!/bin/sh\necho tmux 3.7\n")
+    new_manifest = _write_manifest(new_release, new_archive, version="3.7")
+    remote_manifest.write_bytes(new_manifest.read_bytes())
+    load_calls: list[tuple[bool, bool]] = []
+    original_load_manifest = manager._load_manifest
+
+    def tracked_load_manifest(*, allow_network: bool, persist_remote_cache: bool = True):
+        load_calls.append((allow_network, persist_remote_cache))
+        return original_load_manifest(allow_network=allow_network, persist_remote_cache=persist_remote_cache)
+
+    monkeypatch.setattr(manager, "_load_manifest", tracked_load_manifest)
+
+    status = manager.status()
+
+    assert load_calls == [(True, False)]
+    assert status["manifest"]["tmux_version"] == "3.7"
+    assert status["installed"] is False
+    assert status["status"] == "missing"
+    assert cached_manifest.read_bytes() == cached_payload
 
 
 def test_exact_released_packaged_install_is_adopted_without_archive_resolution(
@@ -423,6 +467,72 @@ def test_exact_released_packaged_install_is_adopted_without_archive_resolution(
     assert not stale_dir.exists()
 
 
+def test_cleanup_preserves_legacy_parent_containing_current_fingerprinted_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    released_manifest = json.loads(RELEASED_MANIFEST_FIXTURE.read_text(encoding="utf-8"))
+    platform_tag = runtime_platform_tag()
+    archive = released_manifest["archives"][platform_tag]
+    archive_sha256 = archive["sha256"]
+    binary_sha256 = tmux_runtime._RELEASED_BINARY_SHA256_BY_ARCHIVE_SHA256[archive_sha256]
+    manifest_sha256 = hashlib.sha256(RELEASED_MANIFEST_FIXTURE.read_bytes()).hexdigest()
+    runtime_dir = tmp_path / "runtime"
+    legacy_parent = runtime_dir / "versions" / "3.6b" / platform_tag
+    legacy_parent.mkdir(parents=True)
+    legacy_binary = legacy_parent / "tmux"
+    legacy_binary.write_text("#!/bin/sh\necho tmux 3.6b\n", encoding="utf-8")
+    legacy_binary.chmod(0o755)
+    manager = TmuxRuntimeManager(runtime_dir=runtime_dir)
+    released_metadata = {
+        "provider": "manifest",
+        "manifest_sha256": manifest_sha256,
+        "tmux_version": "3.6b",
+        "platform": platform_tag,
+        "archive_name": archive["name"],
+        "archive_sha256": archive_sha256,
+        "bin_path": "tmux",
+        "manifest_source": "package:tmux_runtime_manifest.json",
+        "source": released_manifest["source"],
+        "requires_utf8proc": True,
+        "terminfo": "bundled-or-system",
+    }
+    (legacy_parent / manager.spec.metadata_filename).write_text(
+        json.dumps(released_metadata),
+        encoding="utf-8",
+    )
+    replacement_archive = _write_tmux_archive(tmp_path)
+    original_file_sha256 = managed_runtime.file_sha256
+
+    def released_file_sha256(path: Path) -> str:
+        if path.name == "tmux":
+            return binary_sha256
+        return original_file_sha256(path)
+
+    monkeypatch.setattr(managed_runtime, "file_sha256", released_file_sha256)
+    monkeypatch.setattr(manager, "_resolve_manifest_archive", lambda _archive: replacement_archive)
+
+    repaired = manager.ensure(force=True)
+    current_dir = Path(repaired["install_dir"])
+    stale_sibling = legacy_parent / "stale"
+    stale_sibling.mkdir()
+    (stale_sibling / manager.spec.metadata_filename).write_text(
+        json.dumps(released_metadata),
+        encoding="utf-8",
+    )
+    cleanup = manager.clean(keep_previous=0)
+
+    assert repaired["ok"] is True
+    assert repaired["changed"] is True
+    assert current_dir.parent == legacy_parent
+    assert cleanup["ok"] is True
+    assert cleanup["removed"] == [str(stale_sibling)]
+    assert legacy_parent.is_dir()
+    assert legacy_binary.is_file()
+    assert current_dir.is_dir()
+    assert not stale_sibling.exists()
+
+
 def test_remote_manifest_and_archive_cache_support_offline_reuse(tmp_path: Path) -> None:
     archive = _write_tmux_archive(tmp_path)
     manifest = _write_manifest(tmp_path, archive)
@@ -446,33 +556,58 @@ def test_remote_manifest_and_archive_cache_support_offline_reuse(tmp_path: Path)
     assert Path(second["path"]) == Path(first["path"])
 
 
-def test_macos_codesign_path_is_used(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_macos_preparation_preserves_pinned_binary_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     archive = _write_tmux_archive(tmp_path)
     manifest = _write_manifest(tmp_path, archive)
     manager = TmuxRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest)
-    calls: list[list[str]] = []
+    source_bytes = (tmp_path / "archive-root" / "tmux").read_bytes()
+    quarantine_paths: list[Path] = []
 
     monkeypatch.setattr(tmux_runtime, "sys_platform", lambda: "darwin")
-    sign_checks = iter([False, True])
-    monkeypatch.setattr(tmux_runtime, "_codesign_valid", lambda _path: next(sign_checks))
-    monkeypatch.setattr(tmux_runtime, "_strip_quarantine", lambda _path: {"ok": True, "changed": False})
-    monkeypatch.setattr(tmux_runtime.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codesign" else None)
-
-    def fake_run(argv: list[str], **_kwargs: object):
-        calls.append(argv)
-
-        class Proc:
-            returncode = 0
-            stdout = "tmux 3.6b\n" if argv[-1] == "-V" else ""
-            stderr = ""
-
-        return Proc()
-
-    monkeypatch.setattr(tmux_runtime.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        tmux_runtime,
+        "_strip_quarantine",
+        lambda path: quarantine_paths.append(path) or {"ok": True, "changed": False},
+    )
 
     result = manager.ensure()
+    installed = Path(result["path"])
+    metadata = json.loads(
+        (Path(result["install_dir"]) / manager.spec.metadata_filename).read_text(encoding="utf-8")
+    )
 
     assert result["ok"] is True
-    assert result["preparation"]["changed"] is True
-    assert calls[0][:4] == ["/usr/bin/codesign", "-f", "-s", "-"]
-    assert calls[0][4].endswith("/tmux")
+    assert result["preparation"] == {"ok": True, "changed": False}
+    assert len(quarantine_paths) == 1
+    assert quarantine_paths[0].name == "tmux"
+    assert installed.read_bytes() == source_bytes
+    assert metadata["binary_sha256"] == hashlib.sha256(source_bytes).hexdigest()
+
+    installed.write_bytes(source_bytes + b"# changed after install\n")
+    installed.chmod(0o755)
+    assert manager.resolve_binary() is None
+
+
+def test_tmux_cleanup_reclaims_current_and_released_staging_prefixes(tmp_path: Path) -> None:
+    manager = TmuxRuntimeManager(runtime_dir=tmp_path / "runtime", offline=True)
+    current_staging = manager.runtime_dir / "install-pending"
+    released_staging = manager.runtime_dir / "manifest-pending"
+    current_staging.mkdir(parents=True)
+    released_staging.mkdir()
+
+    preview = manager.clean(keep_previous=0, dry_run=True)
+
+    assert preview["ok"] is True
+    assert preview["removed"] == [str(current_staging), str(released_staging)]
+    assert current_staging.is_dir()
+    assert released_staging.is_dir()
+
+    cleaned = manager.clean(keep_previous=0)
+
+    assert cleaned["ok"] is True
+    assert cleaned["removed"] == [str(current_staging), str(released_staging)]
+    assert not current_staging.exists()
+    assert not released_staging.exists()

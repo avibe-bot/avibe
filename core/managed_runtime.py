@@ -1490,7 +1490,10 @@ class ManagedRuntimeManager:
         return True
 
     def _install_dir_is_protected(self, install_dir: Path, protected: set[Path]) -> bool:
-        return install_dir in protected
+        return any(
+            install_dir == item or install_dir in item.parents or item in install_dir.parents
+            for item in protected
+        )
 
     def _retention_ranked_installs(
         self,
