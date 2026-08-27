@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import base64
+import csv
+import hashlib
+import io
 import os
+import re
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
 
 from vibe import restart_supervisor, runtime
-from vibe.upgrade import MEMORY_PACKAGE_REQUIREMENT, RollbackTarget, build_upgrade_plan, execute_upgrade_plan
+from vibe.upgrade import RollbackTarget, build_upgrade_plan, execute_upgrade_plan
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,6 +32,44 @@ def _wheel(project: Path, version: str, wheelhouse: Path) -> None:
         timeout=600,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def _pin_host_memory_extra(wheel: Path, version: str) -> None:
+    """Give each fixture host release its own target-owned Memory pin."""
+
+    with zipfile.ZipFile(wheel) as archive:
+        entries = {info.filename: archive.read(info.filename) for info in archive.infolist()}
+    metadata_name = next(name for name in entries if name.endswith(".dist-info/METADATA"))
+    record_name = next(name for name in entries if name.endswith(".dist-info/RECORD"))
+    metadata = re.sub(
+        rb"Requires-Dist: avibe-memory[^\r\n]*",
+        f'Requires-Dist: avibe-memory=={version}; extra == "memory"'.encode(),
+        entries[metadata_name],
+    )
+    assert metadata != entries[metadata_name]
+    entries[metadata_name] = metadata
+
+    rows = list(csv.reader(io.StringIO(entries[record_name].decode())))
+    digest = base64.urlsafe_b64encode(hashlib.sha256(metadata).digest()).rstrip(b"=").decode()
+    for row in rows:
+        if row[0] == metadata_name:
+            row[1:] = [f"sha256={digest}", str(len(metadata))]
+        elif row[0] == record_name:
+            row[1:] = ["", ""]
+    record = io.StringIO()
+    csv.writer(record, lineterminator="\n").writerows(rows)
+    entries[record_name] = record.getvalue().encode()
+
+    with zipfile.ZipFile(wheel, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, payload in entries.items():
+            archive.writestr(name, payload)
+
+
+def _build_release_wheels(version: str, wheelhouse: Path) -> None:
+    _wheel(ROOT, version, wheelhouse)
+    host_wheel = next(wheelhouse.glob(f"avibe_os-{version}-*.whl"))
+    _pin_host_memory_extra(host_wheel, version)
+    _wheel(ROOT / "packaging" / "avibe-memory", version, wheelhouse)
 
 
 def _python(environment: Path) -> Path:
@@ -61,14 +105,28 @@ def _install_initial(python: Path, wheelhouse: Path, *, memory: bool) -> None:
     wheels = [next(wheelhouse.glob("avibe_os-3.0.14-*.whl"))]
     if memory:
         wheels.append(next(wheelhouse.glob("avibe_memory-3.0.14-*.whl")))
-    env = {
-        **os.environ,
-        "PIP_NO_INDEX": "1",
-        "PIP_FIND_LINKS": str(wheelhouse),
-        "PIP_NO_DEPS": "1",
-    }
+    seed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "download",
+            "--dest",
+            str(wheelhouse),
+            "setuptools",
+            "wheel",
+            *(str(wheel) for wheel in wheels),
+        ],
+        env={**os.environ, "PIP_FIND_LINKS": str(wheelhouse)},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=600,
+    )
+    assert seed.returncode == 0, seed.stdout + seed.stderr
+    env = {**os.environ, "PIP_NO_INDEX": "1", "PIP_FIND_LINKS": str(wheelhouse)}
     result = subprocess.run(
-        [str(python), "-m", "pip", "install", "--no-deps", *(str(wheel) for wheel in wheels)],
+        [str(python), "-m", "pip", "install", *(str(wheel) for wheel in wheels)],
         env=env,
         capture_output=True,
         text=True,
@@ -82,7 +140,6 @@ def _plan_env(wheelhouse: Path) -> dict[str, str]:
         **os.environ,
         "PIP_NO_INDEX": "1",
         "PIP_FIND_LINKS": str(wheelhouse),
-        "PIP_NO_DEPS": "1",
     }
 
 
@@ -98,8 +155,7 @@ def test_packaged_memory_shape_survives_synchronous_upgrade_and_supervisor_rollb
     wheelhouse = tmp_path / "wheelhouse"
     wheelhouse.mkdir()
     for version in ("3.0.14", "3.0.15"):
-        _wheel(ROOT, version, wheelhouse)
-        _wheel(ROOT / "packaging" / "avibe-memory", version, wheelhouse)
+        _build_release_wheels(version, wheelhouse)
 
     environment = tmp_path / "memory-venv"
     python = _venv(environment)
@@ -115,7 +171,8 @@ def test_packaged_memory_shape_survives_synchronous_upgrade_and_supervisor_rollb
         memory_package=True,
         package_spec="avibe-os",
     )
-    assert MEMORY_PACKAGE_REQUIREMENT in forward.command
+    assert forward.command[-1] == "avibe-os[memory]"
+    assert all("avibe-memory" not in argument for argument in forward.command)
     result = execute_upgrade_plan(forward, cwd=tmp_path, capture_output=True, text=True, check=False, timeout=600)
     assert result.returncode == 0, result.stdout + result.stderr
     upgraded = _installed_versions(python)
@@ -133,7 +190,6 @@ def test_packaged_memory_shape_survives_synchronous_upgrade_and_supervisor_rollb
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe-home"))
     monkeypatch.setenv("PIP_NO_INDEX", "1")
     monkeypatch.setenv("PIP_FIND_LINKS", str(wheelhouse))
-    monkeypatch.setenv("PIP_NO_DEPS", "1")
     monkeypatch.setattr(restart_supervisor, "_stop_runtime_for_restart", lambda **kwargs: (True, {}, 0, None, True, 0))
     monkeypatch.setattr(restart_supervisor, "_failed_generation_still_running", lambda **kwargs: False)
     monkeypatch.setattr(restart_supervisor, "get_safe_cwd", lambda: str(tmp_path))
@@ -165,7 +221,7 @@ def test_packaged_core_only_upgrade_preserves_core_only_shape(tmp_path: Path) ->
     wheelhouse = tmp_path / "wheelhouse"
     wheelhouse.mkdir()
     for version in ("3.0.14", "3.0.15"):
-        _wheel(ROOT, version, wheelhouse)
+        _build_release_wheels(version, wheelhouse)
     python = _venv(tmp_path / "core-only-venv")
     _install_initial(python, wheelhouse, memory=False)
     plan = build_upgrade_plan(
@@ -186,11 +242,8 @@ def test_packaged_core_only_upgrade_preserves_core_only_shape(tmp_path: Path) ->
 def test_packaged_missing_memory_fails_before_install(tmp_path: Path) -> None:
     wheelhouse = tmp_path / "wheelhouse"
     wheelhouse.mkdir()
-    _wheel(ROOT, "3.0.14", wheelhouse)
-    _wheel(ROOT, "3.0.15", wheelhouse)
-    memory_wheel = ROOT / "packaging" / "avibe-memory"
-    _wheel(memory_wheel, "3.0.14", wheelhouse)
-    _wheel(memory_wheel, "3.0.15", wheelhouse)
+    _build_release_wheels("3.0.14", wheelhouse)
+    _build_release_wheels("3.0.15", wheelhouse)
     python = _venv(tmp_path / "missing-memory-venv")
     _install_initial(python, wheelhouse, memory=True)
     for wheel in wheelhouse.glob("avibe_memory-*.whl"):

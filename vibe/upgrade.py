@@ -26,8 +26,6 @@ PACKAGE_NAME = "avibe-os"
 LEGACY_PACKAGE_NAME = "vibe-remote"
 MEMORY_PACKAGE_NAME = "avibe-memory"
 MEMORY_EXTRA_NAME = "memory"
-MEMORY_PACKAGE_COMPATIBILITY = ">=3.0.14.dev0,<3.1"
-MEMORY_PACKAGE_REQUIREMENT = f"{MEMORY_PACKAGE_NAME}{MEMORY_PACKAGE_COMPATIBILITY}"
 _MEMORY_SPLIT_MIN_VERSION = Version("3.0.14.dev0")
 PIP_DOWNLOAD_DEST_PLACEHOLDER = "{avibe-pip-download-destination}"
 DEFAULT_UPDATE_METADATA_URL = f"https://pypi.org/pypi/{PACKAGE_NAME}/json"
@@ -94,6 +92,7 @@ class UpgradePlan:
     method: str
     rollback_to: RollbackTarget | None = None
     preflight_command: list[str] | None = None
+    preflight_fallback_command: list[str] | None = None
     cleanup_command: list[str] | None = None
     cleanup_after_command: bool = False
 
@@ -143,19 +142,38 @@ def preflight_upgrade_plan(
 
     if plan.preflight_command is None:
         return None
-    preflight_command = plan.preflight_command
-    scratch_dir: str | None = None
-    try:
-        if PIP_DOWNLOAD_DEST_PLACEHOLDER in preflight_command:
-            scratch_dir = tempfile.mkdtemp(prefix="avibe-pip-download-")
-            preflight_command = [
-                scratch_dir if argument == PIP_DOWNLOAD_DEST_PLACEHOLDER else argument
-                for argument in preflight_command
-            ]
-        return run(preflight_command, env=plan.env, **run_kwargs)
-    finally:
-        if scratch_dir is not None:
-            shutil.rmtree(scratch_dir, ignore_errors=True)
+
+    def run_preflight(command: list[str]) -> subprocess.CompletedProcess[str]:
+        scratch_dir: str | None = None
+        try:
+            if PIP_DOWNLOAD_DEST_PLACEHOLDER in command:
+                scratch_dir = tempfile.mkdtemp(prefix="avibe-pip-download-")
+                command = [
+                    scratch_dir if argument == PIP_DOWNLOAD_DEST_PLACEHOLDER else argument
+                    for argument in command
+                ]
+            return run(command, env=plan.env, **run_kwargs)
+        finally:
+            if scratch_dir is not None:
+                shutil.rmtree(scratch_dir, ignore_errors=True)
+
+    preflight = run_preflight(plan.preflight_command)
+    if (
+        preflight.returncode == 0
+        or plan.preflight_fallback_command is None
+        or not _pip_dry_run_is_unsupported(preflight)
+    ):
+        return preflight
+
+    return run_preflight(plan.preflight_fallback_command)
+
+
+def _pip_dry_run_is_unsupported(result: subprocess.CompletedProcess[str]) -> bool:
+    output = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
+    return "--dry-run" in output and any(
+        marker in output
+        for marker in ("no such option", "unknown option", "unrecognized argument")
+    )
 
 
 def resolve_command_path(command: str | None, search_path: str | None = None) -> str | None:
@@ -622,8 +640,8 @@ def configured_memory_enabled() -> bool:
     except FileNotFoundError:
         return False
     except Exception:
-        logger.warning("Could not read Memory enablement; preserving package shape", exc_info=True)
-        return True
+        logger.warning("Could not read Memory enablement; treating it as disabled", exc_info=True)
+        return False
 
 
 def _distributions_providing_this_package() -> list[str]:
@@ -850,7 +868,7 @@ def rollback_target() -> RollbackTarget | None:
 def _with_memory_extra(package_spec: str) -> str:
     """Add the Memory extra without corrupting URL or local path specs."""
 
-    if package_spec.startswith(("git+", "hg+", "svn+", "bz+", "http://", "https://")):
+    if package_spec.startswith(("git+", "hg+", "svn+", "bz+", "http://", "https://", "file://")):
         return f"{PACKAGE_NAME}[{MEMORY_EXTRA_NAME}] @ {package_spec}"
     try:
         from packaging.requirements import InvalidRequirement, Requirement
@@ -919,7 +937,6 @@ def build_upgrade_plan(
     memory_enabled: bool = False,
     memory_package: bool | None = None,
     memory_version: str | None = None,
-    memory_requirement: str | None = None,
     package_spec: str | None = None,
 ) -> UpgradePlan:
     """How to install avibe: the newest release, or `version` exactly.
@@ -964,9 +981,6 @@ def build_upgrade_plan(
     if not version and include_memory and f"[{MEMORY_EXTRA_NAME}]" not in package_spec:
         package_spec = _with_memory_extra(package_spec)
     pinned_memory_spec = f"{MEMORY_PACKAGE_NAME}=={memory_version}" if include_memory and memory_version else None
-    forward_memory_spec = (
-        (memory_requirement or MEMORY_PACKAGE_REQUIREMENT) if include_memory and not version else None
-    )
 
     if is_uv_tool_install(executable) and uv_binary:
         env = dict(base_env or os.environ)
@@ -974,8 +988,8 @@ def build_upgrade_plan(
         if vibe_bin_dir:
             env["UV_TOOL_BIN_DIR"] = vibe_bin_dir
         command = [uv_binary, "tool", "install", package_spec]
-        if pinned_memory_spec or forward_memory_spec:
-            command.extend(["--with", pinned_memory_spec or forward_memory_spec])
+        if pinned_memory_spec:
+            command.extend(["--with", pinned_memory_spec])
         if not version:
             command.append("--upgrade")
         if version or package_spec != PACKAGE_NAME or is_legacy_uv_tool_install(executable):
@@ -986,8 +1000,8 @@ def build_upgrade_plan(
             if not version:
                 preflight_command.append("--upgrade")
             preflight_command.append(package_spec)
-            if pinned_memory_spec or forward_memory_spec:
-                preflight_command.append(pinned_memory_spec or forward_memory_spec)
+            if pinned_memory_spec:
+                preflight_command.append(pinned_memory_spec)
         return UpgradePlan(
             command=command,
             env=env,
@@ -1015,8 +1029,8 @@ def build_upgrade_plan(
     if version or not installed_metadata_describes_running_code():
         command.append("--force-reinstall")
     command.append(package_spec)
-    if pinned_memory_spec or forward_memory_spec:
-        command.append(pinned_memory_spec or forward_memory_spec)
+    if pinned_memory_spec:
+        command.append(pinned_memory_spec)
     cleanup_command = None
     cleanup_after_command = False
     if version and not include_memory and memory_package_installed():
@@ -1030,7 +1044,27 @@ def build_upgrade_plan(
     # Core-only forward installs retain the origin/dev synchronous behavior: the
     # service is still running while pip resolves, so a second resolver pass is
     # unnecessary general-updater machinery.
-    if include_memory or cleanup_command is not None:
+    preflight_fallback_command = None
+    if include_memory and not version:
+        preflight_command = [
+            executable,
+            "-m",
+            "pip",
+            "install",
+            "--dry-run",
+            "--upgrade",
+            package_spec,
+        ]
+        preflight_fallback_command = [
+            executable,
+            "-m",
+            "pip",
+            "download",
+            "--dest",
+            PIP_DOWNLOAD_DEST_PLACEHOLDER,
+            package_spec,
+        ]
+    elif include_memory or cleanup_command is not None:
         preflight_command = [
             executable,
             "-m",
@@ -1040,70 +1074,18 @@ def build_upgrade_plan(
             PIP_DOWNLOAD_DEST_PLACEHOLDER,
         ]
         preflight_command.extend(["--no-deps", package_spec])
-        if pinned_memory_spec or forward_memory_spec:
-            preflight_command.append(pinned_memory_spec or forward_memory_spec)
+        if pinned_memory_spec:
+            preflight_command.append(pinned_memory_spec)
     return UpgradePlan(
         command=command,
         env=dict(base_env or os.environ),
         method="pip",
         rollback_to=rollback_to,
         preflight_command=preflight_command,
+        preflight_fallback_command=preflight_fallback_command,
         cleanup_command=cleanup_command,
         cleanup_after_command=cleanup_after_command,
     )
-
-
-def build_memory_add_plan(
-    *,
-    version: str | None = None,
-    python_executable: str | None = None,
-    uv_path: str | None = None,
-    base_env: dict[str, str] | None = None,
-) -> UpgradePlan:
-    """Build an explicit package repair plan for avibe-memory."""
-
-    executable = python_executable or sys.executable
-    requirement = MEMORY_PACKAGE_REQUIREMENT if version is None else f"{MEMORY_PACKAGE_NAME}=={version}"
-    uv_binary = find_uv_binary(uv_path=uv_path, base_env=base_env)
-    env = dict(base_env or os.environ)
-    if is_uv_tool_install(executable) and uv_binary:
-        command = [
-            uv_binary,
-            "pip",
-            "install",
-            "--upgrade",
-            "--force-reinstall",
-            "--no-deps",
-            "--python",
-            executable,
-            requirement,
-        ]
-        preflight = [
-            uv_binary,
-            "pip",
-            "install",
-            "--dry-run",
-            "--upgrade",
-            "--force-reinstall",
-            "--no-deps",
-            "--python",
-            executable,
-            requirement,
-        ]
-        return UpgradePlan(command, env, "uv", preflight_command=preflight)
-    command = [executable, "-m", "pip", "install", "--upgrade", "--force-reinstall", "--no-deps", requirement]
-    preflight = [
-        executable,
-        "-m",
-        "pip",
-        "download",
-        "--dest",
-        PIP_DOWNLOAD_DEST_PLACEHOLDER,
-        "--no-deps",
-        requirement,
-    ]
-    return UpgradePlan(command, env, "pip", preflight_command=preflight)
-
 
 def get_safe_cwd() -> str:
     """Return a stable, existing absolute directory for subprocess cwd.

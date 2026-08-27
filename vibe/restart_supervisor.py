@@ -201,8 +201,8 @@ def _legacy_service_launcher(
         return fallback
 
 
-def _launcher_dist_metadata(launcher: runtime.ServiceLauncher) -> list[tuple[str, str]]:
-    """Read all supported distributions from the launcher's site-packages."""
+def _launcher_core_dist_metadata(launcher: runtime.ServiceLauncher) -> list[tuple[str, str]]:
+    """Read only core distributions from the launcher's site-packages."""
 
     site_packages = Path(launcher.main).resolve().parent.parent
     entries: list[tuple[str, str]] = []
@@ -211,17 +211,31 @@ def _launcher_dist_metadata(launcher: runtime.ServiceLauncher) -> list[tuple[str
             payload = email.parser.Parser().parsestr(metadata_path.read_text(encoding="utf-8"))
             name = str(payload.get("Name") or "").strip()
             version = str(payload.get("Version") or "").strip()
-            if name in {PACKAGE_NAME, LEGACY_PACKAGE_NAME, MEMORY_PACKAGE_NAME} and version:
+            if name in {PACKAGE_NAME, LEGACY_PACKAGE_NAME} and version:
                 entries.append((name, version))
     except (OSError, UnicodeError, ValueError):
         return []
     return entries
 
 
+def _launcher_memory_version(launcher: runtime.ServiceLauncher) -> str | None:
+    """Read optional Memory metadata without exposing it to core ownership."""
+
+    site_packages = Path(launcher.main).resolve().parent.parent
+    try:
+        for metadata_path in sorted(site_packages.glob("*.dist-info/METADATA")):
+            payload = email.parser.Parser().parsestr(metadata_path.read_text(encoding="utf-8"))
+            if str(payload.get("Name") or "").strip() == MEMORY_PACKAGE_NAME:
+                return str(payload.get("Version") or "").strip() or None
+    except (OSError, UnicodeError, ValueError):
+        return None
+    return None
+
+
 def _launcher_package_name(launcher: runtime.ServiceLauncher, *, version: str | None = None) -> str:
     """Infer the distribution name that owns a launcher when metadata is stale."""
 
-    metadata = _launcher_dist_metadata(launcher)
+    metadata = _launcher_core_dist_metadata(launcher)
     if version:
         exact = [name for name, candidate in metadata if candidate == version]
         if exact:
@@ -252,7 +266,7 @@ def _legacy_install_metadata(
     try:
         from vibe import __version__ as replacement_version
 
-        for name, version in _launcher_dist_metadata(launcher):
+        for name, version in _launcher_core_dist_metadata(launcher):
             if (
                 name == package_name
                 and version
@@ -280,10 +294,7 @@ def _discover_legacy_upgrade_target(*, trigger: str, vibe_path: str | None) -> R
         if metadata is None:
             return None
         version, package = metadata
-    memory_version = next(
-        (candidate_version for candidate_name, candidate_version in _launcher_dist_metadata(launcher) if candidate_name == MEMORY_PACKAGE_NAME),
-        None,
-    )
+    memory_version = _launcher_memory_version(launcher)
     return RollbackTarget(
         version=version,
         package=package,

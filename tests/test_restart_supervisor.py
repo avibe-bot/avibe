@@ -183,6 +183,46 @@ def test_legacy_upgrade_target_reads_the_running_release_and_launcher(monkeypatc
     )
 
 
+@pytest.mark.parametrize("core_package", ["avibe-os", "vibe-remote"])
+def test_legacy_upgrade_target_keeps_memory_out_of_core_ownership(
+    monkeypatch, tmp_path, core_package
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    paths.ensure_data_dirs()
+    package_dir = core_package.replace("-", "_")
+    tool_root = tmp_path / "uv" / "tools" / core_package
+    python_path = tool_root / "bin" / "python"
+    service_main = tool_root / "lib" / "python3.12" / "site-packages" / "vibe" / "service_main.py"
+    python_path.parent.mkdir(parents=True)
+    service_main.parent.mkdir(parents=True)
+    python_path.write_text("#!/bin/sh\n", encoding="utf-8")
+    service_main.write_text("# old release\n", encoding="utf-8")
+    metadata_root = service_main.parent.parent
+    for directory, name in (("avibe_memory", "avibe-memory"), (package_dir, core_package)):
+        metadata_dir = metadata_root / f"{directory}-3.0.14.dist-info"
+        metadata_dir.mkdir()
+        (metadata_dir / "METADATA").write_text(
+            f"Name: {name}\nVersion: 3.0.14\n", encoding="utf-8"
+        )
+
+    monkeypatch.setattr(restart_supervisor, "_read_recorded_pid", lambda: 123)
+    monkeypatch.setattr(restart_supervisor, "_read_recorded_ui_pid", lambda: None)
+    monkeypatch.setattr(restart_supervisor, "_running_ui_version", lambda: "3.0.14")
+    monkeypatch.setattr(runtime, "get_process_command", lambda _pid: f"{python_path} {service_main}")
+
+    target = restart_supervisor._discover_legacy_upgrade_target(
+        trigger="upgrade", vibe_path=str(tmp_path / "retargeted-vibe")
+    )
+
+    assert target == RollbackTarget(
+        version="3.0.14",
+        package=core_package,
+        launcher=runtime.ServiceLauncher(python=str(python_path), main=str(service_main)),
+        memory_package=True,
+        memory_version="3.0.14",
+    )
+
+
 def test_legacy_upgrade_target_prefers_running_version_over_stale_metadata(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
     paths.ensure_data_dirs()
