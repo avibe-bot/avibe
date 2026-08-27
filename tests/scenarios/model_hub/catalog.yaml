@@ -65,6 +65,12 @@ scenarios:
     kind: persistence
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_config_001_chain_is_the_persisted_artifact_until_explicit_edit
+  - id: MH-ROUTE-EDIT-001
+    name: Replacing one route hop preserves its position and every untouched hop
+    status: covered
+    kind: mutation
+    layer: unit
+    test: ui/src/components/settings/models/RouteChainDialog.test.tsx::MH-ROUTE-EDIT-001
   - id: MH-MATCH-001
     name: Add-time matching persists each exact hop and returns its visible position
     status: covered

@@ -1194,6 +1194,7 @@
         "label": "Route chain for this model",
         "section": "Route chain for this model",
         "removeHop": "Remove hop",
+        "editHop": "Edit hop",
         "addHop": "Add a hop",
         "add": {
           "source": "Source",
@@ -1203,8 +1204,12 @@
           "noMatch": "No source or model matches that",
           "none": "No source/model pair is available to add"
         },
+        "edit": {
+          "confirm": "Replace",
+          "replaced": "Hop {{position}} replaced."
+        },
         "sourceMissing": "Source missing",
-        "invalidAfterRefresh": "This edited hop is unavailable after the refresh. Remove it before saving.",
+        "invalidAfterRefresh": "This edited hop is unavailable after the refresh. Replace or remove it before saving.",
         "reorder": {
           "label": "Reorder by Source order",
           "grabbed": "Hop {{position}} grabbed. Use arrow keys to move.",

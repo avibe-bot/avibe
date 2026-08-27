@@ -858,8 +858,9 @@
   border-radius: var(--model-hub-dialog-action-radius);
   font-size: var(--model-hub-route-selector-confirm-size);
 }
-.model-hub-route-remove { width: 26px; height: 26px; border-radius: 6px; color: var(--foreground); }
-.model-hub-route-remove > svg { width: 13px; height: 13px; }
+.model-hub-route-actions { gap: 4px; }
+.model-hub-route-action { width: 26px; height: 26px; border-radius: 6px; color: var(--foreground); }
+.model-hub-route-action > svg { width: 13px; height: 13px; }
 .model-hub-route-add { height: var(--model-hub-route-add-height); border-radius: var(--model-hub-route-hop-radius); border-color: var(--model-hub-wash-14); font-size: var(--model-hub-route-add-size); }
 .model-hub-route-add > svg { width: 13px; height: 13px; }
 .model-hub-route-reseed { font-size: 12px; }

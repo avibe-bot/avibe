@@ -16,6 +16,7 @@ export type RouteChainInteractionAction =
   | { type: "reset"; draft: RouteHop[]; focusIndex?: number }
   | { type: "focus"; index: number }
   | { type: "append"; hop: RouteHop }
+  | { type: "replace"; index: number; hop: RouteHop }
   | { type: "remove"; index: number }
   | { type: "begin-grab"; index: number }
   | { type: "move-grab"; direction: -1 | 1 }
@@ -78,6 +79,15 @@ export function advanceRouteChainInteraction(
       return {
         draft: [...state.draft, { ...action.hop }],
         focusIndex: state.draft.length,
+        grab: null,
+      };
+    case "replace":
+      if (action.index < 0 || action.index >= state.draft.length) return state;
+      return {
+        draft: state.draft.map((hop, index) =>
+          index === action.index ? { ...action.hop } : hop,
+        ),
+        focusIndex: action.index,
         grab: null,
       };
     case "remove": {
