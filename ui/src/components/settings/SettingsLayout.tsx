@@ -31,6 +31,7 @@ import { useIsDesktop } from '@/lib/useIsDesktop';
 import { AccountMenu } from '../AccountMenu';
 import { LanguageSwitcher } from '../LanguageSwitcher';
 import { ThemeToggle } from '../ThemeToggle';
+import { VersionBadge } from '../VersionBadge';
 import { modelHubEnabledFromConfig } from './models/featureFlags';
 
 type SettingsItem = {
@@ -105,6 +106,8 @@ const pathMatches = (pathname: string, itemPath: string): boolean =>
 const itemMatches = (pathname: string, item: SettingsItem): boolean =>
   item.exact ? pathname === item.path : pathMatches(pathname, item.path);
 
+const normalizedSettingsPath = (path: string): string => path.replace(/\/+$/, '') || '/';
+
 const SettingsNavLink: React.FC<{ item: SettingsItem }> = ({ item }) => {
   const { t } = useTranslation();
   const location = useLocation();
@@ -117,7 +120,7 @@ const SettingsNavLink: React.FC<{ item: SettingsItem }> = ({ item }) => {
       end={item.exact}
       title={t(item.labelKey)}
       className={clsx(
-        'flex items-center gap-2 rounded-lg px-2 py-2 text-[12.5px] font-medium transition-colors',
+        'flex min-h-11 items-center gap-2 rounded-lg px-2 py-2 text-[12.5px] font-medium transition-colors md:min-h-0',
         'md:justify-center lg:justify-start',
         active
           ? 'bg-mint/[0.09] text-foreground'
@@ -147,7 +150,7 @@ const SettingsNavGroup: React.FC<{ item: SettingsItem }> = ({ item }) => {
         aria-expanded={open}
         onClick={() => setManualOpen(!open)}
         className={clsx(
-          'flex w-full items-center gap-2 rounded-lg px-2 py-2 text-[12.5px] font-medium transition-colors',
+          'flex min-h-11 w-full items-center gap-2 rounded-lg px-2 py-2 text-[12.5px] font-medium transition-colors md:min-h-0',
           'md:justify-center lg:justify-start',
           childActive
             ? 'text-foreground'
@@ -254,7 +257,10 @@ export const SettingsLayout: React.FC = () => {
   );
 
   const activeTrail = useMemo(() => {
-    for (const group of visibleGroups) {
+    // Route hierarchy must stay stable while capability/config projections load;
+    // otherwise a mobile deep link can briefly point its Back action at the
+    // wrong parent before its rail item becomes visible.
+    for (const group of SETTINGS_GROUPS) {
       for (const item of group.items) {
         const child = item.children?.find((candidate) => itemMatches(location.pathname, candidate));
         if (child) return [item, child];
@@ -262,7 +268,24 @@ export const SettingsLayout: React.FC = () => {
       }
     }
     return [];
-  }, [location.pathname, visibleGroups]);
+  }, [location.pathname]);
+
+  const mobileBackTarget = useMemo(() => {
+    if (atRoot) return '/';
+    const activeSection = activeTrail.at(-1);
+    if (!activeSection) return '/settings';
+    return normalizedSettingsPath(location.pathname) === normalizedSettingsPath(activeSection.path)
+      ? '/settings'
+      : activeSection.path;
+  }, [activeTrail, atRoot, location.pathname]);
+
+  const mobileBackLabel = mobileBackTarget === '/'
+    ? t('settings.backToWorkbench')
+    : mobileBackTarget === '/settings'
+      ? t('settings.backToSections')
+      : t('settings.backToSection', {
+        section: t(activeTrail.at(-1)?.labelKey ?? 'nav.settings'),
+      });
 
   useEffect(() => {
     if (atRoot || !location.pathname.startsWith('/settings/')) return;
@@ -278,7 +301,16 @@ export const SettingsLayout: React.FC = () => {
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background md:h-[var(--app-shell-h)]">
       <header className="flex h-[calc(3.5rem+env(safe-area-inset-top))] shrink-0 items-center justify-between border-b border-border bg-surface px-4 pt-[env(safe-area-inset-top)] md:h-14 md:pt-0">
         <div className="flex min-w-0 items-center gap-2 text-[13px] font-semibold text-foreground">
-          <Settings className="size-4 text-mint-ink" />
+          {mobileBackTarget && (
+            <NavLink
+              to={mobileBackTarget}
+              aria-label={mobileBackLabel}
+              className="-ml-2 grid size-11 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-foreground/[0.05] hover:text-foreground md:hidden"
+            >
+              <ChevronLeft className="size-5" />
+            </NavLink>
+          )}
+          <Settings className={clsx('size-4 text-mint-ink', mobileBackTarget && 'hidden md:block')} />
           <span>{t('nav.settings')}</span>
           {!atRoot && (
             <>
@@ -289,13 +321,20 @@ export const SettingsLayout: React.FC = () => {
             </>
           )}
         </div>
-        <NavLink
-          to="/"
-          aria-label={t('settings.close')}
-          className="grid size-8 place-items-center rounded-lg text-muted transition hover:bg-foreground/[0.05] hover:text-foreground"
-        >
-          <X className="size-4" />
-        </NavLink>
+        <div className="flex shrink-0 items-center gap-1">
+          {capabilities.can_manage_instance && (
+            <div className="md:hidden">
+              <VersionBadge />
+            </div>
+          )}
+          <NavLink
+            to="/"
+            aria-label={t('settings.close')}
+            className="hidden size-8 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-foreground/[0.05] hover:text-foreground md:grid"
+          >
+            <X className="size-4" />
+          </NavLink>
+        </div>
       </header>
 
       <div className="flex min-h-0 flex-1">
@@ -335,20 +374,12 @@ export const SettingsLayout: React.FC = () => {
 
         <section className={clsx('min-w-0 flex-1 overflow-y-auto', atRoot && 'hidden md:block')}>
           <div
+            key={location.pathname}
             className={clsx(
-              'w-full px-4 pb-[calc(1.25rem+env(safe-area-inset-bottom))] pt-5 md:px-6 md:pb-7 md:pt-7 lg:px-8',
+              'w-full px-4 pb-[calc(1.25rem+env(safe-area-inset-bottom))] pt-5 motion-safe:animate-in motion-safe:slide-in-from-right-4 motion-safe:duration-200 md:px-6 md:pb-7 md:pt-7 md:animate-none lg:px-8',
               isModelHub ? 'min-h-full' : 'mx-auto max-w-[1180px]',
             )}
           >
-            {!atRoot && (
-              <NavLink
-                to="/settings"
-                className="mb-4 inline-flex items-center gap-1.5 text-[12px] font-medium text-muted hover:text-foreground md:hidden"
-              >
-                <ChevronLeft className="size-3.5" />
-                {t('settings.backToSections')}
-              </NavLink>
-            )}
             <Outlet />
           </div>
         </section>
