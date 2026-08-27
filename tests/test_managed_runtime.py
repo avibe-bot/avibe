@@ -1281,6 +1281,51 @@ def test_clean_preserves_remote_manifest_cache_for_offline_resolution(
     assert Path(reused["install_dir"]) == Path(installed["install_dir"])
 
 
+def test_archive_probe_fetches_remote_manifest_without_mutating_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path = tmp_path / "remote-manifest.json"
+    _write_fixture_runtime_release(
+        tmp_path,
+        manifest_path,
+        label="diagnostic",
+        version="1.0.0",
+    )
+    manifest_url = "https://example.test/runtime-manifest.json"
+    manager = _fixture_runtime_manager(
+        tmp_path / "runtime",
+        manifest_url=manifest_url,
+    )
+    cached_manifest = manager._remote_manifest_cache_path()
+    cached_manifest.parent.mkdir(parents=True)
+    cached_manifest.write_bytes(b"existing cached manifest")
+    monkeypatch.setattr(
+        managed_runtime,
+        "fetch_bytes",
+        lambda url, **_kwargs: (
+            manifest_path.read_bytes()
+            if url == manifest_url
+            else pytest.fail(f"unexpected fetch: {url}")
+        ),
+    )
+    monkeypatch.setattr(
+        managed_runtime,
+        "write_atomic",
+        lambda *_args, **_kwargs: pytest.fail("diagnostic load wrote the manifest cache"),
+    )
+    monkeypatch.setattr(
+        managed_runtime,
+        "probe_url",
+        lambda *_args, **_kwargs: {"ok": True, "checked": True},
+    )
+
+    result = manager.probe_archive_reachability()
+
+    assert result == {"ok": True, "checked": True}
+    assert cached_manifest.read_bytes() == b"existing cached manifest"
+
+
 def test_clean_archive_candidates_require_known_shape_maturity_and_unprotected_digest(
     tmp_path: Path,
 ) -> None:

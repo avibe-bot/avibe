@@ -439,6 +439,21 @@ def _write_runtime_archive(tmp_path: Path, *, text: str = "#!/usr/bin/env node\n
     return archive_path
 
 
+def _write_runtime_archive_with_entrypoints(
+    tmp_path: Path,
+    entrypoints: tuple[str, ...],
+) -> Path:
+    archive_path = tmp_path / "vibe-show-runtime-entrypoints.tgz"
+    payload = b"#!/usr/bin/env node\n"
+    with tarfile.open(archive_path, "w:gz") as archive:
+        for entrypoint in entrypoints:
+            member = tarfile.TarInfo(entrypoint)
+            member.mode = 0o755
+            member.size = len(payload)
+            archive.addfile(member, io.BytesIO(payload))
+    return archive_path
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as file:
@@ -9595,6 +9610,54 @@ def test_show_runtime_manager_force_refreshes_matching_manifest_install(monkeypa
     assert installed_cli.read_text(encoding="utf-8") == "healthy runtime\n"
 
 
+def test_show_runtime_manager_force_publication_failure_invalidates_cached_command_and_repairs(
+    monkeypatch,
+    tmp_path,
+):
+    archive_path = _write_runtime_archive(tmp_path, text="healthy runtime\n")
+    manifest_path = _write_runtime_manifest(tmp_path, archive_path)
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        manifest_path=manifest_path,
+    )
+    monkeypatch.setattr(
+        "core.show_runtime._resolve_command",
+        lambda command: ["/bin/node"] if command == "node" else None,
+    )
+    installed = manager.prepare()
+    installed_cli = Path(installed["command"][1])
+    original_write_pointer = show_runtime._ShowManifestRuntimeManager._write_current_pointer
+    writes = 0
+
+    def fail_first_pointer_write(shared_manager, install_dir, manifest, archive):
+        nonlocal writes
+        writes += 1
+        if writes == 1:
+            raise OSError("pointer publication failed")
+        return original_write_pointer(shared_manager, install_dir, manifest, archive)
+
+    monkeypatch.setattr(
+        show_runtime._ShowManifestRuntimeManager,
+        "_write_current_pointer",
+        fail_first_pointer_write,
+    )
+
+    failed = manager.prepare(force=True)
+
+    assert failed["ok"] is False
+    assert failed["reason"] == "runtime_install_failed"
+    assert failed["command"] is None
+    assert manager._managed_command is None
+    assert not installed_cli.exists()
+
+    repaired = manager.prepare()
+
+    assert repaired["ok"] is True
+    assert repaired["command"] == installed["command"]
+    assert installed_cli.read_text(encoding="utf-8") == "healthy runtime\n"
+
+
 def test_show_runtime_manager_preserves_structured_http_download_error(monkeypatch, tmp_path):
     archive_path = _write_runtime_archive(tmp_path)
     archive_url = "https://github.com/avibe-bot/avibe/releases/download/v-test/runtime.tgz?token=secret"
@@ -9845,6 +9908,49 @@ def test_show_runtime_archive_probe_uses_body_free_head_request(monkeypatch, tmp
     assert result["http_status"] == 200
     assert result["final_host"] == "release-assets.githubusercontent.com"
     assert requests[0].get_method() == "HEAD"
+
+
+def test_show_runtime_manifest_probe_fetches_without_mutating_remote_cache(
+    monkeypatch,
+    tmp_path,
+):
+    archive_path = _write_runtime_archive(tmp_path)
+    manifest_path = _write_runtime_manifest(
+        tmp_path,
+        archive_path,
+        url="https://example.test/runtime.tgz",
+    )
+    manifest_url = "https://example.test/show-runtime-manifest.json"
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        manifest_url=manifest_url,
+    )
+    shared_manager = manager._shared_manifest_manager(offline=False)
+    cached_manifest = shared_manager._remote_manifest_cache_path()
+    cached_manifest.parent.mkdir(parents=True)
+    cached_manifest.write_bytes(b"existing Show manifest cache")
+    monkeypatch.setattr(
+        "core.managed_runtime.fetch_bytes",
+        lambda url, **_kwargs: (
+            manifest_path.read_bytes()
+            if url == manifest_url
+            else pytest.fail(f"unexpected fetch: {url}")
+        ),
+    )
+    monkeypatch.setattr(
+        "core.managed_runtime.write_atomic",
+        lambda *_args, **_kwargs: pytest.fail("Show diagnostic probe wrote the manifest cache"),
+    )
+    monkeypatch.setattr(
+        "core.show_runtime.probe_url",
+        lambda *_args, **_kwargs: {"ok": True, "checked": True},
+    )
+
+    result = manager.probe_archive_reachability()
+
+    assert result == {"ok": True, "checked": True}
+    assert cached_manifest.read_bytes() == b"existing Show manifest cache"
 
 
 def test_show_runtime_manager_manifest_install_dir_includes_runtime_and_archive_identity(monkeypatch, tmp_path):
@@ -10467,6 +10573,71 @@ def test_show_runtime_clean_skips_legacy_parent_of_current_fingerprint(monkeypat
     assert str(legacy_parent) not in clean_result["removed"]
     assert current_install_dir.exists() is True
     assert Path(result["command"][1]).exists() is True
+
+
+@pytest.mark.parametrize("include_canonical", (False, True))
+def test_show_runtime_manager_rejects_noncanonical_manifest_entrypoint(
+    monkeypatch,
+    tmp_path,
+    include_canonical,
+):
+    canonical = "node_modules/@avibe/show-runtime/dist/cli.js"
+    alternate = "node_modules/@avibe/show-runtime/dist/alternate.js"
+    entrypoints = (alternate, canonical) if include_canonical else (alternate,)
+    archive_path = _write_runtime_archive_with_entrypoints(tmp_path, entrypoints)
+    manifest_path = _write_runtime_manifest(tmp_path, archive_path)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["archives"][_runtime_platform_tag()]["bin_path"] = alternate
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        manifest_path=manifest_path,
+    )
+    monkeypatch.setattr(
+        "core.show_runtime._resolve_command",
+        lambda command: ["/bin/node"] if command == "node" else None,
+    )
+
+    result = manager.prepare()
+
+    assert result["ok"] is False
+    assert result["reason"] == "runtime_manifest_invalid"
+    assert result["command"] is None
+    assert not (manager.runtime_dir / "current.json").exists()
+
+
+@pytest.mark.parametrize(
+    "minimum_node",
+    (20, [">=22.12.0"], {"range": ">=22.12.0"}),
+    ids=("number", "list", "object"),
+)
+def test_show_runtime_manager_rejects_non_string_manifest_node_requirement(
+    monkeypatch,
+    tmp_path,
+    minimum_node,
+):
+    archive_path = _write_runtime_archive(tmp_path)
+    manifest_path = _write_runtime_manifest(tmp_path, archive_path)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["minimum_node"] = minimum_node
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        manifest_path=manifest_path,
+    )
+    monkeypatch.setattr(
+        "core.show_runtime._resolve_command",
+        lambda command: ["/bin/node"] if command == "node" else None,
+    )
+
+    result = manager.prepare()
+
+    assert result["ok"] is False
+    assert result["reason"] == "runtime_manifest_invalid"
+    assert result["command"] is None
+    assert not (manager.runtime_dir / "current.json").exists()
 
 
 def test_show_runtime_manager_rejects_node_below_manifest_minimum(monkeypatch, tmp_path):

@@ -527,6 +527,33 @@ class _ShowManifestRuntimeManager(ManagedRuntimeManager):
             return False
         return True
 
+    def _parse_manifest(
+        self,
+        payload: bytes,
+        *,
+        loaded_from: str,
+    ) -> ManagedRuntimeManifest | None:
+        manifest = super()._parse_manifest(payload, loaded_from=loaded_from)
+        if manifest is None:
+            return None
+        if "minimum_node" in manifest.payload and not isinstance(
+            manifest.payload["minimum_node"],
+            str,
+        ):
+            self._install_reason = "runtime_manifest_invalid"
+            return None
+        return manifest
+
+    def _manifest_archive_for_platform(
+        self,
+        manifest: ManagedRuntimeManifest,
+    ) -> ManagedRuntimeArchive | None:
+        archive = super()._manifest_archive_for_platform(manifest)
+        if archive is not None and archive.bin_path != self.spec.default_bin_path:
+            self._install_reason = "runtime_manifest_invalid"
+            return None
+        return archive
+
     def _binary_matches_manifest(
         self,
         binary: Path,
@@ -1818,15 +1845,7 @@ class ShowRuntimeManager:
 
     def _remove_managed_runtime_tree_for_replacement(self, path: Path, *, label: str) -> bool:
         """Invalidate cached install facts before removing managed runtime bytes."""
-        self._managed_command = None
-        self._availability = replace(
-            self._availability,
-            install=ShowRuntimeInstallState.ABSENT,
-            command=None,
-            install_reason=None,
-            install_failure_class=None,
-            install_recovery_action=None,
-        )
+        self._invalidate_managed_runtime_projection()
         try:
             if os.path.lexists(path):
                 shutil.rmtree(path)
@@ -1838,6 +1857,17 @@ class ShowRuntimeManager:
             self._install_reason = "runtime_install_failed"
             return False
         return True
+
+    def _invalidate_managed_runtime_projection(self) -> None:
+        self._managed_command = None
+        self._availability = replace(
+            self._availability,
+            install=ShowRuntimeInstallState.ABSENT,
+            command=None,
+            install_reason=None,
+            install_failure_class=None,
+            install_recovery_action=None,
+        )
 
     def _install_managed_runtime_locked(
         self,
@@ -2037,7 +2067,7 @@ class ShowRuntimeManager:
         archive_url: str | None = None
         if self.runtime_source == _RUNTIME_SOURCE_MANIFEST:
             manager = self._shared_manifest_manager(offline=self.offline)
-            manifest = manager.load_manifest(allow_network=not self.offline)
+            manifest = manager.load_manifest_for_diagnostics()
             if not manifest:
                 self._adopt_shared_manifest_evidence(manager)
                 return {
@@ -3263,6 +3293,8 @@ class ShowRuntimeManager:
         if not node:
             self._install_reason = "runtime_node_missing"
             return None
+        if force:
+            self._invalidate_managed_runtime_projection()
         manager = self._shared_manifest_manager(offline=offline)
         result = manager.ensure(force=force)
         self._adopt_shared_manifest_evidence(manager, result)

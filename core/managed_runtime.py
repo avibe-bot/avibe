@@ -530,7 +530,7 @@ class ManagedRuntimeManager:
         }
 
     def probe_archive_reachability(self, *, timeout: float = 10.0) -> dict[str, Any]:
-        manifest = self._load_manifest(allow_network=not self.offline)
+        manifest = self.load_manifest_for_diagnostics()
         if manifest is None:
             return {
                 "ok": False,
@@ -1494,7 +1494,20 @@ class ManagedRuntimeManager:
     def _binary_matches_manifest(self, binary: Path, manifest: ManagedRuntimeManifest) -> bool:
         return self._binary_version(binary) == manifest.runtime_version
 
-    def _load_manifest(self, *, allow_network: bool) -> ManagedRuntimeManifest | None:
+    def load_manifest_for_diagnostics(self) -> ManagedRuntimeManifest | None:
+        """Load the selected manifest without writing runtime state."""
+
+        return self._load_manifest(
+            allow_network=not self.offline,
+            persist_remote_cache=False,
+        )
+
+    def _load_manifest(
+        self,
+        *,
+        allow_network: bool,
+        persist_remote_cache: bool = True,
+    ) -> ManagedRuntimeManifest | None:
         payload: bytes
         loaded_from: str
         cache_remote = False
@@ -1537,7 +1550,7 @@ class ManagedRuntimeManager:
                     self._download_error = dependency_error_details(exc, self.manifest_url)
                     return None
                 loaded_from = self.manifest_url
-                cache_remote = True
+                cache_remote = persist_remote_cache
         else:
             try:
                 resource = package_resources.files(self.spec.package).joinpath(self.spec.manifest_resource)
