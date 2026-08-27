@@ -2729,7 +2729,7 @@ def test_runtime_prepare_force_does_not_report_explicit_command_as_replaced(monk
     assert "VIBE_SHOW_RUNTIME_BIN" in captured.err
 
 
-@pytest.mark.parametrize("consumer", ["memory", "model-hub"])
+@pytest.mark.parametrize("consumer", ["memory", "model-hub", "tmux"])
 def test_runtime_clean_reclaims_each_shared_consumer_in_preview_and_real_run(
     monkeypatch,
     capsys,
@@ -2744,11 +2744,18 @@ def test_runtime_clean_reclaims_each_shared_consumer_in_preview_and_real_run(
             provider_root=tmp_path / "memory-provider",
             offline=True,
         )
-    else:
+    elif consumer == "model-hub":
         from vibe.model_hub_runtime.installer import EngineRuntimeManager
 
         manager = EngineRuntimeManager(
             runtime_dir=tmp_path / "model-hub-runtime",
+            offline=True,
+        )
+    else:
+        from core.tmux_runtime import TmuxRuntimeManager
+
+        manager = TmuxRuntimeManager(
+            runtime_dir=tmp_path / "tmux-runtime",
             offline=True,
         )
 
@@ -2844,6 +2851,7 @@ def test_runtime_clean_reclaims_each_shared_consumer_in_preview_and_real_run(
 
 
 def test_runtime_clean_registry_invokes_every_current_shared_consumer(monkeypatch):
+    from core import tmux_runtime
     from core.memory import artifact as memory_artifact
     from vibe.model_hub_runtime import installer as model_hub_installer
 
@@ -2872,6 +2880,11 @@ def test_runtime_clean_registry_invokes_every_current_shared_consumer(monkeypatc
         "EngineRuntimeManager",
         lambda: FakeManager("model_hub_engine"),
     )
+    monkeypatch.setattr(
+        tmux_runtime,
+        "get_tmux_runtime_manager",
+        lambda: FakeManager("tmux"),
+    )
 
     results = cli._clean_managed_runtime_consumers(keep_previous=2, dry_run=True)
 
@@ -2879,11 +2892,13 @@ def test_runtime_clean_registry_invokes_every_current_shared_consumer(monkeypatc
         "git",
         "memory-runtime",
         "model_hub_engine",
+        "tmux",
     ]
     assert calls == [
         ("git", 2, True),
         ("memory-runtime", 2, True),
         ("model_hub_engine", 2, True),
+        ("tmux", 2, True),
     ]
 
 
@@ -3032,6 +3047,7 @@ def test_runtime_clean_success_reports_every_consumer_and_exits_zero(monkeypatch
             ("git", cleaner(1)),
             ("memory-runtime", cleaner(2)),
             ("model_hub_engine", cleaner(3)),
+            ("tmux", cleaner(4)),
         ),
     )
     args = cli.build_parser().parse_args(["runtime", "clean"])
@@ -3041,6 +3057,7 @@ def test_runtime_clean_success_reports_every_consumer_and_exits_zero(monkeypatch
     assert "Removed 1 Git Runtime cache item(s)." in captured.out
     assert "Removed 2 Memory Runtime cache item(s)." in captured.out
     assert "Removed 3 Model Hub Runtime cache item(s)." in captured.out
+    assert "Removed 4 tmux Runtime cache item(s)." in captured.out
     assert captured.err == ""
 
 
@@ -3107,8 +3124,8 @@ def test_runtime_clean_does_not_render_shared_archive_failure_as_zero_success(mo
 @pytest.mark.parametrize(
     ("language", "consumer_scope", "failure_contract"),
     [
-        ("en", "Show, Git, Memory, and Model Hub", "exit nonzero if any cleanup fails"),
-        ("zh", "Show、Git、Memory 和 Model Hub", "任一清理失败时以非零状态退出"),
+        ("en", "Show, Git, Memory, Model Hub, and tmux", "exit nonzero if any cleanup fails"),
+        ("zh", "Show、Git、Memory、Model Hub 和 tmux", "任一清理失败时以非零状态退出"),
     ],
 )
 def test_runtime_clean_help_names_consumers_and_failure_exit(

@@ -1,34 +1,72 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import stat
-import io
 import tarfile
 import urllib.error
-import warnings
 from pathlib import Path
 
 import pytest
 
-from core import tmux_runtime
+from core import managed_runtime, tmux_runtime
+from core.managed_runtime import ManagedRuntimeManager, runtime_platform_tag
 from core.tmux_runtime import TmuxRuntimeManager
 
 
-def _write_tmux_archive(tmp_path: Path, *, text: str = "#!/bin/sh\necho tmux 3.6b\n") -> Path:
+RELEASED_MANIFEST_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "tmux_runtime" / "v3.6b-released-manifest.json"
+)
+RELEASED_ARTIFACT_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "tmux_runtime" / "v3.6b-release-artifacts.json"
+)
+
+
+def _write_tmux_archive(
+    tmp_path: Path,
+    *,
+    text: str = "#!/bin/sh\necho tmux 3.6b\n",
+    bin_path: str = "tmux",
+) -> Path:
     root = tmp_path / "archive-root"
     root.mkdir()
-    binary = root / "tmux"
+    binary = root / bin_path
+    binary.parent.mkdir(parents=True, exist_ok=True)
     binary.write_text(text, encoding="utf-8")
     binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
     archive = tmp_path / "tmux-test.tar.gz"
     with tarfile.open(archive, "w:gz") as tar:
-        tar.add(binary, arcname="tmux")
+        tar.add(binary, arcname=bin_path)
     return archive
 
 
-def _write_manifest(tmp_path: Path, archive: Path, *, sha256: str | None = None, size: int | None = None) -> Path:
+def _archive_binary_sha256(archive: Path, *, bin_path: str = "tmux") -> str:
+    with tarfile.open(archive, "r:gz") as tar:
+        binary = tar.extractfile(bin_path)
+        assert binary is not None
+        return hashlib.sha256(binary.read()).hexdigest()
+
+
+def _write_manifest(
+    tmp_path: Path,
+    archive: Path,
+    *,
+    sha256: str | None = None,
+    size: int | None = None,
+    include_binary_sha256: bool = True,
+    bin_path: str = "tmux",
+) -> Path:
     digest = sha256 or hashlib.sha256(archive.read_bytes()).hexdigest()
+    archive_payload = {
+        "name": archive.name,
+        "url": archive.as_uri(),
+        "sha256": digest,
+        "size": archive.stat().st_size if size is None else size,
+        "bin_path": bin_path,
+    }
+    if include_binary_sha256:
+        archive_payload["binary_sha256"] = _archive_binary_sha256(archive, bin_path=bin_path)
     manifest = {
         "schema_version": 1,
         "tmux_version": "3.6b",
@@ -36,33 +74,76 @@ def _write_manifest(tmp_path: Path, archive: Path, *, sha256: str | None = None,
         "source_url": "file://test",
         "requires_utf8proc": True,
         "terminfo": "bundled-or-system",
-        "archives": {
-            tmux_runtime._runtime_platform_tag(): {
-                "name": archive.name,
-                "url": archive.as_uri(),
-                "sha256": digest,
-                "size": archive.stat().st_size if size is None else size,
-                "bin_path": "tmux",
-            }
-        },
+        "archives": {runtime_platform_tag(): archive_payload},
     }
     manifest_path = tmp_path / "tmux_runtime_manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     return manifest_path
 
 
-def test_platform_tag_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
-    cases = [
-        ("macosx-14.0-arm64", "ignored", "darwin-arm64"),
-        ("macosx-13.0-x86_64", "ignored", "darwin-x64"),
-        ("macosx-14.0-universal2", "arm64", "darwin-arm64"),
-        ("linux-x86_64", "ignored", "linux-x64"),
-        ("linux-aarch64", "ignored", "linux-arm64"),
-    ]
-    for raw_platform, machine, expected in cases:
-        monkeypatch.setattr(tmux_runtime, "get_platform", lambda value=raw_platform: value)
-        monkeypatch.setattr(tmux_runtime.platform, "machine", lambda value=machine: value)
-        assert tmux_runtime._runtime_platform_tag() == expected
+def test_released_manifest_and_archive_fixtures_pass_through_production_reader(
+    tmp_path: Path,
+) -> None:
+    manifest_path = Path(tmux_runtime.__file__).resolve().parents[1] / "vibe" / "tmux_runtime_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    released_manifest = json.loads(RELEASED_MANIFEST_FIXTURE.read_text(encoding="utf-8"))
+    released_artifacts = json.loads(RELEASED_ARTIFACT_FIXTURE.read_text(encoding="utf-8"))
+    manager = TmuxRuntimeManager(runtime_dir=tmp_path / "runtime", offline=True)
+    parsed = manager._parse_manifest(
+        RELEASED_MANIFEST_FIXTURE.read_bytes(),
+        loaded_from="fixture:tmux-v3.6b",
+    )
+
+    assert parsed is not None
+    assert hashlib.sha256(RELEASED_MANIFEST_FIXTURE.read_bytes()).hexdigest() == (
+        tmux_runtime._RELEASED_PACKAGED_MANIFEST_SHA256
+    )
+    assert released_artifacts["release"] == {
+        "tag": "v3.6b",
+        "tmux_version": "3.6b",
+        "manifest_name": RELEASED_MANIFEST_FIXTURE.name,
+        "manifest_sha256": tmux_runtime._RELEASED_PACKAGED_MANIFEST_SHA256,
+    }
+    assert set(parsed.archives) == set(released_artifacts["archives"])
+    for platform_tag, artifact in released_artifacts["archives"].items():
+        released_archive = released_manifest["archives"][platform_tag]
+        current_archive = manifest["archives"][platform_tag]
+        parsed_archive = parsed.archives[platform_tag]
+        assert released_archive == {
+            key: artifact[key]
+            for key in ("name", "url", "sha256", "size", "bin_path")
+        }
+        assert current_archive == artifact
+        assert parsed_archive.binary_sha256 == artifact["binary_sha256"]
+    assert {
+        archive["sha256"]: archive["binary_sha256"]
+        for archive in released_artifacts["archives"].values()
+    } == tmux_runtime._RELEASED_BINARY_SHA256_BY_ARCHIVE_SHA256
+
+
+def test_tmux_is_a_full_shared_manifest_consumer() -> None:
+    assert issubclass(TmuxRuntimeManager, ManagedRuntimeManager)
+    inherited_methods = {
+        "_downloaded_archive_matches",
+        "_failure",
+        "_load_manifest",
+        "_manifest_archive_for_platform",
+        "_manifest_install_dir",
+        "_resolve_manifest_archive",
+        "_verified_manifest_binary",
+        "_write_current_pointer",
+        "_write_manifest_install_metadata",
+        "ensure",
+        "probe_archive_reachability",
+    }
+    for method_name in inherited_methods:
+        assert getattr(TmuxRuntimeManager, method_name) is getattr(ManagedRuntimeManager, method_name)
+    for deleted_method_name in {
+        "_legacy_manifest_install_dir",
+        "_manifest_install_matches",
+        "_manifest_metadata_path",
+    }:
+        assert not hasattr(TmuxRuntimeManager, deleted_method_name)
 
 
 def test_download_verify_install_and_idempotent_reinstall(tmp_path: Path) -> None:
@@ -84,11 +165,40 @@ def test_download_verify_install_and_idempotent_reinstall(tmp_path: Path) -> Non
     assert Path(second["path"]) == installed_path
 
 
-def test_archive_download_retries_transient_network_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_released_manifest_without_binary_digest_installs_through_shared_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = _write_tmux_archive(tmp_path)
+    archive_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+    binary_sha256 = _archive_binary_sha256(archive)
+    manifest = _write_manifest(tmp_path, archive, include_binary_sha256=False)
+    monkeypatch.setattr(
+        tmux_runtime,
+        "_RELEASED_BINARY_SHA256_BY_ARCHIVE_SHA256",
+        {archive_sha256: binary_sha256},
+    )
+
+    manager = TmuxRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest)
+    result = manager.ensure()
+
+    assert result["ok"] is True
+    metadata = json.loads(
+        (Path(result["install_dir"]) / manager.spec.metadata_filename).read_text(encoding="utf-8")
+    )
+    assert metadata["runtime_id"] == "tmux"
+    assert metadata["binary_sha256"] == binary_sha256
+    assert metadata["manifest_sha256"] == hashlib.sha256(manifest.read_bytes()).hexdigest()
+
+
+def test_archive_download_retries_transient_network_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     archive = _write_tmux_archive(tmp_path)
     manifest = _write_manifest(tmp_path, archive)
     payload = json.loads(manifest.read_text(encoding="utf-8"))
-    payload["archives"][tmux_runtime._runtime_platform_tag()]["url"] = "https://example.test/tmux.tar.gz"
+    payload["archives"][runtime_platform_tag()]["url"] = "https://example.test/tmux.tar.gz"
     manifest.write_text(json.dumps(payload), encoding="utf-8")
     attempts = 0
 
@@ -99,7 +209,7 @@ def test_archive_download_retries_transient_network_failure(tmp_path: Path, monk
             raise urllib.error.URLError(ConnectionResetError("reset"))
         return io.BytesIO(archive.read_bytes())
 
-    monkeypatch.setattr(tmux_runtime.urllib.request, "urlopen", opener)
+    monkeypatch.setattr(managed_runtime.urllib.request, "urlopen", opener)
     monkeypatch.setattr("core.dependency_network.time.sleep", lambda _delay: None)
 
     result = TmuxRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest).ensure()
@@ -120,16 +230,21 @@ def test_bad_checksum_is_rejected(tmp_path: Path) -> None:
     assert manager.resolve_binary() is None
 
 
-def test_successful_archive_fetch_clears_stale_download_error_before_checksum_failure(tmp_path: Path) -> None:
+def test_successful_archive_fetch_clears_stale_download_error_before_checksum_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     archive = _write_tmux_archive(tmp_path)
     manifest = _write_manifest(tmp_path, archive, sha256="0" * 64)
     manager = TmuxRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest)
     manager._download_error = {"kind": "timeout", "message": "old timeout"}
 
-    result = manager.ensure()
+    monkeypatch.setattr(tmux_runtime, "get_tmux_runtime_manager", lambda: manager)
+    result = tmux_runtime.ensure_tmux_installed()
 
     assert result["reason"] == "tmux_archive_checksum_mismatch"
     assert "checksum" in result["message"]
+    assert result["message"] == "tmux archive checksum did not match the pinned manifest."
     assert "old timeout" not in result["message"]
     assert result["download_error"] is None
 
@@ -141,17 +256,20 @@ def test_archive_probe_rejects_unsupported_scheme_before_network(
     archive = _write_tmux_archive(tmp_path)
     manifest = _write_manifest(tmp_path, archive)
     payload = json.loads(manifest.read_text(encoding="utf-8"))
-    payload["archives"][tmux_runtime._runtime_platform_tag()]["url"] = (
+    payload["archives"][runtime_platform_tag()]["url"] = (
         "http://user:secret@example.test/tmux.tar.gz?token=secret"
     )
     manifest.write_text(json.dumps(payload), encoding="utf-8")
     monkeypatch.setattr(
-        tmux_runtime,
+        managed_runtime,
         "probe_url",
         lambda *_args, **_kwargs: pytest.fail("unsupported URL must not be probed"),
     )
 
-    result = TmuxRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest).probe_archive_reachability()
+    result = TmuxRuntimeManager(
+        runtime_dir=tmp_path / "runtime",
+        manifest_path=manifest,
+    ).probe_archive_reachability()
 
     assert result == {
         "ok": False,
@@ -161,19 +279,18 @@ def test_archive_probe_rejects_unsupported_scheme_before_network(
     }
 
 
-def test_install_rejects_non_runnable_binary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_install_rejects_non_runnable_binary_without_replacing_current(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     archive = _write_tmux_archive(tmp_path)
-    manifest_path = _write_manifest(tmp_path, archive)
-    manager = TmuxRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest_path)
-    manifest = manager._load_manifest()
-    assert manifest is not None
-    archive_spec = manager._manifest_archive_for_platform(manifest)
-    assert archive_spec is not None
-    install_dir = manager._manifest_install_dir(manifest, archive_spec)
-    install_dir.mkdir(parents=True)
+    manifest = _write_manifest(tmp_path, archive)
+    manager = TmuxRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest)
+    installed = manager.ensure()
+    assert installed["ok"] is True
+    install_dir = Path(installed["install_dir"])
     sentinel = install_dir / "old-install"
     sentinel.write_text("keep me", encoding="utf-8")
-
     monkeypatch.setattr(tmux_runtime, "_tmux_binary_runnable", lambda _binary: False)
 
     result = manager.ensure(force=True)
@@ -206,6 +323,118 @@ def test_tmux_status_shape(tmp_path: Path) -> None:
     assert status["archive"]["bin_path"] == "tmux"
 
 
+def test_runtime_compatibility_accepts_any_runnable_tmux_version(tmp_path: Path) -> None:
+    archive = _write_tmux_archive(tmp_path, text="#!/bin/sh\necho tmux 3.5a\n")
+    manifest = _write_manifest(tmp_path, archive)
+    manager = TmuxRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest)
+
+    result = manager.ensure()
+
+    assert result["ok"] is True
+    assert manager.status()["version"] == "3.5a"
+
+
+def test_status_reports_install_root_for_nested_binary_path(tmp_path: Path) -> None:
+    bin_path = "usr/local/bin/tmux"
+    archive = _write_tmux_archive(tmp_path, bin_path=bin_path)
+    manifest = _write_manifest(tmp_path, archive, bin_path=bin_path)
+    manager = TmuxRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest)
+
+    installed = manager.ensure()
+    status = manager.status()
+
+    assert installed["ok"] is True
+    assert status["path"] == str(Path(installed["install_dir"]) / bin_path)
+    assert status["install_dir"] == installed["install_dir"]
+
+
+def test_exact_released_packaged_install_is_adopted_without_archive_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    released_manifest = json.loads(RELEASED_MANIFEST_FIXTURE.read_text(encoding="utf-8"))
+    platform_tag = runtime_platform_tag()
+    archive = released_manifest["archives"][platform_tag]
+    archive_sha256 = archive["sha256"]
+    binary_sha256 = tmux_runtime._RELEASED_BINARY_SHA256_BY_ARCHIVE_SHA256[archive_sha256]
+    manifest_sha256 = hashlib.sha256(RELEASED_MANIFEST_FIXTURE.read_bytes()).hexdigest()
+    assert manifest_sha256 == tmux_runtime._RELEASED_PACKAGED_MANIFEST_SHA256
+    released_fingerprint = hashlib.sha256(
+        f"{manifest_sha256}:{archive_sha256}".encode("utf-8")
+    ).hexdigest()[:16]
+    runtime_dir = tmp_path / "runtime"
+    released_dir = runtime_dir / "versions" / "3.6b" / platform_tag / released_fingerprint
+    released_dir.mkdir(parents=True)
+    binary = released_dir / "tmux"
+    binary.write_text("#!/bin/sh\necho tmux 3.6b\n", encoding="utf-8")
+    binary.chmod(0o755)
+    manager = TmuxRuntimeManager(runtime_dir=runtime_dir)
+    metadata_path = released_dir / manager.spec.metadata_filename
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "provider": "manifest",
+                "manifest_sha256": manifest_sha256,
+                "tmux_version": "3.6b",
+                "platform": platform_tag,
+                "archive_name": archive["name"],
+                "archive_sha256": archive_sha256,
+                "bin_path": "tmux",
+                "manifest_source": "package:tmux_runtime_manifest.json",
+                "source": released_manifest["source"],
+                "requires_utf8proc": True,
+                "terminfo": "bundled-or-system",
+            }
+        ),
+        encoding="utf-8",
+    )
+    original_file_sha256 = managed_runtime.file_sha256
+
+    def released_file_sha256(path: Path) -> str:
+        if path.resolve() == binary.resolve():
+            return binary_sha256
+        return original_file_sha256(path)
+
+    monkeypatch.setattr(managed_runtime, "file_sha256", released_file_sha256)
+    monkeypatch.setattr(
+        manager,
+        "_resolve_manifest_archive",
+        lambda _archive: pytest.fail("released install must be adopted without archive resolution"),
+    )
+
+    result = manager.ensure()
+
+    assert result["ok"] is True
+    assert result["changed"] is False
+    assert Path(result["path"]) == binary
+    assert manager.resolve_binary() == binary
+    assert result["install_dir"] == str(released_dir)
+    assert not (manager.runtime_dir / "current.json").exists()
+
+
+def test_remote_manifest_and_archive_cache_support_offline_reuse(tmp_path: Path) -> None:
+    archive = _write_tmux_archive(tmp_path)
+    manifest = _write_manifest(tmp_path, archive)
+    runtime_dir = tmp_path / "runtime"
+    online = TmuxRuntimeManager(runtime_dir=runtime_dir, manifest_url=manifest.as_uri())
+
+    first = online.ensure()
+    assert first["ok"] is True
+    manifest.unlink()
+    archive.unlink()
+
+    offline = TmuxRuntimeManager(
+        runtime_dir=runtime_dir,
+        manifest_url=manifest.as_uri(),
+        offline=True,
+    )
+    second = offline.ensure()
+
+    assert second["ok"] is True
+    assert second["changed"] is False
+    assert Path(second["path"]) == Path(first["path"])
+
+
 def test_macos_codesign_path_is_used(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     archive = _write_tmux_archive(tmp_path)
     manifest = _write_manifest(tmp_path, archive)
@@ -233,146 +462,6 @@ def test_macos_codesign_path_is_used(tmp_path: Path, monkeypatch: pytest.MonkeyP
     result = manager.ensure()
 
     assert result["ok"] is True
-    assert result["signing"]["changed"] is True
+    assert result["preparation"]["changed"] is True
     assert calls[0][:4] == ["/usr/bin/codesign", "-f", "-s", "-"]
     assert calls[0][4].endswith("/tmux")
-
-
-def test_safe_extract_tar_omits_filter_when_data_filter_is_unavailable(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    archive = _write_tmux_archive(tmp_path)
-    destination = tmp_path / "extract"
-    destination.mkdir()
-    calls: list[object] = []
-    monkeypatch.delattr(tarfile, "data_filter", raising=False)
-
-    with tarfile.open(archive, "r:gz") as tar:
-        original_extractall = tar.extractall
-
-        def capture_extractall(path, members=None, *, numeric_owner=False, filter=None):
-            calls.append(filter)
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", DeprecationWarning)
-                return original_extractall(path, members=members, numeric_owner=numeric_owner)
-
-        monkeypatch.setattr(tar, "extractall", capture_extractall)
-        tmux_runtime._safe_extract_tar(tar, destination)
-
-    assert calls == [None]
-    assert (destination / "tmux").is_file()
-
-
-def test_safe_extract_tar_uses_available_data_filter(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    archive = _write_tmux_archive(tmp_path)
-    destination = tmp_path / "extract"
-    destination.mkdir()
-    calls: list[object] = []
-    monkeypatch.setattr(tarfile, "data_filter", object(), raising=False)
-
-    with tarfile.open(archive, "r:gz") as tar:
-        original_extractall = tar.extractall
-
-        def capture_extractall(path, members=None, *, numeric_owner=False, filter=None):
-            calls.append(filter)
-            return original_extractall(path, members=members, numeric_owner=numeric_owner, filter=filter)
-
-        monkeypatch.setattr(tar, "extractall", capture_extractall)
-        tmux_runtime._safe_extract_tar(tar, destination)
-
-    assert calls == ["data"]
-    assert (destination / "tmux").is_file()
-
-
-def test_safe_extract_tar_rejects_symlink_assisted_dotdot_member(tmp_path: Path) -> None:
-    archive = tmp_path / "tmux-symlink-dotdot-escape.tar.gz"
-    destination = tmp_path / "extract"
-    destination.mkdir()
-    outside = tmp_path / "victim"
-
-    with tarfile.open(archive, "w:gz") as tar:
-        link = tarfile.TarInfo("link")
-        link.type = tarfile.SYMTYPE
-        link.linkname = "."
-        tar.addfile(link)
-
-        payload = b"escaped"
-        member = tarfile.TarInfo("link/../victim")
-        member.size = len(payload)
-        member.mode = 0o644
-        tar.addfile(member, io.BytesIO(payload))
-
-    with tarfile.open(archive, "r:gz") as tar:
-        with pytest.raises(ValueError, match="Unsafe tmux archive member path"):
-            tmux_runtime._safe_extract_tar(tar, destination)
-
-    assert not outside.exists()
-    assert not (destination / "victim").exists()
-    assert not (destination / "link").exists()
-
-
-def test_safe_extract_tar_rejects_root_escaping_hard_link(tmp_path: Path) -> None:
-    archive = tmp_path / "tmux-hardlink-escape.tar.gz"
-    victim = tmp_path / "victim"
-    victim.write_text("victim", encoding="utf-8")
-    original_victim_stat = victim.stat()
-    destination = tmp_path / "extract"
-    destination.mkdir()
-
-    with tarfile.open(archive, "w:gz") as tar:
-        directory = tarfile.TarInfo("sub")
-        directory.type = tarfile.DIRTYPE
-        directory.mode = 0o755
-        tar.addfile(directory)
-        hard_link = tarfile.TarInfo("sub/tmux")
-        hard_link.type = tarfile.LNKTYPE
-        hard_link.linkname = "../victim"
-        hard_link.mode = 0o755
-        tar.addfile(hard_link)
-
-    with tarfile.open(archive, "r:gz") as tar:
-        with pytest.raises(ValueError, match="Unsafe tmux archive link target"):
-            tmux_runtime._safe_extract_tar(tar, destination)
-
-    assert not (destination / "sub" / "tmux").exists()
-    assert victim.stat().st_nlink == original_victim_stat.st_nlink
-
-
-def test_safe_extract_tar_allows_root_relative_in_tree_hard_link(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source = tmp_path / "source"
-    source.mkdir()
-    binary = source / "tmux-real"
-    binary.write_text("#!/bin/sh\necho tmux 3.6b\n", encoding="utf-8")
-    binary.chmod(0o755)
-    archive = tmp_path / "tmux-hardlink-safe.tar.gz"
-    destination = tmp_path / "extract"
-    destination.mkdir()
-    monkeypatch.delattr(tarfile, "data_filter", raising=False)
-
-    with tarfile.open(archive, "w:gz") as tar:
-        tar.add(binary, arcname="tmux-real")
-        directory = tarfile.TarInfo("sub")
-        directory.type = tarfile.DIRTYPE
-        directory.mode = 0o755
-        tar.addfile(directory)
-        hard_link = tarfile.TarInfo("sub/tmux")
-        hard_link.type = tarfile.LNKTYPE
-        hard_link.linkname = "tmux-real"
-        hard_link.mode = 0o755
-        tar.addfile(hard_link)
-
-    with tarfile.open(archive, "r:gz") as tar:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            tmux_runtime._safe_extract_tar(tar, destination)
-
-    installed = destination / "sub" / "tmux"
-    assert installed.read_text(encoding="utf-8") == "#!/bin/sh\necho tmux 3.6b\n"
-    assert (destination / "tmux-real").stat().st_ino == installed.stat().st_ino

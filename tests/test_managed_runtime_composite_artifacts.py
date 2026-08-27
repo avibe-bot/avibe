@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from core import managed_runtime, show_runtime, tmux_runtime
+from core import managed_runtime, show_runtime
 from core.managed_runtime import ManagedRuntimeManager, ManagedRuntimeSpec
 
 
@@ -21,7 +21,6 @@ ESBUILD_PAYLOAD = b"fixture-esbuild\n"
 Extractor = Callable[[tarfile.TarFile, Path], None]
 EXTRACTORS: tuple[tuple[str, Extractor], ...] = (
     ("shared", managed_runtime.safe_extract_tar),
-    ("tmux", tmux_runtime._safe_extract_tar),
 )
 
 
@@ -554,7 +553,6 @@ def test_order_dependent_link_target_stays_confined(
     ("_name", "extractor", "detects_before_extract"),
     (
         ("shared", managed_runtime.safe_extract_tar, True),
-        ("tmux", tmux_runtime._safe_extract_tar, True),
     ),
 )
 @pytest.mark.parametrize("supports_filter", (True, False), ids=("available", "unavailable"))
