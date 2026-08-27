@@ -15,11 +15,13 @@ requires the exact matched `avibe-memory` distribution even when Memory is
 currently disabled, because pre-split planners cannot preserve an optional
 package shape.
 
-The existing release identity and one asset-complete finalizer remain the
-publication owner. It stages and verifies both distributions, publishes Memory
-before core, rechecks public availability, and only then removes the transition
-release gate. Manifest ownership follows the distribution that owns each
-artifact; no second tag, finalizer, or release identity is introduced.
+The existing release identity, one asset-complete Draft, and one finalizer
+remain the publication owner. The finalizer stages and verifies both
+distributions, publishes the asset-complete GitHub Release, and reverifies its
+public assets before any package-index upload. It then publishes Memory to PyPI,
+verifies its exact public resolution and hashes, and only then publishes core.
+Memory-before-core ordering applies within PyPI; no second tag, finalizer, or
+release identity is introduced.
 
 Doc A merged in PR #1742. Doc B depends normatively on its lifecycle and
 readiness invariants: `PackageLifecycleTransaction` owns mutation and recovery,
@@ -160,51 +162,81 @@ rejection, and exact split-family rollback.
 
 ## Invariant 3: Publication, Manifest Ownership, And Gate Removal
 
-The existing release workflow stages one asset-complete Draft and has one final
-publication owner. The finalizer must perform these checks and ordering inside
+The existing release workflow stages one asset-complete GitHub Draft and has one
+final publication owner. The Draft remains private through all staged checks,
+then becomes the public asset source before either Python distribution is
+available from PyPI. The finalizer performs these checks and ordering inside
 that one release identity:
 
 1. Build the Memory wheel/sdist and Memory-owned EverOS manifest/assets. Stage
    them in the Draft with hashes and distribution metadata; do not claim public
    availability.
-2. Verify every staged asset hash, filename, metadata version, manifest release
-   identity, and local resolver closure for the exact transition dependency.
-3. Build the transition core artifacts without Memory implementation or
+2. Build the transition core artifacts without Memory implementation or
    EverOS-manifest files. Verify core hashes, metadata, and the complete staged
    asset set while the release remains Draft.
-4. Immediately before finalization, repeat staged hash/metadata/local-resolver
-   checks. The single finalizer publishes the Memory distribution first and
-   records a verifiable version/hash publication checkpoint in the release
-   audit.
-5. Before uploading or declaring core available, verify that the exact public
-   Memory distribution resolves and downloads, and that its public manifest URLs
-   and hashes match the staged bytes. On rerun, the same finalizer probes this
-   checkpoint and public version/hash: an identical published Memory artifact is
-   skipped and finalization resumes at core; absence or non-identical bytes fail
+3. Verify every staged asset hash, filename, metadata version, manifest release
+   identity, and local resolver closure for the exact transition dependency.
+   For every staged sdist, build a wheel in an isolated environment and apply
+   the exact ownership and dependency assertions used for its staged wheel.
+   Before GitHub Release finalization, manifest verification uses staged bytes
+   and hashes. Any staged or rebuilt-wheel failure prevents every public action.
+4. Immediately before publication, repeat the complete staged and isolated
+   rebuild checks. The single finalizer publishes the asset-complete GitHub
+   Release and records its verifiable asset/hash checkpoint.
+5. Re-download the public GitHub assets and require every manifest URL, archive,
+   and hash to match staging. No PyPI upload begins until these public checks
+   pass; a rerun skips only an exact already-published GitHub asset set.
+6. Upload the Memory wheel and sdist to PyPI, record their version/hash
+   checkpoint, then resolve and download the exact Memory distribution from the
+   package index. Require its public bytes, metadata, and Memory-owned manifest
+   hash to match staging. On rerun, the same finalizer skips an exact published
+   Memory artifact and resumes at core; absence or non-identical bytes fail
    closed.
-6. Upload the core distribution from the same asset-complete finalizer, record
-   its verifiable publication checkpoint, then resolve/download both public
-   distributions together and recheck release assets, metadata, manifests, and
-   hashes. A rerun likewise skips only an exact already-published core artifact.
-7. Only after all post-publication checks pass may the finalizer declare the
-   transition release available and remove the transition gate.
+7. Upload the core wheel and sdist to PyPI, record their checkpoint, then
+   resolve/download both public distributions together and recheck metadata,
+   exact dependency closure, manifests, and hashes. Immediately before gate
+   removal, re-download every public asset referenced by every manifest and
+   require every manifest URL, archive, and hash to pass full validation again;
+   this final result cannot be inherited from step 5. Only after these checks
+   pass may the finalizer declare the transition release available and remove
+   the transition gate. Memory-before-core is enforced within PyPI.
 
 No release manifest points at Draft/private assets or a differently-versioned
 distribution. A failed staged or public check leaves the gate in place and
 requires idempotent recovery through a rerun of the same finalizer and release
-identity. If Memory is already public but core publication cannot complete, the
-identical Memory artifact remains published by default, is recorded as stranded
-in the release audit, and is not advertised as a completed transition release.
-It is yanked only when the Memory artifact itself is defective, never merely
-because core publication failed. Recovery resumes from the verified Memory
-checkpoint; it does not publish another Memory version, create a second
-finalizer, or mint a replacement release identity.
+identity. Core archive assets may therefore be publicly downloadable from the
+GitHub Release briefly before core is installable from PyPI; that archive
+visibility is explicitly accepted and is not a package-index availability
+claim. If the GitHub Release is public but a PyPI step fails, the same
+idempotent finalizer reverifies the GitHub checkpoint and resumes from the
+Memory or core PyPI checkpoint. If Memory is already on PyPI but core publication
+cannot complete, the identical Memory artifact remains published by default, is
+recorded as stranded in the release audit, and is not advertised as a completed
+transition release. It is yanked only when the Memory artifact itself is
+defective, never merely because core publication failed. Recovery does not
+publish another Memory version, create a second finalizer, or mint a replacement
+release identity.
 
-The release guard scans the full shipped wheel contents and staged/public asset
-set. It proves that Memory implementation and manifest ownership are absent
-from core, present in the Memory distribution, and resolver-compatible at both
-the staged and public gates. It also covers same-finalizer continuation from an
-exact Memory checkpoint and the stranded-Memory keep/yank policy.
+The release guard scans both wheels and sdists plus the staged/public asset set.
+It proves that the core wheel and sdist contain no Memory implementation or
+EverOS manifest, while the Memory wheel and sdist contain the owned
+implementation, manifest, and complete matching content/metadata. Direct sdist
+inspection is necessary but not sufficient: before any public action, each
+staged sdist is built into a wheel in an isolated environment and that wheel must
+pass the exact ownership, dependency, content, and metadata assertions applied
+to the staged wheel. A rebuild failure prevents GitHub Release finalization. The
+guard also proves resolver compatibility at the staged and public gates,
+same-finalizer continuation from exact GitHub/Memory checkpoints, and the
+stranded-Memory keep/yank policy.
+
+Scheduled manifest verification, backup, and recovery move with ownership. The
+guard remains dual-form: pre-transition releases retain legacy discovery from
+the `avibe-os` wheel, while transition and later releases discover the
+Memory-owned artifact and extract the manifest from `avibe-memory`. Missing,
+ambiguous, or unreadable transition-family Memory artifacts fail visibly rather
+than being classified as a manifest-free legacy release. This workflow migration
+is Gate 5 implementation evidence and must be complete before the transition is
+published.
 
 ## Invariant 4: KBD Retirement And Compatibility
 
@@ -246,16 +278,18 @@ not duplicate or redefine their contracts.
 `MEMORY-INDEP-020` release evidence additionally covers a legacy
 `restart_status.json` fixture, expired intent/nonce recovery, kill-owner plus
 hung-child recovery, and an ordinary restart that returns `busy` while a live
-package reservation is held. The release guard adds staged-asset verification
-and finalizer ordering evidence.
+package reservation is held. The release guard adds staged-asset verification,
+mandatory isolated sdist rebuild equivalence, dual-form manifest discovery, and
+package-index Memory-before-core ordering evidence.
 
 ## Migration And Compatibility Sequence
 
 1. Keep pre-split releases unchanged and accept their released config, package,
    and `restart_status.json` shapes as read-only inputs.
-2. Publish the matched Memory distribution in the same transition release
-   train, but do not make a public core-availability claim before Memory's
-   staged/public checks pass.
+2. Finalize and reverify the asset-complete GitHub Release, then publish the
+   matched Memory distribution to PyPI. Do not make a package-index
+   core-availability claim before Memory's staged, public-asset, and PyPI checks
+   pass.
 3. Ship the transition core with the exact hard dependency and no Memory
    implementation. Its first-start reconciliation only observes and warns.
 4. After the transition release is available, enable Doc A's transaction owner
@@ -279,7 +313,7 @@ state and can be absent without blocking startup.
 | #1739 loader-owned probe and structured unsafe-rollback mapping | Owned by Doc A; release rules consume the resulting readiness and fail-closed error semantics |
 | #1739 packaged Settings repair and `MEMORY-INDEP-018` evidence | Re-run under Doc A's transaction identity and release-family matrix |
 | #1741 frozen execution bundle and child deadline | Required by Doc A; release finalizer stages matching artifacts and does not replace the bundle owner |
-| #1741 single-finalizer staged publication ordering | Preserved and sharpened here with Memory-before-core and post-publication verification |
+| #1741 single-finalizer staged publication ordering | Preserved and sharpened here with mandatory sdist rebuilds, public GitHub assets before PyPI, package-index Memory-before-core ordering, and resumable checkpoints |
 | #1741 legacy cleanup and KBD-1/5/6 notes | Converted into explicit transition, family, and scenario rules above |
 
 No retained branch is an implementation base. This document and Doc A are
@@ -292,12 +326,18 @@ specifications only; product changes require separate owner-approved PRs.
    owner-approved implementation lane; this docs run does not start it.
 2. **Phase 0, lifecycle clarification:** PR #1746 is independent of Doc B and
    must receive owner certification and merge before gates 2b-4 open.
-3. **Phase 0, Doc B:** approve and merge this release and migration contract.
+3. **Phase 0, Doc B:** PR #1747 is merged; this focused post-merge
+   clarification must also receive owner certification and merge before Gate 5.
 4. **Implementation gates 2b-4:** rollback types/019, lifecycle transaction/020,
    and UI recovery/018 require both Doc B and PR #1746 to merge.
-5. **Gate 5, release transition:** only after the transition wheelhouse,
-   scenario 022/023, Doc A's 018-021 evidence, and the single finalizer's
-   staged/public checks pass may the release gate be removed.
+5. **Gate 5, release transition:** this clarification must be merged and the
+   scheduled guard's dual-form legacy/Memory-owned discovery, backup, and
+   recovery must be implemented and verified. Only then, after the transition
+   wheelhouse, scenario 022/023, Doc A's 018-021 evidence, isolated sdist rebuild
+   equivalence, and the single finalizer's staged/public-GitHub/package-index
+   checks pass, including an immediate pre-gate re-download and hash verification
+   of every public asset referenced by every manifest, may the release gate be
+   removed.
 
 No Phase 1 product code begins from this draft. Any finding that challenges the
 no-bridge transition, single finalizer, Memory-before-core ordering, or
