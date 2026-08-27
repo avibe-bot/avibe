@@ -61,6 +61,8 @@ from vibe.opencode_config import (
 from vibe.build_identity import get_build_identity
 from vibe.upgrade import (
     build_upgrade_plan,
+    configured_memory_enabled,
+    execute_upgrade_plan,
     get_latest_version_info,
     get_running_vibe_path,
     get_safe_cwd,
@@ -6126,7 +6128,14 @@ def do_upgrade(auto_restart: bool = True) -> dict:
         {"ok": bool, "message": str, "output": str | None, "restarting": bool}
     """
     current_vibe_path = get_running_vibe_path()
-    plan = build_upgrade_plan(vibe_path=current_vibe_path)
+    try:
+        plan = build_upgrade_plan(
+            vibe_path=current_vibe_path,
+            memory_enabled=configured_memory_enabled(),
+            target_version=get_version_info().get("latest"),
+        )
+    except ValueError as exc:
+        return {"ok": False, "message": "Upgrade failed.", "output": str(exc), "restarting": False}
     runtime_was_running = _runtime_process_was_running()
 
     # Use a stable directory as cwd to avoid "Current directory does not exist"
@@ -6135,12 +6144,12 @@ def do_upgrade(auto_restart: bool = True) -> dict:
     safe_cwd = get_safe_cwd()
 
     try:
-        result = subprocess.run(
-            plan.command,
+        result = execute_upgrade_plan(
+            plan,
+            run=subprocess.run,
             capture_output=True,
             text=True,
             timeout=120,
-            env=plan.env,
             cwd=safe_cwd,
         )
         if result.returncode == 0:

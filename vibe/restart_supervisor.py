@@ -28,10 +28,12 @@ from vibe import runtime
 from vibe.build_identity import get_build_identity
 from vibe.upgrade import (
     LEGACY_PACKAGE_NAME,
+    MEMORY_PACKAGE_NAME,
     PACKAGE_NAME,
     RollbackTarget,
     _names_a_published_release,
     build_upgrade_plan,
+    execute_upgrade_plan,
     get_restart_command,
     get_restart_environment,
     get_restart_invocation_command,
@@ -200,26 +202,49 @@ def _legacy_service_launcher(
 
 
 def _launcher_dist_metadata(launcher: runtime.ServiceLauncher) -> list[tuple[str, str]]:
-    """Read all supported distributions from the launcher's site-packages."""
+    """Read valid distributions without letting one broken entry hide the rest."""
 
-    site_packages = Path(launcher.main).resolve().parent.parent
     entries: list[tuple[str, str]] = []
     try:
-        for metadata_path in sorted(site_packages.glob("*.dist-info/METADATA")):
+        site_packages = Path(launcher.main).resolve().parent.parent
+        metadata_paths = sorted(site_packages.glob("*.dist-info/METADATA"))
+    except (OSError, UnicodeError, ValueError):
+        return entries
+    for metadata_path in metadata_paths:
+        try:
             payload = email.parser.Parser().parsestr(metadata_path.read_text(encoding="utf-8"))
             name = str(payload.get("Name") or "").strip()
             version = str(payload.get("Version") or "").strip()
-            if name in {PACKAGE_NAME, LEGACY_PACKAGE_NAME} and version:
+            if name and version:
                 entries.append((name, version))
-    except (OSError, UnicodeError, ValueError):
-        return []
+        except (OSError, UnicodeError, ValueError):
+            continue
     return entries
+
+
+def _launcher_core_dist_metadata(launcher: runtime.ServiceLauncher) -> list[tuple[str, str]]:
+    """Read only core distributions from the launcher's site-packages."""
+
+    return [
+        (name, version)
+        for name, version in _launcher_dist_metadata(launcher)
+        if name in {PACKAGE_NAME, LEGACY_PACKAGE_NAME}
+    ]
+
+
+def _launcher_memory_version(launcher: runtime.ServiceLauncher) -> str | None:
+    """Read optional Memory metadata without exposing it to core ownership."""
+
+    for name, version in _launcher_dist_metadata(launcher):
+        if name == MEMORY_PACKAGE_NAME:
+            return version
+    return None
 
 
 def _launcher_package_name(launcher: runtime.ServiceLauncher, *, version: str | None = None) -> str:
     """Infer the distribution name that owns a launcher when metadata is stale."""
 
-    metadata = _launcher_dist_metadata(launcher)
+    metadata = _launcher_core_dist_metadata(launcher)
     if version:
         exact = [name for name, candidate in metadata if candidate == version]
         if exact:
@@ -250,7 +275,7 @@ def _legacy_install_metadata(
     try:
         from vibe import __version__ as replacement_version
 
-        for name, version in _launcher_dist_metadata(launcher):
+        for name, version in _launcher_core_dist_metadata(launcher):
             if (
                 name == package_name
                 and version
@@ -278,7 +303,14 @@ def _discover_legacy_upgrade_target(*, trigger: str, vibe_path: str | None) -> R
         if metadata is None:
             return None
         version, package = metadata
-    return RollbackTarget(version=version, package=package, launcher=launcher)
+    memory_version = _launcher_memory_version(launcher)
+    return RollbackTarget(
+        version=version,
+        package=package,
+        launcher=launcher,
+        memory_package=memory_version is not None,
+        memory_version=memory_version,
+    )
 
 
 def _now_iso() -> str:
@@ -656,7 +688,14 @@ def _roll_back_failed_upgrade(
         return rollback
 
     try:
-        plan = build_upgrade_plan(vibe_path=vibe_path, version=version, package_name=rollback_to.package)
+        plan = build_upgrade_plan(
+            python_executable=rollback_to.launcher.python,
+            vibe_path=vibe_path,
+            version=version,
+            package_name=rollback_to.package,
+            memory_package=rollback_to.memory_package,
+            memory_version=rollback_to.memory_version,
+        )
     except Exception as exc:
         rollback.update(state="failed", error=f"cannot build a pinned install for {version}: {exc}")
         record(rollback)
@@ -665,11 +704,11 @@ def _roll_back_failed_upgrade(
     rollback["install"] = {"method": plan.method, "ok": None}
     record(rollback)
     try:
-        result = subprocess.run(
-            plan.command,
+        result = execute_upgrade_plan(
+            plan,
+            run=subprocess.run,
             capture_output=True,
             text=True,
-            env=plan.env,
             cwd=get_safe_cwd(),
             timeout=_ROLLBACK_INSTALL_TIMEOUT_SECONDS,
         )
@@ -877,6 +916,8 @@ def _run_restart_job(
             "rollback_to": rollback_to.version if rollback_to else None,
             "rollback_package": rollback_to.package if rollback_to else None,
             "rollback_launcher": rollback_to.launcher._asdict() if rollback_to else None,
+            "rollback_memory_package": rollback_to.memory_package if rollback_to else False,
+            "rollback_memory_version": rollback_to.memory_version if rollback_to else None,
             "rollback_target_source": rollback_target_source,
             "rollback_discovery_error": rollback_discovery_error,
             "old_pid": old_pid,
@@ -1106,6 +1147,10 @@ def schedule_restart(
         )
         if rollback_to.package:
             command.extend(["--rollback-package", rollback_to.package])
+        if rollback_to.memory_package:
+            command.append("--rollback-memory-package")
+            if rollback_to.memory_version:
+                command.extend(["--rollback-memory-version", rollback_to.memory_version])
     env = get_restart_environment(vibe_path=vibe_path)
     log_path = _restart_log_path(job_id)
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1177,6 +1222,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prepare-show-runtime", action="store_true")
     parser.add_argument("--rollback-to")
     parser.add_argument("--rollback-package")
+    parser.add_argument("--rollback-memory-package", action="store_true")
+    parser.add_argument("--rollback-memory-version")
     parser.add_argument("--rollback-python")
     parser.add_argument("--rollback-main")
     args = parser.parse_args(argv)
@@ -1193,6 +1240,8 @@ def main(argv: list[str] | None = None) -> int:
             version=args.rollback_to,
             package=args.rollback_package,
             launcher=runtime.ServiceLauncher(python=args.rollback_python, main=args.rollback_main),
+            memory_package=args.rollback_memory_package,
+            memory_version=args.rollback_memory_version,
         )
     return _run_restart_job(
         job_id=args.job_id,

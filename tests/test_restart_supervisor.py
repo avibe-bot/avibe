@@ -10,6 +10,7 @@ import textwrap
 import threading
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -180,6 +181,93 @@ def test_legacy_upgrade_target_reads_the_running_release_and_launcher(monkeypatc
         version="3.0.12",
         package="avibe-os",
         launcher=runtime.ServiceLauncher(python=str(python_path), main=str(service_main)),
+    )
+
+
+@pytest.mark.parametrize("core_package", ["avibe-os", "vibe-remote"])
+def test_legacy_upgrade_target_keeps_memory_out_of_core_ownership(
+    monkeypatch, tmp_path, core_package
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    paths.ensure_data_dirs()
+    package_dir = core_package.replace("-", "_")
+    tool_root = tmp_path / "uv" / "tools" / core_package
+    python_path = tool_root / "bin" / "python"
+    service_main = tool_root / "lib" / "python3.12" / "site-packages" / "vibe" / "service_main.py"
+    python_path.parent.mkdir(parents=True)
+    service_main.parent.mkdir(parents=True)
+    python_path.write_text("#!/bin/sh\n", encoding="utf-8")
+    service_main.write_text("# old release\n", encoding="utf-8")
+    metadata_root = service_main.parent.parent
+    for directory, name in (("avibe_memory", "avibe-memory"), (package_dir, core_package)):
+        metadata_dir = metadata_root / f"{directory}-3.0.14.dist-info"
+        metadata_dir.mkdir()
+        (metadata_dir / "METADATA").write_text(
+            f"Name: {name}\nVersion: 3.0.14\n", encoding="utf-8"
+        )
+
+    monkeypatch.setattr(restart_supervisor, "_read_recorded_pid", lambda: 123)
+    monkeypatch.setattr(restart_supervisor, "_read_recorded_ui_pid", lambda: None)
+    monkeypatch.setattr(restart_supervisor, "_running_ui_version", lambda: "3.0.14")
+    monkeypatch.setattr(runtime, "get_process_command", lambda _pid: f"{python_path} {service_main}")
+
+    target = restart_supervisor._discover_legacy_upgrade_target(
+        trigger="upgrade", vibe_path=str(tmp_path / "retargeted-vibe")
+    )
+
+    assert target == RollbackTarget(
+        version="3.0.14",
+        package=core_package,
+        launcher=runtime.ServiceLauncher(python=str(python_path), main=str(service_main)),
+        memory_package=True,
+        memory_version="3.0.14",
+    )
+
+
+def test_legacy_upgrade_target_skips_broken_metadata_entries(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    paths.ensure_data_dirs()
+    tool_root = tmp_path / "uv" / "tools" / "avibe-os"
+    python_path = tool_root / "bin" / "python"
+    service_main = tool_root / "lib" / "python3.12" / "site-packages" / "vibe" / "service_main.py"
+    python_path.parent.mkdir(parents=True)
+    service_main.parent.mkdir(parents=True)
+    python_path.write_text("#!/bin/sh\n", encoding="utf-8")
+    service_main.write_text("# old release\n", encoding="utf-8")
+    metadata_root = service_main.parent.parent
+    broken = metadata_root / "000_broken-1.0.dist-info" / "METADATA"
+    broken.parent.mkdir()
+    broken.write_text("unreadable", encoding="utf-8")
+    non_utf8 = metadata_root / "001_non_utf8-1.0.dist-info" / "METADATA"
+    non_utf8.parent.mkdir()
+    non_utf8.write_bytes(b"\xff")
+    for directory, name in (("avibe_os", "avibe-os"), ("avibe_memory", "avibe-memory")):
+        metadata = metadata_root / f"{directory}-3.0.14.dist-info" / "METADATA"
+        metadata.parent.mkdir()
+        metadata.write_text(f"Name: {name}\nVersion: 3.0.14\n", encoding="utf-8")
+
+    original_read_text = Path.read_text
+
+    def read_text(path, *args, **kwargs):
+        if path == broken:
+            raise OSError("broken metadata")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    launcher = runtime.ServiceLauncher(python=str(python_path), main=str(service_main))
+    monkeypatch.setattr(restart_supervisor, "_read_recorded_pid", lambda: 123)
+    monkeypatch.setattr(restart_supervisor, "_read_recorded_ui_pid", lambda: None)
+    monkeypatch.setattr(restart_supervisor, "_running_ui_version", lambda: "3.0.14")
+    monkeypatch.setattr(runtime, "get_process_command", lambda _pid: f"{python_path} {service_main}")
+
+    assert restart_supervisor._launcher_core_dist_metadata(launcher) == [("avibe-os", "3.0.14")]
+    assert restart_supervisor._launcher_memory_version(launcher) == "3.0.14"
+    assert restart_supervisor._discover_legacy_upgrade_target(trigger="upgrade", vibe_path=None) == RollbackTarget(
+        version="3.0.14",
+        package="avibe-os",
+        launcher=launcher,
+        memory_package=True,
+        memory_version="3.0.14",
     )
 
 
@@ -1540,3 +1628,35 @@ def test_a_recoverable_restart_carries_its_rollback_target_into_the_job(monkeypa
     # from here" is the exact wrong answer, and a silent one.
     with pytest.raises(SystemExit):
         restart_supervisor.main(["--job-id", "jobpartial", "--rollback-to", "3.0.10"])
+
+
+def test_recoverable_restart_carries_memory_shape_into_rollback_job(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    commands: list[list[str]] = []
+    monkeypatch.setattr(restart_supervisor, "get_restart_invocation_command", lambda vibe_path=None: ["/bin/vibe", "restart"])
+    monkeypatch.setattr(restart_supervisor, "get_restart_environment", lambda vibe_path=None: {"PATH": "/bin"})
+    monkeypatch.setattr(restart_supervisor, "get_safe_cwd", lambda: str(tmp_path))
+    monkeypatch.setattr(restart_supervisor, "_prune_restart_logs", lambda: None)
+    monkeypatch.setattr(
+        restart_supervisor.subprocess,
+        "Popen",
+        lambda command, **kwargs: commands.append(command) or SimpleNamespace(pid=4242),
+    )
+    target = RollbackTarget(
+        version="3.0.10",
+        package="avibe-os",
+        launcher=_REPLACED_INSTALL,
+        memory_package=True,
+        memory_version="3.0.10",
+    )
+
+    restart_supervisor.schedule_restart(vibe_path="/bin/vibe", trigger="upgrade", rollback_to=target)
+    argv = commands[-1]
+    assert "--rollback-memory-package" in argv
+    assert argv[argv.index("--rollback-memory-version") + 1] == "3.0.10"
+
+    parsed: dict = {}
+    monkeypatch.setattr(restart_supervisor, "_run_restart_job", lambda **kwargs: parsed.update(kwargs) or 0)
+    assert restart_supervisor.main(argv[2:]) == 0
+    assert parsed["rollback_to"] == target
