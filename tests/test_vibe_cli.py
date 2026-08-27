@@ -1871,6 +1871,13 @@ def test_managed_dependencies_doctor_uses_one_status_contract(monkeypatch):
                 {"id": "askill", "required": True, "installed": False, "status": "missing"},
                 {"id": "avault", "required": True, "installed": True, "status": "ready", "version": "0.1.6"},
                 {"id": "show-runtime", "required": True, "installed": False, "status": "missing"},
+                {
+                    "id": "memory-package",
+                    "required": True,
+                    "installed": True,
+                    "status": "ready",
+                    "version": "3.2.8",
+                },
                 {"id": "tmux", "required": False, "installed": False, "status": "missing"},
                 {"id": "git-runtime", "required": False, "installed": True, "status": "ready"},
                 {"id": "node", "required": True, "installed": False, "status": "missing"},
@@ -1886,8 +1893,75 @@ def test_managed_dependencies_doctor_uses_one_status_contract(monkeypatch):
     assert next(item for item in items if item.get("code") == "dependencies.askill.not_ready")["repair"]["target"] == "askill"
     assert next(item for item in items if item.get("code") == "dependencies.avault.ready")["status"] == "pass"
     assert next(item for item in items if item.get("code") == "dependencies.git-runtime.ready")["status"] == "pass"
+    memory_package = next(
+        item for item in items if item.get("code") == "dependencies.memory-package.ready"
+    )
+    assert memory_package["status"] == "pass"
+    assert "avibe-memory 3.2.8" in memory_package["message"]
     assert next(item for item in items if item.get("code") == "dependencies.tmux.not_ready")["status"] == "warn"
     assert next(item for item in items if item.get("code") == "dependencies.node.not_ready")["status"] == "fail"
+
+
+def test_managed_dependencies_doctor_directs_memory_package_repair_to_settings(monkeypatch):
+    monkeypatch.setattr(
+        cli.api,
+        "dependencies_status",
+        lambda **_kwargs: {
+            "deps": [
+                {
+                    "id": "memory-package",
+                    "required": True,
+                    "installed": True,
+                    "status": "error",
+                    "reason": "memory_package_version_mismatch",
+                },
+                {"id": "git-runtime", "required": False, "installed": True, "status": "ready"},
+            ]
+        },
+    )
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "en")
+
+    items = cli._managed_dependencies_doctor_items(deep=False)
+
+    failure = next(
+        item for item in items if item.get("code") == "dependencies.memory-package.not_ready"
+    )
+    assert failure["status"] == "fail"
+    assert failure["action"] == cli.i18n_t("runtime.doctor.memoryPackageSettingsAction", "en")
+    assert "repair" not in failure
+
+
+def test_managed_dependencies_doctor_deep_does_not_probe_memory_package(monkeypatch):
+    monkeypatch.setattr(
+        cli.api,
+        "dependencies_status",
+        lambda **_kwargs: {
+            "deps": [
+                {
+                    "id": "memory-package",
+                    "required": False,
+                    "installed": False,
+                    "status": "missing",
+                },
+                {"id": "git-runtime", "required": False, "installed": True, "status": "ready"},
+            ]
+        },
+    )
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "en")
+    monkeypatch.setattr(
+        "core.dependency_network.probe_url",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("memory-package must not use a network probe")
+        ),
+    )
+
+    items = cli._managed_dependencies_doctor_items(deep=True)
+
+    failure = next(
+        item for item in items if item.get("code") == "dependencies.memory-package.not_ready"
+    )
+    assert failure["status"] == "warn"
+    assert "repair" not in failure
 
 
 def test_managed_dependencies_doctor_suppresses_unsupported_askill_repair(monkeypatch):

@@ -10863,6 +10863,7 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
     labels = {
         "askill": "askill",
         "avault": "avault",
+        "memory-package": "avibe-memory",
         "tmux": "tmux runtime",
         "git-runtime": "Git Runtime",
         "node": "Node.js",
@@ -10950,6 +10951,19 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
                 f"{label} is not published for this platform",
                 "Use a system dependency where supported, or run Avibe on a platform with a published runtime.",
                 code=f"dependencies.{dependency_id}.platform_unsupported",
+            )
+            continue
+
+        if dependency_id == "memory-package":
+            _add_doctor_item(
+                items,
+                severity,
+                f"{label} is not ready ({status})",
+                i18n_t(
+                    "runtime.doctor.memoryPackageSettingsAction",
+                    _configured_cli_language(),
+                ),
+                code="dependencies.memory-package.not_ready",
             )
             continue
 

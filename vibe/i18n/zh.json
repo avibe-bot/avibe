@@ -994,6 +994,7 @@
       "archiveCacheSkipped": "未能检查 Show Runtime 归档缓存（{reason}）；其中可能仍有可回收归档。",
       "archiveCacheSkippedAction": "等待正在进行的安装或清理结束后，重新运行 Doctor。",
       "archiveCacheSkippedInspectionAction": "\u8bf7\u68c0\u67e5\u8fd0\u884c\u76ee\u5f55\u6743\u9650\u548c Avibe \u65e5\u5fd7\uff0c\u4fee\u590d\u540e\u91cd\u8bd5 Doctor\u3002",
+      "memoryPackageSettingsAction": "\u6253\u5f00\u8bbe\u7f6e > \u4f9d\u8d56\uff0c\u7136\u540e\u91cd\u65b0\u5b89\u88c5 Memory Python \u8f6f\u4ef6\u5305\u3002",
       "providerUnsupportedAction": "请移除 VIBE_SHOW_RUNTIME_SOURCE 以使用随 Avibe 发布的运行时，或将 VIBE_SHOW_RUNTIME_BIN 指向你自行构建的运行时。",
       "repairHealthy": "Show Runtime \u53ef\u4ee5\u6b63\u5e38\u542f\u52a8\uff0c\u65e0\u9700\u4fee\u590d\u3002",
       "repairExplicitCommandFailed": "VIBE_SHOW_RUNTIME_BIN \u6307\u5b9a\u7684 Show Runtime \u547d\u4ee4\u65e0\u6cd5\u542f\u52a8\uff1a{reason}\u3002\u8bf7\u4fee\u590d\u6216\u79fb\u9664\u8be5\u8986\u76d6\u540e\u91cd\u65b0\u8fd0\u884c Doctor\u3002",
