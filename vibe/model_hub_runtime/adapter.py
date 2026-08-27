@@ -79,10 +79,19 @@ class _AuthenticationEvidence(Enum):
     UNKNOWN = "unknown"
 
 
+class _ProtocolObservationShape(Enum):
+    NONE = "none"
+    GENERIC_REQUEST_ERROR = "generic_request_error"
+    HTTP_404 = "http_404"
+    NON_JSON = "non_json"
+    UNSTRUCTURED = "unstructured"
+
+
 @dataclass(frozen=True)
 class _ProtocolEvidence:
     protocol: _ProtocolProof
     authentication: _AuthenticationEvidence
+    shape: _ProtocolObservationShape = _ProtocolObservationShape.NONE
 
 
 @dataclass(frozen=True)
@@ -94,23 +103,15 @@ class _ProtocolEvidenceRule:
     top_level_values: frozenset[str] = frozenset()
     error_identifiers: frozenset[str] = frozenset()
     error_params: frozenset[str] | None = None
-    allow_missing_top_level_error_wrapper: bool = False
 
     def matches(self, status: int, payload: Mapping[str, Any]) -> bool:
         if status not in self.statuses:
             return False
-        error = payload.get("error")
         if self.top_level_field is not None:
             value = payload.get(self.top_level_field)
             if not isinstance(value, str) or value.strip().lower() not in self.top_level_values:
-                if not (
-                    self.allow_missing_top_level_error_wrapper
-                    and self.top_level_field == "type"
-                    and "error" in self.top_level_values
-                    and isinstance(error, dict)
-                    and isinstance(error.get("type"), str)
-                ):
-                    return False
+                return False
+        error = payload.get("error")
         if self.error_identifiers or self.error_params is not None:
             if not isinstance(error, dict):
                 return False
@@ -184,6 +185,13 @@ _OPENAI_CHAT_PARAMS = frozenset(
 )
 _OPENAI_FAMILY_PROTOCOLS = frozenset({"openai_responses", "openai_chat"})
 _OPENAI_FAMILY_PARAMS = _OPENAI_RESPONSES_PARAMS | _OPENAI_CHAT_PARAMS
+_PAIRWISE_EXCLUSION_SHAPES = frozenset(
+    {
+        _ProtocolObservationShape.HTTP_404,
+        _ProtocolObservationShape.NON_JSON,
+        _ProtocolObservationShape.UNSTRUCTURED,
+    }
+)
 
 
 def _openai_evidence_rules(
@@ -264,7 +272,6 @@ _PROTOCOL_OBSERVATION_TAXONOMY = {
                 error_identifiers=_REQUEST_ERROR_IDENTIFIERS | _MODEL_ERROR_IDENTIFIERS,
                 protocol=_ProtocolProof.PROVEN,
                 authentication=_AuthenticationEvidence.ACCEPTED,
-                allow_missing_top_level_error_wrapper=True,
             ),
             _ProtocolEvidenceRule(
                 statuses=_AUTHENTICATION_ERROR_STATUSES,
@@ -273,7 +280,6 @@ _PROTOCOL_OBSERVATION_TAXONOMY = {
                 error_identifiers=_AUTHENTICATION_ERROR_IDENTIFIERS,
                 protocol=_ProtocolProof.PROVEN,
                 authentication=_AuthenticationEvidence.REJECTED,
-                allow_missing_top_level_error_wrapper=True,
             ),
             _ProtocolEvidenceRule(
                 statuses=_SERVER_ERROR_STATUSES,
@@ -282,7 +288,6 @@ _PROTOCOL_OBSERVATION_TAXONOMY = {
                 error_identifiers=_SERVER_ERROR_IDENTIFIERS,
                 protocol=_ProtocolProof.PROVEN,
                 authentication=_AuthenticationEvidence.UNKNOWN,
-                allow_missing_top_level_error_wrapper=True,
             ),
             _ProtocolEvidenceRule(
                 statuses=_RATE_LIMIT_STATUSES,
@@ -291,7 +296,6 @@ _PROTOCOL_OBSERVATION_TAXONOMY = {
                 error_identifiers=_RATE_LIMIT_ERROR_IDENTIFIERS,
                 protocol=_ProtocolProof.PROVEN,
                 authentication=_AuthenticationEvidence.UNKNOWN,
-                allow_missing_top_level_error_wrapper=True,
             ),
         ),
     ),
@@ -314,6 +318,61 @@ _PROTOCOL_OBSERVATION_TAXONOMY = {
         ),
     ),
 }
+
+
+def _error_identifiers(error: Mapping[str, Any]) -> frozenset[str]:
+    return frozenset(
+        value.strip().lower()
+        for value in (error.get("type"), error.get("code"))
+        if isinstance(value, str)
+    )
+
+
+def _payload_is_structured(payload: Mapping[str, Any]) -> bool:
+    return (
+        isinstance(payload.get("error"), dict)
+        or isinstance(payload.get("type"), str)
+        or isinstance(payload.get("code"), str)
+        or isinstance(payload.get("object"), str)
+    )
+
+
+def _anthropic_wrapperless_error_kind(
+    status: int,
+    payload: Mapping[str, Any],
+) -> str | None:
+    if "type" in payload:
+        return None
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return None
+    identifiers = _error_identifiers(error)
+    if status in _REQUEST_ERROR_STATUSES and not (
+        _REQUEST_ERROR_IDENTIFIERS | _MODEL_ERROR_IDENTIFIERS
+    ).isdisjoint(identifiers):
+        return "accepted"
+    if status in _AUTHENTICATION_ERROR_STATUSES and not _AUTHENTICATION_ERROR_IDENTIFIERS.isdisjoint(identifiers):
+        return "rejected"
+    if status in _SERVER_ERROR_STATUSES and not _SERVER_ERROR_IDENTIFIERS.isdisjoint(identifiers):
+        return "unknown"
+    if status in _RATE_LIMIT_STATUSES and not _RATE_LIMIT_ERROR_IDENTIFIERS.isdisjoint(identifiers):
+        return "unknown"
+    return None
+
+
+def _default_unproven_shape(
+    *,
+    status: int,
+    payload: Mapping[str, Any] | None = None,
+    non_json: bool = False,
+) -> _ProtocolObservationShape:
+    if status == 404:
+        return _ProtocolObservationShape.HTTP_404
+    if non_json:
+        return _ProtocolObservationShape.NON_JSON
+    if payload is None or not _payload_is_structured(payload):
+        return _ProtocolObservationShape.UNSTRUCTURED
+    return _ProtocolObservationShape.NONE
 
 
 def _parse_protocol_authenticated_evidence(
@@ -341,11 +400,13 @@ def _parse_protocol_authenticated_evidence(
         return _ProtocolEvidence(
             protocol=_ProtocolProof.UNPROVEN,
             authentication=_AuthenticationEvidence.UNKNOWN,
+            shape=_default_unproven_shape(status=status, non_json=True),
         )
     if not isinstance(payload, dict):
         return _ProtocolEvidence(
             protocol=_ProtocolProof.UNPROVEN,
             authentication=_AuthenticationEvidence.UNKNOWN,
+            shape=_default_unproven_shape(status=status),
         )
 
     top_level_identifiers = {
@@ -362,6 +423,25 @@ def _parse_protocol_authenticated_evidence(
             authentication=_AuthenticationEvidence.REJECTED,
         )
 
+    if protocol == "anthropic":
+        wrapperless = _anthropic_wrapperless_error_kind(status, payload)
+        if wrapperless == "accepted":
+            return _ProtocolEvidence(
+                protocol=_ProtocolProof.UNPROVEN,
+                authentication=_AuthenticationEvidence.ACCEPTED,
+                shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
+            )
+        if wrapperless == "rejected":
+            return _ProtocolEvidence(
+                protocol=_ProtocolProof.UNPROVEN,
+                authentication=_AuthenticationEvidence.REJECTED,
+            )
+        if wrapperless == "unknown":
+            return _ProtocolEvidence(
+                protocol=_ProtocolProof.UNPROVEN,
+                authentication=_AuthenticationEvidence.UNKNOWN,
+            )
+
     taxonomy = _PROTOCOL_OBSERVATION_TAXONOMY.get(protocol)
     for rule in taxonomy.evidence_rules if taxonomy is not None else ():
         if rule.matches(status, payload):
@@ -372,11 +452,7 @@ def _parse_protocol_authenticated_evidence(
     if protocol in _OPENAI_FAMILY_PROTOCOLS and status in _REQUEST_ERROR_STATUSES:
         error = payload.get("error")
         if isinstance(error, dict):
-            identifiers = {
-                value.strip().lower()
-                for value in (error.get("type"), error.get("code"))
-                if isinstance(value, str)
-            }
+            identifiers = _error_identifiers(error)
             if (
                 not _REQUEST_ERROR_IDENTIFIERS.isdisjoint(identifiers)
                 and _AUTHENTICATION_ERROR_IDENTIFIERS.isdisjoint(identifiers)
@@ -385,12 +461,17 @@ def _parse_protocol_authenticated_evidence(
                 return _ProtocolEvidence(
                     protocol=_ProtocolProof.UNPROVEN,
                     authentication=_AuthenticationEvidence.ACCEPTED,
+                    shape=_ProtocolObservationShape.GENERIC_REQUEST_ERROR,
                 )
+    if _response_shape_proves_protocol(protocol, payload):
+        return _ProtocolEvidence(
+            protocol=_ProtocolProof.PROVEN,
+            authentication=_AuthenticationEvidence.UNKNOWN,
+        )
     return _ProtocolEvidence(
-        protocol=(
-            _ProtocolProof.PROVEN if _response_shape_proves_protocol(protocol, payload) else _ProtocolProof.UNPROVEN
-        ),
+        protocol=_ProtocolProof.UNPROVEN,
         authentication=_AuthenticationEvidence.UNKNOWN,
+        shape=_default_unproven_shape(status=status, payload=payload),
     )
 
 
@@ -468,9 +549,9 @@ def _response_shape_proves_protocol(
     if protocol == "anthropic":
         error = body.get("error")
         return body.get("type") == "message" or (
-            isinstance(error, dict)
+            body.get("type") == "error"
+            and isinstance(error, dict)
             and isinstance(error.get("type"), str)
-            and body.get("type") in {"error", None}
         )
     error = body.get("error")
     if protocol == "openai_responses":
@@ -503,8 +584,10 @@ def _openai_family_elimination_proof(
         and sibling is not None
         and candidate.protocol is _ProtocolProof.UNPROVEN
         and candidate.authentication is _AuthenticationEvidence.ACCEPTED
+        and candidate.shape is _ProtocolObservationShape.GENERIC_REQUEST_ERROR
         and sibling.protocol is _ProtocolProof.UNPROVEN
         and sibling.authentication is _AuthenticationEvidence.UNKNOWN
+        and sibling.shape in _PAIRWISE_EXCLUSION_SHAPES
     ):
         return "openai_responses"
     if (
@@ -512,10 +595,36 @@ def _openai_family_elimination_proof(
         and sibling is not None
         and sibling.protocol is _ProtocolProof.UNPROVEN
         and sibling.authentication is _AuthenticationEvidence.ACCEPTED
+        and sibling.shape is _ProtocolObservationShape.GENERIC_REQUEST_ERROR
         and candidate.protocol is _ProtocolProof.UNPROVEN
         and candidate.authentication is _AuthenticationEvidence.UNKNOWN
+        and candidate.shape in _PAIRWISE_EXCLUSION_SHAPES
     ):
         return "openai_chat"
+    return None
+
+
+def _anthropic_wrapperless_elimination_proof(
+    responses: Mapping[str, _ProtocolEvidence],
+) -> str | None:
+    candidate = responses.get("anthropic")
+    openai_responses = responses.get("openai_responses")
+    openai_chat = responses.get("openai_chat")
+    if (
+        candidate is not None
+        and openai_responses is not None
+        and openai_chat is not None
+        and candidate.protocol is _ProtocolProof.UNPROVEN
+        and candidate.authentication is _AuthenticationEvidence.ACCEPTED
+        and candidate.shape is _ProtocolObservationShape.GENERIC_REQUEST_ERROR
+        and openai_responses.protocol is _ProtocolProof.UNPROVEN
+        and openai_responses.authentication is _AuthenticationEvidence.UNKNOWN
+        and openai_responses.shape in _PAIRWISE_EXCLUSION_SHAPES
+        and openai_chat.protocol is _ProtocolProof.UNPROVEN
+        and openai_chat.authentication is _AuthenticationEvidence.UNKNOWN
+        and openai_chat.shape in _PAIRWISE_EXCLUSION_SHAPES
+    ):
+        return "anthropic"
     return None
 
 
@@ -1285,7 +1394,7 @@ class CLIProxyEngineAdapter:
         received_rejection = False
         received_proven_unknown = False
         received_unproven_response = False
-        openai_family_responses: dict[str, _ProtocolEvidence] = {}
+        response_evidence_by_protocol: dict[str, _ProtocolEvidence] = {}
         for protocol in protocol_order:
             if protocol not in SOURCE_PROTOCOLS:
                 raise EngineStateError("unsupported source protocol")
@@ -1320,11 +1429,12 @@ class CLIProxyEngineAdapter:
                 proved_protocol = protocol
             else:
                 received_unproven_response = True
-                if protocol in _OPENAI_FAMILY_PROTOCOLS:
-                    openai_family_responses[protocol] = evidence
-                    proved_protocol = _openai_family_elimination_proof(
-                        openai_family_responses,
-                    )
+                response_evidence_by_protocol[protocol] = evidence
+                proved_protocol = _openai_family_elimination_proof(
+                    response_evidence_by_protocol,
+                ) or _anthropic_wrapperless_elimination_proof(
+                    response_evidence_by_protocol,
+                )
                 if proved_protocol is None:
                     continue
             try:
