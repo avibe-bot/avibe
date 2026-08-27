@@ -104,7 +104,7 @@ class ManagedRuntimeArchive:
     name: str
     url: str
     sha256: str
-    binary_sha256: str
+    binary_sha256: str | None
     size: int | None
     bin_path: str
 
@@ -131,10 +131,16 @@ class ManagedRuntimeSpec:
     archives_field: str = "archives"
     archive_size_field: str = "size"
     platform_aliases: tuple[tuple[str, str], ...] = ()
+    binary_artifact: bool = True
+    record_provider: str = "manifest"
+    metadata_filename_override: str | None = None
+    allow_legacy_missing_runtime_id: bool = False
+    staging_prefixes: tuple[str, ...] = ("install-",)
+    replace_target_on_force: bool = False
 
     @property
     def metadata_filename(self) -> str:
-        return f".avibe-{self.runtime_id}-runtime.json"
+        return self.metadata_filename_override or f".avibe-{self.runtime_id}-runtime.json"
 
 
 @dataclass(frozen=True)
@@ -229,11 +235,19 @@ class ManagedRuntimeManager:
                 # manifest's admitted disk record. Cleanup cannot make the
                 # same assumption because it has no replacement transaction.
                 current_install_dir = None
-            existing_install_dir = current_install_dir or install_dir
-            existing = self._verified_manifest_binary(existing_install_dir, manifest, archive)
-            if existing is None and existing_install_dir != install_dir:
-                existing_install_dir = install_dir
-                existing = self._verified_manifest_binary(install_dir, manifest, archive)
+            candidate_install_dirs: list[Path] = []
+            if current_install_dir is not None:
+                candidate_install_dirs.append(current_install_dir)
+            candidate_install_dirs.extend(self._manifest_install_candidates(manifest, archive))
+            unique_install_dirs = list(dict.fromkeys(candidate_install_dirs))
+            existing_install_dir = unique_install_dirs[0]
+            existing: Path | None = None
+            for candidate_install_dir in unique_install_dirs:
+                candidate = self._verified_manifest_binary(candidate_install_dir, manifest, archive)
+                if candidate is not None:
+                    existing_install_dir = candidate_install_dir
+                    existing = candidate
+                    break
             if existing is not None and not force:
                 return self._reuse_existing_install(existing, existing_install_dir, manifest, archive)
 
@@ -266,7 +280,8 @@ class ManagedRuntimeManager:
                         manifest=manifest,
                         archive=archive,
                     )
-                make_executable(staged_binary)
+                if self.spec.binary_artifact:
+                    make_executable(staged_binary)
                 preparation = self._prepare_binary_for_manifest(staged_binary, manifest)
                 if not preparation.get("ok"):
                     return self._failure(
@@ -274,8 +289,8 @@ class ManagedRuntimeManager:
                         manifest=manifest,
                         archive=archive,
                     )
-                binary_sha256 = file_sha256(staged_binary)
-                if binary_sha256 != archive.binary_sha256:
+                binary_sha256 = file_sha256(staged_binary) if self.spec.binary_artifact else None
+                if self.spec.binary_artifact and binary_sha256 != archive.binary_sha256:
                     return self._failure(
                         self._reason("binary_checksum_mismatch"),
                         manifest=manifest,
@@ -290,11 +305,19 @@ class ManagedRuntimeManager:
 
                 install_dir.parent.mkdir(parents=True, exist_ok=True)
                 if install_dir.exists():
-                    replacement = Path(
-                        tempfile.mkdtemp(prefix=f"{install_dir.name}-", dir=install_dir.parent)
-                    )
-                    replacement.rmdir()
-                    install_dir = replacement
+                    if force and self.spec.replace_target_on_force:
+                        if not self._remove_install_target_for_replacement(install_dir):
+                            return self._failure(
+                                self._reason("install_failed"),
+                                manifest=manifest,
+                                archive=archive,
+                            )
+                    else:
+                        replacement = Path(
+                            tempfile.mkdtemp(prefix=f"{install_dir.name}-", dir=install_dir.parent)
+                        )
+                        replacement.rmdir()
+                        install_dir = replacement
                 shutil.move(str(staging_dir), str(install_dir))
                 candidate_install_dir = install_dir
                 installed_binary = (install_dir / archive.bin_path).resolve(strict=True)
@@ -373,8 +396,8 @@ class ManagedRuntimeManager:
             host_platform = aliases.get(runtime_platform_tag(), runtime_platform_tag())
             installed_platform = aliases.get(platform_tag, platform_tag) if isinstance(platform_tag, str) else None
             if (
-                pointer.get("provider") != "manifest"
-                or pointer.get("runtime_id") != self.spec.runtime_id
+                not self._record_provider_matches(pointer.get("provider"))
+                or not self._record_runtime_id_matches(pointer.get("runtime_id"))
                 or not _safe_metadata_value(runtime_version)
                 or not _safe_metadata_value(platform_tag)
                 or installed_platform != host_platform
@@ -407,18 +430,28 @@ class ManagedRuntimeManager:
             metadata_platform = metadata.get("platform")
             metadata_bin_path = metadata.get("bin_path", self.spec.default_bin_path)
             binary_sha256 = metadata.get("binary_sha256")
+            binary_integrity_valid = (
+                isinstance(binary_sha256, str) and bool(_SHA256_RE.fullmatch(binary_sha256))
+                if self.spec.binary_artifact
+                else (
+                    binary_sha256 is None
+                    or isinstance(binary_sha256, str)
+                    and bool(_SHA256_RE.fullmatch(binary_sha256))
+                )
+            )
             if not (
-                metadata.get("provider") == "manifest"
-                and metadata.get("runtime_id") == self.spec.runtime_id
+                self._record_provider_matches(metadata.get("provider"))
+                and self._record_runtime_id_matches(metadata.get("runtime_id"))
                 and metadata.get("runtime_version") == runtime_version
                 and isinstance(metadata_platform, str)
                 and aliases.get(metadata_platform, metadata_platform) == installed_platform
                 and all(metadata.get(field) == pointer.get(field) for field in digest_fields)
                 and metadata_bin_path == bin_path
-                and isinstance(binary_sha256, str)
-                and _SHA256_RE.fullmatch(binary_sha256)
+                and binary_integrity_valid
                 and binary.is_file()
-                and os.access(binary, os.X_OK)
+                and (not self.spec.binary_artifact or os.access(binary, os.X_OK))
+                and self._record_matches_configured_source(metadata)
+                and self._record_install_dir_matches(install_dir, metadata)
             ):
                 return None
 
@@ -439,7 +472,7 @@ class ManagedRuntimeManager:
                 if self._verified_manifest_binary(install_dir, manifest, archive) != binary:
                     self._install_reason = inspection_reason
                     return None
-            elif file_sha256(binary) != binary_sha256:
+            elif self.spec.binary_artifact and file_sha256(binary) != binary_sha256:
                 self._install_reason = inspection_reason
                 return None
             self._install_reason = None
@@ -481,7 +514,7 @@ class ManagedRuntimeManager:
                 matches_manifest = self._verified_manifest_binary(Path(pointer["install_dir"]), manifest, archive) == binary
         return {
             "id": self.spec.runtime_id,
-            "provider": "manifest",
+            "provider": self.spec.record_provider,
             "platform": runtime_platform_tag(),
             "installed": binary is not None,
             "version": pointer.get("runtime_version") if binary is not None else None,
@@ -497,7 +530,7 @@ class ManagedRuntimeManager:
         }
 
     def probe_archive_reachability(self, *, timeout: float = 10.0) -> dict[str, Any]:
-        manifest = self._load_manifest(allow_network=not self.offline)
+        manifest = self.load_manifest_for_diagnostics()
         if manifest is None:
             return {
                 "ok": False,
@@ -842,6 +875,10 @@ class ManagedRuntimeManager:
                 by_lineage.setdefault(record.lineage, []).append(record)
             current_lineage = records_by_path[current].lineage
             for lineage, lineage_installs in by_lineage.items():
+                lineage_installs = self._retention_ranked_installs(
+                    lineage_installs,
+                    protected,
+                )
                 ranked = sorted(lineage_installs, key=lambda item: item.mtime, reverse=True)
                 if lineage == current_lineage:
                     rollback = [record for record in ranked if record.path.resolve() != current]
@@ -854,7 +891,11 @@ class ManagedRuntimeManager:
                     protected.update(record.path.resolve() for record in ranked[1 : keep_count + 1])
 
         install_candidates = sorted(
-            (path for path in install_dirs if path.resolve() not in protected),
+            (
+                path
+                for path in install_dirs
+                if not self._install_dir_is_protected(path.resolve(), protected)
+            ),
             key=lambda path: path.stat().st_mtime,
             reverse=True,
         )
@@ -969,8 +1010,8 @@ class ManagedRuntimeManager:
                 archive_sha256 = metadata.get("archive_sha256") if isinstance(metadata, dict) else None
                 manifest_source = metadata.get("manifest_source") if isinstance(metadata, dict) else None
                 if (
-                    metadata.get("provider") != "manifest"
-                    or metadata.get("runtime_id") != self.spec.runtime_id
+                    not self._record_provider_matches(metadata.get("provider"))
+                    or not self._record_runtime_id_matches(metadata.get("runtime_id"))
                     or not isinstance(manifest_sha256, str)
                     or not _SHA256_RE.fullmatch(manifest_sha256)
                     or not isinstance(archive_name, str)
@@ -990,7 +1031,11 @@ class ManagedRuntimeManager:
                     _ManagedRuntimeInstall(
                         path=install_dir,
                         lineage=lineage,
-                        archive_name=archive_name,
+                        archive_name=self._install_record_archive_name(
+                            metadata,
+                            archive_name,
+                            archive_sha256,
+                        ),
                         archive_sha256=archive_sha256,
                         mtime=install_info.st_mtime,
                     )
@@ -1059,7 +1104,7 @@ class ManagedRuntimeManager:
         try:
             with os.scandir(self.runtime_dir) as entries:
                 for entry in entries:
-                    if entry.name.startswith("install-") and entry.is_dir(follow_symlinks=False):
+                    if entry.name.startswith(self.spec.staging_prefixes) and entry.is_dir(follow_symlinks=False):
                         staging.append(self.runtime_dir / entry.name)
         except OSError as exc:
             raise OSError(f"runtime directory cannot be inspected: {self.runtime_dir}") from exc
@@ -1082,6 +1127,25 @@ class ManagedRuntimeManager:
             logger.warning("Failed to remove managed runtime directory %s", path, exc_info=True)
             return False
         return True
+
+    def _remove_install_target_for_replacement(self, path: Path) -> bool:
+        try:
+            leaf_info = path.lstat()
+            versions_dir = (self.runtime_dir / "versions").resolve(strict=True)
+            parent = path.parent.resolve(strict=True)
+        except (OSError, RuntimeError):
+            return False
+        if (
+            stat.S_ISLNK(leaf_info.st_mode)
+            or _is_reparse_point(leaf_info)
+            or not stat.S_ISDIR(leaf_info.st_mode)
+            or (
+                parent != versions_dir
+                and versions_dir not in parent.parents
+            )
+        ):
+            return False
+        return self._remove_tree(path)
 
     def _current_archive_sha256(self) -> str:
         pointer_path = self.runtime_dir / "current.json"
@@ -1151,6 +1215,10 @@ class ManagedRuntimeManager:
                 digest.update(chunk)
         return digest.hexdigest()
 
+    def _archive_candidate_sha256(self, name: str, fd: int) -> str:
+        del name
+        return self._sha256_from_fd(fd)
+
     def _clean_downloaded_archives(
         self,
         *,
@@ -1213,7 +1281,7 @@ class ManagedRuntimeManager:
                         opened = os.fstat(fd)
                         if (opened.st_dev, opened.st_ino) != (entry_info.st_dev, entry_info.st_ino):
                             raise OSError("archive was replaced during inspection")
-                        archive_sha256 = self._sha256_from_fd(fd)
+                        archive_sha256 = self._archive_candidate_sha256(name, fd)
                     finally:
                         os.close(fd)
                 except OSError as exc:
@@ -1297,7 +1365,7 @@ class ManagedRuntimeManager:
                         entry_info.st_ino,
                     ):
                         raise OSError("archive was replaced during inspection")
-                    archive_sha256 = self._sha256_from_fd(file_fd)
+                    archive_sha256 = self._archive_candidate_sha256(name, file_fd)
                 finally:
                     os.close(file_fd)
                 if (
@@ -1343,6 +1411,70 @@ class ManagedRuntimeManager:
     def _manifest_installable(self, manifest: ManagedRuntimeManifest) -> bool:
         return True
 
+    def _manifest_install_candidates(
+        self,
+        manifest: ManagedRuntimeManifest,
+        archive: ManagedRuntimeArchive,
+    ) -> Iterator[Path]:
+        yield self._manifest_install_dir(manifest, archive)
+
+    def _manifest_identity_fields(self, manifest: ManagedRuntimeManifest) -> dict[str, str]:
+        del manifest
+        return {}
+
+    def _metadata_matches_install_target(
+        self,
+        metadata: Mapping[str, Any],
+        target: Mapping[str, str],
+    ) -> bool:
+        return all(metadata.get(key) == value for key, value in target.items())
+
+    def _record_provider_matches(self, value: object) -> bool:
+        return value == self.spec.record_provider
+
+    def _record_runtime_id_matches(self, value: object) -> bool:
+        return value == self.spec.runtime_id or (
+            value is None and self.spec.allow_legacy_missing_runtime_id
+        )
+
+    def _archive_cache_name(self, archive: ManagedRuntimeArchive) -> str:
+        return archive.name
+
+    def _install_record_archive_name(
+        self,
+        metadata: Mapping[str, Any],
+        archive_name: str,
+        archive_sha256: str,
+    ) -> str:
+        del metadata, archive_sha256
+        return archive_name
+
+    def _record_matches_configured_source(self, metadata: Mapping[str, Any]) -> bool:
+        del metadata
+        return True
+
+    def _manifest_path_read_error_reason(self) -> str:
+        return self._reason("manifest_missing")
+
+    def _record_install_dir_matches(
+        self,
+        install_dir: Path,
+        metadata: Mapping[str, Any],
+    ) -> bool:
+        del install_dir, metadata
+        return True
+
+    def _install_dir_is_protected(self, install_dir: Path, protected: set[Path]) -> bool:
+        return install_dir in protected
+
+    def _retention_ranked_installs(
+        self,
+        installs: list[_ManagedRuntimeInstall],
+        protected: set[Path],
+    ) -> list[_ManagedRuntimeInstall]:
+        del protected
+        return installs
+
     def _prepare_binary(self, binary: Path) -> dict[str, Any]:
         return {"ok": True, "skipped": True}
 
@@ -1362,7 +1494,20 @@ class ManagedRuntimeManager:
     def _binary_matches_manifest(self, binary: Path, manifest: ManagedRuntimeManifest) -> bool:
         return self._binary_version(binary) == manifest.runtime_version
 
-    def _load_manifest(self, *, allow_network: bool) -> ManagedRuntimeManifest | None:
+    def load_manifest_for_diagnostics(self) -> ManagedRuntimeManifest | None:
+        """Load the selected manifest without writing runtime state."""
+
+        return self._load_manifest(
+            allow_network=not self.offline,
+            persist_remote_cache=False,
+        )
+
+    def _load_manifest(
+        self,
+        *,
+        allow_network: bool,
+        persist_remote_cache: bool = True,
+    ) -> ManagedRuntimeManifest | None:
         payload: bytes
         loaded_from: str
         cache_remote = False
@@ -1373,7 +1518,7 @@ class ManagedRuntimeManager:
             try:
                 payload = self.manifest_path.read_bytes()
             except OSError:
-                self._install_reason = self._reason("manifest_missing")
+                self._install_reason = self._manifest_path_read_error_reason()
                 return None
             loaded_from = str(self.manifest_path)
         elif self.manifest_url:
@@ -1405,7 +1550,7 @@ class ManagedRuntimeManager:
                     self._download_error = dependency_error_details(exc, self.manifest_url)
                     return None
                 loaded_from = self.manifest_url
-                cache_remote = True
+                cache_remote = persist_remote_cache
         else:
             try:
                 resource = package_resources.files(self.spec.package).joinpath(self.spec.manifest_resource)
@@ -1455,7 +1600,12 @@ class ManagedRuntimeManager:
                 url = str(item["url"])
                 name = str(item.get("name") or Path(urllib.parse.urlparse(url).path).name)
                 sha256 = str(item["sha256"]).lower()
-                binary_sha256 = str(item["binary_sha256"]).lower()
+                raw_binary_sha256 = item.get("binary_sha256")
+                binary_sha256 = (
+                    str(raw_binary_sha256).lower()
+                    if raw_binary_sha256 is not None
+                    else None
+                )
                 bin_path = str(item.get("bin_path") or self.spec.default_bin_path)
                 raw_size = item.get(self.spec.archive_size_field)
                 size = int(raw_size) if raw_size is not None else None
@@ -1463,7 +1613,11 @@ class ManagedRuntimeManager:
                     raise ValueError("unsafe archive name")
                 if not _SHA256_RE.fullmatch(sha256):
                     raise ValueError("invalid archive sha256")
-                if not _SHA256_RE.fullmatch(binary_sha256):
+                if self.spec.binary_artifact and (
+                    binary_sha256 is None or not _SHA256_RE.fullmatch(binary_sha256)
+                ):
+                    raise ValueError("invalid binary sha256")
+                if binary_sha256 is not None and not _SHA256_RE.fullmatch(binary_sha256):
                     raise ValueError("invalid binary sha256")
                 if size is not None and size < 0:
                     raise ValueError("invalid archive size")
@@ -1515,7 +1669,7 @@ class ManagedRuntimeManager:
         return archive
 
     def _resolve_manifest_archive(self, archive: ManagedRuntimeArchive) -> Path | None:
-        cached = self.runtime_dir / "downloads" / archive.name
+        cached = self.runtime_dir / "downloads" / self._archive_cache_name(archive)
         if cached.is_file() and self._downloaded_archive_matches(cached, archive):
             return cached
         if self.offline:
@@ -1572,17 +1726,20 @@ class ManagedRuntimeManager:
             / fingerprint
         )
 
-    @staticmethod
     def _install_target_identity(
+        self,
         manifest: ManagedRuntimeManifest,
         archive: ManagedRuntimeArchive,
     ) -> dict[str, str]:
-        return {
+        target = {
             "runtime_version": manifest.runtime_version,
             "platform": archive.platform,
             "archive_sha256": archive.sha256,
-            "binary_sha256": archive.binary_sha256,
         }
+        if archive.binary_sha256 is not None:
+            target["binary_sha256"] = archive.binary_sha256
+        target.update(self._manifest_identity_fields(manifest))
+        return target
 
     @staticmethod
     def _normalized_install_target(target: Mapping[str, str]) -> dict[str, str]:
@@ -1609,7 +1766,8 @@ class ManagedRuntimeManager:
         if (
             install_dir_resolved not in binary.parents
             or not binary.is_file()
-            or not os.access(binary, os.X_OK)
+            or self.spec.binary_artifact
+            and not os.access(binary, os.X_OK)
         ):
             return None
         target = self._install_target_identity(manifest, archive)
@@ -1617,14 +1775,17 @@ class ManagedRuntimeManager:
         metadata_platform = metadata.get("platform")
         aliases = dict(self.spec.platform_aliases)
         if not (
-            metadata.get("provider") == "manifest"
-            and metadata.get("runtime_id") == self.spec.runtime_id
-            and all(metadata.get(key) == value for key, value in target.items())
+            self._record_provider_matches(metadata.get("provider"))
+            and self._record_runtime_id_matches(metadata.get("runtime_id"))
+            and self._metadata_matches_install_target(metadata, target)
             and isinstance(metadata_platform, str)
             and aliases.get(metadata_platform, metadata_platform)
             == aliases.get(target_platform, target_platform)
             and bin_path == archive.bin_path
-            and file_sha256(binary) == archive.binary_sha256
+            and (
+                not self.spec.binary_artifact
+                or file_sha256(binary) == archive.binary_sha256
+            )
         ):
             return None
         return binary
@@ -1635,23 +1796,26 @@ class ManagedRuntimeManager:
         manifest: ManagedRuntimeManifest,
         archive: ManagedRuntimeArchive,
         *,
-        binary_sha256: str,
+        binary_sha256: str | None,
     ) -> None:
+        payload: dict[str, Any] = {
+            "provider": self.spec.record_provider,
+            "runtime_id": self.spec.runtime_id,
+            "manifest_sha256": manifest.digest,
+            "runtime_version": manifest.runtime_version,
+            "platform": archive.platform,
+            "archive_name": archive.name,
+            "archive_sha256": archive.sha256,
+            "bin_path": archive.bin_path,
+            "manifest_source": manifest.loaded_from,
+            "source": manifest.source,
+            **self._manifest_identity_fields(manifest),
+        }
+        if binary_sha256 is not None:
+            payload["binary_sha256"] = binary_sha256
         write_json_atomic(
             install_dir / self.spec.metadata_filename,
-            {
-                "provider": "manifest",
-                "runtime_id": self.spec.runtime_id,
-                "manifest_sha256": manifest.digest,
-                "runtime_version": manifest.runtime_version,
-                "platform": archive.platform,
-                "archive_name": archive.name,
-                "archive_sha256": archive.sha256,
-                "binary_sha256": binary_sha256,
-                "bin_path": archive.bin_path,
-                "manifest_source": manifest.loaded_from,
-                "source": manifest.source,
-            },
+            payload,
         )
 
     def _write_current_pointer(
@@ -1671,7 +1835,7 @@ class ManagedRuntimeManager:
         write_json_atomic(
             self.runtime_dir / "current.json",
             {
-                "provider": "manifest",
+                "provider": self.spec.record_provider,
                 "runtime_id": self.spec.runtime_id,
                 "runtime_version": manifest.runtime_version,
                 "platform": archive.platform,
@@ -1679,6 +1843,7 @@ class ManagedRuntimeManager:
                 "manifest_sha256": manifest_sha256,
                 "archive_sha256": archive.sha256,
                 "bin_path": archive.bin_path,
+                **self._manifest_identity_fields(manifest),
             },
         )
 
@@ -1729,19 +1894,20 @@ class ManagedRuntimeManager:
             "release_state": manifest.payload.get("release_state"),
         }
 
-    @staticmethod
-    def _archive_status_payload(archive: ManagedRuntimeArchive | None) -> dict[str, Any] | None:
+    def _archive_status_payload(self, archive: ManagedRuntimeArchive | None) -> dict[str, Any] | None:
         if archive is None:
             return None
-        return {
+        payload = {
             "platform": archive.platform,
             "name": archive.name,
             "url": redact_url(archive.url),
             "sha256": archive.sha256,
-            "binary_sha256": archive.binary_sha256,
             "size": archive.size,
             "bin_path": archive.bin_path,
         }
+        if archive.binary_sha256 is not None:
+            payload["binary_sha256"] = archive.binary_sha256
+        return payload
 
     def _reuse_existing_install(
         self,
@@ -1902,7 +2068,8 @@ def install_lock_for(runtime_id: str) -> threading.Lock:
 def safe_extract_tar(archive: tarfile.TarFile, destination: Path) -> None:
     supports_data_filter = hasattr(tarfile, "data_filter")
     destination_resolved = destination.resolve()
-    for member in archive.getmembers():
+    members = archive.getmembers()
+    for member in members:
         if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
             raise ValueError(f"Unsupported managed runtime archive member: {member.name}")
         if archive_path_is_unsafe(member.name):
@@ -1910,10 +2077,6 @@ def safe_extract_tar(archive: tarfile.TarFile, destination: Path) -> None:
         target = (destination / member.name).resolve()
         if target != destination_resolved and destination_resolved not in target.parents:
             raise ValueError(f"Unsafe managed runtime archive path: {member.name}")
-        if (member.issym() or member.islnk()) and not supports_data_filter:
-            raise ValueError(
-                f"Managed runtime archive link requires tarfile.data_filter: {member.name}"
-            )
         if member.issym():
             link_target = (destination / member.name).parent / member.linkname
             link_target_resolved = link_target.resolve()
@@ -1933,7 +2096,154 @@ def safe_extract_tar(archive: tarfile.TarFile, destination: Path) -> None:
     if supports_data_filter:
         archive.extractall(destination, filter="data")
     else:
-        archive.extractall(destination)
+        _extract_tar_without_filter(archive, destination, members)
+
+
+def _extract_tar_without_filter(
+    archive: tarfile.TarFile,
+    destination: Path,
+    members: list[tarfile.TarInfo],
+) -> None:
+    member_paths: dict[tuple[str, ...], tarfile.TarInfo] = {}
+    link_targets: dict[tuple[str, ...], tuple[str, ...]] = {}
+    for member in members:
+        path = _normalized_tar_path(member.name)
+        if not path and not member.isdir():
+            raise ValueError(f"Unsafe managed runtime archive path: {member.name}")
+        if path in member_paths:
+            raise ValueError(f"Managed runtime archive path collision: {member.name}")
+        member_paths[path] = member
+
+    for path, member in member_paths.items():
+        for index in range(1, len(path)):
+            ancestor = member_paths.get(path[:index])
+            if ancestor is not None and not ancestor.isdir():
+                raise ValueError(f"Managed runtime archive path/type collision: {member.name}")
+
+    for path, member in member_paths.items():
+        if member.issym():
+            target = _normalized_tar_link_target(path[:-1], member.linkname, member.name)
+            resolved_target = _resolved_tar_symlink_target(target, member_paths)
+            if resolved_target and resolved_target not in member_paths and not any(
+                candidate[: len(resolved_target)] == resolved_target
+                for candidate in member_paths
+            ):
+                raise ValueError(f"Missing managed runtime archive link target: {member.name}")
+            link_targets[path] = target
+        elif member.islnk():
+            target = _normalized_tar_link_target((), member.linkname, member.name)
+            target_member = member_paths.get(target)
+            if target_member is None or not target_member.isfile():
+                raise ValueError(f"Unsafe managed runtime archive hardlink target: {member.name}")
+            link_targets[path] = target
+
+    try:
+        destination_info = destination.lstat()
+    except FileNotFoundError:
+        destination.mkdir(parents=True)
+    else:
+        if _is_reparse_point(destination_info) or not stat.S_ISDIR(destination_info.st_mode):
+            raise ValueError("Managed runtime archive destination is not a directory")
+        if any(destination.iterdir()):
+            raise ValueError("Managed runtime archive destination is not empty")
+
+    directories = sorted(
+        ((path, member) for path, member in member_paths.items() if member.isdir()),
+        key=lambda item: len(item[0]),
+    )
+    for path, _member in directories:
+        destination.joinpath(*path).mkdir(parents=True, exist_ok=True)
+
+    for path, member in member_paths.items():
+        if not member.isfile():
+            continue
+        target = destination.joinpath(*path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source = archive.extractfile(member)
+        if source is None:
+            raise ValueError(f"Unreadable managed runtime archive member: {member.name}")
+        with source, target.open("xb") as handle:
+            shutil.copyfileobj(source, handle)
+        target.chmod(member.mode & 0o777)
+
+    for path, member in member_paths.items():
+        if not member.islnk():
+            continue
+        target = destination.joinpath(*path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.link(destination.joinpath(*link_targets[path]), target)
+
+    for path, member in member_paths.items():
+        if not member.issym():
+            continue
+        target = destination.joinpath(*path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(member.linkname, target)
+
+    for path, member in reversed(directories):
+        destination.joinpath(*path).chmod(member.mode & 0o777)
+
+
+def _normalized_tar_path(value: str) -> tuple[str, ...]:
+    if archive_path_is_unsafe(value) or "\\" in value:
+        raise ValueError(f"Unsafe managed runtime archive path: {value}")
+    parts = tuple(part for part in PurePosixPath(value).parts if part not in {"", "."})
+    return parts
+
+
+def _normalized_tar_link_target(
+    base: tuple[str, ...],
+    value: str,
+    member_name: str,
+) -> tuple[str, ...]:
+    posix_path = PurePosixPath(value)
+    windows_path = PureWindowsPath(value)
+    if (
+        not value
+        or "\\" in value
+        or posix_path.is_absolute()
+        or windows_path.is_absolute()
+        or windows_path.drive
+        or windows_path.root
+    ):
+        raise ValueError(f"Unsafe managed runtime archive link target: {member_name}")
+    parts = list(base)
+    for part in posix_path.parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not parts:
+                raise ValueError(f"Unsafe managed runtime archive link target: {member_name}")
+            parts.pop()
+        else:
+            parts.append(part)
+    return tuple(parts)
+
+
+def _resolved_tar_symlink_target(
+    target: tuple[str, ...],
+    member_paths: Mapping[tuple[str, ...], tarfile.TarInfo],
+) -> tuple[str, ...]:
+    pending = list(target)
+    resolved: list[str] = []
+    visited: set[tuple[str, ...]] = set()
+    while pending:
+        resolved.append(pending.pop(0))
+        candidate = tuple(resolved)
+        member = member_paths.get(candidate)
+        if member is None or not member.issym():
+            continue
+        if candidate in visited:
+            raise ValueError(f"Managed runtime archive symlink cycle: {member.name}")
+        visited.add(candidate)
+        linked = _normalized_tar_link_target(
+            candidate[:-1],
+            member.linkname,
+            member.name,
+        )
+        resolved = []
+        pending = [*linked, *pending]
+    return tuple(resolved)
 
 
 def archive_path_is_unsafe(value: str) -> bool:
