@@ -457,8 +457,9 @@ Scope:
 
 Add:
 
-- `MEMORY-INDEP-018`: enabled upgrade keeps Memory installed and a pinned
-  rollback restores the prior package shape;
+- `MEMORY-INDEP-018` (superseded by the Wave 3c Doc A/Doc B split): this plan's
+  former enabled-upgrade/package-shape assignment is retained as lineage only;
+  the active owner is Doc A's UI/Settings recovery contract;
 - wheel-content assertions proving `avibe-os` contains no Memory runtime
   implementation or EverOS artifact manifest; and
 - packaged install smoke for missing, disabled, enabled, incompatible, upgrade,
@@ -468,8 +469,19 @@ Exit gate: both package matrices pass CI; local Incus `master` regression passes
 Workbench and Slack/Discord/Telegram/Feishu/WeChat capture; service health is
 verified; no temporary fallback implementation remains.
 
-Rollback: the recorded package shape and compatible unchanged data/config allow
-one pinned install operation to restore both core and Memory implementation.
+Rollback (superseded by the Wave 3c Doc A contract): this legacy one-operation
+statement is lineage only. Active rollback follows
+[`memory-wave3c-lifecycle-contract.md`](memory-wave3c-lifecycle-contract.md):
+core-only cleanup uninstalls Memory introduced by the forward mutation, while
+split-package rollback restores independent exact core and Memory pins with
+provider verification.
+
+Wave 3c scenario ownership is now explicit: Doc A
+(`docs/plans/memory-wave3c-lifecycle-contract.md`) owns `MEMORY-INDEP-018`
+UI/Settings recovery, `019` rollback, `020` admission, and `021` import fencing;
+Doc B (`docs/plans/memory-wave3c-release-migration-contract.md`) owns `022` and
+`023`. The former `MEMORY-INDEP-018` package-shape assignment in this plan is
+superseded and must not be used as an independent implementation target.
 
 ## Verification Summary
 
