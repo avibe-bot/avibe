@@ -11,6 +11,12 @@ def test_non_agentic_policy_defaults_only_an_omitted_limit() -> None:
         RecallPolicy.from_payload({"mode": "keyword", "max_results": None})
 
 
+def test_policy_matches_everos_result_limit() -> None:
+    assert RecallPolicy(mode="hybrid", max_results=100).max_results == 100
+    with pytest.raises(ValueError):
+        RecallPolicy(mode="hybrid", max_results=101)
+
+
 @pytest.mark.parametrize(
     "field",
     ["timeout_seconds", "max_model_calls", "cost_budget_tokens"],

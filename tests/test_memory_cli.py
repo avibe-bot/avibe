@@ -28,16 +28,16 @@ _MEMORY_HELP_BY_LANGUAGE = {
         "profile": ("Print machine-readable output",),
         "list": (
             "Page number (1-based)",
-            "Episodes per page (1-20)",
+            "Episodes per page (1-100)",
             "Print machine-readable output",
         ),
         "search": (
             "Search query",
-            "Maximum results (1-20)",
+            "Maximum results (1-100)",
             "Recall mode (default: hybrid)",
             "Print machine-readable output",
         ),
-        "remember": ("Text to remember (maximum 4,000 characters)", "Print machine-readable output"),
+        "remember": ("Text to remember", "Print machine-readable output"),
     },
     "zh": {
         "top": ("通过运行中的控制器使用本地记忆",),
@@ -50,9 +50,9 @@ _MEMORY_HELP_BY_LANGUAGE = {
         ),
         "status": ("输出机器可读格式",),
         "profile": ("输出机器可读格式",),
-        "list": ("页码（从 1 开始）", "每页记忆片段数（1-20）", "输出机器可读格式"),
-        "search": ("搜索内容", "最大结果数（1-20）", "召回模式（默认：hybrid）", "输出机器可读格式"),
-        "remember": ("要记住的文本（最多 4,000 个字符）", "输出机器可读格式"),
+        "list": ("页码（从 1 开始）", "每页记忆片段数（1-100）", "输出机器可读格式"),
+        "search": ("搜索内容", "最大结果数（1-100）", "召回模式（默认：hybrid）", "输出机器可读格式"),
+        "remember": ("要记住的文本", "输出机器可读格式"),
     },
 }
 
@@ -263,7 +263,7 @@ def test_memory_list_parser_defaults_match_everos_page_semantics() -> None:
     [
         ["memory", "list", "--page", "0", "--json"],
         ["memory", "list", "--limit", "0", "--json"],
-        ["memory", "list", "--limit", "21", "--json"],
+        ["memory", "list", "--limit", "101", "--json"],
     ],
 )
 def test_memory_list_rejects_invalid_bounds_before_transport(
@@ -280,6 +280,23 @@ def test_memory_list_rejects_invalid_bounds_before_transport(
 
     assert cli.cmd_memory(args) == 1
     assert json.loads(capsys.readouterr().out)["code"] == "memory_invalid_input"
+
+
+def test_memory_list_accepts_everos_max_page_size(monkeypatch, capsys) -> None:
+    args = cli.build_parser().parse_args(
+        ["memory", "list", "--limit", "100", "--json"]
+    )
+    calls: list[int] = []
+
+    def list_sync(**kwargs):
+        calls.append(kwargs["limit"])
+        return {"status_code": 200, "body": {"status": "ok", "items": []}}
+
+    monkeypatch.setattr(internal_client, "memory_list_sync", list_sync)
+
+    assert cli.cmd_memory(args) == 0
+    assert calls == [100]
+    assert json.loads(capsys.readouterr().out)["ok"] is True
 
 
 def test_memory_list_all_rejection_comes_from_controller(monkeypatch, capsys) -> None:
@@ -401,7 +418,7 @@ def test_memory_cli_passes_agent_session_to_the_internal_boundary(monkeypatch, c
 
 
 def test_memory_cli_rejects_out_of_range_search_without_transport(monkeypatch, capsys) -> None:
-    args = cli.build_parser().parse_args(["memory", "search", "query", "--limit", "21", "--json"])
+    args = cli.build_parser().parse_args(["memory", "search", "query", "--limit", "101", "--json"])
 
     def transport_must_not_run(*_args, **_kwargs):
         raise AssertionError("invalid CLI input reached the UDS")
@@ -410,6 +427,28 @@ def test_memory_cli_rejects_out_of_range_search_without_transport(monkeypatch, c
 
     assert cli.cmd_memory(args) == 1
     assert json.loads(capsys.readouterr().out)["code"] == "memory_invalid_input"
+
+
+def test_memory_cli_accepts_everos_max_results_and_large_query(
+    monkeypatch,
+    capsys,
+) -> None:
+    query = "find this detail " * 700
+    args = cli.build_parser().parse_args(
+        ["memory", "search", query, "--limit", "100", "--json"]
+    )
+    calls: list[tuple[str, int]] = []
+
+    def search_sync(text, limit, **_kwargs):
+        calls.append((text, limit))
+        return {"status_code": 200, "body": {"status": "ok", "items": []}}
+
+    monkeypatch.setattr(internal_client, "memory_search_sync", search_sync)
+
+    assert len(query.encode()) > 8 * 1024
+    assert cli.cmd_memory(args) == 0
+    assert calls == [(query.strip(), 100)]
+    assert json.loads(capsys.readouterr().out)["ok"] is True
 
 
 def test_memory_cli_human_output_uses_configured_i18n(monkeypatch, capsys) -> None:
@@ -611,13 +650,17 @@ def test_memory_remember_nonqueued_outcomes_exit_nonzero(monkeypatch, capsys, bo
     assert json.loads(capsys.readouterr().out)["code"] == expected
 
 
-def test_memory_remember_rejects_over_limit_text_before_transport(monkeypatch, capsys) -> None:
-    args = cli.build_parser().parse_args(["memory", "remember", "x" * 4_001, "--json"])
-    monkeypatch.setattr(
-        internal_client,
-        "memory_remember_sync",
-        lambda *_args, **_kwargs: pytest.fail("invalid input reached the controller"),
-    )
+def test_memory_remember_accepts_text_over_legacy_cli_limit(monkeypatch, capsys) -> None:
+    text = "x" * 4_001
+    args = cli.build_parser().parse_args(["memory", "remember", text, "--json"])
+    calls: list[str] = []
 
-    assert cli.cmd_memory(args) == 1
-    assert json.loads(capsys.readouterr().out)["code"] == "memory_invalid_input"
+    def remember_sync(value, **_kwargs):
+        calls.append(value)
+        return {"status_code": 200, "body": {"status": "accepted"}}
+
+    monkeypatch.setattr(internal_client, "memory_remember_sync", remember_sync)
+
+    assert cli.cmd_memory(args) == 0
+    assert calls == [text]
+    assert json.loads(capsys.readouterr().out)["ok"] is True

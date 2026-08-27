@@ -26,3 +26,7 @@ observations:
     scenarios:
       - MEMORY-LIST-008
     observation: Settings selects an owner origin rather than accepting a raw owner id; the controller derives the Agent owner from the authenticated principal and every returned row identifies its origin.
+  - id: MEMORY-LIST-OBS-006
+    scenarios:
+      - MEMORY-LIST-009
+    observation: The pinned EverOS contract accepts pages up to 100 items and owns episode payload sizing; Avibe retains shape and scope validation without imposing a smaller aggregate byte limit.

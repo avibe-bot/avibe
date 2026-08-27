@@ -11,6 +11,10 @@ MemoryKind = Literal["profile", "episode", "fact"]
 MemoryOrigin = Literal["user", "agent"]
 RecallMode = Literal["auto", "keyword", "vector", "hybrid", "agentic"]
 MAX_AGENTIC_TIMEOUT_SECONDS = 30.0
+# Pinned EverOS 1.2.3 request bounds. Keep every Avibe entry point aligned
+# with the provider contract instead of layering a smaller product limit on top.
+MAX_MEMORY_SEARCH_RESULTS = 100
+MAX_MEMORY_LIST_PAGE_SIZE = 100
 MemoryContentKind = Literal["image", "audio", "doc", "pdf", "html", "email"]
 MemoryFailureKind = Literal[
     "boot_recovery",
@@ -472,7 +476,7 @@ class RecallPolicy:
         if (
             isinstance(self.max_results, bool)
             or not isinstance(self.max_results, int)
-            or not 1 <= self.max_results <= 20
+            or not 1 <= self.max_results <= MAX_MEMORY_SEARCH_RESULTS
         ):
             raise ValueError("invalid recall result limit")
         if type(self.include_profile) is not bool or type(self.include_current_session) is not bool:

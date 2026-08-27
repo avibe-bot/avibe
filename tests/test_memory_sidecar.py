@@ -455,6 +455,22 @@ def test_sidecar_guard_accepts_agentic_but_rejects_untrusted_search_scope() -> N
     agentic_body = json.dumps({**search, "method": "agentic"}).encode()
     assert _request_rejection("POST", "/api/v2/memory/search", agentic_body) is None
     assert (
+        _request_rejection(
+            "POST",
+            "/api/v2/memory/search",
+            json.dumps({**search, "top_k": 100}).encode(),
+        )
+        is None
+    )
+    assert (
+        _request_rejection(
+            "POST",
+            "/api/v2/memory/search",
+            json.dumps({**search, "top_k": 101}).encode(),
+        )
+        == "search"
+    )
+    assert (
         sidecar._agentic_request_timeout(
             "/api/v2/memory/search",
             agentic_body,
@@ -486,7 +502,7 @@ def test_sidecar_guard_accepts_agentic_but_rejects_untrusted_search_scope() -> N
         )
 
 
-def test_sidecar_guard_keeps_profile_exact_and_allows_only_bounded_episode_lists() -> None:
+def test_sidecar_guard_keeps_profile_exact_and_uses_everos_episode_page_limit() -> None:
     principal = "u-11111111111111111111111111111111"
     profile = {
         "user_id": principal,
@@ -502,7 +518,7 @@ def test_sidecar_guard_keeps_profile_exact_and_allows_only_bounded_episode_lists
         "project_id": "notes",
         "memory_type": "episode",
         "page": 2,
-        "page_size": 20,
+        "page_size": 100,
         "sort_by": "timestamp",
         "sort_order": "desc",
     }
@@ -520,7 +536,7 @@ def test_sidecar_guard_keeps_profile_exact_and_allows_only_bounded_episode_lists
         {**episode, "project_id": "all"},
         {**episode, "project_id": "p-" + "a" * 32},
         {**episode, "page": 0},
-        {**episode, "page_size": 21},
+        {**episode, "page_size": 101},
         {**episode, "sort_by": "updated_at"},
         {**episode, "sort_order": "asc"},
         {**episode, "filters": {}},

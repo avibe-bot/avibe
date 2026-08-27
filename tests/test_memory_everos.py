@@ -732,7 +732,7 @@ def test_search_uses_public_search_only_and_maps_episode_and_nested_fact() -> No
             PRINCIPAL,
             PROJECT,
             "language",
-            2,
+            100,
             session_ref=SESSION_REF,
         )
 
@@ -748,7 +748,7 @@ def test_search_uses_public_search_only_and_maps_episode_and_nested_fact() -> No
                 "project_id": PROJECT,
                 "query": "language",
                 "method": "hybrid",
-                "top_k": 2,
+                "top_k": 100,
                 "include_profile": True,
                 "enable_llm_rerank": False,
                 "filters": {"session_id": WIRE_SESSION_ID},
@@ -1107,6 +1107,40 @@ def test_list_episodes_uses_exact_get_shape_and_projects_a_bounded_page() -> Non
     )
 
 
+def test_list_episodes_accepts_everos_max_page_size() -> None:
+    requests: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "request_id": "empty-page",
+                "data": {
+                    "episodes": [],
+                    "profiles": [],
+                    "agent_cases": [],
+                    "agent_skills": [],
+                    "total_count": 0,
+                    "count": 0,
+                },
+            },
+        )
+
+    with _sidecar_transport(handler):
+        result = asyncio.run(
+            EverOSPort(Path("/tmp/everos.sock")).list_episodes(
+                PRINCIPAL,
+                PROJECT,
+                1,
+                100,
+            )
+        )
+
+    assert requests[0]["page_size"] == 100
+    assert result.page_size == 100
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -1313,6 +1347,48 @@ def test_profile_accepts_large_everos_payloads(owner_id: str) -> None:
     assert len(summary.encode()) > 64 * 1024
     assert items[0].profile is not None
     assert items[0].profile.summary == summary.strip()
+
+
+def test_profile_accepts_everos_structures_beyond_legacy_avibe_limits() -> None:
+    """MEMORY-SEARCH-018: profile structure is governed by EverOS."""
+
+    nested: object = "value"
+    for _index in range(12):
+        nested = {"nested": nested}
+    long_key = "k" * 129
+    profile_data = {
+        "summary": "Complete profile",
+        "explicit_info": [
+            {"description": f"fact-{index}"} for index in range(201)
+        ],
+        "implicit_traits": [
+            {"description": f"trait-{index}"} for index in range(201)
+        ],
+        long_key: nested,
+    }
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "profiles": [
+                        {"user_id": "owner-1", "profile_data": profile_data}
+                    ],
+                    "provider_metadata": list(range(201)),
+                }
+            },
+        )
+
+    with _sidecar_transport(handler):
+        items = asyncio.run(
+            EverOSPort(Path("/tmp/everos.sock")).profile("owner-1", PROJECT)
+        )
+
+    assert items[0].profile is not None
+    assert len(items[0].profile.explicit_info) == 201
+    assert len(items[0].profile.implicit_traits) == 201
+    assert json.loads(items[0].text)[long_key] == nested
 
 
 def test_profile_maps_known_fields_without_collapsing_basis_and_evidence() -> None:
