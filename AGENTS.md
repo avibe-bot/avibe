@@ -177,6 +177,10 @@ Persisted-shape rule:
 - a schema change must load older releases' files via migration or safe
   degradation (a broken optional-feature section disables that feature and
   warns; startup never fails), with load fixtures covering the released shapes
+- installed-shape restoration and runtime readiness are orthogonal: rollback may
+  exactly restore a captured shape that remains non-ready and repairable. Report
+  both outcomes separately; current health criteria must not invalidate exact
+  restoration.
 
 Source-of-truth rule:
 
@@ -218,6 +222,11 @@ Source-of-truth rule:
 - the GitHub Codex bot is the review gate: after every push confirm a review
   of the new head starts, comment `@codex review` if none appears, and treat a
   trigger as accepted only once the bot reacts 👀 to that comment
+- only an explicit owner decision may make Codex findings advisory for an
+  architecture/spec-only PR: findings inform owner decision-completeness
+  certification instead of requiring edits until zero findings. This is a
+  per-PR exception; ordinary documentation and every product/test code PR retain
+  the normal exact-head Codex clean/pass, CI, and zero-unresolved-thread gates.
 - a bot pass is either an authenticated Codex-bot issue comment with the pass
   phrase and exact reviewed commit, or a head-bound Codex-bot `+1` captured as
   new waiter activity after the prior review was terminal; close-out requires
