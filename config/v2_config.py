@@ -3671,6 +3671,16 @@ class V2Config:
     # Non-persisted diagnostics from disk migration/recovery. They let callers
     # surface a repair notice without weakening the strict write validator.
     load_warnings: ClassVar[tuple[str, ...]] = ()
+    recovered_sections: ClassVar[tuple[str, ...]] = ()
+    whole_config_recovery: ClassVar[bool] = False
+
+    @property
+    def memory_required(self) -> bool | None:
+        """Return the persisted Memory requirement, or None when unreadable."""
+
+        if self.whole_config_recovery:
+            return None
+        return bool(self.memory.enabled)
 
     @classmethod
     def default(cls) -> "V2Config":
@@ -3714,6 +3724,8 @@ class V2Config:
                 logger.error("%s (backup=%s)", warning, backup)
                 config = cls.default()
                 config.load_warnings = (warning,)
+                config.recovered_sections = ()
+                config.whole_config_recovery = True
                 return config
 
         try:
@@ -3724,6 +3736,8 @@ class V2Config:
             logger.error("%s (backup=%s)", warning, backup)
             config = cls.default()
             config.load_warnings = (warning,)
+            config.recovered_sections = ()
+            config.whole_config_recovery = True
             return config
 
         if not isinstance(payload, dict):
@@ -3732,12 +3746,15 @@ class V2Config:
             logger.error("%s (backup=%s)", warning, backup)
             config = cls.default()
             config.load_warnings = (warning,)
+            config.recovered_sections = ()
+            config.whole_config_recovery = True
             return config
 
         migrated_payload, migrated, migration_warnings = _migrate_config_payload_on_load(payload)
         candidate = migrated_payload
         recovery_warnings: list[str] = []
         recovered_sections: set[str] = set()
+        whole_config_recovery = False
         while True:
             try:
                 config = cls.from_payload(candidate)
@@ -3755,12 +3772,14 @@ class V2Config:
                     logger.error("%s", warning)
                     config = cls.default()
                     recovery_warnings.append(warning)
+                    whole_config_recovery = True
                     break
                 if not _reset_recoverable_config_section(candidate, section, field_name):
                     warning = f"Config section '{section}' could not be recovered; using recovery defaults: {exc}"
                     logger.error("%s", warning)
                     config = cls.default()
                     recovery_warnings.append(warning)
+                    whole_config_recovery = True
                     break
                 recovered_sections.add(recovered)
                 recovery_warnings.append(f"Recovered invalid config section '{recovered}': {exc}")
@@ -3804,6 +3823,8 @@ class V2Config:
                 backup,
             )
         config.load_warnings = all_warnings
+        config.recovered_sections = tuple(sorted(recovered_sections))
+        config.whole_config_recovery = whole_config_recovery
         return config
 
     @classmethod

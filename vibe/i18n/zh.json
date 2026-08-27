@@ -450,6 +450,7 @@
     "infoUnavailable": "更新信息不可用，请稍后重试。",
     "upgradeFailed": "升级失败，请检查日志。",
     "upgradeFailedShort": "升级失败",
+    "memoryRequirementUnreadable": "无法安全读取持久化的记忆需求，升级已被阻止。",
     "upgradeFailedSlack": "❌ *升级失败*\n\n请检查日志获取详情。",
     "updating": "正在更新 Avibe...",
     "updatingSlack": "⏳ *正在更新 Avibe...*\n\n请稍等，服务稍后会重启。",

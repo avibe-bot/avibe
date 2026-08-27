@@ -161,6 +161,74 @@ def _plan_env(wheelhouse: Path) -> dict[str, str]:
 
 
 @pytest.mark.integration
+def test_memory_indep_021_packaged_core_only_status_blocks_optional_imports(
+    tmp_path: Path,
+    packaged_dependency_seed: Path,
+) -> None:
+    wheelhouse = tmp_path / "wheelhouse"
+    wheelhouse.mkdir()
+    _build_release_wheels("3.0.14", wheelhouse)
+    python = _venv(tmp_path / "core-only-status-venv")
+    _install_initial(
+        python,
+        wheelhouse,
+        memory=False,
+        dependency_seed=packaged_dependency_seed,
+    )
+    script = r'''
+import importlib.abc
+import json
+import os
+import sys
+
+from config import paths
+from config.v2_config import V2Config
+
+config_path = paths.get_config_path()
+config_path.parent.mkdir(parents=True, exist_ok=True)
+V2Config.default().save(config_path)
+if os.environ["MEMORY_CONFIG_CASE"] == "malformed":
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["memory"]["recovery_intent"] = "invalid"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+class BlockMemoryImplementation(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "avibe_memory" or fullname.startswith("avibe_memory."):
+            raise AssertionError(f"optional implementation import: {fullname}")
+        return None
+
+sys.meta_path.insert(0, BlockMemoryImplementation())
+from vibe import api
+
+package, runtime = api._memory_dependencies_status(offline=True)
+assert package["readiness"] == "not_required"
+assert package["provider_count"] == 0
+assert runtime["status"] == "not_required"
+assert not any(
+    name == "avibe_memory" or name.startswith("avibe_memory.")
+    for name in sys.modules
+)
+'''
+    for case in ("disabled", "malformed"):
+        home = tmp_path / f"avibe-home-{case}"
+        result = subprocess.run(
+            [str(python), "-c", script],
+            cwd=tmp_path,
+            env={
+                **os.environ,
+                "AVIBE_HOME": str(home),
+                "MEMORY_CONFIG_CASE": case,
+                "PYTHONPATH": "",
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.integration
 def test_packaged_memory_shape_survives_synchronous_upgrade_and_supervisor_rollback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

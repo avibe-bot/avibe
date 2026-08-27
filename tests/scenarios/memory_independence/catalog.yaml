@@ -14,6 +14,10 @@ capability:
     - tests/test_core_services_dispatch.py
     - tests/test_admin_notifications.py
     - tests/test_memory_disabled_isolation.py
+    - tests/test_memory_loader.py
+    - tests/test_local_deps.py
+    - tests/test_memory_upgrade_packaged.py
+    - tests/test_upgrade_flow.py
     - tests/scenarios/memory_independence/test_memory_rollback_types.py
 contract:
   dispatch: capture_must_not_fence_turn_start
@@ -136,3 +140,9 @@ scenarios:
     kind: guardrail
     layer: scenario
     test: tests/scenarios/memory_independence/test_memory_rollback_types.py::test_memory_indep_019_release_family_property_table
+  - id: MEMORY-INDEP-021
+    name: Not-required and unreadable Memory status imports no optional implementation
+    status: covered
+    kind: guardrail
+    layer: scenario
+    test: tests/test_local_deps.py::test_memory_indep_021_status_import_fence
