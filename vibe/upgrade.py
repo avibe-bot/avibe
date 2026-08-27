@@ -807,6 +807,10 @@ class RollbackTarget(NamedTuple):
     memory_version: str | None = None
 
 
+class MemoryRollbackTargetUnavailableError(RuntimeError):
+    """The installed Memory package cannot be pinned for a safe rollback."""
+
+
 def _names_a_published_release(version: str) -> bool:
     """Whether an index could serve `version`, as opposed to it naming this tree.
 
@@ -839,10 +843,10 @@ def rollback_target() -> RollbackTarget | None:
     left on the machine to measure. Calling this from the detached restart job
     would answer for the install that did the replacing, which is not a rollback.
 
-    Which is why the only caller is :func:`build_upgrade_plan`, and why the
-    answer reaches everyone else as `UpgradePlan.rollback_to`. As a function
-    anyone could reach, it was reached at the wrong time -- both upgrade paths
-    called it after the install they were describing had already been overwritten.
+    The general upgrade planner and the Settings Memory-package repair owner are
+    the only callers. Both capture this target before the install they are about
+    to run, and every later phase receives the complete value rather than
+    measuring any field again.
 
     So: the version from this process's already-bound `__version__`, which the
     install on disk cannot change underneath it; the distribution from this
@@ -864,12 +868,19 @@ def rollback_target() -> RollbackTarget | None:
     if not _names_a_published_release(__version__):
         return None
     memory_package = memory_package_installed()
+    memory_version = None
+    if memory_package:
+        memory_version = _published_version(installed_memory_package_version())
+        if memory_version is None:
+            raise MemoryRollbackTargetUnavailableError(
+                "The installed avibe-memory version cannot be determined for safe rollback"
+            )
     return RollbackTarget(
         version=__version__,
         package=installed_package_name(),
         launcher=runtime_mod.current_service_launcher(),
         memory_package=memory_package,
-        memory_version=installed_memory_package_version() if memory_package else None,
+        memory_version=memory_version,
     )
 
 

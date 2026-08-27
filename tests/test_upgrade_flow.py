@@ -29,6 +29,7 @@ from vibe.upgrade import (
     get_safe_cwd,
     installed_package_name,
     memory_package_repair_supported,
+    MemoryRollbackTargetUnavailableError,
     pinned_package_spec,
     RollbackTarget,
     rollback_target,
@@ -538,6 +539,45 @@ def test_a_tree_with_no_published_release_has_no_rollback_target(monkeypatch):
     monkeypatch.setattr("vibe.upgrade.installed_package_name", lambda *args, **kwargs: "vibe-remote")
     monkeypatch.setattr("vibe.runtime.current_service_launcher", lambda: launcher)
     assert rollback_target() == RollbackTarget(version="3.0.10", package="vibe-remote", launcher=launcher)
+
+
+@pytest.mark.parametrize("memory_version", (None, "not-a-version"))
+def test_rollback_target_rejects_memory_without_a_publishable_version(
+    monkeypatch,
+    memory_version,
+):
+    monkeypatch.setattr("vibe.__version__", "3.0.10", raising=False)
+    monkeypatch.setattr("vibe.upgrade.memory_package_installed", lambda: True)
+    monkeypatch.setattr(
+        "vibe.upgrade.installed_memory_package_version",
+        lambda: memory_version,
+    )
+
+    with pytest.raises(MemoryRollbackTargetUnavailableError):
+        rollback_target()
+
+
+def test_rollback_target_carries_an_exact_memory_package_shape(monkeypatch):
+    launcher = ServiceLauncher(
+        python="/uv/tools/avibe-os/bin/python",
+        main="/uv/tools/avibe-os/service_main.py",
+    )
+    monkeypatch.setattr("vibe.__version__", "3.0.10", raising=False)
+    monkeypatch.setattr("vibe.upgrade.memory_package_installed", lambda: True)
+    monkeypatch.setattr(
+        "vibe.upgrade.installed_memory_package_version",
+        lambda: "3.0.10",
+    )
+    monkeypatch.setattr("vibe.upgrade.installed_package_name", lambda: "avibe-os")
+    monkeypatch.setattr("vibe.runtime.current_service_launcher", lambda: launcher)
+
+    assert rollback_target() == RollbackTarget(
+        version="3.0.10",
+        package="avibe-os",
+        launcher=launcher,
+        memory_package=True,
+        memory_version="3.0.10",
+    )
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

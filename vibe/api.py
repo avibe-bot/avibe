@@ -71,6 +71,7 @@ from vibe.upgrade import (
     installed_memory_package_version,
     memory_package_installed,
     memory_package_repair_supported,
+    MemoryRollbackTargetUnavailableError,
     rollback_target,
     should_skip_show_runtime_prepare,
 )
@@ -8792,6 +8793,14 @@ def _prepare_memory_package_job() -> dict:
     current_vibe_path = get_running_vibe_path()
     try:
         repair_rollback_to = rollback_target()
+    except MemoryRollbackTargetUnavailableError as exc:
+        return {
+            "ok": False,
+            "message": "memory_package_metadata_unreadable",
+            "output": str(exc),
+            "reason": "memory_package_metadata_unreadable",
+            "restarting": False,
+        }
     except Exception as exc:  # noqa: BLE001
         return {
             "ok": False,

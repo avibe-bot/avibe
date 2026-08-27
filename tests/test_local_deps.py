@@ -1715,6 +1715,43 @@ def test_memory_package_dependency_job_fails_before_install_without_rollback_tar
     }
 
 
+def test_memory_package_dependency_job_fails_before_install_for_unreadable_rollback_shape(
+    monkeypatch,
+):
+    from vibe.upgrade import MemoryRollbackTargetUnavailableError
+
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/bin/vibe")
+    monkeypatch.setattr(
+        api,
+        "rollback_target",
+        Mock(
+            side_effect=MemoryRollbackTargetUnavailableError(
+                "The installed avibe-memory version cannot be determined for safe rollback"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        api,
+        "build_memory_package_repair_plan",
+        lambda **_: pytest.fail("an incomplete rollback shape must not build an install plan"),
+    )
+    monkeypatch.setattr(
+        api,
+        "execute_upgrade_plan",
+        lambda *_args, **_kwargs: pytest.fail("an incomplete rollback shape must not install"),
+    )
+
+    result = api._prepare_memory_package_job()
+
+    assert result == {
+        "ok": False,
+        "message": "memory_package_metadata_unreadable",
+        "output": "The installed avibe-memory version cannot be determined for safe rollback",
+        "reason": "memory_package_metadata_unreadable",
+        "restarting": False,
+    }
+
+
 def test_dependencies_status_node_unsupported_not_ready(monkeypatch):
     # Node present but below the runtime minimum (node_supported False) -> not ready.
     monkeypatch.setattr(

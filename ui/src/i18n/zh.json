@@ -1772,7 +1772,7 @@
     "memory_plugin_unavailable": "记忆实现当前不可用。",
     "memory_plugin_incompatible": "记忆实现与此 Avibe 版本不兼容。",
     "memory_package_install_failed": "记忆 Python 包安装失败。",
-    "memory_package_metadata_unreadable": "无法读取记忆 Python 包元数据。",
+    "memory_package_metadata_unreadable": "无法读取记忆 Python 包版本，因此无法确定安全回滚目标，修复操作已阻止。",
     "memory_package_missing": "记忆 Python 包尚未安装。",
     "memory_package_repair_unavailable": "记忆包修复仅适用于已安装的 Avibe 正式版本。",
     "memory_package_restart_required": "记忆 Python 包已安装，但需要手动重启 Avibe。",

@@ -1772,7 +1772,7 @@
     "memory_plugin_unavailable": "The Memory implementation is unavailable.",
     "memory_plugin_incompatible": "The Memory implementation is incompatible with this Avibe version.",
     "memory_package_install_failed": "The Memory Python package failed to install.",
-    "memory_package_metadata_unreadable": "The Memory Python package metadata is unreadable.",
+    "memory_package_metadata_unreadable": "The Memory Python package version cannot be read, so repair is blocked because a safe rollback target cannot be determined.",
     "memory_package_missing": "The Memory Python package isn't installed yet.",
     "memory_package_repair_unavailable": "Memory package repair requires an installed Avibe release.",
     "memory_package_restart_required": "The Memory Python package was installed, but Avibe must be restarted manually.",
