@@ -1439,6 +1439,47 @@ def test_required_memory_package_probe_and_artifact_order_keeps_package_ready(
     assert runtime["reason"] == "memory_runtime_install_failed"
 
 
+@pytest.mark.parametrize(
+    ("build_kind", "current_version"),
+    (("source", "3.0.14"), ("package", "3.0.14")),
+)
+def test_mismatched_memory_runtime_keeps_repair_action_across_build_paths(
+    monkeypatch,
+    build_kind,
+    current_version,
+) -> None:
+    monkeypatch.setattr(
+        api,
+        "_load_memory_requirement",
+        lambda: api._MemoryRequirementProjection(True, "required"),
+    )
+    monkeypatch.setattr(
+        api,
+        "_inspect_memory_package_metadata",
+        lambda: api._MemoryPackageMetadata(1, "3.0.14"),
+    )
+    monkeypatch.setattr(api, "_published_running_version", lambda: current_version)
+    monkeypatch.setattr(api, "get_build_identity", lambda: SimpleNamespace(kind=build_kind))
+    monkeypatch.setattr(api, "probe_memory_runtime_entrypoint", lambda: None)
+    monkeypatch.setattr(
+        api,
+        "_memory_artifact_status",
+        lambda **_: (
+            True,
+            {
+                "installed": True,
+                "status": "ready",
+                "matches_manifest": False,
+            },
+        ),
+    )
+
+    _package, runtime = api._memory_dependencies_status(offline=True)
+
+    assert runtime["has_update"] is True
+    assert runtime["action_class"] == "repairable"
+
+
 def test_required_memory_package_accepts_pep440_equivalent_versions(
     monkeypatch,
 ) -> None:

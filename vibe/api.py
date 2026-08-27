@@ -8599,6 +8599,12 @@ def _memory_runtime_row(
     }
 
 
+def _memory_runtime_action_class(runtime: dict) -> str:
+    if not runtime.get("installed") or runtime.get("matches_manifest") is False:
+        return "repairable"
+    return "none"
+
+
 def _memory_dependencies_status(*, offline: bool) -> tuple[dict, dict]:
     requirement = _load_memory_requirement()
     unknown_metadata = _MemoryPackageMetadata(None, None)
@@ -8664,11 +8670,7 @@ def _memory_dependencies_status(*, offline: bool) -> tuple[dict, dict]:
         return package, _memory_runtime_row(
             requirement,
             runtime,
-            action_class=(
-                "none"
-                if runtime.get("installed")
-                else "repairable"
-            ),
+            action_class=_memory_runtime_action_class(runtime),
         )
 
     if metadata.provider_count == 0:
@@ -8753,7 +8755,7 @@ def _memory_dependencies_status(*, offline: bool) -> tuple[dict, dict]:
         _memory_runtime_row(
             requirement,
             runtime,
-            action_class="none" if runtime.get("installed") else "repairable",
+            action_class=_memory_runtime_action_class(runtime),
         ),
     )
 
