@@ -57,6 +57,16 @@ def _normalized_version(value: object, *, field: str) -> str:
         raise PackageShapeError(f"{field} is not a valid package version") from exc
 
 
+def _normalized_provider_id(value: object) -> str:
+    try:
+        provider_id = os.fsdecode(os.fspath(value)).strip()
+    except TypeError as exc:
+        raise PackageShapeError("distribution provider identity is missing") from exc
+    if not provider_id:
+        raise PackageShapeError("distribution provider identity is missing")
+    return os.path.normcase(os.path.realpath(os.path.abspath(provider_id)))
+
+
 @dataclass(frozen=True, order=True)
 class DistributionProvider:
     """One exact installed dist-info provider."""
@@ -70,15 +80,13 @@ class DistributionProvider:
         canonical_name = canonicalize_name(self.name)
         if not canonical_name:
             raise PackageShapeError("distribution provider name is missing")
-        if not isinstance(self.provider_id, str) or not self.provider_id.strip():
-            raise PackageShapeError("distribution provider identity is missing")
         object.__setattr__(self, "name", canonical_name)
         object.__setattr__(
             self,
             "version",
             _normalized_version(self.version, field=f"{canonical_name} version"),
         )
-        object.__setattr__(self, "provider_id", self.provider_id.strip())
+        object.__setattr__(self, "provider_id", _normalized_provider_id(self.provider_id))
         object.__setattr__(self, "requires_dist", tuple(self.requires_dist))
 
 
@@ -273,11 +281,21 @@ def capture_package_shape(
     """Validate an exact provider inventory into one immutable captured shape."""
 
     normalized_core_version = _normalized_version(core_version, field="running core version")
-    relevant = tuple(
+    observed = tuple(
         provider
         for provider in providers
         if provider.name in CORE_DISTRIBUTION_NAMES or provider.name == MEMORY_PACKAGE_NAME
     )
+    by_identity: dict[str, DistributionProvider] = {}
+    for provider in observed:
+        existing = by_identity.get(provider.provider_id)
+        if existing is not None and existing != provider:
+            raise PackageShapeError(
+                "canonical distribution provider identity has conflicting metadata"
+            )
+        by_identity[provider.provider_id] = provider
+    relevant = tuple(by_identity.values())
+
     by_name: dict[str, list[DistributionProvider]] = {}
     for provider in relevant:
         by_name.setdefault(provider.name, []).append(provider)
@@ -529,7 +547,7 @@ def resolve_rollback_plan(
         raise RollbackResolutionError("rollback staging destination already exists")
     staging_dir.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{staging_dir.name}-", dir=staging_dir.parent))
-    command = [
+    command_prefix = [
         resolver_python or sys.executable,
         "-m",
         "pip",
@@ -543,8 +561,26 @@ def resolve_rollback_plan(
         "--only-binary=:all:",
         "--dest",
         str(temporary),
-        *(requirement.specifier for requirement in requirements),
     ]
+    resolver_requests = ((False, requirements),)
+    if captured.residual_memory:
+        # Residual Memory metadata points at the replacement avibe-os family.
+        # Resolve the legacy core closure normally, then stage that exact
+        # residual wheel without following its forward-core dependency.
+        core_requirements = tuple(
+            requirement
+            for requirement in requirements
+            if requirement.distribution != MEMORY_PACKAGE_NAME
+        )
+        memory_requirements = tuple(
+            requirement
+            for requirement in requirements
+            if requirement.distribution == MEMORY_PACKAGE_NAME
+        )
+        resolver_requests = (
+            (False, core_requirements),
+            (True, memory_requirements),
+        )
     env = {
         **{
             key: value
@@ -560,18 +596,24 @@ def resolve_rollback_plan(
     moved_to_staging = False
     resolved = False
     try:
-        result = subprocess.run(
-            command,
-            env=env,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=300,
-        )
-        if result.returncode != 0:
-            raise RollbackResolutionError(
-                "exact rollback requirements did not resolve from the local wheelhouse"
+        for without_dependencies, requested in resolver_requests:
+            command = [
+                *command_prefix,
+                *(["--no-deps"] if without_dependencies else []),
+                *(requirement.specifier for requirement in requested),
+            ]
+            result = subprocess.run(
+                command,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=300,
             )
+            if result.returncode != 0:
+                raise RollbackResolutionError(
+                    "exact rollback requirements did not resolve from the local wheelhouse"
+                )
         temporary_artifacts = _staged_artifacts(temporary)
         _verify_staged_shape(captured, temporary_artifacts)
         staged_versions = {
