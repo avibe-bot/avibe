@@ -8417,6 +8417,50 @@ _DEFAULT_STARTUP_SHOW_PAGE_PREWARM_LIMIT = 3
 _MAX_STARTUP_SHOW_PAGE_PREWARM_LIMIT = 10
 
 
+def _memory_package_dependency(*, required: bool, current_version: str) -> dict:
+    """Describe whether the optional distribution matches this Avibe release."""
+
+    installed = memory_package_installed()
+    installed_version = installed_memory_package_version() if installed else None
+    dependency = {
+        "id": "memory-package",
+        "kind": "runtime",
+        "required": required,
+        "installed": installed,
+        "version": installed_version,
+        "latest_version": None,
+        "has_update": False,
+    }
+    if not installed:
+        return {
+            **dependency,
+            "status": "missing",
+            "reason": "memory_package_missing",
+        }
+    if installed_version is None:
+        return {
+            **dependency,
+            "status": "error",
+            "reason": "memory_package_metadata_unreadable",
+        }
+
+    from packaging.version import InvalidVersion, Version
+
+    try:
+        matches_running_release = Version(installed_version) == Version(current_version)
+    except InvalidVersion:
+        matches_running_release = False
+    if matches_running_release:
+        return {**dependency, "status": "ready", "reason": None}
+    return {
+        **dependency,
+        "latest_version": current_version,
+        "has_update": True,
+        "status": "error",
+        "reason": "memory_package_version_mismatch",
+    }
+
+
 def dependencies_status(*, offline: bool = False) -> dict:
     """Status of the required local runtime dependencies for the Dependencies
     settings page: askill, local managed runtimes, and the shared Node.js
@@ -8508,34 +8552,13 @@ def dependencies_status(*, offline: bool = False) -> dict:
         get_build_identity().kind != "source"
         and memory_package_repair_supported()
     ):
-        memory_package = memory_package_installed()
-        memory_package_version = (
-            installed_memory_package_version() if memory_package else None
-        )
+        from vibe import __version__
+
         deps.append(
-            {
-                "id": "memory-package",
-                "kind": "runtime",
-                "required": memory_required,
-                "installed": memory_package,
-                "version": memory_package_version,
-                "latest_version": None,
-                "has_update": False,
-                "status": (
-                    "ready"
-                    if memory_package_version is not None
-                    else ("error" if memory_package else "missing")
-                ),
-                "reason": (
-                    None
-                    if memory_package_version is not None
-                    else (
-                        "memory_package_metadata_unreadable"
-                        if memory_package
-                        else "memory_package_missing"
-                    )
-                ),
-            }
+            _memory_package_dependency(
+                required=memory_required,
+                current_version=__version__,
+            )
         )
     deps.append(
         {

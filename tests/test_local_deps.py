@@ -1237,6 +1237,109 @@ def test_dependencies_status_shape(monkeypatch):
     assert by["node"]["installed"] and by["node"]["version"] == "20.11"
 
 
+@pytest.mark.parametrize(
+    ("installed", "installed_version", "current_version", "expected"),
+    (
+        pytest.param(
+            True,
+            "3.0.14",
+            "3.0.14",
+            {"status": "ready", "reason": None, "latest_version": None, "has_update": False},
+            id="exact-match",
+        ),
+        pytest.param(
+            True,
+            "3.0.14.0",
+            "3.0.14",
+            {"status": "ready", "reason": None, "latest_version": None, "has_update": False},
+            id="normalized-equivalent",
+        ),
+        pytest.param(
+            True,
+            "3.0.13",
+            "3.0.14",
+            {
+                "status": "error",
+                "reason": "memory_package_version_mismatch",
+                "latest_version": "3.0.14",
+                "has_update": True,
+            },
+            id="version-mismatch",
+        ),
+        pytest.param(
+            True,
+            "not-a-version",
+            "3.0.14",
+            {
+                "status": "error",
+                "reason": "memory_package_version_mismatch",
+                "latest_version": "3.0.14",
+                "has_update": True,
+            },
+            id="invalid-installed-version",
+        ),
+        pytest.param(
+            True,
+            None,
+            "3.0.14",
+            {
+                "status": "error",
+                "reason": "memory_package_metadata_unreadable",
+                "latest_version": None,
+                "has_update": False,
+            },
+            id="unreadable-metadata",
+        ),
+        pytest.param(
+            False,
+            None,
+            "3.0.14",
+            {
+                "status": "missing",
+                "reason": "memory_package_missing",
+                "latest_version": None,
+                "has_update": False,
+            },
+            id="absent-distribution",
+        ),
+    ),
+)
+def test_memory_package_dependency_requires_the_running_release(
+    monkeypatch,
+    installed,
+    installed_version,
+    current_version,
+    expected,
+):
+    monkeypatch.setattr(api, "memory_package_installed", lambda: installed)
+    if installed:
+        monkeypatch.setattr(
+            api,
+            "installed_memory_package_version",
+            lambda: installed_version,
+        )
+    else:
+        monkeypatch.setattr(
+            api,
+            "installed_memory_package_version",
+            lambda: pytest.fail("an absent distribution has no version metadata"),
+        )
+
+    dependency = api._memory_package_dependency(
+        required=True,
+        current_version=current_version,
+    )
+
+    assert dependency == {
+        "id": "memory-package",
+        "kind": "runtime",
+        "required": True,
+        "installed": installed,
+        "version": installed_version,
+        **expected,
+    }
+
+
 def test_source_version_does_not_advertise_python_package_repair(monkeypatch):
     monkeypatch.setattr(api, "memory_package_repair_supported", lambda: False)
     monkeypatch.setattr(

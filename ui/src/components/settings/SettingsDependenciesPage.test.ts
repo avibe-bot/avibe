@@ -17,6 +17,10 @@ describe('dependencyHasInstallAction', () => {
   it('does not offer a healthy Memory Python package reinstall', () => {
     expect(dependencyHasInstallAction({ id: 'memory-package', status: 'ready' })).toBe(false);
   });
+
+  it('offers repair for a mismatched Memory Python package', () => {
+    expect(dependencyHasInstallAction({ id: 'memory-package', status: 'error' })).toBe(true);
+  });
 });
 
 describe('memoryRuntimeSidecarRunning', () => {
