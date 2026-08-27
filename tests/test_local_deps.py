@@ -1526,6 +1526,18 @@ def test_memory_package_metadata_enumerates_canonical_provider_set(
     assert calls == ["avibe-memory"]
 
 
+def test_missing_first_run_config_is_readable_not_required(monkeypatch) -> None:
+    monkeypatch.setattr(
+        api.V2Config,
+        "load",
+        classmethod(lambda _cls: (_ for _ in ()).throw(FileNotFoundError())),
+    )
+
+    requirement = api._load_memory_requirement()
+
+    assert requirement == api._MemoryRequirementProjection(False, "not_required")
+
+
 @pytest.mark.parametrize(
     "case",
     ("disabled", "safe-degraded-memory", "whole-config-failure"),

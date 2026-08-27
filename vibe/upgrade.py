@@ -649,6 +649,8 @@ def configured_memory_enabled() -> bool:
         from config.v2_config import V2Config
 
         required = V2Config.load().memory_required
+    except FileNotFoundError:
+        return False
     except Exception as exc:
         raise MemoryRequirementUnreadableError(
             "The persisted Memory requirement could not be read"

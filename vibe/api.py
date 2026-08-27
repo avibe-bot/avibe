@@ -8441,6 +8441,8 @@ def _load_memory_requirement() -> _MemoryRequirementProjection:
 
     try:
         config = V2Config.load()
+    except FileNotFoundError:
+        return _MemoryRequirementProjection(False, "not_required")
     except Exception:  # noqa: BLE001
         logger.warning("Could not read the persisted Memory requirement", exc_info=True)
         return _MemoryRequirementProjection(None, "memory_requirement_unreadable")

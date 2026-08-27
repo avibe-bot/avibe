@@ -1739,6 +1739,15 @@ def test_unreadable_memory_config_blocks_package_plan(monkeypatch):
         configured_memory_enabled()
 
 
+def test_missing_first_run_config_does_not_block_package_plan(monkeypatch):
+    monkeypatch.setattr(
+        "config.v2_config.V2Config.load",
+        lambda: (_ for _ in ()).throw(FileNotFoundError()),
+    )
+
+    assert configured_memory_enabled() is False
+
+
 def test_uv_forward_plan_locks_memory_to_target_release(monkeypatch):
     monkeypatch.setattr("vibe.upgrade.is_uv_tool_install", lambda executable: True)
     monkeypatch.setattr("vibe.upgrade.is_legacy_uv_tool_install", lambda executable: False)
