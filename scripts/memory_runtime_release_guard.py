@@ -5,6 +5,9 @@ Package policy schema v1 declares ``Requires-Python: >=3.10``, supported minors
 ``3.10``, ``3.11``, and ``3.12``, and universal wheel tag ``py3-none-any``.
 Changing a contract requires a policy schema/version change and an updated
 repository-owned declaration.
+
+Wheel archive validation retains O(one bounded member + control metadata),
+never O(the archive's total decompressed payload).
 """
 
 from __future__ import annotations
@@ -359,6 +362,8 @@ def _valid_record_hash(value: str) -> bool:
     algorithm, separator, encoded = value.partition("=")
     if separator != "=" or algorithm not in WHEEL_RECORD_HASH_ALGORITHMS or not encoded or "=" in encoded:
         return False
+    if re.fullmatch(r"[A-Za-z0-9_-]+", encoded) is None:
+        return False
     try:
         decoded = base64.b64decode(
             encoded + "=" * (-len(encoded) % 4), altchars=b"-_", validate=True
@@ -374,19 +379,24 @@ def _validate_wheel_archive(
     infos = archive.infolist()
     names = [info.filename for info in infos]
     aliases = [name.rstrip("/").casefold() for name in names]
+    data_root = f"{dist_info.removesuffix('.dist-info')}.data"
     unsafe_data = any(
-        name.split("/", 2)[1] not in WHEEL_DATA_SCHEMES
+        parts[0].endswith(".data")
+        and (parts[0] != data_root or len(parts) < 3 or parts[1] not in WHEEL_DATA_SCHEMES or not parts[2])
         for name in names
-        if name.split("/", 1)[0].endswith(".data") and "/" in name
+        for parts in (name.split("/"),)
     )
     if any(not _is_safe_wheel_path(name) for name in names) or len(aliases) != len(set(aliases)) or unsafe_data:
         raise ReleaseAssetError(f"wheel archive structure is invalid: {wheel.name}")
-    members = {
-        info.filename: _read_wheel_member(archive, info, wheel)
-        for info in infos
-        if not info.is_dir()
-    }
     record = f"{dist_info}/RECORD"
+    retained = {record, *(f"{dist_info}/{name}" for name, _ in _WHEEL_CONTROL_POLICY.controls)}
+    member_names = {info.filename for info in infos if not info.is_dir()}
+    members = {}
+    for info in infos:
+        if not info.is_dir():
+            content = _read_wheel_member(archive, info, wheel)
+            if info.filename in retained:
+                members[info.filename] = content
     if names.count(record) != 1:
         raise ReleaseAssetError(f"wheel RECORD structure is invalid: {wheel.name}")
     try:
@@ -411,7 +421,7 @@ def _validate_wheel_archive(
             raise ReleaseAssetError(f"wheel RECORD structure is invalid: {wheel.name}")
         recorded.add(path)
         recorded_aliases.add(alias)
-    if recorded - generated != set(members) - generated:
+    if record not in recorded or recorded - generated != member_names - generated:
         raise ReleaseAssetError(f"wheel RECORD entries differ from archive: {wheel.name}")
     return members
 

@@ -158,6 +158,7 @@ def _wheel(
     wheel_trailer: str = "\n",
     duplicate_control: str | None = None,
     include_record: bool = True,
+    record_self: bool = True,
     record_bytes: bytes | None = None,
     record_extra: tuple[str, ...] = (),
     record_omit: tuple[str, ...] = (),
@@ -197,7 +198,8 @@ def _wheel(
                     rows.append(f"{member},sha256={digest},{len(content)}\n")
             empty_digest = base64.urlsafe_b64encode(hashlib.sha256(b"").digest()).rstrip(b"=").decode()
             rows.extend(f"{member},sha256={empty_digest},0\n" for member in record_extra)
-            rows.append(f"{record},,\n")
+            if record_self:
+                rows.append(f"{record},,\n")
             record_bytes = "".join(rows).encode()
         files[record] = record_bytes
     with zipfile.ZipFile(path, "w", compression=compression) as archive:
@@ -641,23 +643,34 @@ def test_wheel_data_schemes_are_an_explicit_structural_allowlist(tmp_path: Path)
     allowed = {f"avibe_os-3.1.0.data/{scheme}/payload": b"x" for scheme in guard.WHEEL_DATA_SCHEMES}
 
     _verify_wheels(tmp_path / "allowed", manifest, core_options={"extra_files": allowed})
-    with pytest.raises(guard.ReleaseAssetError, match="archive structure"):
-        _verify_wheels(
-            tmp_path / "unknown",
-            manifest,
-            core_options={"extra_files": {"avibe_os-3.1.0.data/unknown/payload": b"x"}},
-        )
+    for member in (
+        "avibe_os-3.1.0.data/unknown/payload",
+        "avibe_os-3.1.0.data/scripts",
+        "avibe_os-3.1.0.data/scripts/",
+        "other-9.9.data/scripts/vibe",
+    ):
+        with pytest.raises(guard.ReleaseAssetError, match="archive structure"):
+            _verify_wheels(
+                tmp_path / member.replace("/", "-"),
+                manifest,
+                core_options={"extra_files": {member: b"x"}},
+            )
+
+
+def test_wheel_record_hashes_use_unpadded_urlsafe_base64() -> None:
+    assert not guard._valid_record_hash("sha256=" + "/" * 43)
 
 
 @pytest.mark.parametrize(
     "core_options",
     [
         {"include_record": False},
+        {"record_self": False},
         {"record_omit": ("avibe_os/__init__.py",)},
         {"record_extra": ("safe/absent.py",)},
         {"record_extra": ("avibe_os/__init__.py",)},
     ],
-    ids=["missing-record", "missing-row", "absent-path", "duplicate-row"],
+    ids=["missing-record", "missing-self-row", "missing-row", "absent-path", "duplicate-row"],
 )
 def test_wheel_record_is_bidirectionally_bound_to_archive(
     tmp_path: Path, core_options: dict[str, object]
@@ -698,6 +711,16 @@ def test_wheel_reads_every_member_for_integrity(tmp_path: Path) -> None:
 
     with pytest.raises(guard.ReleaseAssetError, match="cannot read wheel"):
         guard.inspect_wheel(wheel, policy=policy)
+
+
+def test_wheel_archive_discards_payload_bytes_after_integrity_read(tmp_path: Path) -> None:
+    wheel = _wheel(tmp_path / "avibe_os-3.1.0-py3-none-any.whl", "avibe-os")
+    dist_info = "avibe_os-3.1.0.dist-info"
+
+    with zipfile.ZipFile(wheel) as archive:
+        retained = guard._validate_wheel_archive(archive, wheel, dist_info)
+
+    assert set(retained) == {f"{dist_info}/{name}" for name in ("METADATA", "WHEEL", "RECORD")}
 
 
 def test_existing_guard_commands_remain_stdlib_only(tmp_path: Path) -> None:
