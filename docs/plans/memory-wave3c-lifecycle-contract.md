@@ -243,18 +243,22 @@ Every external command has immutable `execution_timeout_seconds`, enforced by a
 captured child-side deadline runner. The detached package supervisor keeps its
 primary reservation descriptor or handle from `admitted` through terminal or
 durably recorded `quarantined`; starting or completing a runner never releases
-that primary hold. On POSIX a runner owns its process group and inherits only a
+that primary hold. Every external command tree launched during that protected
+interval follows one containment invariant, whether it belongs to forward
+mutation, activation, verification, rollback, rollback verification, or a
+future stage. On POSIX each runner owns its process group and inherits only a
 duplicate of the supervisor's open-file-description lock. If the supervisor
 dies, that duplicate extends exclusion only until the already-running bounded
 command tree exits; there is no entrypoint-to-supervisor lock handoff. On
-Windows a runner never inherits byte-range lock ownership. The supervisor owns
-a Job Object with kill-on-owner-close containment for the mutation command tree,
-so its death terminates the tree and reservation release implies that no
-mutation child remains. A parent that merely waits for an uncontained child is
-not compliant. The runner remains only a bundle executor: it cannot own
-lifecycle state, renew a deadline, start recovery, or write the record. No
-external bootstrap, second reservation, or reaper is introduced. G3-2 owns the
-supervisor hold and process containment.
+Windows the supervisor assigns every runner and its descendants to a
+supervisor-owned Job Object with kill-on-owner-close before they can execute;
+the runner never inherits byte-range lock ownership. The supervisor's death
+therefore terminates every protected command tree, and reservation release on
+either platform implies that zero protected external work remains. A parent
+that merely waits for any uncontained child is not compliant. The runner remains
+only a bundle executor: it cannot own lifecycle state, renew a deadline, start
+recovery, or write the record. No external bootstrap, second reservation, or
+reaper is introduced. G3-2 owns the supervisor hold and process containment.
 
 Failure semantics are closed:
 
@@ -348,13 +352,17 @@ or acquisition-ID owner claim. Exhausting the bounded rereads returns generic
 retryable `busy`. Lock-file publication bytes may be observed for diagnostics,
 but they never authorize an owner-specific classification or correlation.
 
-G3-1B derives `busy_package_transaction` only from a durable `active` or
-`interrupted` transaction projection. It means that a package transaction
-exists; it does not claim that the current OS reservation holder is that
-transaction. The caller does not submit a new intent while that transaction is
-nonterminal and instead follows its projection. Contention with an ordinary
-restart remains generic reservation contention. The client never invents or
-persists an `intent_id` before the server returns it.
+G3-1B derives `busy_package_transaction` from any durable nonterminal
+transaction record. It means that a package transaction exists; it does not
+claim that the current OS reservation holder is that transaction. A held
+reservation with such a record produces the internal read-only projection
+`indeterminate-held`, never `interrupted`; it permits neither recovery election
+nor new admission. A free reservation with such a record proves `interrupted`
+and permits only same-intent recovery election, never a new forward admission.
+The caller does not submit a new intent while that record is nonterminal and
+instead follows its projection. Contention with an ordinary restart remains
+generic reservation contention. The client never invents or persists an
+`intent_id` before the server returns it.
 
 Every API that accepts an `intent_id` is lookup or recovery only. An ID absent
 from the current record and retained terminal audit returns stable
@@ -429,6 +437,16 @@ acquisition-ID comparison or metadata correlation may produce an owner-specific
 result. No second lock, heartbeat, token, lease, or durable ownership channel is
 allowed.
 
+For a durable nonterminal transaction, a failed nonblocking probe means only
+`indeterminate-held`; it cannot establish whether package or ordinary-restart
+work holds the reservation. A successful probe, immediately released without
+publication or lifecycle writes, proves that no protected process work remains
+and projects `interrupted`. No timestamp, command deadline, PID, acquisition ID,
+or diagnostic publication may infer interruption or correlate the current
+holder to the transaction. The ambiguity is constructively bounded: every
+runner and ordinary restart is bounded, and the OS releases the reservation
+when the last protected process closes its descriptor or handle.
+
 The package supervisor holds the reservation from `admitted` through active
 forward, activation, verification, and rollback work. If it enters quarantine
 with no command running, it records `quarantined` durably and releases the live
@@ -440,10 +458,10 @@ existing detached ordinary-restart supervisor with a one-shot receipt channel.
 On both POSIX and Windows that supervisor, not the entrypoint, attempts one
 nonblocking acquisition of the same reservation. After acquisition it publishes
 the diagnostic metadata described above and reads the package transaction
-record once before any stop/start work. If it finds nonterminal `inactive`,
-`interrupted`, `mutating` residue, or `quarantined` without a live package
-recovery owner, it releases the reservation and returns structured
-`blocked_interrupted_transaction` pointing to recovery; it never starts a
+record once before any stop/start work. If it finds any durable nonterminal
+transaction record, acquisition itself has proved that record `interrupted`; it
+releases the reservation and returns structured
+`blocked_interrupted_transaction` pointing to recovery, and never starts a
 partial ordinary stop/start. Contention returns generic retryable `busy` and
 never infers the current holder from publication bytes. A restart explicitly
 owned by the elected recovery transaction is exempt and uses that transaction's
@@ -477,12 +495,13 @@ a gate-3 implementation note, not a Phase 0 product change.
 
 ### Crash Recovery And Quarantine
 
-A same-`intent_id` request is the only recovery-election request. If the
-reservation is live, it returns the current transaction projection without
-claiming that transaction owns the reservation. If the reservation is not live,
-contenders make one nonblocking acquisition attempt on the same lock. One
-becomes recovery owner; losers return current nonterminal or generic busy state.
-Recovery never repeats forward mutation.
+A same-`intent_id` request is the only recovery-election request. It makes one
+nonblocking acquisition attempt on the same lock. Failure returns the current
+transaction as `indeterminate-held` without claiming that the holder owns the
+transaction, and starts no recovery. Success proves `interrupted` and elects
+that contender as recovery owner; other contenders return the durable
+nonterminal projection or generic busy state. No deadline or diagnostic fact
+may bypass this acquisition proof. Recovery never repeats forward mutation.
 
 The elected owner reconciles installed metadata with `CapturedPackageShape` and
 the recorded `ResolvedRollbackPlan`:
@@ -566,8 +585,9 @@ controller, Web, CLI, and Settings, including:
 - same-nonce convergence, bounded retry-neutral
   `busy_pending_publication` rereads with no owner claim, exhausted generic
   `busy`, and different-nonce contention;
-- G3-1B record-derived `busy_package_transaction` projection for active and
-  interrupted transactions without reservation-holder inference;
+- G3-1B record-derived `busy_package_transaction` for every durable nonterminal
+  transaction, with held `indeterminate-held` and free `interrupted`
+  projections that never infer the reservation holder;
 - a nonterminal record surviving the embedded ten-entry terminal audit and a
   released legacy record
   `restart_status.json` fixture loading read-only;
@@ -582,8 +602,9 @@ controller, Web, CLI, and Settings, including:
   nonblocking acquisition that succeeds once no live reservation remains,
   including the package supervisor's continuous primary hold, POSIX runner
   duplicate survival only through bounded exit, Windows Job Object
-  kill-on-owner-close containment, and the ordinary supervisor's symmetric
-  acquire/check/receipt/full-hold sequence; and
+  kill-on-owner-close containment for every protected external command stage,
+  zero protected work at reservation release, and the ordinary supervisor's
+  symmetric acquire/check/receipt/full-hold sequence; and
 - quarantine entry, forward rejection, exact recovery, and explicit verified
   reconciliation exit.
 
@@ -598,21 +619,25 @@ dependency-install deadline.
 If the POST response is lost, the caller queries by nonce. Once the server-issued
 `intent_id` is known, the dependency adapter returns a live in-memory job when
 present; otherwise it reads the dedicated transaction record and terminal audit.
-It is read-only and never acquires the reservation or writes lifecycle state.
-The G3-1B read-only record projection distinguishes `active` from `interrupted`
-using durable transaction and recovery facts. Reservation liveness may confirm
-that no live holder remains, but a held reservation never identifies a package
-owner. Both states project `status=in_progress`; `interrupted` additionally
-exposes a recovery entry in the UI. Only an explicit same-`intent_id` recovery
-request may trigger the election described in Invariant 3, so polling never
-becomes an owner. During the short admission publication window,
+It is read-only and never writes lifecycle state. A live in-memory job projects
+`active`. Otherwise G3-1B combines the durable nonterminal record with an
+owner-neutral nonblocking reservation probe: failure projects internal
+`indeterminate-held`, while success is immediately released and projects
+`interrupted`. `indeterminate-held` maps to the existing nonterminal
+`status=in_progress` without a recovery affordance, so the UI gains no new
+status or behavior; `interrupted` maps to the same status with its existing
+recovery entry. Both external admission results remain
+`busy_package_transaction` because the durable record exists, never because a
+holder was inferred. Only an explicit same-`intent_id` recovery request may
+trigger the election described in Invariant 3, so polling never becomes an
+owner. During the short admission publication window,
 `busy_pending_publication` is a retryable nonterminal response: the caller
 boundedly rereads the current record by the same nonce without assuming an owner
 type or minting a new nonce. Exhaustion returns generic retryable `busy`.
 
 Projection rules are:
 
-- active, interrupted, or recovering state returns nonterminal
+- active, indeterminate-held, interrupted, or recovering state returns nonterminal
   `status=in_progress` with the
   same dependency, nonce, and server identity;
 - quarantine returns structured `status=quarantined`, the owner reason, and the
@@ -628,15 +653,20 @@ The deadline bounds one polling session, not the transaction. After a final
 owner read and dependency refresh, it returns exactly one machine shape:
 
 - owner terminal success/failure or readiness-derived success;
-- retryable `in_progress` for an active transaction, including when the last
-  read failed after an earlier active projection;
+- retryable `in_progress` for an active or indeterminate-held transaction,
+  including when the last read failed after either earlier projection;
 - retryable `in_progress` for an interrupted nonterminal transaction with a
   recovery affordance; interrupted is never classified as transport
   exhaustion;
 - structured `quarantined`; or
 - terminal `dependency_poll_transport_exhausted` with sanitized
   `last_transport_error` only when transport exhausted without any structured
-  terminal, active, interrupted, or quarantined projection.
+  terminal, active, indeterminate-held, interrupted, or quarantined projection.
+
+The polling deadline never converts `indeterminate-held` to `interrupted` and
+never authorizes recovery. Only a successful owner-neutral reservation probe
+does so; bounded command execution and process-close lock release guarantee that
+the ambiguous interval itself is bounded without a heartbeat or owner claim.
 
 A reachable structured failure is returned unchanged. Active work is never
 reclassified as failed because one polling session expired. A caller resumes by
@@ -651,9 +681,9 @@ state-derived recovery, quarantine projection, and terminal convergence.
 
 | Scenario | Contract | Automated evidence | Packaged evidence |
 | --- | --- | --- | --- |
-| `MEMORY-INDEP-018` | UI recovery follows nonce, server identity, owner state, and final readiness | POST-loss retry boundary; nonce/ID projection truth table; transport, active/interrupted, quarantined, and terminal deadline results | Real wheels: Settings repair, response loss, all-process restart, over-deadline recovery, quarantine projection, convergence |
+| `MEMORY-INDEP-018` | UI recovery follows nonce, server identity, owner-neutral liveness, and final readiness | POST-loss retry boundary; nonce/ID projection truth table; transport, active/indeterminate-held/interrupted, quarantined, and terminal deadline results; no deadline-based interruption | Real wheels: Settings repair, response loss, all-process restart, over-deadline recovery, quarantine projection, convergence |
 | `MEMORY-INDEP-019` | Capture is exact and every constructed rollback is staged and executable | Provider-cardinality property; private plan construction; cleanup verification; capture/resolution failure to terminal `failed`; resolution and rollback failure injection | Wheelhouse matrix for core-only and optional split shapes, duplicate providers, partial mutation, activation failure, exact restore, quarantine |
-| `MEMORY-INDEP-020` | One server owner and reservation cover admission through recovery and ordinary restart exclusion | G3-1A liveness-only reservation with diagnostic publication, bounded owner-neutral `busy_pending_publication`, generic contention, and non-overlapping Windows lock/publication bytes; G3-1B multiprocess nonce/identity contention, versioned JSON-safe package-shape DTO storage, active/interrupted record projection, record-derived `busy_package_transaction`, ordinary pre-mutation crash to terminal `failed`, repair-lineage loss back to quarantine, server rejection, legacy fixture, and nonterminal retention; G3-2 package-supervisor acquisition and continuous primary hold, post-staging private shape rehydration, frozen execution, child timeout, POSIX runner duplicate survival, Windows Job Object kill-on-owner-close, no-live-reservation acquisition, and quarantine enter/exit; G3-3 platform-symmetric ordinary-restart supervisor acquisition, record check, one-shot receipt, and full hold | Concurrent controller/Web/CLI/Settings requests, restart contention, killed-owner recovery, exact package and service health |
+| `MEMORY-INDEP-020` | One server owner and reservation cover admission through recovery and ordinary restart exclusion | G3-1A liveness-only reservation with diagnostic publication, bounded owner-neutral `busy_pending_publication`, generic contention, and non-overlapping Windows lock/publication bytes; G3-1B multiprocess nonce/identity contention, versioned JSON-safe package-shape DTO storage, active/indeterminate-held/interrupted projection, record-derived `busy_package_transaction`, ordinary pre-mutation crash to terminal `failed`, repair-lineage loss back to quarantine, server rejection, legacy fixture, and nonterminal retention; G3-2 package-supervisor acquisition and continuous primary hold, post-staging private shape rehydration, frozen execution, child timeout, all-stage POSIX runner duplicate survival and Windows Job Object kill-on-owner-close, zero protected work at reservation release, no-live-reservation acquisition, and quarantine enter/exit; G3-3 platform-symmetric ordinary-restart supervisor acquisition, record check, one-shot receipt, and full hold | Concurrent controller/Web/CLI/Settings requests, restart contention, killed-owner recovery, exact package and service health |
 | `MEMORY-INDEP-020` (gate 3 implementation evidence) | Pending ordinary restart follow-up remains retryable when package reservation is busy | Verify `pending_restart.json` is requeued or handed off after structured `busy`; no marker loss and no package-record write | Ordinary config restart completes after package reservation release |
 | `MEMORY-INDEP-020` (gate 4 implementation evidence) | QR callers preserve activation when shared restart admission is busy | Verify shared-entrypoint `busy` is surfaced as retryable/presented activation state; no QR-local lock or pending protocol | WeChat QR login during package reservation, followed by eventual restart and active bot |
 | `MEMORY-INDEP-021` | Not-required status imports no optional implementation | Subprocess import guard for disabled, safe-degraded optional config, and whole-config failure; non-constructing loader probe | Packaged core-only and malformed-config smoke with blocked optional imports |
@@ -697,12 +727,13 @@ Retained behavior is reconciled, not cherry-picked:
    reservation primitive, diagnostic publication, generic contention, and
    non-overlapping Windows lock-byte layout; G3-1B owns admission, the outer
    versioned record and audit, nonce/identity, JSON-safe `package_shape` DTO
-   storage, active/interrupted projection, record-derived
+   storage, active/indeterminate-held/interrupted projection, record-derived
    `busy_package_transaction`, crash recovery, and quarantine; G3-2 owns the
    package detached supervisor's acquisition and continuous primary hold,
    staging validation and private shape rehydration, frozen execution bundle,
-   POSIX runner duplicates, child deadlines, and Windows Job Object
-   kill-on-owner-close containment; G3-3 owns the platform-symmetric ordinary
+   all-stage POSIX runner duplicates, child deadlines, and Windows Job Object
+   kill-on-owner-close containment for every protected external command tree;
+   G3-3 owns the platform-symmetric ordinary
    restart supervisor acquisition, lifecycle-record check, response-only
    receipt, and full restart hold. No step may infer reservation ownership from
    publication metadata.
