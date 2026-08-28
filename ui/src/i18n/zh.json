@@ -941,7 +941,7 @@
         "viaGateway": "模型网关管理",
         "connectedUnused": "已启用 · 当前未被使用",
         "takeover": "已自动切换 · 临时使用备用供应商",
-        "unavailable": "等待供应商恢复",
+        "unavailable": "当前不可用",
         "note": "路由按供应商优先级执行；也可为单个模型单独调整。"
       },
       "status": {
@@ -993,7 +993,7 @@
           "supplying": "{{backends}} 正在使用",
           "standby": "可用 · 当前未使用",
           "unavailableRetry": "暂不可用 · {{delay}} 后自动重试",
-          "unavailableDue": "暂不可用 · 正在重试"
+          "unavailableDue": "暂不可用 · 下次请求时重试"
         }
       },
       "subscriptionPicker": {
@@ -1035,7 +1035,7 @@
       },
       "order": {
         "title": "{{backend}} · 供应商优先级",
-        "subtitle": "排在前面的供应商优先使用；请求失败时，模型网关按顺序自动切换。",
+        "subtitle": "在每个模型已有路由中，排在前面的供应商优先使用；当额度不足、触发限流、服务端、认证或网络出错导致请求无法完成时，模型网关会自动切换到下一优先级。",
         "infoLabel": "什么是供应商优先级",
         "reorder": "调整供应商顺序",
         "section": {
@@ -1414,7 +1414,7 @@
           "title": "模型网关 · Gateway",
           "recommended": "推荐 · 默认",
           "openModels": "打开模型页",
-          "description": "登录、API Key 和模型路由都在「设置 → 模型网关」中管理。不改动 {{backend}} 自己的配置，随时可切换。"
+          "description": "登录、API Key 和模型路由都在「设置 → 模型」中管理。不改动 {{backend}} 自己的配置，随时可切换。"
         },
         "direct": {
           "title": "直连模式 · Direct",
