@@ -4,11 +4,11 @@
 from __future__ import annotations
 
 import argparse
-from email.parser import Parser
+from contextlib import nullcontext
 import hashlib
+from importlib.metadata import PathDistribution
 import json
 import os
-from pathlib import PurePosixPath
 import shutil
 import subprocess
 import sys
@@ -17,10 +17,8 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
@@ -132,10 +130,10 @@ class PackageMetadata:
 
 
 @dataclass(frozen=True)
-class PackageArchive:
-    path: Path
+class InstalledDistribution:
     metadata: PackageMetadata
-    files: dict[str, bytes]
+    dist_info: str
+    files: dict[tuple[str, str], bytes]
 
 
 @dataclass(frozen=True)
@@ -151,40 +149,55 @@ class ManifestDiscovery:
     manifest_bytes: bytes
 
 
-SdistBuilder = Callable[[Path, Path], Path]
-
+INSTALL_SCHEMES = ("purelib", "platlib", "scripts", "headers", "data")
+PIP_OFFLINE_FLAGS = ("--disable-pip-version-check", "--no-input", "--no-index", "--no-cache-dir")
+_EMPTY_SCHEMES = dict.fromkeys(INSTALL_SCHEMES, frozenset())
+_CORE_LIBRARIES = frozenset({"config/", "core/", "modules/", "storage/", "vibe/"})
+_MEMORY_LIBRARIES = frozenset({"avibe_memory/", MEMORY_MANIFEST_PATH})
 NAMESPACE_POLICIES = {
     1: {
-        "avibe-os": frozenset({"config", "core", "modules", "storage", "vibe"}),
-        "avibe-memory": frozenset({"avibe_memory"}),
+        "avibe-os": {
+            **_EMPTY_SCHEMES,
+            "purelib": _CORE_LIBRARIES,
+            "platlib": _CORE_LIBRARIES,
+            "scripts": frozenset({"vibe"}),
+        },
+        "avibe-memory": {
+            **_EMPTY_SCHEMES,
+            "purelib": _MEMORY_LIBRARIES,
+            "platlib": _MEMORY_LIBRARIES,
+        },
     }
 }
-PIP_FLAGS = (
-    "install",
-    "--dry-run",
-    "--ignore-installed",
-    "--disable-pip-version-check",
-    "--no-input",
-    "--no-index",
-    "--only-binary=:all:",
-)
 
 
-def _run_pip(arguments: list[str], failure: str) -> None:
-    pip = shutil.which("pip") or shutil.which("pip3")
-    if pip is None:
-        raise ReleaseAssetError("offline pip tooling is unavailable")
+def _run_interpreter(
+    python_executable: Path,
+    arguments: list[str],
+    failure: str,
+) -> subprocess.CompletedProcess[str]:
     environment = {key: value for key, value in os.environ.items() if not key.startswith("PIP_")}
-    environment.update(PIP_CONFIG_FILE=os.devnull, PIP_NO_CACHE_DIR="1", PYTHONPATH="")
-    result = subprocess.run(
-        [pip, *arguments],
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    environment.update(PIP_CONFIG_FILE=os.devnull, PIP_NO_CACHE_DIR="1", PYTHONNOUSERSITE="1", PYTHONPATH="")
+    try:
+        executable = python_executable.expanduser().resolve(strict=True)
+        if not executable.is_file() or not os.access(executable, os.X_OK):
+            raise OSError("path is not executable")
+        result = subprocess.run(
+            [str(executable), *arguments],
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        raise ReleaseAssetError(f"requested Python interpreter is unavailable: {python_executable}: {exc}") from exc
     if result.returncode:
         raise ReleaseAssetError(f"{failure}: {result.stdout}{result.stderr}")
+    return result
+
+
+def _run_pip(python_executable: Path, arguments: list[str], failure: str) -> None:
+    _run_interpreter(python_executable, ["-m", "pip", "--isolated", *arguments], failure)
 
 
 def _sha256(path: Path) -> str:
@@ -220,96 +233,133 @@ def _assert_filename_identity(path: Path, metadata: PackageMetadata) -> None:
         raise ReleaseAssetError(f"distribution filename identity differs from metadata: {path.name}")
 
 
-def _metadata(message_bytes: bytes, context: str) -> PackageMetadata:
-    try:
-        message = Parser().parsestr(message_bytes.decode("utf-8"))
-    except UnicodeDecodeError as exc:
-        raise ReleaseAssetError(f"{context} metadata is not UTF-8") from exc
-    required: dict[str, str] = {}
-    for key in ("Name", "Version", "Requires-Python"):
-        values = message.get_all(key) or []
-        if len(values) != 1 or not values[0]:
-            raise ReleaseAssetError(f"{context} metadata must contain exactly one {key}")
-        required[key] = values[0]
+def _metadata(message, context: str) -> PackageMetadata:
+    values = [message.get_all(key) or [] for key in ("Name", "Version", "Requires-Python")]
+    if any(len(field) != 1 or not field[0] for field in values):
+        raise ReleaseAssetError(f"{context} metadata has invalid identity fields")
+    name, version, requires_python = (field[0] for field in values)
     return PackageMetadata(
-        name=str(canonicalize_name(required["Name"])),
-        version=required["Version"],
-        requires_python=required["Requires-Python"],
+        name=str(canonicalize_name(name)),
+        version=version,
+        requires_python=requires_python,
         requires_dist=tuple(sorted(message.get_all("Requires-Dist") or [])),
     )
 
 
-def _validate_wheel_structure(path: Path) -> None:
-    _run_pip(
-        [*PIP_FLAGS, "--no-deps", "--ignore-requires-python", str(path.resolve())],
-        f"wheel structure validation failed for {path.name}",
+def _interpreter_version(python_executable: Path) -> str:
+    result = _run_interpreter(
+        python_executable,
+        ["-I", "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+        "cannot identify requested Python interpreter",
     )
+    version = result.stdout.strip()
+    if len(version.split(".")) != 2 or not version.replace(".", "").isdigit():
+        raise ReleaseAssetError("requested Python interpreter reported an invalid version")
+    return version
 
 
-def _wheel_archive(path: Path) -> PackageArchive:
-    _validate_wheel_structure(path)
+def _pip_scheme(python_executable: Path, prefix: Path, distribution: str) -> dict[str, Path]:
+    script = (
+        "import json,sys; from pip._internal.locations import get_scheme; "
+        "s=get_scheme(sys.argv[1],prefix=sys.argv[2]); "
+        "print(json.dumps({k:getattr(s,k) for k in "
+        "('purelib','platlib','scripts','headers','data')}))"
+    )
+    result = _run_interpreter(
+        python_executable,
+        ["-I", "-c", script, distribution, str(prefix.resolve())],
+        f"cannot determine pip install scheme for {distribution}",
+    )
     try:
-        with zipfile.ZipFile(path) as archive:
-            names = archive.namelist()
-            if len(names) != len(set(names)):
-                raise ReleaseAssetError(f"wheel contains duplicate paths: {path.name}")
-            if any(
-                "\\" in name or PurePosixPath(name).is_absolute() or ".." in PurePosixPath(name).parts for name in names
-            ):
-                raise ReleaseAssetError(f"wheel contains an unsafe path: {path.name}")
-            files = {name: archive.read(name) for name in names if not name.endswith("/")}
-    except (OSError, zipfile.BadZipFile) as exc:
-        raise ReleaseAssetError(f"cannot read wheel {path.name}: {exc}") from exc
-    metadata_paths = [name for name in files if name.endswith(".dist-info/METADATA")]
+        raw = json.loads(result.stdout)
+        if (
+            not isinstance(raw, dict)
+            or set(raw) != set(INSTALL_SCHEMES)
+            or not all(map(lambda value: isinstance(value, str), raw.values()))
+        ):
+            raise ValueError
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise ReleaseAssetError(f"pip install scheme is invalid for {distribution}") from exc
+    return {key: Path(value).resolve() for key, value in raw.items()}
+
+
+def _pip_install(
+    python_executable: Path,
+    wheels: tuple[Path, ...],
+    find_links: tuple[Path, ...],
+    prefix: Path,
+    *,
+    no_deps: bool,
+) -> None:
+    prefix.mkdir(parents=True)
+    links = [item for directory in find_links for item in ("--find-links", str(directory.resolve()))]
+    arguments = [
+        "install",
+        *PIP_OFFLINE_FLAGS,
+        "--no-compile",
+        "--ignore-installed",
+        "--only-binary=:all:",
+        "--prefix",
+        str(prefix.resolve()),
+        *links,
+    ]
+    if no_deps:
+        arguments.append("--no-deps")
+    arguments.extend(str(wheel.resolve()) for wheel in wheels)
+    _run_pip(python_executable, arguments, "offline pip install failed")
+
+
+def _installed_distribution(
+    wheel: Path,
+    distribution: str,
+    prefix: Path,
+    python_executable: Path,
+) -> InstalledDistribution:
+    _pip_install(python_executable, (wheel,), (wheel.parent,), prefix, no_deps=True)
+    metadata_paths = sorted(prefix.rglob("*.dist-info/METADATA"))
     if len(metadata_paths) != 1:
-        raise ReleaseAssetError(f"wheel must contain exactly one METADATA file: {path.name}")
-    package = PackageArchive(path, _metadata(files[metadata_paths[0]], path.name), files)
-    _assert_filename_identity(path, package.metadata)
-    return package
-
-
-def _sdist_archive(path: Path) -> PackageArchive:
-    files: dict[str, bytes] = {}
-    roots: set[str] = set()
-    try:
-        with tarfile.open(path, "r:gz") as archive:
-            for member in archive.getmembers():
-                member_path = PurePosixPath(member.name)
-                if member_path.is_absolute() or ".." in member_path.parts or not member_path.parts:
-                    raise ReleaseAssetError(f"sdist contains an unsafe path: {path.name}")
-                roots.add(member_path.parts[0])
-                if member.isdir():
-                    continue
-                if not member.isfile():
-                    raise ReleaseAssetError(f"sdist contains a non-regular entry: {path.name}")
-                stream = archive.extractfile(member)
-                if stream is None:
-                    raise ReleaseAssetError(f"sdist member is unreadable: {member.name}")
-                relative = PurePosixPath(*member_path.parts[1:]).as_posix()
-                if not relative or relative in files:
-                    raise ReleaseAssetError(f"sdist contains duplicate or root-level content: {path.name}")
-                files[relative] = stream.read()
-    except (OSError, tarfile.TarError) as exc:
-        raise ReleaseAssetError(f"cannot read sdist {path.name}: {exc}") from exc
-    if len(roots) != 1 or "PKG-INFO" not in files:
-        raise ReleaseAssetError(f"sdist must have one root and one PKG-INFO: {path.name}")
-    package = PackageArchive(path, _metadata(files["PKG-INFO"], path.name), files)
-    _assert_filename_identity(path, package.metadata)
-    return package
-
-
-def _installed_files(package: PackageArchive) -> dict[str, bytes]:
-    if package.path.suffix != ".whl":
-        return package.files
-    installed: dict[str, bytes] = {}
-    for name, content in package.files.items():
-        parts = PurePosixPath(name).parts
-        if len(parts) >= 3 and parts[0].endswith(".data") and parts[1] in {"purelib", "platlib"}:
-            name = PurePosixPath(*parts[2:]).as_posix()
-        if name in installed:
-            raise ReleaseAssetError(f"wheel has colliding install paths: {package.path.name}")
-        installed[name] = content
-    return installed
+        raise ReleaseAssetError(f"pip install produced {len(metadata_paths)} METADATA files for {wheel.name}")
+    metadata_path = metadata_paths[0]
+    installed = PathDistribution(metadata_path.parent)
+    metadata = _metadata(installed.metadata, wheel.name)
+    if metadata.name != canonicalize_name(distribution):
+        raise ReleaseAssetError(f"installed distribution identity differs from expected {distribution}")
+    _assert_filename_identity(wheel, metadata)
+    scheme = _pip_scheme(python_executable, prefix, distribution)
+    scheme_roots = sorted(
+        scheme.items(),
+        key=lambda item: (-len(item[1].parts), INSTALL_SCHEMES.index(item[0])),
+    )
+    entries = installed.files
+    if entries is None:
+        raise ReleaseAssetError(f"installed RECORD is invalid: {wheel.name}")
+    files: dict[tuple[str, str], bytes] = {}
+    recorded: set[Path] = set()
+    for entry in entries:
+        target = Path(entry.locate()).resolve()
+        try:
+            target.relative_to(prefix.resolve())
+        except ValueError as exc:
+            raise ReleaseAssetError(f"installed RECORD escapes its disposable prefix: {entry}") from exc
+        if target in recorded or not target.is_file() or target.is_symlink():
+            raise ReleaseAssetError(f"installed RECORD path is invalid: {entry}")
+        recorded.add(target)
+        for scheme_name, root in scheme_roots:
+            try:
+                relative = target.relative_to(root)
+            except ValueError:
+                continue
+            key = (scheme_name, relative.as_posix())
+            if not relative.parts or key in files:
+                raise ReleaseAssetError(f"installed RECORD has a colliding path: {entry}")
+            files[key] = target.read_bytes()
+            break
+        else:
+            raise ReleaseAssetError(f"installed path is outside pip's install scheme: {entry}")
+    actual = {path.resolve() for path in prefix.rglob("*") if path.is_file()}
+    if actual != recorded:
+        raise ReleaseAssetError(f"installed inventory differs from RECORD: {wheel.name}")
+    return InstalledDistribution(metadata, metadata_path.parent.name, files)
 
 
 def _requirements_for(metadata: PackageMetadata, name: str) -> tuple[Requirement, ...]:
@@ -333,9 +383,13 @@ def _exact_memory_pin(metadata: PackageMetadata) -> str | None:
         or requirement.marker is not None
         or len(specifiers) != 1
         or specifiers[0].operator != "=="
+        or "*" in specifiers[0].version
     ):
         return None
-    return str(Version(specifiers[0].version))
+    try:
+        return str(Version(specifiers[0].version))
+    except InvalidVersion as exc:
+        raise ReleaseAssetError("avibe-memory exact dependency has an invalid version") from exc
 
 
 def _package_files(asset_dir: Path, distribution: str, suffix: str) -> list[Path]:
@@ -397,6 +451,7 @@ def _package_release_policy(payload: dict, release_tag: str) -> PackageReleasePo
 def discover_release_manifest(
     asset_dir: Path,
     *,
+    python_executable: Path,
     release_tag: str | None = None,
 ) -> ManifestDiscovery:
     if not asset_dir.is_dir():
@@ -405,10 +460,16 @@ def discover_release_manifest(
     memory_paths = _package_files(asset_dir, "avibe-memory", ".whl")
     if len(core_paths) != 1 or len(memory_paths) > 1:
         raise ReleaseAssetError("release must contain one core wheel and at most one Memory wheel")
-    core = _wheel_archive(core_paths[0])
-    core_manifest = _installed_files(core).get(MEMORY_MANIFEST_PATH)
-    memory = _wheel_archive(memory_paths[0]) if memory_paths else None
-    memory_manifest = _installed_files(memory).get(MEMORY_MANIFEST_PATH) if memory else None
+    with tempfile.TemporaryDirectory(prefix="memory-manifest-discovery-") as temporary:
+        root = Path(temporary)
+        core = _installed_distribution(core_paths[0], "avibe-os", root / "core", python_executable)
+        memory = (
+            _installed_distribution(memory_paths[0], "avibe-memory", root / "memory", python_executable)
+            if memory_paths
+            else None
+        )
+        core_manifest = _package_file(core, MEMORY_MANIFEST_PATH)
+        memory_manifest = _package_file(memory, MEMORY_MANIFEST_PATH) if memory else None
     if core_manifest and memory_manifest:
         raise ReleaseAssetError("Memory Runtime manifest ownership is ambiguous")
     if memory_manifest:
@@ -426,48 +487,53 @@ def discover_release_manifest(
     raise LegacyManifestAbsent("legacy release predates the Memory Runtime manifest")
 
 
-def _assert_metadata_parity(wheel: PackageArchive, sdist: PackageArchive, name: str) -> None:
-    if wheel.metadata.name != name or wheel.metadata != sdist.metadata:
-        raise ReleaseAssetError(f"{name} wheel and sdist metadata differ")
+def _package_file(package: InstalledDistribution, path: str) -> bytes | None:
+    matches = [
+        content
+        for (scheme, name), content in package.files.items()
+        if scheme in {"purelib", "platlib"} and name == path
+    ]
+    if len(matches) > 1:
+        raise ReleaseAssetError(f"installed distribution has duplicate library paths: {path}")
+    return matches[0] if matches else None
 
 
-def _owned_content(package: PackageArchive, prefix: str) -> dict[str, bytes]:
-    return {name: value for name, value in _installed_files(package).items() if name.startswith(prefix)}
+def _owned_files(package: InstalledDistribution) -> dict[tuple[str, str], bytes]:
+    return {
+        key: value
+        for key, value in package.files.items()
+        if not (
+            key[0] in {"purelib", "platlib"}
+            and (key[1] == package.dist_info or key[1].startswith(f"{package.dist_info}/"))
+        )
+    }
 
 
-def _assert_namespace_policy(package: PackageArchive, distribution: str, policy_version: int) -> None:
-    policies = NAMESPACE_POLICIES[policy_version]
-    allowed_top_levels = policies[distribution]
-    known_namespaces = set().union(*policies.values())
-    for name in _installed_files(package):
-        if name == MEMORY_MANIFEST_PATH:
-            if distribution == "avibe-memory":
-                continue
-            raise ReleaseAssetError(f"{distribution} artifact violates namespace policy: {name}")
-        top_level = PurePosixPath(name).parts[0]
-        if top_level.endswith((".dist-info", ".data")):
-            continue
-        if package.path.suffix == ".whl":
-            allowed = top_level in allowed_top_levels
-        else:
-            allowed = top_level not in known_namespaces or top_level in allowed_top_levels
-        if not allowed:
-            raise ReleaseAssetError(f"{distribution} artifact violates namespace policy: {name}")
+def _assert_namespace_policy(
+    package: InstalledDistribution,
+    distribution: str,
+    policy_version: int,
+) -> None:
+    policy = NAMESPACE_POLICIES[policy_version][distribution]
+    for key in _owned_files(package):
+        scheme, path = key
+        allowed = policy[scheme]
+        if not any(path == entry or (entry.endswith("/") and path.startswith(entry)) for entry in allowed):
+            raise ReleaseAssetError(f"{distribution} artifact violates namespace policy: {scheme}/{path}")
 
 
-def _assert_transition_packages(
-    packages: tuple[PackageArchive, PackageArchive, PackageArchive, PackageArchive],
+def _assert_transition_pair(
+    core: InstalledDistribution,
+    memory: InstalledDistribution,
     policy: PackageReleasePolicy,
 ) -> str:
-    core_wheel, memory_wheel, core_sdist, memory_sdist = packages
-    _assert_metadata_parity(core_wheel, core_sdist, "avibe-os")
-    _assert_metadata_parity(memory_wheel, memory_sdist, "avibe-memory")
-    version = core_wheel.metadata.version
-    if memory_wheel.metadata.version != version:
+    version = core.metadata.version
+    normalized_version = str(Version(version))
+    if memory.metadata.version != version:
         raise ReleaseAssetError("core and Memory distribution versions differ")
-    if _exact_memory_pin(core_wheel.metadata) != version:
+    if _exact_memory_pin(core.metadata) != normalized_version:
         raise ReleaseAssetError("transition core must hard-depend on the exact Memory version")
-    reverse_requirements = _requirements_for(memory_wheel.metadata, "avibe-os")
+    reverse_requirements = _requirements_for(memory.metadata, "avibe-os")
     if len(reverse_requirements) != 1:
         raise ReleaseAssetError("Memory metadata must contain exactly one avibe-os dependency")
     reverse_requirement = reverse_requirements[0]
@@ -475,36 +541,31 @@ def _assert_transition_packages(
         reverse_requirement.url is not None
         or reverse_requirement.marker is not None
         or not reverse_requirement.specifier
-        or Version(version) not in reverse_requirement.specifier
+        or Version(normalized_version) not in reverse_requirement.specifier
     ):
         raise ReleaseAssetError("Memory avibe-os dependency must accept the exact core version")
-    requires_python = {core_wheel.metadata.requires_python, memory_wheel.metadata.requires_python}
+    requires_python = {core.metadata.requires_python, memory.metadata.requires_python}
     if requires_python != {policy.requires_python}:
         raise ReleaseAssetError(f"core and Memory Requires-Python must match release policy {policy.requires_python}")
-
-    for package, distribution in (
-        (core_wheel, "avibe-os"),
-        (core_sdist, "avibe-os"),
-        (memory_wheel, "avibe-memory"),
-        (memory_sdist, "avibe-memory"),
-    ):
-        _assert_namespace_policy(package, distribution, policy.namespace_policy_version)
-    wheel_implementation = _owned_content(memory_wheel, "avibe_memory/")
-    sdist_implementation = _owned_content(memory_sdist, "avibe_memory/")
-    if not REQUIRED_MEMORY_IMPLEMENTATION.issubset(wheel_implementation):
+    _assert_namespace_policy(core, "avibe-os", policy.namespace_policy_version)
+    _assert_namespace_policy(memory, "avibe-memory", policy.namespace_policy_version)
+    if _package_file(core, MEMORY_MANIFEST_PATH) is not None:
+        raise ReleaseAssetError("core artifact must not own the Memory Runtime manifest")
+    implementation = {
+        path for scheme, path in memory.files if scheme in {"purelib", "platlib"} and path.startswith("avibe_memory/")
+    }
+    if not REQUIRED_MEMORY_IMPLEMENTATION.issubset(implementation):
         raise ReleaseAssetError("Memory artifact is missing required implementation files")
-    if wheel_implementation != sdist_implementation:
-        raise ReleaseAssetError("Memory wheel and sdist implementation content differ")
-    wheel_manifest = _installed_files(memory_wheel).get(MEMORY_MANIFEST_PATH)
-    sdist_manifest = _installed_files(memory_sdist).get(MEMORY_MANIFEST_PATH)
-    if wheel_manifest is None or wheel_manifest != sdist_manifest:
-        raise ReleaseAssetError("Memory wheel and sdist manifest content differ")
+    if _package_file(memory, MEMORY_MANIFEST_PATH) is None:
+        raise ReleaseAssetError("Memory artifact is missing its owned manifest")
+    collisions = set(_owned_files(core)) & set(_owned_files(memory))
+    if collisions:
+        scheme, path = sorted(collisions)[0]
+        raise ReleaseAssetError(f"core and Memory install paths collide: {scheme}/{path}")
     return version
 
 
-def _transition_artifacts(
-    asset_dir: Path,
-) -> tuple[PackageArchive, PackageArchive, PackageArchive, PackageArchive]:
+def _transition_artifacts(asset_dir: Path) -> tuple[Path, Path, Path, Path]:
     if not asset_dir.is_dir():
         raise ReleaseAssetError("release package directory is missing")
 
@@ -515,57 +576,53 @@ def _transition_artifacts(
         return matches[0]
 
     return (
-        _wheel_archive(one("avibe-os", ".whl")),
-        _wheel_archive(one("avibe-memory", ".whl")),
-        _sdist_archive(one("avibe-os", ".tar.gz")),
-        _sdist_archive(one("avibe-memory", ".tar.gz")),
+        one("avibe-os", ".whl"),
+        one("avibe-memory", ".whl"),
+        one("avibe-os", ".tar.gz"),
+        one("avibe-memory", ".tar.gz"),
     )
 
 
-def _extract_sdist(sdist: Path, destination: Path) -> Path:
-    archive = _sdist_archive(sdist)
-    project_root = destination / sdist.name.removesuffix(".tar.gz")
-    project_root.mkdir(parents=True)
-    for name, content in archive.files.items():
-        target = project_root.joinpath(*PurePosixPath(name).parts)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(content)
-    return project_root
-
-
-def rebuild_sdist_wheel(sdist: Path, output_dir: Path) -> Path:
+def rebuild_sdist_wheel(
+    sdist: Path,
+    output_dir: Path,
+    *,
+    python_executable: Path,
+    find_links: tuple[Path, ...],
+) -> Path:
+    distribution, _ = _filename_identity(sdist)
     output_dir.mkdir(parents=True, exist_ok=True)
-    attempt_dir = Path(tempfile.mkdtemp(prefix="attempt-", dir=output_dir))
-    extract_dir = attempt_dir / "source"
-    project_root = _extract_sdist(sdist, extract_dir)
-    wheel_dir = attempt_dir / "wheel"
+    wheel_dir = Path(tempfile.mkdtemp(prefix="attempt-", dir=output_dir)) / "wheel"
     wheel_dir.mkdir(parents=True)
-    environment = {**os.environ, "PYTHONPATH": ""}
-    result = subprocess.run(
-        [sys.executable, "-m", "build", "--wheel", "--outdir", str(wheel_dir), str(project_root)],
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
+    links = [item for directory in find_links for item in ("--find-links", str(directory.resolve()))]
+    _run_pip(
+        python_executable,
+        [
+            "wheel",
+            *PIP_OFFLINE_FLAGS,
+            "--no-deps",
+            "--wheel-dir",
+            str(wheel_dir.resolve()),
+            *links,
+            str(sdist.resolve()),
+        ],
+        f"isolated pip sdist rebuild failed for {sdist.name}",
     )
-    if result.returncode != 0:
-        raise ReleaseAssetError(f"isolated sdist rebuild failed for {sdist.name}: {result.stdout}{result.stderr}")
-    wheels = sorted(wheel_dir.glob("*.whl"))
+    wheels = _package_files(wheel_dir, distribution, ".whl")
     if len(wheels) != 1:
         raise ReleaseAssetError(f"isolated sdist rebuild produced {len(wheels)} wheels for {sdist.name}")
     return wheels[0]
 
 
-def _resolve_wheelhouse(
+def _install_pair(
     wheels: tuple[Path, Path],
-    find_links: tuple[Path, ...],
-    python_versions: tuple[str, ...],
-) -> None:
-    for python_version in python_versions:
-        links = [item for directory in find_links for item in ("--find-links", str(directory.resolve()))]
-        command = [*PIP_FLAGS, "--python-version", python_version, *links]
-        command.extend(str(wheel.resolve()) for wheel in wheels)
-        _run_pip(command, f"offline pip resolution failed for Python {python_version}")
+    root: Path,
+    python_executable: Path,
+) -> tuple[InstalledDistribution, InstalledDistribution]:
+    return (
+        _installed_distribution(wheels[0], "avibe-os", root / "core", python_executable),
+        _installed_distribution(wheels[1], "avibe-memory", root / "memory", python_executable),
+    )
 
 
 def verify_transition_distributions(
@@ -573,11 +630,15 @@ def verify_transition_distributions(
     rebuild_root: Path,
     *,
     release_tag: str,
-    builder: SdistBuilder = rebuild_sdist_wheel,
+    python_executable: Path,
+    expected_manifest: bytes | None = None,
 ) -> str:
-    staged = _transition_artifacts(asset_dir)
-    core_wheel, memory_wheel, core_sdist, memory_sdist = staged
-    manifest_bytes = _installed_files(memory_wheel).get(MEMORY_MANIFEST_PATH)
+    python_version = _interpreter_version(python_executable)
+    core_wheel, memory_wheel, core_sdist, memory_sdist = _transition_artifacts(asset_dir)
+    rebuild_root.mkdir(parents=True, exist_ok=True)
+    attempt = Path(tempfile.mkdtemp(prefix="attempt-", dir=rebuild_root))
+    staged = _install_pair((core_wheel, memory_wheel), attempt / "staged", python_executable)
+    manifest_bytes = _package_file(staged[1], MEMORY_MANIFEST_PATH)
     try:
         manifest_payload = json.loads(manifest_bytes) if manifest_bytes is not None else None
     except (TypeError, json.JSONDecodeError) as exc:
@@ -587,23 +648,47 @@ def verify_transition_distributions(
     policy = _package_release_policy(manifest_payload, release_tag)
     if policy is None:
         raise ReleaseAssetError("Memory artifact manifest is missing frozen package_policy")
-    version = _assert_transition_packages(staged, policy)
+    if python_version not in policy.supported_python_versions:
+        raise ReleaseAssetError(f"requested Python {python_version} is not in the release policy interpreter matrix")
+    if expected_manifest is not None and manifest_bytes != expected_manifest:
+        raise ReleaseAssetError("transition package manifest does not match the selected manifest")
+    version = _assert_transition_pair(*staged, policy)
     if Version(version) != _release_version(release_tag):
         raise ReleaseAssetError("distribution version does not match the release tag")
-    _resolve_wheelhouse(
-        (core_wheel.path, memory_wheel.path),
+    _pip_install(
+        python_executable,
+        (core_wheel, memory_wheel),
         (asset_dir,),
-        policy.supported_python_versions,
+        attempt / "staged-combined",
+        no_deps=False,
     )
-    rebuilt_core = _wheel_archive(builder(core_sdist.path, rebuild_root / "core"))
-    rebuilt_memory = _wheel_archive(builder(memory_sdist.path, rebuild_root / "memory"))
-    rebuilt_version = _assert_transition_packages((rebuilt_core, rebuilt_memory, core_sdist, memory_sdist), policy)
+    rebuilt_wheels = (
+        rebuild_sdist_wheel(
+            core_sdist, attempt / "core-build", python_executable=python_executable, find_links=(asset_dir,)
+        ),
+        rebuild_sdist_wheel(
+            memory_sdist, attempt / "memory-build", python_executable=python_executable, find_links=(asset_dir,)
+        ),
+    )
+    rebuilt = _install_pair(rebuilt_wheels, attempt / "rebuilt", python_executable)
+    _assert_filename_identity(core_sdist, rebuilt[0].metadata)
+    _assert_filename_identity(memory_sdist, rebuilt[1].metadata)
+    rebuilt_version = _assert_transition_pair(*rebuilt, policy)
     if rebuilt_version != version:
         raise ReleaseAssetError("rebuilt distribution version differs from staged artifacts")
-    _resolve_wheelhouse(
-        (rebuilt_core.path, rebuilt_memory.path),
-        (asset_dir, rebuilt_core.path.parent, rebuilt_memory.path.parent),
-        policy.supported_python_versions,
+    for distribution, staged_package, rebuilt_package in zip(
+        ("avibe-os", "avibe-memory"), staged, rebuilt, strict=True
+    ):
+        if staged_package.metadata != rebuilt_package.metadata:
+            raise ReleaseAssetError(f"{distribution} wheel and sdist metadata differ")
+        if _owned_files(staged_package) != _owned_files(rebuilt_package):
+            raise ReleaseAssetError(f"{distribution} wheel and sdist installed content differ")
+    _pip_install(
+        python_executable,
+        rebuilt_wheels,
+        (asset_dir, rebuilt_wheels[0].parent, rebuilt_wheels[1].parent),
+        attempt / "rebuilt-combined",
+        no_deps=False,
     )
     return version
 
@@ -818,9 +903,11 @@ def main(argv: list[str] | None = None) -> int:
     discover.add_argument("--asset-dir", type=Path, required=True)
     discover.add_argument("--output-manifest", type=Path, required=True)
     discover.add_argument("--release-tag")
+    discover.add_argument("--python-executable", type=Path, required=True)
     packages = subparsers.add_parser("verify-packages")
     packages.add_argument("--asset-dir", type=Path, required=True)
     packages.add_argument("--work-dir", type=Path)
+    packages.add_argument("--python-executable", type=Path, required=True)
     subparsers.add_parser("verify-public")
     subparsers.add_parser("check-policy")
     args = parser.parse_args(argv)
@@ -833,7 +920,11 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "verify":
             spec = verify_release_assets(args.manifest, args.asset_dir)
         elif args.command == "discover-manifest":
-            discovery = discover_release_manifest(args.asset_dir, release_tag=args.release_tag)
+            discovery = discover_release_manifest(
+                args.asset_dir,
+                python_executable=args.python_executable,
+                release_tag=args.release_tag,
+            )
             args.output_manifest.parent.mkdir(parents=True, exist_ok=True)
             args.output_manifest.write_bytes(discovery.manifest_bytes)
             spec = load_release_spec(args.output_manifest)
@@ -842,17 +933,19 @@ def main(argv: list[str] | None = None) -> int:
             result["manifest_owner"] = discovery.owner
         elif args.command == "verify-packages":
             spec = load_release_spec(args.manifest)
-            if args.work_dir is None:
-                with tempfile.TemporaryDirectory(prefix="memory-distribution-rebuild-") as temporary:
-                    version = verify_transition_distributions(
-                        args.asset_dir, Path(temporary), release_tag=spec.release_tag
-                    )
-            else:
-                args.work_dir.mkdir(parents=True, exist_ok=True)
-                version = verify_transition_distributions(args.asset_dir, args.work_dir, release_tag=spec.release_tag)
-            discovery = discover_release_manifest(args.asset_dir, release_tag=spec.release_tag)
-            if discovery.owner != "memory" or discovery.manifest_bytes != spec.manifest_bytes:
-                raise ReleaseAssetError("transition package manifest does not match the selected manifest")
+            workspace = (
+                tempfile.TemporaryDirectory(prefix="memory-distribution-rebuild-")
+                if args.work_dir is None
+                else nullcontext(args.work_dir)
+            )
+            with workspace as work_dir:
+                version = verify_transition_distributions(
+                    args.asset_dir,
+                    Path(work_dir),
+                    release_tag=spec.release_tag,
+                    python_executable=args.python_executable,
+                    expected_manifest=spec.manifest_bytes,
+                )
             result["package_version"] = version
         elif args.command == "verify-public":
             spec = verify_public_release_assets(args.manifest)
