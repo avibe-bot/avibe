@@ -6,16 +6,14 @@ Package policy schema v1 declares ``Requires-Python: >=3.10``, supported minors
 Changing a contract requires a policy schema/version change and an updated
 repository-owned declaration.
 
-Wheel archive validation retains O(one bounded member + control metadata),
-never O(the archive's total decompressed payload).
-The archive inventory retains raw RECORD bytes but never interprets ledger rows;
-the immediate RECORD-ledger successor owns those semantics.
+Portable wheel path grammar schema v1 is repository-owned policy. It validates
+only lexical path identity and topology; archive reads and installed-layout
+inference belong to later successors.
 """
 
 from __future__ import annotations
 
 import argparse
-import base64
 from bisect import bisect_left
 from email.parser import Parser
 import hashlib
@@ -26,6 +24,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, fields
@@ -53,8 +52,6 @@ PACKAGE_POLICY_SCHEMA_VERSION = 1
 PACKAGE_POLICY_REQUIRES_PYTHON = ">=3.10"
 PACKAGE_POLICY_SUPPORTED_PYTHON_VERSIONS = ("3.10", "3.11", "3.12")
 SUPPORTED_NAMESPACE_POLICY_VERSIONS = frozenset({1})
-MAX_WHEEL_MEMBER_BYTES = 16 * 1024 * 1024
-WHEEL_DATA_SCHEMES = frozenset({"data", "headers", "platlib", "purelib", "scripts"})
 
 
 @dataclass(frozen=True)
@@ -69,19 +66,18 @@ class _WheelControlPolicy:
 
 
 @dataclass(frozen=True)
-class _WheelArchiveEntry:
-    path: str
-    path_key: str
-    is_dir: bool
-    size: int
-    sha256: str
-
-
-@dataclass(frozen=True)
-class _PortableWheelPathPolicy:
-    invalid_component_chars: frozenset[str]
+class _PortableWheelPathGrammar:
+    schema_version: int
+    unicode_normalization: str
+    max_component_utf8_bytes: int
+    reject_absolute_paths: bool
+    reject_windows_drives: bool
+    forbidden_separators: frozenset[str]
+    forbidden_component_names: frozenset[str]
+    forbidden_component_chars: frozenset[str]
+    forbidden_component_suffixes: tuple[str, ...]
+    forbidden_codepoint_ranges: tuple[tuple[int, int], ...]
     reserved_component_names: frozenset[str]
-    control_char_pattern: re.Pattern[str]
 
 
 _WHEEL_CONTROL_POLICY = _WheelControlPolicy(
@@ -93,14 +89,25 @@ _WHEEL_CONTROL_POLICY = _WheelControlPolicy(
     parser_defects=(),
     parser_body="",
 )
-_PORTABLE_WHEEL_PATH_POLICY = _PortableWheelPathPolicy(
-    invalid_component_chars=frozenset('<>:"|?*'),
+_PORTABLE_WHEEL_PATH_GRAMMAR = _PortableWheelPathGrammar(
+    schema_version=1,
+    unicode_normalization="NFC",
+    max_component_utf8_bytes=255,
+    reject_absolute_paths=True,
+    reject_windows_drives=True,
+    forbidden_separators=frozenset({"\\"}),
+    forbidden_component_names=frozenset({"", ".", ".."}),
+    forbidden_component_chars=frozenset('<>:"|?*'),
+    forbidden_component_suffixes=(" ", "."),
+    forbidden_codepoint_ranges=((0, 31), (127, 159)),
     reserved_component_names=frozenset(
-        {"con", "prn", "aux", "nul"}
-        | {f"com{number}" for number in range(1, 10)}
-        | {f"lpt{number}" for number in range(1, 10)}
+        {"con", "prn", "aux", "nul", "conin$", "conout$"}
+        | {
+            f"{prefix}{suffix}"
+            for prefix in ("com", "lpt")
+            for suffix in (*map(str, range(1, 10)), "\u00b9", "\u00b2", "\u00b3")
+        }
     ),
-    control_char_pattern=re.compile(r"[\x00-\x1f\x7f-\x9f]"),
 )
 
 
@@ -354,116 +361,66 @@ def _compare_wheel_control_policy(wheel: Path, observed: dict[str, object]) -> N
 
 
 def _portable_wheel_path_key(value: str) -> str | None:
-    policy = _PORTABLE_WHEEL_PATH_POLICY
-    if policy.control_char_pattern.search(value):
+    grammar = _PORTABLE_WHEEL_PATH_GRAMMAR
+    if type(value) is not str:
+        return None
+    normalized = unicodedata.normalize(grammar.unicode_normalization, value)
+    if normalized != value:
+        return None
+    if any(separator in value for separator in grammar.forbidden_separators):
         return None
     path = PurePosixPath(value)
     canonical = str(path) + ("/" if value.endswith("/") else "")
-    components = value.rstrip("/").split("/")
-    folded = tuple(component.casefold() for component in components)
+    components = normalized.rstrip("/").split("/")
+    keys = tuple(component.casefold() for component in components)
+    try:
+        oversized = any(
+            len(component.encode("utf-8")) > grammar.max_component_utf8_bytes
+            for component in components
+        )
+    except UnicodeEncodeError:
+        return None
     if (
         not path.parts
-        or "\\" in value
-        or path.is_absolute()
-        or PureWindowsPath(value).drive
+        or (grammar.reject_absolute_paths and path.is_absolute())
+        or (grammar.reject_windows_drives and bool(PureWindowsPath(value).drive))
         or value != canonical
+        or oversized
         or any(
-            not component
-            or component in {".", ".."}
-            or component.endswith((" ", "."))
-            or not policy.invalid_component_chars.isdisjoint(component)
-            or folded_component.split(".", 1)[0] in policy.reserved_component_names
-            for component, folded_component in zip(components, folded, strict=True)
+            component in grammar.forbidden_component_names
+            or component.endswith(grammar.forbidden_component_suffixes)
+            or not grammar.forbidden_component_chars.isdisjoint(component)
+            or any(
+                start <= ord(character) <= end
+                for character in component
+                for start, end in grammar.forbidden_codepoint_ranges
+            )
+            or key.split(".", 1)[0] in grammar.reserved_component_names
+            for component, key in zip(components, keys, strict=True)
         )
     ):
         return None
-    return "/".join(folded)
+    return "/".join(keys)
 
 
-def _inventory_wheel_member(
-    archive: zipfile.ZipFile,
-    member: zipfile.ZipInfo,
-    wheel: Path,
-    path_key: str,
-    *,
-    retain: bool,
-) -> tuple[_WheelArchiveEntry, bytes | None]:
-    if (
-        member.file_size < 0
-        or member.file_size > MAX_WHEEL_MEMBER_BYTES
-        or (member.is_dir() and member.file_size != 0)
-    ):
-        raise ReleaseAssetError(f"wheel member size is invalid: {wheel.name}")
-    digest = hashlib.sha256()
-    content = bytearray() if retain else None
-    size = 0
-    try:
-        with archive.open(member) as stream:
-            while chunk := stream.read(min(64 * 1024, MAX_WHEEL_MEMBER_BYTES + 1 - size)):
-                size += len(chunk)
-                if size > MAX_WHEEL_MEMBER_BYTES:
-                    raise ReleaseAssetError(f"wheel member size is invalid: {wheel.name}")
-                digest.update(chunk)
-                if content is not None:
-                    content.extend(chunk)
-    except ReleaseAssetError:
-        raise
-    except Exception as exc:
-        raise ReleaseAssetError(f"cannot read wheel member: {wheel.name}") from exc
-    if size != member.file_size or (member.is_dir() and size != 0):
-        raise ReleaseAssetError(f"wheel member size is invalid: {wheel.name}")
-    encoded = base64.urlsafe_b64encode(digest.digest()).rstrip(b"=").decode()
-    entry = _WheelArchiveEntry(member.filename, path_key, member.is_dir(), size, encoded)
-    return entry, bytes(content) if content is not None else None
-
-
-def _validate_wheel_archive(
-    archive: zipfile.ZipFile, wheel: Path, dist_info: str
-) -> tuple[tuple[_WheelArchiveEntry, ...], dict[str, bytes]]:
-    infos = archive.infolist()
-    identities: list[tuple[zipfile.ZipInfo, str, str]] = []
-    for info in infos:
-        raw_name = info.orig_filename
-        if type(raw_name) is not str or type(info.filename) is not str or raw_name != info.filename:
-            raise ReleaseAssetError(f"wheel archive structure is invalid: {wheel.name}")
-        path_key = _portable_wheel_path_key(raw_name)
-        if path_key is None:
-            raise ReleaseAssetError(f"wheel archive structure is invalid: {wheel.name}")
-        identities.append((info, raw_name, path_key))
-    names = [name for _, name, _ in identities]
-    topology = sorted((alias, info.is_dir()) for info, _, alias in identities)
-    aliases = [alias for alias, _ in topology]
-    data_root = f"{dist_info.removesuffix('.dist-info')}.data"
-    unsafe_data = any(
-        parts[0].endswith(".data")
-        and (parts[0] != data_root or len(parts) < 3 or parts[1] not in WHEEL_DATA_SCHEMES or not parts[2])
-        for name in names
-        for parts in (name.split("/"),)
-    )
-    duplicate_or_alias = any(left == right for left, right in zip(aliases, aliases[1:]))
+def _portable_wheel_topology_is_valid(entries: tuple[tuple[str, bool], ...]) -> bool:
+    topology: list[tuple[str, bool]] = []
+    for value, is_dir in entries:
+        key = _portable_wheel_path_key(value)
+        if key is None or type(is_dir) is not bool:
+            return False
+        topology.append((key, is_dir))
+    topology.sort()
+    keys = [key for key, _ in topology]
+    duplicate_or_alias = any(left == right for left, right in zip(keys, keys[1:]))
     prefix_conflict = any(
-        index < len(aliases) and aliases[index].startswith(prefix)
-        for alias, is_dir in topology
+        index < len(keys) and keys[index].startswith(prefix)
+        for key, is_dir in topology
         if not is_dir
-        for prefix in (f"{alias}/",)
-        for index in (bisect_left(aliases, prefix),)
+        for prefix in (f"{key}/",)
+        for index in (bisect_left(keys, prefix),)
     )
-    if duplicate_or_alias or unsafe_data or prefix_conflict:
-        raise ReleaseAssetError(f"wheel archive structure is invalid: {wheel.name}")
-    record = f"{dist_info}/RECORD"
-    retained = {record, *(f"{dist_info}/{name}" for name, _ in _WHEEL_CONTROL_POLICY.controls)}
-    inventory = []
-    members: dict[str, bytes] = {}
-    for info, name, alias in identities:
-        entry, content = _inventory_wheel_member(
-            archive, info, wheel, alias, retain=name in retained
-        )
-        inventory.append(entry)
-        if content is not None:
-            members[name] = content
-    if names.count(record) != 1:
-        raise ReleaseAssetError(f"wheel control structure is invalid: {wheel.name}")
-    return tuple(inventory), members
+    return not duplicate_or_alias and not prefix_conflict
 
 
 def inspect_wheel(wheel: Path, *, policy: PackageReleasePolicy) -> PackageMetadata:
@@ -489,8 +446,7 @@ def inspect_wheel(wheel: Path, *, policy: PackageReleasePolicy) -> PackageMetada
     dist_info = f"{str(filename_name).replace('-', '_')}-{filename_version}.dist-info"
     try:
         with zipfile.ZipFile(wheel) as archive:
-            inventory, members = _validate_wheel_archive(archive, wheel, dist_info)
-            names = [entry.path for entry in inventory]
+            names = archive.namelist()
             dist_infos = {
                 name.split("/", 1)[0]
                 for name in names
@@ -504,7 +460,7 @@ def inspect_wheel(wheel: Path, *, policy: PackageReleasePolicy) -> PackageMetada
             )
             _compare_wheel_control_policy(wheel, {"controls": control_counts})
             metadata_bytes, wheel_bytes = (
-                members[f"{dist_info}/{name}"]
+                archive.read(f"{dist_info}/{name}")
                 for name, _ in _WHEEL_CONTROL_POLICY.controls
             )
     except ReleaseAssetError:

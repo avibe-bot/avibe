@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import gzip
 import hashlib
 import io
@@ -157,10 +156,6 @@ def _wheel(
     wheel_tags: tuple[str, ...] = ("py3-none-any",),
     wheel_trailer: str = "\n",
     duplicate_control: str | None = None,
-    include_record: bool = True,
-    record_bytes: bytes | None = None,
-    extra_files: dict[str, bytes] | None = None,
-    compression: int = zipfile.ZIP_STORED,
 ) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     dist_info = dist_info or f"{name.replace('-', '_')}-3.1.0.dist-info"
@@ -177,25 +172,14 @@ def _wheel(
         + "".join(f"Tag: {value}\n" for value in wheel_tags)
         + wheel_trailer
     ).encode()
-    files = {f"{name.replace('-', '_')}/__init__.py": b"x = 1\n"}
-    files.update(extra_files or {})
+    files: dict[str, bytes] = {}
     if include_metadata:
         files[f"{dist_info}/METADATA"] = metadata
     if include_wheel:
         files[f"{dist_info}/WHEEL"] = wheel
     if extra_dist_info:
         files["other-3.1.0.dist-info/METADATA"] = metadata
-    record = f"{dist_info}/RECORD"
-    if include_record:
-        if record_bytes is None:
-            rows = []
-            for member, content in files.items():
-                digest = base64.urlsafe_b64encode(hashlib.sha256(content).digest()).rstrip(b"=").decode()
-                rows.append(f"{member},sha256={digest},{len(content)}\n")
-            rows.append(f"{record},,\n")
-            record_bytes = "".join(rows).encode()
-        files[record] = record_bytes
-    with zipfile.ZipFile(path, "w", compression=compression) as archive:
+    with zipfile.ZipFile(path, "w") as archive:
         for member, content in files.items():
             archive.writestr(member, content)
         if duplicate_control is not None:
@@ -440,7 +424,7 @@ def test_wheel_rejects_duplicate_control_files(tmp_path: Path, control: str) -> 
     manifest, _ = _manifest(tmp_path)
 
     with pytest.warns(UserWarning, match="Duplicate name"):
-        with pytest.raises(guard.ReleaseAssetError, match="control|archive structure"):
+        with pytest.raises(guard.ReleaseAssetError, match="control"):
             _verify_wheels(
                 tmp_path / control,
                 manifest,
@@ -568,7 +552,7 @@ def test_wheel_inspector_rejects_policy_without_declared_source(tmp_path: Path) 
 
 
 @pytest.mark.parametrize("encrypted", [False, True], ids=["unsupported-compression", "encrypted"])
-def test_wheel_translates_unreadable_members_to_asset_failure(
+def test_wheel_translates_unreadable_controls_to_asset_failure(
     tmp_path: Path, encrypted: bool
 ) -> None:
     manifest, _ = _manifest(tmp_path)
@@ -579,109 +563,97 @@ def test_wheel_translates_unreadable_members_to_asset_failure(
     wheel = _wheel(tmp_path / "avibe_os-3.1.0-py3-none-any.whl", "avibe-os")
     _make_first_zip_member_unreadable(wheel, encrypted=encrypted)
 
-    with pytest.raises(guard.ReleaseAssetError, match="cannot read wheel"):
+    with pytest.raises(guard.ReleaseAssetError, match="cannot read wheel controls"):
         guard.inspect_wheel(wheel, policy=policy)
 
 
 @pytest.mark.parametrize(
-    "member",
+    "value",
     [
-        "/absolute",
-        "../outside",
-        "pkg/./module.py",
-        "bad\\path",
-        "C:/absolute",
-        *(f"pkg/a{character}b" for character in '<>:"|?*'),
-        "pkg/trailing.",
-        "pkg/trailing ",
-        *(f"pkg/{name}" for name in ("CON", "prn.txt", "AUX", "NUL.bin", "COM1", "LPT9.py")),
-        "pkg/control\x1f",
+        pytest.param("", id="empty-path"),
+        pytest.param("/absolute", id="posix-absolute"),
+        pytest.param("//server/share", id="unc-absolute"),
+        pytest.param("C:/absolute", id="drive-absolute"),
+        pytest.param("C:relative", id="drive-relative"),
+        pytest.param("../outside", id="leading-dotdot"),
+        pytest.param("pkg/../outside", id="embedded-dotdot"),
+        pytest.param("pkg/./module.py", id="dot-component"),
+        pytest.param("pkg//module.py", id="empty-component"),
+        pytest.param("pkg\\module.py", id="backslash"),
+        *(
+            pytest.param(f"pkg/a{character}b", id=f"forbidden-{ord(character)}")
+            for character in '<>:"|?*'
+        ),
+        pytest.param("pkg/trailing.", id="trailing-dot"),
+        pytest.param("pkg/trailing ", id="trailing-space"),
+        pytest.param("pkg/control\x00", id="nul"),
+        pytest.param("pkg/control\x1f", id="c0-control"),
+        pytest.param("pkg/control\x7f", id="delete-control"),
+        pytest.param("pkg/control\x9f", id="c1-control"),
     ],
 )
-def test_wheel_rejects_unsafe_archive_paths(tmp_path: Path, member: str) -> None:
-    manifest, _ = _manifest(tmp_path)
-
-    with pytest.raises(guard.ReleaseAssetError, match="archive structure"):
-        _verify_wheels(
-            tmp_path / "wheels", manifest, core_options={"extra_files": {member: b"x"}}
-        )
+def test_portable_wheel_path_grammar_rejects_each_declared_rule(value: str) -> None:
+    assert guard._portable_wheel_path_key(value) is None
 
 
-def test_wheel_rejects_archive_aliases(tmp_path: Path) -> None:
-    manifest, _ = _manifest(tmp_path)
+def test_portable_wheel_path_grammar_is_versioned_repository_policy() -> None:
+    grammar = guard._PORTABLE_WHEEL_PATH_GRAMMAR
+    expected_devices = {"con", "prn", "aux", "nul", "conin$", "conout$"} | {
+        f"{prefix}{suffix}"
+        for prefix in ("com", "lpt")
+        for suffix in (*map(str, range(1, 10)), "\u00b9", "\u00b2", "\u00b3")
+    }
 
-    with pytest.raises(guard.ReleaseAssetError, match="archive structure"):
-        _verify_wheels(
-            tmp_path / "wheels",
-            manifest,
-            core_options={"extra_files": {"AVIBE_OS/__init__.py": b"x"}},
-        )
-
-
-def test_wheel_data_schemes_are_an_explicit_structural_allowlist(tmp_path: Path) -> None:
-    manifest, _ = _manifest(tmp_path)
-    allowed = {f"avibe_os-3.1.0.data/{scheme}/payload": b"x" for scheme in guard.WHEEL_DATA_SCHEMES}
-
-    _verify_wheels(tmp_path / "allowed", manifest, core_options={"extra_files": allowed})
-    for member in (
-        "avibe_os-3.1.0.data/unknown/payload",
-        "avibe_os-3.1.0.data/scripts",
-        "avibe_os-3.1.0.data/scripts/",
-        "other-9.9.data/scripts/vibe",
-    ):
-        with pytest.raises(guard.ReleaseAssetError, match="archive structure"):
-            _verify_wheels(
-                tmp_path / member.replace("/", "-"),
-                manifest,
-                core_options={"extra_files": {member: b"x"}},
-            )
+    assert grammar.schema_version == 1
+    assert grammar.unicode_normalization == "NFC"
+    assert grammar.max_component_utf8_bytes == 255
+    assert grammar.reject_absolute_paths
+    assert grammar.reject_windows_drives
+    assert grammar.reserved_component_names == expected_devices
 
 
-def test_wheel_rejects_raw_nul_member_name_before_zipfile_sanitization(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "device", sorted(guard._PORTABLE_WHEEL_PATH_GRAMMAR.reserved_component_names)
+)
+def test_portable_wheel_path_rejects_every_reserved_device_alias(device: str) -> None:
+    assert guard._portable_wheel_path_key(f"pkg/{device.upper()}.txt") is None
+
+
+def test_portable_wheel_path_enforces_utf8_component_byte_limit() -> None:
+    assert guard._portable_wheel_path_key("a" * 255) == "a" * 255
+    assert guard._portable_wheel_path_key("a" * 256) is None
+    assert guard._portable_wheel_path_key("\u00e9" * 127 + "a") is not None
+    assert guard._portable_wheel_path_key("\u00e9" * 128) is None
+
+
+def test_portable_wheel_path_requires_nfc_and_returns_one_alias_key() -> None:
+    assert guard._portable_wheel_path_key("PKG/CAF\u00c9.py") == "pkg/caf\u00e9.py"
+    assert guard._portable_wheel_path_key("pkg/cafe\u0301.py") is None
+    assert guard._portable_wheel_path_key("pkg/data/") == "pkg/data"
+
+
+@pytest.mark.parametrize(
+    ("entries", "accepted"),
+    [
+        ((("pkg/", True), ("pkg/module.py", False)), True),
+        ((("pkg/module.py", False), ("pkg/module.py", False)), False),
+        ((("PKG/module.py", False), ("pkg/MODULE.py", False)), False),
+        ((("conflict", False), ("conflict/child", False)), False),
+        ((("Conflict", False), ("conflict/child", False)), False),
+        ((("pkg/cafe\u0301.py", False),), False),
+    ],
+    ids=["valid", "duplicate", "casefold-alias", "prefix", "casefold-prefix", "non-nfc"],
+)
+def test_portable_wheel_topology_uses_grammar_keys(
+    entries: tuple[tuple[str, bool], ...], accepted: bool
 ) -> None:
-    manifest, _ = _manifest(tmp_path)
-    manifest_bytes = manifest.read_bytes()
-    policy = guard.load_package_release_policy(
-        manifest_bytes, expected_manifest=manifest_bytes, release_tag="v3.1.0"
-    )
-    wheel = _wheel(
-        tmp_path / "avibe_os-3.1.0-py3-none-any.whl",
-        "avibe-os",
-        extra_files={"evilXtail": b"x"},
-    )
-    wheel.write_bytes(wheel.read_bytes().replace(b"evilXtail", b"evil\x00tail"))
-
-    with zipfile.ZipFile(wheel) as archive:
-        member = next(info for info in archive.infolist() if info.filename == "evil")
-        assert member.orig_filename == "evil\x00tail"
-
-    with pytest.raises(guard.ReleaseAssetError, match="archive structure"):
-        guard.inspect_wheel(wheel, policy=policy)
+    assert guard._portable_wheel_topology_is_valid(entries) is accepted
 
 
-@pytest.mark.parametrize("ancestor", ["conflict", "Conflict"], ids=["exact", "casefold"])
-def test_wheel_rejects_file_and_descendant_topology(
-    tmp_path: Path, ancestor: str
+def test_portable_wheel_topology_uses_one_binary_search_per_file(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    manifest, _ = _manifest(tmp_path)
-
-    with pytest.raises(guard.ReleaseAssetError, match="archive structure"):
-        _verify_wheels(
-            tmp_path / "wheels",
-            manifest,
-            core_options={"extra_files": {ancestor: b"x", "conflict/child": b"y"}},
-        )
-
-
-def test_wheel_topology_uses_one_binary_search_per_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    wheel = _wheel(
-        tmp_path / "avibe_os-3.1.0-py3-none-any.whl",
-        "avibe-os",
-        extra_files={f"payload/item-{index:04d}": b"" for index in range(256)},
-    )
+    entries = tuple((f"payload/item-{index:04d}", False) for index in range(256))
     calls = 0
     bisect_left = guard.bisect_left
 
@@ -691,125 +663,8 @@ def test_wheel_topology_uses_one_binary_search_per_file(
         return bisect_left(values, prefix)
 
     monkeypatch.setattr(guard, "bisect_left", tracking_bisect)
-    with zipfile.ZipFile(wheel) as archive:
-        inventory, _ = guard._validate_wheel_archive(
-            archive, wheel, "avibe_os-3.1.0.dist-info"
-        )
-
-    assert calls == sum(not entry.is_dir for entry in inventory)
-
-
-@pytest.mark.parametrize(
-    ("declared_size", "payload"),
-    [(1, b""), (0, b"x")],
-    ids=["declared-payload", "observed-payload"],
-)
-def test_wheel_rejects_payload_bearing_directory_member(
-    tmp_path: Path, declared_size: int, payload: bytes
-) -> None:
-    member = zipfile.ZipInfo("payload/")
-    member.file_size = declared_size
-
-    class Archive:
-        @staticmethod
-        def open(_member: zipfile.ZipInfo) -> io.BytesIO:
-            return io.BytesIO(payload)
-
-    with pytest.raises(guard.ReleaseAssetError, match="member size"):
-        guard._inventory_wheel_member(
-            Archive(),
-            member,
-            tmp_path / "wheel.whl",
-            "payload",
-            retain=False,
-        )
-
-
-def test_wheel_requires_raw_record_control(tmp_path: Path) -> None:
-    manifest, _ = _manifest(tmp_path)
-
-    with pytest.raises(guard.ReleaseAssetError, match="control structure"):
-        _verify_wheels(
-            tmp_path / "wheels", manifest, core_options={"include_record": False}
-        )
-
-
-def test_wheel_rejects_duplicate_raw_record_control(tmp_path: Path) -> None:
-    manifest, _ = _manifest(tmp_path)
-
-    with pytest.warns(UserWarning, match="Duplicate name"):
-        with pytest.raises(
-            guard.ReleaseAssetError, match="archive structure|control structure"
-        ):
-            _verify_wheels(
-                tmp_path / "wheels",
-                manifest,
-                core_options={"duplicate_control": "RECORD"},
-            )
-
-
-def test_wheel_inventory_retains_raw_record_without_interpreting_ledger(
-    tmp_path: Path,
-) -> None:
-    manifest, _ = _manifest(tmp_path)
-    opaque_record = b"\xffnot,a,ledger\n"
-    wheels = tmp_path / "wheels"
-
-    _verify_wheels(wheels, manifest, core_options={"record_bytes": opaque_record})
-    wheel = wheels / "avibe_os-3.1.0-py3-none-any.whl"
-    dist_info = "avibe_os-3.1.0.dist-info"
-    record = f"{dist_info}/RECORD"
-    with zipfile.ZipFile(wheel) as archive:
-        inventory, retained = guard._validate_wheel_archive(archive, wheel, dist_info)
-    entry = next(item for item in inventory if item.path == record)
-
-    assert retained[record] == opaque_record
-    assert entry.size == len(opaque_record)
-    assert entry.sha256 == base64.urlsafe_b64encode(
-        hashlib.sha256(opaque_record).digest()
-    ).rstrip(b"=").decode()
-
-
-@pytest.mark.parametrize(
-    "compression",
-    [zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED],
-    ids=["oversized", "high-compression"],
-)
-def test_wheel_bounds_every_member_read(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, compression: int
-) -> None:
-    manifest, _ = _manifest(tmp_path)
-    monkeypatch.setattr(guard, "MAX_WHEEL_MEMBER_BYTES", 32)
-
-    with pytest.raises(guard.ReleaseAssetError, match="member size"):
-        _verify_wheels(
-            tmp_path / "wheels",
-            manifest,
-            core_options={"extra_files": {"payload.bin": b"x" * 33}, "compression": compression},
-        )
-
-
-def test_wheel_reads_every_member_for_integrity(tmp_path: Path) -> None:
-    manifest, _ = _manifest(tmp_path)
-    wheel = _wheel(tmp_path / "avibe_os-3.1.0-py3-none-any.whl", "avibe-os")
-    wheel.write_bytes(wheel.read_bytes().replace(b"x = 1\n", b"x = 2\n"))
-    manifest_bytes = manifest.read_bytes()
-    policy = guard.load_package_release_policy(
-        manifest_bytes, expected_manifest=manifest_bytes, release_tag="v3.1.0"
-    )
-
-    with pytest.raises(guard.ReleaseAssetError, match="cannot read wheel"):
-        guard.inspect_wheel(wheel, policy=policy)
-
-
-def test_wheel_archive_discards_payload_bytes_after_integrity_read(tmp_path: Path) -> None:
-    wheel = _wheel(tmp_path / "avibe_os-3.1.0-py3-none-any.whl", "avibe-os")
-    dist_info = "avibe_os-3.1.0.dist-info"
-
-    with zipfile.ZipFile(wheel) as archive:
-        _, retained = guard._validate_wheel_archive(archive, wheel, dist_info)
-
-    assert set(retained) == {f"{dist_info}/{name}" for name in ("METADATA", "WHEEL", "RECORD")}
+    assert guard._portable_wheel_topology_is_valid(entries)
+    assert calls == len(entries)
 
 
 def test_existing_guard_commands_remain_stdlib_only(tmp_path: Path) -> None:
