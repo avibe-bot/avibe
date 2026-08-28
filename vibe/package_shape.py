@@ -1,4 +1,4 @@
-"""Exact pre-mutation package capture and staged rollback resolution."""
+"""Exact package capture, persisted recovery DTOs, and rollback resolution."""
 
 from __future__ import annotations
 
@@ -28,6 +28,7 @@ LEGACY_CORE_PACKAGE_NAME = "vibe-remote"
 MEMORY_PACKAGE_NAME = "avibe-memory"
 CORE_DISTRIBUTION_NAMES = frozenset({CORE_PACKAGE_NAME, LEGACY_CORE_PACKAGE_NAME})
 MEMORY_SPLIT_MIN_VERSION = Version("3.0.14.dev0")
+PACKAGE_SHAPE_RECORD_SCHEMA_VERSION = 1
 
 
 class PackageShapeError(ValueError):
@@ -40,6 +41,10 @@ class DuplicateDistributionProviderError(PackageShapeError):
 
 class RollbackResolutionError(PackageShapeError):
     """An exact rollback target could not be resolved entirely into staging."""
+
+
+class PackageShapeRecordError(PackageShapeError):
+    """Persisted package-shape data is unknown, incomplete, or inconsistent."""
 
 
 class ReleaseFamily(str, Enum):
@@ -223,6 +228,533 @@ class ResolvedRollbackPlan:
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         raise TypeError("ResolvedRollbackPlan is constructed only by rollback resolution")
+
+
+@dataclass(frozen=True, order=True)
+class DistributionProviderRecord:
+    """Filesystem-independent evidence for one captured provider."""
+
+    name: str
+    version: str
+    provider_id: str
+    requires_dist: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CapturedPackageShapeRecord:
+    """Non-executable persisted form of a captured package shape."""
+
+    core_provider: DistributionProviderRecord
+    launcher: ServiceLauncher
+    release_family: ReleaseFamily
+    memory_providers: tuple[DistributionProviderRecord, ...]
+    transition_memory_version: str | None
+    residual_memory: bool
+
+
+@dataclass(frozen=True, order=True)
+class StagedArtifactRecord:
+    """Recorded artifact identity; existence and hashes require live revalidation."""
+
+    distribution: str
+    version: str
+    path: str
+    sha256: str
+    requires_dist: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ResolvedRollbackPlanRecord:
+    """Non-executable persisted form of a resolved rollback plan."""
+
+    captured: CapturedPackageShapeRecord
+    requirements: tuple[ExactRequirement, ...]
+    artifacts: tuple[StagedArtifactRecord, ...]
+    staging_dir: str
+    uninstall_distributions: tuple[str, ...]
+    verification: PackageShapeVerification
+
+
+def _record_object(
+    value: object,
+    keys: frozenset[str],
+    *,
+    field: str,
+) -> dict[str, object]:
+    if type(value) is not dict or frozenset(value) != keys:
+        raise PackageShapeRecordError(f"{field} has unknown or missing fields")
+    return value
+
+
+def _record_list(value: object, *, field: str) -> list[object]:
+    if type(value) is not list:
+        raise PackageShapeRecordError(f"{field} is not a JSON array")
+    return value
+
+
+def _record_string(value: object, *, field: str) -> str:
+    if type(value) is not str or not value:
+        raise PackageShapeRecordError(f"{field} is missing")
+    return value
+
+
+def _record_strings(value: object, *, field: str) -> tuple[str, ...]:
+    return tuple(
+        _record_string(item, field=f"{field} item")
+        for item in _record_list(value, field=field)
+    )
+
+
+def _record_bool(value: object, *, field: str) -> bool:
+    if type(value) is not bool:
+        raise PackageShapeRecordError(f"{field} is not a boolean")
+    return value
+
+
+def _record_int(value: object, *, field: str) -> int:
+    if type(value) is not int:
+        raise PackageShapeRecordError(f"{field} is not an integer")
+    return value
+
+
+def _record_version(value: object, *, field: str) -> str:
+    raw = _record_string(value, field=field)
+    try:
+        normalized = _normalized_version(raw, field=field)
+    except PackageShapeError as exc:
+        raise PackageShapeRecordError(str(exc)) from exc
+    if raw != normalized:
+        raise PackageShapeRecordError(f"{field} is not canonical")
+    return raw
+
+
+def _record_distribution(value: object, *, field: str) -> str:
+    raw = _record_string(value, field=field)
+    if raw != canonicalize_name(raw):
+        raise PackageShapeRecordError(f"{field} is not canonical")
+    return raw
+
+
+def _record_schema(envelope: dict[str, object]) -> None:
+    version = envelope["schema_version"]
+    if type(version) is not int or version != PACKAGE_SHAPE_RECORD_SCHEMA_VERSION:
+        raise PackageShapeRecordError("package-shape record schema version is unsupported")
+
+
+def _provider_to_record(provider: DistributionProvider) -> DistributionProviderRecord:
+    return DistributionProviderRecord(
+        name=provider.name,
+        version=provider.version,
+        provider_id=provider.provider_id,
+        requires_dist=provider.requires_dist,
+    )
+
+
+def _decode_provider(value: object, *, field: str) -> DistributionProviderRecord:
+    payload = _record_object(
+        value,
+        frozenset({"name", "version", "provider_id", "requires_dist"}),
+        field=field,
+    )
+    return DistributionProviderRecord(
+        name=_record_distribution(payload["name"], field=f"{field} name"),
+        version=_record_version(payload["version"], field=f"{field} version"),
+        provider_id=_record_string(payload["provider_id"], field=f"{field} identity"),
+        requires_dist=_record_strings(
+            payload["requires_dist"],
+            field=f"{field} requirements",
+        ),
+    )
+
+
+def _encode_provider(provider: DistributionProviderRecord) -> dict[str, object]:
+    return {
+        "name": provider.name,
+        "version": provider.version,
+        "provider_id": provider.provider_id,
+        "requires_dist": list(provider.requires_dist),
+    }
+
+
+def _captured_to_record(
+    captured: CapturedPackageShape | CapturedPackageShapeRecord,
+) -> CapturedPackageShapeRecord:
+    if isinstance(captured, CapturedPackageShapeRecord):
+        return captured
+    if not isinstance(captured, CapturedPackageShape):
+        raise PackageShapeRecordError("captured package shape has an unsupported type")
+    return CapturedPackageShapeRecord(
+        core_provider=_provider_to_record(captured.core_provider),
+        launcher=captured.launcher,
+        release_family=captured.release_family,
+        memory_providers=tuple(
+            _provider_to_record(item) for item in captured.memory_providers
+        ),
+        transition_memory_version=captured.transition_memory_version,
+        residual_memory=captured.residual_memory,
+    )
+
+
+def _validate_captured_record(record: CapturedPackageShapeRecord) -> None:
+    if record.core_provider.name not in CORE_DISTRIBUTION_NAMES:
+        raise PackageShapeRecordError("captured core provider is not an Avibe distribution")
+    if len(record.memory_providers) > 1:
+        raise PackageShapeRecordError("captured record has multiple Memory providers")
+    if any(provider.name != MEMORY_PACKAGE_NAME for provider in record.memory_providers):
+        raise PackageShapeRecordError("captured Memory provider has the wrong name")
+    if record.release_family is ReleaseFamily.TRANSITION:
+        if record.transition_memory_version is None:
+            raise PackageShapeRecordError("transition record is missing its Memory version")
+    elif record.transition_memory_version is not None:
+        raise PackageShapeRecordError("non-transition record carries a transition version")
+    expected_residual = (
+        record.release_family is ReleaseFamily.PRE_SPLIT and bool(record.memory_providers)
+    )
+    if record.residual_memory is not expected_residual:
+        raise PackageShapeRecordError("residual Memory marker is inconsistent")
+
+
+def encode_captured_package_shape_record(
+    captured: CapturedPackageShape | CapturedPackageShapeRecord,
+) -> dict[str, object]:
+    """Encode captured evidence into a versioned JSON-safe object."""
+
+    record = _captured_to_record(captured)
+    _validate_captured_record(record)
+    return {
+        "schema_version": PACKAGE_SHAPE_RECORD_SCHEMA_VERSION,
+        "record_type": "captured_package_shape",
+        "shape": {
+            "core_provider": _encode_provider(record.core_provider),
+            "launcher": {
+                "python": record.launcher.python,
+                "main": record.launcher.main,
+            },
+            "release_family": record.release_family.value,
+            "memory_providers": [
+                _encode_provider(provider) for provider in record.memory_providers
+            ],
+            "transition_memory_version": record.transition_memory_version,
+            "residual_memory": record.residual_memory,
+        },
+    }
+
+
+def decode_captured_package_shape_record(value: object) -> CapturedPackageShapeRecord:
+    """Decode captured evidence without consulting installed package state."""
+
+    envelope = _record_object(
+        value,
+        frozenset({"schema_version", "record_type", "shape"}),
+        field="captured package-shape record",
+    )
+    _record_schema(envelope)
+    if envelope["record_type"] != "captured_package_shape":
+        raise PackageShapeRecordError("captured package-shape record type is unsupported")
+    shape = _record_object(
+        envelope["shape"],
+        frozenset(
+            {
+                "core_provider",
+                "launcher",
+                "release_family",
+                "memory_providers",
+                "transition_memory_version",
+                "residual_memory",
+            }
+        ),
+        field="captured package shape",
+    )
+    launcher = _record_object(
+        shape["launcher"],
+        frozenset({"python", "main"}),
+        field="service launcher",
+    )
+    family_value = _record_string(shape["release_family"], field="release family")
+    try:
+        family = ReleaseFamily(family_value)
+    except ValueError as exc:
+        raise PackageShapeRecordError("captured release family is unknown") from exc
+    transition = shape["transition_memory_version"]
+    if transition is not None:
+        transition = _record_version(transition, field="transition Memory version")
+    record = CapturedPackageShapeRecord(
+        core_provider=_decode_provider(shape["core_provider"], field="core provider"),
+        launcher=ServiceLauncher(
+            python=_record_string(launcher["python"], field="launcher Python"),
+            main=_record_string(launcher["main"], field="launcher main"),
+        ),
+        release_family=family,
+        memory_providers=tuple(
+            _decode_provider(item, field="Memory provider")
+            for item in _record_list(
+                shape["memory_providers"],
+                field="Memory providers",
+            )
+        ),
+        transition_memory_version=transition,
+        residual_memory=_record_bool(
+            shape["residual_memory"],
+            field="residual Memory",
+        ),
+    )
+    _validate_captured_record(record)
+    return record
+
+
+def _decode_requirement(value: object) -> ExactRequirement:
+    payload = _record_object(
+        value,
+        frozenset({"distribution", "version"}),
+        field="rollback requirement",
+    )
+    return ExactRequirement(
+        distribution=_record_distribution(
+            payload["distribution"],
+            field="requirement distribution",
+        ),
+        version=_record_version(payload["version"], field="requirement version"),
+    )
+
+
+def _decode_artifact(value: object) -> StagedArtifactRecord:
+    payload = _record_object(
+        value,
+        frozenset({"distribution", "version", "path", "sha256", "requires_dist"}),
+        field="staged artifact",
+    )
+    digest = _record_string(payload["sha256"], field="artifact SHA-256")
+    if len(digest) != 64 or any(
+        character not in "0123456789abcdef" for character in digest
+    ):
+        raise PackageShapeRecordError("artifact SHA-256 is not canonical")
+    return StagedArtifactRecord(
+        distribution=_record_distribution(
+            payload["distribution"],
+            field="artifact distribution",
+        ),
+        version=_record_version(payload["version"], field="artifact version"),
+        path=_record_string(payload["path"], field="artifact path"),
+        sha256=digest,
+        requires_dist=_record_strings(
+            payload["requires_dist"],
+            field="artifact requirements",
+        ),
+    )
+
+
+def _decode_verification(value: object) -> PackageShapeVerification:
+    payload = _record_object(
+        value,
+        frozenset(
+            {
+                "core_distribution",
+                "core_version",
+                "absent_core_distributions",
+                "memory_provider_cardinality",
+                "memory_version",
+                "residual_memory",
+            }
+        ),
+        field="package-shape verification",
+    )
+    memory_version = payload["memory_version"]
+    if memory_version is not None:
+        memory_version = _record_version(
+            memory_version,
+            field="verified Memory version",
+        )
+    return PackageShapeVerification(
+        core_distribution=_record_distribution(
+            payload["core_distribution"],
+            field="verified core distribution",
+        ),
+        core_version=_record_version(
+            payload["core_version"],
+            field="verified core version",
+        ),
+        absent_core_distributions=tuple(
+            _record_distribution(item, field="absent core distribution")
+            for item in _record_list(
+                payload["absent_core_distributions"],
+                field="absent core distributions",
+            )
+        ),
+        memory_provider_cardinality=_record_int(
+            payload["memory_provider_cardinality"],
+            field="Memory provider cardinality",
+        ),
+        memory_version=memory_version,
+        residual_memory=_record_bool(
+            payload["residual_memory"],
+            field="verified residual Memory",
+        ),
+    )
+
+
+def _plan_to_record(
+    plan: ResolvedRollbackPlan | ResolvedRollbackPlanRecord,
+) -> ResolvedRollbackPlanRecord:
+    if isinstance(plan, ResolvedRollbackPlanRecord):
+        return plan
+    if not isinstance(plan, ResolvedRollbackPlan):
+        raise PackageShapeRecordError("resolved rollback plan has an unsupported type")
+    return ResolvedRollbackPlanRecord(
+        captured=_captured_to_record(plan.captured),
+        requirements=plan.requirements,
+        artifacts=tuple(
+            StagedArtifactRecord(
+                distribution=item.distribution,
+                version=item.version,
+                path=str(item.path),
+                sha256=item.sha256,
+                requires_dist=item.requires_dist,
+            )
+            for item in plan.artifacts
+        ),
+        staging_dir=str(plan.staging_dir),
+        uninstall_distributions=plan.uninstall_distributions,
+        verification=plan.verification,
+    )
+
+
+def _validate_plan_record(record: ResolvedRollbackPlanRecord) -> None:
+    _validate_captured_record(record.captured)
+    if not record.requirements or not record.artifacts:
+        raise PackageShapeRecordError("resolved rollback record has an empty closure")
+    requirement_keys = {
+        (item.distribution, item.version) for item in record.requirements
+    }
+    artifact_keys = {(item.distribution, item.version) for item in record.artifacts}
+    if (
+        len(requirement_keys) != len(record.requirements)
+        or not requirement_keys <= artifact_keys
+    ):
+        raise PackageShapeRecordError("resolved rollback record has an inconsistent closure")
+    expected_uninstalls = tuple(
+        sorted((*CORE_DISTRIBUTION_NAMES, MEMORY_PACKAGE_NAME))
+    )
+    if record.uninstall_distributions != expected_uninstalls:
+        raise PackageShapeRecordError("resolved rollback record has an unknown uninstall set")
+    captured = record.captured
+    expected_verification = PackageShapeVerification(
+        core_distribution=captured.core_provider.name,
+        core_version=captured.core_provider.version,
+        absent_core_distributions=tuple(
+            sorted(CORE_DISTRIBUTION_NAMES - {captured.core_provider.name})
+        ),
+        memory_provider_cardinality=len(captured.memory_providers),
+        memory_version=(
+            captured.memory_providers[0].version
+            if captured.memory_providers
+            else None
+        ),
+        residual_memory=captured.residual_memory,
+    )
+    if record.verification != expected_verification:
+        raise PackageShapeRecordError("resolved rollback verification is inconsistent")
+
+
+def encode_resolved_rollback_plan_record(
+    plan: ResolvedRollbackPlan | ResolvedRollbackPlanRecord,
+) -> dict[str, object]:
+    """Encode a plan as data that cannot itself authorize execution."""
+
+    record = _plan_to_record(plan)
+    _validate_plan_record(record)
+    return {
+        "schema_version": PACKAGE_SHAPE_RECORD_SCHEMA_VERSION,
+        "record_type": "resolved_rollback_plan",
+        "plan": {
+            "captured": encode_captured_package_shape_record(record.captured),
+            "requirements": [
+                {
+                    "distribution": item.distribution,
+                    "version": item.version,
+                }
+                for item in record.requirements
+            ],
+            "artifacts": [
+                {
+                    "distribution": item.distribution,
+                    "version": item.version,
+                    "path": item.path,
+                    "sha256": item.sha256,
+                    "requires_dist": list(item.requires_dist),
+                }
+                for item in record.artifacts
+            ],
+            "staging_dir": record.staging_dir,
+            "uninstall_distributions": list(record.uninstall_distributions),
+            "verification": {
+                "core_distribution": record.verification.core_distribution,
+                "core_version": record.verification.core_version,
+                "absent_core_distributions": list(
+                    record.verification.absent_core_distributions
+                ),
+                "memory_provider_cardinality": (
+                    record.verification.memory_provider_cardinality
+                ),
+                "memory_version": record.verification.memory_version,
+                "residual_memory": record.verification.residual_memory,
+            },
+        },
+    }
+
+
+def decode_resolved_rollback_plan_record(value: object) -> ResolvedRollbackPlanRecord:
+    """Decode plan data without constructing an executable rollback plan."""
+
+    envelope = _record_object(
+        value,
+        frozenset({"schema_version", "record_type", "plan"}),
+        field="resolved rollback record",
+    )
+    _record_schema(envelope)
+    if envelope["record_type"] != "resolved_rollback_plan":
+        raise PackageShapeRecordError("resolved rollback record type is unsupported")
+    plan = _record_object(
+        envelope["plan"],
+        frozenset(
+            {
+                "captured",
+                "requirements",
+                "artifacts",
+                "staging_dir",
+                "uninstall_distributions",
+                "verification",
+            }
+        ),
+        field="resolved rollback plan",
+    )
+    record = ResolvedRollbackPlanRecord(
+        captured=decode_captured_package_shape_record(plan["captured"]),
+        requirements=tuple(
+            _decode_requirement(item)
+            for item in _record_list(
+                plan["requirements"],
+                field="rollback requirements",
+            )
+        ),
+        artifacts=tuple(
+            _decode_artifact(item)
+            for item in _record_list(plan["artifacts"], field="staged artifacts")
+        ),
+        staging_dir=_record_string(
+            plan["staging_dir"],
+            field="staging directory",
+        ),
+        uninstall_distributions=tuple(
+            _record_distribution(item, field="uninstall distribution")
+            for item in _record_list(
+                plan["uninstall_distributions"],
+                field="uninstall distributions",
+            )
+        ),
+        verification=_decode_verification(plan["verification"]),
+    )
+    _validate_plan_record(record)
+    return record
 
 
 def _parsed_memory_requirements(provider: DistributionProvider) -> tuple[Requirement, ...]:
@@ -673,17 +1205,27 @@ def resolve_rollback_plan(
 
 __all__ = [
     "CapturedPackageShape",
+    "CapturedPackageShapeRecord",
     "DistributionProvider",
+    "DistributionProviderRecord",
     "DuplicateDistributionProviderError",
     "ExactRequirement",
+    "PACKAGE_SHAPE_RECORD_SCHEMA_VERSION",
     "PackageShapeError",
+    "PackageShapeRecordError",
     "PackageShapeVerification",
     "ReleaseFamily",
     "ResolvedRollbackPlan",
+    "ResolvedRollbackPlanRecord",
     "RollbackResolutionError",
     "StagedArtifact",
+    "StagedArtifactRecord",
     "capture_installed_package_shape",
     "capture_package_shape",
+    "decode_captured_package_shape_record",
+    "decode_resolved_rollback_plan_record",
+    "encode_captured_package_shape_record",
+    "encode_resolved_rollback_plan_record",
     "inspect_installed_distribution_providers",
     "resolve_rollback_plan",
 ]
