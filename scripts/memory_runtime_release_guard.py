@@ -28,12 +28,20 @@ from packaging.requirements import InvalidRequirement, Requirement
 from packaging.version import InvalidVersion, Version
 
 try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 project support.
+    import tomli as tomllib
+
+try:
     from scripts.release_package_version import package_version_from_release_tag
 except ModuleNotFoundError:  # Direct execution adds scripts/, not the repository root.
     from release_package_version import package_version_from_release_tag
 
 RELEASE_DOWNLOAD_ROOT = "https://github.com/avibe-bot/avibe/releases/download"
 LAST_LEGACY_RELEASE_VERSION = Version("3.0.14rc2")
+PROJECT_REQUIRES_PYTHON = tomllib.loads(
+    (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+)["project"]["requires-python"]
 EXPECTED_EVEROS_VERSION = "1.2.3"
 EXPECTED_PYTHON_VERSION = "3.12.12"
 EXPECTED_LOCK_SHA256 = "e6acc17e4c0969563d380326e90134965af0822259bb4a9adb4d54433e9737fe"
@@ -237,6 +245,20 @@ def _sdist_archive(path: Path) -> PackageArchive:
     return PackageArchive(path, _metadata(files["PKG-INFO"], path.name), files)
 
 
+def _installed_files(package: PackageArchive) -> dict[str, bytes]:
+    if package.path.suffix != ".whl":
+        return package.files
+    installed: dict[str, bytes] = {}
+    for name, content in package.files.items():
+        parts = PurePosixPath(name).parts
+        if len(parts) >= 3 and parts[0].endswith(".data") and parts[1] in {"purelib", "platlib"}:
+            name = PurePosixPath(*parts[2:]).as_posix()
+        if name in installed:
+            raise ReleaseAssetError(f"wheel has colliding install paths: {package.path.name}")
+        installed[name] = content
+    return installed
+
+
 def _requirements_for(metadata: PackageMetadata, name: str) -> tuple[str, ...]:
     expected = _canonical_name(name)
     matches = []
@@ -288,9 +310,9 @@ def discover_release_manifest(
     core = _wheel_archive(core_paths[0])
     if core.metadata.name != "avibe-os":
         raise ReleaseAssetError("core wheel metadata Name must be avibe-os")
-    core_manifest = core.files.get(MEMORY_MANIFEST_PATH)
+    core_manifest = _installed_files(core).get(MEMORY_MANIFEST_PATH)
     memory = _wheel_archive(memory_paths[0]) if memory_paths else None
-    memory_manifest = memory.files.get(MEMORY_MANIFEST_PATH) if memory else None
+    memory_manifest = _installed_files(memory).get(MEMORY_MANIFEST_PATH) if memory else None
     if memory and memory.metadata.name != "avibe-memory":
         raise ReleaseAssetError("Memory wheel metadata Name must be avibe-memory")
     if core_manifest and memory_manifest:
@@ -318,7 +340,7 @@ def _assert_metadata_parity(wheel: PackageArchive, sdist: PackageArchive, name: 
 
 
 def _owned_content(package: PackageArchive, prefix: str) -> dict[str, bytes]:
-    return {name: value for name, value in package.files.items() if name.startswith(prefix)}
+    return {name: value for name, value in _installed_files(package).items() if name.startswith(prefix)}
 
 
 def _assert_transition_packages(
@@ -349,11 +371,16 @@ def _assert_transition_packages(
         or core_version not in reverse_requirement.specifier
     ):
         raise ReleaseAssetError("Memory avibe-os dependency must accept the exact core version")
-    if core_wheel.metadata.requires_python != memory_wheel.metadata.requires_python:
-        raise ReleaseAssetError("core and Memory Requires-Python metadata differ")
+    if (
+        core_wheel.metadata.requires_python != PROJECT_REQUIRES_PYTHON
+        or memory_wheel.metadata.requires_python != PROJECT_REQUIRES_PYTHON
+    ):
+        raise ReleaseAssetError(
+            f"core and Memory Requires-Python must match the project range {PROJECT_REQUIRES_PYTHON}"
+        )
 
     for package in (core_wheel, core_sdist):
-        if _owned_content(package, "avibe_memory/") or MEMORY_MANIFEST_PATH in package.files:
+        if _owned_content(package, "avibe_memory/") or MEMORY_MANIFEST_PATH in _installed_files(package):
             raise ReleaseAssetError(f"core artifact owns Memory content: {package.path.name}")
     wheel_implementation = _owned_content(memory_wheel, "avibe_memory/")
     sdist_implementation = _owned_content(memory_sdist, "avibe_memory/")
@@ -361,8 +388,8 @@ def _assert_transition_packages(
         raise ReleaseAssetError("Memory artifact is missing required implementation files")
     if wheel_implementation != sdist_implementation:
         raise ReleaseAssetError("Memory wheel and sdist implementation content differ")
-    wheel_manifest = memory_wheel.files.get(MEMORY_MANIFEST_PATH)
-    sdist_manifest = memory_sdist.files.get(MEMORY_MANIFEST_PATH)
+    wheel_manifest = _installed_files(memory_wheel).get(MEMORY_MANIFEST_PATH)
+    sdist_manifest = _installed_files(memory_sdist).get(MEMORY_MANIFEST_PATH)
     if wheel_manifest is None or wheel_manifest != sdist_manifest:
         raise ReleaseAssetError("Memory wheel and sdist manifest content differ")
     return version
@@ -400,9 +427,11 @@ def _extract_sdist(sdist: Path, destination: Path) -> Path:
 
 
 def rebuild_sdist_wheel(sdist: Path, output_dir: Path) -> Path:
-    extract_dir = output_dir / f"source-{sdist.stem}"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    attempt_dir = Path(tempfile.mkdtemp(prefix="attempt-", dir=output_dir))
+    extract_dir = attempt_dir / "source"
     project_root = _extract_sdist(sdist, extract_dir)
-    wheel_dir = output_dir / f"wheel-{sdist.stem}"
+    wheel_dir = attempt_dir / "wheel"
     wheel_dir.mkdir(parents=True)
     environment = {**os.environ, "PYTHONPATH": ""}
     result = subprocess.run(
