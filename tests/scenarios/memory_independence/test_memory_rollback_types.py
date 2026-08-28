@@ -7,7 +7,10 @@ import base64
 import csv
 import hashlib
 import io
+import json
+import os
 import subprocess
+import sys
 import zipfile
 from dataclasses import FrozenInstanceError, dataclass
 from pathlib import Path
@@ -471,11 +474,11 @@ def test_memory_indep_019_local_resolution_only_downloads(
         requires_dist=(OPTIONAL_MEMORY_REQUIREMENT,),
     )
     _wheel(wheelhouse, "avibe-memory", "3.0.15")
-    commands: list[tuple[str, ...]] = []
+    calls: list[tuple[tuple[str, ...], dict[str, str]]] = []
     real_run = subprocess.run
 
     def record_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        commands.append(tuple(command))
+        calls.append((tuple(command), kwargs["env"]))
         return real_run(command, **kwargs)
 
     monkeypatch.setattr("vibe.package_shape.subprocess.run", record_run)
@@ -484,42 +487,93 @@ def test_memory_indep_019_local_resolution_only_downloads(
         wheelhouse=wheelhouse,
         staging_dir=tmp_path / "staging",
     )
-    assert len(commands) == 1
-    assert commands[0][1:4] == ("-m", "pip", "download")
-    assert "install" not in commands[0]
+    assert len(calls) == 2
+    snapshot_command, snapshot_env = calls[0]
+    pip_command, pip_env = calls[1]
+    assert snapshot_command[0] == pip_command[0] == os.path.normcase(os.path.abspath(sys.executable))
+    assert snapshot_command[1] == "-c"
+    assert pip_command[1:4] == ("-m", "pip", "download")
+    assert snapshot_env == {key: value for key, value in pip_env.items() if key != "PIP_FIND_LINKS"}
+    assert "install" not in pip_command
 
 
-def test_memory_indep_019_live_resolver_captures_marker_environment(
+@pytest.mark.parametrize("explicit_resolver", [False, True], ids=["default", "explicit"])
+def test_memory_indep_019_polluted_parent_cannot_change_snapshot_or_resolution(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    explicit_resolver: bool,
 ) -> None:
-    shape = _shape("3.0.14", memory_version=None)
     wheelhouse = tmp_path / "wheelhouse"
     wheelhouse.mkdir()
-    _wheel(wheelhouse, "avibe-os", "3.0.14", requires_dist=(OPTIONAL_MEMORY_REQUIREMENT,))
-    environment = {
-        "python_version": "3.12",
-        "python_full_version": "3.12.7",
-        "implementation_name": "cpython",
-        "implementation_version": "3.12.7",
-        "os_name": "posix",
-        "platform_machine": "fixture-machine",
-        "platform_python_implementation": "CPython",
-        "platform_release": "fixture-release",
-        "platform_system": "FixtureOS",
-        "platform_version": "fixture-version",
-        "sys_platform": "fixture",
-    }
-    monkeypatch.setattr("vibe.package_shape.default_environment", lambda: environment)
+    _wheel(
+        wheelhouse,
+        "avibe-os",
+        "3.0.14",
+        requires_dist=(
+            OPTIONAL_MEMORY_REQUIREMENT,
+            'shape-helper==1; platform_machine == "polluted-machine"',
+        ),
+    )
+    hook_dir = tmp_path / "hook"
+    hook_dir.mkdir()
+    (hook_dir / "sitecustomize.py").write_text(
+        'import platform\nplatform.machine = lambda: "polluted-machine"\n',
+        encoding="utf-8",
+    )
+    script = """
+import json
+import platform
+import sys
+from pathlib import Path
+from vibe.package_shape import DistributionProvider, capture_package_shape, resolve_rollback_plan
+from vibe.runtime import ServiceLauncher
 
-    plan = resolve_rollback_plan(
-        shape,
-        wheelhouse=wheelhouse,
-        staging_dir=tmp_path / "staging",
+shape = capture_package_shape(
+    core_version="3.0.14",
+    launcher=ServiceLauncher(python="/opt/avibe/bin/python", main="/opt/avibe/vibe/service_main.py"),
+    providers=(DistributionProvider(
+        name="avibe-os",
+        version="3.0.14",
+        provider_id="/avibe-os-3.0.14.dist-info",
+        requires_dist=(
+            'avibe-memory>=3.0.14.dev0,<3.1; extra == "memory"',
+            'shape-helper==1; platform_machine == "polluted-machine"',
+        ),
+    ),),
+)
+plan = resolve_rollback_plan(
+    shape,
+    wheelhouse=Path(sys.argv[1]),
+    staging_dir=Path(sys.argv[2]),
+    resolver_python=sys.executable if sys.argv[3] == "explicit" else None,
+)
+print(json.dumps({
+    "parent_machine": platform.machine(),
+    "snapshot_machine": plan.resolver_environment.platform_machine,
+    "artifacts": [artifact.distribution for artifact in plan.artifacts],
+}))
+"""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            script,
+            str(wheelhouse),
+            str(tmp_path / "staging"),
+            "explicit" if explicit_resolver else "default",
+        ],
+        cwd=ROOT,
+        env={**os.environ, "PYTHONPATH": str(hook_dir)},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
     )
 
-    assert plan.resolver_environment.python_full_version == "3.12.7"
-    assert plan.resolver_environment.platform_machine == "fixture-machine"
+    assert result.returncode == 0, result.stderr
+    observed = json.loads(result.stdout)
+    assert observed["parent_machine"] == "polluted-machine"
+    assert observed["snapshot_machine"] != "polluted-machine"
+    assert observed["artifacts"] == ["avibe-os"]
 
 
 def test_memory_indep_019_resolved_plan_constructor_cannot_be_bypassed() -> None:

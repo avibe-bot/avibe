@@ -24,6 +24,7 @@ from vibe.package_shape import (
     ResolverEnvironment,
     ResolvedRollbackPlan,
     ResolvedRollbackPlanRecord,
+    RollbackResolutionError,
     StagedArtifact,
     decode_captured_package_shape_record,
     decode_resolved_rollback_plan_record,
@@ -309,8 +310,8 @@ def test_memory_indep_019_dependency_closure_uses_only_persisted_snapshot(
     _append_artifact(payload, tmp_path, "shape-leaf", "2")
     monkeypatch.setattr(
         package_shape,
-        "default_environment",
-        lambda: pytest.fail("decode consulted the current resolver environment"),
+        "_capture_resolver_environment",
+        lambda *_args: pytest.fail("decode consulted the current resolver environment"),
     )
 
     decoded = decode_resolved_rollback_plan_record(payload)
@@ -365,7 +366,7 @@ def test_memory_indep_019_explicit_resolver_snapshot_uses_only_stdlib(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     environment_dir = tmp_path / "resolver"
-    venv.EnvBuilder(with_pip=False).create(environment_dir)
+    venv.EnvBuilder(with_pip=False, symlinks=os.name != "nt").create(environment_dir)
     executable = environment_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     hook_dir = tmp_path / "hook"
     hook_dir.mkdir()
@@ -376,6 +377,37 @@ def test_memory_indep_019_explicit_resolver_snapshot_uses_only_stdlib(
 
     assert environment.python_version
     assert environment.implementation_name
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("executable", "/different/python"), ("python_full_version", "3.11.8")],
+)
+def test_memory_indep_019_resolver_snapshot_rejects_interpreter_identity_mismatch(
+    field: str,
+    value: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver_python = "/expected/python"
+    payload: dict[str, object] = {
+        "interpreter": {
+            "executable": resolver_python,
+            "python_version": RESOLVER_ENVIRONMENT_VALUES["python_version"],
+            "python_full_version": RESOLVER_ENVIRONMENT_VALUES["python_full_version"],
+            "implementation_name": RESOLVER_ENVIRONMENT_VALUES["implementation_name"],
+            "implementation_version": RESOLVER_ENVIRONMENT_VALUES["implementation_version"],
+        },
+        "environment": RESOLVER_ENVIRONMENT_VALUES,
+    }
+    payload["interpreter"][field] = value  # type: ignore[index]
+    monkeypatch.setattr(
+        package_shape.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=json.dumps(payload)),
+    )
+
+    with pytest.raises(RollbackResolutionError, match="snapshot failed"):
+        package_shape._capture_resolver_environment(resolver_python)
 
 
 @pytest.mark.parametrize(

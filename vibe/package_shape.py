@@ -13,6 +13,10 @@ inherit path constraints.
 
 Identity precedes semantics, snapshots precede evaluation, validation has one
 DTO-construction source, and every policy decision names its persisted source.
+
+Marker snapshots and pip resolution are always subprocess observations using
+one normalized interpreter and one sanitized-environment constructor. The
+parent process is never a resolver marker source.
 """
 
 from __future__ import annotations
@@ -36,7 +40,7 @@ from types import UnionType
 from typing import Any, Union, get_args, get_origin, get_type_hints
 
 from packaging.requirements import InvalidRequirement, Requirement
-from packaging.markers import UndefinedComparison, UndefinedEnvironmentName, default_environment
+from packaging.markers import UndefinedComparison, UndefinedEnvironmentName
 from packaging.utils import (
     InvalidName,
     InvalidWheelFilename,
@@ -1245,13 +1249,15 @@ import os
 import platform
 import sys
 
+executable = os.path.normcase(os.path.abspath(sys.executable))
+python_full_version = platform.python_version()
 version = sys.implementation.version
 implementation_version = f"{version.major}.{version.minor}.{version.micro}"
 if version.releaselevel != "final":
     implementation_version += version.releaselevel[0] + str(version.serial)
-print(json.dumps({
+environment = {
     "python_version": ".".join(platform.python_version_tuple()[:2]),
-    "python_full_version": platform.python_version(),
+    "python_full_version": python_full_version,
     "implementation_name": sys.implementation.name,
     "implementation_version": implementation_version,
     "os_name": os.name,
@@ -1261,6 +1267,15 @@ print(json.dumps({
     "platform_system": platform.system(),
     "platform_version": platform.version(),
     "sys_platform": sys.platform,
+}
+print(json.dumps({
+    "interpreter": {
+        "executable": executable,
+        **{key: environment[key] for key in (
+            "python_version", "python_full_version", "implementation_name", "implementation_version"
+        )},
+    },
+    "environment": environment,
 }))
 """
 
@@ -1278,31 +1293,47 @@ def _resolver_subprocess_environment(*, wheelhouse: Path | None = None) -> dict[
     return environment
 
 
-def _capture_resolver_environment(resolver_python: str | None) -> ResolverEnvironment:
+def _normalize_resolver_python(resolver_python: str | None) -> str:
+    value = resolver_python or sys.executable
+    if not value or "\0" in value:
+        raise RollbackResolutionError("resolver interpreter path is invalid")
+    return os.path.normcase(os.path.abspath(value))
+
+
+def _capture_resolver_environment(resolver_python: str) -> ResolverEnvironment:
     try:
-        if resolver_python is None:
-            payload: object = default_environment()
-        else:
-            result = subprocess.run(
-                [
-                    resolver_python,
-                    "-c",
-                    _RESOLVER_ENVIRONMENT_SNAPSHOT_SCRIPT,
-                ],
-                env=_resolver_subprocess_environment(),
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=30,
+        result = subprocess.run(
+            [resolver_python, "-c", _RESOLVER_ENVIRONMENT_SNAPSHOT_SCRIPT],
+            env=_resolver_subprocess_environment(),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            raise RollbackResolutionError("resolver environment snapshot failed")
+        payload = json.loads(result.stdout)
+        identity_fields = ("python_version", "python_full_version", "implementation_name", "implementation_version")
+        if type(payload) is not dict or frozenset(payload) != {"interpreter", "environment"}:
+            raise PackageShapeRecordError("resolver snapshot fields are invalid")
+        identity = payload["interpreter"]
+        if (
+            type(identity) is not dict
+            or frozenset(identity) != {"executable", *identity_fields}
+            or any(
+                type(identity[field]) is not str or not identity[field] for field in ("executable", *identity_fields)
             )
-            if result.returncode != 0:
-                raise RollbackResolutionError("resolver environment snapshot failed")
-            payload = json.loads(result.stdout)
+        ):
+            raise PackageShapeRecordError("resolver interpreter identity is invalid")
         environment = _decode_record_dto(
-            payload,
+            payload["environment"],
             ResolverEnvironment,
             field="resolver environment",
         )
+        if identity["executable"] != resolver_python or any(
+            identity[field] != getattr(environment, field) for field in identity_fields
+        ):
+            raise PackageShapeRecordError("resolver interpreter identity disagrees with its marker snapshot")
     except (json.JSONDecodeError, OSError, subprocess.SubprocessError, PackageShapeError) as exc:
         raise RollbackResolutionError("resolver environment snapshot failed") from exc
     assert isinstance(environment, ResolverEnvironment)
@@ -1318,6 +1349,7 @@ def resolve_rollback_plan(
 ) -> ResolvedRollbackPlan:
     """Resolve exact requirements from one local wheelhouse without installing."""
 
+    resolver_python = _normalize_resolver_python(resolver_python)
     requirements = _rollback_requirements(captured)
     resolver_environment = _capture_resolver_environment(resolver_python)
     wheelhouse = Path(wheelhouse).resolve()
@@ -1329,7 +1361,7 @@ def resolve_rollback_plan(
     staging_dir.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{staging_dir.name}-", dir=staging_dir.parent))
     command_prefix = [
-        resolver_python or sys.executable,
+        resolver_python,
         "-m",
         "pip",
         "download",
