@@ -4,12 +4,15 @@ import gzip
 import hashlib
 import io
 import json
+import struct
 import subprocess
 import sys
 import tarfile
 from pathlib import Path
+import zipfile
 
 import pytest
+from packaging import tags as packaging_tags
 
 from scripts import memory_runtime_release_guard as guard
 from scripts.build_memory_runtime import LOCK_SHA256 as RUNTIME_LOCK_SHA256
@@ -44,6 +47,7 @@ def _manifest(
     release_tag: str = "v3.1.0",
     requires_python: str = ">=3.10",
     supported_python_versions: tuple[str, ...] = ("3.10", "3.11", "3.12"),
+    wheel_tag: object = "py3-none-any",
 ) -> tuple[Path, dict[str, bytes]]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     tag = release_tag
@@ -79,6 +83,7 @@ def _manifest(
             "release_family": "3.1",
             "requires_python": requires_python,
             "supported_python_versions": list(supported_python_versions),
+            "wheel_tag": wheel_tag,
             "namespace_policy_version": 1,
         },
         "archives": archives,
@@ -134,6 +139,98 @@ def _verify_static(
     )
 
 
+def _wheel(
+    path: Path,
+    name: str,
+    *,
+    metadata_name: str | None = None,
+    metadata_distribution_version: str = "3.1.0",
+    metadata_version: str | None = "2.4",
+    requires_dist: tuple[str, ...] = (),
+    dist_info: str | None = None,
+    extra_dist_info: bool = False,
+    include_metadata: bool = True,
+    include_wheel: bool = True,
+    wheel_version: str = "1.0",
+    root_is_purelib: tuple[str, ...] = ("true",),
+    wheel_tags: tuple[str, ...] = ("py3-none-any",),
+    wheel_trailer: str = "\n",
+    duplicate_control: str | None = None,
+) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    dist_info = dist_info or f"{name.replace('-', '_')}-3.1.0.dist-info"
+    metadata_header = "" if metadata_version is None else f"Metadata-Version: {metadata_version}\n"
+    metadata = (
+        f"{metadata_header}Name: {metadata_name or name}\n"
+        f"Version: {metadata_distribution_version}\nRequires-Python: >=3.10\n"
+        + "".join(f"Requires-Dist: {requirement}\n" for requirement in requires_dist)
+        + "\n"
+    ).encode()
+    wheel = (
+        f"Wheel-Version: {wheel_version}\nGenerator: gate5a-test\n"
+        + "".join(f"Root-Is-Purelib: {value}\n" for value in root_is_purelib)
+        + "".join(f"Tag: {value}\n" for value in wheel_tags)
+        + wheel_trailer
+    ).encode()
+    files: dict[str, bytes] = {}
+    if include_metadata:
+        files[f"{dist_info}/METADATA"] = metadata
+    if include_wheel:
+        files[f"{dist_info}/WHEEL"] = wheel
+    if extra_dist_info:
+        files["other-3.1.0.dist-info/METADATA"] = metadata
+    with zipfile.ZipFile(path, "w") as archive:
+        for member, content in files.items():
+            archive.writestr(member, content)
+        if duplicate_control is not None:
+            member = f"{dist_info}/{duplicate_control}"
+            archive.writestr(member, files[member])
+    return path
+
+
+def _verify_wheels(
+    tmp_path: Path,
+    manifest: Path,
+    *,
+    filename_tag: str = "py3-none-any",
+    core_options: dict[str, object] | None = None,
+    memory_options: dict[str, object] | None = None,
+) -> tuple[guard.PackageMetadata, guard.PackageMetadata, guard.PackageReleasePolicy]:
+    core = _wheel(
+        tmp_path / f"avibe_os-3.1.0-{filename_tag}.whl",
+        "avibe-os",
+        requires_dist=("avibe-memory==3.1.0",),
+        **(core_options or {}),
+    )
+    memory = _wheel(
+        tmp_path / f"avibe_memory-3.1.0-{filename_tag}.whl",
+        "avibe-memory",
+        requires_dist=("avibe-os==3.1.0",),
+        **(memory_options or {}),
+    )
+    manifest_bytes = manifest.read_bytes()
+    return guard.verify_wheel_transition(
+        core,
+        memory,
+        release_tag=json.loads(manifest_bytes)["release_tag"],
+        manifest_bytes=manifest_bytes,
+        expected_manifest=manifest_bytes,
+    )
+
+
+def _make_first_zip_member_unreadable(wheel: Path, *, encrypted: bool) -> None:
+    content = bytearray(wheel.read_bytes())
+    local = content.index(b"PK\x03\x04")
+    central = content.index(b"PK\x01\x02")
+    if encrypted:
+        for offset in (local + 6, central + 8):
+            struct.pack_into("<H", content, offset, struct.unpack_from("<H", content, offset)[0] | 1)
+    else:
+        struct.pack_into("<H", content, local + 8, 99)
+        struct.pack_into("<H", content, central + 10, 99)
+    wheel.write_bytes(content)
+
+
 @pytest.mark.parametrize(
     ("section", "field", "value"),
     [
@@ -148,6 +245,7 @@ def _verify_static(
         ("package_policy", "supported_python_versions", ["3.11+local"]),
         ("package_policy", "supported_python_versions", ["3.11.post1"]),
         ("package_policy", "supported_python_versions", ["3.11.dev1"]),
+        ("package_policy", "wheel_tag", True),
         ("package_policy", "namespace_policy_version", True),
     ],
 )
@@ -189,6 +287,17 @@ def test_package_policy_accepts_declared_requires_python_literal(
 
     assert policy.requires_python == ">=3.10"
     assert policy.supported_python_versions == guard.PACKAGE_POLICY_SUPPORTED_PYTHON_VERSIONS
+    assert policy.wheel_tag == "py3-none-any"
+
+
+def test_package_policy_rejects_undeclared_wheel_tag(tmp_path: Path) -> None:
+    manifest, _ = _manifest(tmp_path, wheel_tag="py3-none-manylinux_2_17_x86_64")
+    manifest_bytes = manifest.read_bytes()
+
+    with pytest.raises(guard.ManifestPolicyError, match="wheel_tag"):
+        guard.load_package_release_policy(
+            manifest_bytes, expected_manifest=manifest_bytes, release_tag="v3.1.0"
+        )
 
 
 @pytest.mark.parametrize(
@@ -257,6 +366,205 @@ def test_requirement_classification_keeps_wildcard_equality_non_exact(tmp_path: 
         _verify_static(manifest, memory_requirement="avibe-os>=4")
     with pytest.raises(guard.ReleaseAssetError, match="exact avibe-os"):
         _verify_static(manifest, memory_requirement="avibe-os>=0")
+
+
+def test_wheel_transition_checks_manifest_identity_before_opening_wheels(tmp_path: Path) -> None:
+    """MEMORY-INDEP-022: manifest identity precedes wheel parsing."""
+    manifest, _ = _manifest(tmp_path)
+
+    with pytest.raises(guard.ReleaseAssetError, match="does not match"):
+        guard.verify_wheel_transition(
+            tmp_path / "missing-core.whl",
+            tmp_path / "missing-memory.whl",
+            release_tag="v3.1.0",
+            manifest_bytes=b'{"unsupported_semantics":true}',
+            expected_manifest=manifest.read_bytes(),
+        )
+
+
+def test_wheel_transition_accepts_declared_control_metadata(tmp_path: Path) -> None:
+    """MEMORY-INDEP-023: wheel controls bind to declared release policy."""
+    manifest, _ = _manifest(tmp_path)
+
+    core, memory, policy = _verify_wheels(tmp_path / "wheels", manifest)
+
+    assert (core.name, memory.name) == ("avibe-os", "avibe-memory")
+    assert policy.wheel_tag == "py3-none-any"
+
+
+@pytest.mark.parametrize(
+    "core_options",
+    [
+        {"metadata_name": "other"},
+        {"metadata_distribution_version": "3.1.1"},
+        {"dist_info": "other-3.1.0.dist-info"},
+        {"extra_dist_info": True},
+    ],
+)
+def test_wheel_binds_filename_metadata_and_top_level_dist_info(
+    tmp_path: Path, core_options: dict[str, object]
+) -> None:
+    manifest, _ = _manifest(tmp_path)
+
+    with pytest.raises(guard.ReleaseAssetError, match="identity|control structure"):
+        _verify_wheels(tmp_path / "wheels", manifest, core_options=core_options)
+
+
+@pytest.mark.parametrize("missing", ["metadata", "wheel"])
+def test_wheel_requires_control_files(tmp_path: Path, missing: str) -> None:
+    manifest, _ = _manifest(tmp_path)
+    options = {f"include_{missing}": False}
+
+    with pytest.raises(guard.ReleaseAssetError, match="control policy"):
+        _verify_wheels(tmp_path / "wheels", manifest, core_options=options)
+
+
+@pytest.mark.parametrize("control", ["METADATA", "WHEEL"])
+def test_wheel_rejects_duplicate_control_files(tmp_path: Path, control: str) -> None:
+    manifest, _ = _manifest(tmp_path)
+
+    with pytest.warns(UserWarning, match="Duplicate name"):
+        with pytest.raises(guard.ReleaseAssetError, match="control"):
+            _verify_wheels(
+                tmp_path / control,
+                manifest,
+                core_options={"duplicate_control": control},
+            )
+
+
+@pytest.mark.parametrize(
+    ("wheel_version", "accepted"),
+    [("1.0", True), ("1.1", True), ("1", False), ("1.foo", False), ("2.0", False)],
+)
+def test_wheel_version_is_complete_and_supported(
+    tmp_path: Path, wheel_version: str, accepted: bool
+) -> None:
+    manifest, _ = _manifest(tmp_path)
+    verify = lambda: _verify_wheels(
+        tmp_path / wheel_version.replace(".", "-"),
+        manifest,
+        core_options={"wheel_version": wheel_version},
+    )
+
+    if accepted:
+        verify()
+    else:
+        with pytest.raises(guard.ReleaseAssetError, match="control policy"):
+            verify()
+
+
+@pytest.mark.parametrize("values", [(), ("false",), ("true", "true")])
+def test_wheel_requires_exactly_one_purelib_declaration(
+    tmp_path: Path, values: tuple[str, ...]
+) -> None:
+    manifest, _ = _manifest(tmp_path)
+
+    with pytest.raises(guard.ReleaseAssetError, match="control policy"):
+        _verify_wheels(
+            tmp_path / "wheels", manifest, core_options={"root_is_purelib": values}
+        )
+
+
+@pytest.mark.parametrize(
+    ("metadata_version", "accepted"),
+    [(None, False), ("2.3", False), ("999.0", False), ("2.4", True)],
+)
+def test_wheel_uses_packaging_validated_core_metadata(
+    tmp_path: Path, metadata_version: str | None, accepted: bool
+) -> None:
+    manifest, _ = _manifest(tmp_path)
+    verify = lambda: _verify_wheels(
+        tmp_path / str(metadata_version),
+        manifest,
+        core_options={"metadata_version": metadata_version},
+    )
+
+    if accepted:
+        verify()
+    else:
+        with pytest.raises(guard.ReleaseAssetError, match="control metadata|control policy"):
+            verify()
+
+
+@pytest.mark.parametrize(
+    "wheel_trailer",
+    ["not a valid header\n", "\nunexpected body\n"],
+    ids=["malformed-header", "body"],
+)
+def test_wheel_rejects_malformed_parser_structure(
+    tmp_path: Path, wheel_trailer: str
+) -> None:
+    manifest, _ = _manifest(tmp_path)
+
+    with pytest.raises(guard.ReleaseAssetError, match="control policy"):
+        _verify_wheels(
+            tmp_path / "wheels",
+            manifest,
+            core_options={"wheel_trailer": wheel_trailer},
+        )
+
+
+def test_wheel_tags_bind_control_filename_and_declared_policy(tmp_path: Path) -> None:
+    manifest, _ = _manifest(tmp_path)
+    with pytest.raises(guard.ReleaseAssetError, match="control policy"):
+        _verify_wheels(
+            tmp_path / "control",
+            manifest,
+            core_options={"wheel_tags": ("cp312-cp312-linux_x86_64",)},
+        )
+    platform_tag = "py3-none-manylinux_2_17_x86_64"
+    with pytest.raises(guard.ReleaseAssetError, match="release policy"):
+        _verify_wheels(
+            tmp_path / "policy",
+            manifest,
+            filename_tag=platform_tag,
+            core_options={"wheel_tags": (platform_tag,)},
+            memory_options={"wheel_tags": (platform_tag,)},
+        )
+
+
+def test_wheel_policy_checks_every_declared_python_minor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, _ = _manifest(tmp_path)
+    calls: list[tuple[int, int]] = []
+    compatible_tags = packaging_tags.compatible_tags
+
+    def tracking_tags(python_version, interpreter=None, platforms=None):
+        calls.append(tuple(python_version))
+        return compatible_tags(python_version, interpreter, platforms)
+
+    monkeypatch.setattr(packaging_tags, "compatible_tags", tracking_tags)
+
+    _verify_wheels(tmp_path / "wheels", manifest)
+
+    assert calls == [(3, 10), (3, 11), (3, 12)] * 2
+
+
+def test_wheel_inspector_rejects_policy_without_declared_source(tmp_path: Path) -> None:
+    wheel = _wheel(tmp_path / "avibe_os-3.1.0-py3-none-any.whl", "avibe-os")
+    invented_policy = guard.PackageReleasePolicy(
+        ">=3.10", ("3.11+local",), "py3-none-any", 1
+    )
+
+    with pytest.raises(guard.ReleaseAssetError, match="inspection policy"):
+        guard.inspect_wheel(wheel, policy=invented_policy)
+
+
+@pytest.mark.parametrize("encrypted", [False, True], ids=["unsupported-compression", "encrypted"])
+def test_wheel_translates_unreadable_controls_to_asset_failure(
+    tmp_path: Path, encrypted: bool
+) -> None:
+    manifest, _ = _manifest(tmp_path)
+    manifest_bytes = manifest.read_bytes()
+    policy = guard.load_package_release_policy(
+        manifest_bytes, expected_manifest=manifest_bytes, release_tag="v3.1.0"
+    )
+    wheel = _wheel(tmp_path / "avibe_os-3.1.0-py3-none-any.whl", "avibe-os")
+    _make_first_zip_member_unreadable(wheel, encrypted=encrypted)
+
+    with pytest.raises(guard.ReleaseAssetError, match="cannot read wheel controls"):
+        guard.inspect_wheel(wheel, policy=policy)
 
 
 def test_existing_guard_commands_remain_stdlib_only(tmp_path: Path) -> None:
