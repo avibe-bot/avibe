@@ -429,7 +429,7 @@ def test_wheel_binds_filename_metadata_and_top_level_dist_info(
 ) -> None:
     manifest, _ = _manifest(tmp_path)
 
-    with pytest.raises(guard.ReleaseAssetError, match="identity|control structure"):
+    with pytest.raises(guard.ReleaseAssetError, match="identity|control structure|RECORD structure"):
         _verify_wheels(tmp_path / "wheels", manifest, core_options=core_options)
 
 
@@ -447,7 +447,7 @@ def test_wheel_rejects_duplicate_control_files(tmp_path: Path, control: str) -> 
     manifest, _ = _manifest(tmp_path)
 
     with pytest.warns(UserWarning, match="Duplicate name"):
-        with pytest.raises(guard.ReleaseAssetError, match="control"):
+        with pytest.raises(guard.ReleaseAssetError, match="control|archive structure"):
             _verify_wheels(
                 tmp_path / control,
                 manifest,
@@ -661,6 +661,43 @@ def test_wheel_record_hashes_use_unpadded_urlsafe_base64() -> None:
     assert not guard._valid_record_hash("sha256=" + "/" * 43)
 
 
+def test_wheel_rejects_raw_nul_member_name_before_zipfile_sanitization(
+    tmp_path: Path,
+) -> None:
+    manifest, _ = _manifest(tmp_path)
+    manifest_bytes = manifest.read_bytes()
+    policy = guard.load_package_release_policy(
+        manifest_bytes, expected_manifest=manifest_bytes, release_tag="v3.1.0"
+    )
+    wheel = _wheel(
+        tmp_path / "avibe_os-3.1.0-py3-none-any.whl",
+        "avibe-os",
+        extra_files={"evilXtail": b"x"},
+    )
+    wheel.write_bytes(wheel.read_bytes().replace(b"evilXtail", b"evil\x00tail"))
+
+    with zipfile.ZipFile(wheel) as archive:
+        member = next(info for info in archive.infolist() if info.filename == "evil")
+        assert member.orig_filename == "evil\x00tail"
+
+    with pytest.raises(guard.ReleaseAssetError, match="archive structure"):
+        guard.inspect_wheel(wheel, policy=policy)
+
+
+@pytest.mark.parametrize("ancestor", ["conflict", "Conflict"], ids=["exact", "casefold"])
+def test_wheel_rejects_file_and_descendant_topology(
+    tmp_path: Path, ancestor: str
+) -> None:
+    manifest, _ = _manifest(tmp_path)
+
+    with pytest.raises(guard.ReleaseAssetError, match="archive structure"):
+        _verify_wheels(
+            tmp_path / "wheels",
+            manifest,
+            core_options={"extra_files": {ancestor: b"x", "conflict/child": b"y"}},
+        )
+
+
 @pytest.mark.parametrize(
     "core_options",
     [
@@ -718,7 +755,7 @@ def test_wheel_archive_discards_payload_bytes_after_integrity_read(tmp_path: Pat
     dist_info = "avibe_os-3.1.0.dist-info"
 
     with zipfile.ZipFile(wheel) as archive:
-        retained = guard._validate_wheel_archive(archive, wheel, dist_info)
+        _, retained = guard._validate_wheel_archive(archive, wheel, dist_info)
 
     assert set(retained) == {f"{dist_info}/{name}" for name in ("METADATA", "WHEEL", "RECORD")}
 

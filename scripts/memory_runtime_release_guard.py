@@ -69,6 +69,15 @@ class _WheelControlPolicy:
     parser_body: str
 
 
+@dataclass(frozen=True)
+class _WheelArchiveEntry:
+    path: str
+    path_key: str
+    is_dir: bool
+    size: int
+    sha256: str
+
+
 _WHEEL_CONTROL_POLICY = _WheelControlPolicy(
     controls=(("METADATA", 1), ("WHEEL", 1)),
     wheel_version_major=1,
@@ -343,19 +352,37 @@ def _is_safe_wheel_path(value: str) -> bool:
     )
 
 
-def _read_wheel_member(
-    archive: zipfile.ZipFile, member: zipfile.ZipInfo, wheel: Path
-) -> bytes:
+def _inventory_wheel_member(
+    archive: zipfile.ZipFile,
+    member: zipfile.ZipInfo,
+    wheel: Path,
+    path_key: str,
+    *,
+    retain: bool,
+) -> tuple[_WheelArchiveEntry, bytes | None]:
     if member.file_size < 0 or member.file_size > MAX_WHEEL_MEMBER_BYTES:
         raise ReleaseAssetError(f"wheel member size is invalid: {wheel.name}")
+    digest = hashlib.sha256()
+    content = bytearray() if retain else None
+    size = 0
     try:
         with archive.open(member) as stream:
-            content = stream.read(MAX_WHEEL_MEMBER_BYTES + 1)
+            while chunk := stream.read(min(64 * 1024, MAX_WHEEL_MEMBER_BYTES + 1 - size)):
+                size += len(chunk)
+                if size > MAX_WHEEL_MEMBER_BYTES:
+                    raise ReleaseAssetError(f"wheel member size is invalid: {wheel.name}")
+                digest.update(chunk)
+                if content is not None:
+                    content.extend(chunk)
+    except ReleaseAssetError:
+        raise
     except Exception as exc:
         raise ReleaseAssetError(f"cannot read wheel member: {wheel.name}") from exc
-    if len(content) > MAX_WHEEL_MEMBER_BYTES or len(content) != member.file_size:
+    if size != member.file_size:
         raise ReleaseAssetError(f"wheel member size is invalid: {wheel.name}")
-    return content
+    encoded = base64.urlsafe_b64encode(digest.digest()).rstrip(b"=").decode()
+    entry = _WheelArchiveEntry(member.filename, path_key, member.is_dir(), size, encoded)
+    return entry, bytes(content) if content is not None else None
 
 
 def _valid_record_hash(value: str) -> bool:
@@ -375,10 +402,23 @@ def _valid_record_hash(value: str) -> bool:
 
 def _validate_wheel_archive(
     archive: zipfile.ZipFile, wheel: Path, dist_info: str
-) -> dict[str, bytes]:
+) -> tuple[tuple[_WheelArchiveEntry, ...], dict[str, bytes]]:
     infos = archive.infolist()
-    names = [info.filename for info in infos]
-    aliases = [name.rstrip("/").casefold() for name in names]
+    identities: list[tuple[zipfile.ZipInfo, str, str]] = []
+    for info in infos:
+        raw_name = info.orig_filename
+        if (
+            type(raw_name) is not str
+            or type(info.filename) is not str
+            or "\x00" in raw_name
+            or raw_name != info.filename
+            or not _is_safe_wheel_path(raw_name)
+        ):
+            raise ReleaseAssetError(f"wheel archive structure is invalid: {wheel.name}")
+        identities.append((info, raw_name, raw_name.rstrip("/").casefold()))
+    names = [name for _, name, _ in identities]
+    aliases = [alias for _, _, alias in identities]
+    file_aliases = {alias for info, _, alias in identities if not info.is_dir()}
     data_root = f"{dist_info.removesuffix('.dist-info')}.data"
     unsafe_data = any(
         parts[0].endswith(".data")
@@ -386,17 +426,24 @@ def _validate_wheel_archive(
         for name in names
         for parts in (name.split("/"),)
     )
-    if any(not _is_safe_wheel_path(name) for name in names) or len(aliases) != len(set(aliases)) or unsafe_data:
+    prefix_conflict = any(
+        other.startswith(f"{file_alias}/")
+        for file_alias in file_aliases
+        for other in aliases
+    )
+    if len(aliases) != len(set(aliases)) or unsafe_data or prefix_conflict:
         raise ReleaseAssetError(f"wheel archive structure is invalid: {wheel.name}")
     record = f"{dist_info}/RECORD"
     retained = {record, *(f"{dist_info}/{name}" for name, _ in _WHEEL_CONTROL_POLICY.controls)}
-    member_names = {info.filename for info in infos if not info.is_dir()}
-    members = {}
-    for info in infos:
-        if not info.is_dir():
-            content = _read_wheel_member(archive, info, wheel)
-            if info.filename in retained:
-                members[info.filename] = content
+    inventory = []
+    members: dict[str, bytes] = {}
+    for info, name, alias in identities:
+        entry, content = _inventory_wheel_member(
+            archive, info, wheel, alias, retain=name in retained
+        )
+        inventory.append(entry)
+        if content is not None:
+            members[name] = content
     if names.count(record) != 1:
         raise ReleaseAssetError(f"wheel RECORD structure is invalid: {wheel.name}")
     try:
@@ -404,6 +451,8 @@ def _validate_wheel_archive(
     except Exception as exc:
         raise ReleaseAssetError(f"wheel RECORD structure is invalid: {wheel.name}") from exc
     generated = {record, f"{record}.jws", f"{record}.p7s"}
+    observed = {entry.path: entry for entry in inventory if not entry.is_dir}
+    member_names = set(observed)
     recorded: set[str] = set()
     recorded_aliases: set[str] = set()
     for row in rows:
@@ -423,7 +472,7 @@ def _validate_wheel_archive(
         recorded_aliases.add(alias)
     if record not in recorded or recorded - generated != member_names - generated:
         raise ReleaseAssetError(f"wheel RECORD entries differ from archive: {wheel.name}")
-    return members
+    return tuple(inventory), members
 
 
 def inspect_wheel(wheel: Path, *, policy: PackageReleasePolicy) -> PackageMetadata:
@@ -449,7 +498,8 @@ def inspect_wheel(wheel: Path, *, policy: PackageReleasePolicy) -> PackageMetada
     dist_info = f"{str(filename_name).replace('-', '_')}-{filename_version}.dist-info"
     try:
         with zipfile.ZipFile(wheel) as archive:
-            names = archive.namelist()
+            inventory, members = _validate_wheel_archive(archive, wheel, dist_info)
+            names = [entry.path for entry in inventory]
             dist_infos = {
                 name.split("/", 1)[0]
                 for name in names
@@ -462,7 +512,6 @@ def inspect_wheel(wheel: Path, *, policy: PackageReleasePolicy) -> PackageMetada
                 for name, _ in _WHEEL_CONTROL_POLICY.controls
             )
             _compare_wheel_control_policy(wheel, {"controls": control_counts})
-            members = _validate_wheel_archive(archive, wheel, dist_info)
             metadata_bytes, wheel_bytes = (
                 members[f"{dist_info}/{name}"]
                 for name, _ in _WHEEL_CONTROL_POLICY.controls
