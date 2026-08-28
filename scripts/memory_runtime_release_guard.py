@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import nullcontext
 import hashlib
 from importlib.metadata import PathDistribution
 import json
@@ -134,6 +133,7 @@ class InstalledDistribution:
     metadata: PackageMetadata
     dist_info: str
     files: dict[tuple[str, str], bytes]
+    python_version: str
 
 
 @dataclass(frozen=True)
@@ -180,8 +180,6 @@ def _run_interpreter(
     environment.update(PIP_CONFIG_FILE=os.devnull, PIP_NO_CACHE_DIR="1", PYTHONNOUSERSITE="1", PYTHONPATH="")
     try:
         executable = python_executable.expanduser().resolve(strict=True)
-        if not executable.is_file() or not os.access(executable, os.X_OK):
-            raise OSError("path is not executable")
         result = subprocess.run(
             [str(executable), *arguments],
             env=environment,
@@ -246,24 +244,13 @@ def _metadata(message, context: str) -> PackageMetadata:
     )
 
 
-def _interpreter_version(python_executable: Path) -> str:
-    result = _run_interpreter(
-        python_executable,
-        ["-I", "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
-        "cannot identify requested Python interpreter",
-    )
-    version = result.stdout.strip()
-    if len(version.split(".")) != 2 or not version.replace(".", "").isdigit():
-        raise ReleaseAssetError("requested Python interpreter reported an invalid version")
-    return version
-
-
-def _pip_scheme(python_executable: Path, prefix: Path, distribution: str) -> dict[str, Path]:
+def _pip_scheme(python_executable: Path, prefix: Path, distribution: str) -> tuple[dict[str, Path], str]:
     script = (
         "import json,sys; from pip._internal.locations import get_scheme; "
         "s=get_scheme(sys.argv[1],prefix=sys.argv[2]); "
         "print(json.dumps({k:getattr(s,k) for k in "
-        "('purelib','platlib','scripts','headers','data')}))"
+        "('purelib','platlib','scripts','headers','data')} | "
+        "{'python':f'{sys.version_info.major}.{sys.version_info.minor}'}))"
     )
     result = _run_interpreter(
         python_executable,
@@ -272,15 +259,12 @@ def _pip_scheme(python_executable: Path, prefix: Path, distribution: str) -> dic
     )
     try:
         raw = json.loads(result.stdout)
-        if (
-            not isinstance(raw, dict)
-            or set(raw) != set(INSTALL_SCHEMES)
-            or not all(map(lambda value: isinstance(value, str), raw.values()))
-        ):
+        keys = {*INSTALL_SCHEMES, "python"}
+        if not isinstance(raw, dict) or set(raw) != keys or not all(isinstance(value, str) for value in raw.values()):
             raise ValueError
     except (json.JSONDecodeError, ValueError) as exc:
         raise ReleaseAssetError(f"pip install scheme is invalid for {distribution}") from exc
-    return {key: Path(value).resolve() for key, value in raw.items()}
+    return ({key: Path(raw[key]).resolve() for key in INSTALL_SCHEMES}, raw["python"])
 
 
 def _pip_install(
@@ -325,7 +309,7 @@ def _installed_distribution(
     if metadata.name != canonicalize_name(distribution):
         raise ReleaseAssetError(f"installed distribution identity differs from expected {distribution}")
     _assert_filename_identity(wheel, metadata)
-    scheme = _pip_scheme(python_executable, prefix, distribution)
+    scheme, python_version = _pip_scheme(python_executable, prefix, distribution)
     scheme_roots = sorted(
         scheme.items(),
         key=lambda item: (-len(item[1].parts), INSTALL_SCHEMES.index(item[0])),
@@ -359,7 +343,7 @@ def _installed_distribution(
     actual = {path.resolve() for path in prefix.rglob("*") if path.is_file()}
     if actual != recorded:
         raise ReleaseAssetError(f"installed inventory differs from RECORD: {wheel.name}")
-    return InstalledDistribution(metadata, metadata_path.parent.name, files)
+    return InstalledDistribution(metadata, metadata_path.parent.name, files, python_version)
 
 
 def _requirements_for(metadata: PackageMetadata, name: str) -> tuple[Requirement, ...]:
@@ -488,14 +472,11 @@ def discover_release_manifest(
 
 
 def _package_file(package: InstalledDistribution, path: str) -> bytes | None:
-    matches = [
-        content
-        for (scheme, name), content in package.files.items()
-        if scheme in {"purelib", "platlib"} and name == path
-    ]
-    if len(matches) > 1:
-        raise ReleaseAssetError(f"installed distribution has duplicate library paths: {path}")
-    return matches[0] if matches else None
+    for scheme in ("purelib", "platlib"):
+        key = (scheme, path)
+        if key in package.files:
+            return package.files[key]
+    return None
 
 
 def _owned_files(package: InstalledDistribution) -> dict[tuple[str, str], bytes]:
@@ -633,7 +614,6 @@ def verify_transition_distributions(
     python_executable: Path,
     expected_manifest: bytes | None = None,
 ) -> str:
-    python_version = _interpreter_version(python_executable)
     core_wheel, memory_wheel, core_sdist, memory_sdist = _transition_artifacts(asset_dir)
     rebuild_root.mkdir(parents=True, exist_ok=True)
     attempt = Path(tempfile.mkdtemp(prefix="attempt-", dir=rebuild_root))
@@ -648,8 +628,10 @@ def verify_transition_distributions(
     policy = _package_release_policy(manifest_payload, release_tag)
     if policy is None:
         raise ReleaseAssetError("Memory artifact manifest is missing frozen package_policy")
-    if python_version not in policy.supported_python_versions:
-        raise ReleaseAssetError(f"requested Python {python_version} is not in the release policy interpreter matrix")
+    if staged[0].python_version not in policy.supported_python_versions:
+        raise ReleaseAssetError(
+            f"requested Python {staged[0].python_version} is not in the release policy interpreter matrix"
+        )
     if expected_manifest is not None and manifest_bytes != expected_manifest:
         raise ReleaseAssetError("transition package manifest does not match the selected manifest")
     version = _assert_transition_pair(*staged, policy)
@@ -933,15 +915,10 @@ def main(argv: list[str] | None = None) -> int:
             result["manifest_owner"] = discovery.owner
         elif args.command == "verify-packages":
             spec = load_release_spec(args.manifest)
-            workspace = (
-                tempfile.TemporaryDirectory(prefix="memory-distribution-rebuild-")
-                if args.work_dir is None
-                else nullcontext(args.work_dir)
-            )
-            with workspace as work_dir:
+            with tempfile.TemporaryDirectory(prefix="memory-distribution-rebuild-") as temporary:
                 version = verify_transition_distributions(
                     args.asset_dir,
-                    Path(work_dir),
+                    args.work_dir or Path(temporary),
                     release_tag=spec.release_tag,
                     python_executable=args.python_executable,
                     expected_manifest=spec.manifest_bytes,

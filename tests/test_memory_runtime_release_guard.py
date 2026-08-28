@@ -100,15 +100,11 @@ from pathlib import Path
 import zipfile
 def get_requires_for_build_wheel(config_settings=None): return []
 def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
-    metadata = Path("PKG-INFO").read_bytes(); message = Parser().parsestr(metadata.decode())
-    name, version = message["Name"].replace("-", "_"), message["Version"]
+    metadata=Path("PKG-INFO").read_bytes(); message=Parser().parsestr(metadata.decode()); name=message["Name"].replace("-", "_"); version=message["Version"]
     dist_info, wheel_name = f"{name}-{version}.dist-info", f"{name}-{version}-py3-none-any.whl"
-    excluded = {"PKG-INFO", "pyproject.toml", "_backend.py"}
-    files = {p.as_posix(): p.read_bytes() for p in Path().rglob("*") if p.is_file()
-             and p.as_posix() not in excluded and "__pycache__" not in p.parts}
+    files={p.as_posix():p.read_bytes() for p in Path().rglob("*") if p.is_file() and p.name not in {"PKG-INFO","pyproject.toml","_backend.py"} and "__pycache__" not in p.parts}
     files[f"{dist_info}/METADATA"] = metadata; files[f"{dist_info}/WHEEL"] = b"Wheel-Version: 1.0\\nRoot-Is-Purelib: true\\nTag: py3-none-any\\n\\n"
-    record = f"{dist_info}/RECORD"
-    files[record] = ("".join(f"{path},,\\n" for path in sorted(files)) + f"{record},,\\n").encode()
+    record=f"{dist_info}/RECORD"; files[record]=("".join(f"{path},,\\n" for path in sorted(files))+f"{record},,\\n").encode()
     with zipfile.ZipFile(Path(wheel_directory) / wheel_name, "w") as archive:
         for path, content in files.items():
             archive.writestr(path, content)
@@ -125,16 +121,10 @@ def _package(
     version: str = VERSION,
     requires_python: str = ">=3.10",
 ) -> Path:
-    metadata = "\n".join(
-        [
-            "Metadata-Version: 2.4",
-            f"Name: {name}",
-            f"Version: {version}",
-            f"Requires-Python: {requires_python}",
-            *(f"Requires-Dist: {item}" for item in requirements),
-            "",
-            "",
-        ]
+    metadata = (
+        f"Metadata-Version: 2.4\nName: {name}\nVersion: {version}\nRequires-Python: {requires_python}\n"
+        + "".join(f"Requires-Dist: {item}\n" for item in requirements)
+        + "\n"
     ).encode()
     members = dict(files or {})
     if path.suffix == ".whl":
@@ -261,16 +251,6 @@ def test_memory_indep_022_dual_form_discovery_reads_legacy_core_and_transition_m
         guard.discover_release_manifest(package_dir, python_executable=PYTHON)
 
 
-@pytest.mark.parametrize(
-    "filename",
-    ["avibe_os-3.1.1-py3-none-any.whl", "avibe_os-3.1.1.tar.gz"],
-)
-def test_package_guard_binds_parsed_filenames_to_metadata(filename: str) -> None:
-    metadata = guard.PackageMetadata("avibe-os", VERSION, ">=3.10", ())
-    with pytest.raises(guard.ReleaseAssetError, match="filename identity"):
-        guard._assert_filename_identity(Path(filename), metadata)
-
-
 def test_package_guard_uses_offline_pip_for_complete_dependency_resolution(tmp_path: Path) -> None:
     manifest, _ = _manifest(tmp_path)
     package_dir, artifacts = _transition_packages(
@@ -303,18 +283,22 @@ def test_package_guard_evaluates_markers_with_the_bound_interpreter(tmp_path: Pa
 
 
 @pytest.mark.parametrize(
-    "package_options",
+    ("package_options", "error"),
     [
-        {"memory_extra_files": {"core/controller.py": b"shadow\n"}},
-        {"memory_extra_files": {f"avibe_memory-{VERSION}.data/scripts/vibe": b"shadow\n"}},
-        {"core_files": {**CORE_FILES, "avibe_os-3.1.0.data/purelib/avibe_memory/runtime.py": b"shadow\n"}},
+        ({"memory_extra_files": {"core/controller.py": b"shadow\n"}}, "namespace policy"),
+        ({"memory_extra_files": {f"avibe_memory-{VERSION}.data/scripts/vibe": b"shadow\n"}}, "namespace policy"),
+        (
+            {"core_files": {**CORE_FILES, "avibe_os-3.1.0.data/purelib/avibe_memory/runtime.py": b"shadow\n"}},
+            "namespace policy",
+        ),
+        ({"core_files": {**CORE_FILES, guard.MEMORY_MANIFEST_PATH: b"owned\n"}}, "must not own"),
     ],
 )
 def test_package_guard_enforces_memory_namespace_policy_in_both_artifact_forms(
-    tmp_path: Path, package_options: dict
+    tmp_path: Path, package_options: dict, error: str
 ) -> None:
     manifest, _ = _manifest(tmp_path)
-    _reject(tmp_path, manifest, "namespace policy", **package_options)
+    _reject(tmp_path, manifest, error, **package_options)
 
 
 def test_package_guard_uses_manifest_frozen_python_policy(tmp_path: Path) -> None:
@@ -326,7 +310,7 @@ def test_package_guard_uses_manifest_frozen_python_policy(tmp_path: Path) -> Non
     package_dir, _ = _transition_packages(tmp_path, manifest, requires_python=">=3.11")
     assert _verify(package_dir, tmp_path / "rebuild") == _verify(package_dir, tmp_path / "rebuild") == VERSION
     with pytest.raises(guard.ReleaseAssetError, match="interpreter is unavailable"):
-        guard._interpreter_version(tmp_path / "missing-python")
+        guard._run_interpreter(tmp_path / "missing-python", [], "probe")
 
 
 def test_sdist_rebuild_delegates_the_archive_directly_to_isolated_pip(
@@ -351,24 +335,12 @@ def test_sdist_rebuild_delegates_the_archive_directly_to_isolated_pip(
     assert rebuilt.name == artifacts["core_wheel"].name
 
 
-def test_transition_package_guard_rejects_staged_and_rebuilt_ownership_drift(tmp_path: Path) -> None:
-    manifest, _ = _manifest(tmp_path)
-    package_dir, artifacts = _transition_packages(tmp_path, manifest)
-    _package(
-        artifacts["core_sdist"],
-        "avibe-os",
-        (f"avibe-memory=={VERSION}",),
-        files={
-            "core/memory_loader.py": b"loader\n",
-            guard.MEMORY_MANIFEST_PATH: manifest.read_bytes(),
-        },
-    )
-    with pytest.raises(guard.ReleaseAssetError, match="must not own the Memory Runtime manifest"):
-        _verify(package_dir, tmp_path / "staged-rebuild")
-
-
 def test_memory_indep_023_package_guard_rejects_dependency_and_metadata_drift(tmp_path: Path) -> None:
     manifest, _ = _manifest(tmp_path)
+    metadata = guard.PackageMetadata("avibe-os", VERSION, ">=3.10", ())
+    for filename in ("avibe_os-3.1.1-py3-none-any.whl", "avibe_os-3.1.1.tar.gz"):
+        with pytest.raises(guard.ReleaseAssetError, match="filename identity"):
+            guard._assert_filename_identity(Path(filename), metadata)
     _reject(tmp_path / "python", manifest, "must match release policy >=3.10", requires_python=">=3.9")
     _reject(
         tmp_path / "wildcard",
