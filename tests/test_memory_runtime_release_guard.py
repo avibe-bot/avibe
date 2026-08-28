@@ -80,6 +80,7 @@ def _manifest(
             "release_family": "3.1",
             "requires_python": requires_python,
             "supported_python_versions": list(supported_python_versions),
+            "wheel_tag": "py3-none-any",
             "namespace_policy_version": 1,
         },
         "archives": archives,
@@ -133,7 +134,7 @@ def _transition_wheels(
     requires_python: str = ">=3.10",
     wheel_tag: str = "py3-none-any",
     core_requirement: str = "avibe-memory==3.1.0",
-    memory_requirement: str = "avibe-os>=3.1,<3.2",
+    memory_requirement: str = "avibe-os==3.1.0",
 ) -> tuple[Path, Path]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     def build(name: str, requirement: str) -> Path:
@@ -159,6 +160,7 @@ def _verify_static(tmp_path: Path, manifest: Path, **wheel_options):
         ("package_policy", "schema_version", 1.0),
         ("package_policy", "release_tag", 1),
         ("package_policy", "supported_python_versions", "3.11"),
+        ("package_policy", "wheel_tag", True),
         ("package_policy", "namespace_policy_version", True),
     ],
 )
@@ -187,6 +189,16 @@ def test_manifest_byte_mismatch_precedes_invalid_semantic_policy(tmp_path: Path)
         guard.load_package_release_policy(mismatched, expected_manifest=selected.read_bytes(), release_tag="v3.1.0")
 
 
+def test_package_policy_pins_universal_wheel_tag(tmp_path: Path) -> None:
+    manifest, _ = _manifest(tmp_path)
+    payload = json.loads(manifest.read_bytes())
+    payload["package_policy"]["wheel_tag"] = "py3-none-manylinux_2_17_x86_64"
+    candidate = json.dumps(payload).encode()
+
+    with pytest.raises(guard.ManifestPolicyError, match="wheel_tag"):
+        guard.load_package_release_policy(candidate, expected_manifest=candidate, release_tag="v3.1.0")
+
+
 def test_wheel_filename_metadata_and_release_tag_are_independent_identities(tmp_path: Path) -> None:
     wheel = _wheel(tmp_path / "avibe_os-3.1.1-py3-none-any.whl", "avibe-os")
     with pytest.raises(guard.ReleaseAssetError, match="filename identity"):
@@ -212,8 +224,10 @@ def test_wheel_tags_match_filename_tags(tmp_path: Path) -> None:
     with pytest.raises(guard.ReleaseAssetError, match="tags"):
         guard.inspect_wheel(wheel)
     manifest, _ = _manifest(tmp_path / "policy")
-    with pytest.raises(guard.ReleaseAssetError, match="supported Python"):
+    with pytest.raises(guard.ReleaseAssetError, match="release policy"):
         _verify_static(tmp_path / "supported", manifest, wheel_tag="cp312-cp312-manylinux_2_17_x86_64")
+    with pytest.raises(guard.ReleaseAssetError, match="release policy"):
+        _verify_static(tmp_path / "platform", manifest, wheel_tag="py3-none-manylinux_2_17_x86_64")
 
 
 def test_wheel_rejects_path_aliases_and_corrupt_members(tmp_path: Path) -> None:
@@ -230,11 +244,25 @@ def test_wheel_rejects_path_aliases_and_corrupt_members(tmp_path: Path) -> None:
             guard.inspect_wheel(wheel)
 
 
+def test_wheel_rejects_blank_record_rows(tmp_path: Path) -> None:
+    wheel = _wheel(
+        tmp_path / "avibe_os-3.1.0-py3-none-any.whl",
+        "avibe-os",
+        include_record=False,
+    )
+    with zipfile.ZipFile(wheel, "a") as archive:
+        archive.writestr("avibe_os-3.1.0.dist-info/RECORD", b"\n\n")
+
+    with pytest.raises(guard.ReleaseAssetError, match="RECORD"):
+        guard.inspect_wheel(wheel)
+
+
 def test_static_transition_uses_release_bound_requires_python(tmp_path: Path) -> None:
     manifest, _ = _manifest(tmp_path)
     core, memory, policy = _verify_static(tmp_path / "valid", manifest)
     assert core.version == memory.version == "3.1.0"
     assert policy.requires_python == ">=3.10"
+    assert policy.wheel_tag == "py3-none-any"
 
     with pytest.raises(guard.ReleaseAssetError, match="Requires-Python"):
         _verify_static(tmp_path / "mismatch", manifest, requires_python=">=3.11")
@@ -247,8 +275,10 @@ def test_requirement_classification_keeps_wildcard_equality_non_exact(tmp_path: 
     manifest, _ = _manifest(tmp_path)
     with pytest.raises(guard.ReleaseAssetError, match="hard-depend"):
         _verify_static(tmp_path / "wildcard", manifest, core_requirement="avibe-memory==3.1.*")
-    with pytest.raises(guard.ReleaseAssetError, match="accept the release version"):
+    with pytest.raises(guard.ReleaseAssetError, match="exact avibe-os"):
         _verify_static(tmp_path / "reverse", manifest, memory_requirement="avibe-os>=4")
+    with pytest.raises(guard.ReleaseAssetError, match="exact avibe-os"):
+        _verify_static(tmp_path / "overbroad", manifest, memory_requirement="avibe-os>=0")
 
 
 def test_existing_guard_commands_remain_stdlib_only(tmp_path: Path) -> None:
