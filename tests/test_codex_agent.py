@@ -3712,7 +3712,17 @@ class CodexTransportCommandTests(unittest.IsolatedAsyncioTestCase):
             await transport.stop()
             initialize_request = json.loads(writes[0])
             self.assertEqual(initialize_request["method"], "initialize")
-            self.assertEqual(initialize_request["params"]["clientInfo"]["name"], "avibe")
+            self.assertEqual(
+                initialize_request["params"],
+                {
+                    "clientInfo": {
+                        "name": "avibe",
+                        "title": "Avibe",
+                        "version": "1.0.0",
+                    },
+                    "capabilities": {"experimentalApi": False},
+                },
+            )
             transport = Transport(
                 binary="codex",
                 cwd="/tmp/work",
@@ -3721,6 +3731,11 @@ class CodexTransportCommandTests(unittest.IsolatedAsyncioTestCase):
             await transport.start()
             await transport.stop()
 
+        forced_args = [
+            arg
+            for override in transport_module.AVIBE_APP_SERVER_CONFIG_OVERRIDES
+            for arg in ("-c", override)
+        ]
         self.assertEqual(
             created_cmds,
             [
@@ -3728,8 +3743,7 @@ class CodexTransportCommandTests(unittest.IsolatedAsyncioTestCase):
                     "codex",
                     "--dangerously-bypass-approvals-and-sandbox",
                     "app-server",
-                    "-c",
-                    "features.memories=false",
+                    *forced_args,
                 ],
                 [
                     "codex",
@@ -3737,8 +3751,7 @@ class CodexTransportCommandTests(unittest.IsolatedAsyncioTestCase):
                     "app-server",
                     "-c",
                     'model_provider="avibe_model_hub"',
-                    "-c",
-                    "features.memories=false",
+                    *forced_args,
                 ],
             ],
         )

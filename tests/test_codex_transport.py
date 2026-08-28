@@ -7,7 +7,19 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from modules.agents.codex.transport import CodexTransport, STREAM_BUFFER_LIMIT
+from modules.agents.codex.transport import (
+    AVIBE_APP_SERVER_CONFIG_OVERRIDES,
+    CodexTransport,
+    STREAM_BUFFER_LIMIT,
+)
+
+
+def _forced_config_args() -> tuple[str, ...]:
+    return tuple(
+        arg
+        for override in AVIBE_APP_SERVER_CONFIG_OVERRIDES
+        for arg in ("-c", override)
+    )
 
 
 class CodexTransportHealthTests(unittest.IsolatedAsyncioTestCase):
@@ -29,7 +41,14 @@ class CodexTransportHealthTests(unittest.IsolatedAsyncioTestCase):
             binary="codex",
             cwd="/tmp",
             runtime_args=["-c", 'model_provider="avibe"'],
-            extra_args=["-c", "features.memories=true"],
+            extra_args=[
+                "-c",
+                "features.memories=true",
+                "-c",
+                "features.plugins=true",
+                "-c",
+                "features.multi_agent=true",
+            ],
         )
 
         async def wait_for_initialize(_method, _params):
@@ -69,9 +88,44 @@ class CodexTransportHealthTests(unittest.IsolatedAsyncioTestCase):
                 "-c",
                 "features.memories=true",
                 "-c",
-                "features.memories=false",
+                "features.plugins=true",
+                "-c",
+                "features.multi_agent=true",
+                *_forced_config_args(),
             ),
         )
+
+        initialize_params = transport.send_request.await_args.args[1]
+        self.assertEqual(
+            initialize_params,
+            {
+                "clientInfo": {
+                    "name": "avibe",
+                    "title": "Avibe",
+                    "version": "1.0.0",
+                },
+                "capabilities": {"experimentalApi": False},
+            },
+        )
+
+    def test_app_server_policy_disables_competing_host_surfaces(self):
+        disabled = set(AVIBE_APP_SERVER_CONFIG_OVERRIDES)
+
+        self.assertTrue(
+            {
+                "agents.enabled=false",
+                "features.apps=false",
+                "features.goals=false",
+                "features.hooks=false",
+                "features.memories=false",
+                "features.multi_agent=false",
+                "features.plugins=false",
+                "features.terminal_visualization_instructions=false",
+            }.issubset(disabled)
+        )
+        self.assertNotIn("features.image_generation=false", disabled)
+        self.assertNotIn("features.shell_tool=false", disabled)
+        self.assertNotIn("web_search=disabled", disabled)
 
     async def test_reader_task_failure_marks_transport_not_alive(self):
         transport = CodexTransport(binary="codex", cwd="/tmp")
