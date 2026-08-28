@@ -586,6 +586,41 @@ def test_the_argv_the_job_builds_is_the_argv_the_entry_point_accepts(monkeypatch
     assert ran["prepare_show_runtime"] is True
 
 
+def test_incomplete_legacy_memory_argv_stays_restartable(monkeypatch):
+    ran = {}
+
+    def fake_run_restart_job(**kwargs):
+        ran.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(restart_supervisor, "_run_restart_job", fake_run_restart_job)
+
+    result = restart_supervisor.main(
+        [
+            "--job-id",
+            "legacy-incomplete-memory",
+            "--trigger",
+            "upgrade",
+            "--rollback-to",
+            "3.0.14",
+            "--rollback-package",
+            "avibe-os",
+            "--rollback-python",
+            "/opt/avibe/bin/python",
+            "--rollback-main",
+            "/opt/avibe/lib/python/site-packages/vibe/service_main.py",
+            "--rollback-memory-package",
+        ]
+    )
+
+    assert result == 0
+    target = ran["rollback_to"]
+    assert target is not None
+    assert not target
+    assert target.memory_package is False
+    assert target.memory_version is None
+
+
 def test_schedule_restart_marks_status_failed_when_spawn_fails(monkeypatch, tmp_path):
     # The "scheduled" status is seeded before spawning; if the spawn fails, no
     # child will overwrite it, so schedule_restart must mark it failed (otherwise
