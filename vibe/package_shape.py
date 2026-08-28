@@ -86,14 +86,40 @@ def _normalized_version(value: object, *, field: str) -> str:
         raise PackageShapeError(f"{field} is not a valid package version") from exc
 
 
-def _normalized_provider_id(value: object) -> str:
+def _opaque_provider_id(value: object) -> str:
     try:
         provider_id = os.fsdecode(os.fspath(value)).strip()
     except TypeError as exc:
         raise PackageShapeError("distribution provider identity is missing") from exc
-    if not provider_id:
+    if not provider_id or "\0" in provider_id:
         raise PackageShapeError("distribution provider identity is missing")
+    return provider_id
+
+
+def _normalized_observed_provider_id(value: object) -> str:
+    provider_id = _opaque_provider_id(value)
     return os.path.normcase(os.path.realpath(os.path.abspath(provider_id)))
+
+
+def _immutable_requirements(value: object, *, field: str) -> tuple[str, ...]:
+    try:
+        requirements = tuple(value)  # type: ignore[arg-type]
+    except TypeError as exc:
+        raise PackageShapeError(f"{field} are invalid") from exc
+    if any(type(requirement) is not str or not requirement for requirement in requirements):
+        raise PackageShapeError(f"{field} are invalid")
+    return requirements
+
+
+def _canonical_artifact_path(value: object) -> Path:
+    try:
+        raw = os.fsdecode(os.fspath(value))
+    except TypeError as exc:
+        raise PackageShapeError("staged artifact path is invalid") from exc
+    path = Path(raw)
+    if not path.is_absolute() or os.path.normpath(raw) != raw:
+        raise PackageShapeError("staged artifact path is not canonical and absolute")
+    return path
 
 
 @dataclass(frozen=True, order=True)
@@ -116,8 +142,15 @@ class DistributionProvider:
             "version",
             _normalized_version(self.version, field=f"{canonical_name} version"),
         )
-        object.__setattr__(self, "provider_id", _normalized_provider_id(self.provider_id))
-        object.__setattr__(self, "requires_dist", tuple(self.requires_dist))
+        object.__setattr__(self, "provider_id", _opaque_provider_id(self.provider_id))
+        object.__setattr__(
+            self,
+            "requires_dist",
+            _immutable_requirements(
+                self.requires_dist,
+                field="distribution provider requirements",
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -211,6 +244,44 @@ class StagedArtifact:
     sha256: str
     requires_dist: tuple[str, ...]
 
+    def __post_init__(self) -> None:
+        distribution = _canonical_distribution_name(
+            self.distribution,
+            field="staged artifact distribution",
+        )
+        version = _normalized_version(
+            self.version,
+            field=f"{distribution} staged artifact version",
+        )
+        path = _canonical_artifact_path(self.path)
+        try:
+            filename_name, filename_version, _, _ = parse_wheel_filename(path.name)
+        except InvalidWheelFilename as exc:
+            raise PackageShapeError("staged artifact path does not name a canonical wheel") from exc
+        filename_distribution = _canonical_distribution_name(
+            str(filename_name),
+            field="wheel filename distribution",
+        )
+        if distribution != filename_distribution or version != str(filename_version):
+            raise PackageShapeError("staged wheel filename and recorded identity disagree")
+        if (
+            type(self.sha256) is not str
+            or len(self.sha256) != 64
+            or any(character not in "0123456789abcdef" for character in self.sha256)
+        ):
+            raise PackageShapeError("artifact SHA-256 is not canonical")
+        object.__setattr__(self, "distribution", distribution)
+        object.__setattr__(self, "version", version)
+        object.__setattr__(self, "path", path)
+        object.__setattr__(
+            self,
+            "requires_dist",
+            _immutable_requirements(
+                self.requires_dist,
+                field="staged artifact requirements",
+            ),
+        )
+
 
 @dataclass(frozen=True)
 class PackageShapeVerification:
@@ -237,30 +308,13 @@ class ResolvedRollbackPlan:
         raise TypeError("ResolvedRollbackPlan is constructed only by rollback resolution")
 
 
-@dataclass(frozen=True, order=True)
-class DistributionProviderRecord:
-    """Filesystem-independent evidence for one captured provider."""
-
-    name: str
-    version: str
-    provider_id: str
-    requires_dist: tuple[str, ...]
-
-    def __post_init__(self) -> None:
-        _validate_record_fields(self)
-        _require_record_distribution(self.name, field="distribution provider")
-        _require_record_version(self.version, field=f"{self.name} version")
-        if self.provider_id != _normalized_provider_id(self.provider_id):
-            raise PackageShapeRecordError("distribution provider identity is not canonical")
-
-
 @dataclass(frozen=True)
 class _ProviderInventoryRecord:
-    providers: tuple[DistributionProviderRecord, ...]
+    providers: tuple[DistributionProvider, ...]
 
     def __post_init__(self) -> None:
         _validate_record_fields(self)
-        by_identity: dict[str, DistributionProviderRecord] = {}
+        by_identity: dict[str, DistributionProvider] = {}
         for provider in self.providers:
             existing = by_identity.get(provider.provider_id)
             if existing is not None and existing != provider:
@@ -281,10 +335,10 @@ class _ServiceLauncherRecord:
 class CapturedPackageShapeRecord:
     """Non-executable persisted form of a captured package shape."""
 
-    core_provider: DistributionProviderRecord
+    core_provider: DistributionProvider
     launcher: _ServiceLauncherRecord
     release_family: ReleaseFamily
-    memory_providers: tuple[DistributionProviderRecord, ...]
+    memory_providers: tuple[DistributionProvider, ...]
     transition_memory_version: str | None
     residual_memory: bool
 
@@ -337,31 +391,13 @@ class CapturedPackageShapeRecord:
         return len(self.memory_providers)
 
 
-@dataclass(frozen=True, order=True)
-class StagedArtifactRecord:
-    """Recorded artifact identity; existence and hashes require live revalidation."""
-
-    distribution: str
-    version: str
-    path: str
-    sha256: str
-    requires_dist: tuple[str, ...]
-
-    def __post_init__(self) -> None:
-        _validate_record_fields(self)
-        _require_record_distribution(self.distribution, field="artifact distribution")
-        _require_record_version(self.version, field=f"{self.distribution} version")
-        if len(self.sha256) != 64 or any(character not in "0123456789abcdef" for character in self.sha256):
-            raise PackageShapeRecordError("artifact SHA-256 is not canonical")
-
-
 @dataclass(frozen=True)
 class ResolvedRollbackPlanRecord:
     """Non-executable persisted form of a resolved rollback plan."""
 
     captured: CapturedPackageShapeRecord
     requirements: tuple[ExactRequirement, ...]
-    artifacts: tuple[StagedArtifactRecord, ...]
+    artifacts: tuple[StagedArtifact, ...]
     staging_dir: str
     uninstall_distributions: tuple[str, ...]
     verification: PackageShapeVerification
@@ -382,21 +418,18 @@ class ResolvedRollbackPlanRecord:
         if self.requirements != expected_requirements:
             raise PackageShapeRecordError("resolved requirements do not match the captured rollback target")
 
-        by_distribution: dict[str, StagedArtifactRecord] = {}
-        artifact_paths: set[str] = set()
+        by_distribution: dict[str, StagedArtifact] = {}
+        artifact_paths: set[Path] = set()
         for artifact in self.artifacts:
+            artifact_path = artifact.path
+            if artifact_path.parent != staging_dir:
+                raise PackageShapeRecordError("artifact path is not a direct child of the staging directory")
+            if artifact_path in artifact_paths:
+                raise PackageShapeRecordError("staging contains duplicate artifact paths")
+            artifact_paths.add(artifact_path)
             if artifact.distribution in by_distribution:
                 raise PackageShapeRecordError("staging contains duplicate distribution artifacts")
             by_distribution[artifact.distribution] = artifact
-            artifact_path = _require_record_absolute_path(
-                artifact.path,
-                field="artifact path",
-            )
-            if artifact_path.parent != staging_dir:
-                raise PackageShapeRecordError("artifact path is not a direct child of the staging directory")
-            if artifact.path in artifact_paths:
-                raise PackageShapeRecordError("staging contains duplicate artifact paths")
-            artifact_paths.add(artifact.path)
 
         core_artifacts = tuple(
             artifact for artifact in self.artifacts if artifact.distribution in CORE_DISTRIBUTION_NAMES
@@ -424,10 +457,10 @@ class ResolvedRollbackPlanRecord:
         staged_core = core_artifacts[0]
         try:
             staged_family, staged_transition = _release_family(
-                DistributionProviderRecord(
+                DistributionProvider(
                     name=staged_core.distribution,
                     version=staged_core.version,
-                    provider_id=staged_core.path,
+                    provider_id=str(staged_core.path),
                     requires_dist=staged_core.requires_dist,
                 )
             )
@@ -445,12 +478,12 @@ class ResolvedRollbackPlanRecord:
 
 
 _RECORD_DTO_TYPES = (
-    DistributionProviderRecord,
+    DistributionProvider,
     _ProviderInventoryRecord,
     _ServiceLauncherRecord,
     CapturedPackageShapeRecord,
     ExactRequirement,
-    StagedArtifactRecord,
+    StagedArtifact,
     PackageShapeVerification,
     ResolvedRollbackPlanRecord,
 )
@@ -494,6 +527,10 @@ def _validate_declared_record_value(
         if type(value) is not annotation:
             raise PackageShapeRecordError(f"{field} has an invalid enum value")
         return
+    if annotation is Path:
+        if not isinstance(value, Path):
+            raise PackageShapeRecordError(f"{field} has an invalid path type")
+        return
     if type(value) is not annotation:
         raise PackageShapeRecordError(f"{field} has an invalid primitive type")
     if annotation is str and not value:
@@ -521,15 +558,6 @@ def _require_record_version(value: str, *, field: str) -> None:
         raise PackageShapeRecordError(f"{field} is not canonical")
 
 
-def _require_record_distribution(value: str, *, field: str) -> None:
-    _canonical_distribution_name(
-        value,
-        field=field,
-        error_type=PackageShapeRecordError,
-        require_canonical=True,
-    )
-
-
 def _require_record_absolute_path(value: str, *, field: str) -> Path:
     path = Path(value)
     if not path.is_absolute() or os.path.normpath(value) != value:
@@ -553,6 +581,8 @@ def _encode_declared_record_value(value: object, annotation: object) -> object:
         return _encode_record_dto(value)
     if isinstance(annotation, type) and issubclass(annotation, Enum):
         return value.value
+    if annotation is Path:
+        return str(value)
     return value
 
 
@@ -600,6 +630,10 @@ def _decode_declared_record_value(
             return annotation(value)
         except ValueError as exc:
             raise PackageShapeRecordError(f"{field} has an invalid enum value") from exc
+    if annotation is Path:
+        if type(value) is not str or not value:
+            raise PackageShapeRecordError(f"{field} has an invalid path value")
+        return Path(value)
     if type(value) is not annotation:
         raise PackageShapeRecordError(f"{field} has an invalid primitive type")
     if annotation is str and not value:
@@ -664,15 +698,6 @@ def _decode_record(value: object, record_type: str) -> object:
     return _decode_record_dto(value[payload_name], dto_type, field=payload_name)
 
 
-def _provider_to_record(provider: DistributionProvider) -> DistributionProviderRecord:
-    return DistributionProviderRecord(
-        name=provider.name,
-        version=provider.version,
-        provider_id=provider.provider_id,
-        requires_dist=provider.requires_dist,
-    )
-
-
 def _captured_to_record(
     captured: CapturedPackageShape | CapturedPackageShapeRecord,
 ) -> CapturedPackageShapeRecord:
@@ -681,13 +706,13 @@ def _captured_to_record(
     if not isinstance(captured, CapturedPackageShape):
         raise PackageShapeRecordError("captured package shape has an unsupported type")
     return CapturedPackageShapeRecord(
-        core_provider=_provider_to_record(captured.core_provider),
+        core_provider=captured.core_provider,
         launcher=_ServiceLauncherRecord(
             python=captured.launcher.python,
             main=captured.launcher.main,
         ),
         release_family=captured.release_family,
-        memory_providers=tuple(_provider_to_record(item) for item in captured.memory_providers),
+        memory_providers=captured.memory_providers,
         transition_memory_version=captured.transition_memory_version,
         residual_memory=captured.residual_memory,
     )
@@ -719,16 +744,7 @@ def _plan_to_record(
     return ResolvedRollbackPlanRecord(
         captured=_captured_to_record(plan.captured),
         requirements=plan.requirements,
-        artifacts=tuple(
-            StagedArtifactRecord(
-                distribution=item.distribution,
-                version=item.version,
-                path=str(item.path),
-                sha256=item.sha256,
-                requires_dist=item.requires_dist,
-            )
-            for item in plan.artifacts
-        ),
+        artifacts=plan.artifacts,
         staging_dir=str(plan.staging_dir),
         uninstall_distributions=plan.uninstall_distributions,
         verification=plan.verification,
@@ -752,7 +768,7 @@ def decode_resolved_rollback_plan_record(value: object) -> ResolvedRollbackPlanR
 
 
 def _parsed_memory_requirements(
-    provider: DistributionProvider | DistributionProviderRecord,
+    provider: DistributionProvider,
 ) -> tuple[Requirement, ...]:
     parsed: list[Requirement] = []
     for value in provider.requires_dist:
@@ -772,7 +788,7 @@ def _parsed_memory_requirements(
 
 
 def _release_family(
-    provider: DistributionProvider | DistributionProviderRecord,
+    provider: DistributionProvider,
 ) -> tuple[ReleaseFamily, str | None]:
     memory_requirements = _parsed_memory_requirements(provider)
     hard: list[Requirement] = []
@@ -823,7 +839,7 @@ def capture_package_shape(
         if provider.name in CORE_DISTRIBUTION_NAMES or provider.name == MEMORY_PACKAGE_NAME
     )
     try:
-        _ProviderInventoryRecord(providers=tuple(_provider_to_record(provider) for provider in observed))
+        _ProviderInventoryRecord(providers=observed)
     except PackageShapeRecordError as exc:
         raise PackageShapeError(str(exc)) from exc
     relevant = tuple({provider.provider_id: provider for provider in observed}.values())
@@ -898,7 +914,7 @@ def inspect_installed_distribution_providers(
                 DistributionProvider(
                     name=canonical_name,
                     version=distribution.version,
-                    provider_id=_distribution_provider_id(distribution),
+                    provider_id=_normalized_observed_provider_id(_distribution_provider_id(distribution)),
                     requires_dist=tuple(distribution.requires or ()),
                 )
             )
@@ -945,10 +961,6 @@ def _rollback_requirements(
 
 def _wheel_provider(path: Path) -> DistributionProvider:
     try:
-        filename_name, filename_version, _, _ = parse_wheel_filename(path.name)
-    except InvalidWheelFilename as exc:
-        raise RollbackResolutionError("staging contains a non-wheel package artifact") from exc
-    try:
         with zipfile.ZipFile(path) as archive:
             metadata_names = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
             if len(metadata_names) != 1:
@@ -960,16 +972,9 @@ def _wheel_provider(path: Path) -> DistributionProvider:
     provider = DistributionProvider(
         name=metadata.get("Name"),
         version=metadata.get("Version"),
-        provider_id=str(path),
+        provider_id=_normalized_observed_provider_id(path),
         requires_dist=tuple(metadata.get_all("Requires-Dist", [])),
     )
-    filename_distribution = _canonical_distribution_name(
-        str(filename_name),
-        field="wheel filename distribution",
-        error_type=RollbackResolutionError,
-    )
-    if provider.name != filename_distribution or provider.version != str(filename_version):
-        raise RollbackResolutionError("staged wheel filename and metadata disagree")
     return provider
 
 
@@ -979,15 +984,18 @@ def _staged_artifacts(staging_dir: Path) -> tuple[StagedArtifact, ...]:
         if not path.is_file():
             raise RollbackResolutionError("staging contains a non-artifact entry")
         provider = _wheel_provider(path)
-        artifacts.append(
-            StagedArtifact(
-                distribution=provider.name,
-                version=provider.version,
-                path=path,
-                sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
-                requires_dist=provider.requires_dist,
+        try:
+            artifacts.append(
+                StagedArtifact(
+                    distribution=provider.name,
+                    version=provider.version,
+                    path=path,
+                    sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                    requires_dist=provider.requires_dist,
+                )
             )
-        )
+        except PackageShapeError as exc:
+            raise RollbackResolutionError(str(exc)) from exc
     if not artifacts:
         raise RollbackResolutionError("rollback resolution produced no staged artifacts")
     return tuple(artifacts)
@@ -1148,7 +1156,6 @@ __all__ = [
     "CapturedPackageShape",
     "CapturedPackageShapeRecord",
     "DistributionProvider",
-    "DistributionProviderRecord",
     "DuplicateDistributionProviderError",
     "ExactRequirement",
     "PACKAGE_SHAPE_RECORD_SCHEMA_VERSION",
@@ -1160,7 +1167,6 @@ __all__ = [
     "ResolvedRollbackPlanRecord",
     "RollbackResolutionError",
     "StagedArtifact",
-    "StagedArtifactRecord",
     "capture_installed_package_shape",
     "capture_package_shape",
     "decode_captured_package_shape_record",

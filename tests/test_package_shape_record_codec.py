@@ -65,7 +65,7 @@ def _resolved(tmp_path: Path) -> ResolvedRollbackPlan:
         StagedArtifact(
             distribution=requirement.distribution,
             version=requirement.version,
-            path=staging_dir / f"{requirement.distribution}-{requirement.version}.whl",
+            path=(staging_dir / f"{requirement.distribution.replace('-', '_')}-{requirement.version}-py3-none-any.whl"),
             sha256=("a" if index == 0 else "b") * 64,
             requires_dist=(captured.core_provider.requires_dist if index == 0 else ()),
         )
@@ -198,6 +198,7 @@ def test_memory_indep_019_decoder_binds_closure_to_captured_target(
     payload["plan"]["artifacts"][0].update(  # type: ignore[index]
         distribution="unrelated",
         version="1",
+        path=str(tmp_path / "staging" / "unrelated-1-py3-none-any.whl"),
     )
 
     with pytest.raises(PackageShapeRecordError, match="captured rollback target"):
@@ -210,17 +211,18 @@ def test_memory_indep_019_decoder_rejects_duplicate_staged_distribution(
     payload = encode_resolved_rollback_plan_record(_resolved(tmp_path))
     duplicate = deepcopy(payload["plan"]["artifacts"][0])  # type: ignore[index]
     duplicate["version"] = "3.0.13"
+    duplicate["path"] = str(tmp_path / "staging" / "avibe_os-3.0.13-py3-none-any.whl")
     payload["plan"]["artifacts"].append(duplicate)  # type: ignore[index]
 
     with pytest.raises(PackageShapeRecordError, match="duplicate distribution"):
         decode_resolved_rollback_plan_record(payload)
 
 
-def test_memory_indep_019_captured_dto_construction_rejects_invalid_state() -> None:
+def test_memory_indep_019_provider_fact_construction_rejects_invalid_state() -> None:
     record = decode_captured_package_shape_record(encode_captured_package_shape_record(_captured()))
 
-    with pytest.raises(PackageShapeRecordError, match="not canonical"):
-        replace(record.core_provider, version="03.0.14")
+    with pytest.raises(PackageShapeError, match="identity is missing"):
+        replace(record.core_provider, provider_id="")
 
 
 def test_memory_indep_019_decoder_derives_family_from_core_metadata() -> None:
@@ -258,12 +260,12 @@ def test_memory_indep_019_rejects_invalid_distribution_names(
         decode_resolved_rollback_plan_record(payload)
 
 
-def test_memory_indep_019_resolved_dto_construction_rejects_invalid_state(
+def test_memory_indep_019_artifact_fact_construction_rejects_invalid_state(
     tmp_path: Path,
 ) -> None:
     record = decode_resolved_rollback_plan_record(encode_resolved_rollback_plan_record(_resolved(tmp_path)))
 
-    with pytest.raises(PackageShapeRecordError, match="SHA-256"):
+    with pytest.raises(PackageShapeError, match="SHA-256"):
         replace(record.artifacts[0], sha256="not-a-digest")
 
 
@@ -293,7 +295,7 @@ def test_memory_indep_019_dto_binds_artifacts_to_staging_directory(
         else:
             artifact = replace(
                 record.artifacts[0],
-                path=str(tmp_path / "outside.whl"),
+                path=tmp_path / record.artifacts[0].path.name,
             )
             replace(record, artifacts=(artifact, *record.artifacts[1:]))
 
@@ -305,14 +307,8 @@ def test_memory_indep_019_dto_requires_canonical_unique_artifact_paths(
 
     with pytest.raises(PackageShapeRecordError, match="canonical absolute path"):
         replace(record, staging_dir=f"{record.staging_dir}{os.sep}.")
-    duplicate_path = replace(
-        record.artifacts[1],
-        distribution="dependency",
-        version="1",
-        path=record.artifacts[0].path,
-    )
     with pytest.raises(PackageShapeRecordError, match="duplicate artifact paths"):
-        replace(record, artifacts=(record.artifacts[0], duplicate_path))
+        replace(record, artifacts=(record.artifacts[0], record.artifacts[0]))
 
 
 def test_memory_indep_019_dto_rejects_conflicting_provider_identity() -> None:
@@ -334,3 +330,51 @@ def test_memory_indep_019_decoded_record_reencodes_without_live_files(
 
     assert not (tmp_path / "staging").exists()
     assert encode_resolved_rollback_plan_record(decoded) == payload
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink drift fixture requires POSIX symlinks")
+def test_memory_indep_019_provider_decode_is_stable_across_symlink_drift(
+    tmp_path: Path,
+) -> None:
+    first_target = tmp_path / "first"
+    second_target = tmp_path / "second"
+    first_target.mkdir()
+    second_target.mkdir()
+    provider_link = tmp_path / "provider"
+    provider_link.symlink_to(first_target, target_is_directory=True)
+    captured = _captured()
+    provider_id = str(provider_link / "avibe_os-3.0.14.dist-info")
+    captured = replace(
+        captured,
+        core_provider=replace(captured.core_provider, provider_id=provider_id),
+    )
+    payload = _json_round_trip(encode_captured_package_shape_record(captured))
+
+    decoded_before = decode_captured_package_shape_record(payload)
+    provider_link.unlink()
+    provider_link.symlink_to(second_target, target_is_directory=True)
+    decoded_after = decode_captured_package_shape_record(payload)
+
+    assert decoded_before == decoded_after
+    assert decoded_after.core_provider.provider_id == provider_id
+    assert encode_captured_package_shape_record(decoded_after) == payload
+
+
+@pytest.mark.parametrize(
+    "wheel_name",
+    [
+        "unrelated-3.0.14-py3-none-any.whl",
+        "avibe_os-9-py3-none-any.whl",
+    ],
+)
+def test_memory_indep_019_decoder_binds_artifact_identity_to_wheel_filename(
+    wheel_name: str,
+    tmp_path: Path,
+) -> None:
+    payload = encode_resolved_rollback_plan_record(_resolved(tmp_path))
+    payload["plan"]["artifacts"][0]["path"] = str(  # type: ignore[index]
+        tmp_path / "staging" / wheel_name
+    )
+
+    with pytest.raises(PackageShapeRecordError, match="filename and recorded identity"):
+        decode_resolved_rollback_plan_record(payload)
