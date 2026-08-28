@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""Verify and materialize manifest-pinned Memory Runtime release assets."""
+"""Verify and materialize manifest-pinned Memory Runtime release assets.
+
+Package policy schema v1 declares ``Requires-Python: >=3.10`` and supported
+minors ``3.10``, ``3.11``, and ``3.12``. Changing either contract requires a
+policy schema/version change and an updated repository-owned declaration.
+"""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import sys
 import tarfile
@@ -15,6 +21,11 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+
+try:
+    from scripts.release_package_version import package_version_from_release_tag
+except ModuleNotFoundError:  # Direct execution adds scripts/, not the repository root.
+    from release_package_version import package_version_from_release_tag
 
 RELEASE_DOWNLOAD_ROOT = "https://github.com/avibe-bot/avibe/releases/download"
 EXPECTED_EVEROS_VERSION = "1.2.3"
@@ -28,6 +39,10 @@ MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024
 ASSET_FAILURE_EXIT = 1
 POLICY_EXCLUSION_EXIT = 2
 INTERNAL_GUARD_FAILURE_EXIT = 3
+PACKAGE_POLICY_SCHEMA_VERSION = 1
+PACKAGE_POLICY_REQUIRES_PYTHON = ">=3.10"
+PACKAGE_POLICY_SUPPORTED_PYTHON_VERSIONS = ("3.10", "3.11", "3.12")
+SUPPORTED_NAMESPACE_POLICY_VERSIONS = frozenset({1})
 
 
 class ReleaseGuardError(RuntimeError):
@@ -93,6 +108,207 @@ class ReleaseSpec:
         return {"memory-runtime-manifest.json", *(archive.name for archive in self.archives)}
 
 
+@dataclass(frozen=True)
+class PackageMetadata:
+    name: str
+    version: str
+    requires_python: str
+    requires_dist: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PackageReleasePolicy:
+    requires_python: str
+    supported_python_versions: tuple[str, ...]
+    namespace_policy_version: int
+
+
+@dataclass(frozen=True)
+class RequirementClassification:
+    name: str
+    specifier: str
+    exact_version: str | None
+    has_extras: bool
+    has_marker: bool
+    is_direct: bool
+
+
+def _packaging_modules():
+    try:
+        from packaging import requirements, specifiers, utils, version
+    except ModuleNotFoundError as exc:
+        raise ReleaseAssetError("static release verification requires packaging") from exc
+    return requirements, specifiers, utils, version
+
+
+def _release_version(release_tag: str) -> str:
+    *_, versions = _packaging_modules()
+    try:
+        return str(versions.Version(package_version_from_release_tag(release_tag)))
+    except (ValueError, versions.InvalidVersion) as exc:
+        raise ReleaseAssetError(f"invalid release tag: {release_tag!r}") from exc
+
+
+def load_package_release_policy(
+    manifest_bytes: bytes,
+    *,
+    expected_manifest: bytes,
+    release_tag: str,
+) -> PackageReleasePolicy:
+    """Load the B-facing package policy only after exact manifest identity."""
+    if manifest_bytes != expected_manifest:
+        raise ReleaseAssetError("transition package manifest does not match the selected manifest")
+    try:
+        payload = json.loads(manifest_bytes)
+    except (TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ManifestPolicyError("Memory artifact package policy manifest is invalid") from exc
+    if type(payload) is not dict or type(payload.get("schema_version")) is not int or payload["schema_version"] != 1:
+        raise ManifestPolicyError("Memory Runtime manifest schema_version must be integer 1")
+    if type(payload.get("release_tag")) is not str or payload["release_tag"] != release_tag:
+        raise ManifestPolicyError("manifest release_tag differs from the selected release")
+    raw = payload.get("package_policy")
+    keys = {
+        "schema_version",
+        "release_tag",
+        "release_family",
+        "requires_python",
+        "supported_python_versions",
+        "namespace_policy_version",
+    }
+    if type(raw) is not dict or set(raw) != keys:
+        raise ManifestPolicyError("manifest package_policy schema is invalid")
+    if type(raw["schema_version"]) is not int or raw["schema_version"] != PACKAGE_POLICY_SCHEMA_VERSION:
+        raise ManifestPolicyError("manifest package_policy schema_version must be integer 1")
+    if any(type(raw[key]) is not str or not raw[key] for key in ("release_tag", "release_family", "requires_python")):
+        raise ManifestPolicyError("manifest package_policy string fields are invalid")
+    versions = raw["supported_python_versions"]
+    namespace_version = raw["namespace_policy_version"]
+    if (
+        type(versions) is not list
+        or not versions
+        or any(type(version) is not str or re.fullmatch(r"[0-9]+\.[0-9]+", version) is None for version in versions)
+        or type(namespace_version) is not int
+        or namespace_version not in SUPPORTED_NAMESPACE_POLICY_VERSIONS
+    ):
+        raise ManifestPolicyError("manifest package_policy typed fields are invalid")
+    if tuple(versions) != PACKAGE_POLICY_SUPPORTED_PYTHON_VERSIONS:
+        raise ManifestPolicyError("manifest supported Python versions differ from schema 1 policy")
+    release_parts = _release_version(release_tag).split(".")
+    if raw["release_tag"] != release_tag or raw["release_family"] != ".".join(release_parts[:2]):
+        raise ManifestPolicyError("manifest package_policy release identity is invalid")
+    _, specifiers, _, _ = _packaging_modules()
+    try:
+        requires_python = str(specifiers.SpecifierSet(raw["requires_python"]))
+    except specifiers.InvalidSpecifier as exc:
+        raise ManifestPolicyError("manifest package_policy Python contract is invalid") from exc
+    if requires_python != PACKAGE_POLICY_REQUIRES_PYTHON:
+        raise ManifestPolicyError("manifest package_policy Requires-Python differs from schema 1 policy")
+    return PackageReleasePolicy(requires_python, tuple(versions), namespace_version)
+
+
+def classify_requirement(raw: str) -> RequirementClassification:
+    """Classify one valid requirement without treating wildcard equality as exact."""
+    requirements, _, utils, versions = _packaging_modules()
+    try:
+        requirement = requirements.Requirement(raw)
+    except requirements.InvalidRequirement as exc:
+        raise ReleaseAssetError(f"invalid Requires-Dist requirement: {raw!r}") from exc
+    specifiers = tuple(requirement.specifier)
+    exact_version = None
+    if (
+        not requirement.extras
+        and requirement.url is None
+        and requirement.marker is None
+        and len(specifiers) == 1
+        and specifiers[0].operator == "=="
+        and "*" not in specifiers[0].version
+    ):
+        try:
+            exact_version = str(versions.Version(specifiers[0].version))
+        except versions.InvalidVersion as exc:
+            raise ReleaseAssetError(f"invalid exact requirement version: {raw!r}") from exc
+    return RequirementClassification(str(utils.canonicalize_name(requirement.name)), str(requirement.specifier), exact_version, bool(requirement.extras), requirement.marker is not None, requirement.url is not None)
+
+
+def _verify_package_identity(
+    wheel_filename: str,
+    metadata: PackageMetadata,
+    *,
+    expected_name: str,
+    expected_version: str,
+) -> None:
+    """Bind an A2-supplied metadata record to filename and declared policy."""
+    _, _, utils, versions = _packaging_modules()
+    if (
+        type(metadata) is not PackageMetadata
+        or type(wheel_filename) is not str
+        or type(metadata.name) is not str
+        or type(metadata.version) is not str
+        or type(metadata.requires_python) is not str
+        or type(metadata.requires_dist) is not tuple
+        or any(type(requirement) is not str for requirement in metadata.requires_dist)
+    ):
+        raise ReleaseAssetError("transition package metadata types are invalid")
+    try:
+        filename_name, filename_version, _, _ = utils.parse_wheel_filename(wheel_filename)
+        metadata_name = str(utils.canonicalize_name(metadata.name))
+        metadata_version = str(versions.Version(metadata.version))
+    except (TypeError, ValueError, utils.InvalidWheelFilename, versions.InvalidVersion) as exc:
+        raise ReleaseAssetError(f"transition package identity is invalid: {wheel_filename!r}") from exc
+    if metadata_name != str(filename_name) or metadata_version != str(filename_version):
+        raise ReleaseAssetError(f"wheel filename identity differs from metadata: {wheel_filename}")
+    if metadata_name != expected_name:
+        raise ReleaseAssetError("transition wheel distribution identity is invalid")
+    if metadata_version != expected_version:
+        raise ReleaseAssetError("wheel metadata version does not match the release tag")
+
+
+def _requirements_for(metadata: PackageMetadata, name: str) -> tuple[RequirementClassification, ...]:
+    _, _, utils, _ = _packaging_modules()
+    expected = str(utils.canonicalize_name(name))
+    classified = tuple(classify_requirement(raw) for raw in metadata.requires_dist)
+    return tuple(item for item in classified if item.name == expected)
+
+
+def verify_static_transition(
+    *,
+    core_wheel_filename: str,
+    core_metadata: PackageMetadata,
+    memory_wheel_filename: str,
+    memory_metadata: PackageMetadata,
+    release_tag: str,
+    manifest_bytes: bytes,
+    expected_manifest: bytes,
+) -> tuple[PackageMetadata, PackageMetadata, PackageReleasePolicy]:
+    """Freeze A1's policy interface for A2-supplied wheel metadata."""
+    policy = load_package_release_policy(manifest_bytes, expected_manifest=expected_manifest, release_tag=release_tag)
+    expected_version = _release_version(release_tag)
+    _verify_package_identity(
+        core_wheel_filename,
+        core_metadata,
+        expected_name="avibe-os",
+        expected_version=expected_version,
+    )
+    _verify_package_identity(
+        memory_wheel_filename,
+        memory_metadata,
+        expected_name="avibe-memory",
+        expected_version=expected_version,
+    )
+    if core_metadata.requires_python != policy.requires_python or memory_metadata.requires_python != policy.requires_python:
+        raise ReleaseAssetError(f"wheel Requires-Python must match release policy {policy.requires_python}")
+    memory_dependencies = _requirements_for(core_metadata, "avibe-memory")
+    if len(memory_dependencies) != 1 or memory_dependencies[0].exact_version != expected_version:
+        raise ReleaseAssetError("transition core must hard-depend on the exact Memory version")
+    core_dependencies = _requirements_for(memory_metadata, "avibe-os")
+    if len(core_dependencies) != 1:
+        raise ReleaseAssetError("Memory metadata must contain exactly one avibe-os dependency")
+    reverse = core_dependencies[0]
+    if reverse.exact_version != expected_version:
+        raise ReleaseAssetError("Memory must hard-depend on the exact avibe-os release version")
+    return core_metadata, memory_metadata, policy
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -114,7 +330,7 @@ def load_release_spec(manifest_path: Path) -> ReleaseSpec:
         payload = json.loads(manifest_bytes)
     except (OSError, json.JSONDecodeError) as exc:
         raise ManifestPolicyError(f"cannot read Memory Runtime manifest: {exc}") from exc
-    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+    if not isinstance(payload, dict) or type(payload.get("schema_version")) is not int or payload["schema_version"] != 1:
         raise ManifestPolicyError("Memory Runtime manifest schema_version must be 1")
     everos_version = payload.get("everos_version")
     provenance = (

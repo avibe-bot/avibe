@@ -217,14 +217,12 @@ defective, never merely because core publication failed. Recovery does not
 publish another Memory version, create a second finalizer, or mint a replacement
 release identity.
 
-The release guard scans both wheels and sdists plus the staged/public asset set.
-It proves that the core wheel and sdist contain no Memory implementation or
-EverOS manifest, while the Memory wheel and sdist contain the owned
-implementation, manifest, and complete matching content/metadata. Direct sdist
-inspection is necessary but not sufficient: before any public action, each
-staged sdist is built into a wheel in an isolated environment and that wheel must
-pass the exact ownership, dependency, content, and metadata assertions applied
-to the staged wheel. A rebuild failure prevents GitHub Release finalization. The
+The release guard verifies wheels plus the staged/public asset set. It does not
+open sdists or inspect their raw members, source namespaces, or source content.
+The executable sdist contract is an isolated build, equivalence between each
+rebuilt wheel and its staged wheel, and the rebuilt wheel passing every
+wheel-level identity, dependency, content, and metadata check. Successor B owns
+the rebuild mechanism. A rebuild failure prevents GitHub Release finalization. The
 guard also proves resolver compatibility at the staged and public gates,
 same-finalizer continuation from exact GitHub/Memory checkpoints, and the
 stranded-Memory keep/yank policy.

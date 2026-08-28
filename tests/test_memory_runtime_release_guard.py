@@ -4,6 +4,8 @@ import gzip
 import hashlib
 import io
 import json
+import subprocess
+import sys
 import tarfile
 from pathlib import Path
 
@@ -11,7 +13,6 @@ import pytest
 
 from scripts import memory_runtime_release_guard as guard
 from scripts.build_memory_runtime import LOCK_SHA256 as RUNTIME_LOCK_SHA256
-
 
 def test_guard_platform_contract_keeps_no_follow_capable_shipped_targets_enabled() -> None:
     assert guard.EXPECTED_PLATFORMS == frozenset({"darwin-arm64", "linux-arm64", "linux-x64"})
@@ -40,8 +41,12 @@ def _manifest(
     *,
     everos_version: str = "1.2.3",
     lock_sha256: str = guard.EXPECTED_LOCK_SHA256,
+    release_tag: str = "v3.1.0",
+    requires_python: str = ">=3.10",
+    supported_python_versions: tuple[str, ...] = ("3.10", "3.11", "3.12"),
 ) -> tuple[Path, dict[str, bytes]]:
-    tag = "v3.1.0"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    tag = release_tag
     base_url = f"{guard.RELEASE_DOWNLOAD_ROOT}/{tag}"
     archives: dict[str, dict[str, object]] = {}
     remote: dict[str, bytes] = {}
@@ -68,6 +73,14 @@ def _manifest(
         "uv_version": guard.EXPECTED_UV_VERSION,
         "release_state": "published",
         "release_tag": tag,
+        "package_policy": {
+            "schema_version": 1,
+            "release_tag": tag,
+            "release_family": "3.1",
+            "requires_python": requires_python,
+            "supported_python_versions": list(supported_python_versions),
+            "namespace_policy_version": 1,
+        },
         "archives": archives,
     }
     manifest = tmp_path / "memory-runtime-manifest.json"
@@ -75,6 +88,182 @@ def _manifest(
     manifest.write_bytes(manifest_bytes)
     remote[f"{base_url}/memory-runtime-manifest.json"] = manifest_bytes
     return manifest, remote
+
+
+def _package_metadata(
+    name: str,
+    *,
+    version: str = "3.1.0",
+    requires_python: str = ">=3.10",
+    requires_dist: tuple[str, ...] = (),
+) -> guard.PackageMetadata:
+    return guard.PackageMetadata(name, version, requires_python, requires_dist)
+
+
+def _verify_static(
+    manifest: Path,
+    *,
+    metadata_version: str = "3.1.0",
+    filename_version: str | None = None,
+    requires_python: str = ">=3.10",
+    core_requirement: str = "avibe-memory==3.1.0",
+    memory_requirement: str = "avibe-os==3.1.0",
+) -> tuple[guard.PackageMetadata, guard.PackageMetadata, guard.PackageReleasePolicy]:
+    filename_version = filename_version or metadata_version
+    core = _package_metadata(
+        "avibe-os",
+        version=metadata_version,
+        requires_python=requires_python,
+        requires_dist=(core_requirement,),
+    )
+    memory = _package_metadata(
+        "avibe-memory",
+        version=metadata_version,
+        requires_python=requires_python,
+        requires_dist=(memory_requirement,),
+    )
+    manifest_bytes = manifest.read_bytes()
+    return guard.verify_static_transition(
+        core_wheel_filename=f"avibe_os-{filename_version}-py3-none-any.whl",
+        core_metadata=core,
+        memory_wheel_filename=f"avibe_memory-{filename_version}-py3-none-any.whl",
+        memory_metadata=memory,
+        release_tag=json.loads(manifest_bytes)["release_tag"],
+        manifest_bytes=manifest_bytes,
+        expected_manifest=manifest_bytes,
+    )
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "value"),
+    [
+        (None, "schema_version", True),
+        (None, "schema_version", 1.0),
+        (None, "release_tag", "v9.9.9"),
+        ("package_policy", "schema_version", True),
+        ("package_policy", "schema_version", 1.0),
+        ("package_policy", "release_tag", 1),
+        ("package_policy", "supported_python_versions", "3.11"),
+        ("package_policy", "supported_python_versions", ["3.11rc1"]),
+        ("package_policy", "supported_python_versions", ["3.11+local"]),
+        ("package_policy", "supported_python_versions", ["3.11.post1"]),
+        ("package_policy", "supported_python_versions", ["3.11.dev1"]),
+        ("package_policy", "namespace_policy_version", True),
+    ],
+)
+def test_package_policy_requires_exact_json_types(
+    tmp_path: Path, section: str | None, field: str, value: object
+) -> None:
+    manifest, _ = _manifest(tmp_path)
+    payload = json.loads(manifest.read_bytes())
+    target = payload if section is None else payload[section]
+    target[field] = value
+    candidate = json.dumps(payload).encode()
+
+    with pytest.raises(guard.ManifestPolicyError):
+        guard.load_package_release_policy(candidate, expected_manifest=candidate, release_tag="v3.1.0")
+    if section is None and field == "schema_version":
+        manifest.write_bytes(candidate)
+        with pytest.raises(guard.ManifestPolicyError):
+            guard.load_release_spec(manifest)
+
+
+def test_manifest_byte_mismatch_precedes_invalid_semantic_policy(tmp_path: Path) -> None:
+    selected, _ = _manifest(tmp_path)
+    mismatched = b'{"schema_version":1,"package_policy":{"schema_version":2}}'
+
+    with pytest.raises(guard.ReleaseAssetError, match="does not match"):
+        guard.load_package_release_policy(mismatched, expected_manifest=selected.read_bytes(), release_tag="v3.1.0")
+
+
+@pytest.mark.parametrize("requires_python", [">=3.10", ">= 3.10"])
+def test_package_policy_accepts_declared_requires_python_literal(
+    tmp_path: Path, requires_python: str
+) -> None:
+    manifest, _ = _manifest(tmp_path, requires_python=requires_python)
+    manifest_bytes = manifest.read_bytes()
+
+    policy = guard.load_package_release_policy(
+        manifest_bytes, expected_manifest=manifest_bytes, release_tag="v3.1.0"
+    )
+
+    assert policy.requires_python == ">=3.10"
+    assert policy.supported_python_versions == guard.PACKAGE_POLICY_SUPPORTED_PYTHON_VERSIONS
+
+
+@pytest.mark.parametrize(
+    "supported_python_versions",
+    [
+        ("3.9",),
+        ("3.10", "3.11"),
+        ("3.10", "3.11", "3.12", "3.13"),
+        ("3.10", "3.11", "3.12", "3.12"),
+        ("3.12", "3.11", "3.10"),
+    ],
+)
+def test_package_policy_rejects_undeclared_supported_python_versions(
+    tmp_path: Path, supported_python_versions: tuple[str, ...]
+) -> None:
+    manifest, _ = _manifest(tmp_path, supported_python_versions=supported_python_versions)
+    manifest_bytes = manifest.read_bytes()
+
+    with pytest.raises(guard.ManifestPolicyError, match="supported Python"):
+        guard.load_package_release_policy(
+            manifest_bytes, expected_manifest=manifest_bytes, release_tag="v3.1.0"
+        )
+
+
+@pytest.mark.parametrize("requires_python", ["==3.10", ">=3.10,<3.10.2", ">=3.10,!=3.10.1"])
+def test_package_policy_rejects_undeclared_requires_python_contract(
+    tmp_path: Path, requires_python: str
+) -> None:
+    manifest, _ = _manifest(tmp_path, requires_python=requires_python)
+    manifest_bytes = manifest.read_bytes()
+
+    with pytest.raises(guard.ManifestPolicyError, match="Requires-Python"):
+        guard.load_package_release_policy(
+            manifest_bytes, expected_manifest=manifest_bytes, release_tag="v3.1.0"
+        )
+
+
+def test_wheel_filename_metadata_and_release_tag_are_independent_identities(tmp_path: Path) -> None:
+    manifest, _ = _manifest(tmp_path / "metadata")
+    with pytest.raises(guard.ReleaseAssetError, match="filename identity"):
+        _verify_static(manifest, filename_version="3.1.1")
+
+    manifest, _ = _manifest(tmp_path / "release", release_tag="v3.1.1")
+    with pytest.raises(guard.ReleaseAssetError, match="release tag"):
+        _verify_static(manifest)
+
+
+def test_static_transition_uses_release_bound_requires_python(tmp_path: Path) -> None:
+    manifest, _ = _manifest(tmp_path)
+    core, memory, policy = _verify_static(manifest)
+    assert core.version == memory.version == "3.1.0"
+    assert policy.requires_python == ">=3.10"
+
+    with pytest.raises(guard.ReleaseAssetError, match="Requires-Python"):
+        _verify_static(manifest, requires_python=">=3.11")
+
+
+def test_requirement_classification_keeps_wildcard_equality_non_exact(tmp_path: Path) -> None:
+    classification = guard.classify_requirement("avibe-memory==3.1.*")
+    assert classification.exact_version is None
+
+    manifest, _ = _manifest(tmp_path)
+    with pytest.raises(guard.ReleaseAssetError, match="hard-depend"):
+        _verify_static(manifest, core_requirement="avibe-memory==3.1.*")
+    with pytest.raises(guard.ReleaseAssetError, match="exact avibe-os"):
+        _verify_static(manifest, memory_requirement="avibe-os>=4")
+    with pytest.raises(guard.ReleaseAssetError, match="exact avibe-os"):
+        _verify_static(manifest, memory_requirement="avibe-os>=0")
+
+
+def test_existing_guard_commands_remain_stdlib_only(tmp_path: Path) -> None:
+    manifest, _ = _manifest(tmp_path)
+    script = Path(__file__).resolve().parents[1] / "scripts/memory_runtime_release_guard.py"
+    result = subprocess.run([sys._base_executable, "-S", str(script), "--manifest", str(manifest), "check-policy"], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize("everos_version", sorted(guard.PUBLISHED_RUNTIME_PROVENANCE))
