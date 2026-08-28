@@ -428,6 +428,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const recordingStartRef = useRef(false);
   const pendingVoiceInsertionRef = useRef<VoiceInsertionSnapshot | null>(null);
   const focusNextVoiceControlRef = useRef(false);
+  const voiceEditorFocusReturnRef = useRef<HTMLElement | null>(null);
   const finishVoiceControlRef = useRef<HTMLButtonElement | null>(null);
   const recordingTickerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const unmountedRef = useRef(false);
@@ -1234,6 +1235,19 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     }
   }, [voiceControlMode]);
 
+  useLayoutEffect(() => {
+    if (voiceDraftReadOnly || voiceEditorFocusReturnRef.current === null) return;
+    const target = voiceEditorFocusReturnRef.current;
+    voiceEditorFocusReturnRef.current = null;
+    const activeElement = document.activeElement;
+    if (
+      target.isConnected
+      && (activeElement === null || activeElement === document.body || !activeElement.isConnected)
+    ) {
+      target.focus({ preventScroll: true });
+    }
+  }, [voiceDraftReadOnly]);
+
   const handleVoiceShortcut = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
     if (
       !voiceShortcutAvailable
@@ -1247,6 +1261,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     event.preventDefault();
     if (voiceControlMode === 'finish') stopRecording();
     else {
+      const activeElement = document.activeElement;
+      voiceEditorFocusReturnRef.current = (
+        activeElement === textareaRef.current
+        || (
+          activeElement instanceof HTMLElement
+          && activeElement.getAttribute('contenteditable') === 'true'
+          && event.currentTarget.contains(activeElement)
+        )
+      ) ? activeElement as HTMLElement : null;
       focusNextVoiceControlRef.current = true;
       void startRecording(captureVoiceInsertion());
     }
