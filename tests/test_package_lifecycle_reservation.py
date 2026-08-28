@@ -6,6 +6,7 @@ import json
 import multiprocessing
 import os
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -150,6 +151,41 @@ def test_memory_indep_020_stale_free_bytes_are_not_a_live_holder(tmp_path) -> No
     assert probe.publication is None
     assert probe.publication_observed is False
     assert classified.classification is BusyClassification.BUSY
+
+
+def test_memory_indep_020_probe_ignores_pre_lock_acquisition_attempt(tmp_path, monkeypatch) -> None:
+    manager = PackageLifecycleReservationManager(tmp_path)
+    real_try_os_lock = reservation_module._try_os_lock
+    before_lock = threading.Event()
+    allow_lock = threading.Event()
+    acquirer_ident: int | None = None
+    acquired = []
+
+    def block_acquirer(descriptor: int) -> bool:
+        if threading.get_ident() == acquirer_ident:
+            before_lock.set()
+            assert allow_lock.wait(10)
+        return real_try_os_lock(descriptor)
+
+    def acquire() -> None:
+        nonlocal acquirer_ident
+        acquirer_ident = threading.get_ident()
+        acquired.append(manager.acquire(HolderType.PACKAGE))
+
+    monkeypatch.setattr(reservation_module, "_try_os_lock", block_acquirer)
+    thread = threading.Thread(target=acquire)
+    thread.start()
+    try:
+        assert before_lock.wait(10)
+        assert manager.probe().liveness is ReservationLiveness.FREE
+    finally:
+        allow_lock.set()
+        thread.join(10)
+
+    assert not thread.is_alive()
+    assert len(acquired) == 1 and acquired[0] is not None
+    assert manager.probe().liveness is ReservationLiveness.HELD
+    acquired[0].release()
 
 
 def test_memory_indep_020_recovery_turnover_never_names_stale_package_owner(tmp_path) -> None:

@@ -198,10 +198,10 @@ class PackageLifecycleReservationManager:
             _refresh_process_reservations()
             if self._key in _PROCESS_RESERVATIONS:
                 return None
-            _PROCESS_RESERVATIONS.add(self._key)
 
         descriptor: int | None = None
         locked = False
+        registered = False
         try:
             flags = os.O_RDWR | os.O_CREAT
             flags |= getattr(os, "O_CLOEXEC", 0)
@@ -211,9 +211,12 @@ class PackageLifecycleReservationManager:
             if not _try_os_lock(descriptor):
                 os.close(descriptor)
                 descriptor = None
-                self._forget_process_reservation()
                 return None
             locked = True
+            with _PROCESS_RESERVATIONS_LOCK:
+                _refresh_process_reservations()
+                _PROCESS_RESERVATIONS.add(self._key)
+                registered = True
 
             holder = HolderInformation(
                 acquisition_id=uuid.uuid4().hex,
@@ -235,7 +238,8 @@ class PackageLifecycleReservationManager:
                 if locked:
                     _unlock_os_lock(descriptor)
                 os.close(descriptor)
-            self._forget_process_reservation()
+            if registered:
+                self._forget_process_reservation()
             raise
 
     def probe(self) -> LivenessProbeResult:
