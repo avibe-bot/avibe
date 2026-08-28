@@ -125,6 +125,7 @@ class CodexTransportHealthTests(unittest.IsolatedAsyncioTestCase):
         # ``agents`` is a role-definition table in older supported Codex
         # releases; native delegation is disabled through the feature gate.
         self.assertNotIn("agents.enabled=false", disabled)
+        self.assertNotIn("features.fast_mode=false", disabled)
         self.assertNotIn("features.image_generation=false", disabled)
         self.assertNotIn("features.shell_tool=false", disabled)
         self.assertNotIn("web_search=disabled", disabled)

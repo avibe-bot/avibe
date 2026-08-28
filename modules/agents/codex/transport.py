@@ -33,7 +33,6 @@ AVIBE_APP_SERVER_CONFIG_OVERRIDES = (
     "features.browser_use_external=false",
     "features.browser_use_full_cdp_access=false",
     "features.computer_use=false",
-    "features.fast_mode=false",
     "features.goals=false",
     "features.guardian_approval=false",
     "features.hooks=false",
