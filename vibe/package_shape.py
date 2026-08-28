@@ -1,8 +1,7 @@
 """Exact package capture, persisted recovery DTOs, and rollback resolution.
 
-Plan-record dependency-closure semantics belong to the immediate successor
-slice (b). Until that slice merges, consumers must not consume persisted plan
-records for G3-1B outer records or G3-2 rehydration.
+Plan records validate dependency closure offline from their persisted resolver
+environment. They remain factual and cannot authorize rollback execution.
 
 Strictness belongs to our package facts; tolerance belongs only to unrelated
 environmental presence. Live inventory screens relevance tolerantly, then
@@ -11,12 +10,16 @@ validates relevant facts strictly. Persisted record decode is always strict.
 Every persisted executable or module path is owned by one pure lexical
 validator shared by live construction and decode. Ordinary text fields do not
 inherit path constraints.
+
+Identity precedes semantics, snapshots precede evaluation, validation has one
+DTO-construction source, and every policy decision names its persisted source.
 """
 
 from __future__ import annotations
 
 import email.parser
 import hashlib
+import json
 import ntpath
 import os
 import posixpath
@@ -33,6 +36,7 @@ from types import UnionType
 from typing import Any, Union, get_args, get_origin, get_type_hints
 
 from packaging.requirements import InvalidRequirement, Requirement
+from packaging.markers import UndefinedComparison, UndefinedEnvironmentName, default_environment
 from packaging.utils import (
     InvalidName,
     InvalidWheelFilename,
@@ -50,6 +54,7 @@ MEMORY_PACKAGE_NAME = "avibe-memory"
 CORE_DISTRIBUTION_NAMES = frozenset({CORE_PACKAGE_NAME, LEGACY_CORE_PACKAGE_NAME})
 MEMORY_SPLIT_MIN_VERSION = Version("3.0.14.dev0")
 PACKAGE_SHAPE_RECORD_SCHEMA_VERSION = 1
+_RESOLVED_ROLLBACK_PLAN_RECORD_SCHEMA_VERSION = 2
 
 
 class PackageShapeError(ValueError):
@@ -72,6 +77,11 @@ class ReleaseFamily(str, Enum):
     PRE_SPLIT = "pre_split"
     OPTIONAL_SPLIT = "optional_split"
     TRANSITION = "transition"
+
+
+class ArtifactRole(str, Enum):
+    INSTALL = "install"
+    RESIDUAL_PRESERVE = "residual_preserve"
 
 
 def _canonical_distribution_name(
@@ -251,6 +261,32 @@ class ExactRequirement:
         return f"{self.distribution}=={self.version}"
 
 
+@dataclass(frozen=True)
+class ResolverEnvironment:
+    python_version: str
+    python_full_version: str
+    implementation_name: str
+    implementation_version: str
+    os_name: str
+    platform_machine: str
+    platform_python_implementation: str
+    platform_release: str
+    platform_system: str
+    platform_version: str
+    sys_platform: str
+
+    def __post_init__(self) -> None:
+        _validate_record_fields(self)
+        try:
+            full_version = Version(self.python_full_version)
+            Version(self.implementation_version)
+        except InvalidVersion as exc:
+            raise PackageShapeRecordError("resolver environment version is invalid") from exc
+        expected_python_version = ".".join(str(part) for part in full_version.release[:2])
+        if self.python_version != expected_python_version:
+            raise PackageShapeRecordError("resolver environment Python versions disagree")
+
+
 @dataclass(frozen=True, order=True)
 class StagedArtifact:
     distribution: str
@@ -258,6 +294,7 @@ class StagedArtifact:
     path: Path
     sha256: str
     requires_dist: tuple[str, ...]
+    role: ArtifactRole
 
     def __post_init__(self) -> None:
         distribution = _canonical_distribution_name(
@@ -285,6 +322,8 @@ class StagedArtifact:
             or any(character not in "0123456789abcdef" for character in self.sha256)
         ):
             raise PackageShapeError("artifact SHA-256 is not canonical")
+        if type(self.role) is not ArtifactRole:
+            raise PackageShapeError("staged artifact role is invalid")
         object.__setattr__(self, "distribution", distribution)
         object.__setattr__(self, "version", version)
         object.__setattr__(self, "path", path)
@@ -313,6 +352,7 @@ class ResolvedRollbackPlan:
     """A rollback whose complete exact closure already exists in staging."""
 
     captured: CapturedPackageShape
+    resolver_environment: ResolverEnvironment
     requirements: tuple[ExactRequirement, ...]
     artifacts: tuple[StagedArtifact, ...]
     staging_dir: Path
@@ -413,6 +453,7 @@ class ResolvedRollbackPlanRecord:
     """Non-executable persisted form of a resolved rollback plan."""
 
     captured: CapturedPackageShapeRecord
+    resolver_environment: ResolverEnvironment
     requirements: tuple[ExactRequirement, ...]
     artifacts: tuple[StagedArtifact, ...]
     staging_dir: str
@@ -465,12 +506,6 @@ class ResolvedRollbackPlanRecord:
             or staged_memory_version != self.captured.memory_version
         ):
             raise PackageShapeRecordError("staging does not contain the exact captured Memory shape")
-        missing_requirements = {
-            (requirement.distribution, requirement.version) for requirement in self.requirements
-        } - {(artifact.distribution, artifact.version) for artifact in self.artifacts}
-        if missing_requirements:
-            raise PackageShapeRecordError("resolved staging is missing an exact rollback artifact")
-
         staged_core = core_artifacts[0]
         try:
             staged_family, staged_transition = _release_family(
@@ -488,10 +523,101 @@ class ResolvedRollbackPlanRecord:
             or staged_transition != self.captured.transition_memory_version
         ):
             raise PackageShapeRecordError("staged core artifact does not match the captured release family")
+        _validate_resolved_closure(self)
         if self.uninstall_distributions != _rollback_uninstall_distributions():
             raise PackageShapeRecordError("resolved rollback record has an unknown uninstall set")
         if self.verification != _package_shape_verification(self.captured):
             raise PackageShapeRecordError("resolved rollback verification is inconsistent")
+
+
+def _marker_environment(environment: ResolverEnvironment, extra: str) -> dict[str, str]:
+    return {
+        **{field.name: getattr(environment, field.name) for field in fields(environment)},
+        "extra": extra,
+    }
+
+
+def _active_requirement(
+    value: str,
+    environment: ResolverEnvironment,
+    extras: set[str],
+) -> Requirement | None:
+    try:
+        requirement = Requirement(value)
+        active = requirement.marker is None or any(
+            requirement.marker.evaluate(_marker_environment(environment, extra)) for extra in ("", *sorted(extras))
+        )
+    except (InvalidRequirement, UndefinedComparison, UndefinedEnvironmentName) as exc:
+        raise PackageShapeRecordError("staged artifact dependency metadata is invalid") from exc
+    if not active:
+        return None
+    if requirement.url is not None:
+        raise PackageShapeRecordError("staged artifact dependency uses an unverifiable direct URL")
+    return requirement
+
+
+def _validate_resolved_closure(record: ResolvedRollbackPlanRecord) -> None:
+    install = {
+        artifact.distribution: artifact for artifact in record.artifacts if artifact.role is ArtifactRole.INSTALL
+    }
+    residual = tuple(artifact for artifact in record.artifacts if artifact.role is ArtifactRole.RESIDUAL_PRESERVE)
+    expected_residual: tuple[str, str] | None = None
+    if record.captured.release_family is ReleaseFamily.PRE_SPLIT and record.captured.residual_memory:
+        assert record.captured.memory_version is not None
+        expected_residual = (MEMORY_PACKAGE_NAME, record.captured.memory_version)
+    if tuple((artifact.distribution, artifact.version) for artifact in residual) != (
+        (expected_residual,) if expected_residual is not None else ()
+    ):
+        raise PackageShapeRecordError("residual-preserve artifact does not match the bundled residual shape")
+
+    reachable: set[str] = set()
+    active_extras: dict[str, set[str]] = {}
+    pending: list[StagedArtifact] = []
+
+    def schedule(artifact: StagedArtifact, extras: set[str]) -> None:
+        known = active_extras.setdefault(artifact.distribution, set())
+        if artifact.distribution in reachable and extras <= known:
+            return
+        known.update(extras)
+        reachable.add(artifact.distribution)
+        pending.append(artifact)
+
+    for requirement in record.requirements:
+        if expected_residual == (requirement.distribution, requirement.version):
+            continue
+        artifact = install.get(requirement.distribution)
+        if artifact is None:
+            raise PackageShapeRecordError("resolved staging is missing a top-level install artifact")
+        if artifact.version != requirement.version:
+            raise PackageShapeRecordError("top-level install artifact does not match the captured exact pin")
+        schedule(artifact, set())
+
+    while pending:
+        source = pending.pop()
+        for value in source.requires_dist:
+            requirement = _active_requirement(
+                value,
+                record.resolver_environment,
+                active_extras[source.distribution],
+            )
+            if requirement is None:
+                continue
+            distribution = _canonical_distribution_name(
+                requirement.name,
+                field="active dependency distribution",
+                error_type=PackageShapeRecordError,
+            )
+            target = install.get(distribution)
+            if target is None:
+                raise PackageShapeRecordError("active dependency is missing staged install artifact")
+            if not requirement.specifier.contains(target.version):
+                raise PackageShapeRecordError("staged install artifact does not satisfy active dependency")
+            # Requires-Dist edges name distributions. Python stdlib imports are
+            # not package metadata edges and therefore need no ambient allowlist.
+            schedule(target, set(requirement.extras))
+
+    if orphaned := set(install) - reachable:
+        raise PackageShapeRecordError(f"staging contains unreachable install artifacts: {', '.join(sorted(orphaned))}")
 
 
 _RECORD_DTO_TYPES = (
@@ -500,6 +626,7 @@ _RECORD_DTO_TYPES = (
     _ServiceLauncherRecord,
     CapturedPackageShapeRecord,
     ExactRequirement,
+    ResolverEnvironment,
     StagedArtifact,
     PackageShapeVerification,
     ResolvedRollbackPlanRecord,
@@ -697,29 +824,37 @@ def _decode_record_dto(value: object, dto_type: type, *, field: str) -> object:
 
 
 _RECORD_ENVELOPES = {
-    "captured_package_shape": ("shape", CapturedPackageShapeRecord),
-    "resolved_rollback_plan": ("plan", ResolvedRollbackPlanRecord),
+    "captured_package_shape": (
+        "shape",
+        CapturedPackageShapeRecord,
+        PACKAGE_SHAPE_RECORD_SCHEMA_VERSION,
+    ),
+    "resolved_rollback_plan": (
+        "plan",
+        ResolvedRollbackPlanRecord,
+        _RESOLVED_ROLLBACK_PLAN_RECORD_SCHEMA_VERSION,
+    ),
 }
 
 
 def _encode_record(record_type: str, record: object) -> dict[str, object]:
-    payload_name, dto_type = _RECORD_ENVELOPES[record_type]
+    payload_name, dto_type, schema_version = _RECORD_ENVELOPES[record_type]
     if type(record) is not dto_type:
         raise PackageShapeRecordError("record DTO type is unsupported")
     return {
-        "schema_version": PACKAGE_SHAPE_RECORD_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "record_type": record_type,
         payload_name: _encode_record_dto(record),
     }
 
 
 def _decode_record(value: object, record_type: str) -> object:
-    payload_name, dto_type = _RECORD_ENVELOPES[record_type]
+    payload_name, dto_type, schema_version = _RECORD_ENVELOPES[record_type]
     required = frozenset({"schema_version", "record_type", payload_name})
     if type(value) is not dict or frozenset(value) != required:
         raise PackageShapeRecordError("record has unknown or missing fields")
     version = value["schema_version"]
-    if type(version) is not int or version != PACKAGE_SHAPE_RECORD_SCHEMA_VERSION:
+    if type(version) is not int or version != schema_version:
         raise PackageShapeRecordError("package-shape record schema version is unsupported")
     if type(value["record_type"]) is not str or value["record_type"] != record_type:
         raise PackageShapeRecordError("package-shape record type is unsupported")
@@ -771,6 +906,7 @@ def _plan_to_record(
         raise PackageShapeRecordError("resolved rollback plan has an unsupported type")
     return ResolvedRollbackPlanRecord(
         captured=_captured_to_record(plan.captured),
+        resolver_environment=plan.resolver_environment,
         requirements=plan.requirements,
         artifacts=plan.artifacts,
         staging_dir=str(plan.staging_dir),
@@ -1007,7 +1143,11 @@ def _wheel_provider(path: Path) -> DistributionProvider:
     return provider
 
 
-def _staged_artifacts(staging_dir: Path) -> tuple[StagedArtifact, ...]:
+def _staged_artifacts(
+    staging_dir: Path,
+    *,
+    residual_memory: bool,
+) -> tuple[StagedArtifact, ...]:
     artifacts: list[StagedArtifact] = []
     for path in sorted(staging_dir.iterdir()):
         if not path.is_file():
@@ -1021,6 +1161,11 @@ def _staged_artifacts(staging_dir: Path) -> tuple[StagedArtifact, ...]:
                     path=path,
                     sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
                     requires_dist=provider.requires_dist,
+                    role=(
+                        ArtifactRole.RESIDUAL_PRESERVE
+                        if residual_memory and provider.name == MEMORY_PACKAGE_NAME
+                        else ArtifactRole.INSTALL
+                    ),
                 )
             )
         except PackageShapeError as exc:
@@ -1053,9 +1198,11 @@ def _construct_resolved_plan(
     requirements: tuple[ExactRequirement, ...],
     artifacts: tuple[StagedArtifact, ...],
     staging_dir: Path,
+    resolver_environment: ResolverEnvironment,
 ) -> ResolvedRollbackPlan:
     plan = object.__new__(ResolvedRollbackPlan)
     object.__setattr__(plan, "captured", captured)
+    object.__setattr__(plan, "resolver_environment", resolver_environment)
     object.__setattr__(plan, "requirements", requirements)
     object.__setattr__(plan, "artifacts", artifacts)
     object.__setattr__(plan, "staging_dir", staging_dir)
@@ -1076,6 +1223,37 @@ def _construct_resolved_plan(
     return plan
 
 
+def _capture_resolver_environment(resolver_python: str | None) -> ResolverEnvironment:
+    try:
+        if resolver_python is None:
+            payload: object = default_environment()
+        else:
+            result = subprocess.run(
+                [
+                    resolver_python,
+                    "-c",
+                    "import json; from packaging.markers import default_environment; "
+                    "print(json.dumps(default_environment()))",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            if result.returncode != 0:
+                raise RollbackResolutionError("resolver environment snapshot failed")
+            payload = json.loads(result.stdout)
+        environment = _decode_record_dto(
+            payload,
+            ResolverEnvironment,
+            field="resolver environment",
+        )
+    except (json.JSONDecodeError, OSError, subprocess.SubprocessError, PackageShapeError) as exc:
+        raise RollbackResolutionError("resolver environment snapshot failed") from exc
+    assert isinstance(environment, ResolverEnvironment)
+    return environment
+
+
 def resolve_rollback_plan(
     captured: CapturedPackageShape,
     *,
@@ -1086,6 +1264,7 @@ def resolve_rollback_plan(
     """Resolve exact requirements from one local wheelhouse without installing."""
 
     requirements = _rollback_requirements(captured)
+    resolver_environment = _capture_resolver_environment(resolver_python)
     wheelhouse = Path(wheelhouse).resolve()
     staging_dir = Path(staging_dir).resolve()
     if not wheelhouse.is_dir():
@@ -1151,24 +1330,32 @@ def resolve_rollback_plan(
             )
             if result.returncode != 0:
                 raise RollbackResolutionError("exact rollback requirements did not resolve from the local wheelhouse")
-        temporary_artifacts = _staged_artifacts(temporary)
+        temporary_artifacts = _staged_artifacts(
+            temporary,
+            residual_memory=captured.residual_memory,
+        )
         _construct_resolved_plan(
             captured=captured,
             requirements=requirements,
             artifacts=temporary_artifacts,
             staging_dir=temporary,
+            resolver_environment=resolver_environment,
         )
 
         if staging_dir.exists():
             raise RollbackResolutionError("rollback staging destination appeared during resolution")
         os.replace(temporary, staging_dir)
         moved_to_staging = True
-        artifacts = _staged_artifacts(staging_dir)
+        artifacts = _staged_artifacts(
+            staging_dir,
+            residual_memory=captured.residual_memory,
+        )
         plan = _construct_resolved_plan(
             captured=captured,
             requirements=requirements,
             artifacts=artifacts,
             staging_dir=staging_dir,
+            resolver_environment=resolver_environment,
         )
         resolved = True
         return plan
@@ -1182,6 +1369,7 @@ def resolve_rollback_plan(
 
 
 __all__ = [
+    "ArtifactRole",
     "CapturedPackageShape",
     "CapturedPackageShapeRecord",
     "DistributionProvider",
@@ -1192,6 +1380,7 @@ __all__ = [
     "PackageShapeRecordError",
     "PackageShapeVerification",
     "ReleaseFamily",
+    "ResolverEnvironment",
     "ResolvedRollbackPlan",
     "ResolvedRollbackPlanRecord",
     "RollbackResolutionError",

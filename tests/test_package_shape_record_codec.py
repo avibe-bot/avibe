@@ -13,12 +13,14 @@ import pytest
 
 import vibe.package_shape as package_shape
 from vibe.package_shape import (
+    ArtifactRole,
     CapturedPackageShapeRecord,
     DistributionProvider,
     ExactRequirement,
     PackageShapeError,
     PackageShapeRecordError,
     ReleaseFamily,
+    ResolverEnvironment,
     ResolvedRollbackPlan,
     ResolvedRollbackPlanRecord,
     StagedArtifact,
@@ -29,6 +31,25 @@ from vibe.package_shape import (
 )
 from vibe.runtime import ServiceLauncher
 from vibe.upgrade import rollback_target
+
+
+RESOLVER_ENVIRONMENT_VALUES = {
+    "python_version": "3.11",
+    "python_full_version": "3.11.9",
+    "implementation_name": "cpython",
+    "implementation_version": "3.11.9",
+    "os_name": "posix",
+    "platform_machine": "x86_64",
+    "platform_python_implementation": "CPython",
+    "platform_release": "test-release",
+    "platform_system": "Linux",
+    "platform_version": "test-version",
+    "sys_platform": "linux",
+}
+
+
+def _resolver_environment(**overrides: str) -> ResolverEnvironment:
+    return ResolverEnvironment(**{**RESOLVER_ENVIRONMENT_VALUES, **overrides})
 
 
 def _captured() -> package_shape.CapturedPackageShape:
@@ -70,6 +91,7 @@ def _resolved(tmp_path: Path) -> ResolvedRollbackPlan:
             path=(staging_dir / f"{requirement.distribution.replace('-', '_')}-{requirement.version}-py3-none-any.whl"),
             sha256=("a" if index == 0 else "b") * 64,
             requires_dist=(captured.core_provider.requires_dist if index == 0 else ()),
+            role=ArtifactRole.INSTALL,
         )
         for index, requirement in enumerate(requirements)
     )
@@ -78,6 +100,7 @@ def _resolved(tmp_path: Path) -> ResolvedRollbackPlan:
         requirements=requirements,
         artifacts=artifacts,
         staging_dir=staging_dir,
+        resolver_environment=_resolver_environment(),
     )
 
 
@@ -85,6 +108,27 @@ def _json_round_trip(value: dict[str, object]) -> dict[str, object]:
     loaded = json.loads(json.dumps(value))
     assert isinstance(loaded, dict)
     return loaded
+
+
+def _append_artifact(
+    payload: dict[str, object],
+    tmp_path: Path,
+    distribution: str,
+    version: str,
+    *,
+    requires_dist: tuple[str, ...] = (),
+    role: str = "install",
+) -> None:
+    payload["plan"]["artifacts"].append(  # type: ignore[index]
+        {
+            "distribution": distribution,
+            "version": version,
+            "path": str(tmp_path / "staging" / f"{distribution.replace('-', '_')}-{version}-py3-none-any.whl"),
+            "sha256": "c" * 64,
+            "requires_dist": list(requires_dist),
+            "role": role,
+        }
+    )
 
 
 def test_memory_indep_019_captured_codec_is_json_safe_immutable_and_lossless() -> None:
@@ -144,10 +188,15 @@ def test_memory_indep_019_resolved_codec_preserves_complete_non_executable_plan(
 
     assert isinstance(decoded, ResolvedRollbackPlanRecord)
     assert not isinstance(decoded, ResolvedRollbackPlan)
+    assert encoded["schema_version"] == 2
     assert encode_resolved_rollback_plan_record(decoded) == encoded
     assert decoded.staging_dir == str(tmp_path / "staging")
     assert [artifact.sha256 for artifact in decoded.artifacts] == ["a" * 64, "b" * 64]
     assert decoded.verification.memory_version == "3.0.15"
+    assert tuple(encoded["plan"]["resolver_environment"]) == tuple(  # type: ignore[index]
+        RESOLVER_ENVIRONMENT_VALUES
+    )
+    assert {artifact.role for artifact in decoded.artifacts} == {ArtifactRole.INSTALL}
     with pytest.raises(TypeError, match="constructed only by rollback resolution"):
         ResolvedRollbackPlan(**decoded.__dict__)
 
@@ -214,13 +263,100 @@ def test_memory_indep_019_resolved_decoder_rejects_structural_drift(
         decode_resolved_rollback_plan_record(payload)
 
 
+@pytest.mark.parametrize("version", [0, 1, 3, True, "2", None])
 def test_memory_indep_019_resolved_decoder_rejects_unknown_schema(
+    version: object,
     tmp_path: Path,
 ) -> None:
     payload = encode_resolved_rollback_plan_record(_resolved(tmp_path))
-    payload["schema_version"] = 2
+    payload["schema_version"] = version
 
     with pytest.raises(PackageShapeRecordError, match="schema version"):
+        decode_resolved_rollback_plan_record(payload)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda value: value["plan"]["resolver_environment"].pop("python_version"),
+        lambda value: value["plan"]["resolver_environment"].update(extra="unknown"),
+        lambda value: value["plan"]["resolver_environment"].update(python_version=3.11),
+        lambda value: value["plan"]["resolver_environment"].update(python_full_version="3.12.1"),
+        lambda value: value["plan"]["artifacts"][0].pop("role"),
+    ],
+)
+def test_memory_indep_019_plan_snapshot_and_roles_are_strict(
+    mutation: object,
+    tmp_path: Path,
+) -> None:
+    payload = encode_resolved_rollback_plan_record(_resolved(tmp_path))
+    mutation(payload)  # type: ignore[operator]
+
+    with pytest.raises(PackageShapeRecordError):
+        decode_resolved_rollback_plan_record(payload)
+
+
+def test_memory_indep_019_dependency_closure_uses_only_persisted_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = encode_resolved_rollback_plan_record(_resolved(tmp_path))
+    payload["plan"]["artifacts"][0]["requires_dist"].append(  # type: ignore[index]
+        'shape-helper==1; python_version < "3.12"'
+    )
+    _append_artifact(payload, tmp_path, "shape-helper", "1", requires_dist=("shape-leaf==2",))
+    _append_artifact(payload, tmp_path, "shape-leaf", "2")
+    monkeypatch.setattr(
+        package_shape,
+        "default_environment",
+        lambda: pytest.fail("decode consulted the current resolver environment"),
+    )
+
+    decoded = decode_resolved_rollback_plan_record(payload)
+
+    assert {artifact.distribution for artifact in decoded.artifacts} == {
+        "avibe-os",
+        "avibe-memory",
+        "shape-helper",
+        "shape-leaf",
+    }
+
+
+@pytest.mark.parametrize(
+    ("artifact_version", "include_artifact", "expected"),
+    [
+        ("1", False, "missing staged install artifact"),
+        ("2", True, "does not satisfy"),
+    ],
+)
+def test_memory_indep_019_active_dependency_must_resolve_exactly(
+    artifact_version: str,
+    include_artifact: bool,
+    expected: str,
+    tmp_path: Path,
+) -> None:
+    payload = encode_resolved_rollback_plan_record(_resolved(tmp_path))
+    payload["plan"]["artifacts"][0]["requires_dist"].append("shape-helper==1")  # type: ignore[index]
+    if include_artifact:
+        _append_artifact(payload, tmp_path, "shape-helper", artifact_version)
+
+    with pytest.raises(PackageShapeRecordError, match=expected):
+        decode_resolved_rollback_plan_record(payload)
+
+
+def test_memory_indep_019_unreachable_install_artifact_fails_closed(tmp_path: Path) -> None:
+    payload = encode_resolved_rollback_plan_record(_resolved(tmp_path))
+    _append_artifact(payload, tmp_path, "shape-helper", "1")
+
+    with pytest.raises(PackageShapeRecordError, match="unreachable"):
+        decode_resolved_rollback_plan_record(payload)
+
+
+def test_memory_indep_019_residual_role_requires_bundled_residual_shape(tmp_path: Path) -> None:
+    payload = encode_resolved_rollback_plan_record(_resolved(tmp_path))
+    payload["plan"]["artifacts"][1]["role"] = "residual_preserve"  # type: ignore[index]
+
+    with pytest.raises(PackageShapeRecordError, match="residual-preserve"):
         decode_resolved_rollback_plan_record(payload)
 
 
@@ -291,6 +427,7 @@ def test_memory_indep_019_rejects_invalid_distribution_names(
             "path": str(tmp_path / "staging" / "invalid.whl"),
             "sha256": "c" * 64,
             "requires_dist": [],
+            "role": "install",
         }
     )
     with pytest.raises(PackageShapeRecordError, match="name is invalid"):

@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from vibe.package_shape import (
+    ArtifactRole,
     CapturedPackageShape,
     DistributionProvider,
     DuplicateDistributionProviderError,
@@ -235,9 +236,7 @@ def test_memory_indep_019_release_family_property_table(
             wheelhouse,
             "avibe-memory",
             case.memory_version,
-            requires_dist=(MEMORY_FORWARD_CORE_REQUIREMENT,)
-            if case.residual_memory
-            else (),
+            requires_dist=(MEMORY_FORWARD_CORE_REQUIREMENT,) if case.residual_memory else (),
         )
     staging = tmp_path / "staging"
     if case.expected_requirements is None:
@@ -247,19 +246,23 @@ def test_memory_indep_019_release_family_property_table(
         return
 
     plan = resolve_rollback_plan(shape, wheelhouse=wheelhouse, staging_dir=staging)
-    assert tuple(requirement.specifier for requirement in plan.requirements) == (
-        case.expected_requirements
-    )
+    assert tuple(requirement.specifier for requirement in plan.requirements) == (case.expected_requirements)
     assert plan.verification.memory_provider_cardinality == int(case.memory_version is not None)
     assert plan.verification.memory_version == case.memory_version
     assert plan.verification.residual_memory is case.residual_memory
-    expected_absent_core = (
-        "avibe-os" if case.core_distribution == "vibe-remote" else "vibe-remote"
-    )
+    expected_absent_core = "avibe-os" if case.core_distribution == "vibe-remote" else "vibe-remote"
     assert plan.verification.absent_core_distributions == (expected_absent_core,)
     assert plan.staging_dir == staging
     assert all(artifact.path.parent == staging for artifact in plan.artifacts)
     assert all(len(artifact.sha256) == 64 for artifact in plan.artifacts)
+    assert {artifact.distribution: artifact.role for artifact in plan.artifacts} == {
+        requirement.split("==", 1)[0]: (
+            ArtifactRole.RESIDUAL_PRESERVE
+            if case.residual_memory and requirement.startswith("avibe-memory==")
+            else ArtifactRole.INSTALL
+        )
+        for requirement in case.expected_requirements
+    }
     assert [
         (artifact.distribution, artifact.version)
         for artifact in plan.artifacts
@@ -385,9 +388,7 @@ def test_memory_indep_019_repeated_metadata_paths_count_as_one_provider(
     shape = capture_package_shape(
         core_version="3.0.14",
         launcher=LAUNCHER,
-        providers=inspect_installed_distribution_providers(
-            [core, repeated_core, memory, repeated_memory]
-        ),
+        providers=inspect_installed_distribution_providers([core, repeated_core, memory, repeated_memory]),
     )
 
     assert shape.core_provider.provider_id == str(core_path.resolve())
@@ -488,6 +489,39 @@ def test_memory_indep_019_local_resolution_only_downloads(
     assert "install" not in commands[0]
 
 
+def test_memory_indep_019_live_resolver_captures_marker_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shape = _shape("3.0.14", memory_version=None)
+    wheelhouse = tmp_path / "wheelhouse"
+    wheelhouse.mkdir()
+    _wheel(wheelhouse, "avibe-os", "3.0.14", requires_dist=(OPTIONAL_MEMORY_REQUIREMENT,))
+    environment = {
+        "python_version": "3.12",
+        "python_full_version": "3.12.7",
+        "implementation_name": "cpython",
+        "implementation_version": "3.12.7",
+        "os_name": "posix",
+        "platform_machine": "fixture-machine",
+        "platform_python_implementation": "CPython",
+        "platform_release": "fixture-release",
+        "platform_system": "FixtureOS",
+        "platform_version": "fixture-version",
+        "sys_platform": "fixture",
+    }
+    monkeypatch.setattr("vibe.package_shape.default_environment", lambda: environment)
+
+    plan = resolve_rollback_plan(
+        shape,
+        wheelhouse=wheelhouse,
+        staging_dir=tmp_path / "staging",
+    )
+
+    assert plan.resolver_environment.python_full_version == "3.12.7"
+    assert plan.resolver_environment.platform_machine == "fixture-machine"
+
+
 def test_memory_indep_019_resolved_plan_constructor_cannot_be_bypassed() -> None:
     with pytest.raises(TypeError, match="constructed only by rollback resolution"):
         ResolvedRollbackPlan(
@@ -522,8 +556,7 @@ def _call_inventory(function_name: str) -> dict[str, int]:
                 1
                 for node in ast.walk(tree)
                 if isinstance(node, ast.Call)
-                and (getattr(node.func, "id", None) or getattr(node.func, "attr", None))
-                == function_name
+                and (getattr(node.func, "id", None) or getattr(node.func, "attr", None)) == function_name
             )
             if calls:
                 callers[source.relative_to(ROOT).as_posix()] = calls
