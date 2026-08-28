@@ -189,6 +189,33 @@ def test_package_policy_pins_universal_wheel_tag(tmp_path: Path) -> None:
         guard.load_package_release_policy(candidate, expected_manifest=candidate, release_tag="v3.1.0")
 
 
+@pytest.mark.parametrize("requires_python", [">=3.10", ">= 3.10"])
+def test_package_policy_accepts_declared_requires_python_literal(
+    tmp_path: Path, requires_python: str
+) -> None:
+    manifest, _ = _manifest(tmp_path, requires_python=requires_python)
+    manifest_bytes = manifest.read_bytes()
+
+    policy = guard.load_package_release_policy(
+        manifest_bytes, expected_manifest=manifest_bytes, release_tag="v3.1.0"
+    )
+
+    assert policy.requires_python == ">=3.10"
+
+
+@pytest.mark.parametrize("requires_python", ["==3.10", ">=3.10,<3.10.2", ">=3.10,!=3.10.1"])
+def test_package_policy_rejects_undeclared_requires_python_contract(
+    tmp_path: Path, requires_python: str
+) -> None:
+    manifest, _ = _manifest(tmp_path, requires_python=requires_python)
+    manifest_bytes = manifest.read_bytes()
+
+    with pytest.raises(guard.ManifestPolicyError, match="Requires-Python"):
+        guard.load_package_release_policy(
+            manifest_bytes, expected_manifest=manifest_bytes, release_tag="v3.1.0"
+        )
+
+
 def test_wheel_filename_metadata_and_release_tag_are_independent_identities(tmp_path: Path) -> None:
     manifest, _ = _manifest(tmp_path / "metadata")
     with pytest.raises(guard.ReleaseAssetError, match="filename identity"):

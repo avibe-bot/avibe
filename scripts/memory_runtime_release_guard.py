@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Verify and materialize manifest-pinned Memory Runtime release assets."""
+"""Verify and materialize manifest-pinned Memory Runtime release assets.
+
+Package policy schema v1 declares ``Requires-Python: >=3.10``. Changing that
+contract requires a policy schema/version change and a new declared literal.
+"""
 
 from __future__ import annotations
 
@@ -35,6 +39,7 @@ ASSET_FAILURE_EXIT = 1
 POLICY_EXCLUSION_EXIT = 2
 INTERNAL_GUARD_FAILURE_EXIT = 3
 PACKAGE_POLICY_SCHEMA_VERSION = 1
+PACKAGE_POLICY_REQUIRES_PYTHON = ">=3.10"
 SUPPORTED_NAMESPACE_POLICY_VERSIONS = frozenset({1})
 
 
@@ -192,15 +197,14 @@ def load_package_release_policy(
         raise ManifestPolicyError("manifest package_policy release identity is invalid")
     if raw["wheel_tag"] != "py3-none-any":
         raise ManifestPolicyError("manifest package_policy wheel_tag must be py3-none-any for schema 1")
-    _, specifiers, _, _, parsed_versions = _packaging_modules()
+    _, specifiers, _, _, _ = _packaging_modules()
     try:
-        requires_python = specifiers.SpecifierSet(raw["requires_python"])
-        supported = tuple(parsed_versions.Version(version) for version in versions)
-    except (specifiers.InvalidSpecifier, parsed_versions.InvalidVersion) as exc:
+        requires_python = str(specifiers.SpecifierSet(raw["requires_python"]))
+    except specifiers.InvalidSpecifier as exc:
         raise ManifestPolicyError("manifest package_policy Python contract is invalid") from exc
-    if len(supported) != len(set(supported)) or any(version not in requires_python for version in supported):
-        raise ManifestPolicyError("manifest package_policy excludes a supported Python version")
-    return PackageReleasePolicy(raw["requires_python"], tuple(map(str, supported)), raw["wheel_tag"], namespace_version)
+    if requires_python != PACKAGE_POLICY_REQUIRES_PYTHON:
+        raise ManifestPolicyError("manifest package_policy Requires-Python differs from schema 1 policy")
+    return PackageReleasePolicy(requires_python, tuple(versions), raw["wheel_tag"], namespace_version)
 
 
 def classify_requirement(raw: str) -> RequirementClassification:
