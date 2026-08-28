@@ -8,17 +8,16 @@ repository-owned declaration.
 
 Wheel archive validation retains O(one bounded member + control metadata),
 never O(the archive's total decompressed payload).
+The archive inventory retains raw RECORD bytes but never interprets ledger rows;
+the immediate RECORD-ledger successor owns those semantics.
 """
 
 from __future__ import annotations
 
 import argparse
 import base64
-import binascii
-import csv
 from email.parser import Parser
 import hashlib
-import io
 import json
 import re
 import shutil
@@ -55,7 +54,6 @@ PACKAGE_POLICY_SUPPORTED_PYTHON_VERSIONS = ("3.10", "3.11", "3.12")
 SUPPORTED_NAMESPACE_POLICY_VERSIONS = frozenset({1})
 MAX_WHEEL_MEMBER_BYTES = 16 * 1024 * 1024
 WHEEL_DATA_SCHEMES = frozenset({"data", "headers", "platlib", "purelib", "scripts"})
-WHEEL_RECORD_HASH_ALGORITHMS = frozenset({"sha256", "sha384", "sha512"})
 
 
 @dataclass(frozen=True)
@@ -385,21 +383,6 @@ def _inventory_wheel_member(
     return entry, bytes(content) if content is not None else None
 
 
-def _valid_record_hash(value: str) -> bool:
-    algorithm, separator, encoded = value.partition("=")
-    if separator != "=" or algorithm not in WHEEL_RECORD_HASH_ALGORITHMS or not encoded or "=" in encoded:
-        return False
-    if re.fullmatch(r"[A-Za-z0-9_-]+", encoded) is None:
-        return False
-    try:
-        decoded = base64.b64decode(
-            encoded + "=" * (-len(encoded) % 4), altchars=b"-_", validate=True
-        )
-    except (ValueError, binascii.Error):
-        return False
-    return len(decoded) == hashlib.new(algorithm).digest_size
-
-
 def _validate_wheel_archive(
     archive: zipfile.ZipFile, wheel: Path, dist_info: str
 ) -> tuple[tuple[_WheelArchiveEntry, ...], dict[str, bytes]]:
@@ -445,33 +428,7 @@ def _validate_wheel_archive(
         if content is not None:
             members[name] = content
     if names.count(record) != 1:
-        raise ReleaseAssetError(f"wheel RECORD structure is invalid: {wheel.name}")
-    try:
-        rows = list(csv.reader(io.StringIO(members[record].decode("utf-8")), strict=True))
-    except Exception as exc:
-        raise ReleaseAssetError(f"wheel RECORD structure is invalid: {wheel.name}") from exc
-    generated = {record, f"{record}.jws", f"{record}.p7s"}
-    observed = {entry.path: entry for entry in inventory if not entry.is_dir}
-    member_names = set(observed)
-    recorded: set[str] = set()
-    recorded_aliases: set[str] = set()
-    for row in rows:
-        if len(row) != 3 or not _is_safe_wheel_path(row[0]):
-            raise ReleaseAssetError(f"wheel RECORD structure is invalid: {wheel.name}")
-        path, digest, size = row
-        alias = path.casefold()
-        if path in recorded or alias in recorded_aliases:
-            raise ReleaseAssetError(f"wheel RECORD structure is invalid: {wheel.name}")
-        if path in generated:
-            valid_fields = not digest and not size
-        else:
-            valid_fields = _valid_record_hash(digest) and re.fullmatch(r"[0-9]+", size) is not None
-        if not valid_fields:
-            raise ReleaseAssetError(f"wheel RECORD structure is invalid: {wheel.name}")
-        recorded.add(path)
-        recorded_aliases.add(alias)
-    if record not in recorded or recorded - generated != member_names - generated:
-        raise ReleaseAssetError(f"wheel RECORD entries differ from archive: {wheel.name}")
+        raise ReleaseAssetError(f"wheel control structure is invalid: {wheel.name}")
     return tuple(inventory), members
 
 

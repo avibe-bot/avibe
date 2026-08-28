@@ -158,10 +158,7 @@ def _wheel(
     wheel_trailer: str = "\n",
     duplicate_control: str | None = None,
     include_record: bool = True,
-    record_self: bool = True,
     record_bytes: bytes | None = None,
-    record_extra: tuple[str, ...] = (),
-    record_omit: tuple[str, ...] = (),
     extra_files: dict[str, bytes] | None = None,
     compression: int = zipfile.ZIP_STORED,
 ) -> Path:
@@ -193,13 +190,9 @@ def _wheel(
         if record_bytes is None:
             rows = []
             for member, content in files.items():
-                if member not in record_omit:
-                    digest = base64.urlsafe_b64encode(hashlib.sha256(content).digest()).rstrip(b"=").decode()
-                    rows.append(f"{member},sha256={digest},{len(content)}\n")
-            empty_digest = base64.urlsafe_b64encode(hashlib.sha256(b"").digest()).rstrip(b"=").decode()
-            rows.extend(f"{member},sha256={empty_digest},0\n" for member in record_extra)
-            if record_self:
-                rows.append(f"{record},,\n")
+                digest = base64.urlsafe_b64encode(hashlib.sha256(content).digest()).rstrip(b"=").decode()
+                rows.append(f"{member},sha256={digest},{len(content)}\n")
+            rows.append(f"{record},,\n")
             record_bytes = "".join(rows).encode()
         files[record] = record_bytes
     with zipfile.ZipFile(path, "w", compression=compression) as archive:
@@ -429,7 +422,7 @@ def test_wheel_binds_filename_metadata_and_top_level_dist_info(
 ) -> None:
     manifest, _ = _manifest(tmp_path)
 
-    with pytest.raises(guard.ReleaseAssetError, match="identity|control structure|RECORD structure"):
+    with pytest.raises(guard.ReleaseAssetError, match="identity|control structure"):
         _verify_wheels(tmp_path / "wheels", manifest, core_options=core_options)
 
 
@@ -603,39 +596,15 @@ def test_wheel_rejects_unsafe_archive_paths(tmp_path: Path, member: str) -> None
         )
 
 
-@pytest.mark.parametrize(
-    "record_bytes",
-    [
-        b"\n",
-        b"pkg/module.py,sha256=abc\n",
-        b"pkg/module.py,sha256=not*base64,1\n",
-        b"pkg/module.py,md5=YWJj,3\n",
-        b"pkg/module.py,sha256=YWJj,-1\n",
-        b"pkg/module.py,sha256=YWJj,\xd9\xa3\n",
-        b"../../outside,sha256=YWJj,3\n",
-        b"pkg/./module.py,sha256=YWJj,3\n",
-        b"bad\\path,sha256=YWJj,3\n",
-        b"bad\x00path,sha256=YWJj,3\n",
-    ],
-)
-def test_wheel_rejects_invalid_record_rows(tmp_path: Path, record_bytes: bytes) -> None:
+def test_wheel_rejects_archive_aliases(tmp_path: Path) -> None:
     manifest, _ = _manifest(tmp_path)
 
-    with pytest.raises(guard.ReleaseAssetError, match="RECORD"):
+    with pytest.raises(guard.ReleaseAssetError, match="archive structure"):
         _verify_wheels(
-            tmp_path / "wheels", manifest, core_options={"record_bytes": record_bytes}
+            tmp_path / "wheels",
+            manifest,
+            core_options={"extra_files": {"AVIBE_OS/__init__.py": b"x"}},
         )
-
-
-def test_wheel_rejects_archive_and_record_aliases(tmp_path: Path) -> None:
-    manifest, _ = _manifest(tmp_path)
-
-    for directory, options in (
-        ("archive", {"extra_files": {"AVIBE_OS/__init__.py": b"x"}}),
-        ("record", {"record_extra": ("AVIBE_OS/__init__.py",)}),
-    ):
-        with pytest.raises(guard.ReleaseAssetError, match="archive structure|RECORD"):
-            _verify_wheels(tmp_path / directory, manifest, core_options=options)
 
 
 def test_wheel_data_schemes_are_an_explicit_structural_allowlist(tmp_path: Path) -> None:
@@ -655,10 +624,6 @@ def test_wheel_data_schemes_are_an_explicit_structural_allowlist(tmp_path: Path)
                 manifest,
                 core_options={"extra_files": {member: b"x"}},
             )
-
-
-def test_wheel_record_hashes_use_unpadded_urlsafe_base64() -> None:
-    assert not guard._valid_record_hash("sha256=" + "/" * 43)
 
 
 def test_wheel_rejects_raw_nul_member_name_before_zipfile_sanitization(
@@ -698,24 +663,49 @@ def test_wheel_rejects_file_and_descendant_topology(
         )
 
 
-@pytest.mark.parametrize(
-    "core_options",
-    [
-        {"include_record": False},
-        {"record_self": False},
-        {"record_omit": ("avibe_os/__init__.py",)},
-        {"record_extra": ("safe/absent.py",)},
-        {"record_extra": ("avibe_os/__init__.py",)},
-    ],
-    ids=["missing-record", "missing-self-row", "missing-row", "absent-path", "duplicate-row"],
-)
-def test_wheel_record_is_bidirectionally_bound_to_archive(
-    tmp_path: Path, core_options: dict[str, object]
-) -> None:
+def test_wheel_requires_raw_record_control(tmp_path: Path) -> None:
     manifest, _ = _manifest(tmp_path)
 
-    with pytest.raises(guard.ReleaseAssetError, match="RECORD"):
-        _verify_wheels(tmp_path / "wheels", manifest, core_options=core_options)
+    with pytest.raises(guard.ReleaseAssetError, match="control structure"):
+        _verify_wheels(
+            tmp_path / "wheels", manifest, core_options={"include_record": False}
+        )
+
+
+def test_wheel_rejects_duplicate_raw_record_control(tmp_path: Path) -> None:
+    manifest, _ = _manifest(tmp_path)
+
+    with pytest.warns(UserWarning, match="Duplicate name"):
+        with pytest.raises(
+            guard.ReleaseAssetError, match="archive structure|control structure"
+        ):
+            _verify_wheels(
+                tmp_path / "wheels",
+                manifest,
+                core_options={"duplicate_control": "RECORD"},
+            )
+
+
+def test_wheel_inventory_retains_raw_record_without_interpreting_ledger(
+    tmp_path: Path,
+) -> None:
+    manifest, _ = _manifest(tmp_path)
+    opaque_record = b"\xffnot,a,ledger\n"
+    wheels = tmp_path / "wheels"
+
+    _verify_wheels(wheels, manifest, core_options={"record_bytes": opaque_record})
+    wheel = wheels / "avibe_os-3.1.0-py3-none-any.whl"
+    dist_info = "avibe_os-3.1.0.dist-info"
+    record = f"{dist_info}/RECORD"
+    with zipfile.ZipFile(wheel) as archive:
+        inventory, retained = guard._validate_wheel_archive(archive, wheel, dist_info)
+    entry = next(item for item in inventory if item.path == record)
+
+    assert retained[record] == opaque_record
+    assert entry.size == len(opaque_record)
+    assert entry.sha256 == base64.urlsafe_b64encode(
+        hashlib.sha256(opaque_record).digest()
+    ).rstrip(b"=").decode()
 
 
 @pytest.mark.parametrize(
