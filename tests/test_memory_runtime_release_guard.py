@@ -4,8 +4,10 @@ import gzip
 import hashlib
 import io
 import json
+import shutil
 import tarfile
 from pathlib import Path
+import zipfile
 
 import pytest
 
@@ -77,6 +79,111 @@ def _manifest(
     return manifest, remote
 
 
+def _package_metadata(name: str, version: str, requirements: tuple[str, ...]) -> bytes:
+    fields = [
+        "Metadata-Version: 2.4",
+        f"Name: {name}",
+        f"Version: {version}",
+        "Requires-Python: >=3.10",
+        *(f"Requires-Dist: {requirement}" for requirement in requirements),
+    ]
+    return ("\n".join(fields) + "\n\n").encode()
+
+
+def _wheel(
+    path: Path,
+    *,
+    name: str,
+    version: str,
+    requirements: tuple[str, ...],
+    files: dict[str, bytes],
+) -> Path:
+    dist_info = name.replace("-", "_") + f"-{version}.dist-info"
+    with zipfile.ZipFile(path, "w") as archive:
+        for member_name, content in {
+            **files,
+            f"{dist_info}/METADATA": _package_metadata(name, version, requirements),
+        }.items():
+            archive.writestr(member_name, content)
+    return path
+
+
+def _sdist(
+    path: Path,
+    *,
+    name: str,
+    version: str,
+    requirements: tuple[str, ...],
+    files: dict[str, bytes],
+) -> Path:
+    root = f"{name.replace('-', '_')}-{version}"
+    with tarfile.open(path, "w:gz") as archive:
+        for member_name, content in {
+            "PKG-INFO": _package_metadata(name, version, requirements),
+            **files,
+        }.items():
+            member = tarfile.TarInfo(f"{root}/{member_name}")
+            member.size = len(content)
+            archive.addfile(member, io.BytesIO(content))
+    return path
+
+
+def _transition_packages(tmp_path: Path, manifest: Path) -> tuple[Path, dict[str, Path]]:
+    package_dir = tmp_path / "packages"
+    package_dir.mkdir(parents=True)
+    version = "3.1.0"
+    core_files = {"core/memory_loader.py": b"MEMORY_ENTRYPOINT = 'avibe_memory.runtime'\n"}
+    memory_files = {
+        "avibe_memory/__init__.py": b"from .runtime import start\n",
+        "avibe_memory/runtime.py": b"def start(): return None\n",
+        guard.MEMORY_MANIFEST_PATH: manifest.read_bytes(),
+    }
+    artifacts = {
+        "core_wheel": _wheel(
+            package_dir / f"avibe_os-{version}-py3-none-any.whl",
+            name="avibe-os",
+            version=version,
+            requirements=(f"avibe-memory=={version}",),
+            files=core_files,
+        ),
+        "core_sdist": _sdist(
+            package_dir / f"avibe_os-{version}.tar.gz",
+            name="avibe-os",
+            version=version,
+            requirements=(f"avibe-memory=={version}",),
+            files=core_files,
+        ),
+        "memory_wheel": _wheel(
+            package_dir / f"avibe_memory-{version}-py3-none-any.whl",
+            name="avibe-memory",
+            version=version,
+            requirements=("avibe-os>=3.0.14.dev0,<3.2",),
+            files=memory_files,
+        ),
+        "memory_sdist": _sdist(
+            package_dir / f"avibe_memory-{version}.tar.gz",
+            name="avibe-memory",
+            version=version,
+            requirements=("avibe-os>=3.0.14.dev0,<3.2",),
+            files=memory_files,
+        ),
+    }
+    return package_dir, artifacts
+
+
+def _copy_builder(artifacts: dict[str, Path], built: list[str]):
+    def build(sdist: Path, output_dir: Path) -> Path:
+        kind = "memory" if sdist.name.startswith("avibe_memory-") else "core"
+        built.append(kind)
+        output_dir.mkdir(parents=True)
+        source = artifacts[f"{kind}_wheel"]
+        target = output_dir / source.name
+        shutil.copyfile(source, target)
+        return target
+
+    return build
+
+
 @pytest.mark.parametrize("everos_version", sorted(guard.PUBLISHED_RUNTIME_PROVENANCE))
 def test_guard_accepts_every_published_runtime_provenance(
     tmp_path: Path,
@@ -100,6 +207,196 @@ def test_guard_keeps_gh_v3_0_9rc3_runtime_in_coverage() -> None:
         lock_sha256="62b00f1a9ca04cc4ea4c5af51f389ba49acdea8786e5f7044d52823244502c57",
         uv_version="0.9.18",
     )
+
+
+def test_memory_indep_022_dual_form_discovery_reads_legacy_core_and_transition_memory(
+    tmp_path: Path,
+) -> None:
+    manifest, _ = _manifest(tmp_path)
+    package_dir, artifacts = _transition_packages(tmp_path, manifest)
+
+    transition = guard.discover_release_manifest(package_dir)
+    assert transition == guard.ManifestDiscovery("memory", manifest.read_bytes())
+
+    legacy_dir = tmp_path / "legacy"
+    legacy_dir.mkdir()
+    _wheel(
+        legacy_dir / "avibe_os-3.0.13-py3-none-any.whl",
+        name="avibe-os",
+        version="3.0.13",
+        requirements=(),
+        files={guard.MEMORY_MANIFEST_PATH: manifest.read_bytes()},
+    )
+    legacy = guard.discover_release_manifest(legacy_dir)
+    assert legacy == guard.ManifestDiscovery("core", manifest.read_bytes())
+
+    artifacts["memory_wheel"].unlink()
+    with pytest.raises(guard.ReleaseAssetError, match="transition avibe-memory artifact is missing"):
+        guard.discover_release_manifest(package_dir)
+
+
+def test_memory_indep_022_023_discovery_distinguishes_legacy_and_ambiguous_transition(
+    tmp_path: Path,
+) -> None:
+    manifest, _ = _manifest(tmp_path)
+    legacy_dir = tmp_path / "manifest-free"
+    legacy_dir.mkdir()
+    _wheel(
+        legacy_dir / "avibe_os-3.0.8-py3-none-any.whl",
+        name="avibe-os",
+        version="3.0.8",
+        requirements=(),
+        files={"core/memory_loader.py": b"legacy\n"},
+    )
+    with pytest.raises(guard.LegacyManifestAbsent):
+        guard.discover_release_manifest(legacy_dir)
+
+    package_dir, artifacts = _transition_packages(tmp_path / "ambiguous", manifest)
+    _wheel(
+        artifacts["core_wheel"],
+        name="avibe-os",
+        version="3.1.0",
+        requirements=("avibe-memory==3.1.0",),
+        files={
+            "core/memory_loader.py": b"loader\n",
+            guard.MEMORY_MANIFEST_PATH: manifest.read_bytes(),
+        },
+    )
+    with pytest.raises(guard.ReleaseAssetError, match="ownership is ambiguous"):
+        guard.discover_release_manifest(package_dir)
+
+
+def test_memory_indep_023_package_guard_reuses_assertions_for_both_rebuilt_wheels(
+    tmp_path: Path,
+) -> None:
+    manifest, _ = _manifest(tmp_path)
+    package_dir, artifacts = _transition_packages(tmp_path, manifest)
+    built: list[str] = []
+
+    version = guard.verify_transition_distributions(
+        package_dir,
+        tmp_path / "rebuild",
+        builder=_copy_builder(artifacts, built),
+    )
+
+    assert version == "3.1.0"
+    assert built == ["core", "memory"]
+
+
+def test_default_sdist_builder_uses_pep517_isolation_without_importing_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest, _ = _manifest(tmp_path)
+    _, artifacts = _transition_packages(tmp_path, manifest)
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], **kwargs):
+        calls.append(argv)
+        assert "--no-isolation" not in argv
+        assert kwargs["env"]["PYTHONPATH"] == ""
+        project_root = Path(argv[-1])
+        assert (project_root / "PKG-INFO").is_file()
+        wheel_dir = Path(argv[argv.index("--outdir") + 1])
+        shutil.copyfile(artifacts["core_wheel"], wheel_dir / artifacts["core_wheel"].name)
+        return guard.subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(guard.subprocess, "run", run)
+    rebuilt = guard.rebuild_sdist_wheel(artifacts["core_sdist"], tmp_path / "isolated")
+
+    assert rebuilt.name == artifacts["core_wheel"].name
+    assert calls[0][1:4] == ["-m", "build", "--wheel"]
+
+
+def test_transition_package_guard_rejects_staged_and_rebuilt_ownership_drift(
+    tmp_path: Path,
+) -> None:
+    manifest, _ = _manifest(tmp_path)
+    package_dir, artifacts = _transition_packages(tmp_path, manifest)
+    _sdist(
+        artifacts["core_sdist"],
+        name="avibe-os",
+        version="3.1.0",
+        requirements=("avibe-memory==3.1.0",),
+        files={
+            "core/memory_loader.py": b"loader\n",
+            guard.MEMORY_MANIFEST_PATH: manifest.read_bytes(),
+        },
+    )
+    with pytest.raises(guard.ReleaseAssetError, match="core artifact owns Memory content"):
+        guard.verify_transition_distributions(
+            package_dir,
+            tmp_path / "staged-rebuild",
+            builder=_copy_builder(artifacts, []),
+        )
+
+    package_dir, artifacts = _transition_packages(tmp_path / "rebuilt", manifest)
+    bad_core = _wheel(
+        tmp_path / "bad-core.whl",
+        name="avibe-os",
+        version="3.1.0",
+        requirements=("avibe-memory==3.1.0",),
+        files={guard.MEMORY_MANIFEST_PATH: manifest.read_bytes()},
+    )
+
+    def bad_builder(sdist: Path, output_dir: Path) -> Path:
+        if sdist.name.startswith("avibe_os-"):
+            return bad_core
+        return _copy_builder(artifacts, [])(sdist, output_dir)
+
+    with pytest.raises(guard.ReleaseAssetError, match="core artifact owns Memory content"):
+        guard.verify_transition_distributions(
+            package_dir,
+            tmp_path / "bad-rebuild",
+            builder=bad_builder,
+        )
+
+
+def test_memory_indep_023_package_guard_rejects_dependency_and_metadata_drift(
+    tmp_path: Path,
+) -> None:
+    manifest, _ = _manifest(tmp_path)
+    package_dir, artifacts = _transition_packages(tmp_path, manifest)
+    _wheel(
+        artifacts["core_wheel"],
+        name="avibe-os",
+        version="3.1.0",
+        requirements=("avibe-memory==3.1.1",),
+        files={"core/memory_loader.py": b"MEMORY_ENTRYPOINT = 'avibe_memory.runtime'\n"},
+    )
+    _sdist(
+        artifacts["core_sdist"],
+        name="avibe-os",
+        version="3.1.0",
+        requirements=("avibe-memory==3.1.1",),
+        files={"core/memory_loader.py": b"MEMORY_ENTRYPOINT = 'avibe_memory.runtime'\n"},
+    )
+
+    with pytest.raises(guard.ReleaseAssetError, match="hard-depend on the exact Memory version"):
+        guard.verify_transition_distributions(
+            package_dir,
+            tmp_path / "metadata-rebuild",
+            builder=_copy_builder(artifacts, []),
+        )
+
+    package_dir, artifacts = _transition_packages(tmp_path / "metadata", manifest)
+    _sdist(
+        artifacts["memory_sdist"],
+        name="avibe-memory",
+        version="3.1.0",
+        requirements=("avibe-os>=3.1,<3.2",),
+        files={
+            "avibe_memory/__init__.py": b"from .runtime import start\n",
+            "avibe_memory/runtime.py": b"def start(): return None\n",
+            guard.MEMORY_MANIFEST_PATH: manifest.read_bytes(),
+        },
+    )
+    with pytest.raises(guard.ReleaseAssetError, match="wheel and sdist metadata differ"):
+        guard.verify_transition_distributions(
+            package_dir,
+            tmp_path / "parity-rebuild",
+            builder=_copy_builder(artifacts, []),
+        )
 
 
 def test_guard_rejects_unknown_runtime_provenance(tmp_path: Path) -> None:
@@ -162,6 +459,30 @@ def test_fetch_and_verify_exact_memory_runtime_release(
 
     assert spec.release_tag == "v3.1.0"
     assert verified.expected_asset_names == {path.name for path in (tmp_path / "backup").iterdir()}
+
+
+def test_memory_indep_022_023_public_verifier_redownloads_every_manifest_asset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest, remote = _manifest(tmp_path)
+    downloaded: list[str] = []
+    fake_download = _fake_download(remote)
+
+    def tracked_download(url: str, destination: Path, expected_size: int, attempts: int = 3) -> None:
+        downloaded.append(url)
+        fake_download(url, destination, expected_size, attempts)
+
+    monkeypatch.setattr(guard, "_download", tracked_download)
+    spec = guard.verify_public_release_assets(manifest)
+
+    assert spec.release_tag == "v3.1.0"
+    assert set(downloaded) == set(remote)
+
+    archive_url = next(url for url in remote if url.endswith(".tar.gz"))
+    remote[archive_url] = b"x" * len(remote[archive_url])
+    with pytest.raises(guard.ReleaseAssetError, match="integrity mismatch"):
+        guard.verify_public_release_assets(manifest)
 
 
 def test_verify_rejects_changed_archive(tmp_path: Path) -> None:
@@ -271,5 +592,10 @@ def test_guard_workflow_reports_and_verifies_supported_published_manifests() -> 
     assert "check-policy" in resolution
     assert "Guarded Memory Runtime manifests" in resolution
     assert "Excluded Memory Runtime manifests" in resolution
+    assert "discover-manifest" in resolution
+    assert "avibe_memory-*.whl" in resolution
     assert "fromJSON(needs.resolve_manifests.outputs.manifests)" in workflow
     assert "matrix.manifest.release_tag" in workflow
+    assert "matrix.manifest.owner == 'memory'" in workflow
+    assert "verify-packages --asset-dir" in workflow
+    assert "python3 -m pip install build" in workflow

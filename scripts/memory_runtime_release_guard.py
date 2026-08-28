@@ -4,17 +4,25 @@
 from __future__ import annotations
 
 import argparse
+from email.message import Message
+from email.parser import Parser
 import hashlib
 import json
+import os
+from pathlib import PurePosixPath
+import re
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 RELEASE_DOWNLOAD_ROOT = "https://github.com/avibe-bot/avibe/releases/download"
 EXPECTED_EVEROS_VERSION = "1.2.3"
@@ -28,6 +36,11 @@ MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024
 ASSET_FAILURE_EXIT = 1
 POLICY_EXCLUSION_EXIT = 2
 INTERNAL_GUARD_FAILURE_EXIT = 3
+LEGACY_MANIFEST_ABSENT_EXIT = 4
+MEMORY_MANIFEST_PATH = "vibe/memory_runtime_manifest.json"
+REQUIRED_MEMORY_IMPLEMENTATION = frozenset(
+    {"avibe_memory/__init__.py", "avibe_memory/runtime.py"}
+)
 
 
 class ReleaseGuardError(RuntimeError):
@@ -40,6 +53,10 @@ class ManifestPolicyError(ReleaseGuardError):
 
 class ReleaseAssetError(ReleaseGuardError):
     """Raised when guarded release bytes are unavailable or fail verification."""
+
+
+class LegacyManifestAbsent(ReleaseGuardError):
+    """Raised when a pre-transition release predates the managed runtime manifest."""
 
 
 @dataclass(frozen=True)
@@ -93,6 +110,30 @@ class ReleaseSpec:
         return {"memory-runtime-manifest.json", *(archive.name for archive in self.archives)}
 
 
+@dataclass(frozen=True)
+class PackageMetadata:
+    name: str
+    version: str
+    requires_python: str
+    requires_dist: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PackageArchive:
+    path: Path
+    metadata: PackageMetadata
+    files: dict[str, bytes]
+
+
+@dataclass(frozen=True)
+class ManifestDiscovery:
+    owner: str
+    manifest_bytes: bytes
+
+
+SdistBuilder = Callable[[Path, Path], Path]
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -106,6 +147,263 @@ def _required_string(payload: dict, key: str, context: str) -> str:
     if not isinstance(value, str) or not value:
         raise ManifestPolicyError(f"{context}.{key} must be a non-empty string")
     return value
+
+
+def _canonical_name(value: str) -> str:
+    return re.sub(r"[-_.]+", "-", value).lower()
+
+
+def _metadata(message_bytes: bytes, context: str) -> PackageMetadata:
+    try:
+        message: Message = Parser().parsestr(message_bytes.decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        raise ReleaseAssetError(f"{context} metadata is not UTF-8") from exc
+    required: dict[str, str] = {}
+    for key in ("Name", "Version", "Requires-Python"):
+        values = message.get_all(key) or []
+        if len(values) != 1 or not values[0]:
+            raise ReleaseAssetError(f"{context} metadata must contain exactly one {key}")
+        required[key] = values[0]
+    return PackageMetadata(
+        name=_canonical_name(required["Name"]),
+        version=required["Version"],
+        requires_python=required["Requires-Python"],
+        requires_dist=tuple(sorted(message.get_all("Requires-Dist") or [])),
+    )
+
+
+def _wheel_archive(path: Path) -> PackageArchive:
+    try:
+        with zipfile.ZipFile(path) as archive:
+            names = archive.namelist()
+            if len(names) != len(set(names)):
+                raise ReleaseAssetError(f"wheel contains duplicate paths: {path.name}")
+            if any(
+                "\\" in name
+                or PurePosixPath(name).is_absolute()
+                or ".." in PurePosixPath(name).parts
+                for name in names
+            ):
+                raise ReleaseAssetError(f"wheel contains an unsafe path: {path.name}")
+            files = {
+                name: archive.read(name)
+                for name in names
+                if not name.endswith("/")
+            }
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise ReleaseAssetError(f"cannot read wheel {path.name}: {exc}") from exc
+    metadata_paths = [name for name in files if name.endswith(".dist-info/METADATA")]
+    if len(metadata_paths) != 1:
+        raise ReleaseAssetError(f"wheel must contain exactly one METADATA file: {path.name}")
+    return PackageArchive(path, _metadata(files[metadata_paths[0]], path.name), files)
+
+
+def _sdist_archive(path: Path) -> PackageArchive:
+    files: dict[str, bytes] = {}
+    roots: set[str] = set()
+    try:
+        with tarfile.open(path, "r:gz") as archive:
+            for member in archive.getmembers():
+                member_path = PurePosixPath(member.name)
+                if member_path.is_absolute() or ".." in member_path.parts or not member_path.parts:
+                    raise ReleaseAssetError(f"sdist contains an unsafe path: {path.name}")
+                roots.add(member_path.parts[0])
+                if member.isdir():
+                    continue
+                if not member.isfile():
+                    raise ReleaseAssetError(f"sdist contains a non-regular entry: {path.name}")
+                stream = archive.extractfile(member)
+                if stream is None:
+                    raise ReleaseAssetError(f"sdist member is unreadable: {member.name}")
+                relative = PurePosixPath(*member_path.parts[1:]).as_posix()
+                if not relative or relative in files:
+                    raise ReleaseAssetError(f"sdist contains duplicate or root-level content: {path.name}")
+                files[relative] = stream.read()
+    except ReleaseAssetError:
+        raise
+    except (OSError, tarfile.TarError) as exc:
+        raise ReleaseAssetError(f"cannot read sdist {path.name}: {exc}") from exc
+    if len(roots) != 1 or "PKG-INFO" not in files:
+        raise ReleaseAssetError(f"sdist must have one root and one PKG-INFO: {path.name}")
+    return PackageArchive(path, _metadata(files["PKG-INFO"], path.name), files)
+
+
+def _requirements_for(metadata: PackageMetadata, name: str) -> tuple[str, ...]:
+    expected = _canonical_name(name)
+    matches = []
+    for requirement in metadata.requires_dist:
+        match = re.match(r"\s*([A-Za-z0-9_.-]+)", requirement)
+        if match and _canonical_name(match.group(1)) == expected:
+            matches.append(requirement)
+    return tuple(matches)
+
+
+def _exact_memory_pin(metadata: PackageMetadata) -> str | None:
+    requirements = _requirements_for(metadata, "avibe-memory")
+    if len(requirements) != 1:
+        return None
+    match = re.fullmatch(r"\s*avibe[-_.]memory\s*==\s*([^\s;]+)\s*", requirements[0], re.IGNORECASE)
+    return match.group(1) if match else None
+
+
+def _package_files(asset_dir: Path, distribution: str, suffix: str) -> list[Path]:
+    prefix = distribution.replace("-", "_") + "-"
+    matches = [
+        path
+        for path in asset_dir.iterdir()
+        if path.name.startswith(prefix) and path.name.endswith(suffix)
+    ]
+    if any(path.is_symlink() or not path.is_file() for path in matches):
+        raise ReleaseAssetError(f"{distribution} release artifacts contain an unsafe entry")
+    return sorted(matches)
+
+
+def discover_release_manifest(asset_dir: Path) -> ManifestDiscovery:
+    if not asset_dir.is_dir():
+        raise ReleaseAssetError("release package directory is missing")
+    core_paths = _package_files(asset_dir, "avibe-os", ".whl")
+    memory_paths = _package_files(asset_dir, "avibe-memory", ".whl")
+    if len(core_paths) != 1 or len(memory_paths) > 1:
+        raise ReleaseAssetError("release must contain one core wheel and at most one Memory wheel")
+    core = _wheel_archive(core_paths[0])
+    if core.metadata.name != "avibe-os":
+        raise ReleaseAssetError("core wheel metadata Name must be avibe-os")
+    core_manifest = core.files.get(MEMORY_MANIFEST_PATH)
+    memory = _wheel_archive(memory_paths[0]) if memory_paths else None
+    memory_manifest = memory.files.get(MEMORY_MANIFEST_PATH) if memory else None
+    if memory and memory.metadata.name != "avibe-memory":
+        raise ReleaseAssetError("Memory wheel metadata Name must be avibe-memory")
+    if core_manifest and memory_manifest:
+        raise ReleaseAssetError("Memory Runtime manifest ownership is ambiguous")
+    if memory_manifest:
+        return ManifestDiscovery("memory", memory_manifest)
+    transition_pin = _exact_memory_pin(core.metadata)
+    if transition_pin is not None:
+        detail = "artifact is missing" if memory is None else "artifact has no owned manifest"
+        raise ReleaseAssetError(f"transition avibe-memory {detail}")
+    if memory is not None:
+        raise ReleaseAssetError("legacy release unexpectedly contains an unowned Memory wheel")
+    if core_manifest:
+        return ManifestDiscovery("core", core_manifest)
+    raise LegacyManifestAbsent("legacy release predates the Memory Runtime manifest")
+
+
+def _assert_metadata_parity(wheel: PackageArchive, sdist: PackageArchive, name: str) -> None:
+    if wheel.metadata.name != name or sdist.metadata.name != name:
+        raise ReleaseAssetError(f"{name} distribution metadata has the wrong Name")
+    if wheel.metadata != sdist.metadata:
+        raise ReleaseAssetError(f"{name} wheel and sdist metadata differ")
+
+
+def _owned_content(package: PackageArchive, prefix: str) -> dict[str, bytes]:
+    return {name: value for name, value in package.files.items() if name.startswith(prefix)}
+
+
+def _assert_transition_packages(
+    core_wheel: PackageArchive,
+    memory_wheel: PackageArchive,
+    core_sdist: PackageArchive,
+    memory_sdist: PackageArchive,
+) -> str:
+    _assert_metadata_parity(core_wheel, core_sdist, "avibe-os")
+    _assert_metadata_parity(memory_wheel, memory_sdist, "avibe-memory")
+    version = core_wheel.metadata.version
+    if memory_wheel.metadata.version != version:
+        raise ReleaseAssetError("core and Memory distribution versions differ")
+    if _exact_memory_pin(core_wheel.metadata) != version:
+        raise ReleaseAssetError("transition core must hard-depend on the exact Memory version")
+    if len(_requirements_for(memory_wheel.metadata, "avibe-os")) != 1:
+        raise ReleaseAssetError("Memory metadata must contain exactly one avibe-os dependency")
+    if core_wheel.metadata.requires_python != memory_wheel.metadata.requires_python:
+        raise ReleaseAssetError("core and Memory Requires-Python metadata differ")
+
+    for package in (core_wheel, core_sdist):
+        if _owned_content(package, "avibe_memory/") or MEMORY_MANIFEST_PATH in package.files:
+            raise ReleaseAssetError(f"core artifact owns Memory content: {package.path.name}")
+    wheel_implementation = _owned_content(memory_wheel, "avibe_memory/")
+    sdist_implementation = _owned_content(memory_sdist, "avibe_memory/")
+    if not REQUIRED_MEMORY_IMPLEMENTATION.issubset(wheel_implementation):
+        raise ReleaseAssetError("Memory artifact is missing required implementation files")
+    if wheel_implementation != sdist_implementation:
+        raise ReleaseAssetError("Memory wheel and sdist implementation content differ")
+    wheel_manifest = memory_wheel.files.get(MEMORY_MANIFEST_PATH)
+    sdist_manifest = memory_sdist.files.get(MEMORY_MANIFEST_PATH)
+    if wheel_manifest is None or wheel_manifest != sdist_manifest:
+        raise ReleaseAssetError("Memory wheel and sdist manifest content differ")
+    return version
+
+
+def _transition_artifacts(asset_dir: Path) -> tuple[PackageArchive, PackageArchive, PackageArchive, PackageArchive]:
+    if not asset_dir.is_dir():
+        raise ReleaseAssetError("release package directory is missing")
+    paths: list[Path] = []
+    for distribution in ("avibe-os", "avibe-memory"):
+        for suffix in (".whl", ".tar.gz"):
+            matches = _package_files(asset_dir, distribution, suffix)
+            if len(matches) != 1:
+                raise ReleaseAssetError(
+                    f"transition release must contain exactly one {distribution} {suffix} artifact"
+                )
+            paths.append(matches[0])
+    return (
+        _wheel_archive(paths[0]),
+        _wheel_archive(paths[2]),
+        _sdist_archive(paths[1]),
+        _sdist_archive(paths[3]),
+    )
+
+
+def _extract_sdist(sdist: Path, destination: Path) -> Path:
+    archive = _sdist_archive(sdist)
+    project_root = destination / sdist.name.removesuffix(".tar.gz")
+    project_root.mkdir(parents=True)
+    for name, content in archive.files.items():
+        target = project_root.joinpath(*PurePosixPath(name).parts)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+    return project_root
+
+
+def rebuild_sdist_wheel(sdist: Path, output_dir: Path) -> Path:
+    extract_dir = output_dir / f"source-{sdist.stem}"
+    project_root = _extract_sdist(sdist, extract_dir)
+    wheel_dir = output_dir / f"wheel-{sdist.stem}"
+    wheel_dir.mkdir(parents=True)
+    environment = {**os.environ, "PYTHONPATH": ""}
+    result = subprocess.run(
+        [sys.executable, "-m", "build", "--wheel", "--outdir", str(wheel_dir), str(project_root)],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise ReleaseAssetError(f"isolated sdist rebuild failed for {sdist.name}: {result.stdout}{result.stderr}")
+    wheels = sorted(wheel_dir.glob("*.whl"))
+    if len(wheels) != 1:
+        raise ReleaseAssetError(f"isolated sdist rebuild produced {len(wheels)} wheels for {sdist.name}")
+    return wheels[0]
+
+
+def verify_transition_distributions(
+    asset_dir: Path,
+    rebuild_root: Path,
+    *,
+    builder: SdistBuilder = rebuild_sdist_wheel,
+) -> str:
+    core_wheel, memory_wheel, core_sdist, memory_sdist = _transition_artifacts(asset_dir)
+    version = _assert_transition_packages(core_wheel, memory_wheel, core_sdist, memory_sdist)
+    rebuilt_core = _wheel_archive(builder(core_sdist.path, rebuild_root / "core"))
+    rebuilt_memory = _wheel_archive(builder(memory_sdist.path, rebuild_root / "memory"))
+    rebuilt_version = _assert_transition_packages(
+        rebuilt_core,
+        rebuilt_memory,
+        core_sdist,
+        memory_sdist,
+    )
+    if rebuilt_version != version:
+        raise ReleaseAssetError("rebuilt distribution version differs from staged artifacts")
+    return version
 
 
 def load_release_spec(manifest_path: Path) -> ReleaseSpec:
@@ -308,23 +606,67 @@ def fetch_release_assets(manifest_path: Path, output_dir: Path) -> ReleaseSpec:
     return spec
 
 
+def verify_public_release_assets(manifest_path: Path) -> ReleaseSpec:
+    with tempfile.TemporaryDirectory(prefix="memory-runtime-public-verify-") as temporary:
+        return fetch_release_assets(manifest_path, Path(temporary) / "assets")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument("--manifest", type=Path)
     subparsers = parser.add_subparsers(dest="command", required=True)
     fetch = subparsers.add_parser("fetch")
     fetch.add_argument("--output-dir", type=Path, required=True)
     verify = subparsers.add_parser("verify")
     verify.add_argument("--asset-dir", type=Path, required=True)
+    discover = subparsers.add_parser("discover-manifest")
+    discover.add_argument("--asset-dir", type=Path, required=True)
+    discover.add_argument("--output-manifest", type=Path, required=True)
+    discover.add_argument("--release-tag")
+    packages = subparsers.add_parser("verify-packages")
+    packages.add_argument("--asset-dir", type=Path, required=True)
+    packages.add_argument("--work-dir", type=Path)
+    subparsers.add_parser("verify-public")
     subparsers.add_parser("check-policy")
     args = parser.parse_args(argv)
+    if args.command != "discover-manifest" and args.manifest is None:
+        parser.error("--manifest is required for this command")
+    result: dict[str, object] = {}
     try:
         if args.command == "fetch":
             spec = fetch_release_assets(args.manifest, args.output_dir)
         elif args.command == "verify":
             spec = verify_release_assets(args.manifest, args.asset_dir)
+        elif args.command == "discover-manifest":
+            discovery = discover_release_manifest(args.asset_dir)
+            args.output_manifest.parent.mkdir(parents=True, exist_ok=True)
+            args.output_manifest.write_bytes(discovery.manifest_bytes)
+            spec = load_release_spec(args.output_manifest)
+            if args.release_tag and spec.release_tag != args.release_tag:
+                raise ReleaseAssetError("owned manifest release identity does not match the selected release")
+            result["manifest_owner"] = discovery.owner
+        elif args.command == "verify-packages":
+            spec = load_release_spec(args.manifest)
+            if args.work_dir is None:
+                with tempfile.TemporaryDirectory(prefix="memory-distribution-rebuild-") as temporary:
+                    version = verify_transition_distributions(args.asset_dir, Path(temporary))
+            else:
+                args.work_dir.mkdir(parents=True, exist_ok=True)
+                version = verify_transition_distributions(args.asset_dir, args.work_dir)
+            discovery = discover_release_manifest(args.asset_dir)
+            if discovery.owner != "memory" or discovery.manifest_bytes != spec.manifest_bytes:
+                raise ReleaseAssetError("transition package manifest does not match the selected manifest")
+            result["package_version"] = version
+        elif args.command == "verify-public":
+            spec = verify_public_release_assets(args.manifest)
         else:
             spec = load_release_spec(args.manifest)
+    except LegacyManifestAbsent as exc:
+        print(
+            json.dumps({"ok": False, "failure_kind": "legacy_absent", "error": str(exc)}),
+            file=sys.stderr,
+        )
+        return LEGACY_MANIFEST_ABSENT_EXIT
     except ManifestPolicyError as exc:
         print(
             json.dumps({"ok": False, "failure_kind": "policy", "error": str(exc)}),
@@ -343,7 +685,12 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return INTERNAL_GUARD_FAILURE_EXIT
-    print(json.dumps({"ok": True, "release_tag": spec.release_tag, "asset_count": len(spec.expected_asset_names)}))
+    result.update(
+        ok=True,
+        release_tag=spec.release_tag,
+        asset_count=len(spec.expected_asset_names),
+    )
+    print(json.dumps(result))
     return 0
 
 

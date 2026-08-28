@@ -54,38 +54,32 @@ jobs:
                 '{release_tag: $release_tag, reason: $reason}' >> "$excluded_file"
               continue
             fi
-            set +e
-            CANDIDATE_TAG="$candidate_tag" CANDIDATE_DIR="$candidate_dir" \
-              python3 - <<'PY'
-          import json
-          import os
-          import zipfile
-          from pathlib import Path
-
-          wheels = sorted(Path(os.environ["CANDIDATE_DIR"]).glob("avibe_os-*.whl"))
-          if len(wheels) != 1:
-              raise SystemExit(1)
-          with zipfile.ZipFile(wheels[0]) as wheel:
-              try:
-                  manifest = wheel.read("vibe/memory_runtime_manifest.json")
-              except KeyError:
-                  raise SystemExit(4) from None
-          payload = json.loads(manifest)
-          if payload.get("release_state") != "published" or payload.get("release_tag") != os.environ["CANDIDATE_TAG"]:
-              raise SystemExit(1)
-          (Path(os.environ["CANDIDATE_DIR"]) / "memory-runtime-manifest.json").write_bytes(manifest)
-          PY
-            manifest_status=$?
-            set -e
-            # Wheels without a manifest predate Memory Runtime and are not scope exclusions.
-            if [ "$manifest_status" -eq 4 ]; then
-              continue
-            elif [ "$manifest_status" -ne 0 ]; then
-              jq -nc --arg release_tag "$candidate_tag" \
-                --arg reason "wheel does not contain a self-pinned published manifest" \
-                '{release_tag: $release_tag, reason: $reason}' >> "$excluded_file"
-              continue
+            asset_names="$(
+              gh release view "$candidate_tag" --repo "$GITHUB_REPOSITORY" \
+                --json assets --jq '.assets[].name'
+            )"
+            if grep -Eq '^avibe_memory-.*\.whl$' <<<"$asset_names"; then
+              gh release download "$candidate_tag" --repo "$GITHUB_REPOSITORY" \
+                --pattern 'avibe_memory-*.whl' --dir "$candidate_dir" >/dev/null
             fi
+            set +e
+            discovery_output="$(
+              python3 scripts/memory_runtime_release_guard.py \
+                discover-manifest --asset-dir "$candidate_dir" \
+                --output-manifest "$candidate_dir/memory-runtime-manifest.json" \
+                --release-tag "$candidate_tag" 2>&1
+            )"
+            discovery_status=$?
+            set -e
+            # Explicitly retain releases that predate the managed runtime as
+            # manifest-free legacy releases. Transition package failures are fatal.
+            if [ "$discovery_status" -eq 4 ]; then
+              continue
+            elif [ "$discovery_status" -ne 0 ]; then
+              echo "$discovery_output" >&2
+              exit "$discovery_status"
+            fi
+            manifest_owner="$(jq -r '.manifest_owner' <<<"$discovery_output")"
             manifest="$candidate_dir/memory-runtime-manifest.json"
             manifest_sha="$(sha256sum "$manifest" | cut -d' ' -f1)"
             set +e
@@ -97,7 +91,8 @@ jobs:
             set -e
             if [ "$policy_status" -eq 0 ]; then
               jq -nc --arg release_tag "$candidate_tag" --arg sha256 "$manifest_sha" \
-                '{release_tag: $release_tag, sha256: $sha256}' >> "$records_file"
+                --arg owner "$manifest_owner" \
+                '{release_tag: $release_tag, sha256: $sha256, owner: $owner}' >> "$records_file"
             elif [ "$policy_status" -eq 2 ]; then
               policy_reason="$(jq -r '.error // "manifest excluded by policy"' <<<"$policy_output")"
               jq -nc --arg release_tag "$candidate_tag" --arg reason "$policy_reason" \
@@ -172,33 +167,36 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ matrix.manifest.release_tag }}
           EXPECTED_SHA256: ${{ matrix.manifest.sha256 }}
+          EXPECTED_OWNER: ${{ matrix.manifest.owner }}
         shell: bash
         run: |
           set -euo pipefail
-          manifest_dir="$RUNNER_TEMP/memory-runtime-manifest"
-          rm -rf "$manifest_dir"
-          mkdir -p "$manifest_dir"
+          package_dir="$RUNNER_TEMP/memory-runtime-packages"
+          rm -rf "$package_dir"
+          mkdir -p "$package_dir"
           gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
-            --pattern 'avibe_os-*.whl' --dir "$manifest_dir" >/dev/null
-          CANDIDATE_TAG="$RELEASE_TAG" CANDIDATE_DIR="$manifest_dir" \
-            python3 - <<'PY'
-          import json
-          import os
-          import zipfile
-          from pathlib import Path
-
-          wheels = sorted(Path(os.environ["CANDIDATE_DIR"]).glob("avibe_os-*.whl"))
-          if len(wheels) != 1:
-              raise SystemExit("expected exactly one avibe_os wheel")
-          with zipfile.ZipFile(wheels[0]) as wheel:
-              manifest = wheel.read("vibe/memory_runtime_manifest.json")
-          payload = json.loads(manifest)
-          if payload.get("release_state") != "published" or payload.get("release_tag") != os.environ["CANDIDATE_TAG"]:
-              raise SystemExit("wheel does not contain the selected published manifest")
-          (Path(os.environ["CANDIDATE_DIR"]) / "memory-runtime-manifest.json").write_bytes(manifest)
-          PY
-          manifest="$manifest_dir/memory-runtime-manifest.json"
+            --pattern 'avibe_os-*' --dir "$package_dir" >/dev/null
+          if [ "$EXPECTED_OWNER" = "memory" ]; then
+            gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --pattern 'avibe_memory-*' --dir "$package_dir" >/dev/null
+          fi
+          discovery_output="$(
+            python3 scripts/memory_runtime_release_guard.py \
+              discover-manifest --asset-dir "$package_dir" \
+              --output-manifest "$package_dir/memory-runtime-manifest.json" \
+              --release-tag "$RELEASE_TAG"
+          )"
+          test "$(jq -r '.manifest_owner' <<<"$discovery_output")" = "$EXPECTED_OWNER"
+          manifest="$package_dir/memory-runtime-manifest.json"
           test "$(sha256sum "$manifest" | cut -d' ' -f1)" = "$EXPECTED_SHA256"
+
+      - name: Verify Memory distribution ownership and isolated sdist rebuilds
+        if: matrix.manifest.owner == 'memory'
+        run: |
+          python3 -m pip install build
+          python3 scripts/memory_runtime_release_guard.py \
+            --manifest "$RUNNER_TEMP/memory-runtime-packages/memory-runtime-manifest.json" \
+            verify-packages --asset-dir "$RUNNER_TEMP/memory-runtime-packages"
 
       - name: Fetch and verify published assets
         id: probe
@@ -210,7 +208,7 @@ jobs:
           set +e
           probe_output="$(
             python3 scripts/memory_runtime_release_guard.py \
-              --manifest "$RUNNER_TEMP/memory-runtime-manifest/memory-runtime-manifest.json" \
+              --manifest "$RUNNER_TEMP/memory-runtime-packages/memory-runtime-manifest.json" \
               fetch --output-dir "$RUNNER_TEMP/memory-runtime-release" 2>&1
           )"
           probe_status=$?
@@ -264,7 +262,7 @@ jobs:
             exit 1
           fi
           python3 scripts/memory_runtime_release_guard.py \
-            --manifest "$RUNNER_TEMP/memory-runtime-manifest/memory-runtime-manifest.json" \
+            --manifest "$RUNNER_TEMP/memory-runtime-packages/memory-runtime-manifest.json" \
             verify --asset-dir "$restore_dir"
 
           existing="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
@@ -285,7 +283,7 @@ jobs:
         if: steps.probe.outputs.result == 'bytes_failure'
         run: |
           python3 scripts/memory_runtime_release_guard.py \
-            --manifest "$RUNNER_TEMP/memory-runtime-manifest/memory-runtime-manifest.json" \
+            --manifest "$RUNNER_TEMP/memory-runtime-packages/memory-runtime-manifest.json" \
             fetch --output-dir "$RUNNER_TEMP/memory-runtime-release"
 
       - name: Check whether this manifest already has a backup
