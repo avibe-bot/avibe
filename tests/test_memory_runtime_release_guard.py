@@ -154,6 +154,8 @@ def _wheel(
     wheel_version: str = "1.0",
     root_is_purelib: tuple[str, ...] = ("true",),
     wheel_tags: tuple[str, ...] = ("py3-none-any",),
+    wheel_trailer: str = "\n",
+    duplicate_control: str | None = None,
 ) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     dist_info = dist_info or f"{name.replace('-', '_')}-3.1.0.dist-info"
@@ -168,7 +170,7 @@ def _wheel(
         f"Wheel-Version: {wheel_version}\nGenerator: gate5a-test\n"
         + "".join(f"Root-Is-Purelib: {value}\n" for value in root_is_purelib)
         + "".join(f"Tag: {value}\n" for value in wheel_tags)
-        + "\n"
+        + wheel_trailer
     ).encode()
     files: dict[str, bytes] = {}
     if include_metadata:
@@ -180,6 +182,9 @@ def _wheel(
     with zipfile.ZipFile(path, "w") as archive:
         for member, content in files.items():
             archive.writestr(member, content)
+        if duplicate_control is not None:
+            member = f"{dist_info}/{duplicate_control}"
+            archive.writestr(member, files[member])
     return path
 
 
@@ -282,7 +287,7 @@ def test_package_policy_accepts_declared_requires_python_literal(
 
     assert policy.requires_python == ">=3.10"
     assert policy.supported_python_versions == guard.PACKAGE_POLICY_SUPPORTED_PYTHON_VERSIONS
-    assert policy.wheel_tag == guard.PACKAGE_POLICY_WHEEL_TAG
+    assert policy.wheel_tag == "py3-none-any"
 
 
 def test_package_policy_rejects_undeclared_wheel_tag(tmp_path: Path) -> None:
@@ -410,8 +415,21 @@ def test_wheel_requires_control_files(tmp_path: Path, missing: str) -> None:
     manifest, _ = _manifest(tmp_path)
     options = {f"include_{missing}": False}
 
-    with pytest.raises(guard.ReleaseAssetError, match="control structure"):
+    with pytest.raises(guard.ReleaseAssetError, match="control policy"):
         _verify_wheels(tmp_path / "wheels", manifest, core_options=options)
+
+
+@pytest.mark.parametrize("control", ["METADATA", "WHEEL"])
+def test_wheel_rejects_duplicate_control_files(tmp_path: Path, control: str) -> None:
+    manifest, _ = _manifest(tmp_path)
+
+    with pytest.warns(UserWarning, match="Duplicate name"):
+        with pytest.raises(guard.ReleaseAssetError, match="control"):
+            _verify_wheels(
+                tmp_path / control,
+                manifest,
+                core_options={"duplicate_control": control},
+            )
 
 
 @pytest.mark.parametrize(
@@ -431,7 +449,7 @@ def test_wheel_version_is_complete_and_supported(
     if accepted:
         verify()
     else:
-        with pytest.raises(guard.ReleaseAssetError, match="Wheel-Version"):
+        with pytest.raises(guard.ReleaseAssetError, match="control policy"):
             verify()
 
 
@@ -441,7 +459,7 @@ def test_wheel_requires_exactly_one_purelib_declaration(
 ) -> None:
     manifest, _ = _manifest(tmp_path)
 
-    with pytest.raises(guard.ReleaseAssetError, match="Root-Is-Purelib"):
+    with pytest.raises(guard.ReleaseAssetError, match="control policy"):
         _verify_wheels(
             tmp_path / "wheels", manifest, core_options={"root_is_purelib": values}
         )
@@ -464,13 +482,31 @@ def test_wheel_uses_packaging_validated_core_metadata(
     if accepted:
         verify()
     else:
-        with pytest.raises(guard.ReleaseAssetError, match="core metadata"):
+        with pytest.raises(guard.ReleaseAssetError, match="control metadata|control policy"):
             verify()
+
+
+@pytest.mark.parametrize(
+    "wheel_trailer",
+    ["not a valid header\n", "\nunexpected body\n"],
+    ids=["malformed-header", "body"],
+)
+def test_wheel_rejects_malformed_parser_structure(
+    tmp_path: Path, wheel_trailer: str
+) -> None:
+    manifest, _ = _manifest(tmp_path)
+
+    with pytest.raises(guard.ReleaseAssetError, match="control policy"):
+        _verify_wheels(
+            tmp_path / "wheels",
+            manifest,
+            core_options={"wheel_trailer": wheel_trailer},
+        )
 
 
 def test_wheel_tags_bind_control_filename_and_declared_policy(tmp_path: Path) -> None:
     manifest, _ = _manifest(tmp_path)
-    with pytest.raises(guard.ReleaseAssetError, match="metadata tags"):
+    with pytest.raises(guard.ReleaseAssetError, match="control policy"):
         _verify_wheels(
             tmp_path / "control",
             manifest,

@@ -21,7 +21,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 import zipfile
 
@@ -45,9 +45,29 @@ INTERNAL_GUARD_FAILURE_EXIT = 3
 PACKAGE_POLICY_SCHEMA_VERSION = 1
 PACKAGE_POLICY_REQUIRES_PYTHON = ">=3.10"
 PACKAGE_POLICY_SUPPORTED_PYTHON_VERSIONS = ("3.10", "3.11", "3.12")
-PACKAGE_POLICY_WHEEL_TAG = "py3-none-any"
-PACKAGE_POLICY_METADATA_VERSION = "2.4"
 SUPPORTED_NAMESPACE_POLICY_VERSIONS = frozenset({1})
+
+
+@dataclass(frozen=True)
+class _WheelControlPolicy:
+    controls: tuple[tuple[str, int], ...]
+    wheel_version_major: int
+    metadata_version: str
+    root_is_purelib: tuple[str, ...]
+    tags: tuple[str, ...]
+    parser_defects: tuple[str, ...]
+    parser_body: str
+
+
+_WHEEL_CONTROL_POLICY = _WheelControlPolicy(
+    controls=(("METADATA", 1), ("WHEEL", 1)),
+    wheel_version_major=1,
+    metadata_version="2.4",
+    root_is_purelib=("true",),
+    tags=("py3-none-any",),
+    parser_defects=(),
+    parser_body="",
+)
 
 
 class ReleaseGuardError(RuntimeError):
@@ -210,7 +230,7 @@ def load_package_release_policy(
         raise ManifestPolicyError("manifest package_policy Python contract is invalid") from exc
     if requires_python != PACKAGE_POLICY_REQUIRES_PYTHON:
         raise ManifestPolicyError("manifest package_policy Requires-Python differs from schema 1 policy")
-    if raw["wheel_tag"] != PACKAGE_POLICY_WHEEL_TAG:
+    if raw["wheel_tag"] != _WHEEL_CONTROL_POLICY.tags[0]:
         raise ManifestPolicyError("manifest package_policy wheel_tag differs from schema 1 policy")
     return PackageReleasePolicy(requires_python, tuple(versions), raw["wheel_tag"], namespace_version)
 
@@ -276,6 +296,29 @@ def _verify_package_identity(
         raise ReleaseAssetError(f"wheel tags differ from release policy: {wheel_filename}")
 
 
+def _parse_wheel_version_major(values: tuple[str, ...]) -> int | None:
+    if len(values) != 1:
+        return None
+    match = re.fullmatch(r"([0-9]+)\.([0-9]+)", values[0])
+    return int(match.group(1)) if match is not None else None
+
+
+def _compare_wheel_control_policy(wheel: Path, observed: dict[str, object]) -> None:
+    policy_fields = tuple(field.name for field in fields(_WHEEL_CONTROL_POLICY))
+    if tuple(observed) not in (("controls",), policy_fields):
+        raise ReleaseAssetError(f"wheel control policy observation is incomplete: {wheel.name}")
+    mismatches = tuple(
+        field.name
+        for field in fields(_WHEEL_CONTROL_POLICY)
+        if field.name in observed
+        and observed[field.name] != getattr(_WHEEL_CONTROL_POLICY, field.name)
+    )
+    if mismatches:
+        raise ReleaseAssetError(
+            f"wheel control policy mismatch ({', '.join(mismatches)}): {wheel.name}"
+        )
+
+
 def inspect_wheel(wheel: Path, *, policy: PackageReleasePolicy) -> PackageMetadata:
     """Validate wheel control metadata without inferring installed behavior."""
     if (
@@ -283,7 +326,7 @@ def inspect_wheel(wheel: Path, *, policy: PackageReleasePolicy) -> PackageMetada
         or type(policy) is not PackageReleasePolicy
         or policy.requires_python != PACKAGE_POLICY_REQUIRES_PYTHON
         or policy.supported_python_versions != PACKAGE_POLICY_SUPPORTED_PYTHON_VERSIONS
-        or policy.wheel_tag != PACKAGE_POLICY_WHEEL_TAG
+        or policy.wheel_tag != _WHEEL_CONTROL_POLICY.tags[0]
         or type(policy.namespace_policy_version) is not int
         or policy.namespace_policy_version not in SUPPORTED_NAMESPACE_POLICY_VERSIONS
     ):
@@ -305,41 +348,39 @@ def inspect_wheel(wheel: Path, *, policy: PackageReleasePolicy) -> PackageMetada
                 for name in names
                 if "/" in name and name.split("/", 1)[0].endswith(".dist-info")
             }
-            controls = [f"{dist_info}/METADATA", f"{dist_info}/WHEEL"]
-            if dist_infos != {dist_info} or any(names.count(control) != 1 for control in controls):
+            if dist_infos != {dist_info}:
                 raise ReleaseAssetError(f"wheel control structure is invalid: {wheel.name}")
-            metadata_bytes, wheel_bytes = (archive.read(control) for control in controls)
+            control_counts = tuple(
+                (name, names.count(f"{dist_info}/{name}"))
+                for name, _ in _WHEEL_CONTROL_POLICY.controls
+            )
+            _compare_wheel_control_policy(wheel, {"controls": control_counts})
+            metadata_bytes, wheel_bytes = (
+                archive.read(f"{dist_info}/{name}")
+                for name, _ in _WHEEL_CONTROL_POLICY.controls
+            )
     except ReleaseAssetError:
         raise
     except Exception as exc:
         raise ReleaseAssetError(f"cannot read wheel controls: {wheel.name}") from exc
     try:
         parsed_metadata = metadata_module.Metadata.from_email(metadata_bytes, validate=True)
-    except Exception as exc:
-        raise ReleaseAssetError(f"wheel core metadata is invalid: {wheel.name}") from exc
-    if parsed_metadata.metadata_version != PACKAGE_POLICY_METADATA_VERSION:
-        raise ReleaseAssetError(f"wheel core metadata version differs from policy: {wheel.name}")
-    try:
         wheel_metadata = Parser().parsestr(wheel_bytes.decode("utf-8"))
-    except UnicodeDecodeError as exc:
-        raise ReleaseAssetError(f"wheel metadata is not UTF-8: {wheel.name}") from exc
-    wheel_versions = wheel_metadata.get_all("Wheel-Version") or []
-    purelib = wheel_metadata.get_all("Root-Is-Purelib") or []
-    try:
-        version_match = re.fullmatch(r"([0-9]+)\.([0-9]+)", wheel_versions[0])
-        if len(wheel_versions) != 1 or version_match is None or int(version_match.group(1)) != 1:
-            raise ValueError
-        declared_tags = {
-            tag
-            for value in wheel_metadata.get_all("Tag") or []
-            for tag in tags.parse_tag(value)
+        wheel_versions = tuple(wheel_metadata.get_all("Wheel-Version") or ())
+        observation = {
+            "controls": control_counts,
+            "wheel_version_major": _parse_wheel_version_major(wheel_versions),
+            "metadata_version": parsed_metadata.metadata_version,
+            "root_is_purelib": tuple(wheel_metadata.get_all("Root-Is-Purelib") or ()),
+            "tags": tuple(wheel_metadata.get_all("Tag") or ()),
+            "parser_defects": tuple(type(defect).__name__ for defect in wheel_metadata.defects),
+            "parser_body": wheel_metadata.get_payload(),
         }
-    except (IndexError, TypeError, ValueError) as exc:
-        raise ReleaseAssetError(f"wheel Wheel-Version or tags are invalid: {wheel.name}") from exc
-    if purelib != ["true"]:
-        raise ReleaseAssetError(f"wheel requires exactly one Root-Is-Purelib: true: {wheel.name}")
-    if not declared_tags or declared_tags != filename_tags:
-        raise ReleaseAssetError(f"wheel metadata tags differ from filename: {wheel.name}")
+        _compare_wheel_control_policy(wheel, observation)
+    except ReleaseAssetError:
+        raise
+    except Exception as exc:
+        raise ReleaseAssetError(f"wheel control metadata is invalid: {wheel.name}") from exc
     platforms = {tag.platform for tag in policy_tags}
     for supported_version in policy.supported_python_versions:
         python_version = tuple(map(int, supported_version.split(".")))
