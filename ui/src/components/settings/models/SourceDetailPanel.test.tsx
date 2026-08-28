@@ -79,7 +79,7 @@ const UNKNOWN_WRITE_CASES = (['edit', 'delete'] as const).flatMap((action) =>
 const submitManagementWrite = async (action: UnknownWriteAction, forced: boolean) => {
   await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
   if (action === 'edit') {
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
     const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
     await userEvent.clear(name);
     await userEvent.type(name, 'Unknown edit');
@@ -90,10 +90,10 @@ const submitManagementWrite = async (action: UnknownWriteAction, forced: boolean
     return;
   }
 
-  await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除来源$/i }));
-  await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除来源$/i }));
+  await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除供应商$/i }));
+  await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除供应商$/i }));
   if (forced) {
-    await userEvent.click(await screen.findByRole('button', { name: /^Remove source$|^移除来源$/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^Remove source$|^移除供应商$/i }));
   }
 };
 
@@ -278,7 +278,7 @@ describe('SourceDetailPanel', () => {
     renderEchoPanel();
 
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
     const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
     const endpoint = screen.getByLabelText(/^Base URL$/i);
     await userEvent.clear(name);
@@ -297,7 +297,7 @@ describe('SourceDetailPanel', () => {
   it('explains client validation instead of leaving a mute disabled save', async () => {
     renderEchoPanel();
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
 
     const endpoint = screen.getByLabelText(/^Base URL$/i);
     await userEvent.clear(endpoint);
@@ -311,7 +311,7 @@ describe('SourceDetailPanel', () => {
       .mockRejectedValueOnce(new ApiCallError('discovery_failed'));
     renderEchoPanel();
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
 
     const endpoint = screen.getByLabelText(/^Base URL$/i);
     await userEvent.clear(endpoint);
@@ -321,7 +321,7 @@ describe('SourceDetailPanel', () => {
     await userEvent.click(save);
 
     await waitFor(() => expect(patch).toHaveBeenCalledWith(source.id, { base_url: 'https:relay.example' }));
-    expect(await screen.findByText(/source was not saved|来源没有保存上/i)).toBeTruthy();
+    expect(await screen.findByText(/source was not saved|供应商没有保存/i)).toBeTruthy();
     expect(screen.getByDisplayValue('https:relay.example')).toBeTruthy();
   });
 
@@ -336,7 +336,7 @@ describe('SourceDetailPanel', () => {
       </I18nextProvider>,
     );
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
 
     expect(screen.getByTitle('relay.example · OpenAI Chat Completions')).toBeTruthy();
     expect(screen.queryByText('openai_chat')).toBeNull();
@@ -352,13 +352,13 @@ describe('SourceDetailPanel', () => {
     renderEchoPanel();
 
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
     const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
     await userEvent.clear(name);
     await userEvent.type(name, updated.display_name);
     await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
 
-    const impactDialog = await screen.findByRole('dialog', { name: /source was updated|来源已更新/i });
+    const impactDialog = await screen.findByRole('dialog', { name: /source was updated|供应商已更新/i });
     expect(screen.queryByRole('heading', { name: updated.display_name })).toBeNull();
     const done = within(impactDialog)
       .getAllByRole('button', { name: /^Done$|^完成$/i })
@@ -387,10 +387,10 @@ describe('SourceDetailPanel', () => {
     renderEchoPanel();
 
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除来源$/i }));
-    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除来源$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除供应商$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除供应商$/i }));
     expect(await screen.findAllByText(/claude-opus-4-6/)).toHaveLength(2);
-    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除来源$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除供应商$/i }));
 
     await waitFor(() => expect(requests).toHaveLength(2));
     expect(requests[0].url).not.toContain('force=true');
@@ -401,7 +401,7 @@ describe('SourceDetailPanel', () => {
       would_interrupt: gaps,
     });
     expect(screen.queryByTestId('source-gone')).toBeNull();
-    const impactDialog = await screen.findByRole('dialog', { name: /source was removed|来源已移除/i });
+    const impactDialog = await screen.findByRole('dialog', { name: /source was removed|供应商已移除/i });
     const done = within(impactDialog)
       .getAllByRole('button', { name: /^Done$|^完成$/i })
       .find((button) => button.classList.contains('model-hub-guard-action'));
@@ -424,8 +424,8 @@ describe('SourceDetailPanel', () => {
     renderEchoPanel();
 
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除来源$/i }));
-    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除来源$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除供应商$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除供应商$/i }));
 
     expect(await screen.findByTestId('source-gone')).toBeTruthy();
     expect(requests).toHaveLength(1);
@@ -447,8 +447,8 @@ describe('SourceDetailPanel', () => {
     renderEchoPanel();
 
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除来源$/i }));
-    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除来源$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除供应商$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除供应商$/i }));
 
     expect(await screen.findByRole('heading', { name: source.display_name })).toBeTruthy();
     const retry = await screen.findByRole('button', { name: /^Try again$|^重试$/i });
@@ -473,7 +473,7 @@ describe('SourceDetailPanel', () => {
     renderEchoPanel();
 
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
     const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
     await userEvent.clear(name);
     await userEvent.type(name, 'Held draft');
@@ -509,7 +509,7 @@ describe('SourceDetailPanel', () => {
     renderEchoPanel();
 
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
     const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
     await userEvent.clear(name);
     await userEvent.type(name, 'Held failure');
@@ -517,7 +517,7 @@ describe('SourceDetailPanel', () => {
     await userEvent.click(await screen.findByRole('button', { name: /^Save anyway$|^仍要保存$/i }));
 
     expect(await screen.findByDisplayValue('Held failure')).toBeTruthy();
-    expect(screen.getByText(/source was not saved|来源没有保存上/i)).toBeTruthy();
+    expect(screen.getByText(/source was not saved|供应商没有保存/i)).toBeTruthy();
   });
 
   it('retries a failed forced delete with the exact held server plan', async () => {
@@ -538,9 +538,9 @@ describe('SourceDetailPanel', () => {
     renderEchoPanel();
 
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除来源$/i }));
-    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除来源$/i }));
-    await userEvent.click(await screen.findByRole('button', { name: /^Remove source$|^移除来源$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除供应商$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除供应商$/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^Remove source$|^移除供应商$/i }));
     await userEvent.click(await screen.findByRole('button', { name: /^Try again$|^重试$/i }));
 
     await waitFor(() => expect(requests).toHaveLength(3));
@@ -582,7 +582,7 @@ describe('SourceDetailPanel', () => {
 
       if (outcome === 'committed' && forced) {
         const impact = await screen.findByRole('dialog', {
-          name: action === 'edit' ? /source was updated|来源已更新/i : /source was removed|来源已移除/i,
+          name: action === 'edit' ? /source was updated|供应商已更新/i : /source was removed|供应商已移除/i,
         });
         expect(impact.textContent).toContain('claude-opus-4-6');
         const done = within(impact)
@@ -624,7 +624,7 @@ describe('SourceDetailPanel', () => {
       renderEchoPanel();
 
       await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-      await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+      await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
       const endpoint = screen.getByLabelText(/^Base URL$/i);
       await userEvent.clear(endpoint);
       await userEvent.type(endpoint, requestedBaseUrl);
@@ -700,7 +700,7 @@ describe('SourceDetailPanel', () => {
 
       await submitManagementWrite(action, false);
       const impact = await screen.findByRole('dialog', {
-        name: action === 'edit' ? /source was updated|来源已更新/i : /source was removed|来源已移除/i,
+        name: action === 'edit' ? /source was updated|供应商已更新/i : /source was removed|供应商已移除/i,
       });
       const committedEvidence = () => Array.from(impact.querySelectorAll('.model-hub-guard-hop'))
         .map((node) => node.textContent);
@@ -719,7 +719,7 @@ describe('SourceDetailPanel', () => {
 
       await userEvent.click(within(impact).getByRole('button', { name: /^Try again$|^重试$/i }));
       await waitFor(() => expect(screen.queryByRole('dialog', {
-        name: action === 'edit' ? /source was updated|来源已更新/i : /source was removed|来源已移除/i,
+        name: action === 'edit' ? /source was updated|供应商已更新/i : /source was removed|供应商已移除/i,
       })).toBeNull());
       expect(reconcile).toHaveBeenCalledTimes(2);
     },
@@ -755,7 +755,7 @@ describe('SourceDetailPanel', () => {
     );
 
     await submitManagementWrite('edit', false);
-    const impact = await screen.findByRole('dialog', { name: /source was updated|来源已更新/i });
+    const impact = await screen.findByRole('dialog', { name: /source was updated|供应商已更新/i });
     const closeBeforeLanding = within(impact).getAllByRole('button', { name: /^Done$|^完成$/i })
       .find((button) => button.classList.contains('model-hub-guard-close'));
     expect(closeBeforeLanding).toBeTruthy();
@@ -771,7 +771,7 @@ describe('SourceDetailPanel', () => {
     expect((dismissClose as HTMLButtonElement).disabled).toBe(false);
     expect(trackedSettled).toBe(false);
     await userEvent.click(dismissClose!);
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: /source was updated|来源已更新/i })).toBeNull());
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /source was updated|供应商已更新/i })).toBeNull());
     expect(tracked).toBeDefined();
     await tracked;
     expect(trackedSettled).toBe(true);
@@ -786,19 +786,19 @@ describe('SourceDetailPanel', () => {
     renderEchoPanel(() => landing.promise);
 
     await submitManagementWrite('delete', false);
-    const impact = await screen.findByRole('dialog', { name: /source was removed|来源已移除/i });
+    const impact = await screen.findByRole('dialog', { name: /source was removed|供应商已移除/i });
     const done = within(impact).getAllByRole('button', { name: /^Done$|^完成$/i })
       .find((button) => button.classList.contains('model-hub-guard-action'));
     expect(done).toBeTruthy();
     await userEvent.click(done!);
 
     expect(await screen.findByTestId('source-gone')).toBeTruthy();
-    expect(screen.getByRole('dialog', { name: /source was removed|来源已移除/i })).toBeTruthy();
+    expect(screen.getByRole('dialog', { name: /source was removed|供应商已移除/i })).toBeTruthy();
     expect(impact.textContent).toContain(heldHops[0].menu_model);
     expect(impact.textContent).toContain(heldGaps[0].agents[0]);
 
     landing.resolve('landed');
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: /source was removed|来源已移除/i })).toBeNull());
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /source was removed|供应商已移除/i })).toBeNull());
   });
 
   it.each((['edit', 'delete'] as const).flatMap((action) => [
@@ -844,7 +844,7 @@ describe('SourceDetailPanel', () => {
   it('opens the manual model draft in the table and keeps Add disabled while blank', async () => {
     renderPanel();
     await userEvent.click(screen.getAllByRole('button', { name: /^Add model$|^添加模型$/i })[0]);
-    const input = screen.getByPlaceholderText(/^Model ID$|^型号 ID$/i);
+    const input = screen.getByPlaceholderText(/^Model ID$|^模型 ID$/i);
     expect(input).toBeTruthy();
     const draft = input.closest('[data-manual-model-draft]');
     expect(draft).toBeTruthy();
@@ -972,8 +972,8 @@ describe('SourceDetailPanel', () => {
     renderEchoPanel();
 
     await userEvent.click(screen.getAllByRole('button', { name: /^Add model$|^添加模型$/i })[0]);
-    const draft = screen.getByPlaceholderText(/^Model ID$|^型号 ID$/i).closest('[data-manual-model-draft]');
-    await userEvent.type(within(draft as HTMLElement).getByPlaceholderText(/^Model ID$|^型号 ID$/i), 'model-b');
+    const draft = screen.getByPlaceholderText(/^Model ID$|^模型 ID$/i).closest('[data-manual-model-draft]');
+    await userEvent.type(within(draft as HTMLElement).getByPlaceholderText(/^Model ID$|^模型 ID$/i), 'model-b');
     await userEvent.click(within(draft as HTMLElement).getByRole('button', { name: /^Add model$|^添加模型$/i }));
 
     expect(await screen.findByText('model-b')).toBeTruthy();

@@ -52,7 +52,7 @@ afterEach(cleanup);
 describe('AgentCard', () => {
   it.each([
     ['en', 'Gateway · Supply unavailable for now'],
-    ['zh', '网关 · 供给暂不可用'],
+    ['zh', '网关 · 等待供应商恢复'],
   ] as const)('renders the waiting umbrella in %s', (lng, copy) => {
     render(<I18nextProvider i18n={localeInstance(lng)}><AgentCard agents={[{ ...hubAgent, named_agents: [{ name: 'claude', effective_model_id: 'claude-opus-4-6', supply_status: 'waiting' }] }]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
 
@@ -118,7 +118,7 @@ describe('AgentCard', () => {
 
   it.each([
     ['en', 'Adjust priority', 'Switch to direct', 'Switch to gateway'],
-    ['zh', '调整优先级', '切到直连', '切换到网关'],
+    ['zh', '调整优先级', '切到直连', '切换到模型网关'],
   ] as const)('uses explicit gateway action labels and icons in %s', (lng, orderCopy, directCopy, gatewayCopy) => {
     const directAgent: AgentSupply = {
       ...hubAgent,
@@ -202,7 +202,7 @@ describe('AgentCard', () => {
     expect(screen.queryByText(pausedModel)).toBeNull();
     await userEvent.click(screen.getByRole('button', { name: /more model/i }));
     expect(screen.getByText(pausedModel)).toBeTruthy();
-    expect(screen.getByText(/^Supply paused$|^供给已暂停$/i)).toBeTruthy();
+    expect(screen.getByText(/^Supply paused$|^等待供应商恢复$/i)).toBeTruthy();
   });
 
   it('keeps a chain reread reachable when a short group is unresolved', async () => {

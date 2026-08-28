@@ -153,12 +153,12 @@ describe('AddApiKeyDialog', () => {
     renderDialog();
     const user = await fillCredentials();
 
-    await user.click(screen.getByRole('button', { name: /Fetch models|拉取型号/i }));
-    expect(await screen.findByText(/Fetched 2 models|拉到 2 个型号/i)).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: /Fetch models|拉取模型/i }));
+    expect(await screen.findByText(/Fetched 2 models|拉到 2 个模型/i)).toBeTruthy();
     expect(create).not.toHaveBeenCalled();
 
     await user.type(screen.getByRole('textbox', { name: /^Base URL$/i }), '/changed');
-    expect(screen.queryByText(/Fetched 2 models|拉到 2 个型号/i)).toBeNull();
+    expect(screen.queryByText(/Fetched 2 models|拉到 2 个模型/i)).toBeNull();
   });
 
   it('sends one manually selected interface on the first observation and create', async () => {
@@ -294,12 +294,12 @@ describe('AddApiKeyDialog', () => {
     const { onClose } = renderDialog();
     const user = await fillCredentials();
 
-    await user.click(screen.getByRole('button', { name: /Fetch models|拉取型号/i }));
+    await user.click(screen.getByRole('button', { name: /Fetch models|拉取模型/i }));
     await user.click(screen.getAllByRole('button', { name: /^Cancel$|^取消$/i }).at(-1)!);
 
     expect(wasAborted).toBe(true);
     expect(onClose).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: /Fetch models|拉取型号/i })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Fetch models|拉取模型/i })).toBeTruthy();
   });
 
   it('reconciles a lost source-create response by nonce without posting twice', async () => {
@@ -489,7 +489,7 @@ describe('AddApiKeyDialog', () => {
 
     await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
 
-    expect(await screen.findByText(/model list did not come back|没拿到它的型号清单/i)).toBeTruthy();
+    expect(await screen.findByText(/model list did not come back|没拿到它的模型清单/i)).toBeTruthy();
     expect(screen.getByRole('button', { name: /Add anyway|仍要添加/i })).toBeTruthy();
     expect(screen.queryByText(i18n.t('settings.models.addKey.fail.unclassified'))).toBeNull();
   });
@@ -596,8 +596,8 @@ describe('AddApiKeyDialog', () => {
         would_interrupt: [gap],
       }],
     ]);
-    expect(await screen.findByText(/^Removed hops$|^已移除的跳$/i)).toBeTruthy();
-    expect(screen.getByText(/now have no usable source|现在没有可用来源/i)).toBeTruthy();
+    expect(await screen.findByText(/^Removed hops$|^已移除的路由项$/i)).toBeTruthy();
+    expect(screen.getByText(/now have no usable source|现在没有可用供应商/i)).toBeTruthy();
   });
 
   it('requires confirmation again when the server recomputes a different replacement plan', async () => {
@@ -718,7 +718,7 @@ describe('AddApiKeyDialog', () => {
       }
 
       if (outcome === 'impact') {
-        expect(await screen.findByText(/^Removed hops$|^已移除的跳$/i)).toBeTruthy();
+        expect(await screen.findByText(/^Removed hops$|^已移除的路由项$/i)).toBeTruthy();
         expect(screen.getByText(/pm-claude/)).toBeTruthy();
         expect(replace.mock.calls.at(-1)?.[1]).toEqual({
           key: 'sk-terminal',
@@ -760,7 +760,7 @@ describe('AddApiKeyDialog', () => {
     expect(await screen.findByText(/Couldn't replace the key|更换失败/i)).toBeTruthy();
     expect(screen.getByRole('button', { name: /^Retry$|^重试$/i })).toBeTruthy();
     expect(screen.queryByText(i18n.t('settings.models.repair.repaired'))).toBeNull();
-    expect(screen.queryByText(/^Removed hops$|^已移除的跳$/i)).toBeNull();
+    expect(screen.queryByText(/^Removed hops$|^已移除的路由项$/i)).toBeNull();
     expect(settled.readInventory).toHaveBeenCalledOnce();
     expect(settled.source).not.toHaveBeenCalled();
     expect(settled.unread).not.toHaveBeenCalled();
