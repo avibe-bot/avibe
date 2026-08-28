@@ -5,10 +5,16 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+type VoiceStopped = (
+  reason: 'finish' | 'abort' | 'error',
+  metadata: { pendingSegmentCount: number },
+) => void;
+
 const voiceMocks = vi.hoisted(() => ({
   abort: vi.fn(),
   finish: vi.fn(),
   getUserMedia: vi.fn(),
+  onStopped: undefined as VoiceStopped | undefined,
   pipelineStart: vi.fn(),
   realtimeAbort: vi.fn(),
   realtimeStart: vi.fn(),
@@ -29,6 +35,10 @@ vi.mock('../../lib/avibeFetch', async (importOriginal) => ({
 vi.mock('../../lib/voiceRecording', async (importOriginal) => ({
   ...await importOriginal<typeof import('../../lib/voiceRecording')>(),
   VoiceRecordingPipeline: class {
+    constructor(options: { onStopped: VoiceStopped }) {
+      voiceMocks.onStopped = options.onStopped;
+    }
+
     start = voiceMocks.pipelineStart;
     finish = voiceMocks.finish;
     abort = voiceMocks.abort;
@@ -82,6 +92,7 @@ beforeEach(() => {
   voiceMocks.abort.mockReset();
   voiceMocks.finish.mockReset();
   voiceMocks.getUserMedia.mockReset();
+  voiceMocks.onStopped = undefined;
   voiceMocks.pipelineStart.mockReset().mockResolvedValue(true);
   voiceMocks.realtimeAbort.mockReset();
   voiceMocks.realtimeStart.mockReset().mockReturnValue(new Promise(() => undefined));
@@ -139,7 +150,7 @@ describe('Composer voice shortcut', () => {
     await waitFor(() => expect(voiceMocks.getUserMedia).toHaveBeenCalledOnce());
   });
 
-  it('owns a configured editor chord before Lexical handles it', async () => {
+  it('keeps a configured editor chord through the complete voice flow', async () => {
     const shortcuts = defaultActionShortcuts();
     shortcuts.voiceInput = {
       code: 'KeyZ',
@@ -154,10 +165,18 @@ describe('Composer voice shortcut', () => {
     const textbox = screen.getByRole('textbox');
     await waitFor(() => expect(textbox.textContent).toBe('Keep this draft'));
     await act(async () => undefined);
+    textbox.focus();
 
     fireEvent.keyDown(textbox, { code: 'KeyZ', key: 'z', ctrlKey: true });
     await waitFor(() => expect(voiceMocks.getUserMedia).toHaveBeenCalledOnce());
     expect(textbox.textContent).toBe('Keep this draft');
+
+    const finish = await screen.findByRole('button', { name: en.chat.compose.stopRecording });
+    await waitFor(() => expect(document.activeElement).toBe(finish));
+    fireEvent.keyDown(finish, { code: 'KeyZ', key: 'z', ctrlKey: true });
+    expect(voiceMocks.finish).toHaveBeenCalledOnce();
+    act(() => voiceMocks.onStopped?.('finish', { pendingSegmentCount: 0 }));
+    await waitFor(() => expect(document.activeElement).toBe(textbox));
   });
 
   it('yields the voice shortcut while the mention picker is open', async () => {
