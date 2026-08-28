@@ -139,7 +139,7 @@ describe('Composer voice shortcut', () => {
     await waitFor(() => expect(voiceMocks.getUserMedia).toHaveBeenCalledOnce());
   });
 
-  it('owns a configured editor chord before Lexical handles it', async () => {
+  it('keeps a configured editor chord through the complete voice flow', async () => {
     const shortcuts = defaultActionShortcuts();
     shortcuts.voiceInput = {
       code: 'KeyZ',
@@ -158,6 +158,11 @@ describe('Composer voice shortcut', () => {
     fireEvent.keyDown(textbox, { code: 'KeyZ', key: 'z', ctrlKey: true });
     await waitFor(() => expect(voiceMocks.getUserMedia).toHaveBeenCalledOnce());
     expect(textbox.textContent).toBe('Keep this draft');
+
+    const finish = await screen.findByRole('button', { name: en.chat.compose.stopRecording });
+    await waitFor(() => expect(document.activeElement).toBe(finish));
+    fireEvent.keyDown(finish, { code: 'KeyZ', key: 'z', ctrlKey: true });
+    expect(voiceMocks.finish).toHaveBeenCalledOnce();
   });
 
   it('yields the voice shortcut while the mention picker is open', async () => {

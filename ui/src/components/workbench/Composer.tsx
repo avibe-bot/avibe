@@ -1246,7 +1246,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     }
     event.preventDefault();
     if (voiceControlMode === 'finish') stopRecording();
-    else void startRecording(captureVoiceInsertion());
+    else {
+      focusNextVoiceControlRef.current = true;
+      void startRecording(captureVoiceInsertion());
+    }
   }, [
     captureVoiceInsertion,
     startRecording,
