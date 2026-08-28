@@ -245,10 +245,30 @@ describe('SourceDetailPanel', () => {
     const search = screen.getByRole('textbox', { name: /Search model IDs|搜索模型 ID/i });
     await userEvent.type(search, 'missing-model');
 
-    expect(screen.queryByText('model-a')).toBeNull();
+    const filteredRow = screen.getByText('model-a').closest('.model-hub-source-table-row') as HTMLElement;
+    expect(filteredRow.hidden).toBe(true);
     expect(screen.getByText(/No models match this search|没有匹配的模型/i)).toBeTruthy();
     await userEvent.clear(search);
-    expect(screen.getByText('model-a')).toBeTruthy();
+    expect(filteredRow.hidden).toBe(false);
+  });
+
+  it('keeps a row-local tier failure answerable while search filters the row', async () => {
+    vi.spyOn(modelsApi, 'updateModelReasoningEfforts').mockRejectedValueOnce(new Error('write failed'));
+    renderPanel();
+    await userEvent.click(screen.getByRole('button', { name: /high/i }));
+    await userEvent.type(screen.getByPlaceholderText(/Enter to add|回车添加/i), 'draft{Enter}');
+    const failure = await screen.findByText(/tier was not saved|档位没保存上/i);
+    const row = failure.closest('.model-hub-source-table-row') as HTMLElement;
+
+    const search = screen.getByRole('textbox', { name: /Search model IDs|搜索模型 ID/i });
+    await userEvent.type(search, 'missing-model');
+    expect(row.hidden).toBe(true);
+    expect(document.activeElement).toBe(search);
+
+    await userEvent.clear(search);
+    expect(row.hidden).toBe(false);
+    expect(screen.getByRole('button', { name: /^Try again$|^重试$/i })).toBeTruthy();
+    expect(document.activeElement).toBe(search);
   });
 
   it('keeps the detail surface to inventory, entry kind, tiers, and refetch', () => {
@@ -1161,7 +1181,16 @@ describe('SourceDetailPanel', () => {
     expect(pointer).toMatch(/\.model-hub-source-tier-reveal \{ opacity: 0;/);
     expect(pointer).toMatch(/\.model-hub-source-table-row:hover \.model-hub-source-tier-reveal,[\s\S]*?opacity: 1;/);
     expect(pointer).not.toMatch(/display: none|height|padding|margin|border/);
+    expect(pointer).toMatch(/\.model-hub-source-row-action \{ opacity: 0;/);
+    expect(pointer).not.toMatch(/\.model-hub-source-row-actions \{ opacity: 0;/);
     expect(touch).toMatch(/\.model-hub-source-tier-reveal \{ display: none; \}/);
+  });
+
+  it('bounds refetch notices inside the fixed-height detail dialog', () => {
+    const css = readFileSync(join(process.cwd(), 'src/components/settings/models/modelHubSurface.css'), 'utf8');
+    const notices = css.match(/\.model-hub-source-notices\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(notices).toContain('max-height: var(--model-hub-source-notices-max-height)');
+    expect(notices).toContain('overflow-y: auto');
   });
 
   // The reveal is a paint, so what a tap has to find cannot be part of it: the

@@ -896,6 +896,7 @@
   --model-hub-source-table-gap: 12px;
   --model-hub-source-table-padding-x: 20px;
   --model-hub-source-table-padding-y: 7px;
+  --model-hub-source-notices-max-height: min(160px, 25dvh);
   --model-hub-source-title-size: 15px;
   --model-hub-source-state-size: 12px;
   --model-hub-source-age-size: 11px;
@@ -928,6 +929,12 @@
 }
 
 .model-hub-source-dialog { display: flex; }
+.model-hub-source-notices {
+  max-height: var(--model-hub-source-notices-max-height);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  overflow-wrap: anywhere;
+}
 .model-hub-source-dialog > button {
   top: 18px;
   right: 18px;
@@ -1090,9 +1097,9 @@
   .model-hub-source-tier-reveal { opacity: 0; transition: opacity 120ms ease; }
   .model-hub-source-table-row:hover .model-hub-source-tier-reveal,
   .model-hub-source-tier-cell:focus-visible .model-hub-source-tier-reveal { opacity: 1; }
-  .model-hub-source-row-actions { opacity: 0; transition: opacity 120ms ease; }
-  .model-hub-source-table-row:hover .model-hub-source-row-actions,
-  .model-hub-source-table-row:focus-within .model-hub-source-row-actions { opacity: 1; }
+  .model-hub-source-row-action { opacity: 0; transition: opacity 120ms ease; }
+  .model-hub-source-table-row:hover .model-hub-source-row-action,
+  .model-hub-source-table-row:focus-within .model-hub-source-row-action { opacity: 1; }
 }
 @media (hover: none) {
   .model-hub-source-tier-reveal { display: none; }

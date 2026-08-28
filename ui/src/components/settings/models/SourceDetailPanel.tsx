@@ -393,6 +393,7 @@ export const SourceDetailPanel: React.FC<{
   const filteredModels = normalizedQuery
     ? models.filter((model) => model.id.toLocaleLowerCase(i18n.language).includes(normalizedQuery))
     : models;
+  const visibleModelIds = new Set(filteredModels.map((model) => model.id));
   const editDraft = 'draft' in manageStage ? manageStage.draft : null;
   const editAssessment = editDraft
     ? assessSourceEdit(source, editDraft)
@@ -898,8 +899,9 @@ export const SourceDetailPanel: React.FC<{
           <span className="truncate">{t('settings.models.sourceDetail.col.id')}</span><span className="flex min-w-0 items-center gap-1"><span className="truncate">{t('settings.models.sourceDetail.col.tiers')}</span><Info className="model-hub-ink-59 size-[13px] shrink-0" /></span><span />
         </div>
         <div className="model-hub-source-table-scroll min-h-0 flex-1 overflow-y-auto">
-        {filteredModels.length === 0 && !manualDraft ? <p className="px-5 py-12 text-center text-[12px] text-muted">{t(normalizedQuery ? 'settings.models.sourceDetail.searchEmpty' : source.last_discovered_at ? 'settings.models.sourceDetail.empty' : 'settings.models.sourceDetail.emptyNeverFetched')}</p> : filteredModels.map((model) => (
-          <div key={model.id} className="model-hub-source-table-row grid gap-3 border-b border-border last:border-b-0 md:items-center md:gap-y-0">
+        {filteredModels.length === 0 && !manualDraft && <p className="px-5 py-12 text-center text-[12px] text-muted">{t(normalizedQuery ? 'settings.models.sourceDetail.searchEmpty' : source.last_discovered_at ? 'settings.models.sourceDetail.empty' : 'settings.models.sourceDetail.emptyNeverFetched')}</p>}
+        {models.map((model) => (
+          <div key={model.id} hidden={!visibleModelIds.has(model.id)} className="model-hub-source-table-row grid gap-3 border-b border-border last:border-b-0 md:items-center md:gap-y-0">
             <span className="flex min-w-0 items-center gap-2"><span className="model-hub-source-model truncate font-mono text-foreground" title={model.id}>{model.id}</span>{model.origin !== 'discovered' && <span className="model-hub-source-pill model-hub-source-entry-pill model-hub-source-entry-pill--manual w-fit rounded-full border font-semibold">{t('settings.models.sourceDetail.entry.manual')}</span>}{result?.added.includes(model.id) && <span className="model-hub-accent-pill--mint model-hub-source-pill rounded-full border px-2 py-0.5 font-semibold">{t('settings.models.sourceDetail.refetch.added')}</span>}</span>
             <TierEditor
               model={model}

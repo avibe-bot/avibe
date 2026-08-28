@@ -171,30 +171,32 @@ const AgentModelCard: React.FC<{
                 )}
               >
                 <p className="model-hub-mode-menu-title px-2.5 pb-1.5 pt-1 text-[10px] font-bold uppercase text-muted max-md:hidden">{t('settings.models.gateway.modeMenu.title')}</p>
-                <div role="menuitem" aria-current="true" className="model-hub-mode-menu-current flex items-start gap-2.5 rounded-[7px] px-2.5 py-2.5">
-                  <Route className="model-hub-ink-mint mt-0.5 size-4 shrink-0" aria-hidden="true" />
-                  <span className="min-w-0 flex-1">
-                    <span className="block text-[12px] font-bold text-foreground">{t('settings.models.gateway.modeMenu.gatewayCurrent')}</span>
-                    <span className="mt-0.5 block text-[10.5px] leading-[15px] text-muted">{t('settings.models.gateway.modeMenu.gatewayDescription')}</span>
-                  </span>
-                  <Check className="model-hub-ink-mint mt-0.5 size-4 shrink-0" aria-hidden="true" />
+                <div role="group" aria-label={t('settings.models.gateway.modeMenu.title') as string}>
+                  <button type="button" aria-pressed="true" className="model-hub-mode-menu-current flex w-full items-start gap-2.5 rounded-[7px] px-2.5 py-2.5 text-left" onClick={() => setModeMenuOpen(false)}>
+                    <Route className="model-hub-ink-mint mt-0.5 size-4 shrink-0" aria-hidden="true" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-[12px] font-bold text-foreground">{t('settings.models.gateway.modeMenu.gatewayCurrent')}</span>
+                      <span className="mt-0.5 block text-[10.5px] leading-[15px] text-muted">{t('settings.models.gateway.modeMenu.gatewayDescription')}</span>
+                    </span>
+                    <Check className="model-hub-ink-mint mt-0.5 size-4 shrink-0" aria-hidden="true" />
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed="false"
+                    disabled={pending}
+                    className="model-hub-mode-menu-item mt-0.5 flex w-full items-start gap-2.5 rounded-[7px] px-2.5 py-2.5 text-left hover:bg-surface-2 disabled:opacity-50"
+                    onClick={() => {
+                      setModeMenuOpen(false);
+                      onSwitchDirect(agent);
+                    }}
+                  >
+                    <Power className="mt-0.5 size-4 shrink-0 text-muted" aria-hidden="true" />
+                    <span className="min-w-0">
+                      <span className="block text-[12px] font-bold text-foreground">{t(switchFailed ? 'settings.models.gateway.retry' : 'settings.models.gateway.switchToDirect')}</span>
+                      <span className="mt-0.5 block text-[10.5px] leading-[15px] text-muted">{t('settings.models.gateway.modeMenu.directDescription', { backend: t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend }) })}</span>
+                    </span>
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  role="menuitem"
-                  disabled={pending}
-                  className="model-hub-mode-menu-item mt-0.5 flex w-full items-start gap-2.5 rounded-[7px] px-2.5 py-2.5 text-left hover:bg-surface-2 disabled:opacity-50"
-                  onClick={() => {
-                    setModeMenuOpen(false);
-                    onSwitchDirect(agent);
-                  }}
-                >
-                  <Power className="mt-0.5 size-4 shrink-0 text-muted" aria-hidden="true" />
-                  <span className="min-w-0">
-                    <span className="block text-[12px] font-bold text-foreground">{t(switchFailed ? 'settings.models.gateway.retry' : 'settings.models.gateway.switchToDirect')}</span>
-                    <span className="mt-0.5 block text-[10.5px] leading-[15px] text-muted">{t('settings.models.gateway.modeMenu.directDescription', { backend: t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend }) })}</span>
-                  </span>
-                </button>
               </ResponsiveMenu>
               <Button variant="outline" size="xs" className="model-hub-agent-head-action rounded-md bg-background px-2.5 text-[11px] font-semibold shadow-sm" onClick={() => onOpenOrder(agent)} disabled={pending}><ArrowDownUp aria-hidden="true" />{t('settings.models.gateway.sourceOrder')}</Button>
             </div>

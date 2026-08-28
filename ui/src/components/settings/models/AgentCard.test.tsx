@@ -1,11 +1,10 @@
 // @vitest-environment jsdom
 import type { ComponentProps } from 'react';
-import { render, screen } from '@testing-library/react';
+import { cleanup, render, screen, within } from '@testing-library/react';
 import { createInstance } from 'i18next';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup } from '@testing-library/react';
 
 import i18n from '@/i18n';
 import en from '../../../i18n/en.json';
@@ -151,7 +150,9 @@ describe('AgentCard', () => {
     const order = screen.getByRole('button', { name: orderCopy });
     const gateway = screen.getByRole('button', { name: gatewayCopy });
     await userEvent.click(screen.getByRole('button', { name: /Runtime mode:|运行模式[:：]/i }));
-    const direct = await screen.findByRole('menuitem', { name: new RegExp(directCopy, 'i') });
+    const modeGroup = await screen.findByRole('group', { name: /Runtime mode|运行模式/i });
+    const direct = within(modeGroup).getByRole('button', { name: new RegExp(directCopy, 'i') });
+    expect(within(modeGroup).queryByRole('menuitem')).toBeNull();
     expect(order.querySelector('svg')).toBeTruthy();
     expect(direct.querySelector('.lucide-power')).toBeTruthy();
     expect(gateway.querySelector('svg')).toBeTruthy();
@@ -230,7 +231,7 @@ describe('AgentCard', () => {
 
     expect(screen.getByText(/did not go through/i)).toBeTruthy();
     await userEvent.click(screen.getByRole('button', { name: /Runtime mode:|运行模式[:：]/i }));
-    await userEvent.click(await screen.findByRole('menuitem', { name: /retry|重试/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /retry|重试/i }));
     expect(onSwitchDirect).toHaveBeenCalledWith(hubAgent);
   });
 });
