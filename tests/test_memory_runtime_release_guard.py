@@ -249,7 +249,9 @@ def test_memory_indep_022_023_discovery_distinguishes_legacy_and_ambiguous_trans
         files={"core/memory_loader.py": b"legacy\n"},
     )
     with pytest.raises(guard.LegacyManifestAbsent):
-        guard.discover_release_manifest(legacy_dir)
+        guard.discover_release_manifest(legacy_dir, release_tag="gh-v3.0.14rc2")
+    with pytest.raises(guard.ReleaseAssetError, match="transition-and-later"):
+        guard.discover_release_manifest(legacy_dir, release_tag="v3.0.14")
 
     package_dir, artifacts = _transition_packages(tmp_path / "ambiguous", manifest)
     _wheel(
@@ -276,6 +278,7 @@ def test_memory_indep_023_package_guard_reuses_assertions_for_both_rebuilt_wheel
     version = guard.verify_transition_distributions(
         package_dir,
         tmp_path / "rebuild",
+        release_tag="v3.1.0",
         builder=_copy_builder(artifacts, built),
     )
 
@@ -327,6 +330,7 @@ def test_transition_package_guard_rejects_staged_and_rebuilt_ownership_drift(
         guard.verify_transition_distributions(
             package_dir,
             tmp_path / "staged-rebuild",
+            release_tag="v3.1.0",
             builder=_copy_builder(artifacts, []),
         )
 
@@ -348,6 +352,7 @@ def test_transition_package_guard_rejects_staged_and_rebuilt_ownership_drift(
         guard.verify_transition_distributions(
             package_dir,
             tmp_path / "bad-rebuild",
+            release_tag="v3.1.0",
             builder=bad_builder,
         )
 
@@ -376,6 +381,7 @@ def test_memory_indep_023_package_guard_rejects_dependency_and_metadata_drift(
         guard.verify_transition_distributions(
             package_dir,
             tmp_path / "metadata-rebuild",
+            release_tag="v3.1.0",
             builder=_copy_builder(artifacts, []),
         )
 
@@ -395,6 +401,42 @@ def test_memory_indep_023_package_guard_rejects_dependency_and_metadata_drift(
         guard.verify_transition_distributions(
             package_dir,
             tmp_path / "parity-rebuild",
+            release_tag="v3.1.0",
+            builder=_copy_builder(artifacts, []),
+        )
+
+    package_dir, artifacts = _transition_packages(tmp_path / "reverse", manifest)
+    for key in ("memory_wheel", "memory_sdist"):
+        factory = _wheel if key.endswith("wheel") else _sdist
+        factory(
+            artifacts[key],
+            name="avibe-memory",
+            version="3.1.0",
+            requirements=("avibe-os>=4",),
+            files={
+                "avibe_memory/__init__.py": b"from .runtime import start\n",
+                "avibe_memory/runtime.py": b"def start(): return None\n",
+                guard.MEMORY_MANIFEST_PATH: manifest.read_bytes(),
+            },
+        )
+    with pytest.raises(guard.ReleaseAssetError, match="must accept the exact core version"):
+        guard.verify_transition_distributions(
+            package_dir,
+            tmp_path / "reverse-rebuild",
+            release_tag="v3.1.0",
+            builder=_copy_builder(artifacts, []),
+        )
+
+
+def test_transition_package_guard_binds_distribution_version_to_release_tag(tmp_path: Path) -> None:
+    manifest, _ = _manifest(tmp_path)
+    package_dir, artifacts = _transition_packages(tmp_path, manifest)
+
+    with pytest.raises(guard.ReleaseAssetError, match="does not match the release tag"):
+        guard.verify_transition_distributions(
+            package_dir,
+            tmp_path / "tag-rebuild",
+            release_tag="v3.1.1",
             builder=_copy_builder(artifacts, []),
         )
 
@@ -593,9 +635,11 @@ def test_guard_workflow_reports_and_verifies_supported_published_manifests() -> 
     assert "Guarded Memory Runtime manifests" in resolution
     assert "Excluded Memory Runtime manifests" in resolution
     assert "discover-manifest" in resolution
+    assert 'elif [ "$discovery_status" -eq 2 ]' in resolution
     assert "avibe_memory-*.whl" in resolution
     assert "fromJSON(needs.resolve_manifests.outputs.manifests)" in workflow
     assert "matrix.manifest.release_tag" in workflow
     assert "matrix.manifest.owner == 'memory'" in workflow
     assert "verify-packages --asset-dir" in workflow
+    assert workflow.count("python3 -m pip install packaging") == 2
     assert "python3 -m pip install build" in workflow

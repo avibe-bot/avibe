@@ -31,6 +31,9 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 
+      - name: Install release metadata parser
+        run: python3 -m pip install packaging
+
       - name: Resolve every published Memory Runtime manifest
         id: manifests
         env:
@@ -74,6 +77,11 @@ jobs:
             # Explicitly retain releases that predate the managed runtime as
             # manifest-free legacy releases. Transition package failures are fatal.
             if [ "$discovery_status" -eq 4 ]; then
+              continue
+            elif [ "$discovery_status" -eq 2 ]; then
+              policy_reason="$(jq -r '.error // "manifest excluded by policy"' <<<"$discovery_output")"
+              jq -nc --arg release_tag "$candidate_tag" --arg reason "$policy_reason" \
+                '{release_tag: $release_tag, reason: $reason}' >> "$excluded_file"
               continue
             elif [ "$discovery_status" -ne 0 ]; then
               echo "$discovery_output" >&2
@@ -161,6 +169,9 @@ jobs:
         manifest: ${{ fromJSON(needs.resolve_manifests.outputs.manifests) }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+
+      - name: Install release metadata parser
+        run: python3 -m pip install packaging
 
       - name: Resolve selected published Memory Runtime manifest
         env:

@@ -24,7 +24,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.version import InvalidVersion, Version
+
+try:
+    from scripts.release_package_version import package_version_from_release_tag
+except ModuleNotFoundError:  # Direct execution adds scripts/, not the repository root.
+    from release_package_version import package_version_from_release_tag
+
 RELEASE_DOWNLOAD_ROOT = "https://github.com/avibe-bot/avibe/releases/download"
+TRANSITION_RELEASE_VERSION = Version("3.0.14")
 EXPECTED_EVEROS_VERSION = "1.2.3"
 EXPECTED_PYTHON_VERSION = "3.12.12"
 EXPECTED_LOCK_SHA256 = "e6acc17e4c0969563d380326e90134965af0822259bb4a9adb4d54433e9737fe"
@@ -258,7 +267,18 @@ def _package_files(asset_dir: Path, distribution: str, suffix: str) -> list[Path
     return sorted(matches)
 
 
-def discover_release_manifest(asset_dir: Path) -> ManifestDiscovery:
+def _release_version(release_tag: str) -> Version:
+    try:
+        return Version(package_version_from_release_tag(release_tag))
+    except (ValueError, InvalidVersion) as exc:
+        raise ReleaseAssetError(f"invalid release tag: {release_tag!r}") from exc
+
+
+def discover_release_manifest(
+    asset_dir: Path,
+    *,
+    release_tag: str | None = None,
+) -> ManifestDiscovery:
     if not asset_dir.is_dir():
         raise ReleaseAssetError("release package directory is missing")
     core_paths = _package_files(asset_dir, "avibe-os", ".whl")
@@ -285,6 +305,8 @@ def discover_release_manifest(asset_dir: Path) -> ManifestDiscovery:
         raise ReleaseAssetError("legacy release unexpectedly contains an unowned Memory wheel")
     if core_manifest:
         return ManifestDiscovery("core", core_manifest)
+    if release_tag is not None and _release_version(release_tag) >= TRANSITION_RELEASE_VERSION:
+        raise ReleaseAssetError("transition-and-later release is missing its Memory manifest")
     raise LegacyManifestAbsent("legacy release predates the Memory Runtime manifest")
 
 
@@ -312,8 +334,21 @@ def _assert_transition_packages(
         raise ReleaseAssetError("core and Memory distribution versions differ")
     if _exact_memory_pin(core_wheel.metadata) != version:
         raise ReleaseAssetError("transition core must hard-depend on the exact Memory version")
-    if len(_requirements_for(memory_wheel.metadata, "avibe-os")) != 1:
+    reverse_requirements = _requirements_for(memory_wheel.metadata, "avibe-os")
+    if len(reverse_requirements) != 1:
         raise ReleaseAssetError("Memory metadata must contain exactly one avibe-os dependency")
+    try:
+        reverse_requirement = Requirement(reverse_requirements[0])
+        core_version = Version(version)
+    except (InvalidRequirement, InvalidVersion) as exc:
+        raise ReleaseAssetError("Memory avibe-os dependency metadata is invalid") from exc
+    if (
+        reverse_requirement.url is not None
+        or reverse_requirement.marker is not None
+        or not reverse_requirement.specifier
+        or core_version not in reverse_requirement.specifier
+    ):
+        raise ReleaseAssetError("Memory avibe-os dependency must accept the exact core version")
     if core_wheel.metadata.requires_python != memory_wheel.metadata.requires_python:
         raise ReleaseAssetError("core and Memory Requires-Python metadata differ")
 
@@ -389,10 +424,13 @@ def verify_transition_distributions(
     asset_dir: Path,
     rebuild_root: Path,
     *,
+    release_tag: str,
     builder: SdistBuilder = rebuild_sdist_wheel,
 ) -> str:
     core_wheel, memory_wheel, core_sdist, memory_sdist = _transition_artifacts(asset_dir)
     version = _assert_transition_packages(core_wheel, memory_wheel, core_sdist, memory_sdist)
+    if Version(version) != _release_version(release_tag):
+        raise ReleaseAssetError("distribution version does not match the release tag")
     rebuilt_core = _wheel_archive(builder(core_sdist.path, rebuild_root / "core"))
     rebuilt_memory = _wheel_archive(builder(memory_sdist.path, rebuild_root / "memory"))
     rebuilt_version = _assert_transition_packages(
@@ -638,7 +676,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "verify":
             spec = verify_release_assets(args.manifest, args.asset_dir)
         elif args.command == "discover-manifest":
-            discovery = discover_release_manifest(args.asset_dir)
+            discovery = discover_release_manifest(args.asset_dir, release_tag=args.release_tag)
             args.output_manifest.parent.mkdir(parents=True, exist_ok=True)
             args.output_manifest.write_bytes(discovery.manifest_bytes)
             spec = load_release_spec(args.output_manifest)
@@ -649,11 +687,15 @@ def main(argv: list[str] | None = None) -> int:
             spec = load_release_spec(args.manifest)
             if args.work_dir is None:
                 with tempfile.TemporaryDirectory(prefix="memory-distribution-rebuild-") as temporary:
-                    version = verify_transition_distributions(args.asset_dir, Path(temporary))
+                    version = verify_transition_distributions(
+                        args.asset_dir, Path(temporary), release_tag=spec.release_tag
+                    )
             else:
                 args.work_dir.mkdir(parents=True, exist_ok=True)
-                version = verify_transition_distributions(args.asset_dir, args.work_dir)
-            discovery = discover_release_manifest(args.asset_dir)
+                version = verify_transition_distributions(
+                    args.asset_dir, args.work_dir, release_tag=spec.release_tag
+                )
+            discovery = discover_release_manifest(args.asset_dir, release_tag=spec.release_tag)
             if discovery.owner != "memory" or discovery.manifest_bytes != spec.manifest_bytes:
                 raise ReleaseAssetError("transition package manifest does not match the selected manifest")
             result["package_version"] = version
