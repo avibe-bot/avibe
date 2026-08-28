@@ -222,7 +222,14 @@ At `resolved`, the owner holds one immutable execution bundle containing:
 - uninstall and provider-verification commands;
 - captured launcher, stop/start commands and environments, health targets, and
   bounded timeouts; and
+- a transaction-owned immutable recovery bootstrap containing the decoder,
+  runner, validated DTO schema, and every rollback execution dependency; and
 - all data needed to project a terminal or quarantined result.
+
+The owner stages and hash-verifies that bootstrap before it writes `resolved`.
+The transaction record names its immutable locator, schema version, and content
+hash. The bootstrap is part of transaction staging, not an installed package or
+a second lifecycle owner. Its complete recovery contract is Invariant 3 I3.
 
 Immediately before the first package-mutating child command, the owner performs
 a write-ahead transition to `state=mutating` in the same transaction record and
@@ -231,34 +238,22 @@ the Windows equivalent). No package command may start before that marker is
 durable. The marker is the recovery boundary: `admitted`, `captured`, and
 `resolved` prove that no package mutation was started.
 
-The supervisor imports every internal helper and standard-library module the
-bundle can call before `mutating`. From `mutating` onward it executes only
-bundle-held commands/data and already imported standard-library code. A
-fail-loud guard rejects any later Python import or package/resource read from the
-environment being replaced. Rollback uses the same bundle. Activation and
-health are observed only through external child processes and bounded HTTP
-probes.
+Before `mutating`, the supervisor may use the live implementation only to
+capture, resolve, build, and validate the staged bundle and bootstrap. From
+`mutating` onward the original supervisor and every elected recovery owner use
+only the record-referenced bootstrap, bundle-held commands/data, and the
+bootstrap's dependencies. A fail-loud guard rejects any Python import or
+package/resource read from the environment being replaced. Rollback uses the
+same bundle. Activation and health are observed only through contained external
+child processes and bounded HTTP probes.
 
-Every external command has immutable `execution_timeout_seconds`, enforced by a
-captured child-side deadline runner. The detached package supervisor keeps its
-primary reservation descriptor or handle from `admitted` through terminal or
-durably recorded `quarantined`; starting or completing a runner never releases
-that primary hold. Every external command tree launched during that protected
-interval follows one containment invariant, whether it belongs to forward
-mutation, activation, verification, rollback, rollback verification, or a
-future stage. On POSIX each runner owns its process group and inherits only a
-duplicate of the supervisor's open-file-description lock. If the supervisor
-dies, that duplicate extends exclusion only until the already-running bounded
-command tree exits; there is no entrypoint-to-supervisor lock handoff. On
-Windows the supervisor assigns every runner and its descendants to a
-supervisor-owned Job Object with kill-on-owner-close before they can execute;
-the runner never inherits byte-range lock ownership. The supervisor's death
-therefore terminates every protected command tree, and reservation release on
-either platform implies that zero protected external work remains. A parent
-that merely waits for any uncontained child is not compliant. The runner remains
-only a bundle executor: it cannot own lifecycle state, renew a deadline, start
-recovery, or write the record. No external bootstrap, second reservation, or
-reaper is introduced. G3-2 owns the supervisor hold and process containment.
+Every external command has immutable `execution_timeout_seconds`, enforced by
+the staged runner. Command containment and reservation lifetime obey Invariant 3
+I1 for both package transactions and ordinary restarts. The runner is only a
+bundle executor: it cannot own lifecycle state, renew a deadline, start
+recovery, or write the record. No second reservation, external reaper, or
+independent coordination process is introduced. G3-2 owns bootstrap staging,
+the package-supervisor hold, and process containment.
 
 Failure semantics are closed:
 
@@ -266,7 +261,9 @@ Failure semantics are closed:
   mutation; after durable `admitted` but before `mutating`, an ordinary forward
   lineage records terminal `failed` with a machine reason, leaves the
   installation untouched, appends the terminal audit entry, releases the
-  reservation, and never enters quarantine;
+  reservation, and never enters quarantine, except that a record which already
+  claims `resolved` but names an invalid I3 bootstrap is internally inconsistent
+  and enters fail-closed quarantine;
 - every pre-mutation loss in a repair lineage returns the current record to its
   retained quarantine state under the rule below; it never becomes terminal
   `failed` or permits a new forward intent;
@@ -284,6 +281,74 @@ provider ambiguity, cleanup verification, resolution failure, partial mutation,
 activation failure, exact rollback, and quarantine entry.
 
 ## Invariant 3: One Admission And Recovery Owner
+
+### Quantified Reservation And Recovery Invariants
+
+The following three invariants are exhaustive. They apply to every current and
+future lifecycle stage; a stage is not exempt merely because it does not invoke
+the package manager.
+
+**I1: containment covers every reservation-protected command tree.** For every
+lifecycle reservation holder in `{package transaction, ordinary restart}` and
+every external command tree it launches while holding the reservation, exactly
+one platform rule applies:
+
+- on POSIX, the bounded runner owns its process group and inherits a duplicate
+  of the detached supervisor's open-file-description lock; or
+- on Windows, the detached supervisor assigns the runner and every descendant
+  to a supervisor-owned Job Object with kill-on-owner-close before execution,
+  while the runner inherits no byte-range lock ownership.
+
+On both platforms the detached supervisor acquires the reservation itself,
+keeps its primary descriptor or handle throughout its complete lifecycle, and
+uses the one-shot receipt only to return admission. Starting or completing one
+runner never releases the primary hold. If the supervisor dies, the POSIX
+duplicate extends exclusion until the already-running bounded tree exits, while
+the Windows Job Object terminates that tree before the supervisor handle closes.
+This covers forward mutation, activation, verification, rollback,
+rollback-verification, ordinary stop/start/readiness work, and every future
+external stage. A completed handoff to the intended long-running Avibe service
+is not protected command work, but the start runner must exit and readiness must
+prove that handoff before release. Therefore, for every release of the
+reservation, zero protected external work remains. Entrypoint-to-supervisor lock
+handoff, parent-waits-only containment, an uncontained descendant, or a
+stage-specific exception violates I1.
+
+**I2: persisted transaction states form three disjoint sets.** Every persisted
+state belongs to exactly one row:
+
+| Set | Members and authority | Reservation projection |
+| --- | --- | --- |
+| Active-track nonterminal | `admitted`, `captured`, `resolved`, `mutating`, `activating`, `verifying`, `rolling_back`, `recovering`, and `repairing`; the durable record proves a package transaction exists | Held probe -> `indeterminate-held`; free probe -> `interrupted`. Neither result identifies the holder. Only `interrupted` permits same-intent election. |
+| Authoritative parked | `quarantined`; deliberate lock release leaves the record as the authoritative projection and forward-mutation block | Entirely outside the held/free liveness overlay. Project `quarantined` and its exact recovery/repair affordance without relabeling it `interrupted`. |
+| Terminal | `succeeded`, `restored`, `reconciled`, and admitted pre-mutation `failed` | No liveness overlay; return the terminal projection and retain it only through the bounded audit rule. |
+
+Unadmitted `rejected`, `busy_package_transaction`,
+`busy_pending_publication`, and generic `busy` responses are not transaction
+states. G3-1B derives `busy_package_transaction` from an active-track record,
+not from OS-lock ownership; an ordinary restart that happens to hold the lock
+does not change that projection. A parked quarantine returns its authoritative
+quarantine rejection instead. When `repair_quarantine` durably transitions the
+same record to `admitted (repair)`, that repair lineage joins the active track
+while retaining `quarantined_baseline`; every failure rule below returns it to
+the parked set when required.
+
+**I3: post-mutation recovery is independent of installed packages.** Before
+`resolved`, G3-2 creates a transaction-owned immutable recovery bootstrap that
+contains the decoder, runner, validated versioned DTO schema, rollback command
+material, and every execution dependency needed by the recorded rollback. It
+stores it in transaction staging outside every package install target, validates
+the complete staged artifact, and records its immutable locator, schema version,
+and content hash. It cannot write `resolved` until those facts are durable. From
+`mutating` onward, both the original supervisor and an elected replacement
+validate that hash and execute through the bootstrap. A replacement imports
+only bootstrap-owned code; it never imports the installed `package_shape`,
+package-lifecycle implementation, or another module/resource from the
+environment being repaired. A record-referenced bootstrap that is missing,
+corrupt, schema-invalid, or hash-mismatched produces fail-closed `quarantined`
+without executing mutation or rollback. The bootstrap owns no record,
+reservation, election, or acknowledgement; it is immutable execution staging
+under the one lifecycle owner.
 
 ### Admission Protocol
 
@@ -352,16 +417,14 @@ or acquisition-ID owner claim. Exhausting the bounded rereads returns generic
 retryable `busy`. Lock-file publication bytes may be observed for diagnostics,
 but they never authorize an owner-specific classification or correlation.
 
-G3-1B derives `busy_package_transaction` from any durable nonterminal
-transaction record. It means that a package transaction exists; it does not
-claim that the current OS reservation holder is that transaction. A held
-reservation with such a record produces the internal read-only projection
-`indeterminate-held`, never `interrupted`; it permits neither recovery election
-nor new admission. A free reservation with such a record proves `interrupted`
-and permits only same-intent recovery election, never a new forward admission.
-The caller does not submit a new intent while that record is nonterminal and
-instead follows its projection. Contention with an ordinary restart remains
-generic reservation contention. The client never invents or persists an
+G3-1B applies I2. It derives `busy_package_transaction` from a durable
+active-track record. It means that a package transaction exists; it does not
+claim that the current OS reservation holder is that transaction. Held and free
+probes project `indeterminate-held` and `interrupted` exactly as I2 defines. A
+parked record instead projects authoritative `quarantined`, including its exact
+reason and repair affordance. The caller does not submit a new forward intent
+while either record class is current. Contention with an ordinary restart
+remains generic reservation contention. The client never invents or persists an
 `intent_id` before the server returns it.
 
 Every API that accepts an `intent_id` is lookup or recovery only. An ID absent
@@ -376,10 +439,10 @@ or executes a package command.
 record starts at `schema_version: 1` and contains the current transaction
 (identity, canonical intent digest, non-authoritative diagnostic reservation
 acquisition ID, `repair_lineage`, retained `quarantined_baseline`, captured
-shape, resolved bundle identity, current transition, recovery facts,
-mutation-boundary marker, and the exact projection needed by read-only adapters)
-plus an atomically updated `terminal_audit` array containing at most ten
-structured terminal projections.
+shape, resolved bundle identity, recovery-bootstrap locator/schema/hash, current
+transition, recovery facts, mutation-boundary marker, and the exact projection
+needed by read-only adapters) plus an atomically updated `terminal_audit` array
+containing at most ten structured terminal projections.
 This is the fixed `N=10` retention window.
 Each update writes and syncs a temporary file, atomically replaces the record,
 and syncs its parent directory (or the Windows durability equivalent) before a
@@ -388,11 +451,13 @@ receipt or next admission is returned.
 The `package_shape` owner supplies the versioned JSON-safe DTOs and codecs for
 captured shape, rollback target, and execution-bundle package data. G3-1B owns
 only the outer lifecycle record and persists those encoded values without
-duplicating package-shape semantics. G3-2 validates all referenced staging
-artifacts and hashes before it privately rehydrates the encoded values through
-the `package_shape` codec. Serialized DTOs are not executable plan objects and
-do not create another record owner, persistence surface, or coordination
-channel.
+duplicating package-shape semantics. Before `resolved`, G3-2 uses that live
+owner to validate the DTOs and build the I3 bootstrap. After `resolved`, only
+the hash-verified bootstrap may decode those values or execute rollback; neither
+the original nor a replacement supervisor rehydrates them through the installed
+`package_shape` codec. Serialized DTOs and the bootstrap are not executable
+authority and do not create another record owner, persistence surface, or
+coordination channel.
 
 Nonterminal current transactions are never rotated, pruned, overwritten, or
 replaced by a new intent. When a later intent is durably admitted, only
@@ -437,39 +502,43 @@ acquisition-ID comparison or metadata correlation may produce an owner-specific
 result. No second lock, heartbeat, token, lease, or durable ownership channel is
 allowed.
 
-For a durable nonterminal transaction, a failed nonblocking probe means only
+For an I2 active-track record, a failed nonblocking probe means only
 `indeterminate-held`; it cannot establish whether package or ordinary-restart
 work holds the reservation. A successful probe, immediately released without
 publication or lifecycle writes, proves that no protected process work remains
 and projects `interrupted`. No timestamp, command deadline, PID, acquisition ID,
 or diagnostic publication may infer interruption or correlate the current
-holder to the transaction. The ambiguity is constructively bounded: every
-runner and ordinary restart is bounded, and the OS releases the reservation
-when the last protected process closes its descriptor or handle.
+holder to the transaction. The ambiguity is constructively bounded by I1:
+every protected runner and ordinary restart is bounded, and the reservation
+cannot become free while protected external work remains.
 
-The package supervisor holds the reservation from `admitted` through active
-forward, activation, verification, and rollback work. If it enters quarantine
-with no command running, it records `quarantined` durably and releases the live
-reservation; the nonterminal record, not a stale lock, continues to block
-forward admission.
+The package supervisor holds the reservation from `admitted` through every
+active-track command and transition. If it enters quarantine with no protected
+command running, it records `quarantined` durably and releases the live
+reservation. I2 then makes that parked record, not a stale lock or a liveness
+overlay, the authoritative forward-admission block.
 
 Ordinary `schedule_restart` serializes its immutable request and spawns the
 existing detached ordinary-restart supervisor with a one-shot receipt channel.
 On both POSIX and Windows that supervisor, not the entrypoint, attempts one
 nonblocking acquisition of the same reservation. After acquisition it publishes
 the diagnostic metadata described above and reads the package transaction
-record once before any stop/start work. If it finds any durable nonterminal
-transaction record, acquisition itself has proved that record `interrupted`; it
-releases the reservation and returns structured
-`blocked_interrupted_transaction` pointing to recovery, and never starts a
-partial ordinary stop/start. Contention returns generic retryable `busy` and
-never infers the current holder from publication bytes. A restart explicitly
-owned by the elected recovery transaction is exempt and uses that transaction's
-reservation.
+record once before any stop/start work. If it finds an active-track record,
+acquisition proves that record `interrupted`; it releases the reservation and
+returns structured `blocked_interrupted_transaction` pointing to recovery. If
+it finds authoritative parked `quarantined`, it releases the reservation and
+returns structured `blocked_quarantined_transaction` with that record's repair
+affordance, without relabeling it. Neither case starts a partial ordinary
+stop/start. Contention returns generic retryable `busy` and never infers the
+current holder from publication bytes. A restart explicitly owned by the
+elected recovery transaction is exempt and uses that transaction's reservation.
 
 After passing the record check, the ordinary-restart supervisor returns its
 acquisition result through the one-shot receipt and keeps its primary descriptor
 or handle continuously through restart status, stop, start, and readiness work.
+Every external command tree in that sequence receives the I1 POSIX duplicate or
+Windows Job Object containment before it starts; the ordinary supervisor cannot
+release until no protected tree remains.
 The receipt carries only the response; it is not a second lock, durable
 acknowledgement, or transfer of reservation ownership. Neither platform passes
 a reservation from the entrypoint to the detached supervisor. The supervisor
@@ -495,16 +564,29 @@ a gate-3 implementation note, not a Phase 0 product change.
 
 ### Crash Recovery And Quarantine
 
-A same-`intent_id` request is the only recovery-election request. It makes one
-nonblocking acquisition attempt on the same lock. Failure returns the current
-transaction as `indeterminate-held` without claiming that the holder owns the
+An explicit same-`intent_id` request is the only active-track recovery-election
+request. It makes one nonblocking acquisition attempt on the same lock. Failure
+returns `indeterminate-held` without claiming that the holder owns the
 transaction, and starts no recovery. Success proves `interrupted` and elects
 that contender as recovery owner; other contenders return the durable
-nonterminal projection or generic busy state. No deadline or diagnostic fact
+active-track projection or generic busy state. No deadline or diagnostic fact
 may bypass this acquisition proof. Recovery never repeats forward mutation.
 
-The elected owner reconciles installed metadata with `CapturedPackageShape` and
-the recorded `ResolvedRollbackPlan`:
+Parked `quarantined` never participates in that held/free election. Its
+authoritative projection remains visible until the original same-intent exact
+recovery or explicit `repair_quarantine` action acquires the reservation under
+the rules below. Neither action first relabels quarantine as `interrupted`.
+
+For `admitted` or `captured`, the elected owner needs no bootstrap or installed
+shape inspection: the write-ahead boundary proves that mutation never began and
+the pre-mutation lineage rules apply directly. For `resolved` or any later
+active-track state, the elected replacement first validates the record-referenced
+I3 bootstrap using its staged schema and hash. It imports and executes only that
+bootstrap, never the installed `package_shape` or lifecycle implementation.
+Missing, corrupt, or schema-invalid staging returns the record to authoritative
+`quarantined` with the exact bootstrap reason. The bootstrap then reconciles
+installed metadata with `CapturedPackageShape` and the recorded
+`ResolvedRollbackPlan`:
 
 - if the current state is `admitted`, `captured`, or `resolved`, the durable
   write-ahead marker proves no package command started; for an ordinary forward
@@ -560,22 +642,21 @@ new attempt
   -> rejected | busy_package_transaction
   -> busy_pending_publication | busy
   -> admitted -> captured -> resolved
-  -> failed (ordinary pre-mutation loss) | mutating
+  -> failed (ordinary pre-resolution loss)
+  -> quarantined (invalid resolved bootstrap) | mutating
   -> activating -> verifying -> succeeded
   -> rolling_back -> restored | quarantined
-stale nonterminal + same-intent election
+active-track + same-intent election
+  -> recovering -> restored | quarantined
+quarantined + original same-intent exact recovery
   -> recovering -> restored | quarantined
 quarantined + explicit repair
   -> admitted (repair, repair_lineage=true) -> captured -> resolved
   -> repairing -> reconciled | quarantined
 ```
 
-`succeeded`, `restored`, `reconciled`, and an admitted pre-mutation `failed` are
-terminal transaction states. `rejected`, `busy_package_transaction`,
-`busy_pending_publication`, and generic `busy` are
-unadmitted responses; every busy outcome is retryable according to its rule
-above and never terminal. `quarantined` is persistent nonterminal and
-mutation-blocking.
+The persisted states and unadmitted responses have exactly the I2 partition.
+Every busy outcome is retryable according to its rule above and never terminal.
 
 `MEMORY-INDEP-020` reserves multiprocess admission and recovery evidence across
 controller, Web, CLI, and Settings, including:
@@ -585,9 +666,10 @@ controller, Web, CLI, and Settings, including:
 - same-nonce convergence, bounded retry-neutral
   `busy_pending_publication` rereads with no owner claim, exhausted generic
   `busy`, and different-nonce contention;
-- G3-1B record-derived `busy_package_transaction` for every durable nonterminal
+- G3-1B record-derived `busy_package_transaction` for every active-track
   transaction, with held `indeterminate-held` and free `interrupted`
-  projections that never infer the reservation holder;
+  projections that never infer the reservation holder, plus authoritative
+  quarantine entirely outside that overlay;
 - a nonterminal record surviving the embedded ten-entry terminal audit and a
   released legacy record
   `restart_status.json` fixture loading read-only;
@@ -600,13 +682,23 @@ controller, Web, CLI, and Settings, including:
   `busy` while package work is active and retrying later;
 - child timeout, reservation behavior after owner death, and a
   nonblocking acquisition that succeeds once no live reservation remains,
-  including the package supervisor's continuous primary hold, POSIX runner
-  duplicate survival only through bounded exit, Windows Job Object
+  including each package and ordinary supervisor's continuous primary hold,
+  POSIX runner duplicate survival only through bounded exit, Windows Job Object
   kill-on-owner-close containment for every protected external command stage,
-  zero protected work at reservation release, and the ordinary supervisor's
-  symmetric acquire/check/receipt/full-hold sequence; and
+  and zero protected work at reservation release;
+- staged I3 bootstrap construction and hash recording before `resolved`,
+  post-mutation and replacement-owner execution without importing installed
+  package-shape/lifecycle code, and missing/corrupt bootstrap quarantine; and
 - quarantine entry, forward rejection, exact recovery, and explicit verified
   reconciliation exit.
+
+The three Codex review rounds are closed by invariant rather than by example:
+
+| Review round and comments | Root class | Quantified exclusion and required evidence |
+| --- | --- | --- |
+| Round 1: `3878813171`, `3878813178` | Supervisor hold across commands; detached cross-platform acquisition | I1 requires supervisor self-acquisition, continuous primary hold, response-only receipt, and runner-only duplicates. |
+| Round 2: `3878989468`, `3878989479` | Owner-neutral active/interrupted evidence; all-stage Windows containment | I2 permits only held `indeterminate-held` or free `interrupted` for active-track records; I1 quantifies containment over every protected stage. |
+| Round 3: `3879091837`, `3879091850`, `3879091858` | Ordinary-restart containment; quarantine/liveness separation; recovery independence from replaced code | I1 covers every ordinary-restart tree, I2 excludes parked quarantine from the liveness overlay, and I3 requires the hash-bound immutable recovery bootstrap. |
 
 ## Invariant 4: UI Recovery Is State-Derived
 
@@ -620,13 +712,14 @@ If the POST response is lost, the caller queries by nonce. Once the server-issue
 `intent_id` is known, the dependency adapter returns a live in-memory job when
 present; otherwise it reads the dedicated transaction record and terminal audit.
 It is read-only and never writes lifecycle state. A live in-memory job projects
-`active`. Otherwise G3-1B combines the durable nonterminal record with an
-owner-neutral nonblocking reservation probe: failure projects internal
-`indeterminate-held`, while success is immediately released and projects
-`interrupted`. `indeterminate-held` maps to the existing nonterminal
-`status=in_progress` without a recovery affordance, so the UI gains no new
-status or behavior; `interrupted` maps to the same status with its existing
-recovery entry. Both external admission results remain
+`active`. Without one, G3-1B first applies I2 to the record: parked quarantine
+projects its authoritative structured state without probing liveness; only an
+active-track record is combined with an owner-neutral nonblocking reservation
+probe. Probe failure projects internal `indeterminate-held`, while success is
+immediately released and projects `interrupted`. `indeterminate-held` maps to
+the existing nonterminal `status=in_progress` without a recovery affordance, so
+the UI gains no new status or behavior; `interrupted` maps to the same status
+with its existing recovery entry. The external active-track admission result is
 `busy_package_transaction` because the durable record exists, never because a
 holder was inferred. Only an explicit same-`intent_id` recovery request may
 trigger the election described in Invariant 3, so polling never becomes an
@@ -637,7 +730,7 @@ type or minting a new nonce. Exhaustion returns generic retryable `busy`.
 
 Projection rules are:
 
-- active, indeterminate-held, interrupted, or recovering state returns nonterminal
+- active-track, indeterminate-held, or interrupted state returns nonterminal
   `status=in_progress` with the
   same dependency, nonce, and server identity;
 - quarantine returns structured `status=quarantined`, the owner reason, and the
@@ -683,7 +776,7 @@ state-derived recovery, quarantine projection, and terminal convergence.
 | --- | --- | --- | --- |
 | `MEMORY-INDEP-018` | UI recovery follows nonce, server identity, owner-neutral liveness, and final readiness | POST-loss retry boundary; nonce/ID projection truth table; transport, active/indeterminate-held/interrupted, quarantined, and terminal deadline results; no deadline-based interruption | Real wheels: Settings repair, response loss, all-process restart, over-deadline recovery, quarantine projection, convergence |
 | `MEMORY-INDEP-019` | Capture is exact and every constructed rollback is staged and executable | Provider-cardinality property; private plan construction; cleanup verification; capture/resolution failure to terminal `failed`; resolution and rollback failure injection | Wheelhouse matrix for core-only and optional split shapes, duplicate providers, partial mutation, activation failure, exact restore, quarantine |
-| `MEMORY-INDEP-020` | One server owner and reservation cover admission through recovery and ordinary restart exclusion | G3-1A liveness-only reservation with diagnostic publication, bounded owner-neutral `busy_pending_publication`, generic contention, and non-overlapping Windows lock/publication bytes; G3-1B multiprocess nonce/identity contention, versioned JSON-safe package-shape DTO storage, active/indeterminate-held/interrupted projection, record-derived `busy_package_transaction`, ordinary pre-mutation crash to terminal `failed`, repair-lineage loss back to quarantine, server rejection, legacy fixture, and nonterminal retention; G3-2 package-supervisor acquisition and continuous primary hold, post-staging private shape rehydration, frozen execution, child timeout, all-stage POSIX runner duplicate survival and Windows Job Object kill-on-owner-close, zero protected work at reservation release, no-live-reservation acquisition, and quarantine enter/exit; G3-3 platform-symmetric ordinary-restart supervisor acquisition, record check, one-shot receipt, and full hold | Concurrent controller/Web/CLI/Settings requests, restart contention, killed-owner recovery, exact package and service health |
+| `MEMORY-INDEP-020` | One server owner and reservation cover admission through recovery and ordinary restart exclusion | G3-1A liveness-only reservation with diagnostic publication, bounded owner-neutral `busy_pending_publication`, generic contention, and non-overlapping Windows lock/publication bytes; G3-1B multiprocess nonce/identity contention, versioned JSON-safe package-shape DTO storage, I2 active-track/parked/terminal partition, record-derived `busy_package_transaction`, ordinary pre-mutation crash to terminal `failed`, repair-lineage loss back to quarantine, server rejection, legacy fixture, and nonterminal retention; G3-2 package-supervisor acquisition and continuous primary hold, I3 immutable recovery bootstrap, frozen execution, child timeout, I1 all-stage POSIX runner duplicate survival and Windows Job Object kill-on-owner-close, zero protected work at reservation release, no-live-reservation acquisition, and quarantine enter/exit; G3-3 platform-symmetric ordinary-restart supervisor acquisition, record check, one-shot receipt, full hold, and I1 command-tree containment | Concurrent controller/Web/CLI/Settings requests, restart contention, killed-owner recovery without installed package code, exact package and service health |
 | `MEMORY-INDEP-020` (gate 3 implementation evidence) | Pending ordinary restart follow-up remains retryable when package reservation is busy | Verify `pending_restart.json` is requeued or handed off after structured `busy`; no marker loss and no package-record write | Ordinary config restart completes after package reservation release |
 | `MEMORY-INDEP-020` (gate 4 implementation evidence) | QR callers preserve activation when shared restart admission is busy | Verify shared-entrypoint `busy` is surfaced as retryable/presented activation state; no QR-local lock or pending protocol | WeChat QR login during package reservation, followed by eventual restart and active bot |
 | `MEMORY-INDEP-021` | Not-required status imports no optional implementation | Subprocess import guard for disabled, safe-degraded optional config, and whole-config failure; non-constructing loader probe | Packaged core-only and malformed-config smoke with blocked optional imports |
@@ -706,7 +799,7 @@ Retained behavior is reconciled, not cherry-picked:
 | #1739 loader-owned non-constructing runtime probe | Preserve one runtime-contract owner and add the not-required import fence |
 | #1739 fail-closed rollback metadata handling | Preserve fail-closed capture and structured caller projection behind the transaction owner |
 | #1739 Settings packaged repair and state-derived missing-job recovery | Re-derive under nonce/server identity and owner-state polling |
-| #1741 pre-mutation frozen bundle and child timeout | Preserve as the transaction execution boundary |
+| #1741 pre-mutation frozen bundle and child timeout | Preserve inside the hash-bound I3 recovery bootstrap and I1 containment boundary |
 | #1741 caller-issued identity | Replace with caller nonce and server-issued persisted identity |
 | #1741 one-shot ordinary restart probe | Replace with detached-supervisor acquire, record check, response-only receipt, and full hold through ordinary restart process work |
 | #1741 terminal unrecoverable failure | Replace with persistent nonterminal quarantine |
@@ -726,17 +819,18 @@ Retained behavior is reconciled, not cherry-picked:
    `MEMORY-INDEP-020` in bounded steps: G3-1A owns the liveness-only OS
    reservation primitive, diagnostic publication, generic contention, and
    non-overlapping Windows lock-byte layout; G3-1B owns admission, the outer
-   versioned record and audit, nonce/identity, JSON-safe `package_shape` DTO
-   storage, active/indeterminate-held/interrupted projection, record-derived
-   `busy_package_transaction`, crash recovery, and quarantine; G3-2 owns the
-   package detached supervisor's acquisition and continuous primary hold,
-   staging validation and private shape rehydration, frozen execution bundle,
-   all-stage POSIX runner duplicates, child deadlines, and Windows Job Object
+   versioned record and audit, nonce/identity, opaque JSON-safe `package_shape`
+   DTO storage, the I2 active-track/parked/terminal partition, record-derived
+   `busy_package_transaction`, recovery election, and quarantine; G3-2 owns the
+   package detached supervisor's acquisition and continuous primary hold, I3
+   bootstrap construction/hash validation, frozen execution, all-stage POSIX
+   runner duplicates, child deadlines, and Windows Job Object
    kill-on-owner-close containment for every protected external command tree;
-   G3-3 owns the platform-symmetric ordinary
-   restart supervisor acquisition, lifecycle-record check, response-only
-   receipt, and full restart hold. No step may infer reservation ownership from
-   publication metadata.
+   G3-3 owns the platform-symmetric ordinary restart supervisor acquisition,
+   lifecycle-record check, response-only receipt, continuous restart hold, and
+   I1 containment for every stop/start/readiness command tree. No step may infer
+   reservation ownership from publication metadata or import installed
+   package-shape/lifecycle code for post-mutation recovery.
 5. **Gate 4, recovery adapter:** after both documents merge, implement
    nonce/identity UI convergence and packaged `MEMORY-INDEP-018`.
 
