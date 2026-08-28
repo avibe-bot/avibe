@@ -590,6 +590,9 @@ def test_wheel_translates_unreadable_controls_to_asset_failure(
         pytest.param("pkg/control\x1f", id="c0-control"),
         pytest.param("pkg/control\x7f", id="delete-control"),
         pytest.param("pkg/control\x9f", id="c1-control"),
+        pytest.param("pkg/caf\u00e9.py", id="non-ascii-letter"),
+        pytest.param("pkg/\U00010570.py", id="ucd13-vithkuqi-capital"),
+        pytest.param("pkg/\U00010597.py", id="ucd14-vithkuqi-small"),
     ],
 )
 def test_portable_wheel_path_grammar_rejects_each_declared_rule(value: str) -> None:
@@ -605,6 +608,7 @@ def test_portable_wheel_path_grammar_is_versioned_repository_policy() -> None:
     }
 
     assert grammar.schema_version == 1
+    assert grammar.ascii_components_only
     assert grammar.unicode_normalization == "NFC"
     assert grammar.max_component_utf8_bytes == 255
     assert grammar.reject_absolute_paths
@@ -645,12 +649,11 @@ def test_portable_wheel_path_allows_space_inside_ordinary_stem() -> None:
 def test_portable_wheel_path_enforces_utf8_component_byte_limit() -> None:
     assert guard._portable_wheel_path_key("a" * 255) == "a" * 255
     assert guard._portable_wheel_path_key("a" * 256) is None
-    assert guard._portable_wheel_path_key("\u00e9" * 127 + "a") is not None
-    assert guard._portable_wheel_path_key("\u00e9" * 128) is None
 
 
-def test_portable_wheel_path_requires_nfc_and_returns_one_alias_key() -> None:
-    assert guard._portable_wheel_path_key("PKG/CAF\u00c9.py") == "pkg/caf\u00e9.py"
+def test_portable_wheel_path_is_ascii_before_nfc_and_alias_key() -> None:
+    assert guard._portable_wheel_path_key("PKG/CAFE.py") == "pkg/cafe.py"
+    assert guard._portable_wheel_path_key("pkg/caf\u00e9.py") is None
     assert guard._portable_wheel_path_key("pkg/cafe\u0301.py") is None
     assert guard._portable_wheel_path_key("pkg/data/") == "pkg/data"
 

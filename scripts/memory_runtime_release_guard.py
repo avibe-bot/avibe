@@ -67,7 +67,14 @@ class _WheelControlPolicy:
 
 @dataclass(frozen=True)
 class _PortableWheelPathGrammar:
+    """Release-family policy for repository-built avibe-os/avibe-memory wheels.
+
+    Schema v1 is ASCII-only, so its retained NFC rule is vacuously satisfied.
+    Non-ASCII paths require schema v2 plus an explicit versioned Unicode source.
+    """
+
     schema_version: int
+    ascii_components_only: bool
     unicode_normalization: str
     max_component_utf8_bytes: int
     reject_absolute_paths: bool
@@ -91,6 +98,7 @@ _WHEEL_CONTROL_POLICY = _WheelControlPolicy(
 )
 _PORTABLE_WHEEL_PATH_GRAMMAR = _PortableWheelPathGrammar(
     schema_version=1,
+    ascii_components_only=True,
     unicode_normalization="NFC",
     max_component_utf8_bytes=255,
     reject_absolute_paths=True,
@@ -364,6 +372,11 @@ def _portable_wheel_path_key(value: str) -> str | None:
     grammar = _PORTABLE_WHEEL_PATH_GRAMMAR
     if type(value) is not str:
         return None
+    components = value.rstrip("/").split("/")
+    if grammar.ascii_components_only and any(
+        not component.isascii() for component in components
+    ):
+        return None
     normalized = unicodedata.normalize(grammar.unicode_normalization, value)
     if normalized != value:
         return None
@@ -371,7 +384,6 @@ def _portable_wheel_path_key(value: str) -> str | None:
         return None
     path = PurePosixPath(value)
     canonical = str(path) + ("/" if value.endswith("/") else "")
-    components = normalized.rstrip("/").split("/")
     keys = tuple(component.casefold() for component in components)
     try:
         oversized = any(
