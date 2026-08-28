@@ -10,8 +10,12 @@ repository-owned declaration.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
+import csv
 from email.parser import Parser
 import hashlib
+import io
 import json
 import re
 import shutil
@@ -22,7 +26,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, fields
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import zipfile
 
 try:
@@ -46,6 +50,9 @@ PACKAGE_POLICY_SCHEMA_VERSION = 1
 PACKAGE_POLICY_REQUIRES_PYTHON = ">=3.10"
 PACKAGE_POLICY_SUPPORTED_PYTHON_VERSIONS = ("3.10", "3.11", "3.12")
 SUPPORTED_NAMESPACE_POLICY_VERSIONS = frozenset({1})
+MAX_WHEEL_MEMBER_BYTES = 16 * 1024 * 1024
+WHEEL_DATA_SCHEMES = frozenset({"data", "headers", "platlib", "purelib", "scripts"})
+WHEEL_RECORD_HASH_ALGORITHMS = frozenset({"sha256", "sha384", "sha512"})
 
 
 @dataclass(frozen=True)
@@ -319,6 +326,96 @@ def _compare_wheel_control_policy(wheel: Path, observed: dict[str, object]) -> N
         )
 
 
+def _is_safe_wheel_path(value: str) -> bool:
+    path = PurePosixPath(value)
+    canonical = str(path) + ("/" if value.endswith("/") else "")
+    return (
+        bool(path.parts)
+        and "\x00" not in value
+        and "\\" not in value
+        and not path.is_absolute()
+        and not PureWindowsPath(value).drive
+        and ".." not in path.parts
+        and value == canonical
+    )
+
+
+def _read_wheel_member(
+    archive: zipfile.ZipFile, member: zipfile.ZipInfo, wheel: Path
+) -> bytes:
+    if member.file_size < 0 or member.file_size > MAX_WHEEL_MEMBER_BYTES:
+        raise ReleaseAssetError(f"wheel member size is invalid: {wheel.name}")
+    try:
+        with archive.open(member) as stream:
+            content = stream.read(MAX_WHEEL_MEMBER_BYTES + 1)
+    except Exception as exc:
+        raise ReleaseAssetError(f"cannot read wheel member: {wheel.name}") from exc
+    if len(content) > MAX_WHEEL_MEMBER_BYTES or len(content) != member.file_size:
+        raise ReleaseAssetError(f"wheel member size is invalid: {wheel.name}")
+    return content
+
+
+def _valid_record_hash(value: str) -> bool:
+    algorithm, separator, encoded = value.partition("=")
+    if separator != "=" or algorithm not in WHEEL_RECORD_HASH_ALGORITHMS or not encoded or "=" in encoded:
+        return False
+    try:
+        decoded = base64.b64decode(
+            encoded + "=" * (-len(encoded) % 4), altchars=b"-_", validate=True
+        )
+    except (ValueError, binascii.Error):
+        return False
+    return len(decoded) == hashlib.new(algorithm).digest_size
+
+
+def _validate_wheel_archive(
+    archive: zipfile.ZipFile, wheel: Path, dist_info: str
+) -> dict[str, bytes]:
+    infos = archive.infolist()
+    names = [info.filename for info in infos]
+    aliases = [name.rstrip("/").casefold() for name in names]
+    unsafe_data = any(
+        name.split("/", 2)[1] not in WHEEL_DATA_SCHEMES
+        for name in names
+        if name.split("/", 1)[0].endswith(".data") and "/" in name
+    )
+    if any(not _is_safe_wheel_path(name) for name in names) or len(aliases) != len(set(aliases)) or unsafe_data:
+        raise ReleaseAssetError(f"wheel archive structure is invalid: {wheel.name}")
+    members = {
+        info.filename: _read_wheel_member(archive, info, wheel)
+        for info in infos
+        if not info.is_dir()
+    }
+    record = f"{dist_info}/RECORD"
+    if names.count(record) != 1:
+        raise ReleaseAssetError(f"wheel RECORD structure is invalid: {wheel.name}")
+    try:
+        rows = list(csv.reader(io.StringIO(members[record].decode("utf-8")), strict=True))
+    except Exception as exc:
+        raise ReleaseAssetError(f"wheel RECORD structure is invalid: {wheel.name}") from exc
+    generated = {record, f"{record}.jws", f"{record}.p7s"}
+    recorded: set[str] = set()
+    recorded_aliases: set[str] = set()
+    for row in rows:
+        if len(row) != 3 or not _is_safe_wheel_path(row[0]):
+            raise ReleaseAssetError(f"wheel RECORD structure is invalid: {wheel.name}")
+        path, digest, size = row
+        alias = path.casefold()
+        if path in recorded or alias in recorded_aliases:
+            raise ReleaseAssetError(f"wheel RECORD structure is invalid: {wheel.name}")
+        if path in generated:
+            valid_fields = not digest and not size
+        else:
+            valid_fields = _valid_record_hash(digest) and re.fullmatch(r"[0-9]+", size) is not None
+        if not valid_fields:
+            raise ReleaseAssetError(f"wheel RECORD structure is invalid: {wheel.name}")
+        recorded.add(path)
+        recorded_aliases.add(alias)
+    if recorded - generated != set(members) - generated:
+        raise ReleaseAssetError(f"wheel RECORD entries differ from archive: {wheel.name}")
+    return members
+
+
 def inspect_wheel(wheel: Path, *, policy: PackageReleasePolicy) -> PackageMetadata:
     """Validate wheel control metadata without inferring installed behavior."""
     if (
@@ -355,8 +452,9 @@ def inspect_wheel(wheel: Path, *, policy: PackageReleasePolicy) -> PackageMetada
                 for name, _ in _WHEEL_CONTROL_POLICY.controls
             )
             _compare_wheel_control_policy(wheel, {"controls": control_counts})
+            members = _validate_wheel_archive(archive, wheel, dist_info)
             metadata_bytes, wheel_bytes = (
-                archive.read(f"{dist_info}/{name}")
+                members[f"{dist_info}/{name}"]
                 for name, _ in _WHEEL_CONTROL_POLICY.controls
             )
     except ReleaseAssetError:
