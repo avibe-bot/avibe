@@ -4,13 +4,11 @@
 from __future__ import annotations
 
 import argparse
-from email.message import Message
 from email.parser import Parser
 import hashlib
 import json
 import os
 from pathlib import PurePosixPath
-import re
 import shutil
 import subprocess
 import sys
@@ -25,12 +23,15 @@ from pathlib import Path
 from typing import Callable
 
 from packaging.requirements import InvalidRequirement, Requirement
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.utils import (
+    InvalidSdistFilename,
+    InvalidWheelFilename,
+    canonicalize_name,
+    parse_sdist_filename,
+    parse_wheel_filename,
+)
 from packaging.version import InvalidVersion, Version
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python 3.10 project support.
-    import tomli as tomllib
 
 try:
     from scripts.release_package_version import package_version_from_release_tag
@@ -39,9 +40,6 @@ except ModuleNotFoundError:  # Direct execution adds scripts/, not the repositor
 
 RELEASE_DOWNLOAD_ROOT = "https://github.com/avibe-bot/avibe/releases/download"
 LAST_LEGACY_RELEASE_VERSION = Version("3.0.14rc2")
-PROJECT_REQUIRES_PYTHON = tomllib.loads(
-    (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
-)["project"]["requires-python"]
 EXPECTED_EVEROS_VERSION = "1.2.3"
 EXPECTED_PYTHON_VERSION = "3.12.12"
 EXPECTED_LOCK_SHA256 = "e6acc17e4c0969563d380326e90134965af0822259bb4a9adb4d54433e9737fe"
@@ -55,9 +53,7 @@ POLICY_EXCLUSION_EXIT = 2
 INTERNAL_GUARD_FAILURE_EXIT = 3
 LEGACY_MANIFEST_ABSENT_EXIT = 4
 MEMORY_MANIFEST_PATH = "vibe/memory_runtime_manifest.json"
-REQUIRED_MEMORY_IMPLEMENTATION = frozenset(
-    {"avibe_memory/__init__.py", "avibe_memory/runtime.py"}
-)
+REQUIRED_MEMORY_IMPLEMENTATION = frozenset({"avibe_memory/__init__.py", "avibe_memory/runtime.py"})
 
 
 class ReleaseGuardError(RuntimeError):
@@ -143,12 +139,52 @@ class PackageArchive:
 
 
 @dataclass(frozen=True)
+class PackageReleasePolicy:
+    requires_python: str
+    supported_python_versions: tuple[str, ...]
+    namespace_policy_version: int
+
+
+@dataclass(frozen=True)
 class ManifestDiscovery:
     owner: str
     manifest_bytes: bytes
 
 
 SdistBuilder = Callable[[Path, Path], Path]
+
+NAMESPACE_POLICIES = {
+    1: {
+        "avibe-os": frozenset({"config", "core", "modules", "storage", "vibe"}),
+        "avibe-memory": frozenset({"avibe_memory"}),
+    }
+}
+PIP_FLAGS = (
+    "install",
+    "--dry-run",
+    "--ignore-installed",
+    "--disable-pip-version-check",
+    "--no-input",
+    "--no-index",
+    "--only-binary=:all:",
+)
+
+
+def _run_pip(arguments: list[str], failure: str) -> None:
+    pip = shutil.which("pip") or shutil.which("pip3")
+    if pip is None:
+        raise ReleaseAssetError("offline pip tooling is unavailable")
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("PIP_")}
+    environment.update(PIP_CONFIG_FILE=os.devnull, PIP_NO_CACHE_DIR="1", PYTHONPATH="")
+    result = subprocess.run(
+        [pip, *arguments],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode:
+        raise ReleaseAssetError(f"{failure}: {result.stdout}{result.stderr}")
 
 
 def _sha256(path: Path) -> str:
@@ -166,13 +202,27 @@ def _required_string(payload: dict, key: str, context: str) -> str:
     return value
 
 
-def _canonical_name(value: str) -> str:
-    return re.sub(r"[-_.]+", "-", value).lower()
+def _filename_identity(path: Path) -> tuple[str, Version]:
+    try:
+        parsed = parse_wheel_filename(path.name)[:2] if path.name.endswith(".whl") else parse_sdist_filename(path.name)
+    except (InvalidWheelFilename, InvalidSdistFilename) as exc:
+        raise ReleaseAssetError(f"invalid distribution filename: {path.name}") from exc
+    return str(parsed[0]), parsed[1]
+
+
+def _assert_filename_identity(path: Path, metadata: PackageMetadata) -> None:
+    filename_name, filename_version = _filename_identity(path)
+    try:
+        metadata_version = Version(metadata.version)
+    except InvalidVersion as exc:
+        raise ReleaseAssetError(f"invalid distribution metadata Version: {path.name}") from exc
+    if filename_name != metadata.name or filename_version != metadata_version:
+        raise ReleaseAssetError(f"distribution filename identity differs from metadata: {path.name}")
 
 
 def _metadata(message_bytes: bytes, context: str) -> PackageMetadata:
     try:
-        message: Message = Parser().parsestr(message_bytes.decode("utf-8"))
+        message = Parser().parsestr(message_bytes.decode("utf-8"))
     except UnicodeDecodeError as exc:
         raise ReleaseAssetError(f"{context} metadata is not UTF-8") from exc
     required: dict[str, str] = {}
@@ -182,37 +232,40 @@ def _metadata(message_bytes: bytes, context: str) -> PackageMetadata:
             raise ReleaseAssetError(f"{context} metadata must contain exactly one {key}")
         required[key] = values[0]
     return PackageMetadata(
-        name=_canonical_name(required["Name"]),
+        name=str(canonicalize_name(required["Name"])),
         version=required["Version"],
         requires_python=required["Requires-Python"],
         requires_dist=tuple(sorted(message.get_all("Requires-Dist") or [])),
     )
 
 
+def _validate_wheel_structure(path: Path) -> None:
+    _run_pip(
+        [*PIP_FLAGS, "--no-deps", "--ignore-requires-python", str(path.resolve())],
+        f"wheel structure validation failed for {path.name}",
+    )
+
+
 def _wheel_archive(path: Path) -> PackageArchive:
+    _validate_wheel_structure(path)
     try:
         with zipfile.ZipFile(path) as archive:
             names = archive.namelist()
             if len(names) != len(set(names)):
                 raise ReleaseAssetError(f"wheel contains duplicate paths: {path.name}")
             if any(
-                "\\" in name
-                or PurePosixPath(name).is_absolute()
-                or ".." in PurePosixPath(name).parts
-                for name in names
+                "\\" in name or PurePosixPath(name).is_absolute() or ".." in PurePosixPath(name).parts for name in names
             ):
                 raise ReleaseAssetError(f"wheel contains an unsafe path: {path.name}")
-            files = {
-                name: archive.read(name)
-                for name in names
-                if not name.endswith("/")
-            }
+            files = {name: archive.read(name) for name in names if not name.endswith("/")}
     except (OSError, zipfile.BadZipFile) as exc:
         raise ReleaseAssetError(f"cannot read wheel {path.name}: {exc}") from exc
     metadata_paths = [name for name in files if name.endswith(".dist-info/METADATA")]
     if len(metadata_paths) != 1:
         raise ReleaseAssetError(f"wheel must contain exactly one METADATA file: {path.name}")
-    return PackageArchive(path, _metadata(files[metadata_paths[0]], path.name), files)
+    package = PackageArchive(path, _metadata(files[metadata_paths[0]], path.name), files)
+    _assert_filename_identity(path, package.metadata)
+    return package
 
 
 def _sdist_archive(path: Path) -> PackageArchive:
@@ -236,13 +289,13 @@ def _sdist_archive(path: Path) -> PackageArchive:
                 if not relative or relative in files:
                     raise ReleaseAssetError(f"sdist contains duplicate or root-level content: {path.name}")
                 files[relative] = stream.read()
-    except ReleaseAssetError:
-        raise
     except (OSError, tarfile.TarError) as exc:
         raise ReleaseAssetError(f"cannot read sdist {path.name}: {exc}") from exc
     if len(roots) != 1 or "PKG-INFO" not in files:
         raise ReleaseAssetError(f"sdist must have one root and one PKG-INFO: {path.name}")
-    return PackageArchive(path, _metadata(files["PKG-INFO"], path.name), files)
+    package = PackageArchive(path, _metadata(files["PKG-INFO"], path.name), files)
+    _assert_filename_identity(path, package.metadata)
+    return package
 
 
 def _installed_files(package: PackageArchive) -> dict[str, bytes]:
@@ -259,31 +312,36 @@ def _installed_files(package: PackageArchive) -> dict[str, bytes]:
     return installed
 
 
-def _requirements_for(metadata: PackageMetadata, name: str) -> tuple[str, ...]:
-    expected = _canonical_name(name)
-    matches = []
-    for requirement in metadata.requires_dist:
-        match = re.match(r"\s*([A-Za-z0-9_.-]+)", requirement)
-        if match and _canonical_name(match.group(1)) == expected:
-            matches.append(requirement)
-    return tuple(matches)
+def _requirements_for(metadata: PackageMetadata, name: str) -> tuple[Requirement, ...]:
+    expected = canonicalize_name(name)
+    try:
+        requirements = tuple(Requirement(raw) for raw in metadata.requires_dist)
+    except InvalidRequirement as exc:
+        raise ReleaseAssetError(f"{metadata.name} has invalid Requires-Dist metadata") from exc
+    return tuple(item for item in requirements if canonicalize_name(item.name) == expected)
 
 
 def _exact_memory_pin(metadata: PackageMetadata) -> str | None:
     requirements = _requirements_for(metadata, "avibe-memory")
     if len(requirements) != 1:
         return None
-    match = re.fullmatch(r"\s*avibe[-_.]memory\s*==\s*([^\s;]+)\s*", requirements[0], re.IGNORECASE)
-    return match.group(1) if match else None
+    requirement = requirements[0]
+    specifiers = tuple(requirement.specifier)
+    if (
+        requirement.extras
+        or requirement.url is not None
+        or requirement.marker is not None
+        or len(specifiers) != 1
+        or specifiers[0].operator != "=="
+    ):
+        return None
+    return str(Version(specifiers[0].version))
 
 
 def _package_files(asset_dir: Path, distribution: str, suffix: str) -> list[Path]:
-    prefix = distribution.replace("-", "_") + "-"
-    matches = [
-        path
-        for path in asset_dir.iterdir()
-        if path.name.startswith(prefix) and path.name.endswith(suffix)
-    ]
+    expected = canonicalize_name(distribution)
+    candidates = [path for path in asset_dir.iterdir() if path.name.endswith(suffix)]
+    matches = [path for path in candidates if _filename_identity(path)[0] == expected]
     if any(path.is_symlink() or not path.is_file() for path in matches):
         raise ReleaseAssetError(f"{distribution} release artifacts contain an unsafe entry")
     return sorted(matches)
@@ -294,6 +352,46 @@ def _release_version(release_tag: str) -> Version:
         return Version(package_version_from_release_tag(release_tag))
     except (ValueError, InvalidVersion) as exc:
         raise ReleaseAssetError(f"invalid release tag: {release_tag!r}") from exc
+
+
+def _package_release_policy(payload: dict, release_tag: str) -> PackageReleasePolicy | None:
+    raw = payload.get("package_policy")
+    if raw is None:
+        return None
+    keys = {
+        "schema_version",
+        "release_tag",
+        "release_family",
+        "requires_python",
+        "supported_python_versions",
+        "namespace_policy_version",
+    }
+    if not isinstance(raw, dict) or set(raw) != keys or raw.get("schema_version") != 1:
+        raise ManifestPolicyError("manifest package_policy schema is invalid")
+    release_version = _release_version(release_tag)
+    release_family = f"{release_version.major}.{release_version.minor}"
+    requires_python = raw.get("requires_python")
+    versions = raw.get("supported_python_versions")
+    namespace_policy_version = raw.get("namespace_policy_version")
+    if (
+        raw.get("release_tag") != release_tag
+        or raw.get("release_family") != release_family
+        or not isinstance(requires_python, str)
+        or not isinstance(versions, list)
+        or not versions
+        or any(not isinstance(version, str) for version in versions)
+        or len(versions) != len(set(versions))
+        or namespace_policy_version not in NAMESPACE_POLICIES
+    ):
+        raise ManifestPolicyError("manifest package_policy identity is invalid")
+    try:
+        specifier = SpecifierSet(requires_python)
+        parsed_versions = tuple(Version(version) for version in versions)
+    except (InvalidSpecifier, InvalidVersion) as exc:
+        raise ManifestPolicyError("manifest package_policy Python contract is invalid") from exc
+    if any(version not in specifier for version in parsed_versions):
+        raise ManifestPolicyError("manifest package_policy excludes a supported Python version")
+    return PackageReleasePolicy(requires_python, tuple(versions), namespace_policy_version)
 
 
 def discover_release_manifest(
@@ -308,13 +406,9 @@ def discover_release_manifest(
     if len(core_paths) != 1 or len(memory_paths) > 1:
         raise ReleaseAssetError("release must contain one core wheel and at most one Memory wheel")
     core = _wheel_archive(core_paths[0])
-    if core.metadata.name != "avibe-os":
-        raise ReleaseAssetError("core wheel metadata Name must be avibe-os")
     core_manifest = _installed_files(core).get(MEMORY_MANIFEST_PATH)
     memory = _wheel_archive(memory_paths[0]) if memory_paths else None
     memory_manifest = _installed_files(memory).get(MEMORY_MANIFEST_PATH) if memory else None
-    if memory and memory.metadata.name != "avibe-memory":
-        raise ReleaseAssetError("Memory wheel metadata Name must be avibe-memory")
     if core_manifest and memory_manifest:
         raise ReleaseAssetError("Memory Runtime manifest ownership is ambiguous")
     if memory_manifest:
@@ -333,9 +427,7 @@ def discover_release_manifest(
 
 
 def _assert_metadata_parity(wheel: PackageArchive, sdist: PackageArchive, name: str) -> None:
-    if wheel.metadata.name != name or sdist.metadata.name != name:
-        raise ReleaseAssetError(f"{name} distribution metadata has the wrong Name")
-    if wheel.metadata != sdist.metadata:
+    if wheel.metadata.name != name or wheel.metadata != sdist.metadata:
         raise ReleaseAssetError(f"{name} wheel and sdist metadata differ")
 
 
@@ -343,12 +435,31 @@ def _owned_content(package: PackageArchive, prefix: str) -> dict[str, bytes]:
     return {name: value for name, value in _installed_files(package).items() if name.startswith(prefix)}
 
 
+def _assert_namespace_policy(package: PackageArchive, distribution: str, policy_version: int) -> None:
+    policies = NAMESPACE_POLICIES[policy_version]
+    allowed_top_levels = policies[distribution]
+    known_namespaces = set().union(*policies.values())
+    for name in _installed_files(package):
+        if name == MEMORY_MANIFEST_PATH:
+            if distribution == "avibe-memory":
+                continue
+            raise ReleaseAssetError(f"{distribution} artifact violates namespace policy: {name}")
+        top_level = PurePosixPath(name).parts[0]
+        if top_level.endswith((".dist-info", ".data")):
+            continue
+        if package.path.suffix == ".whl":
+            allowed = top_level in allowed_top_levels
+        else:
+            allowed = top_level not in known_namespaces or top_level in allowed_top_levels
+        if not allowed:
+            raise ReleaseAssetError(f"{distribution} artifact violates namespace policy: {name}")
+
+
 def _assert_transition_packages(
-    core_wheel: PackageArchive,
-    memory_wheel: PackageArchive,
-    core_sdist: PackageArchive,
-    memory_sdist: PackageArchive,
+    packages: tuple[PackageArchive, PackageArchive, PackageArchive, PackageArchive],
+    policy: PackageReleasePolicy,
 ) -> str:
+    core_wheel, memory_wheel, core_sdist, memory_sdist = packages
     _assert_metadata_parity(core_wheel, core_sdist, "avibe-os")
     _assert_metadata_parity(memory_wheel, memory_sdist, "avibe-memory")
     version = core_wheel.metadata.version
@@ -359,29 +470,25 @@ def _assert_transition_packages(
     reverse_requirements = _requirements_for(memory_wheel.metadata, "avibe-os")
     if len(reverse_requirements) != 1:
         raise ReleaseAssetError("Memory metadata must contain exactly one avibe-os dependency")
-    try:
-        reverse_requirement = Requirement(reverse_requirements[0])
-        core_version = Version(version)
-    except (InvalidRequirement, InvalidVersion) as exc:
-        raise ReleaseAssetError("Memory avibe-os dependency metadata is invalid") from exc
+    reverse_requirement = reverse_requirements[0]
     if (
         reverse_requirement.url is not None
         or reverse_requirement.marker is not None
         or not reverse_requirement.specifier
-        or core_version not in reverse_requirement.specifier
+        or Version(version) not in reverse_requirement.specifier
     ):
         raise ReleaseAssetError("Memory avibe-os dependency must accept the exact core version")
-    if (
-        core_wheel.metadata.requires_python != PROJECT_REQUIRES_PYTHON
-        or memory_wheel.metadata.requires_python != PROJECT_REQUIRES_PYTHON
-    ):
-        raise ReleaseAssetError(
-            f"core and Memory Requires-Python must match the project range {PROJECT_REQUIRES_PYTHON}"
-        )
+    requires_python = {core_wheel.metadata.requires_python, memory_wheel.metadata.requires_python}
+    if requires_python != {policy.requires_python}:
+        raise ReleaseAssetError(f"core and Memory Requires-Python must match release policy {policy.requires_python}")
 
-    for package in (core_wheel, core_sdist):
-        if _owned_content(package, "avibe_memory/") or MEMORY_MANIFEST_PATH in _installed_files(package):
-            raise ReleaseAssetError(f"core artifact owns Memory content: {package.path.name}")
+    for package, distribution in (
+        (core_wheel, "avibe-os"),
+        (core_sdist, "avibe-os"),
+        (memory_wheel, "avibe-memory"),
+        (memory_sdist, "avibe-memory"),
+    ):
+        _assert_namespace_policy(package, distribution, policy.namespace_policy_version)
     wheel_implementation = _owned_content(memory_wheel, "avibe_memory/")
     sdist_implementation = _owned_content(memory_sdist, "avibe_memory/")
     if not REQUIRED_MEMORY_IMPLEMENTATION.issubset(wheel_implementation):
@@ -395,23 +502,23 @@ def _assert_transition_packages(
     return version
 
 
-def _transition_artifacts(asset_dir: Path) -> tuple[PackageArchive, PackageArchive, PackageArchive, PackageArchive]:
+def _transition_artifacts(
+    asset_dir: Path,
+) -> tuple[PackageArchive, PackageArchive, PackageArchive, PackageArchive]:
     if not asset_dir.is_dir():
         raise ReleaseAssetError("release package directory is missing")
-    paths: list[Path] = []
-    for distribution in ("avibe-os", "avibe-memory"):
-        for suffix in (".whl", ".tar.gz"):
-            matches = _package_files(asset_dir, distribution, suffix)
-            if len(matches) != 1:
-                raise ReleaseAssetError(
-                    f"transition release must contain exactly one {distribution} {suffix} artifact"
-                )
-            paths.append(matches[0])
+
+    def one(distribution: str, suffix: str) -> Path:
+        matches = _package_files(asset_dir, distribution, suffix)
+        if len(matches) != 1:
+            raise ReleaseAssetError(f"release must contain one {distribution} {suffix}")
+        return matches[0]
+
     return (
-        _wheel_archive(paths[0]),
-        _wheel_archive(paths[2]),
-        _sdist_archive(paths[1]),
-        _sdist_archive(paths[3]),
+        _wheel_archive(one("avibe-os", ".whl")),
+        _wheel_archive(one("avibe-memory", ".whl")),
+        _sdist_archive(one("avibe-os", ".tar.gz")),
+        _sdist_archive(one("avibe-memory", ".tar.gz")),
     )
 
 
@@ -449,6 +556,18 @@ def rebuild_sdist_wheel(sdist: Path, output_dir: Path) -> Path:
     return wheels[0]
 
 
+def _resolve_wheelhouse(
+    wheels: tuple[Path, Path],
+    find_links: tuple[Path, ...],
+    python_versions: tuple[str, ...],
+) -> None:
+    for python_version in python_versions:
+        links = [item for directory in find_links for item in ("--find-links", str(directory.resolve()))]
+        command = [*PIP_FLAGS, "--python-version", python_version, *links]
+        command.extend(str(wheel.resolve()) for wheel in wheels)
+        _run_pip(command, f"offline pip resolution failed for Python {python_version}")
+
+
 def verify_transition_distributions(
     asset_dir: Path,
     rebuild_root: Path,
@@ -456,20 +575,36 @@ def verify_transition_distributions(
     release_tag: str,
     builder: SdistBuilder = rebuild_sdist_wheel,
 ) -> str:
-    core_wheel, memory_wheel, core_sdist, memory_sdist = _transition_artifacts(asset_dir)
-    version = _assert_transition_packages(core_wheel, memory_wheel, core_sdist, memory_sdist)
+    staged = _transition_artifacts(asset_dir)
+    core_wheel, memory_wheel, core_sdist, memory_sdist = staged
+    manifest_bytes = _installed_files(memory_wheel).get(MEMORY_MANIFEST_PATH)
+    try:
+        manifest_payload = json.loads(manifest_bytes) if manifest_bytes is not None else None
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ReleaseAssetError("Memory artifact package policy manifest is invalid") from exc
+    if not isinstance(manifest_payload, dict):
+        raise ReleaseAssetError("Memory artifact is missing its package policy manifest")
+    policy = _package_release_policy(manifest_payload, release_tag)
+    if policy is None:
+        raise ReleaseAssetError("Memory artifact manifest is missing frozen package_policy")
+    version = _assert_transition_packages(staged, policy)
     if Version(version) != _release_version(release_tag):
         raise ReleaseAssetError("distribution version does not match the release tag")
+    _resolve_wheelhouse(
+        (core_wheel.path, memory_wheel.path),
+        (asset_dir,),
+        policy.supported_python_versions,
+    )
     rebuilt_core = _wheel_archive(builder(core_sdist.path, rebuild_root / "core"))
     rebuilt_memory = _wheel_archive(builder(memory_sdist.path, rebuild_root / "memory"))
-    rebuilt_version = _assert_transition_packages(
-        rebuilt_core,
-        rebuilt_memory,
-        core_sdist,
-        memory_sdist,
-    )
+    rebuilt_version = _assert_transition_packages((rebuilt_core, rebuilt_memory, core_sdist, memory_sdist), policy)
     if rebuilt_version != version:
         raise ReleaseAssetError("rebuilt distribution version differs from staged artifacts")
+    _resolve_wheelhouse(
+        (rebuilt_core.path, rebuilt_memory.path),
+        (asset_dir, rebuilt_core.path.parent, rebuilt_memory.path.parent),
+        policy.supported_python_versions,
+    )
     return version
 
 
@@ -482,11 +617,7 @@ def load_release_spec(manifest_path: Path) -> ReleaseSpec:
     if not isinstance(payload, dict) or payload.get("schema_version") != 1:
         raise ManifestPolicyError("Memory Runtime manifest schema_version must be 1")
     everos_version = payload.get("everos_version")
-    provenance = (
-        PUBLISHED_RUNTIME_PROVENANCE.get(everos_version)
-        if isinstance(everos_version, str)
-        else None
-    )
+    provenance = PUBLISHED_RUNTIME_PROVENANCE.get(everos_version) if isinstance(everos_version, str) else None
     if payload.get("release_state") != "published" or provenance is None:
         raise ManifestPolicyError("Memory Runtime manifest must describe a published supported EverOS version")
     if (
@@ -519,6 +650,7 @@ def load_release_spec(manifest_path: Path) -> ReleaseSpec:
             raise ManifestPolicyError("Memory Runtime sync bootstrap contract is invalid")
 
     release_tag = _required_string(payload, "release_tag", "manifest")
+    _package_release_policy(payload, release_tag)
     release_root = f"{RELEASE_DOWNLOAD_ROOT}/{release_tag}"
     raw_archives = payload.get("archives")
     if not isinstance(raw_archives, dict) or set(raw_archives) != EXPECTED_PLATFORMS:
@@ -590,9 +722,7 @@ def verify_release_assets(manifest_path: Path, asset_dir: Path) -> ReleaseSpec:
                         "lib/python3.12/site-packages/avibe_memory_sync_scrubbers.py",
                     )
                     marker = bundle.extractfile(
-                        bundle.getmember(
-                            "lib/python3.12/site-packages/avibe_memory_sync_bootstrap.pth"
-                        )
+                        bundle.getmember("lib/python3.12/site-packages/avibe_memory_sync_bootstrap.pth")
                     )
                     if (
                         bootstrap_digest != spec.sync_bootstrap_sha256
@@ -600,9 +730,7 @@ def verify_release_assets(manifest_path: Path, asset_dir: Path) -> ReleaseSpec:
                         or marker is None
                         or marker.read() != b"import avibe_memory_sync_bootstrap\n"
                     ):
-                        raise ReleaseAssetError(
-                            f"Memory Runtime sync contract mismatch: {archive.name}"
-                        )
+                        raise ReleaseAssetError(f"Memory Runtime sync contract mismatch: {archive.name}")
         except (KeyError, OSError, tarfile.TarError) as exc:
             raise ReleaseAssetError(f"invalid Memory Runtime archive: {archive.name}") from exc
         if digest != archive.binary_sha256:
@@ -721,9 +849,7 @@ def main(argv: list[str] | None = None) -> int:
                     )
             else:
                 args.work_dir.mkdir(parents=True, exist_ok=True)
-                version = verify_transition_distributions(
-                    args.asset_dir, args.work_dir, release_tag=spec.release_tag
-                )
+                version = verify_transition_distributions(args.asset_dir, args.work_dir, release_tag=spec.release_tag)
             discovery = discover_release_manifest(args.asset_dir, release_tag=spec.release_tag)
             if discovery.owner != "memory" or discovery.manifest_bytes != spec.manifest_bytes:
                 raise ReleaseAssetError("transition package manifest does not match the selected manifest")
