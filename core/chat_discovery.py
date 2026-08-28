@@ -26,6 +26,10 @@ from storage.models import (
     state_meta,
 )
 from storage.settings_service import make_scope_id, upsert_scope
+from storage.settings_revision import (
+    RUNTIME_SETTINGS_SCOPE_TYPES,
+    mark_runtime_settings_changed,
+)
 from config.v2_settings import make_thread_native_id, split_thread_native_id
 
 logger = logging.getLogger(__name__)
@@ -1011,10 +1015,17 @@ def _descendant_scope_rows(conn: Connection, scope_id: str) -> list[dict[str, An
     return descendants
 
 
-def _remove_scope_row_preserving_history(conn: Connection, row: dict[str, Any]) -> dict[str, bool]:
+def _remove_scope_row_preserving_history(
+    conn: Connection, row: dict[str, Any]
+) -> tuple[dict[str, bool], bool]:
     """Delete one scope's settings, then delete or dismiss its scope row."""
     scope_id = str(row["id"])
-    conn.execute(scope_settings.delete().where(scope_settings.c.scope_id == scope_id))
+    settings_result = conn.execute(
+        scope_settings.delete().where(scope_settings.c.scope_id == scope_id)
+    )
+    runtime_settings_changed = bool(settings_result.rowcount) and str(
+        row["scope_type"]
+    ) in RUNTIME_SETTINGS_SCOPE_TYPES
     if _scope_has_history(conn, scope_id):
         now = _utc_now_iso()
         metadata = _json_loads(row["metadata_json"], {})
@@ -1024,9 +1035,9 @@ def _remove_scope_row_preserving_history(conn: Connection, row: dict[str, Any]) 
             .where(scopes.c.id == scope_id)
             .values(metadata_json=_json_dumps(metadata), updated_at=now)
         )
-        return {"removed": False, "dismissed": True}
+        return {"removed": False, "dismissed": True}, runtime_settings_changed
     result = conn.execute(scopes.delete().where(scopes.c.id == scope_id))
-    return {"removed": bool(result.rowcount), "dismissed": False}
+    return {"removed": bool(result.rowcount), "dismissed": False}, runtime_settings_changed
 
 
 def _clear_scope_debounce_entries(db_path: Path | None, rows: list[dict[str, Any]]) -> None:
@@ -1072,9 +1083,14 @@ def delete_scope(
             if row is None:
                 return {"removed": False, "dismissed": False}
             descendants = _descendant_scope_rows(conn, scope_id)
+            runtime_settings_changed = False
             for descendant in reversed(descendants):
-                _remove_scope_row_preserving_history(conn, descendant)
-            outcome = _remove_scope_row_preserving_history(conn, dict(row))
+                _, descendant_changed = _remove_scope_row_preserving_history(conn, descendant)
+                runtime_settings_changed = runtime_settings_changed or descendant_changed
+            outcome, row_changed = _remove_scope_row_preserving_history(conn, dict(row))
+            runtime_settings_changed = runtime_settings_changed or row_changed
+            if runtime_settings_changed:
+                mark_runtime_settings_changed(conn)
             _clear_scope_debounce_entries(db_path, [dict(row), *descendants])
             return outcome
     finally:
