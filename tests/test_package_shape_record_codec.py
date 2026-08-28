@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import venv
 from copy import deepcopy
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
@@ -320,6 +321,56 @@ def test_memory_indep_019_dependency_closure_uses_only_persisted_snapshot(
         "shape-helper",
         "shape-leaf",
     }
+
+
+def test_memory_indep_019_dependency_markers_use_only_selected_extras(
+    tmp_path: Path,
+) -> None:
+    payload = encode_resolved_rollback_plan_record(_resolved(tmp_path))
+    payload["plan"]["artifacts"][0]["requires_dist"].append("shape-helper[foo]==1")  # type: ignore[index]
+    _append_artifact(
+        payload,
+        tmp_path,
+        "shape-helper",
+        "1",
+        requires_dist=('shape-leaf==2; extra != "foo"',),
+    )
+
+    decoded = decode_resolved_rollback_plan_record(payload)
+
+    assert {artifact.distribution for artifact in decoded.artifacts} == {
+        "avibe-os",
+        "avibe-memory",
+        "shape-helper",
+    }
+
+
+def test_memory_indep_019_resolver_environment_allows_empty_platform_facts(
+    tmp_path: Path,
+) -> None:
+    record = decode_resolved_rollback_plan_record(encode_resolved_rollback_plan_record(_resolved(tmp_path)))
+    environment = _resolver_environment(
+        platform_machine="",
+        platform_release="",
+        platform_system="",
+        platform_version="",
+    )
+    expected = replace(record, resolver_environment=environment)
+
+    assert decode_resolved_rollback_plan_record(encode_resolved_rollback_plan_record(expected)) == expected
+
+
+def test_memory_indep_019_explicit_resolver_snapshot_uses_only_stdlib(
+    tmp_path: Path,
+) -> None:
+    environment_dir = tmp_path / "resolver"
+    venv.EnvBuilder(with_pip=False).create(environment_dir)
+    executable = environment_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+
+    environment = package_shape._capture_resolver_environment(str(executable))
+
+    assert environment.python_version
+    assert environment.implementation_name
 
 
 @pytest.mark.parametrize(

@@ -287,6 +287,16 @@ class ResolverEnvironment:
             raise PackageShapeRecordError("resolver environment Python versions disagree")
 
 
+_EMPTY_RESOLVER_ENVIRONMENT_FIELDS = frozenset(
+    {
+        "platform_machine",
+        "platform_release",
+        "platform_system",
+        "platform_version",
+    }
+)
+
+
 @dataclass(frozen=True, order=True)
 class StagedArtifact:
     distribution: str
@@ -540,12 +550,13 @@ def _marker_environment(environment: ResolverEnvironment, extra: str) -> dict[st
 def _active_requirement(
     value: str,
     environment: ResolverEnvironment,
-    extras: set[str],
+    selected_extras: set[str],
 ) -> Requirement | None:
     try:
         requirement = Requirement(value)
+        marker_contexts = selected_extras or {""}
         active = requirement.marker is None or any(
-            requirement.marker.evaluate(_marker_environment(environment, extra)) for extra in ("", *sorted(extras))
+            requirement.marker.evaluate(_marker_environment(environment, extra)) for extra in sorted(marker_contexts)
         )
     except (InvalidRequirement, UndefinedComparison, UndefinedEnvironmentName) as exc:
         raise PackageShapeRecordError("staged artifact dependency metadata is invalid") from exc
@@ -571,14 +582,14 @@ def _validate_resolved_closure(record: ResolvedRollbackPlanRecord) -> None:
         raise PackageShapeRecordError("residual-preserve artifact does not match the bundled residual shape")
 
     reachable: set[str] = set()
-    active_extras: dict[str, set[str]] = {}
+    marker_contexts: dict[str, set[str]] = {}
     pending: list[StagedArtifact] = []
 
-    def schedule(artifact: StagedArtifact, extras: set[str]) -> None:
-        known = active_extras.setdefault(artifact.distribution, set())
-        if artifact.distribution in reachable and extras <= known:
+    def schedule(artifact: StagedArtifact, contexts: set[str]) -> None:
+        known = marker_contexts.setdefault(artifact.distribution, set())
+        if artifact.distribution in reachable and contexts <= known:
             return
-        known.update(extras)
+        known.update(contexts)
         reachable.add(artifact.distribution)
         pending.append(artifact)
 
@@ -590,7 +601,7 @@ def _validate_resolved_closure(record: ResolvedRollbackPlanRecord) -> None:
             raise PackageShapeRecordError("resolved staging is missing a top-level install artifact")
         if artifact.version != requirement.version:
             raise PackageShapeRecordError("top-level install artifact does not match the captured exact pin")
-        schedule(artifact, set())
+        schedule(artifact, {""})
 
     while pending:
         source = pending.pop()
@@ -598,7 +609,7 @@ def _validate_resolved_closure(record: ResolvedRollbackPlanRecord) -> None:
             requirement = _active_requirement(
                 value,
                 record.resolver_environment,
-                active_extras[source.distribution],
+                marker_contexts[source.distribution],
             )
             if requirement is None:
                 continue
@@ -614,7 +625,7 @@ def _validate_resolved_closure(record: ResolvedRollbackPlanRecord) -> None:
                 raise PackageShapeRecordError("staged install artifact does not satisfy active dependency")
             # Requires-Dist edges name distributions. Python stdlib imports are
             # not package metadata edges and therefore need no ambient allowlist.
-            schedule(target, set(requirement.extras))
+            schedule(target, set(requirement.extras) or {""})
 
     if orphaned := set(install) - reachable:
         raise PackageShapeRecordError(f"staging contains unreachable install artifacts: {', '.join(sorted(orphaned))}")
@@ -642,6 +653,7 @@ def _validate_declared_record_value(
     annotation: object,
     *,
     field: str,
+    allow_empty: bool = False,
 ) -> None:
     origin = get_origin(annotation)
     if origin in (Union, UnionType):
@@ -651,7 +663,7 @@ def _validate_declared_record_value(
         candidates = tuple(option for option in options if option is not type(None))
         if len(candidates) != 1:
             raise PackageShapeRecordError(f"{field} has an unsupported field schema")
-        _validate_declared_record_value(value, candidates[0], field=field)
+        _validate_declared_record_value(value, candidates[0], field=field, allow_empty=allow_empty)
         return
     if origin is tuple:
         if type(value) is not tuple:
@@ -677,7 +689,7 @@ def _validate_declared_record_value(
         return
     if type(value) is not annotation:
         raise PackageShapeRecordError(f"{field} has an invalid primitive type")
-    if annotation is str and not value:
+    if annotation is str and not value and not allow_empty:
         raise PackageShapeRecordError(f"{field} is missing")
 
 
@@ -690,6 +702,7 @@ def _validate_record_fields(value: object) -> None:
             getattr(value, name),
             annotation,
             field=f"{type(value).__name__}.{name}",
+            allow_empty=(type(value) is ResolverEnvironment and name in _EMPTY_RESOLVER_ENVIRONMENT_FIELDS),
         )
 
 
@@ -760,6 +773,7 @@ def _decode_declared_record_value(
     annotation: object,
     *,
     field: str,
+    allow_empty: bool = False,
 ) -> object:
     origin = get_origin(annotation)
     if origin in (Union, UnionType):
@@ -770,6 +784,7 @@ def _decode_declared_record_value(
             value,
             next(option for option in options if option is not type(None)),
             field=field,
+            allow_empty=allow_empty,
         )
     if origin is tuple:
         if type(value) is not list:
@@ -791,7 +806,7 @@ def _decode_declared_record_value(
         return Path(value)
     if type(value) is not annotation:
         raise PackageShapeRecordError(f"{field} has an invalid primitive type")
-    if annotation is str and not value:
+    if annotation is str and not value and not allow_empty:
         raise PackageShapeRecordError(f"{field} is missing")
     return value
 
@@ -808,6 +823,7 @@ def _decode_record_dto(value: object, dto_type: type, *, field: str) -> object:
                     value[name],
                     annotation,
                     field=f"{field}.{name}",
+                    allow_empty=(dto_type is ResolverEnvironment and name in _EMPTY_RESOLVER_ENVIRONMENT_FIELDS),
                 )
                 for name, annotation in schema
             }
@@ -1223,6 +1239,32 @@ def _construct_resolved_plan(
     return plan
 
 
+_RESOLVER_ENVIRONMENT_SNAPSHOT_SCRIPT = """
+import json
+import os
+import platform
+import sys
+
+version = sys.implementation.version
+implementation_version = f"{version.major}.{version.minor}.{version.micro}"
+if version.releaselevel != "final":
+    implementation_version += version.releaselevel[0] + str(version.serial)
+print(json.dumps({
+    "python_version": ".".join(platform.python_version_tuple()[:2]),
+    "python_full_version": platform.python_version(),
+    "implementation_name": sys.implementation.name,
+    "implementation_version": implementation_version,
+    "os_name": os.name,
+    "platform_machine": platform.machine(),
+    "platform_python_implementation": platform.python_implementation(),
+    "platform_release": platform.release(),
+    "platform_system": platform.system(),
+    "platform_version": platform.version(),
+    "sys_platform": sys.platform,
+}))
+"""
+
+
 def _capture_resolver_environment(resolver_python: str | None) -> ResolverEnvironment:
     try:
         if resolver_python is None:
@@ -1232,8 +1274,7 @@ def _capture_resolver_environment(resolver_python: str | None) -> ResolverEnviro
                 [
                     resolver_python,
                     "-c",
-                    "import json; from packaging.markers import default_environment; "
-                    "print(json.dumps(default_environment()))",
+                    _RESOLVER_ENVIRONMENT_SNAPSHOT_SCRIPT,
                 ],
                 capture_output=True,
                 text=True,
