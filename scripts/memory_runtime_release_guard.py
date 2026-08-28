@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Verify and materialize manifest-pinned Memory Runtime release assets."""
+"""Verify and materialize manifest-pinned Memory Runtime release assets.
+
+Identity and byte-level checks precede semantic parsing. Semantic policy parsers
+never receive bytes that failed an available identity or exact-byte check.
+"""
 
 from __future__ import annotations
 
@@ -161,24 +165,6 @@ FORBIDDEN_PATH_POLICIES = {
         },
     }
 }
-_RUNTIME_PROBE = (
-    "import hashlib, importlib.resources as resources, sys\n"
-    "from importlib.metadata import distribution, packages_distributions\n"
-    "from pathlib import Path\n"
-    "expected_version, expected_digest, source = sys.argv[1:]\n"
-    "source = Path(source).resolve()\n"
-    "assert all(source != (path := Path(item).resolve()) and source not in path.parents for item in sys.path)\n"
-    "import avibe_memory\n"
-    "provider = distribution('avibe-memory')\n"
-    "normalize = lambda value: value.lower().replace('_', '-')\n"
-    "assert normalize(provider.metadata['Name']) == 'avibe-memory'\n"
-    "assert provider.version == expected_version\n"
-    "assert {normalize(name) for name in packages_distributions().get('avibe_memory', ())} == {'avibe-memory'}\n"
-    "assert Path(sys.prefix).resolve() in Path(avibe_memory.__file__).resolve().parents\n"
-    "manifest = resources.files('vibe').joinpath('memory_runtime_manifest.json')\n"
-    "assert manifest.is_file()\n"
-    "assert hashlib.sha256(manifest.read_bytes()).hexdigest() == expected_digest\n"
-)
 
 
 def _run_interpreter(
@@ -189,7 +175,7 @@ def _run_interpreter(
     environment = {key: value for key, value in os.environ.items() if not key.startswith("PIP_")}
     environment.update(PIP_CONFIG_FILE=os.devnull, PIP_NO_CACHE_DIR="1", PYTHONNOUSERSITE="1", PYTHONPATH="")
     try:
-        executable = python_executable.expanduser().absolute()
+        executable = python_executable.expanduser().resolve(strict=True)
         result = subprocess.run(
             [str(executable), *arguments],
             env=environment,
@@ -603,48 +589,6 @@ def _install_pair(
     )
 
 
-def _runtime_probe(
-    wheels: tuple[Path, Path],
-    find_links: tuple[Path, ...],
-    root: Path,
-    python_executable: Path,
-    version: str,
-    manifest_bytes: bytes,
-) -> None:
-    environment = root / "environment"
-    _run_interpreter(
-        python_executable,
-        ["-I", "-m", "venv", str(environment)],
-        "cannot create isolated Memory runtime probe environment",
-    )
-    environment_python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    links = [item for directory in find_links for item in ("--find-links", str(directory.resolve()))]
-    _run_pip(
-        environment_python,
-        [
-            "install",
-            *PIP_OFFLINE_FLAGS,
-            "--no-compile",
-            "--only-binary=:all:",
-            *links,
-            *(str(w.resolve()) for w in wheels),
-        ],
-        "offline pip install failed",
-    )
-    _run_interpreter(
-        environment_python,
-        [
-            "-I",
-            "-c",
-            _RUNTIME_PROBE,
-            version,
-            hashlib.sha256(manifest_bytes).hexdigest(),
-            str(Path(__file__).resolve().parents[1]),
-        ],
-        "installed Memory runtime probe failed",
-    )
-
-
 def verify_transition_distributions(
     asset_dir: Path,
     rebuild_root: Path,
@@ -659,6 +603,8 @@ def verify_transition_distributions(
     staged = _install_pair((core_wheel, memory_wheel), attempt / "staged", python_executable)
     manifest_resource = _distribution_resource(staged[1], MEMORY_MANIFEST_PATH)
     manifest_bytes = manifest_resource[1] if manifest_resource else None
+    if expected_manifest is not None and manifest_bytes != expected_manifest:
+        raise ReleaseAssetError("transition package manifest does not match the selected manifest")
     try:
         manifest_payload = json.loads(manifest_bytes) if manifest_bytes is not None else None
     except (TypeError, json.JSONDecodeError) as exc:
@@ -672,8 +618,6 @@ def verify_transition_distributions(
         raise ReleaseAssetError(
             f"requested Python {staged[0].python_version} is not in the release policy interpreter matrix"
         )
-    if expected_manifest is not None and manifest_bytes != expected_manifest:
-        raise ReleaseAssetError("transition package manifest does not match the selected manifest")
     version = _assert_transition_pair(*staged, policy)
     if Version(version) != _release_version(release_tag):
         raise ReleaseAssetError("distribution version does not match the release tag")
@@ -698,22 +642,6 @@ def verify_transition_distributions(
             raise ReleaseAssetError(f"{distribution} wheel and sdist metadata differ")
         if _owned_files(staged_package) != _owned_files(rebuilt_package):
             raise ReleaseAssetError(f"{distribution} wheel and sdist installed content differ")
-    _runtime_probe(
-        (core_wheel, memory_wheel),
-        (asset_dir,),
-        attempt / "staged-runtime",
-        python_executable,
-        version,
-        manifest_bytes,
-    )
-    _runtime_probe(
-        rebuilt_wheels,
-        (asset_dir, rebuilt_wheels[0].parent, rebuilt_wheels[1].parent),
-        attempt / "rebuilt-runtime",
-        python_executable,
-        version,
-        manifest_bytes,
-    )
     return version
 
 

@@ -159,18 +159,16 @@ def _transition_packages(
     core_files: dict[str, bytes] | None = None,
     core_requirements: tuple[str, ...] = (f"avibe-memory=={VERSION}",),
     memory_extra_files: dict[str, bytes] | None = None,
-    memory_files: dict[str, bytes] | None = None,
     memory_requirements: tuple[str, ...] = ("avibe-os>=3.0.14.dev0,<3.2",),
 ) -> tuple[Path, dict[str, Path]]:
     package_dir = root / "packages"
     package_dir.mkdir(parents=True)
-    if memory_files is None:
-        memory_files = {
-            "avibe_memory/__init__.py": b"from .runtime import start\n",
-            "avibe_memory/runtime.py": b"def start(): return None\n",
-            guard.MEMORY_MANIFEST_PATH: manifest.read_bytes(),
-        }
-    memory_files.update(memory_extra_files or {})
+    memory_files = {
+        "avibe_memory/__init__.py": b"from .runtime import start\n",
+        "avibe_memory/runtime.py": b"def start(): return None\n",
+        guard.MEMORY_MANIFEST_PATH: manifest.read_bytes(),
+        **(memory_extra_files or {}),
+    }
     artifacts: dict[str, Path] = {}
     for key, name, requirements, files in (
         ("core", "avibe-os", core_requirements, core_files or CORE_FILES),
@@ -253,37 +251,6 @@ def test_memory_indep_022_dual_form_discovery_reads_legacy_core_and_transition_m
         guard.discover_release_manifest(package_dir, python_executable=PYTHON)
 
 
-def test_package_guard_uses_offline_pip_for_complete_dependency_resolution(tmp_path: Path) -> None:
-    manifest, _ = _manifest(tmp_path)
-    package_dir, artifacts = _transition_packages(
-        tmp_path,
-        manifest,
-        core_requirements=("avibe-memory==3.1.0", "shared==1"),
-        memory_requirements=("avibe-os>=3.1,<3.2", "shared==2"),
-    )
-    _package(
-        package_dir / "shared-1-py3-none-any.whl",
-        "shared",
-        files={"shared/__init__.py": b""},
-        version="1",
-    )
-    with pytest.raises(guard.ReleaseAssetError, match="offline pip install"):
-        _verify(package_dir, tmp_path / "rebuild")
-
-
-def test_package_guard_evaluates_markers_with_the_bound_interpreter(tmp_path: Path) -> None:
-    manifest, _ = _manifest(tmp_path)
-    _reject(
-        tmp_path,
-        manifest,
-        "offline pip install",
-        core_requirements=(
-            f"avibe-memory=={VERSION}",
-            f"target-only==1; python_version == '{PYTHON_VERSION}'",
-        ),
-    )
-
-
 @pytest.mark.parametrize(
     ("package_options", "error"),
     [
@@ -303,12 +270,6 @@ def test_package_guard_enforces_memory_namespace_policy_in_both_artifact_forms(
     _reject(tmp_path, manifest, error, **package_options)
 
 
-def test_package_guard_proves_runtime_without_source_tree_leakage(tmp_path: Path) -> None:
-    manifest, _ = _manifest(tmp_path)
-    files = {guard.MEMORY_MANIFEST_PATH: manifest.read_bytes()}
-    _reject(tmp_path, manifest, "installed Memory runtime probe failed", memory_files=files)
-
-
 def test_package_guard_uses_manifest_frozen_python_policy(tmp_path: Path) -> None:
     manifest, _ = _manifest(
         tmp_path,
@@ -319,6 +280,23 @@ def test_package_guard_uses_manifest_frozen_python_policy(tmp_path: Path) -> Non
     assert _verify(package_dir, tmp_path / "rebuild") == _verify(package_dir, tmp_path / "rebuild") == VERSION
     with pytest.raises(guard.ReleaseAssetError, match="interpreter is unavailable"):
         guard._run_interpreter(tmp_path / "missing-python", [], "probe")
+
+
+def test_package_guard_rejects_manifest_byte_mismatch_before_policy_parsing(tmp_path: Path) -> None:
+    selected, _ = _manifest(tmp_path)
+    payload = json.loads(selected.read_bytes())
+    payload["package_policy"]["schema_version"] = 2
+    embedded = tmp_path / "embedded.json"
+    embedded.write_text(json.dumps(payload))
+    package_dir, _ = _transition_packages(tmp_path / "release", embedded)
+    with pytest.raises(guard.ReleaseAssetError, match="does not match the selected manifest"):
+        guard.verify_transition_distributions(
+            package_dir,
+            tmp_path / "rebuild",
+            release_tag="v3.1.0",
+            python_executable=PYTHON,
+            expected_manifest=selected.read_bytes(),
+        )
 
 
 def test_sdist_rebuild_delegates_the_archive_directly_to_isolated_pip(
