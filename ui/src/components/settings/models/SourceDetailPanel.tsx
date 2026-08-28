@@ -266,6 +266,7 @@ const TierEditor: React.FC<{
   // Containment is that same rule stated once, at the boundary it is about.
   return (
     <div
+      data-source-dialog-local-escape
       className="flex min-w-0 flex-col gap-1.5"
       onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) onClose(); }}
       onKeyDown={(event) => {
@@ -338,6 +339,7 @@ const DraftTiers: React.FC<{
         </span>
       ))}
       <Input
+        data-source-dialog-local-escape
         value={draft}
         onChange={(event) => setDraft(event.target.value)}
         onKeyDown={(event) => {

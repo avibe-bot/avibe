@@ -1314,6 +1314,12 @@ export const SettingsModelsPage: React.FC = () => {
             event.preventDefault();
             window.requestAnimationFrame(() => sourceDetailHeadingRef.current?.focus());
           }}
+          onEscapeKeyDown={(event) => {
+            // Radix observes Escape before React's row handlers; marked editors own it locally.
+            if (event.target instanceof Element && event.target.closest('[data-source-dialog-local-escape]')) {
+              event.preventDefault();
+            }
+          }}
         >
           <DialogTitle className="sr-only">{selectedSource?.display_name ?? t('settings.models.sourceDetail.gone')}</DialogTitle>
           <DialogDescription className="sr-only">{t('settings.models.sourceDetail.footnote')}</DialogDescription>

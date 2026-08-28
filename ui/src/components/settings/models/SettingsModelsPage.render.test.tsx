@@ -463,6 +463,37 @@ describe('SettingsModelsPage surface branches', () => {
     expect(screen.queryByText(/^Switch to the gateway and you gain three things$|^切换到模型网关，你会多出三件事$/i)).toBeNull();
   });
 
+  it('keeps tier-editor Escape local to the provider dialog', async () => {
+    const editableSource: Source = {
+      ...retainedSource,
+      models: [{ id: 'model-a', display_name: null, origin: 'manual', reasoning_efforts: ['high'] }],
+    };
+    renderPage([editableSource]);
+    const user = userEvent.setup();
+
+    await user.click((await screen.findByText('Retained source')).closest('button') as HTMLButtonElement);
+    const sourceDialog = await screen.findByRole('dialog', { name: 'Retained source' });
+    await user.click(within(sourceDialog).getByRole('button', { name: /high/i }));
+    const tierInput = within(sourceDialog).getByPlaceholderText(/Enter to add|回车添加/i);
+    await user.type(tierInput, 'draft');
+    await user.keyboard('{Escape}');
+
+    expect(screen.getByRole('dialog', { name: 'Retained source' })).toBeTruthy();
+    expect(within(sourceDialog).queryByPlaceholderText(/Enter to add|回车添加/i)).toBeNull();
+
+    await user.click(within(sourceDialog).getByRole('button', { name: /^Add model$|^添加模型$/i }));
+    const manualDraft = sourceDialog.querySelector('[data-manual-model-draft]');
+    const draftTierInput = within(manualDraft as HTMLElement).getByPlaceholderText(/Enter to add|回车添加/i);
+    await user.type(draftTierInput, 'draft');
+    await user.keyboard('{Escape}');
+
+    expect(screen.getByRole('dialog', { name: 'Retained source' })).toBeTruthy();
+    expect((draftTierInput as HTMLInputElement).value).toBe('');
+
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Retained source' })).toBeNull());
+  });
+
   it('moves recent switches into the Logs tab and removes the Advanced placeholder', async () => {
     renderPage([retainedSource]);
 
