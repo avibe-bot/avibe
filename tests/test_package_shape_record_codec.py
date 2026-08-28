@@ -100,6 +100,41 @@ def test_memory_indep_019_captured_codec_is_json_safe_immutable_and_lossless() -
         decoded.residual_memory = True  # type: ignore[misc]
 
 
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [
+        ("python", "/opt/avibe/bin/py\0thon"),
+        ("main", "/opt/avibe/service\0_main.py"),
+        ("python", "python"),
+        ("main", "/opt/avibe/service_main"),
+    ],
+)
+def test_memory_indep_019_launcher_dto_and_decode_reject_invalid_paths(
+    field: str,
+    invalid: str,
+) -> None:
+    record = decode_captured_package_shape_record(encode_captured_package_shape_record(_captured()))
+    with pytest.raises(PackageShapeRecordError, match="path"):
+        replace(record.launcher, **{field: invalid})
+
+    payload = encode_captured_package_shape_record(record)
+    payload["shape"]["launcher"][field] = invalid  # type: ignore[index]
+    with pytest.raises(PackageShapeRecordError, match="path"):
+        decode_captured_package_shape_record(payload)
+
+
+def test_memory_indep_019_launcher_dto_paths_round_trip_offline() -> None:
+    record = decode_captured_package_shape_record(encode_captured_package_shape_record(_captured()))
+    launcher = replace(
+        record.launcher,
+        python=r"C:\Avibe\python.exe",
+        main=r"C:\Avibe\vibe\service_main.py",
+    )
+    expected = replace(record, launcher=launcher)
+
+    assert decode_captured_package_shape_record(encode_captured_package_shape_record(expected)) == expected
+
+
 def test_memory_indep_019_resolved_codec_preserves_complete_non_executable_plan(
     tmp_path: Path,
 ) -> None:

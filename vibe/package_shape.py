@@ -7,13 +7,19 @@ records for G3-1B outer records or G3-2 rehydration.
 Strictness belongs to our package facts; tolerance belongs only to unrelated
 environmental presence. Live inventory screens relevance tolerantly, then
 validates relevant facts strictly. Persisted record decode is always strict.
+
+Every persisted executable or module path is owned by one pure lexical
+validator shared by live construction and decode. Ordinary text fields do not
+inherit path constraints.
 """
 
 from __future__ import annotations
 
 import email.parser
 import hashlib
+import ntpath
 import os
+import posixpath
 import shutil
 import subprocess
 import sys
@@ -338,6 +344,8 @@ class _ServiceLauncherRecord:
 
     def __post_init__(self) -> None:
         _validate_record_fields(self)
+        _require_launcher_path(self.python, field="launcher python", kind="executable")
+        _require_launcher_path(self.main, field="launcher main", kind="module")
 
 
 @dataclass(frozen=True)
@@ -572,6 +580,17 @@ def _require_record_absolute_path(value: str, *, field: str) -> Path:
     if not path.is_absolute() or os.path.normpath(value) != value:
         raise PackageShapeRecordError(f"{field} is not a canonical absolute path")
     return path
+
+
+def _require_launcher_path(value: str, *, field: str, kind: str) -> None:
+    if "\0" in value:
+        raise PackageShapeRecordError(f"{field} is not a usable {kind} path")
+    path_module = posixpath if posixpath.isabs(value) else ntpath
+    if not path_module.isabs(value) or path_module.normpath(value) != value:
+        raise PackageShapeRecordError(f"{field} is not a canonical absolute {kind} path")
+    basename = path_module.basename(value)
+    if not basename or (kind == "module" and not basename.lower().endswith(".py")):
+        raise PackageShapeRecordError(f"{field} is not a usable {kind} path")
 
 
 def _encode_declared_record_value(value: object, annotation: object) -> object:
