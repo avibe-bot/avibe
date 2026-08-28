@@ -935,8 +935,8 @@
       "retry": "已自动切换到备用供应商，直接重试即可",
       "waiting": "模型 {model} 暂时不可用，等待 {source} 于 {retry_at} 自动恢复。",
       "waiting_without_retry": "模型 {model} 的路由已恢复，直接重试即可。",
-      "interrupted": "模型 {model} 当前不可用：{blockers}。请前往模型网关处理。",
-      "route_unconfigured": "模型 {model} 尚未配置路由。请前往模型网关配置。",
+      "interrupted": "模型 {model} 当前不可用：{blockers}。请前往「模型」页处理。",
+      "route_unconfigured": "模型 {model} 尚未配置路由。请前往「模型」页配置。",
       "request_incompatible": "此请求不兼容；切换模型供应商也无法解决。"
     }
   },

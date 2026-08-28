@@ -23,6 +23,7 @@ describe('Models page vocabulary', () => {
     expect(en.settings.models.order.subtitle).toBe("Among sources already configured in each model's route, those at the top are used first. When quota, rate-limit, server, authentication, or network failures prevent a request, the next priority is used automatically.");
     expect(zh.settings.models.order.section['heldOut.note']).toBe('这些供应商仍保留在已有路由末尾。要从路由中移除，请编辑对应模型的路由。');
     expect(en.settings.models.order.section['heldOut.note']).toBe("These sources remain in existing routes after the ordered sources. To remove one from a route, edit that model's gateway route.");
+    expect(zh.settings.models.supplyMode.fixHint).toBe('去「模型」页添加或启用供应商即可恢复。');
     expect('policy' in zh.settings.models.agents).toBe(false);
   });
 });
