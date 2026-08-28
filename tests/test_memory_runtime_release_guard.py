@@ -79,7 +79,6 @@ def _manifest(
             "release_family": "3.1",
             "requires_python": requires_python,
             "supported_python_versions": list(supported_python_versions),
-            "wheel_tag": "py3-none-any",
             "namespace_policy_version": 1,
         },
         "archives": archives,
@@ -107,7 +106,6 @@ def _verify_static(
     metadata_version: str = "3.1.0",
     filename_version: str | None = None,
     requires_python: str = ">=3.10",
-    wheel_tag: str = "py3-none-any",
     core_requirement: str = "avibe-memory==3.1.0",
     memory_requirement: str = "avibe-os==3.1.0",
 ) -> tuple[guard.PackageMetadata, guard.PackageMetadata, guard.PackageReleasePolicy]:
@@ -126,9 +124,9 @@ def _verify_static(
     )
     manifest_bytes = manifest.read_bytes()
     return guard.verify_static_transition(
-        core_wheel_filename=f"avibe_os-{filename_version}-{wheel_tag}.whl",
+        core_wheel_filename=f"avibe_os-{filename_version}-py3-none-any.whl",
         core_metadata=core,
-        memory_wheel_filename=f"avibe_memory-{filename_version}-{wheel_tag}.whl",
+        memory_wheel_filename=f"avibe_memory-{filename_version}-py3-none-any.whl",
         memory_metadata=memory,
         release_tag=json.loads(manifest_bytes)["release_tag"],
         manifest_bytes=manifest_bytes,
@@ -150,7 +148,6 @@ def _verify_static(
         ("package_policy", "supported_python_versions", ["3.11+local"]),
         ("package_policy", "supported_python_versions", ["3.11.post1"]),
         ("package_policy", "supported_python_versions", ["3.11.dev1"]),
-        ("package_policy", "wheel_tag", True),
         ("package_policy", "namespace_policy_version", True),
     ],
 )
@@ -179,16 +176,6 @@ def test_manifest_byte_mismatch_precedes_invalid_semantic_policy(tmp_path: Path)
         guard.load_package_release_policy(mismatched, expected_manifest=selected.read_bytes(), release_tag="v3.1.0")
 
 
-def test_package_policy_pins_universal_wheel_tag(tmp_path: Path) -> None:
-    manifest, _ = _manifest(tmp_path)
-    payload = json.loads(manifest.read_bytes())
-    payload["package_policy"]["wheel_tag"] = "py3-none-manylinux_2_17_x86_64"
-    candidate = json.dumps(payload).encode()
-
-    with pytest.raises(guard.ManifestPolicyError, match="wheel_tag"):
-        guard.load_package_release_policy(candidate, expected_manifest=candidate, release_tag="v3.1.0")
-
-
 @pytest.mark.parametrize("requires_python", [">=3.10", ">= 3.10"])
 def test_package_policy_accepts_declared_requires_python_literal(
     tmp_path: Path, requires_python: str
@@ -201,6 +188,29 @@ def test_package_policy_accepts_declared_requires_python_literal(
     )
 
     assert policy.requires_python == ">=3.10"
+    assert policy.supported_python_versions == guard.PACKAGE_POLICY_SUPPORTED_PYTHON_VERSIONS
+
+
+@pytest.mark.parametrize(
+    "supported_python_versions",
+    [
+        ("3.9",),
+        ("3.10", "3.11"),
+        ("3.10", "3.11", "3.12", "3.13"),
+        ("3.10", "3.11", "3.12", "3.12"),
+        ("3.12", "3.11", "3.10"),
+    ],
+)
+def test_package_policy_rejects_undeclared_supported_python_versions(
+    tmp_path: Path, supported_python_versions: tuple[str, ...]
+) -> None:
+    manifest, _ = _manifest(tmp_path, supported_python_versions=supported_python_versions)
+    manifest_bytes = manifest.read_bytes()
+
+    with pytest.raises(guard.ManifestPolicyError, match="supported Python"):
+        guard.load_package_release_policy(
+            manifest_bytes, expected_manifest=manifest_bytes, release_tag="v3.1.0"
+        )
 
 
 @pytest.mark.parametrize("requires_python", ["==3.10", ">=3.10,<3.10.2", ">=3.10,!=3.10.1"])
@@ -226,20 +236,11 @@ def test_wheel_filename_metadata_and_release_tag_are_independent_identities(tmp_
         _verify_static(manifest)
 
 
-def test_declared_wheel_tag_binds_wheel_filenames(tmp_path: Path) -> None:
-    manifest, _ = _manifest(tmp_path)
-    with pytest.raises(guard.ReleaseAssetError, match="release policy"):
-        _verify_static(manifest, wheel_tag="cp312-cp312-manylinux_2_17_x86_64")
-    with pytest.raises(guard.ReleaseAssetError, match="release policy"):
-        _verify_static(manifest, wheel_tag="py3-none-manylinux_2_17_x86_64")
-
-
 def test_static_transition_uses_release_bound_requires_python(tmp_path: Path) -> None:
     manifest, _ = _manifest(tmp_path)
     core, memory, policy = _verify_static(manifest)
     assert core.version == memory.version == "3.1.0"
     assert policy.requires_python == ">=3.10"
-    assert policy.wheel_tag == "py3-none-any"
 
     with pytest.raises(guard.ReleaseAssetError, match="Requires-Python"):
         _verify_static(manifest, requires_python=">=3.11")
