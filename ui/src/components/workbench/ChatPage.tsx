@@ -359,6 +359,19 @@ export const ChatPage: React.FC = () => {
   // the chat surface still hidden and the iframe already gone — a blank chat.
   const showPageAccessDenied = showPageRestoreAccess === 'deny';
   const showPageActive = isShowPageActive(readOnly, showPageMode, showPageAccessDenied);
+  // The voice chord belongs to the active Chat page, not to whichever child
+  // happens to hold focus. Capture lets it win before the rich editor handles a
+  // user-configured chord such as Ctrl+Z. Starting remains limited to a writable,
+  // visible Chat surface; once recording, Composer still accepts the chord as
+  // Finish after focus moves elsewhere in this document.
+  const voiceShortcutCanStart = pageActive && writable && !showPageActive;
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      composerRef.current?.handleVoiceShortcut(event, voiceShortcutCanStart);
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [voiceShortcutCanStart]);
   // True while the share popover is open. The popover floats over the Show Page
   // iframe; making the iframe inert lets an outside tap there reach the parent
   // document so the (non-modal) popover dismisses, without modal-blocking the

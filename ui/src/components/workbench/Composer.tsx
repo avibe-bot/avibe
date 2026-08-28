@@ -56,6 +56,7 @@ import {
   workbenchUploadErrorTranslationKey,
 } from '../../lib/workbenchUpload';
 import { Button } from '../ui/button';
+import { inForegroundSurface } from './chatShortcuts';
 import {
   MentionEditor,
   type AgentSearchResult,
@@ -366,6 +367,9 @@ export interface ComposerHandle {
    *  with a separating space when the composer is non-empty. No-op when the
    *  mention editor isn't active (the plain-textarea home composer). */
   appendText: (text: string) => void;
+  /** Handle the Chat page's configured voice chord. Starting may be gated by
+   *  the page, while an active recording can always be completed. */
+  handleVoiceShortcut: (event: KeyboardEvent, allowStart: boolean) => boolean;
 }
 
 // The chat-style input row: an auto-growing textarea + a Send/Stop icon button,
@@ -401,6 +405,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // box is non-empty (``hasText``) for the Send button; ``value`` still backs the
   // plain-textarea (home) path. See onChange below.
   const [hasText, setHasText] = useState(false);
+  const composerRootRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const valueRef = useRef('');
   // Seed once from a saved draft, but only while the box is untouched so a
@@ -654,19 +659,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       && voiceSessionLocksDraft(voiceSessionsById.get(sessionId))
     )
   );
-  useImperativeHandle(ref, () => ({
-    addFiles: (files: File[]) => void uploadFiles(files),
-    insertSessionReference: (refSessionId: string, title?: string | null) => {
-      if (voiceDraftLocked()) return;
-      // Same node a typed `#` pick yields: trigger `#`, label = title||id, data
-      // carries the stable sessionId → serializes to `#<id>` + a session ref.
-      mentionRef.current?.insertMention('#', title?.trim() || refSessionId, { sessionId: refSessionId });
-    },
-    appendText: (text: string) => {
-      if (!voiceDraftLocked()) mentionRef.current?.append(text);
-    },
-  }));
-
   const captureVoiceInsertion = useCallback((): VoiceInsertionSnapshot => {
     if (useMentions) {
       return mentionRef.current?.captureSelection()
@@ -1248,31 +1240,40 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     }
   }, [voiceDraftReadOnly]);
 
-  const handleVoiceShortcut = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+  const handleVoiceShortcut = useCallback((event: KeyboardEvent, allowStart: boolean): boolean => {
     if (
       !voiceShortcutAvailable
       || event.defaultPrevented
       || event.repeat
-      || event.currentTarget.querySelector('[data-mention-picker]') !== null
-      || !actionShortcutMatches(event.nativeEvent, voiceInputShortcut)
+      || Boolean(composerRootRef.current?.querySelector('[data-mention-picker]'))
+      || !actionShortcutMatches(event, voiceInputShortcut)
     ) {
-      return;
+      return false;
     }
+    if (
+      voiceControlMode === 'record'
+      && (!allowStart || inForegroundSurface(event.target as Element | null))
+    ) return false;
+
     event.preventDefault();
     if (voiceControlMode === 'finish') stopRecording();
     else {
       const activeElement = document.activeElement;
-      voiceEditorFocusReturnRef.current = (
+      const editorFocus = (
         activeElement === textareaRef.current
         || (
           activeElement instanceof HTMLElement
           && activeElement.getAttribute('contenteditable') === 'true'
-          && event.currentTarget.contains(activeElement)
+          && composerRootRef.current?.contains(activeElement)
         )
       ) ? activeElement as HTMLElement : null;
-      focusNextVoiceControlRef.current = true;
+      voiceEditorFocusReturnRef.current = editorFocus;
+      // Keep the page's current focus when the shortcut started outside the
+      // editor. Editor starts still move to Finish, then restore the caret.
+      focusNextVoiceControlRef.current = editorFocus !== null;
       void startRecording(captureVoiceInsertion());
     }
+    return true;
   }, [
     captureVoiceInsertion,
     startRecording,
@@ -1281,6 +1282,23 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     voiceInputShortcut,
     voiceShortcutAvailable,
   ]);
+
+  // ChatPage owns the window listener because the shortcut applies across that
+  // page, while the composer remains the sole owner of voice state and actions.
+  // No deps array keeps every exposed operation on the latest render state.
+  useImperativeHandle(ref, () => ({
+    addFiles: (files: File[]) => void uploadFiles(files),
+    insertSessionReference: (refSessionId: string, title?: string | null) => {
+      if (voiceDraftLocked()) return;
+      // Same node a typed `#` pick yields: trigger `#`, label = title||id, data
+      // carries the stable sessionId → serializes to `#<id>` + a session ref.
+      mentionRef.current?.insertMention('#', title?.trim() || refSessionId, { sessionId: refSessionId });
+    },
+    appendText: (text: string) => {
+      if (!voiceDraftLocked()) mentionRef.current?.append(text);
+    },
+    handleVoiceShortcut,
+  }));
 
   useEffect(() => {
     if (!busyControls) {
@@ -1350,8 +1368,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
   return (
     <div
+      ref={composerRootRef}
       className={cn('mx-auto flex w-full max-w-[1080px] flex-col gap-2', className)}
-      onKeyDownCapture={handleVoiceShortcut}
     >
       {mediaEnabled && attachments.length > 0 && (
         <div className="flex flex-wrap gap-2">
