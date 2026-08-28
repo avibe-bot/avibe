@@ -362,10 +362,15 @@ def test_memory_indep_019_resolver_environment_allows_empty_platform_facts(
 
 def test_memory_indep_019_explicit_resolver_snapshot_uses_only_stdlib(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     environment_dir = tmp_path / "resolver"
     venv.EnvBuilder(with_pip=False).create(environment_dir)
     executable = environment_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    hook_dir = tmp_path / "hook"
+    hook_dir.mkdir()
+    (hook_dir / "sitecustomize.py").write_text('print("polluted stdout")\n')
+    monkeypatch.setenv("PYTHONPATH", str(hook_dir))
 
     environment = package_shape._capture_resolver_environment(str(executable))
 

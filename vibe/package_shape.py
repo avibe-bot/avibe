@@ -1265,6 +1265,19 @@ print(json.dumps({
 """
 
 
+def _resolver_subprocess_environment(*, wheelhouse: Path | None = None) -> dict[str, str]:
+    environment = {
+        **{key: value for key, value in os.environ.items() if not key.startswith("PIP_") and key != "PYTHONPATH"},
+        "PIP_CONFIG_FILE": os.devnull,
+        "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+        "PIP_NO_INDEX": "1",
+        "PYTHONNOUSERSITE": "1",
+    }
+    if wheelhouse is not None:
+        environment["PIP_FIND_LINKS"] = str(wheelhouse)
+    return environment
+
+
 def _capture_resolver_environment(resolver_python: str | None) -> ResolverEnvironment:
     try:
         if resolver_python is None:
@@ -1276,6 +1289,7 @@ def _capture_resolver_environment(resolver_python: str | None) -> ResolverEnviro
                     "-c",
                     _RESOLVER_ENVIRONMENT_SNAPSHOT_SCRIPT,
                 ],
+                env=_resolver_subprocess_environment(),
                 capture_output=True,
                 text=True,
                 check=False,
@@ -1344,14 +1358,7 @@ def resolve_rollback_plan(
             (False, core_requirements),
             (True, memory_requirements),
         )
-    env = {
-        **{key: value for key, value in os.environ.items() if not key.startswith("PIP_") and key != "PYTHONPATH"},
-        "PIP_CONFIG_FILE": os.devnull,
-        "PIP_DISABLE_PIP_VERSION_CHECK": "1",
-        "PIP_NO_INDEX": "1",
-        "PIP_FIND_LINKS": str(wheelhouse),
-        "PYTHONNOUSERSITE": "1",
-    }
+    env = _resolver_subprocess_environment(wheelhouse=wheelhouse)
     moved_to_staging = False
     resolved = False
     try:
