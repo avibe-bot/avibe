@@ -99,6 +99,7 @@ def _wheel(
     version: str = "3.1.0",
     requires_python: str = ">=3.10",
     requires_dist: tuple[str, ...] = (),
+    metadata_version: str | None = "2.4",
     wheel_version: str = "1.0",
     wheel_tag: str = "py3-none-any",
     include_wheel_metadata: bool = True,
@@ -106,8 +107,9 @@ def _wheel(
 ) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     dist_info = f"{name.replace('-', '_')}-{version}.dist-info"
+    metadata_header = "" if metadata_version is None else f"Metadata-Version: {metadata_version}\n"
     metadata = (
-        f"Metadata-Version: 2.4\nName: {name}\nVersion: {version}\n"
+        f"{metadata_header}Name: {name}\nVersion: {version}\n"
         f"Requires-Python: {requires_python}\n"
         + "".join(f"Requires-Dist: {requirement}\n" for requirement in requires_dist)
         + "\n"
@@ -160,6 +162,10 @@ def _verify_static(tmp_path: Path, manifest: Path, **wheel_options):
         ("package_policy", "schema_version", 1.0),
         ("package_policy", "release_tag", 1),
         ("package_policy", "supported_python_versions", "3.11"),
+        ("package_policy", "supported_python_versions", ["3.11rc1"]),
+        ("package_policy", "supported_python_versions", ["3.11+local"]),
+        ("package_policy", "supported_python_versions", ["3.11.post1"]),
+        ("package_policy", "supported_python_versions", ["3.11.dev1"]),
         ("package_policy", "wheel_tag", True),
         ("package_policy", "namespace_policy_version", True),
     ],
@@ -219,6 +225,16 @@ def test_wheel_version_requires_complete_major_minor_syntax(tmp_path: Path) -> N
         guard.inspect_wheel(wheel)
 
 
+@pytest.mark.parametrize(("metadata_version", "accepted"), [(None, False), ("999.0", False), ("2.4", True)])
+def test_wheel_validates_core_metadata_version(tmp_path: Path, metadata_version: str | None, accepted: bool) -> None:
+    wheel = _wheel(tmp_path / "avibe_os-3.1.0-py3-none-any.whl", "avibe-os", metadata_version=metadata_version)
+    if accepted:
+        assert guard.inspect_wheel(wheel).name == "avibe-os"
+    else:
+        with pytest.raises(guard.ReleaseAssetError, match="core metadata"):
+            guard.inspect_wheel(wheel)
+
+
 def test_wheel_tags_match_filename_tags(tmp_path: Path) -> None:
     wheel = _wheel(tmp_path / "avibe_os-3.1.0-py3-none-any.whl", "avibe-os", wheel_tag="cp312-cp312-linux_x86_64")
     with pytest.raises(guard.ReleaseAssetError, match="tags"):
@@ -228,6 +244,9 @@ def test_wheel_tags_match_filename_tags(tmp_path: Path) -> None:
         _verify_static(tmp_path / "supported", manifest, wheel_tag="cp312-cp312-manylinux_2_17_x86_64")
     with pytest.raises(guard.ReleaseAssetError, match="release policy"):
         _verify_static(tmp_path / "platform", manifest, wheel_tag="py3-none-manylinux_2_17_x86_64")
+    invalid_python = _wheel(tmp_path / "python" / "avibe_os-3.1.0-py3-none-any.whl", "avibe-os")
+    with pytest.raises(guard.ReleaseAssetError, match="supported Python"):
+        guard.inspect_wheel(invalid_python, supported_python_versions=("3.11+local",))
 
 
 def test_wheel_rejects_path_aliases_and_corrupt_members(tmp_path: Path) -> None:
@@ -244,14 +263,18 @@ def test_wheel_rejects_path_aliases_and_corrupt_members(tmp_path: Path) -> None:
             guard.inspect_wheel(wheel)
 
 
-def test_wheel_rejects_blank_record_rows(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "record",
+    (b"\n\n", b"../../outside-victim,,\n", b"/absolute/path,,\n", b"bad\\path,,\n", b"bad\x00path,,\n", b"C:/absolute/path,,\n"),
+)
+def test_wheel_rejects_invalid_record_rows(tmp_path: Path, record: bytes) -> None:
     wheel = _wheel(
         tmp_path / "avibe_os-3.1.0-py3-none-any.whl",
         "avibe-os",
         include_record=False,
     )
     with zipfile.ZipFile(wheel, "a") as archive:
-        archive.writestr("avibe_os-3.1.0.dist-info/RECORD", b"\n\n")
+        archive.writestr("avibe_os-3.1.0.dist-info/RECORD", record)
 
     with pytest.raises(guard.ReleaseAssetError, match="RECORD"):
         guard.inspect_wheel(wheel)

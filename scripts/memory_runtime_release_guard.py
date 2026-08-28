@@ -17,7 +17,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import zipfile
 
 try:
@@ -147,6 +147,20 @@ def _release_version(release_tag: str) -> str:
         raise ReleaseAssetError(f"invalid release tag: {release_tag!r}") from exc
 
 
+def _is_safe_relative_path(value: str) -> bool:
+    path = PurePosixPath(value)
+    canonical = str(path) + ("/" if value.endswith("/") else "")
+    return (
+        bool(path.parts)
+        and "\x00" not in value
+        and "\\" not in value
+        and not path.is_absolute()
+        and not PureWindowsPath(value).drive
+        and ".." not in path.parts
+        and value == canonical
+    )
+
+
 def load_package_release_policy(
     manifest_bytes: bytes,
     *,
@@ -185,7 +199,7 @@ def load_package_release_policy(
     if (
         type(versions) is not list
         or not versions
-        or any(type(version) is not str or not version for version in versions)
+        or any(type(version) is not str or re.fullmatch(r"[0-9]+\.[0-9]+", version) is None for version in versions)
         or len(versions) != len(set(versions))
         or type(namespace_version) is not int
         or namespace_version not in SUPPORTED_NAMESPACE_POLICY_VERSIONS
@@ -247,7 +261,7 @@ def inspect_wheel(
         with zipfile.ZipFile(wheel) as archive:
             names = archive.namelist()
             canonical = [str(PurePosixPath(name)) + ("/" if name.endswith("/") else "") for name in names]
-            unsafe = any("\\" in name or PurePosixPath(name).is_absolute() or ".." in PurePosixPath(name).parts or name != clean or ("/" in name and name.split("/", 1)[0].endswith(".data") and name.split("/", 2)[1] not in WHEEL_DATA_SCHEMES) for name, clean in zip(names, canonical))
+            unsafe = any(not _is_safe_relative_path(name) or ("/" in name and name.split("/", 1)[0].endswith(".data") and name.split("/", 2)[1] not in WHEEL_DATA_SCHEMES) for name in names)
             dist_infos = {name.split("/", 1)[0] for name in names if "/" in name and name.split("/", 1)[0].endswith(".dist-info")}
             if len(names) != len({name.rstrip("/").casefold() for name in canonical}) or unsafe or len(dist_infos) != 1:
                 raise ReleaseAssetError(f"wheel control structure is invalid: {wheel.name}")
@@ -257,10 +271,17 @@ def inspect_wheel(
                 raise ReleaseAssetError(f"wheel control structure is invalid: {wheel.name}")
             if archive.testzip() is not None:
                 raise ReleaseAssetError(f"wheel member integrity is invalid: {wheel.name}")
-            metadata_message = Parser().parsestr(archive.read(f"{dist_info}/METADATA").decode("utf-8"))
+            metadata_bytes = archive.read(f"{dist_info}/METADATA")
+            try:
+                from packaging.metadata import Metadata
+
+                Metadata.from_email(metadata_bytes, validate=True)
+            except Exception as exc:
+                raise ReleaseAssetError(f"wheel core metadata is invalid: {wheel.name}") from exc
+            metadata_message = Parser().parsestr(metadata_bytes.decode("utf-8"))
             wheel_message = Parser().parsestr(archive.read(f"{dist_info}/WHEEL").decode("utf-8"))
             record_rows = list(csv.reader(archive.read(f"{dist_info}/RECORD").decode("utf-8").splitlines()))
-            if not record_rows or any(len(row) != 3 or not row[0] for row in record_rows):
+            if not record_rows or any(len(row) != 3 or not _is_safe_relative_path(row[0]) for row in record_rows):
                 raise ReleaseAssetError(f"wheel RECORD structure is invalid: {wheel.name}")
     except (OSError, UnicodeDecodeError, zipfile.BadZipFile) as exc:
         raise ReleaseAssetError(f"cannot read wheel structure: {wheel.name}") from exc
@@ -287,7 +308,12 @@ def inspect_wheel(
         raise ReleaseAssetError(f"wheel tags differ from release policy: {wheel.name}")
     platforms = {tag.platform for tag in policy_tags}
     for supported_version in supported_python_versions:
-        python_version = tuple(map(int, supported_version.split(".")[:2]))
+        try:
+            if re.fullmatch(r"[0-9]+\.[0-9]+", supported_version) is None:
+                raise ValueError
+            python_version = tuple(map(int, supported_version.split(".")))
+        except (TypeError, ValueError) as exc:
+            raise ReleaseAssetError(f"supported Python version is invalid: {supported_version!r}") from exc
         if policy_tags.isdisjoint((*tags.cpython_tags(python_version, platforms=platforms), *tags.compatible_tags(python_version, platforms=platforms))):
             raise ReleaseAssetError(f"wheel tags do not cover supported Python {supported_version}: {wheel.name}")
     parsed = PackageMetadata(str(utils.canonicalize_name(name)), parsed_version, requires_python, tuple(sorted(metadata_message.get_all("Requires-Dist") or [])))
