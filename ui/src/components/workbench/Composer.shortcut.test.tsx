@@ -1,6 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { createInstance } from 'i18next';
+import { useEffect, useRef } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -59,7 +60,7 @@ import {
   defaultActionShortcuts,
   writeActionShortcuts,
 } from '../../lib/actionShortcuts';
-import { Composer } from './Composer';
+import { Composer, type ComposerHandle } from './Composer';
 
 const i18n = createInstance();
 void i18n.use(initReactI18next).init({
@@ -69,13 +70,39 @@ void i18n.use(initReactI18next).init({
   interpolation: { escapeValue: false },
 });
 
-const renderComposer = (
-  sessionId = 'shortcut-session',
-  state: { disabled?: boolean; initialDraft?: string; mentions?: boolean } = {},
-) => render(
-  <I18nextProvider i18n={i18n}>
-    <ToastProvider>
+type ComposerTestState = {
+  disabled?: boolean;
+  initialDraft?: string;
+  mentions?: boolean;
+  shortcutStartEnabled?: boolean;
+};
+
+const ComposerShortcutHarness = ({
+  sessionId,
+  state,
+}: {
+  sessionId: string;
+  state: ComposerTestState;
+}) => {
+  const composerRef = useRef<ComposerHandle>(null);
+  const shortcutStartEnabled = state.shortcutStartEnabled ?? true;
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      composerRef.current?.handleVoiceShortcut(event, shortcutStartEnabled);
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [shortcutStartEnabled]);
+
+  return (
+    <>
+      <button type="button">Outside composer</button>
+      <div role="dialog" aria-label="Foreground surface">
+        <button type="button">Foreground control</button>
+      </div>
       <Composer
+        ref={composerRef}
         sessionId={sessionId}
         onSend={() => undefined}
         disabled={state.disabled}
@@ -83,9 +110,25 @@ const renderComposer = (
         onSearchAgents={state.mentions ? async () => [] : undefined}
         onSearchSessions={state.mentions ? async () => [] : undefined}
       />
+    </>
+  );
+};
+
+const composerView = (
+  sessionId = 'shortcut-session',
+  state: ComposerTestState = {},
+) => (
+  <I18nextProvider i18n={i18n}>
+    <ToastProvider>
+      <ComposerShortcutHarness sessionId={sessionId} state={state} />
     </ToastProvider>
-  </I18nextProvider>,
+  </I18nextProvider>
 );
+
+const renderComposer = (
+  sessionId = 'shortcut-session',
+  state: ComposerTestState = {},
+) => render(composerView(sessionId, state));
 
 beforeEach(() => {
   window.localStorage.clear();
@@ -138,16 +181,47 @@ describe('Composer voice shortcut', () => {
     expect(voiceMocks.finish).toHaveBeenCalledOnce();
   });
 
-  it('does not handle the shortcut outside the composer', async () => {
+  it('starts and finishes from anywhere in the Chat page without taking foreign focus', async () => {
     renderComposer('scoped-shortcut-session');
-    const textbox = screen.getByRole('textbox');
+    const outside = screen.getByRole('button', { name: 'Outside composer' });
+    await act(async () => undefined);
+    outside.focus();
+
+    fireEvent.keyDown(outside, { code: 'KeyZ', altKey: true });
+    await waitFor(() => expect(voiceMocks.getUserMedia).toHaveBeenCalledOnce());
+    expect(document.activeElement).toBe(outside);
+
+    fireEvent.keyDown(outside, { code: 'KeyZ', altKey: true });
+    expect(voiceMocks.finish).toHaveBeenCalledOnce();
+  });
+
+  it('does not start behind a foreground surface but always finishes an active recording', async () => {
+    const view = renderComposer('gated-shortcut-session');
+    const outside = screen.getByRole('button', { name: 'Outside composer' });
+    const foreground = screen.getByRole('button', { name: 'Foreground control' });
     await act(async () => undefined);
 
-    fireEvent.keyDown(window, { code: 'KeyZ', altKey: true });
+    fireEvent.keyDown(foreground, { code: 'KeyZ', altKey: true });
     expect(voiceMocks.getUserMedia).not.toHaveBeenCalled();
 
-    fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
+    fireEvent.keyDown(outside, { code: 'KeyZ', altKey: true });
     await waitFor(() => expect(voiceMocks.getUserMedia).toHaveBeenCalledOnce());
+    view.rerender(composerView('gated-shortcut-session', { shortcutStartEnabled: false }));
+
+    fireEvent.keyDown(foreground, { code: 'KeyZ', altKey: true });
+    expect(voiceMocks.finish).toHaveBeenCalledOnce();
+  });
+
+  it('does not start when the Chat page is not eligible', async () => {
+    renderComposer('inactive-shortcut-session', { shortcutStartEnabled: false });
+    await screen.findByRole('button', { name: en.chat.compose.voice });
+    await act(async () => undefined);
+
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Outside composer' }), {
+      code: 'KeyZ',
+      altKey: true,
+    });
+    expect(voiceMocks.getUserMedia).not.toHaveBeenCalled();
   });
 
   it('keeps a configured editor chord through the complete voice flow', async () => {
