@@ -31,7 +31,7 @@ describe('SourceRow', () => {
 
   it('explains that a healthy source is not currently supplying a route', () => {
     render(<I18nextProvider i18n={i18n}><SourceRow source={source} onOpen={vi.fn()} /></I18nextProvider>);
-    expect(screen.getByText(/Available · not currently supplying|可用 · 当前未供给/i)).toBeTruthy();
+    expect(screen.getByText(/Available · not currently supplying|可用 · 当前未使用/i)).toBeTruthy();
   });
 
   it('labels a custom upstream by host and protocol', () => {
@@ -55,12 +55,12 @@ describe('SourceRow', () => {
         />
       </I18nextProvider>,
     );
-    expect(screen.getByText(/Supplying Claude Code|正在供给 Claude Code/i)).toBeTruthy();
+    expect(screen.getByText(/Supplying Claude Code|正在使用 Claude Code/i)).toBeTruthy();
   });
 
   it('consumes persisted adoption when the source projection carries it', () => {
     render(<I18nextProvider i18n={i18n}><SourceRow source={{ ...source, state: { ...source.state, status: 'standby' }, adopted_by: [{ backend: 'codex', menu_model: 'gpt-5' }] }} onOpen={vi.fn()} /></I18nextProvider>);
-    expect(screen.getByText(/Supplying Codex|正在供给 Codex/i)).toBeTruthy();
+    expect(screen.getByText(/Supplying Codex|正在使用 Codex/i)).toBeTruthy();
   });
 
   it('does not show a cached adoption after that backend switches to direct mode', () => {
@@ -73,8 +73,8 @@ describe('SourceRow', () => {
         />
       </I18nextProvider>,
     );
-    expect(screen.queryByText(/Supplying Codex|正在供给 Codex/i)).toBeNull();
-    expect(screen.getByText(/Available · not currently supplying|可用 · 当前未供给/i)).toBeTruthy();
+    expect(screen.queryByText(/Supplying Codex|正在使用 Codex/i)).toBeNull();
+    expect(screen.getByText(/Available · not currently supplying|可用 · 当前未使用/i)).toBeTruthy();
   });
 
   it('advances cooldown copy when its retry deadline passes', () => {

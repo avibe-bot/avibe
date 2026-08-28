@@ -32,7 +32,7 @@ describe('SourcesCard footer', () => {
       </I18nextProvider>,
     );
 
-    const panel = screen.getByRole('heading', { name: /Upstream sources|上游来源/i }).closest('section');
+    const panel = screen.getByRole('heading', { name: /Upstream sources|模型供应商/i }).closest('section');
     expect(panel?.className).toContain('w-full');
     expect(panel?.className).toContain('min-w-0');
     expect(panel?.className).not.toContain('max-h-full');
@@ -60,7 +60,7 @@ describe('SourcesCard footer', () => {
       </I18nextProvider>,
     );
 
-    const info = screen.getByRole('button', { name: /What upstream sources are|什么是上游来源/i });
+    const info = screen.getByRole('button', { name: /What upstream sources are|什么是模型供应商/i });
     await user.tab();
     expect(document.activeElement).toBe(info);
     await user.keyboard('[Enter]');
@@ -80,7 +80,7 @@ describe('SourcesCard footer', () => {
 
     const subscription = screen.getByRole('button', { name: /Add subscription|添加订阅/i });
     expect((subscription as HTMLButtonElement).disabled).toBe(false);
-    expect(screen.queryByRole('button', { name: /^Add source$|^添加来源$/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Add source$|^添加供应商$/i })).toBeNull();
 
     await userEvent.click(screen.getByRole('button', { name: /Add API key|添加 API Key/i }));
     expect(onAddApiKey).toHaveBeenCalledOnce();
