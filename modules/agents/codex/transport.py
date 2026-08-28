@@ -18,6 +18,50 @@ logger = logging.getLogger(__name__)
 STREAM_BUFFER_LIMIT = 128 * 1024 * 1024  # 128 MB
 
 
+# Avibe owns the user-facing surface, durable automation, memory, and agent
+# delegation. Keep Codex app-server focused on the execution capabilities that
+# Avibe deliberately exposes instead of inheriting Codex client features from a
+# user's global config. These overrides are appended last so backend extra args
+# cannot re-enable a competing host surface for this process.
+AVIBE_APP_SERVER_CONFIG_OVERRIDES = (
+    "analytics.enabled=false",
+    "check_for_update_on_startup=false",
+    "feedback.enabled=false",
+    "features.apps=false",
+    "features.auth_elicitation=false",
+    "features.browser_use=false",
+    "features.browser_use_external=false",
+    "features.browser_use_full_cdp_access=false",
+    "features.computer_use=false",
+    "features.goals=false",
+    "features.guardian_approval=false",
+    "features.hooks=false",
+    "features.in_app_browser=false",
+    "features.in_app_updates=false",
+    "features.memories=false",
+    "features.mentions_v2=false",
+    "features.multi_agent=false",
+    "features.personality=false",
+    "features.plugin_sharing=false",
+    "features.plugins=false",
+    "features.recommended_plugins=false",
+    "features.remote_plugin=false",
+    "features.skill_mcp_dependency_install=false",
+    "features.terminal_visualization_instructions=false",
+    "features.tool_call_mcp_elicitation=false",
+    "features.tool_suggest=false",
+    "features.workspace_dependencies=false",
+)
+
+
+def _avibe_app_server_config_args() -> list[str]:
+    return [
+        arg
+        for override in AVIBE_APP_SERVER_CONFIG_OVERRIDES
+        for arg in ("-c", override)
+    ]
+
+
 class CodexTransport:
     """Manages a persistent ``codex app-server`` subprocess.
 
@@ -74,10 +118,7 @@ class CodexTransport:
             + ["app-server"]
             + self._runtime_args
             + self._extra_args
-            # Keep this process-local policy last so user args cannot re-enable
-            # memory. Older Codex builds ignore unknown config keys, while an
-            # unknown ``--disable`` feature would abort startup.
-            + ["-c", "features.memories=false"]
+            + _avibe_app_server_config_args()
         )
         logger.info("Launching Codex app-server: %s (cwd=%s)", " ".join(cmd), self._cwd)
 
@@ -117,8 +158,12 @@ class CodexTransport:
                 {
                     "clientInfo": {
                         "name": "avibe",
+                        "title": "Avibe",
                         "version": "1.0.0",
                     },
+                    # Avibe intentionally consumes only the stable app-server
+                    # contract. Omitted server-request capabilities stay off.
+                    "capabilities": {"experimentalApi": False},
                 },
             )
             logger.info("Codex app-server initialized: %s", resp)
