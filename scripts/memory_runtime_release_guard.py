@@ -4,8 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
-from email.parser import Parser
 import hashlib
 import json
 import re
@@ -17,8 +15,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath, PureWindowsPath
-import zipfile
+from pathlib import Path
 
 try:
     from scripts.release_package_version import package_version_from_release_tag
@@ -39,7 +36,6 @@ POLICY_EXCLUSION_EXIT = 2
 INTERNAL_GUARD_FAILURE_EXIT = 3
 PACKAGE_POLICY_SCHEMA_VERSION = 1
 SUPPORTED_NAMESPACE_POLICY_VERSIONS = frozenset({1})
-WHEEL_DATA_SCHEMES = frozenset({"data", "headers", "platlib", "purelib", "scripts"})
 
 
 class ReleaseGuardError(RuntimeError):
@@ -147,20 +143,6 @@ def _release_version(release_tag: str) -> str:
         raise ReleaseAssetError(f"invalid release tag: {release_tag!r}") from exc
 
 
-def _is_safe_relative_path(value: str) -> bool:
-    path = PurePosixPath(value)
-    canonical = str(path) + ("/" if value.endswith("/") else "")
-    return (
-        bool(path.parts)
-        and "\x00" not in value
-        and "\\" not in value
-        and not path.is_absolute()
-        and not PureWindowsPath(value).drive
-        and ".." not in path.parts
-        and value == canonical
-    )
-
-
 def load_package_release_policy(
     manifest_bytes: bytes,
     *,
@@ -245,82 +227,41 @@ def classify_requirement(raw: str) -> RequirementClassification:
     return RequirementClassification(str(utils.canonicalize_name(requirement.name)), str(requirement.specifier), exact_version, bool(requirement.extras), requirement.marker is not None, requirement.url is not None)
 
 
-def inspect_wheel(
-    wheel: Path,
+def _verify_package_identity(
+    wheel_filename: str,
+    metadata: PackageMetadata,
     *,
-    supported_python_versions: tuple[str, ...] = (),
-    expected_wheel_tag: str | None = None,
-) -> PackageMetadata:
-    """Validate wheel controls and metadata without installing the wheel."""
+    expected_name: str,
+    expected_version: str,
+    expected_wheel_tag: str,
+) -> None:
+    """Bind an A2-supplied metadata record to filename and declared policy."""
     _, _, tags, utils, versions = _packaging_modules()
+    if (
+        type(metadata) is not PackageMetadata
+        or type(wheel_filename) is not str
+        or type(metadata.name) is not str
+        or type(metadata.version) is not str
+        or type(metadata.requires_python) is not str
+        or type(metadata.requires_dist) is not tuple
+        or any(type(requirement) is not str for requirement in metadata.requires_dist)
+    ):
+        raise ReleaseAssetError("transition package metadata types are invalid")
     try:
-        filename_name, filename_version, _, filename_tags = utils.parse_wheel_filename(wheel.name)
-    except utils.InvalidWheelFilename as exc:
-        raise ReleaseAssetError(f"invalid wheel filename: {wheel.name}") from exc
-    try:
-        with zipfile.ZipFile(wheel) as archive:
-            names = archive.namelist()
-            canonical = [str(PurePosixPath(name)) + ("/" if name.endswith("/") else "") for name in names]
-            unsafe = any(not _is_safe_relative_path(name) or ("/" in name and name.split("/", 1)[0].endswith(".data") and name.split("/", 2)[1] not in WHEEL_DATA_SCHEMES) for name in names)
-            dist_infos = {name.split("/", 1)[0] for name in names if "/" in name and name.split("/", 1)[0].endswith(".dist-info")}
-            if len(names) != len({name.rstrip("/").casefold() for name in canonical}) or unsafe or len(dist_infos) != 1:
-                raise ReleaseAssetError(f"wheel control structure is invalid: {wheel.name}")
-            dist_info = next(iter(dist_infos))
-            required = {f"{dist_info}/{name}" for name in ("METADATA", "WHEEL", "RECORD")}
-            if not required <= set(names):
-                raise ReleaseAssetError(f"wheel control structure is invalid: {wheel.name}")
-            if archive.testzip() is not None:
-                raise ReleaseAssetError(f"wheel member integrity is invalid: {wheel.name}")
-            metadata_bytes = archive.read(f"{dist_info}/METADATA")
-            try:
-                from packaging.metadata import Metadata
-
-                Metadata.from_email(metadata_bytes, validate=True)
-            except Exception as exc:
-                raise ReleaseAssetError(f"wheel core metadata is invalid: {wheel.name}") from exc
-            metadata_message = Parser().parsestr(metadata_bytes.decode("utf-8"))
-            wheel_message = Parser().parsestr(archive.read(f"{dist_info}/WHEEL").decode("utf-8"))
-            record_rows = list(csv.reader(archive.read(f"{dist_info}/RECORD").decode("utf-8").splitlines()))
-            if not record_rows or any(len(row) != 3 or not _is_safe_relative_path(row[0]) for row in record_rows):
-                raise ReleaseAssetError(f"wheel RECORD structure is invalid: {wheel.name}")
-    except (OSError, UnicodeDecodeError, zipfile.BadZipFile) as exc:
-        raise ReleaseAssetError(f"cannot read wheel structure: {wheel.name}") from exc
-    values = [metadata_message.get_all(key) or [] for key in ("Name", "Version", "Requires-Python")]
-    wheel_versions = wheel_message.get_all("Wheel-Version") or []
-    if any(len(field) != 1 or not field[0] for field in values) or len(wheel_versions) != 1:
-        raise ReleaseAssetError(f"wheel metadata identity is invalid: {wheel.name}")
-    name, version, requires_python = (field[0] for field in values)
-    try:
-        parsed_version = str(versions.Version(version))
-        declared_tags = {tag for value in wheel_message.get_all("Tag") or [] for tag in tags.parse_tag(value)}
-        policy_tags = tags.parse_tag(expected_wheel_tag) if expected_wheel_tag is not None else filename_tags
-        wheel_version = re.fullmatch(r"([0-9]+)\.([0-9]+)", wheel_versions[0])
-        if wheel_version is None:
-            raise ValueError
-        wheel_major = int(wheel_version.group(1))
-    except (ValueError, versions.InvalidVersion) as exc:
-        raise ReleaseAssetError(f"wheel metadata version or tags are invalid: {wheel.name}") from exc
-    if wheel_major > 1:
-        raise ReleaseAssetError(f"wheel metadata version is unsupported: {wheel.name}")
-    if declared_tags != filename_tags:
-        raise ReleaseAssetError(f"wheel metadata tags differ from filename: {wheel.name}")
-    if expected_wheel_tag is not None and filename_tags != policy_tags:
-        raise ReleaseAssetError(f"wheel tags differ from release policy: {wheel.name}")
-    platforms = {tag.platform for tag in policy_tags}
-    for supported_version in supported_python_versions:
-        try:
-            if re.fullmatch(r"[0-9]+\.[0-9]+", supported_version) is None:
-                raise ValueError
-            python_version = tuple(map(int, supported_version.split(".")))
-        except (TypeError, ValueError) as exc:
-            raise ReleaseAssetError(f"supported Python version is invalid: {supported_version!r}") from exc
-        if policy_tags.isdisjoint((*tags.cpython_tags(python_version, platforms=platforms), *tags.compatible_tags(python_version, platforms=platforms))):
-            raise ReleaseAssetError(f"wheel tags do not cover supported Python {supported_version}: {wheel.name}")
-    parsed = PackageMetadata(str(utils.canonicalize_name(name)), parsed_version, requires_python, tuple(sorted(metadata_message.get_all("Requires-Dist") or [])))
-    expected_dist_info = f"{str(filename_name).replace('-', '_')}-{filename_version}.dist-info"
-    if parsed.name != str(filename_name) or parsed.version != str(filename_version) or dist_info != expected_dist_info:
-        raise ReleaseAssetError(f"wheel filename identity differs from metadata: {wheel.name}")
-    return parsed
+        filename_name, filename_version, _, filename_tags = utils.parse_wheel_filename(wheel_filename)
+        metadata_name = str(utils.canonicalize_name(metadata.name))
+        metadata_version = str(versions.Version(metadata.version))
+        policy_tags = tags.parse_tag(expected_wheel_tag)
+    except (TypeError, ValueError, utils.InvalidWheelFilename, versions.InvalidVersion) as exc:
+        raise ReleaseAssetError(f"transition package identity is invalid: {wheel_filename!r}") from exc
+    if metadata_name != str(filename_name) or metadata_version != str(filename_version):
+        raise ReleaseAssetError(f"wheel filename identity differs from metadata: {wheel_filename}")
+    if metadata_name != expected_name:
+        raise ReleaseAssetError("transition wheel distribution identity is invalid")
+    if metadata_version != expected_version:
+        raise ReleaseAssetError("wheel metadata version does not match the release tag")
+    if filename_tags != policy_tags:
+        raise ReleaseAssetError(f"wheel tags differ from release policy: {wheel_filename}")
 
 
 def _requirements_for(metadata: PackageMetadata, name: str) -> tuple[RequirementClassification, ...]:
@@ -331,34 +272,44 @@ def _requirements_for(metadata: PackageMetadata, name: str) -> tuple[Requirement
 
 
 def verify_static_transition(
-    core_wheel: Path,
-    memory_wheel: Path,
     *,
+    core_wheel_filename: str,
+    core_metadata: PackageMetadata,
+    memory_wheel_filename: str,
+    memory_metadata: PackageMetadata,
     release_tag: str,
     manifest_bytes: bytes,
     expected_manifest: bytes,
 ) -> tuple[PackageMetadata, PackageMetadata, PackageReleasePolicy]:
-    """Freeze A's static contract for successor B's staged and rebuilt wheels."""
+    """Freeze A1's policy interface for A2-supplied wheel metadata."""
     policy = load_package_release_policy(manifest_bytes, expected_manifest=expected_manifest, release_tag=release_tag)
-    core = inspect_wheel(core_wheel, supported_python_versions=policy.supported_python_versions, expected_wheel_tag=policy.wheel_tag)
-    memory = inspect_wheel(memory_wheel, supported_python_versions=policy.supported_python_versions, expected_wheel_tag=policy.wheel_tag)
     expected_version = _release_version(release_tag)
-    if core.name != "avibe-os" or memory.name != "avibe-memory":
-        raise ReleaseAssetError("transition wheel distribution identity is invalid")
-    if core.version != expected_version or memory.version != expected_version:
-        raise ReleaseAssetError("wheel metadata version does not match the release tag")
-    if core.requires_python != policy.requires_python or memory.requires_python != policy.requires_python:
+    _verify_package_identity(
+        core_wheel_filename,
+        core_metadata,
+        expected_name="avibe-os",
+        expected_version=expected_version,
+        expected_wheel_tag=policy.wheel_tag,
+    )
+    _verify_package_identity(
+        memory_wheel_filename,
+        memory_metadata,
+        expected_name="avibe-memory",
+        expected_version=expected_version,
+        expected_wheel_tag=policy.wheel_tag,
+    )
+    if core_metadata.requires_python != policy.requires_python or memory_metadata.requires_python != policy.requires_python:
         raise ReleaseAssetError(f"wheel Requires-Python must match release policy {policy.requires_python}")
-    memory_dependencies = _requirements_for(core, "avibe-memory")
+    memory_dependencies = _requirements_for(core_metadata, "avibe-memory")
     if len(memory_dependencies) != 1 or memory_dependencies[0].exact_version != expected_version:
         raise ReleaseAssetError("transition core must hard-depend on the exact Memory version")
-    core_dependencies = _requirements_for(memory, "avibe-os")
+    core_dependencies = _requirements_for(memory_metadata, "avibe-os")
     if len(core_dependencies) != 1:
         raise ReleaseAssetError("Memory metadata must contain exactly one avibe-os dependency")
     reverse = core_dependencies[0]
     if reverse.exact_version != expected_version:
         raise ReleaseAssetError("Memory must hard-depend on the exact avibe-os release version")
-    return core, memory, policy
+    return core_metadata, memory_metadata, policy
 
 
 def _sha256(path: Path) -> str:

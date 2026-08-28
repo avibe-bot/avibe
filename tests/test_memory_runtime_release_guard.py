@@ -8,7 +8,6 @@ import subprocess
 import sys
 import tarfile
 from pathlib import Path
-import zipfile
 
 import pytest
 
@@ -92,64 +91,49 @@ def _manifest(
     return manifest, remote
 
 
-def _wheel(
-    path: Path,
+def _package_metadata(
     name: str,
     *,
     version: str = "3.1.0",
     requires_python: str = ">=3.10",
     requires_dist: tuple[str, ...] = (),
-    metadata_version: str | None = "2.4",
-    wheel_version: str = "1.0",
-    wheel_tag: str = "py3-none-any",
-    include_wheel_metadata: bool = True,
-    include_record: bool = True,
-) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    dist_info = f"{name.replace('-', '_')}-{version}.dist-info"
-    metadata_header = "" if metadata_version is None else f"Metadata-Version: {metadata_version}\n"
-    metadata = (
-        f"{metadata_header}Name: {name}\nVersion: {version}\n"
-        f"Requires-Python: {requires_python}\n"
-        + "".join(f"Requires-Dist: {requirement}\n" for requirement in requires_dist)
-        + "\n"
-    ).encode()
-    files = {f"{dist_info}/METADATA": metadata, f"{name.replace('-', '_')}/__init__.py": b"x = 1\n"}
-    if include_wheel_metadata:
-        files[f"{dist_info}/WHEEL"] = (
-            f"Wheel-Version: {wheel_version}\nGenerator: gate5a-test\n"
-            f"Root-Is-Purelib: true\nTag: {wheel_tag}\n\n"
-        ).encode()
-    if include_record:
-        record = f"{dist_info}/RECORD"
-        files[record] = ("".join(f"{item},,\n" for item in sorted(files)) + f"{record},,\n").encode()
-    with zipfile.ZipFile(path, "w") as archive:
-        for member, content in files.items():
-            archive.writestr(member, content)
-    return path
+) -> guard.PackageMetadata:
+    return guard.PackageMetadata(name, version, requires_python, requires_dist)
 
 
-def _transition_wheels(
-    tmp_path: Path,
+def _verify_static(
+    manifest: Path,
     *,
-    version: str = "3.1.0",
+    metadata_version: str = "3.1.0",
+    filename_version: str | None = None,
     requires_python: str = ">=3.10",
     wheel_tag: str = "py3-none-any",
     core_requirement: str = "avibe-memory==3.1.0",
     memory_requirement: str = "avibe-os==3.1.0",
-) -> tuple[Path, Path]:
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    def build(name: str, requirement: str) -> Path:
-        stem = name.replace("-", "_")
-        return _wheel(tmp_path / f"{stem}-{version}-{wheel_tag}.whl", name, version=version, requires_python=requires_python, requires_dist=(requirement,), wheel_tag=wheel_tag)
-
-    return build("avibe-os", core_requirement), build("avibe-memory", memory_requirement)
-
-
-def _verify_static(tmp_path: Path, manifest: Path, **wheel_options):
-    core, memory = _transition_wheels(tmp_path, **wheel_options)
+) -> tuple[guard.PackageMetadata, guard.PackageMetadata, guard.PackageReleasePolicy]:
+    filename_version = filename_version or metadata_version
+    core = _package_metadata(
+        "avibe-os",
+        version=metadata_version,
+        requires_python=requires_python,
+        requires_dist=(core_requirement,),
+    )
+    memory = _package_metadata(
+        "avibe-memory",
+        version=metadata_version,
+        requires_python=requires_python,
+        requires_dist=(memory_requirement,),
+    )
     manifest_bytes = manifest.read_bytes()
-    return guard.verify_static_transition(core, memory, release_tag=json.loads(manifest_bytes)["release_tag"], manifest_bytes=manifest_bytes, expected_manifest=manifest_bytes)
+    return guard.verify_static_transition(
+        core_wheel_filename=f"avibe_os-{filename_version}-{wheel_tag}.whl",
+        core_metadata=core,
+        memory_wheel_filename=f"avibe_memory-{filename_version}-{wheel_tag}.whl",
+        memory_metadata=memory,
+        release_tag=json.loads(manifest_bytes)["release_tag"],
+        manifest_bytes=manifest_bytes,
+        expected_manifest=manifest_bytes,
+    )
 
 
 @pytest.mark.parametrize(
@@ -206,89 +190,32 @@ def test_package_policy_pins_universal_wheel_tag(tmp_path: Path) -> None:
 
 
 def test_wheel_filename_metadata_and_release_tag_are_independent_identities(tmp_path: Path) -> None:
-    wheel = _wheel(tmp_path / "avibe_os-3.1.1-py3-none-any.whl", "avibe-os")
+    manifest, _ = _manifest(tmp_path / "metadata")
     with pytest.raises(guard.ReleaseAssetError, match="filename identity"):
-        guard.inspect_wheel(wheel)
-    for directory, options in (("wheel", {"include_wheel_metadata": False}), ("record", {"include_record": False})):
-        invalid = _wheel(tmp_path / directory / "avibe_os-3.1.0-py3-none-any.whl", "avibe-os", **options)
-        with pytest.raises(guard.ReleaseAssetError, match="control structure"):
-            guard.inspect_wheel(invalid)
+        _verify_static(manifest, filename_version="3.1.1")
 
     manifest, _ = _manifest(tmp_path / "release", release_tag="v3.1.1")
     with pytest.raises(guard.ReleaseAssetError, match="release tag"):
-        _verify_static(tmp_path / "wheels", manifest)
+        _verify_static(manifest)
 
 
-def test_wheel_version_requires_complete_major_minor_syntax(tmp_path: Path) -> None:
-    wheel = _wheel(tmp_path / "avibe_os-3.1.0-py3-none-any.whl", "avibe-os", wheel_version="1.foo")
-    with pytest.raises(guard.ReleaseAssetError, match="metadata version"):
-        guard.inspect_wheel(wheel)
-
-
-@pytest.mark.parametrize(("metadata_version", "accepted"), [(None, False), ("999.0", False), ("2.4", True)])
-def test_wheel_validates_core_metadata_version(tmp_path: Path, metadata_version: str | None, accepted: bool) -> None:
-    wheel = _wheel(tmp_path / "avibe_os-3.1.0-py3-none-any.whl", "avibe-os", metadata_version=metadata_version)
-    if accepted:
-        assert guard.inspect_wheel(wheel).name == "avibe-os"
-    else:
-        with pytest.raises(guard.ReleaseAssetError, match="core metadata"):
-            guard.inspect_wheel(wheel)
-
-
-def test_wheel_tags_match_filename_tags(tmp_path: Path) -> None:
-    wheel = _wheel(tmp_path / "avibe_os-3.1.0-py3-none-any.whl", "avibe-os", wheel_tag="cp312-cp312-linux_x86_64")
-    with pytest.raises(guard.ReleaseAssetError, match="tags"):
-        guard.inspect_wheel(wheel)
-    manifest, _ = _manifest(tmp_path / "policy")
+def test_declared_wheel_tag_binds_wheel_filenames(tmp_path: Path) -> None:
+    manifest, _ = _manifest(tmp_path)
     with pytest.raises(guard.ReleaseAssetError, match="release policy"):
-        _verify_static(tmp_path / "supported", manifest, wheel_tag="cp312-cp312-manylinux_2_17_x86_64")
+        _verify_static(manifest, wheel_tag="cp312-cp312-manylinux_2_17_x86_64")
     with pytest.raises(guard.ReleaseAssetError, match="release policy"):
-        _verify_static(tmp_path / "platform", manifest, wheel_tag="py3-none-manylinux_2_17_x86_64")
-    invalid_python = _wheel(tmp_path / "python" / "avibe_os-3.1.0-py3-none-any.whl", "avibe-os")
-    with pytest.raises(guard.ReleaseAssetError, match="supported Python"):
-        guard.inspect_wheel(invalid_python, supported_python_versions=("3.11+local",))
-
-
-def test_wheel_rejects_path_aliases_and_corrupt_members(tmp_path: Path) -> None:
-    alias = _wheel(tmp_path / "alias" / "avibe_os-3.1.0-py3-none-any.whl", "avibe-os")
-    with zipfile.ZipFile(alias, "a") as archive:
-        archive.writestr("avibe_os-3.1.0.dist-info/./METADATA", b"alias")
-    corrupt = _wheel(tmp_path / "corrupt" / "avibe_os-3.1.0-py3-none-any.whl", "avibe-os")
-    corrupt.write_bytes(corrupt.read_bytes().replace(b"x = 1\n", b"x = 2\n"))
-    unsupported = _wheel(tmp_path / "data" / "avibe_os-3.1.0-py3-none-any.whl", "avibe-os")
-    with zipfile.ZipFile(unsupported, "a") as archive:
-        archive.writestr("avibe_os-3.1.0.data/unknown/payload", b"data")
-    for wheel in (alias, corrupt, unsupported):
-        with pytest.raises(guard.ReleaseAssetError):
-            guard.inspect_wheel(wheel)
-
-
-@pytest.mark.parametrize(
-    "record",
-    (b"\n\n", b"../../outside-victim,,\n", b"/absolute/path,,\n", b"bad\\path,,\n", b"bad\x00path,,\n", b"C:/absolute/path,,\n"),
-)
-def test_wheel_rejects_invalid_record_rows(tmp_path: Path, record: bytes) -> None:
-    wheel = _wheel(
-        tmp_path / "avibe_os-3.1.0-py3-none-any.whl",
-        "avibe-os",
-        include_record=False,
-    )
-    with zipfile.ZipFile(wheel, "a") as archive:
-        archive.writestr("avibe_os-3.1.0.dist-info/RECORD", record)
-
-    with pytest.raises(guard.ReleaseAssetError, match="RECORD"):
-        guard.inspect_wheel(wheel)
+        _verify_static(manifest, wheel_tag="py3-none-manylinux_2_17_x86_64")
 
 
 def test_static_transition_uses_release_bound_requires_python(tmp_path: Path) -> None:
     manifest, _ = _manifest(tmp_path)
-    core, memory, policy = _verify_static(tmp_path / "valid", manifest)
+    core, memory, policy = _verify_static(manifest)
     assert core.version == memory.version == "3.1.0"
     assert policy.requires_python == ">=3.10"
     assert policy.wheel_tag == "py3-none-any"
 
     with pytest.raises(guard.ReleaseAssetError, match="Requires-Python"):
-        _verify_static(tmp_path / "mismatch", manifest, requires_python=">=3.11")
+        _verify_static(manifest, requires_python=">=3.11")
 
 
 def test_requirement_classification_keeps_wildcard_equality_non_exact(tmp_path: Path) -> None:
@@ -297,11 +224,11 @@ def test_requirement_classification_keeps_wildcard_equality_non_exact(tmp_path: 
 
     manifest, _ = _manifest(tmp_path)
     with pytest.raises(guard.ReleaseAssetError, match="hard-depend"):
-        _verify_static(tmp_path / "wildcard", manifest, core_requirement="avibe-memory==3.1.*")
+        _verify_static(manifest, core_requirement="avibe-memory==3.1.*")
     with pytest.raises(guard.ReleaseAssetError, match="exact avibe-os"):
-        _verify_static(tmp_path / "reverse", manifest, memory_requirement="avibe-os>=4")
+        _verify_static(manifest, memory_requirement="avibe-os>=4")
     with pytest.raises(guard.ReleaseAssetError, match="exact avibe-os"):
-        _verify_static(tmp_path / "overbroad", manifest, memory_requirement="avibe-os>=0")
+        _verify_static(manifest, memory_requirement="avibe-os>=0")
 
 
 def test_existing_guard_commands_remain_stdlib_only(tmp_path: Path) -> None:
