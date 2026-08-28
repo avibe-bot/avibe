@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from copy import deepcopy
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
@@ -66,7 +67,7 @@ def _resolved(tmp_path: Path) -> ResolvedRollbackPlan:
             version=requirement.version,
             path=staging_dir / f"{requirement.distribution}-{requirement.version}.whl",
             sha256=("a" if index == 0 else "b") * 64,
-            requires_dist=("dependency==1",) if index == 0 else (),
+            requires_dist=(captured.core_provider.requires_dist if index == 0 else ()),
         )
         for index, requirement in enumerate(requirements)
     )
@@ -215,17 +216,11 @@ def test_memory_indep_019_decoder_rejects_duplicate_staged_distribution(
         decode_resolved_rollback_plan_record(payload)
 
 
-def test_memory_indep_019_captured_encoder_rejects_unvalidated_dto() -> None:
-    record = decode_captured_package_shape_record(
-        encode_captured_package_shape_record(_captured())
-    )
-    invalid = replace(
-        record,
-        core_provider=replace(record.core_provider, version="03.0.14"),
-    )
+def test_memory_indep_019_captured_dto_construction_rejects_invalid_state() -> None:
+    record = decode_captured_package_shape_record(encode_captured_package_shape_record(_captured()))
 
     with pytest.raises(PackageShapeRecordError, match="not canonical"):
-        encode_captured_package_shape_record(invalid)
+        replace(record.core_provider, version="03.0.14")
 
 
 def test_memory_indep_019_decoder_derives_family_from_core_metadata() -> None:
@@ -263,19 +258,72 @@ def test_memory_indep_019_rejects_invalid_distribution_names(
         decode_resolved_rollback_plan_record(payload)
 
 
-def test_memory_indep_019_resolved_encoder_rejects_unvalidated_dto(
+def test_memory_indep_019_resolved_dto_construction_rejects_invalid_state(
     tmp_path: Path,
 ) -> None:
-    record = decode_resolved_rollback_plan_record(
-        encode_resolved_rollback_plan_record(_resolved(tmp_path))
-    )
-    invalid = replace(
-        record,
-        artifacts=(replace(record.artifacts[0], sha256="not-a-digest"), *record.artifacts[1:]),
-    )
+    record = decode_resolved_rollback_plan_record(encode_resolved_rollback_plan_record(_resolved(tmp_path)))
 
     with pytest.raises(PackageShapeRecordError, match="SHA-256"):
-        encode_resolved_rollback_plan_record(invalid)
+        replace(record.artifacts[0], sha256="not-a-digest")
+
+
+def test_memory_indep_019_dto_rejects_staged_core_family_disagreement(
+    tmp_path: Path,
+) -> None:
+    record = decode_resolved_rollback_plan_record(encode_resolved_rollback_plan_record(_resolved(tmp_path)))
+    staged_core = replace(
+        record.artifacts[0],
+        requires_dist=("avibe-memory==3.0.14",),
+    )
+
+    with pytest.raises(PackageShapeRecordError, match="captured release family"):
+        replace(record, artifacts=(staged_core, *record.artifacts[1:]))
+
+
+@pytest.mark.parametrize("target", ["staging_dir", "artifact_path"])
+def test_memory_indep_019_dto_binds_artifacts_to_staging_directory(
+    target: str,
+    tmp_path: Path,
+) -> None:
+    record = decode_resolved_rollback_plan_record(encode_resolved_rollback_plan_record(_resolved(tmp_path)))
+
+    with pytest.raises(PackageShapeRecordError, match="staging directory"):
+        if target == "staging_dir":
+            replace(record, staging_dir=str(tmp_path / "elsewhere"))
+        else:
+            artifact = replace(
+                record.artifacts[0],
+                path=str(tmp_path / "outside.whl"),
+            )
+            replace(record, artifacts=(artifact, *record.artifacts[1:]))
+
+
+def test_memory_indep_019_dto_requires_canonical_unique_artifact_paths(
+    tmp_path: Path,
+) -> None:
+    record = decode_resolved_rollback_plan_record(encode_resolved_rollback_plan_record(_resolved(tmp_path)))
+
+    with pytest.raises(PackageShapeRecordError, match="canonical absolute path"):
+        replace(record, staging_dir=f"{record.staging_dir}{os.sep}.")
+    duplicate_path = replace(
+        record.artifacts[1],
+        distribution="dependency",
+        version="1",
+        path=record.artifacts[0].path,
+    )
+    with pytest.raises(PackageShapeRecordError, match="duplicate artifact paths"):
+        replace(record, artifacts=(record.artifacts[0], duplicate_path))
+
+
+def test_memory_indep_019_dto_rejects_conflicting_provider_identity() -> None:
+    record = decode_captured_package_shape_record(encode_captured_package_shape_record(_captured()))
+    memory_provider = replace(
+        record.memory_providers[0],
+        provider_id=record.core_provider.provider_id,
+    )
+
+    with pytest.raises(PackageShapeRecordError, match="conflicting metadata"):
+        replace(record, memory_providers=(memory_provider,))
 
 
 def test_memory_indep_019_decoded_record_reencodes_without_live_files(
