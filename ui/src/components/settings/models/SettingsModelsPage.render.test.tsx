@@ -154,7 +154,7 @@ describe('SettingsModelsPage surface branches', () => {
   it('coalesces the OAuth success landing with its trailing stale-row notification', () => {
     const page = readFileSync(join(process.cwd(), 'src/components/settings/models/SettingsModelsPage.tsx'), 'utf8');
     const start = page.indexOf('const subscriptionAdded');
-    const callback = page.slice(start, page.indexOf('React.useEffect(() => {', start));
+    const callback = page.slice(start, page.indexOf('const closeSubscription', start));
 
     expect(callback).toMatch(/if \(!source\) \{[\s\S]*?subscriptionSuccessReconcileRef\.current/);
     expect(callback).toMatch(/sourceEntityAuthority\.landLatest\(source\)[\s\S]*?subscriptionSuccessReconcileRef\.current = true;[\s\S]*?void refresh\(\)/);
@@ -187,15 +187,19 @@ describe('SettingsModelsPage surface branches', () => {
     await screen.findByText('Retained source');
     const listSources = vi.mocked(modelsApi.listSources);
     const refreshesBeforeCreate = listSources.mock.calls.length;
+    listSources.mockResolvedValue([retainedSource, created]);
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: /Add subscription|添加订阅/i }));
     await user.click(await screen.findByRole('menuitem', { name: /Claude subscription|Claude 订阅/i }));
     await user.click(screen.getByRole('button', { name: /Sign in|去登录/i }));
 
     await waitFor(() => expect(status).toHaveBeenCalledWith(terminal.flow_id));
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+    expect(screen.queryByRole('dialog', { name: 'Created subscription' })).toBeNull();
     await waitFor(() => expect(listSources).toHaveBeenCalledTimes(refreshesBeforeCreate + 1));
     await act(async () => Promise.resolve());
     expect(listSources).toHaveBeenCalledTimes(refreshesBeforeCreate + 1);
+    await waitFor(() => expect(screen.getByRole('dialog', { name: 'Created subscription' })).toBeTruthy(), { timeout: 2500 });
   });
 
   it('renders Frame 09 as the sources tab when every backend is direct and no source exists', async () => {
@@ -471,7 +475,8 @@ describe('SettingsModelsPage surface branches', () => {
     renderPage([editableSource]);
     const user = userEvent.setup();
 
-    await user.click((await screen.findByText('Retained source')).closest('button') as HTMLButtonElement);
+    const sourceOpener = (await screen.findByText('Retained source')).closest('button') as HTMLButtonElement;
+    await user.click(sourceOpener);
     const sourceDialog = await screen.findByRole('dialog', { name: 'Retained source' });
     await user.click(within(sourceDialog).getByRole('button', { name: /high/i }));
     const tierInput = within(sourceDialog).getByPlaceholderText(/Enter to add|回车添加/i);
@@ -482,7 +487,16 @@ describe('SettingsModelsPage surface branches', () => {
     expect(within(sourceDialog).queryByPlaceholderText(/Enter to add|回车添加/i)).toBeNull();
 
     await user.click(within(sourceDialog).getByRole('button', { name: /^Add model$|^添加模型$/i }));
-    const manualDraft = sourceDialog.querySelector('[data-manual-model-draft]');
+    let manualDraft = sourceDialog.querySelector('[data-manual-model-draft]');
+    const modelIdInput = within(manualDraft as HTMLElement).getByPlaceholderText(/^Model ID$|^模型 ID$/i);
+    await user.type(modelIdInput, 'draft-model');
+    await user.keyboard('{Escape}');
+
+    expect(screen.getByRole('dialog', { name: 'Retained source' })).toBeTruthy();
+    expect(sourceDialog.querySelector('[data-manual-model-draft]')).toBeNull();
+
+    await user.click(within(sourceDialog).getByRole('button', { name: /^Add model$|^添加模型$/i }));
+    manualDraft = sourceDialog.querySelector('[data-manual-model-draft]');
     const draftTierInput = within(manualDraft as HTMLElement).getByPlaceholderText(/Enter to add|回车添加/i);
     await user.type(draftTierInput, 'draft');
     await user.keyboard('{Escape}');
@@ -492,6 +506,7 @@ describe('SettingsModelsPage surface branches', () => {
 
     await user.keyboard('{Escape}');
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Retained source' })).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(sourceOpener));
   });
 
   it('moves recent switches into the Logs tab and removes the Advanced placeholder', async () => {

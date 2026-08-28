@@ -339,12 +339,11 @@ const DraftTiers: React.FC<{
         </span>
       ))}
       <Input
-        data-source-dialog-local-escape
         value={draft}
         onChange={(event) => setDraft(event.target.value)}
         onKeyDown={(event) => {
           if (event.key === 'Enter') { event.preventDefault(); add(); }
-          if (event.key === 'Escape') { event.preventDefault(); setDraft(''); event.currentTarget.blur(); }
+          if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setDraft(''); event.currentTarget.blur(); }
         }}
         placeholder={t('settings.models.sourceDetail.tiers.inputHint') as string}
         className="model-hub-source-tier h-7 w-36 rounded-full border-mint/40 px-2.5"
@@ -931,7 +930,16 @@ export const SourceDetailPanel: React.FC<{
           </div>
         ))}
         {manualDraft && (
-          <div data-manual-model-draft className="model-hub-source-table-draft grid gap-3 border-y border-mint/20 bg-mint/[0.05] md:items-center md:gap-y-0">
+          <div
+            data-manual-model-draft
+            data-source-dialog-local-escape
+            className="model-hub-source-table-draft grid gap-3 border-y border-mint/20 bg-mint/[0.05] md:items-center md:gap-y-0"
+            onKeyDown={(event) => {
+              if (event.key !== 'Escape') return;
+              event.preventDefault();
+              if (!busy) setManualDraft(null);
+            }}
+          >
             <span className="flex min-w-0 items-center gap-2"><Input
                 autoFocus
                 value={manualDraft.modelId}

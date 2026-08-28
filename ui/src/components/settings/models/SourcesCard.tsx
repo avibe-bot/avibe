@@ -12,7 +12,7 @@ export const SourcesCard: React.FC<{
   read: RegionRead<Source[]>;
   onRetry: () => void;
   readFailureCopy?: string;
-  onOpenSource: (source: Source) => void;
+  onOpenSource: (source: Source, opener: HTMLButtonElement) => void;
   onAddApiKey: () => void;
   onAddSubscription: () => void;
   subscriptionPickerOpen?: boolean;

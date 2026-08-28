@@ -16,7 +16,7 @@ import type { AgentBackend, Source } from './types';
 
 export const SourceRow: React.FC<{
   source: Source;
-  onOpen: (source: Source) => void;
+  onOpen: (source: Source, opener: HTMLButtonElement) => void;
   activeBackends?: ReadonlySet<AgentBackend>;
 }> = ({ source, onOpen, activeBackends }) => {
   const { t, i18n } = useTranslation();
@@ -44,7 +44,7 @@ export const SourceRow: React.FC<{
     <button
       type="button"
       data-source-id={source.id}
-      onClick={() => onOpen(source)}
+      onClick={(event) => onOpen(source, event.currentTarget)}
       className={cn(
         'flex h-auto min-h-[96px] w-full items-center gap-2.5 rounded-[10px] border border-border bg-background px-3 py-2 text-left transition-colors hover:border-border-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
         adopted && source.supply_channel === 'native_cli' && 'border-cyan/30 bg-cyan/[0.04]',
