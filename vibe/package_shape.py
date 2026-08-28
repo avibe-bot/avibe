@@ -420,24 +420,32 @@ def encode_captured_package_shape_record(
     """Encode captured evidence into a versioned JSON-safe object."""
 
     record = _captured_to_record(captured)
-    _validate_captured_record(record)
-    return {
-        "schema_version": PACKAGE_SHAPE_RECORD_SCHEMA_VERSION,
-        "record_type": "captured_package_shape",
-        "shape": {
-            "core_provider": _encode_provider(record.core_provider),
-            "launcher": {
-                "python": record.launcher.python,
-                "main": record.launcher.main,
+    try:
+        _validate_captured_record(record)
+        payload: dict[str, object] = {
+            "schema_version": PACKAGE_SHAPE_RECORD_SCHEMA_VERSION,
+            "record_type": "captured_package_shape",
+            "shape": {
+                "core_provider": _encode_provider(record.core_provider),
+                "launcher": {
+                    "python": record.launcher.python,
+                    "main": record.launcher.main,
+                },
+                "release_family": record.release_family.value,
+                "memory_providers": [
+                    _encode_provider(provider) for provider in record.memory_providers
+                ],
+                "transition_memory_version": record.transition_memory_version,
+                "residual_memory": record.residual_memory,
             },
-            "release_family": record.release_family.value,
-            "memory_providers": [
-                _encode_provider(provider) for provider in record.memory_providers
-            ],
-            "transition_memory_version": record.transition_memory_version,
-            "residual_memory": record.residual_memory,
-        },
-    }
+        }
+    except PackageShapeRecordError:
+        raise
+    except (AttributeError, TypeError) as exc:
+        raise PackageShapeRecordError("captured record DTO is invalid") from exc
+    if decode_captured_package_shape_record(payload) != record:
+        raise PackageShapeRecordError("captured record DTO is not canonical")
+    return payload
 
 
 def decode_captured_package_shape_record(value: object) -> CapturedPackageShapeRecord:
@@ -622,21 +630,71 @@ def _validate_plan_record(record: ResolvedRollbackPlanRecord) -> None:
     _validate_captured_record(record.captured)
     if not record.requirements or not record.artifacts:
         raise PackageShapeRecordError("resolved rollback record has an empty closure")
-    requirement_keys = {
-        (item.distribution, item.version) for item in record.requirements
-    }
-    artifact_keys = {(item.distribution, item.version) for item in record.artifacts}
-    if (
-        len(requirement_keys) != len(record.requirements)
-        or not requirement_keys <= artifact_keys
+    captured = record.captured
+    if captured.release_family is ReleaseFamily.TRANSITION and (
+        not captured.memory_providers
+        or captured.memory_providers[0].version != captured.transition_memory_version
     ):
-        raise PackageShapeRecordError("resolved rollback record has an inconsistent closure")
+        raise PackageShapeRecordError(
+            "resolved transition record does not contain its exact Memory target"
+        )
+    expected_requirements = [
+        ExactRequirement(captured.core_provider.name, captured.core_provider.version)
+    ]
+    if captured.memory_providers:
+        memory_provider = captured.memory_providers[0]
+        expected_requirements.append(
+            ExactRequirement(memory_provider.name, memory_provider.version)
+        )
+    if record.requirements != tuple(expected_requirements):
+        raise PackageShapeRecordError(
+            "resolved requirements do not match the captured rollback target"
+        )
+
+    by_distribution: dict[str, list[StagedArtifactRecord]] = {}
+    for artifact in record.artifacts:
+        by_distribution.setdefault(artifact.distribution, []).append(artifact)
+    if any(len(artifacts) != 1 for artifacts in by_distribution.values()):
+        raise PackageShapeRecordError(
+            "resolved staging contains a duplicate distribution"
+        )
+    core_artifacts = tuple(
+        artifact
+        for artifact in record.artifacts
+        if artifact.distribution in CORE_DISTRIBUTION_NAMES
+    )
+    if len(core_artifacts) != 1 or (
+        core_artifacts[0].distribution,
+        core_artifacts[0].version,
+    ) != (captured.core_provider.name, captured.core_provider.version):
+        raise PackageShapeRecordError(
+            "resolved staging does not match the captured core target"
+        )
+    memory_artifacts = tuple(
+        artifact
+        for artifact in record.artifacts
+        if artifact.distribution == MEMORY_PACKAGE_NAME
+    )
+    staged_memory_version = (
+        memory_artifacts[0].version if len(memory_artifacts) == 1 else None
+    )
+    captured_memory_version = (
+        captured.memory_providers[0].version
+        if captured.memory_providers
+        else None
+    )
+    if (
+        len(memory_artifacts) != len(captured.memory_providers)
+        or staged_memory_version != captured_memory_version
+    ):
+        raise PackageShapeRecordError(
+            "resolved staging does not match the captured Memory target"
+        )
     expected_uninstalls = tuple(
         sorted((*CORE_DISTRIBUTION_NAMES, MEMORY_PACKAGE_NAME))
     )
     if record.uninstall_distributions != expected_uninstalls:
         raise PackageShapeRecordError("resolved rollback record has an unknown uninstall set")
-    captured = record.captured
     expected_verification = PackageShapeVerification(
         core_distribution=captured.core_provider.name,
         core_version=captured.core_provider.version,
@@ -661,45 +719,53 @@ def encode_resolved_rollback_plan_record(
     """Encode a plan as data that cannot itself authorize execution."""
 
     record = _plan_to_record(plan)
-    _validate_plan_record(record)
-    return {
-        "schema_version": PACKAGE_SHAPE_RECORD_SCHEMA_VERSION,
-        "record_type": "resolved_rollback_plan",
-        "plan": {
-            "captured": encode_captured_package_shape_record(record.captured),
-            "requirements": [
-                {
-                    "distribution": item.distribution,
-                    "version": item.version,
-                }
-                for item in record.requirements
-            ],
-            "artifacts": [
-                {
-                    "distribution": item.distribution,
-                    "version": item.version,
-                    "path": item.path,
-                    "sha256": item.sha256,
-                    "requires_dist": list(item.requires_dist),
-                }
-                for item in record.artifacts
-            ],
-            "staging_dir": record.staging_dir,
-            "uninstall_distributions": list(record.uninstall_distributions),
-            "verification": {
-                "core_distribution": record.verification.core_distribution,
-                "core_version": record.verification.core_version,
-                "absent_core_distributions": list(
-                    record.verification.absent_core_distributions
-                ),
-                "memory_provider_cardinality": (
-                    record.verification.memory_provider_cardinality
-                ),
-                "memory_version": record.verification.memory_version,
-                "residual_memory": record.verification.residual_memory,
+    try:
+        _validate_plan_record(record)
+        payload: dict[str, object] = {
+            "schema_version": PACKAGE_SHAPE_RECORD_SCHEMA_VERSION,
+            "record_type": "resolved_rollback_plan",
+            "plan": {
+                "captured": encode_captured_package_shape_record(record.captured),
+                "requirements": [
+                    {
+                        "distribution": item.distribution,
+                        "version": item.version,
+                    }
+                    for item in record.requirements
+                ],
+                "artifacts": [
+                    {
+                        "distribution": item.distribution,
+                        "version": item.version,
+                        "path": item.path,
+                        "sha256": item.sha256,
+                        "requires_dist": list(item.requires_dist),
+                    }
+                    for item in record.artifacts
+                ],
+                "staging_dir": record.staging_dir,
+                "uninstall_distributions": list(record.uninstall_distributions),
+                "verification": {
+                    "core_distribution": record.verification.core_distribution,
+                    "core_version": record.verification.core_version,
+                    "absent_core_distributions": list(
+                        record.verification.absent_core_distributions
+                    ),
+                    "memory_provider_cardinality": (
+                        record.verification.memory_provider_cardinality
+                    ),
+                    "memory_version": record.verification.memory_version,
+                    "residual_memory": record.verification.residual_memory,
+                },
             },
-        },
-    }
+        }
+    except PackageShapeRecordError:
+        raise
+    except (AttributeError, TypeError) as exc:
+        raise PackageShapeRecordError("resolved record DTO is invalid") from exc
+    if decode_resolved_rollback_plan_record(payload) != record:
+        raise PackageShapeRecordError("resolved record DTO is not canonical")
+    return payload
 
 
 def decode_resolved_rollback_plan_record(value: object) -> ResolvedRollbackPlanRecord:

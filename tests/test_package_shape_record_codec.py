@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
 import pytest
@@ -179,6 +179,57 @@ def test_resolved_decoder_rejects_unknown_schema_version(tmp_path: Path) -> None
 
     with pytest.raises(PackageShapeRecordError, match="schema version"):
         decode_resolved_rollback_plan_record(payload)
+
+
+def test_resolved_decoder_binds_closure_to_captured_target(tmp_path: Path) -> None:
+    payload = encode_resolved_rollback_plan_record(_resolved(tmp_path))
+    payload["plan"]["requirements"][0].update(  # type: ignore[index]
+        distribution="unrelated",
+        version="1",
+    )
+    payload["plan"]["artifacts"][0].update(  # type: ignore[index]
+        distribution="unrelated",
+        version="1",
+    )
+
+    with pytest.raises(PackageShapeRecordError, match="captured rollback target"):
+        decode_resolved_rollback_plan_record(payload)
+
+
+def test_resolved_decoder_rejects_duplicate_staged_distribution(tmp_path: Path) -> None:
+    payload = encode_resolved_rollback_plan_record(_resolved(tmp_path))
+    duplicate = deepcopy(payload["plan"]["artifacts"][0])  # type: ignore[index]
+    duplicate["version"] = "3.0.13"
+    payload["plan"]["artifacts"].append(duplicate)  # type: ignore[index]
+
+    with pytest.raises(PackageShapeRecordError, match="duplicate distribution"):
+        decode_resolved_rollback_plan_record(payload)
+
+
+def test_captured_encoder_rejects_unvalidated_record_dto() -> None:
+    record = decode_captured_package_shape_record(
+        encode_captured_package_shape_record(_captured())
+    )
+    invalid = replace(
+        record,
+        core_provider=replace(record.core_provider, version="03.0.14"),
+    )
+
+    with pytest.raises(PackageShapeRecordError, match="not canonical"):
+        encode_captured_package_shape_record(invalid)
+
+
+def test_resolved_encoder_rejects_unvalidated_record_dto(tmp_path: Path) -> None:
+    record = decode_resolved_rollback_plan_record(
+        encode_resolved_rollback_plan_record(_resolved(tmp_path))
+    )
+    invalid = replace(
+        record,
+        artifacts=(replace(record.artifacts[0], sha256="not-a-digest"), *record.artifacts[1:]),
+    )
+
+    with pytest.raises(PackageShapeRecordError, match="SHA-256"):
+        encode_resolved_rollback_plan_record(invalid)
 
 
 def test_decoded_record_reencodes_without_live_files(tmp_path: Path) -> None:
