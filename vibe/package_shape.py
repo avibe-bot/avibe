@@ -3,6 +3,10 @@
 Plan-record dependency-closure semantics belong to the immediate successor
 slice (b). Until that slice merges, consumers must not consume persisted plan
 records for G3-1B outer records or G3-2 rehydration.
+
+Strictness belongs to our package facts; tolerance belongs only to unrelated
+environmental presence. Live inventory screens relevance tolerantly, then
+validates relevant facts strictly. Persisted record decode is always strict.
 """
 
 from __future__ import annotations
@@ -907,14 +911,15 @@ def inspect_installed_distribution_providers(
     try:
         for distribution in distributions:
             name = distribution.metadata["Name"]
-            if not isinstance(name, str) or not name.strip():
-                raise PackageShapeError("installed distribution name is unreadable")
+            if not isinstance(name, str) or canonicalize_name(name.strip()) not in (
+                *CORE_DISTRIBUTION_NAMES,
+                MEMORY_PACKAGE_NAME,
+            ):
+                continue
             canonical_name = _canonical_distribution_name(
                 name,
                 field="installed distribution",
             )
-            if canonical_name not in CORE_DISTRIBUTION_NAMES and canonical_name != MEMORY_PACKAGE_NAME:
-                continue
             providers.append(
                 DistributionProvider(
                     name=canonical_name,
