@@ -159,16 +159,18 @@ def _transition_packages(
     core_files: dict[str, bytes] | None = None,
     core_requirements: tuple[str, ...] = (f"avibe-memory=={VERSION}",),
     memory_extra_files: dict[str, bytes] | None = None,
+    memory_files: dict[str, bytes] | None = None,
     memory_requirements: tuple[str, ...] = ("avibe-os>=3.0.14.dev0,<3.2",),
 ) -> tuple[Path, dict[str, Path]]:
     package_dir = root / "packages"
     package_dir.mkdir(parents=True)
-    memory_files = {
-        "avibe_memory/__init__.py": b"from .runtime import start\n",
-        "avibe_memory/runtime.py": b"def start(): return None\n",
-        guard.MEMORY_MANIFEST_PATH: manifest.read_bytes(),
-        **(memory_extra_files or {}),
-    }
+    if memory_files is None:
+        memory_files = {
+            "avibe_memory/__init__.py": b"from .runtime import start\n",
+            "avibe_memory/runtime.py": b"def start(): return None\n",
+            guard.MEMORY_MANIFEST_PATH: manifest.read_bytes(),
+        }
+    memory_files.update(memory_extra_files or {})
     artifacts: dict[str, Path] = {}
     for key, name, requirements, files in (
         ("core", "avibe-os", core_requirements, core_files or CORE_FILES),
@@ -285,13 +287,13 @@ def test_package_guard_evaluates_markers_with_the_bound_interpreter(tmp_path: Pa
 @pytest.mark.parametrize(
     ("package_options", "error"),
     [
-        ({"memory_extra_files": {"core/controller.py": b"shadow\n"}}, "namespace policy"),
-        ({"memory_extra_files": {f"avibe_memory-{VERSION}.data/scripts/vibe": b"shadow\n"}}, "namespace policy"),
+        ({"memory_extra_files": {"core/controller.py": b"shadow\n"}}, "forbidden path policy"),
+        ({"memory_extra_files": {f"avibe_memory-{VERSION}.data/scripts/vibe": b"shadow\n"}}, "forbidden path policy"),
         (
             {"core_files": {**CORE_FILES, "avibe_os-3.1.0.data/purelib/avibe_memory/runtime.py": b"shadow\n"}},
-            "namespace policy",
+            "forbidden path policy",
         ),
-        ({"core_files": {**CORE_FILES, guard.MEMORY_MANIFEST_PATH: b"owned\n"}}, "must not own"),
+        ({"core_files": {**CORE_FILES, guard.MEMORY_MANIFEST_PATH: b"owned\n"}}, "forbidden path policy"),
     ],
 )
 def test_package_guard_enforces_memory_namespace_policy_in_both_artifact_forms(
@@ -299,6 +301,12 @@ def test_package_guard_enforces_memory_namespace_policy_in_both_artifact_forms(
 ) -> None:
     manifest, _ = _manifest(tmp_path)
     _reject(tmp_path, manifest, error, **package_options)
+
+
+def test_package_guard_proves_runtime_without_source_tree_leakage(tmp_path: Path) -> None:
+    manifest, _ = _manifest(tmp_path)
+    files = {guard.MEMORY_MANIFEST_PATH: manifest.read_bytes()}
+    _reject(tmp_path, manifest, "installed Memory runtime probe failed", memory_files=files)
 
 
 def test_package_guard_uses_manifest_frozen_python_policy(tmp_path: Path) -> None:

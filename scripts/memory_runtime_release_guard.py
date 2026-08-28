@@ -50,7 +50,6 @@ POLICY_EXCLUSION_EXIT = 2
 INTERNAL_GUARD_FAILURE_EXIT = 3
 LEGACY_MANIFEST_ABSENT_EXIT = 4
 MEMORY_MANIFEST_PATH = "vibe/memory_runtime_manifest.json"
-REQUIRED_MEMORY_IMPLEMENTATION = frozenset({"avibe_memory/__init__.py", "avibe_memory/runtime.py"})
 
 
 class ReleaseGuardError(RuntimeError):
@@ -151,24 +150,35 @@ class ManifestDiscovery:
 
 INSTALL_SCHEMES = ("purelib", "platlib", "scripts", "headers", "data")
 PIP_OFFLINE_FLAGS = ("--disable-pip-version-check", "--no-input", "--no-index", "--no-cache-dir")
-_EMPTY_SCHEMES = dict.fromkeys(INSTALL_SCHEMES, frozenset())
-_CORE_LIBRARIES = frozenset({"config/", "core/", "modules/", "storage/", "vibe/"})
-_MEMORY_LIBRARIES = frozenset({"avibe_memory/", MEMORY_MANIFEST_PATH})
-NAMESPACE_POLICIES = {
+_CORE_FORBIDDEN = frozenset({"avibe_memory/", MEMORY_MANIFEST_PATH})
+_MEMORY_FORBIDDEN = frozenset({"config/", "core/", "modules/", "storage/", "vibe/"})
+FORBIDDEN_PATH_POLICIES = {
     1: {
-        "avibe-os": {
-            **_EMPTY_SCHEMES,
-            "purelib": _CORE_LIBRARIES,
-            "platlib": _CORE_LIBRARIES,
-            "scripts": frozenset({"vibe"}),
-        },
+        "avibe-os": {scheme: _CORE_FORBIDDEN for scheme in INSTALL_SCHEMES},
         "avibe-memory": {
-            **_EMPTY_SCHEMES,
-            "purelib": _MEMORY_LIBRARIES,
-            "platlib": _MEMORY_LIBRARIES,
+            **{scheme: _MEMORY_FORBIDDEN for scheme in INSTALL_SCHEMES},
+            "scripts": _MEMORY_FORBIDDEN | {"vibe"},
         },
     }
 }
+_RUNTIME_PROBE = (
+    "import hashlib, importlib.resources as resources, sys\n"
+    "from importlib.metadata import distribution, packages_distributions\n"
+    "from pathlib import Path\n"
+    "expected_version, expected_digest, source = sys.argv[1:]\n"
+    "source = Path(source).resolve()\n"
+    "assert all(source != (path := Path(item).resolve()) and source not in path.parents for item in sys.path)\n"
+    "import avibe_memory\n"
+    "provider = distribution('avibe-memory')\n"
+    "normalize = lambda value: value.lower().replace('_', '-')\n"
+    "assert normalize(provider.metadata['Name']) == 'avibe-memory'\n"
+    "assert provider.version == expected_version\n"
+    "assert {normalize(name) for name in packages_distributions().get('avibe_memory', ())} == {'avibe-memory'}\n"
+    "assert Path(sys.prefix).resolve() in Path(avibe_memory.__file__).resolve().parents\n"
+    "manifest = resources.files('vibe').joinpath('memory_runtime_manifest.json')\n"
+    "assert manifest.is_file()\n"
+    "assert hashlib.sha256(manifest.read_bytes()).hexdigest() == expected_digest\n"
+)
 
 
 def _run_interpreter(
@@ -179,7 +189,7 @@ def _run_interpreter(
     environment = {key: value for key, value in os.environ.items() if not key.startswith("PIP_")}
     environment.update(PIP_CONFIG_FILE=os.devnull, PIP_NO_CACHE_DIR="1", PYTHONNOUSERSITE="1", PYTHONPATH="")
     try:
-        executable = python_executable.expanduser().resolve(strict=True)
+        executable = python_executable.expanduser().absolute()
         result = subprocess.run(
             [str(executable), *arguments],
             env=environment,
@@ -419,7 +429,7 @@ def _package_release_policy(payload: dict, release_tag: str) -> PackageReleasePo
         or not versions
         or any(not isinstance(version, str) for version in versions)
         or len(versions) != len(set(versions))
-        or namespace_policy_version not in NAMESPACE_POLICIES
+        or namespace_policy_version not in FORBIDDEN_PATH_POLICIES
     ):
         raise ManifestPolicyError("manifest package_policy identity is invalid")
     try:
@@ -452,12 +462,12 @@ def discover_release_manifest(
             if memory_paths
             else None
         )
-        core_manifest = _package_file(core, MEMORY_MANIFEST_PATH)
-        memory_manifest = _package_file(memory, MEMORY_MANIFEST_PATH) if memory else None
+        core_manifest = _distribution_resource(core, MEMORY_MANIFEST_PATH)
+        memory_manifest = _distribution_resource(memory, MEMORY_MANIFEST_PATH) if memory else None
     if core_manifest and memory_manifest:
         raise ReleaseAssetError("Memory Runtime manifest ownership is ambiguous")
     if memory_manifest:
-        return ManifestDiscovery("memory", memory_manifest)
+        return ManifestDiscovery("memory", memory_manifest[1])
     transition_pin = _exact_memory_pin(core.metadata)
     if transition_pin is not None:
         detail = "artifact is missing" if memory is None else "artifact has no owned manifest"
@@ -465,18 +475,17 @@ def discover_release_manifest(
     if memory is not None:
         raise ReleaseAssetError("legacy release unexpectedly contains an unowned Memory wheel")
     if core_manifest:
-        return ManifestDiscovery("core", core_manifest)
+        return ManifestDiscovery("core", core_manifest[1])
     if release_tag is not None and _release_version(release_tag) > LAST_LEGACY_RELEASE_VERSION:
         raise ReleaseAssetError("transition-and-later release is missing its Memory manifest")
     raise LegacyManifestAbsent("legacy release predates the Memory Runtime manifest")
 
 
-def _package_file(package: InstalledDistribution, path: str) -> bytes | None:
-    for scheme in ("purelib", "platlib"):
-        key = (scheme, path)
-        if key in package.files:
-            return package.files[key]
-    return None
+def _distribution_resource(package: InstalledDistribution, path: str) -> tuple[str, bytes] | None:
+    matches = [(scheme, content) for (scheme, name), content in package.files.items() if name == path]
+    if len(matches) > 1:
+        raise ReleaseAssetError(f"distribution resource has multiple installed locations: {path}")
+    return matches[0] if matches else None
 
 
 def _owned_files(package: InstalledDistribution) -> dict[tuple[str, str], bytes]:
@@ -490,17 +499,18 @@ def _owned_files(package: InstalledDistribution) -> dict[tuple[str, str], bytes]
     }
 
 
-def _assert_namespace_policy(
+def _assert_forbidden_paths(
     package: InstalledDistribution,
     distribution: str,
     policy_version: int,
 ) -> None:
-    policy = NAMESPACE_POLICIES[policy_version][distribution]
+    policy = FORBIDDEN_PATH_POLICIES[policy_version][distribution]
     for key in _owned_files(package):
         scheme, path = key
-        allowed = policy[scheme]
-        if not any(path == entry or (entry.endswith("/") and path.startswith(entry)) for entry in allowed):
-            raise ReleaseAssetError(f"{distribution} artifact violates namespace policy: {scheme}/{path}")
+        if distribution == "avibe-memory" and path == MEMORY_MANIFEST_PATH:
+            continue
+        if any(path == entry or (entry.endswith("/") and path.startswith(entry)) for entry in policy.get(scheme, ())):
+            raise ReleaseAssetError(f"{distribution} artifact violates forbidden path policy: {scheme}/{path}")
 
 
 def _assert_transition_pair(
@@ -528,21 +538,8 @@ def _assert_transition_pair(
     requires_python = {core.metadata.requires_python, memory.metadata.requires_python}
     if requires_python != {policy.requires_python}:
         raise ReleaseAssetError(f"core and Memory Requires-Python must match release policy {policy.requires_python}")
-    _assert_namespace_policy(core, "avibe-os", policy.namespace_policy_version)
-    _assert_namespace_policy(memory, "avibe-memory", policy.namespace_policy_version)
-    if _package_file(core, MEMORY_MANIFEST_PATH) is not None:
-        raise ReleaseAssetError("core artifact must not own the Memory Runtime manifest")
-    implementation = {
-        path for scheme, path in memory.files if scheme in {"purelib", "platlib"} and path.startswith("avibe_memory/")
-    }
-    if not REQUIRED_MEMORY_IMPLEMENTATION.issubset(implementation):
-        raise ReleaseAssetError("Memory artifact is missing required implementation files")
-    if _package_file(memory, MEMORY_MANIFEST_PATH) is None:
-        raise ReleaseAssetError("Memory artifact is missing its owned manifest")
-    collisions = set(_owned_files(core)) & set(_owned_files(memory))
-    if collisions:
-        scheme, path = sorted(collisions)[0]
-        raise ReleaseAssetError(f"core and Memory install paths collide: {scheme}/{path}")
+    _assert_forbidden_paths(core, "avibe-os", policy.namespace_policy_version)
+    _assert_forbidden_paths(memory, "avibe-memory", policy.namespace_policy_version)
     return version
 
 
@@ -606,6 +603,48 @@ def _install_pair(
     )
 
 
+def _runtime_probe(
+    wheels: tuple[Path, Path],
+    find_links: tuple[Path, ...],
+    root: Path,
+    python_executable: Path,
+    version: str,
+    manifest_bytes: bytes,
+) -> None:
+    environment = root / "environment"
+    _run_interpreter(
+        python_executable,
+        ["-I", "-m", "venv", str(environment)],
+        "cannot create isolated Memory runtime probe environment",
+    )
+    environment_python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    links = [item for directory in find_links for item in ("--find-links", str(directory.resolve()))]
+    _run_pip(
+        environment_python,
+        [
+            "install",
+            *PIP_OFFLINE_FLAGS,
+            "--no-compile",
+            "--only-binary=:all:",
+            *links,
+            *(str(w.resolve()) for w in wheels),
+        ],
+        "offline pip install failed",
+    )
+    _run_interpreter(
+        environment_python,
+        [
+            "-I",
+            "-c",
+            _RUNTIME_PROBE,
+            version,
+            hashlib.sha256(manifest_bytes).hexdigest(),
+            str(Path(__file__).resolve().parents[1]),
+        ],
+        "installed Memory runtime probe failed",
+    )
+
+
 def verify_transition_distributions(
     asset_dir: Path,
     rebuild_root: Path,
@@ -618,7 +657,8 @@ def verify_transition_distributions(
     rebuild_root.mkdir(parents=True, exist_ok=True)
     attempt = Path(tempfile.mkdtemp(prefix="attempt-", dir=rebuild_root))
     staged = _install_pair((core_wheel, memory_wheel), attempt / "staged", python_executable)
-    manifest_bytes = _package_file(staged[1], MEMORY_MANIFEST_PATH)
+    manifest_resource = _distribution_resource(staged[1], MEMORY_MANIFEST_PATH)
+    manifest_bytes = manifest_resource[1] if manifest_resource else None
     try:
         manifest_payload = json.loads(manifest_bytes) if manifest_bytes is not None else None
     except (TypeError, json.JSONDecodeError) as exc:
@@ -637,13 +677,6 @@ def verify_transition_distributions(
     version = _assert_transition_pair(*staged, policy)
     if Version(version) != _release_version(release_tag):
         raise ReleaseAssetError("distribution version does not match the release tag")
-    _pip_install(
-        python_executable,
-        (core_wheel, memory_wheel),
-        (asset_dir,),
-        attempt / "staged-combined",
-        no_deps=False,
-    )
     rebuilt_wheels = (
         rebuild_sdist_wheel(
             core_sdist, attempt / "core-build", python_executable=python_executable, find_links=(asset_dir,)
@@ -665,12 +698,21 @@ def verify_transition_distributions(
             raise ReleaseAssetError(f"{distribution} wheel and sdist metadata differ")
         if _owned_files(staged_package) != _owned_files(rebuilt_package):
             raise ReleaseAssetError(f"{distribution} wheel and sdist installed content differ")
-    _pip_install(
+    _runtime_probe(
+        (core_wheel, memory_wheel),
+        (asset_dir,),
+        attempt / "staged-runtime",
         python_executable,
+        version,
+        manifest_bytes,
+    )
+    _runtime_probe(
         rebuilt_wheels,
         (asset_dir, rebuilt_wheels[0].parent, rebuilt_wheels[1].parent),
-        attempt / "rebuilt-combined",
-        no_deps=False,
+        attempt / "rebuilt-runtime",
+        python_executable,
+        version,
+        manifest_bytes,
     )
     return version
 
