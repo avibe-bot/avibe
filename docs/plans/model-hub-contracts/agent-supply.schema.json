@@ -186,7 +186,7 @@
       "description": "Read-only projection of every enabled named Vibe Agent on this backend, derived live from each Agent's explicit model. The distinct name avoids collision with SupplyGap.agents, whose items are bare names inside a mutation-refusal payload.",
       "items": {
         "type": "object",
-        "required": ["name", "effective_model_id", "supply_status"],
+        "required": ["name", "effective_model_id", "supply_status", "route_reason"],
         "additionalProperties": false,
         "properties": {
           "name": { "type": "string", "minLength": 1 },
@@ -197,6 +197,10 @@
           "supply_status": {
             "enum": ["ok", "degraded", "waiting", "interrupted", null],
             "description": "This named Agent's own live rollup for effective_model_id. null in Direct mode or when effective_model_id is null."
+          },
+          "route_reason": {
+            "enum": ["route_unconfigured", null],
+            "description": "Why this Agent has no usable route before Source health is considered. route_unconfigured means the selected model has no configured hops; null covers configured routes, Direct mode, and Agents without an explicit model."
           }
         },
         "allOf": [
@@ -230,8 +234,11 @@
           "model_supply": { "type": "null" },
           "named_agents": {
             "items": {
-              "required": ["supply_status"],
-              "properties": { "supply_status": { "type": "null" } }
+              "required": ["supply_status", "route_reason"],
+              "properties": {
+                "supply_status": { "type": "null" },
+                "route_reason": { "type": "null" }
+              }
             }
           }
         }

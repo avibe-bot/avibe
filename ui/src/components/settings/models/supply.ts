@@ -69,11 +69,14 @@ export const needsAttention = (state: SourceState): boolean =>
 export const healthyButUnrunnable = (agent: Pick<AgentSupply, 'sources'>, source: Source): boolean =>
   !isUnhealthy(source.state) && !processAvailabilityOf(agent, source.id).runnable;
 
-export type AgentGroupStatus = SupplyStatus | 'unused';
+export type AgentGroupStatus = SupplyStatus | 'unconfigured' | 'unused';
 
 /** Summarize the enabled Agents using one backend without inventing a backend selection. */
 export const agentGroupStatus = (agents: NamedAgentSupply[]): AgentGroupStatus => {
   if (agents.length === 0) return 'unused';
+  if (agents.every((agent) =>
+    agent.effective_model_id === null || agent.route_reason === 'route_unconfigured'
+  )) return 'unconfigured';
 
   const statuses = agents.map((agent) => agent.supply_status);
   if (statuses.every((status) => status === 'ok')) return 'ok';

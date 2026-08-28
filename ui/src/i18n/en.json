@@ -925,6 +925,7 @@
             "degraded": "Degraded",
             "waiting": "Supply unavailable for now",
             "interrupted": "No source is available",
+            "unconfigured": "No model route configured",
             "unused": "No Agent uses this backend"
           },
           "emptyModels": "This backend has no models"

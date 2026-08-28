@@ -45,14 +45,14 @@
       "react-hooks/preserve-manual-memoization": 1
     },
     "src/components/shared/RoutingConfigPanel.tsx": {
-      "@typescript-eslint/no-explicit-any": 3,
+      "@typescript-eslint/no-explicit-any": 2,
       "react-hooks/set-state-in-effect": 1
     },
     "src/components/steps/AgentDetection.tsx": {
       "@typescript-eslint/no-explicit-any": 3
     },
     "src/components/steps/ChannelList.tsx": {
-      "@typescript-eslint/no-explicit-any": 29
+      "@typescript-eslint/no-explicit-any": 28
     },
     "src/components/steps/DiscordConfig.tsx": {
       "@typescript-eslint/no-explicit-any": 6
@@ -79,7 +79,7 @@
       "@typescript-eslint/no-explicit-any": 4
     },
     "src/components/steps/UserList.tsx": {
-      "@typescript-eslint/no-explicit-any": 6
+      "@typescript-eslint/no-explicit-any": 3
     },
     "src/components/steps/WeChatConfig.tsx": {
       "@typescript-eslint/no-explicit-any": 4
