@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from bisect import bisect_left
 from email.parser import Parser
 import hashlib
 import json
@@ -76,6 +77,13 @@ class _WheelArchiveEntry:
     sha256: str
 
 
+@dataclass(frozen=True)
+class _PortableWheelPathPolicy:
+    invalid_component_chars: frozenset[str]
+    reserved_component_names: frozenset[str]
+    control_char_pattern: re.Pattern[str]
+
+
 _WHEEL_CONTROL_POLICY = _WheelControlPolicy(
     controls=(("METADATA", 1), ("WHEEL", 1)),
     wheel_version_major=1,
@@ -84,6 +92,15 @@ _WHEEL_CONTROL_POLICY = _WheelControlPolicy(
     tags=("py3-none-any",),
     parser_defects=(),
     parser_body="",
+)
+_PORTABLE_WHEEL_PATH_POLICY = _PortableWheelPathPolicy(
+    invalid_component_chars=frozenset('<>:"|?*'),
+    reserved_component_names=frozenset(
+        {"con", "prn", "aux", "nul"}
+        | {f"com{number}" for number in range(1, 10)}
+        | {f"lpt{number}" for number in range(1, 10)}
+    ),
+    control_char_pattern=re.compile(r"[\x00-\x1f\x7f-\x9f]"),
 )
 
 
@@ -336,18 +353,31 @@ def _compare_wheel_control_policy(wheel: Path, observed: dict[str, object]) -> N
         )
 
 
-def _is_safe_wheel_path(value: str) -> bool:
+def _portable_wheel_path_key(value: str) -> str | None:
+    policy = _PORTABLE_WHEEL_PATH_POLICY
+    if policy.control_char_pattern.search(value):
+        return None
     path = PurePosixPath(value)
     canonical = str(path) + ("/" if value.endswith("/") else "")
-    return (
-        bool(path.parts)
-        and "\x00" not in value
-        and "\\" not in value
-        and not path.is_absolute()
-        and not PureWindowsPath(value).drive
-        and ".." not in path.parts
-        and value == canonical
-    )
+    components = value.rstrip("/").split("/")
+    folded = tuple(component.casefold() for component in components)
+    if (
+        not path.parts
+        or "\\" in value
+        or path.is_absolute()
+        or PureWindowsPath(value).drive
+        or value != canonical
+        or any(
+            not component
+            or component in {".", ".."}
+            or component.endswith((" ", "."))
+            or not policy.invalid_component_chars.isdisjoint(component)
+            or folded_component.split(".", 1)[0] in policy.reserved_component_names
+            for component, folded_component in zip(components, folded, strict=True)
+        )
+    ):
+        return None
+    return "/".join(folded)
 
 
 def _inventory_wheel_member(
@@ -358,7 +388,11 @@ def _inventory_wheel_member(
     *,
     retain: bool,
 ) -> tuple[_WheelArchiveEntry, bytes | None]:
-    if member.file_size < 0 or member.file_size > MAX_WHEEL_MEMBER_BYTES:
+    if (
+        member.file_size < 0
+        or member.file_size > MAX_WHEEL_MEMBER_BYTES
+        or (member.is_dir() and member.file_size != 0)
+    ):
         raise ReleaseAssetError(f"wheel member size is invalid: {wheel.name}")
     digest = hashlib.sha256()
     content = bytearray() if retain else None
@@ -376,7 +410,7 @@ def _inventory_wheel_member(
         raise
     except Exception as exc:
         raise ReleaseAssetError(f"cannot read wheel member: {wheel.name}") from exc
-    if size != member.file_size:
+    if size != member.file_size or (member.is_dir() and size != 0):
         raise ReleaseAssetError(f"wheel member size is invalid: {wheel.name}")
     encoded = base64.urlsafe_b64encode(digest.digest()).rstrip(b"=").decode()
     entry = _WheelArchiveEntry(member.filename, path_key, member.is_dir(), size, encoded)
@@ -390,18 +424,15 @@ def _validate_wheel_archive(
     identities: list[tuple[zipfile.ZipInfo, str, str]] = []
     for info in infos:
         raw_name = info.orig_filename
-        if (
-            type(raw_name) is not str
-            or type(info.filename) is not str
-            or "\x00" in raw_name
-            or raw_name != info.filename
-            or not _is_safe_wheel_path(raw_name)
-        ):
+        if type(raw_name) is not str or type(info.filename) is not str or raw_name != info.filename:
             raise ReleaseAssetError(f"wheel archive structure is invalid: {wheel.name}")
-        identities.append((info, raw_name, raw_name.rstrip("/").casefold()))
+        path_key = _portable_wheel_path_key(raw_name)
+        if path_key is None:
+            raise ReleaseAssetError(f"wheel archive structure is invalid: {wheel.name}")
+        identities.append((info, raw_name, path_key))
     names = [name for _, name, _ in identities]
-    aliases = [alias for _, _, alias in identities]
-    file_aliases = {alias for info, _, alias in identities if not info.is_dir()}
+    topology = sorted((alias, info.is_dir()) for info, _, alias in identities)
+    aliases = [alias for alias, _ in topology]
     data_root = f"{dist_info.removesuffix('.dist-info')}.data"
     unsafe_data = any(
         parts[0].endswith(".data")
@@ -409,12 +440,15 @@ def _validate_wheel_archive(
         for name in names
         for parts in (name.split("/"),)
     )
+    duplicate_or_alias = any(left == right for left, right in zip(aliases, aliases[1:]))
     prefix_conflict = any(
-        other.startswith(f"{file_alias}/")
-        for file_alias in file_aliases
-        for other in aliases
+        index < len(aliases) and aliases[index].startswith(prefix)
+        for alias, is_dir in topology
+        if not is_dir
+        for prefix in (f"{alias}/",)
+        for index in (bisect_left(aliases, prefix),)
     )
-    if len(aliases) != len(set(aliases)) or unsafe_data or prefix_conflict:
+    if duplicate_or_alias or unsafe_data or prefix_conflict:
         raise ReleaseAssetError(f"wheel archive structure is invalid: {wheel.name}")
     record = f"{dist_info}/RECORD"
     retained = {record, *(f"{dist_info}/{name}" for name, _ in _WHEEL_CONTROL_POLICY.controls)}

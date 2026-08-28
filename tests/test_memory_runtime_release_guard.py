@@ -585,7 +585,18 @@ def test_wheel_translates_unreadable_members_to_asset_failure(
 
 @pytest.mark.parametrize(
     "member",
-    ["/absolute", "../outside", "pkg/./module.py", "bad\\path", "C:/absolute"],
+    [
+        "/absolute",
+        "../outside",
+        "pkg/./module.py",
+        "bad\\path",
+        "C:/absolute",
+        *(f"pkg/a{character}b" for character in '<>:"|?*'),
+        "pkg/trailing.",
+        "pkg/trailing ",
+        *(f"pkg/{name}" for name in ("CON", "prn.txt", "AUX", "NUL.bin", "COM1", "LPT9.py")),
+        "pkg/control\x1f",
+    ],
 )
 def test_wheel_rejects_unsafe_archive_paths(tmp_path: Path, member: str) -> None:
     manifest, _ = _manifest(tmp_path)
@@ -660,6 +671,57 @@ def test_wheel_rejects_file_and_descendant_topology(
             tmp_path / "wheels",
             manifest,
             core_options={"extra_files": {ancestor: b"x", "conflict/child": b"y"}},
+        )
+
+
+def test_wheel_topology_uses_one_binary_search_per_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wheel = _wheel(
+        tmp_path / "avibe_os-3.1.0-py3-none-any.whl",
+        "avibe-os",
+        extra_files={f"payload/item-{index:04d}": b"" for index in range(256)},
+    )
+    calls = 0
+    bisect_left = guard.bisect_left
+
+    def tracking_bisect(values: list[str], prefix: str) -> int:
+        nonlocal calls
+        calls += 1
+        return bisect_left(values, prefix)
+
+    monkeypatch.setattr(guard, "bisect_left", tracking_bisect)
+    with zipfile.ZipFile(wheel) as archive:
+        inventory, _ = guard._validate_wheel_archive(
+            archive, wheel, "avibe_os-3.1.0.dist-info"
+        )
+
+    assert calls == sum(not entry.is_dir for entry in inventory)
+
+
+@pytest.mark.parametrize(
+    ("declared_size", "payload"),
+    [(1, b""), (0, b"x")],
+    ids=["declared-payload", "observed-payload"],
+)
+def test_wheel_rejects_payload_bearing_directory_member(
+    tmp_path: Path, declared_size: int, payload: bytes
+) -> None:
+    member = zipfile.ZipInfo("payload/")
+    member.file_size = declared_size
+
+    class Archive:
+        @staticmethod
+        def open(_member: zipfile.ZipInfo) -> io.BytesIO:
+            return io.BytesIO(payload)
+
+    with pytest.raises(guard.ReleaseAssetError, match="member size"):
+        guard._inventory_wheel_member(
+            Archive(),
+            member,
+            tmp_path / "wheel.whl",
+            "payload",
+            retain=False,
         )
 
 
