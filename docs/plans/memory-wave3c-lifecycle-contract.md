@@ -239,11 +239,16 @@ health are observed only through external child processes and bounded HTTP
 probes.
 
 Every external command has immutable `execution_timeout_seconds`, enforced by a
-captured child-side deadline runner. The runner owns the Unix process group or
-Windows Job Object, inherits the one reservation descriptor/handle, terminates
-its command tree at the deadline, and exits even if the supervisor died. It is
-only a bundle executor: it cannot own lifecycle state, renew a deadline, start
-recovery, or write the record. No external bootstrap or reaper is introduced.
+captured child-side deadline runner. On POSIX the runner owns the process group
+and inherits the reservation's open-file-description lock; the supervisor hands
+off by closing its duplicate without unlocking. On Windows the supervisor never
+transfers byte-range lock ownership to a child. It holds the reservation for the
+whole mutation and owns a Job Object with kill-on-owner-close containment for
+the mutation command tree, so reservation release implies that no mutation child
+remains. A parent that merely waits for an uncontained child is not compliant.
+The runner remains only a bundle executor: it cannot own lifecycle state, renew
+a deadline, start recovery, or write the record. No external bootstrap, second
+reservation, or reaper is introduced. G3-2 owns this process containment.
 
 Failure semantics are closed:
 
@@ -284,34 +289,35 @@ The adapter first performs read-only nonce lookup:
 - a miss is eligible for a new admission; and
 - a recovery-by-nonce miss returns `nonce_unknown` and cannot execute
   mutation unless the caller has first confirmed that no current/audit
-  projection and no publication holder exist, in which case one replay of the
-  same nonce is allowed.
+  projection exists and a nonblocking reservation probe reports availability,
+  in which case one replay of the same nonce is allowed.
 
 After an initial POST loses transport, the caller first uses recovery-by-nonce.
-If that read confirms absence of a current/audit projection and no lock-holder
-publication, it may replay the same nonce once within the existing boundary;
-once any server identity or projection is observed, it never submits a new
-attempt. Nonce idempotency is bounded to the current record plus retained
-terminal audit. Once a terminal audit entry is pruned, recovery returns
-`nonce_unknown`; a later explicit attempt uses a new nonce. No unadmitted
-outcome is persisted or projected.
+If that read confirms absence of a current/audit projection and a nonblocking
+probe confirms reservation availability, it may replay the same nonce once
+within the existing boundary; once any server identity or projection is
+observed, it never submits a new attempt. Nonce idempotency is bounded to the
+current record plus retained terminal audit. Once a terminal audit entry is
+pruned, recovery returns `nonce_unknown`; a later explicit attempt uses a new
+nonce. No unadmitted outcome is persisted or projected.
 
 For an eligible new attempt, the adapter spawns the existing detached
 supervisor with the immutable nonce, type, and payload. The supervisor:
 
 1. acquires `package-lifecycle.lock` nonblockingly;
 2. immediately mints a collision-resistant acquisition ID and overwrites the
-   lock-file metadata with that ID, holder type, PID, and acquisition timestamp;
+   lock-file observability bytes with that ID, holder type, PID, and acquisition
+   timestamp;
 3. rechecks the current record under that reservation;
 4. rejects source builds, unreadable global configuration, active transactions,
    quarantine, and operator-only package states before package capture or
    subprocess work;
 5. mints a collision-resistant `intent_id`;
 6. atomically and durably writes `schema_version`, `intent_id`, `client_nonce`,
-   reservation acquisition ID, type, payload digest, and `state=admitted` to
-   the dedicated transaction record by writing and syncing a temporary file,
-   replacing the record, and syncing its parent directory (or the Windows
-   durability equivalent); and
+   the non-authoritative reservation acquisition ID for diagnostics, type,
+   payload digest, and `state=admitted` to the dedicated transaction record by
+   writing and syncing a temporary file, replacing the record, and syncing its
+   parent directory (or the Windows durability equivalent); and
 7. only after that write is durable, returns the receipt through a one-shot
    inherited pipe to the adapter.
 
@@ -319,33 +325,25 @@ The pipe is response transport, not a coordination primitive or durable
 acknowledgement. A lost receipt is reconstructed by nonce lookup. Concurrent
 same-nonce requests converge on the recorded identity: a contender that loses
 the reservation rereads the current record and returns its identity/projection
-when the nonce and canonical intent digest match. Reservation contention has
-owner-specific outcomes only after publication is consistent:
+when the nonce and canonical intent digest match. The server returns a matching
+projection before any contention outcome.
 
-- `busy_package_transaction` means another package transaction owns the
-  reservation or has a nonterminal record. The caller does not submit a new
-  intent while that transaction is active; it may read the known projection and
-  retry admission after the transaction is terminal.
-- `busy_restart` means an ordinary restart holds the reservation. The caller
-  retries the same client nonce after a short backoff, without expecting a
-  package publication or minting a new nonce.
-- `busy_reservation_publication` means lock metadata is empty, unreadable,
-  stale, or not yet consistent with the current transaction record. It is
-  retry-neutral: the caller neither assumes a package owner nor an ordinary
-  restart and boundedly rereads both surfaces with the same nonce.
-- if bounded publication rereads are exhausted before consistency, the server
-  returns generic retryable `busy`; it never guesses an owner-specific result.
+The reservation layer proves liveness only. If its nonblocking acquisition
+fails before a matching durable projection is visible, it may return retryable
+`busy_pending_publication` while the adapter boundedly rereads the current
+record. That result says only that the reservation is held and record
+publication may still be settling; it makes no package, ordinary-restart, PID,
+or acquisition-ID owner claim. Exhausting the bounded rereads returns generic
+retryable `busy`. Lock-file publication bytes may be observed for diagnostics,
+but they never authorize an owner-specific classification or correlation.
 
-The server returns a matching projection before any busy outcome. After its
-nonblocking acquisition fails, a contender boundedly rereads the publication
-and lock liveness. An owner-specific result is allowed only when the published
-acquisition ID still names the live holder responsible for that failed
-acquisition and the holder type is cross-consistent with the current transaction
-record: a package holder's record carries the same reservation acquisition ID,
-while an ordinary restart has no live package record. Whether the ID equals or
-differs from a pre-attempt snapshot is irrelevant; consistency, not change, is
-the criterion. Until those checks agree the result stays retry-neutral. The
-client never invents or persists an `intent_id` before the server returns it.
+G3-1B derives `busy_package_transaction` only from a durable `active` or
+`interrupted` transaction projection. It means that a package transaction
+exists; it does not claim that the current OS reservation holder is that
+transaction. The caller does not submit a new intent while that transaction is
+nonterminal and instead follows its projection. Contention with an ordinary
+restart remains generic reservation contention. The client never invents or
+persists an `intent_id` before the server returns it.
 
 Every API that accepts an `intent_id` is lookup or recovery only. An ID absent
 from the current record and retained terminal audit returns stable
@@ -357,11 +355,12 @@ or executes a package command.
 `package_lifecycle_transaction.json` is separate from ordinary
 `restart_status.json`. The lifecycle owner is its sole writer. The canonical
 record starts at `schema_version: 1` and contains the current transaction
-(identity, canonical intent digest, reservation acquisition ID,
-`repair_lineage`, retained `quarantined_baseline`, captured shape, resolved
-bundle identity, current transition, recovery facts, mutation-boundary marker,
-and the exact projection needed by read-only adapters) plus an atomically updated
-`terminal_audit` array containing at most ten structured terminal projections.
+(identity, canonical intent digest, non-authoritative diagnostic reservation
+acquisition ID, `repair_lineage`, retained `quarantined_baseline`, captured
+shape, resolved bundle identity, current transition, recovery facts,
+mutation-boundary marker, and the exact projection needed by read-only adapters)
+plus an atomically updated `terminal_audit` array containing at most ten
+structured terminal projections.
 This is the fixed `N=10` retention window.
 Each update writes and syncs a temporary file, atomically replaces the record,
 and syncs its parent directory (or the Windows durability equivalent) before a
@@ -371,8 +370,8 @@ Nonterminal current transactions are never rotated, pruned, overwritten, or
 replaced by a new intent. When a later intent is durably admitted, only
 terminal `succeeded`, `restored`, `reconciled`, or admitted pre-mutation
 `failed` current records are appended to `terminal_audit`; the oldest terminal
-entry is evicted beyond ten. `rejected`, `busy_package_transaction`,
-`busy_restart`, `busy_reservation_publication`, and generic `busy` are
+entry is evicted beyond ten. `rejected`, record-derived
+`busy_package_transaction`, `busy_pending_publication`, and generic `busy` are
 unadmitted responses, so none creates or rotates a transaction record.
 `restart-*.log` files remain human audit logs only; they
 have no nonce/identity semantics and are not migration input.
@@ -391,21 +390,24 @@ Compatibility rules are:
 ### Reservation And Ordinary Restart
 
 There is exactly one lock file, `package-lifecycle.lock`, under the Avibe runtime
-directory. On Unix its advisory lock is held on one open file descriptor; on
-Windows the equivalent exclusive file lock is held on one inheritable handle.
-Package-manager children inherit that exact descriptor/handle. Unrelated
-children do not.
+directory. On POSIX its advisory lock has open-file-description semantics and is
+held on one open file descriptor. On Windows an exclusive byte-range lock is
+held by the supervisor on a non-inherited handle. The reserved lock byte range
+and the publication byte range are fixed and non-overlapping; publication must
+never extend into the lock range.
 
-The only liveness test is a nonblocking acquisition attempt on that lock. The
-first action by a holder after acquisition is to mint a collision-resistant
-acquisition ID and overwrite, never append to, the lock-file metadata with that
-ID, holder type (`package` or `ordinary_restart`), PID, and acquisition
-timestamp. Ordinary restart publishes the same fields before spawning its
-child. Empty, unreadable, stale, or transaction-inconsistent metadata is
-`busy_reservation_publication`, never owner-specific. Contenders boundedly
-reread the lock metadata and current transaction record; exhaustion returns
-generic retryable `busy`. No second lock, heartbeat, token, lease, or durable
-ownership channel is allowed.
+The only authoritative liveness test is a nonblocking acquisition attempt on
+that OS lock. After acquisition, a holder mints a collision-resistant
+acquisition ID and overwrites, never appends to, the lock-file observability
+bytes with that ID, holder type (`package` or `ordinary_restart`), PID, and
+acquisition timestamp. Those bytes are diagnostic only: empty, unreadable,
+stale, or apparently correlated publication never establishes who owns the OS
+reservation. A contender may boundedly reread publication and the current
+record while returning retryable `busy_pending_publication`, but that response
+carries no owner claim; exhaustion returns generic retryable `busy`. No
+acquisition-ID comparison or metadata correlation may produce an owner-specific
+result. No second lock, heartbeat, token, lease, or durable ownership channel is
+allowed.
 
 The package supervisor holds the reservation from `admitted` through active
 forward, activation, verification, and rollback work. If it enters quarantine
@@ -414,22 +416,24 @@ reservation; the nonterminal record, not a stale lock, continues to block
 forward admission.
 
 Ordinary `schedule_restart` uses the same reservation at its single server
-entrypoint. It attempts acquisition once and returns structured `busy_restart`
-on contention. Immediately after acquisition, it publishes the holder metadata
-described above, then reads the package transaction record once before spawning
-the existing detached ordinary-restart supervisor. If it finds nonterminal
+entrypoint. It attempts acquisition once and returns generic retryable `busy` on
+contention; it never infers the current holder from publication bytes.
+Immediately after acquisition, it publishes the diagnostic metadata described
+above, then reads the package transaction record once before spawning the
+existing detached ordinary-restart supervisor. If it finds nonterminal
 `inactive`, `interrupted`, `mutating` residue, or `quarantined` without a live
 package recovery owner, it releases the reservation and returns structured
 `blocked_interrupted_transaction` pointing to recovery; it never starts a
 partial ordinary stop/start. A restart explicitly owned by the elected
 recovery transaction is exempt and uses that transaction's reservation. The
-entrypoint then passes that same descriptor/handle to the child, closes only
-its parent duplicate after a successful spawn, and the child holds it
-continuously from before writing restart status through its complete stop,
-start, and readiness work. The child exits and thereby releases the
-reservation after that bounded work. It does not write the package transaction
-record or become a package transaction. Package admission while it holds the
-reservation returns `busy_restart`.
+POSIX entrypoint passes the same open-file-description descriptor to the child
+and closes its parent duplicate without unlocking; the child holds it through
+restart status, stop, start, and readiness work. On Windows the ordinary-restart
+supervisor retains the byte-range lock handle itself for that whole bounded
+sequence and never transfers ownership to a child. The owner releases only when
+the sequence is complete. It does not write the package transaction record or
+become a package transaction. Package admission while it holds the reservation
+returns generic retryable `busy`.
 There is no check-release-proceed window, reacquisition, queue, or wait.
 
 QR, Doctor, UI reload, and direct start/stop flows do not independently join
@@ -450,10 +454,11 @@ a gate-3 implementation note, not a Phase 0 product change.
 ### Crash Recovery And Quarantine
 
 A same-`intent_id` request is the only recovery-election request. If the
-reservation is live, it returns the current projection. If the owner and
-reservation are not live, contenders make one nonblocking acquisition attempt
-on the same lock. One becomes recovery owner; losers return current
-nonterminal/busy state. Recovery never repeats forward mutation.
+reservation is live, it returns the current transaction projection without
+claiming that transaction owns the reservation. If the reservation is not live,
+contenders make one nonblocking acquisition attempt on the same lock. One
+becomes recovery owner; losers return current nonterminal or generic busy state.
+Recovery never repeats forward mutation.
 
 The elected owner reconciles installed metadata with `CapturedPackageShape` and
 the recorded `ResolvedRollbackPlan`:
@@ -509,8 +514,8 @@ State transitions are:
 
 ```text
 new attempt
-  -> rejected | busy_package_transaction | busy_restart
-  -> busy_reservation_publication | busy
+  -> rejected | busy_package_transaction
+  -> busy_pending_publication | busy
   -> admitted -> captured -> resolved
   -> failed (ordinary pre-mutation loss) | mutating
   -> activating -> verifying -> succeeded
@@ -524,7 +529,7 @@ quarantined + explicit repair
 
 `succeeded`, `restored`, `reconciled`, and an admitted pre-mutation `failed` are
 terminal transaction states. `rejected`, `busy_package_transaction`,
-`busy_restart`, `busy_reservation_publication`, and generic `busy` are
+`busy_pending_publication`, and generic `busy` are
 unadmitted responses; every busy outcome is retryable according to its rule
 above and never terminal. `quarantined` is persistent nonterminal and
 mutation-blocking.
@@ -535,8 +540,10 @@ controller, Web, CLI, and Settings, including:
 - nonce recovery after a lost admission response and `intent_unknown` for an
   invented or expired server ID;
 - same-nonce convergence, bounded retry-neutral
-  `busy_reservation_publication` rereads, exhausted generic `busy`, and
-  different-nonce contention;
+  `busy_pending_publication` rereads with no owner claim, exhausted generic
+  `busy`, and different-nonce contention;
+- G3-1B record-derived `busy_package_transaction` projection for active and
+  interrupted transactions without reservation-holder inference;
 - a nonterminal record surviving the embedded ten-entry terminal audit and a
   released legacy record
   `restart_status.json` fixture loading read-only;
@@ -547,8 +554,10 @@ controller, Web, CLI, and Settings, including:
   mutation;
 - existing ordinary `pending_restart.json` follow-up receiving shared-entrypoint
   `busy` while package work is active and retrying later;
-- child timeout, inherited-reservation behavior after owner death, and a
-  nonblocking acquisition that succeeds once no live reservation remains; and
+- child timeout, reservation behavior after owner death, and a
+  nonblocking acquisition that succeeds once no live reservation remains,
+  including POSIX close-without-unlock handoff and Windows Job Object
+  kill-on-owner-close containment; and
 - quarantine entry, forward rejection, exact recovery, and explicit verified
   reconciliation exit.
 
@@ -564,16 +573,16 @@ If the POST response is lost, the caller queries by nonce. Once the server-issue
 `intent_id` is known, the dependency adapter returns a live in-memory job when
 present; otherwise it reads the dedicated transaction record and terminal audit.
 It is read-only and never acquires the reservation or writes lifecycle state.
-The read-only probe distinguishes `active` (the reservation is live) from
-`interrupted` (the record is nonterminal but no reservation is live). Both
-project `status=in_progress`; `interrupted` additionally exposes a recovery
-entry in the UI. Only an explicit same-`intent_id` recovery request may trigger
-the election described in Invariant 3, so polling never becomes an owner.
-During the short admission publication window,
-`busy_reservation_publication` is a retryable nonterminal response: the caller
-boundedly rereads lock metadata and the current record by the same nonce without
-assuming an owner type or minting a new nonce. Exhaustion returns generic
-retryable `busy`.
+The G3-1B read-only record projection distinguishes `active` from `interrupted`
+using durable transaction and recovery facts. Reservation liveness may confirm
+that no live holder remains, but a held reservation never identifies a package
+owner. Both states project `status=in_progress`; `interrupted` additionally
+exposes a recovery entry in the UI. Only an explicit same-`intent_id` recovery
+request may trigger the election described in Invariant 3, so polling never
+becomes an owner. During the short admission publication window,
+`busy_pending_publication` is a retryable nonterminal response: the caller
+boundedly rereads the current record by the same nonce without assuming an owner
+type or minting a new nonce. Exhaustion returns generic retryable `busy`.
 
 Projection rules are:
 
@@ -618,7 +627,7 @@ state-derived recovery, quarantine projection, and terminal convergence.
 | --- | --- | --- | --- |
 | `MEMORY-INDEP-018` | UI recovery follows nonce, server identity, owner state, and final readiness | POST-loss retry boundary; nonce/ID projection truth table; transport, active/interrupted, quarantined, and terminal deadline results | Real wheels: Settings repair, response loss, all-process restart, over-deadline recovery, quarantine projection, convergence |
 | `MEMORY-INDEP-019` | Capture is exact and every constructed rollback is staged and executable | Provider-cardinality property; private plan construction; cleanup verification; capture/resolution failure to terminal `failed`; resolution and rollback failure injection | Wheelhouse matrix for core-only and optional split shapes, duplicate providers, partial mutation, activation failure, exact restore, quarantine |
-| `MEMORY-INDEP-020` | One server owner and reservation cover admission through recovery and ordinary restart exclusion | Multiprocess nonce/identity contention; ordinary pre-mutation crash to terminal `failed` with immediate retry; repair-lineage pre-mutation loss back to quarantine; acquisition-ID overwrite and bounded empty/unreadable/stale publication rereads; explicit `busy_package_transaction`/`busy_restart`/`busy_reservation_publication`/generic `busy` retry semantics; operator-only server rejection; released `restart_status.json` fixture; nonterminal retention; ordinary restart short-hold busy; child timeout and no-live-reservation acquisition; quarantine enter/exit | Concurrent controller/Web/CLI/Settings requests, restart contention, killed-owner recovery, exact package and service health |
+| `MEMORY-INDEP-020` | One server owner and reservation cover admission through recovery and ordinary restart exclusion | G3-1A liveness-only reservation with diagnostic publication, bounded owner-neutral `busy_pending_publication`, generic contention, non-overlapping Windows lock/publication bytes, and POSIX close-without-unlock handoff; G3-1B multiprocess nonce/identity contention, active/interrupted record projection, record-derived `busy_package_transaction`, ordinary pre-mutation crash to terminal `failed`, repair-lineage loss back to quarantine, server rejection, legacy fixture, and nonterminal retention; G3-2 frozen execution, child timeout, Windows Job Object kill-on-owner-close, no-live-reservation acquisition, and quarantine enter/exit | Concurrent controller/Web/CLI/Settings requests, restart contention, killed-owner recovery, exact package and service health |
 | `MEMORY-INDEP-020` (gate 3 implementation evidence) | Pending ordinary restart follow-up remains retryable when package reservation is busy | Verify `pending_restart.json` is requeued or handed off after structured `busy`; no marker loss and no package-record write | Ordinary config restart completes after package reservation release |
 | `MEMORY-INDEP-020` (gate 4 implementation evidence) | QR callers preserve activation when shared restart admission is busy | Verify shared-entrypoint `busy` is surfaced as retryable/presented activation state; no QR-local lock or pending protocol | WeChat QR login during package reservation, followed by eventual restart and active bot |
 | `MEMORY-INDEP-021` | Not-required status imports no optional implementation | Subprocess import guard for disabled, safe-degraded optional config, and whole-config failure; non-constructing loader probe | Packaged core-only and malformed-config smoke with blocked optional imports |
@@ -657,9 +666,15 @@ Retained behavior is reconciled, not cherry-picked:
 3. **Gate 2b, rollback types:** after both documents merge, implement
    captured/resolved rollback types and `MEMORY-INDEP-019` using the initial
    release-family policy in Doc B.
-4. **Gate 3, lifecycle owner:** after both documents merge, implement server
-   admission, one reservation, versioned record, embedded terminal audit,
-   frozen bundle, crash recovery, quarantine, and `MEMORY-INDEP-020`.
+4. **Gate 3, lifecycle owner:** after both documents merge, implement
+   `MEMORY-INDEP-020` in bounded steps: G3-1A owns the liveness-only OS
+   reservation, diagnostic publication, generic contention, POSIX handoff, and
+   non-overlapping Windows lock-byte layout; G3-1B owns admission, the versioned
+   record and audit, nonce/identity, active/interrupted projection,
+   record-derived `busy_package_transaction`, crash recovery, and quarantine;
+   G3-2 owns the frozen execution bundle, child deadlines, and Windows Job
+   Object kill-on-owner-close containment. No step may infer reservation
+   ownership from publication metadata.
 5. **Gate 4, recovery adapter:** after both documents merge, implement
    nonce/identity UI convergence and packaged `MEMORY-INDEP-018`.
 
