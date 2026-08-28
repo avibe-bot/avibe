@@ -17,7 +17,12 @@ from pathlib import Path
 from typing import Any
 
 from packaging.requirements import InvalidRequirement, Requirement
-from packaging.utils import InvalidWheelFilename, canonicalize_name, parse_wheel_filename
+from packaging.utils import (
+    InvalidName,
+    InvalidWheelFilename,
+    canonicalize_name,
+    parse_wheel_filename,
+)
 from packaging.version import InvalidVersion, Version
 
 from vibe.runtime import ServiceLauncher
@@ -53,6 +58,24 @@ class ReleaseFamily(str, Enum):
     TRANSITION = "transition"
 
 
+def _canonical_distribution_name(
+    value: object,
+    *,
+    field: str,
+    error_type: type[PackageShapeError] = PackageShapeError,
+    require_canonical: bool = False,
+) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise error_type(f"{field} name is missing")
+    try:
+        canonical = canonicalize_name(value, validate=True)
+    except InvalidName as exc:
+        raise error_type(f"{field} name is invalid") from exc
+    if require_canonical and value != canonical:
+        raise error_type(f"{field} is not canonical")
+    return canonical
+
+
 def _normalized_version(value: object, *, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise PackageShapeError(f"{field} is missing")
@@ -82,9 +105,10 @@ class DistributionProvider:
     requires_dist: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        canonical_name = canonicalize_name(self.name)
-        if not canonical_name:
-            raise PackageShapeError("distribution provider name is missing")
+        canonical_name = _canonical_distribution_name(
+            self.name,
+            field="distribution provider",
+        )
         object.__setattr__(self, "name", canonical_name)
         object.__setattr__(
             self,
@@ -107,19 +131,6 @@ class CapturedPackageShape:
     residual_memory: bool
 
     def __post_init__(self) -> None:
-        if not isinstance(self.release_family, ReleaseFamily):
-            raise PackageShapeError("captured release family is unknown")
-        if self.core_provider.name not in CORE_DISTRIBUTION_NAMES:
-            raise PackageShapeError("captured core provider is not an Avibe distribution")
-        if not isinstance(self.launcher, ServiceLauncher):
-            raise PackageShapeError("captured service launcher is invalid")
-        if len(self.memory_providers) > 1:
-            raise DuplicateDistributionProviderError(
-                "multiple canonical avibe-memory providers are not representable"
-            )
-        if any(provider.name != MEMORY_PACKAGE_NAME for provider in self.memory_providers):
-            raise PackageShapeError("captured Memory provider has the wrong canonical name")
-
         transition_memory_version = self.transition_memory_version
         if transition_memory_version is not None:
             transition_memory_version = _normalized_version(
@@ -128,16 +139,7 @@ class CapturedPackageShape:
             )
         object.__setattr__(self, "memory_providers", tuple(self.memory_providers))
         object.__setattr__(self, "transition_memory_version", transition_memory_version)
-
-        if self.release_family is ReleaseFamily.TRANSITION:
-            if transition_memory_version is None:
-                raise PackageShapeError("transition family is missing its exact Memory requirement")
-        elif transition_memory_version is not None:
-            raise PackageShapeError("only the transition family may carry a hard Memory requirement")
-
-        expected_residual = self.release_family is ReleaseFamily.PRE_SPLIT and self.memory_present
-        if self.residual_memory != expected_residual:
-            raise PackageShapeError("residual Memory marker does not match the captured family")
+        _validate_canonical_package_shape(self, error_type=PackageShapeError)
 
     @property
     def core_version(self) -> str:
@@ -181,9 +183,10 @@ class ExactRequirement:
     version: str
 
     def __post_init__(self) -> None:
-        canonical_name = canonicalize_name(self.distribution)
-        if not canonical_name:
-            raise PackageShapeError("rollback requirement distribution is missing")
+        canonical_name = _canonical_distribution_name(
+            self.distribution,
+            field="rollback requirement distribution",
+        )
         object.__setattr__(self, "distribution", canonical_name)
         object.__setattr__(
             self,
@@ -250,6 +253,26 @@ class CapturedPackageShapeRecord:
     memory_providers: tuple[DistributionProviderRecord, ...]
     transition_memory_version: str | None
     residual_memory: bool
+
+    @property
+    def core_version(self) -> str:
+        return self.core_provider.version
+
+    @property
+    def core_distribution(self) -> str:
+        return self.core_provider.name
+
+    @property
+    def memory_present(self) -> bool:
+        return bool(self.memory_providers)
+
+    @property
+    def memory_version(self) -> str | None:
+        return self.memory_providers[0].version if self.memory_providers else None
+
+    @property
+    def memory_provider_cardinality(self) -> int:
+        return len(self.memory_providers)
 
 
 @dataclass(frozen=True, order=True)
@@ -330,9 +353,12 @@ def _record_version(value: object, *, field: str) -> str:
 
 def _record_distribution(value: object, *, field: str) -> str:
     raw = _record_string(value, field=field)
-    if raw != canonicalize_name(raw):
-        raise PackageShapeRecordError(f"{field} is not canonical")
-    return raw
+    return _canonical_distribution_name(
+        raw,
+        field=field,
+        error_type=PackageShapeRecordError,
+        require_canonical=True,
+    )
 
 
 def _record_schema(envelope: dict[str, object]) -> None:
@@ -395,25 +421,6 @@ def _captured_to_record(
     )
 
 
-def _validate_captured_record(record: CapturedPackageShapeRecord) -> None:
-    if record.core_provider.name not in CORE_DISTRIBUTION_NAMES:
-        raise PackageShapeRecordError("captured core provider is not an Avibe distribution")
-    if len(record.memory_providers) > 1:
-        raise PackageShapeRecordError("captured record has multiple Memory providers")
-    if any(provider.name != MEMORY_PACKAGE_NAME for provider in record.memory_providers):
-        raise PackageShapeRecordError("captured Memory provider has the wrong name")
-    if record.release_family is ReleaseFamily.TRANSITION:
-        if record.transition_memory_version is None:
-            raise PackageShapeRecordError("transition record is missing its Memory version")
-    elif record.transition_memory_version is not None:
-        raise PackageShapeRecordError("non-transition record carries a transition version")
-    expected_residual = (
-        record.release_family is ReleaseFamily.PRE_SPLIT and bool(record.memory_providers)
-    )
-    if record.residual_memory is not expected_residual:
-        raise PackageShapeRecordError("residual Memory marker is inconsistent")
-
-
 def encode_captured_package_shape_record(
     captured: CapturedPackageShape | CapturedPackageShapeRecord,
 ) -> dict[str, object]:
@@ -421,7 +428,6 @@ def encode_captured_package_shape_record(
 
     record = _captured_to_record(captured)
     try:
-        _validate_captured_record(record)
         payload: dict[str, object] = {
             "schema_version": PACKAGE_SHAPE_RECORD_SCHEMA_VERSION,
             "record_type": "captured_package_shape",
@@ -506,7 +512,10 @@ def decode_captured_package_shape_record(value: object) -> CapturedPackageShapeR
             field="residual Memory",
         ),
     )
-    _validate_captured_record(record)
+    _validate_canonical_package_shape(
+        record,
+        error_type=PackageShapeRecordError,
+    )
     return record
 
 
@@ -627,89 +636,27 @@ def _plan_to_record(
 
 
 def _validate_plan_record(record: ResolvedRollbackPlanRecord) -> None:
-    _validate_captured_record(record.captured)
+    _validate_canonical_package_shape(
+        record.captured,
+        error_type=PackageShapeRecordError,
+    )
     if not record.requirements or not record.artifacts:
         raise PackageShapeRecordError("resolved rollback record has an empty closure")
-    captured = record.captured
-    if captured.release_family is ReleaseFamily.TRANSITION and (
-        not captured.memory_providers
-        or captured.memory_providers[0].version != captured.transition_memory_version
-    ):
-        raise PackageShapeRecordError(
-            "resolved transition record does not contain its exact Memory target"
-        )
-    expected_requirements = [
-        ExactRequirement(captured.core_provider.name, captured.core_provider.version)
-    ]
-    if captured.memory_providers:
-        memory_provider = captured.memory_providers[0]
-        expected_requirements.append(
-            ExactRequirement(memory_provider.name, memory_provider.version)
-        )
-    if record.requirements != tuple(expected_requirements):
+    try:
+        expected_requirements = _rollback_requirements(record.captured)
+    except PackageShapeError as exc:
+        raise PackageShapeRecordError(str(exc)) from exc
+    if record.requirements != expected_requirements:
         raise PackageShapeRecordError(
             "resolved requirements do not match the captured rollback target"
         )
-
-    by_distribution: dict[str, list[StagedArtifactRecord]] = {}
-    for artifact in record.artifacts:
-        by_distribution.setdefault(artifact.distribution, []).append(artifact)
-    if any(len(artifacts) != 1 for artifacts in by_distribution.values()):
-        raise PackageShapeRecordError(
-            "resolved staging contains a duplicate distribution"
-        )
-    core_artifacts = tuple(
-        artifact
-        for artifact in record.artifacts
-        if artifact.distribution in CORE_DISTRIBUTION_NAMES
-    )
-    if len(core_artifacts) != 1 or (
-        core_artifacts[0].distribution,
-        core_artifacts[0].version,
-    ) != (captured.core_provider.name, captured.core_provider.version):
-        raise PackageShapeRecordError(
-            "resolved staging does not match the captured core target"
-        )
-    memory_artifacts = tuple(
-        artifact
-        for artifact in record.artifacts
-        if artifact.distribution == MEMORY_PACKAGE_NAME
-    )
-    staged_memory_version = (
-        memory_artifacts[0].version if len(memory_artifacts) == 1 else None
-    )
-    captured_memory_version = (
-        captured.memory_providers[0].version
-        if captured.memory_providers
-        else None
-    )
-    if (
-        len(memory_artifacts) != len(captured.memory_providers)
-        or staged_memory_version != captured_memory_version
-    ):
-        raise PackageShapeRecordError(
-            "resolved staging does not match the captured Memory target"
-        )
-    expected_uninstalls = tuple(
-        sorted((*CORE_DISTRIBUTION_NAMES, MEMORY_PACKAGE_NAME))
-    )
-    if record.uninstall_distributions != expected_uninstalls:
+    try:
+        _verify_staged_shape(record.captured, record.artifacts)
+    except PackageShapeError as exc:
+        raise PackageShapeRecordError(str(exc)) from exc
+    if record.uninstall_distributions != _rollback_uninstall_distributions():
         raise PackageShapeRecordError("resolved rollback record has an unknown uninstall set")
-    expected_verification = PackageShapeVerification(
-        core_distribution=captured.core_provider.name,
-        core_version=captured.core_provider.version,
-        absent_core_distributions=tuple(
-            sorted(CORE_DISTRIBUTION_NAMES - {captured.core_provider.name})
-        ),
-        memory_provider_cardinality=len(captured.memory_providers),
-        memory_version=(
-            captured.memory_providers[0].version
-            if captured.memory_providers
-            else None
-        ),
-        residual_memory=captured.residual_memory,
-    )
-    if record.verification != expected_verification:
+    if record.verification != _package_shape_verification(record.captured):
         raise PackageShapeRecordError("resolved rollback verification is inconsistent")
 
 
@@ -720,7 +667,6 @@ def encode_resolved_rollback_plan_record(
 
     record = _plan_to_record(plan)
     try:
-        _validate_plan_record(record)
         payload: dict[str, object] = {
             "schema_version": PACKAGE_SHAPE_RECORD_SCHEMA_VERSION,
             "record_type": "resolved_rollback_plan",
@@ -823,19 +769,29 @@ def decode_resolved_rollback_plan_record(value: object) -> ResolvedRollbackPlanR
     return record
 
 
-def _parsed_memory_requirements(provider: DistributionProvider) -> tuple[Requirement, ...]:
+def _parsed_memory_requirements(
+    provider: DistributionProvider | DistributionProviderRecord,
+) -> tuple[Requirement, ...]:
     parsed: list[Requirement] = []
     for value in provider.requires_dist:
         try:
             requirement = Requirement(value)
         except (InvalidRequirement, TypeError) as exc:
             raise PackageShapeError("core distribution contains unreadable dependency metadata") from exc
-        if canonicalize_name(requirement.name) == MEMORY_PACKAGE_NAME:
+        if (
+            _canonical_distribution_name(
+                requirement.name,
+                field="core requirement distribution",
+            )
+            == MEMORY_PACKAGE_NAME
+        ):
             parsed.append(requirement)
     return tuple(parsed)
 
 
-def _release_family(provider: DistributionProvider) -> tuple[ReleaseFamily, str | None]:
+def _release_family(
+    provider: DistributionProvider | DistributionProviderRecord,
+) -> tuple[ReleaseFamily, str | None]:
     memory_requirements = _parsed_memory_requirements(provider)
     hard: list[Requirement] = []
     for requirement in memory_requirements:
@@ -868,6 +824,48 @@ def _release_family(provider: DistributionProvider) -> tuple[ReleaseFamily, str 
     if required_version != provider.version:
         raise PackageShapeError("transition core does not require its matching Memory release")
     return ReleaseFamily.TRANSITION, required_version
+
+
+def _validate_canonical_package_shape(
+    shape: CapturedPackageShape | CapturedPackageShapeRecord,
+    *,
+    error_type: type[PackageShapeError],
+) -> None:
+    provider_type = (
+        DistributionProviderRecord
+        if isinstance(shape, CapturedPackageShapeRecord)
+        else DistributionProvider
+    )
+    if not isinstance(shape.release_family, ReleaseFamily):
+        raise error_type("captured release family is unknown")
+    if not isinstance(shape.core_provider, provider_type):
+        raise error_type("captured core provider is invalid")
+    if shape.core_provider.name not in CORE_DISTRIBUTION_NAMES:
+        raise error_type("captured core provider is not an Avibe distribution")
+    if not isinstance(shape.launcher, ServiceLauncher):
+        raise error_type("captured service launcher is invalid")
+    if type(shape.memory_providers) is not tuple or any(
+        not isinstance(provider, provider_type) for provider in shape.memory_providers
+    ):
+        raise error_type("captured Memory providers are invalid")
+    if len(shape.memory_providers) > 1:
+        raise error_type("multiple canonical avibe-memory providers are not representable")
+    if any(provider.name != MEMORY_PACKAGE_NAME for provider in shape.memory_providers):
+        raise error_type("captured Memory provider has the wrong canonical name")
+    if type(shape.residual_memory) is not bool:
+        raise error_type("captured residual Memory marker is invalid")
+
+    try:
+        derived_family, derived_transition = _release_family(shape.core_provider)
+    except PackageShapeError as exc:
+        raise error_type(str(exc)) from exc
+    if shape.release_family is not derived_family:
+        raise error_type("captured release family disagrees with core metadata")
+    if shape.transition_memory_version != derived_transition:
+        raise error_type("captured transition pin disagrees with core metadata")
+    expected_residual = derived_family is ReleaseFamily.PRE_SPLIT and shape.memory_present
+    if shape.residual_memory is not expected_residual:
+        raise error_type("residual Memory marker disagrees with the derived family")
 
 
 def capture_package_shape(
@@ -960,7 +958,10 @@ def inspect_installed_distribution_providers(
             name = distribution.metadata["Name"]
             if not isinstance(name, str) or not name.strip():
                 raise PackageShapeError("installed distribution name is unreadable")
-            canonical_name = canonicalize_name(name)
+            canonical_name = _canonical_distribution_name(
+                name,
+                field="installed distribution",
+            )
             if canonical_name not in CORE_DISTRIBUTION_NAMES and canonical_name != MEMORY_PACKAGE_NAME:
                 continue
             providers.append(
@@ -991,7 +992,9 @@ def capture_installed_package_shape(
     )
 
 
-def _rollback_requirements(captured: CapturedPackageShape) -> tuple[ExactRequirement, ...]:
+def _rollback_requirements(
+    captured: CapturedPackageShape | CapturedPackageShapeRecord,
+) -> tuple[ExactRequirement, ...]:
     if captured.release_family is ReleaseFamily.TRANSITION:
         if not captured.memory_present:
             raise RollbackResolutionError(
@@ -1034,7 +1037,12 @@ def _wheel_provider(path: Path) -> DistributionProvider:
         provider_id=str(path),
         requires_dist=tuple(metadata.get_all("Requires-Dist", [])),
     )
-    if provider.name != canonicalize_name(str(filename_name)) or provider.version != str(filename_version):
+    filename_distribution = _canonical_distribution_name(
+        str(filename_name),
+        field="wheel filename distribution",
+        error_type=RollbackResolutionError,
+    )
+    if provider.name != filename_distribution or provider.version != str(filename_version):
         raise RollbackResolutionError("staged wheel filename and metadata disagree")
     return provider
 
@@ -1060,10 +1068,13 @@ def _staged_artifacts(staging_dir: Path) -> tuple[StagedArtifact, ...]:
 
 
 def _verify_staged_shape(
-    captured: CapturedPackageShape,
-    artifacts: tuple[StagedArtifact, ...],
+    captured: CapturedPackageShape | CapturedPackageShapeRecord,
+    artifacts: tuple[StagedArtifact, ...] | tuple[StagedArtifactRecord, ...],
 ) -> None:
-    by_distribution: dict[str, list[StagedArtifact]] = {}
+    by_distribution: dict[
+        str,
+        list[StagedArtifact | StagedArtifactRecord],
+    ] = {}
     for artifact in artifacts:
         by_distribution.setdefault(artifact.distribution, []).append(artifact)
     if any(len(values) != 1 for values in by_distribution.values()):
@@ -1093,6 +1104,25 @@ def _verify_staged_shape(
         raise RollbackResolutionError("staging does not contain the exact captured Memory shape")
 
 
+def _rollback_uninstall_distributions() -> tuple[str, ...]:
+    return tuple(sorted((*CORE_DISTRIBUTION_NAMES, MEMORY_PACKAGE_NAME)))
+
+
+def _package_shape_verification(
+    captured: CapturedPackageShape | CapturedPackageShapeRecord,
+) -> PackageShapeVerification:
+    return PackageShapeVerification(
+        core_distribution=captured.core_distribution,
+        core_version=captured.core_version,
+        absent_core_distributions=tuple(
+            sorted(CORE_DISTRIBUTION_NAMES - {captured.core_distribution})
+        ),
+        memory_provider_cardinality=captured.memory_provider_cardinality,
+        memory_version=captured.memory_version,
+        residual_memory=captured.residual_memory,
+    )
+
+
 def _construct_resolved_plan(
     *,
     captured: CapturedPackageShape,
@@ -1108,21 +1138,12 @@ def _construct_resolved_plan(
     object.__setattr__(
         plan,
         "uninstall_distributions",
-        tuple(sorted((*CORE_DISTRIBUTION_NAMES, MEMORY_PACKAGE_NAME))),
+        _rollback_uninstall_distributions(),
     )
     object.__setattr__(
         plan,
         "verification",
-        PackageShapeVerification(
-            core_distribution=captured.core_distribution,
-            core_version=captured.core_version,
-            absent_core_distributions=tuple(
-                sorted(CORE_DISTRIBUTION_NAMES - {captured.core_distribution})
-            ),
-            memory_provider_cardinality=captured.memory_provider_cardinality,
-            memory_version=captured.memory_version,
-            residual_memory=captured.residual_memory,
-        ),
+        _package_shape_verification(captured),
     )
     return plan
 

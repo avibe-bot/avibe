@@ -14,6 +14,7 @@ from vibe.package_shape import (
     CapturedPackageShapeRecord,
     DistributionProvider,
     ExactRequirement,
+    PackageShapeError,
     PackageShapeRecordError,
     ReleaseFamily,
     ResolvedRollbackPlan,
@@ -83,7 +84,7 @@ def _json_round_trip(value: dict[str, object]) -> dict[str, object]:
     return loaded
 
 
-def test_captured_record_codec_is_json_safe_immutable_and_lossless() -> None:
+def test_memory_indep_019_captured_codec_is_json_safe_immutable_and_lossless() -> None:
     encoded = _json_round_trip(encode_captured_package_shape_record(_captured()))
 
     decoded = decode_captured_package_shape_record(encoded)
@@ -96,7 +97,7 @@ def test_captured_record_codec_is_json_safe_immutable_and_lossless() -> None:
         decoded.residual_memory = True  # type: ignore[misc]
 
 
-def test_resolved_record_codec_preserves_complete_non_executable_plan(
+def test_memory_indep_019_resolved_codec_preserves_complete_non_executable_plan(
     tmp_path: Path,
 ) -> None:
     encoded = _json_round_trip(encode_resolved_rollback_plan_record(_resolved(tmp_path)))
@@ -114,7 +115,7 @@ def test_resolved_record_codec_preserves_complete_non_executable_plan(
 
 
 @pytest.mark.parametrize("version", [0, 2, True, "1", None])
-def test_record_codec_rejects_unknown_or_non_integer_schema_versions(
+def test_memory_indep_019_codec_rejects_unknown_or_non_integer_schema_versions(
     version: object,
 ) -> None:
     payload = encode_captured_package_shape_record(_captured())
@@ -139,7 +140,9 @@ def test_record_codec_rejects_unknown_or_non_integer_schema_versions(
         lambda value: value["shape"].update(residual_memory=True),
     ],
 )
-def test_captured_decoder_rejects_structural_drift(mutation: object) -> None:
+def test_memory_indep_019_captured_decoder_rejects_structural_drift(
+    mutation: object,
+) -> None:
     payload = deepcopy(encode_captured_package_shape_record(_captured()))
     mutation(payload)  # type: ignore[operator]
 
@@ -162,7 +165,7 @@ def test_captured_decoder_rejects_structural_drift(mutation: object) -> None:
         lambda value: value["plan"].update(requirements="not-a-list"),
     ],
 )
-def test_resolved_decoder_rejects_structural_drift(
+def test_memory_indep_019_resolved_decoder_rejects_structural_drift(
     mutation: object,
     tmp_path: Path,
 ) -> None:
@@ -173,7 +176,9 @@ def test_resolved_decoder_rejects_structural_drift(
         decode_resolved_rollback_plan_record(payload)
 
 
-def test_resolved_decoder_rejects_unknown_schema_version(tmp_path: Path) -> None:
+def test_memory_indep_019_resolved_decoder_rejects_unknown_schema(
+    tmp_path: Path,
+) -> None:
     payload = encode_resolved_rollback_plan_record(_resolved(tmp_path))
     payload["schema_version"] = 2
 
@@ -181,7 +186,9 @@ def test_resolved_decoder_rejects_unknown_schema_version(tmp_path: Path) -> None
         decode_resolved_rollback_plan_record(payload)
 
 
-def test_resolved_decoder_binds_closure_to_captured_target(tmp_path: Path) -> None:
+def test_memory_indep_019_decoder_binds_closure_to_captured_target(
+    tmp_path: Path,
+) -> None:
     payload = encode_resolved_rollback_plan_record(_resolved(tmp_path))
     payload["plan"]["requirements"][0].update(  # type: ignore[index]
         distribution="unrelated",
@@ -196,7 +203,9 @@ def test_resolved_decoder_binds_closure_to_captured_target(tmp_path: Path) -> No
         decode_resolved_rollback_plan_record(payload)
 
 
-def test_resolved_decoder_rejects_duplicate_staged_distribution(tmp_path: Path) -> None:
+def test_memory_indep_019_decoder_rejects_duplicate_staged_distribution(
+    tmp_path: Path,
+) -> None:
     payload = encode_resolved_rollback_plan_record(_resolved(tmp_path))
     duplicate = deepcopy(payload["plan"]["artifacts"][0])  # type: ignore[index]
     duplicate["version"] = "3.0.13"
@@ -206,7 +215,7 @@ def test_resolved_decoder_rejects_duplicate_staged_distribution(tmp_path: Path) 
         decode_resolved_rollback_plan_record(payload)
 
 
-def test_captured_encoder_rejects_unvalidated_record_dto() -> None:
+def test_memory_indep_019_captured_encoder_rejects_unvalidated_dto() -> None:
     record = decode_captured_package_shape_record(
         encode_captured_package_shape_record(_captured())
     )
@@ -219,7 +228,44 @@ def test_captured_encoder_rejects_unvalidated_record_dto() -> None:
         encode_captured_package_shape_record(invalid)
 
 
-def test_resolved_encoder_rejects_unvalidated_record_dto(tmp_path: Path) -> None:
+def test_memory_indep_019_decoder_derives_family_from_core_metadata() -> None:
+    payload = encode_captured_package_shape_record(_captured())
+    payload["shape"].update(  # type: ignore[union-attr]
+        release_family="pre_split",
+        residual_memory=True,
+    )
+
+    with pytest.raises(PackageShapeRecordError, match="release family"):
+        decode_captured_package_shape_record(payload)
+
+
+@pytest.mark.parametrize("invalid_name", ["/", "@"])
+def test_memory_indep_019_rejects_invalid_distribution_names(
+    invalid_name: str,
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(PackageShapeError, match="name is invalid"):
+        DistributionProvider(invalid_name, "1", f"/{invalid_name}.dist-info")
+    with pytest.raises(PackageShapeError, match="name is invalid"):
+        ExactRequirement(invalid_name, "1")
+
+    payload = encode_resolved_rollback_plan_record(_resolved(tmp_path))
+    payload["plan"]["artifacts"].append(  # type: ignore[index]
+        {
+            "distribution": invalid_name,
+            "version": "1",
+            "path": str(tmp_path / "staging" / "invalid.whl"),
+            "sha256": "c" * 64,
+            "requires_dist": [],
+        }
+    )
+    with pytest.raises(PackageShapeRecordError, match="name is invalid"):
+        decode_resolved_rollback_plan_record(payload)
+
+
+def test_memory_indep_019_resolved_encoder_rejects_unvalidated_dto(
+    tmp_path: Path,
+) -> None:
     record = decode_resolved_rollback_plan_record(
         encode_resolved_rollback_plan_record(_resolved(tmp_path))
     )
@@ -232,7 +278,9 @@ def test_resolved_encoder_rejects_unvalidated_record_dto(tmp_path: Path) -> None
         encode_resolved_rollback_plan_record(invalid)
 
 
-def test_decoded_record_reencodes_without_live_files(tmp_path: Path) -> None:
+def test_memory_indep_019_decoded_record_reencodes_without_live_files(
+    tmp_path: Path,
+) -> None:
     payload = encode_resolved_rollback_plan_record(_resolved(tmp_path))
     decoded = decode_resolved_rollback_plan_record(_json_round_trip(payload))
 
