@@ -98,6 +98,7 @@ def _wheel(
     version: str = "3.1.0",
     requires_python: str = ">=3.10",
     requires_dist: tuple[str, ...] = (),
+    wheel_version: str = "1.0",
     include_wheel_metadata: bool = True,
     include_record: bool = True,
 ) -> Path:
@@ -112,9 +113,9 @@ def _wheel(
     files = {f"{dist_info}/METADATA": metadata}
     if include_wheel_metadata:
         files[f"{dist_info}/WHEEL"] = (
-            b"Wheel-Version: 1.0\nGenerator: gate5a-test\n"
-            b"Root-Is-Purelib: true\nTag: py3-none-any\n\n"
-        )
+            f"Wheel-Version: {wheel_version}\nGenerator: gate5a-test\n"
+            "Root-Is-Purelib: true\nTag: py3-none-any\n\n"
+        ).encode()
     if include_record:
         record = f"{dist_info}/RECORD"
         files[record] = ("".join(f"{item},,\n" for item in sorted(files)) + f"{record},,\n").encode()
@@ -196,6 +197,12 @@ def test_wheel_filename_metadata_and_release_tag_are_independent_identities(tmp_
     manifest, _ = _manifest(tmp_path / "release", release_tag="v3.1.1")
     with pytest.raises(guard.ReleaseAssetError, match="release tag"):
         _verify_static(tmp_path / "wheels", manifest)
+
+
+def test_wheel_version_requires_complete_major_minor_syntax(tmp_path: Path) -> None:
+    wheel = _wheel(tmp_path / "avibe_os-3.1.0-py3-none-any.whl", "avibe-os", wheel_version="1.foo")
+    with pytest.raises(guard.ReleaseAssetError, match="metadata version"):
+        guard.inspect_wheel(wheel)
 
 
 def test_static_transition_uses_release_bound_requires_python(tmp_path: Path) -> None:

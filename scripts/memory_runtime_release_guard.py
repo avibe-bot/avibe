@@ -7,6 +7,7 @@ import argparse
 from email.parser import Parser
 import hashlib
 import json
+import re
 import shutil
 import sys
 import tarfile
@@ -253,7 +254,10 @@ def inspect_wheel(wheel: Path) -> PackageMetadata:
     name, version, requires_python = (field[0] for field in values)
     try:
         parsed_version = str(versions.Version(version))
-        wheel_major = int(wheel_versions[0].split(".", 1)[0])
+        wheel_version = re.fullmatch(r"([0-9]+)\.([0-9]+)", wheel_versions[0])
+        if wheel_version is None:
+            raise ValueError
+        wheel_major = int(wheel_version.group(1))
     except (ValueError, versions.InvalidVersion) as exc:
         raise ReleaseAssetError(f"wheel metadata version is invalid: {wheel.name}") from exc
     if wheel_major > 1:
