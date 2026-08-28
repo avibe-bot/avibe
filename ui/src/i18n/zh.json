@@ -710,28 +710,28 @@
     "inProgressHint": "在该分区完成重构前，底层配置仍可先通过设置向导进行调整。",
     "openSetup": "打开设置向导",
     "models": {
-      "title": "模型",
-      "subtitle": "按 Agent 查看每个型号现在能否运行、由谁供给；需要时可为单个型号指定路由。",
-      "addSource": "添加来源",
+      "title": "模型网关",
+      "subtitle": "按 Agent 查看每个模型使用哪个供应商，并按路由自动切换。",
+      "addSource": "添加供应商",
       "loadError": "加载失败：{{detail}}",
       "sourceKind": {
         "api_key": "API Key",
         "subscription": "订阅"
       },
       "shell": {
-        "title": "模型",
-        "running": "网关运行中",
-        "stopped": "网关已关闭",
-        "unavailable": "网关已开启，当前不可用",
-        "degraded": "网关降级运行",
-        "unread": "网关状态未读到",
-        "notStarted": "网关已关闭",
-        "notInstalled": "网关组件未安装",
+        "title": "模型网关",
+        "running": "模型网关运行中",
+        "stopped": "模型网关已关闭",
+        "unavailable": "模型网关已开启，当前不可用",
+        "degraded": "模型网关降级运行",
+        "unread": "模型网关状态不可用",
+        "notStarted": "模型网关已关闭",
+        "notInstalled": "模型网关组件未安装",
         "allDirect_one": "{{count}} 个后端都在直连",
         "allDirect_other": "{{count}} 个后端都在直连",
         "starting": "正在启动…",
         "stopping": "正在关闭…",
-        "unsupported": "这个平台还没有网关组件",
+        "unsupported": "当前平台不支持模型网关",
         "toggle": {
           "turnOn": "开启模型网关",
           "turnOff": "关闭模型网关",
@@ -741,11 +741,11 @@
         "closed": {
           "off": {
             "title": "模型网关已关闭",
-            "body": "开启后才会显示和编辑来源、路由与网关模型。"
+            "body": "开启后才会显示和编辑模型供应商与路由。"
           },
           "down": {
             "title": "模型网关已关闭",
-            "body": "上一次启动没有就绪。开启网关即可重试。"
+            "body": "上一次启动没有就绪。开启模型网关即可重试。"
           },
           "enabledDown": {
             "title": "模型网关已开启，但当前不可用",
@@ -753,35 +753,35 @@
           },
           "notInstalled": {
             "title": "模型网关尚未安装",
-            "body": "开启后会安装由 Avibe 管理的网关组件。"
+            "body": "开启后会安装由 Avibe 管理的模型网关组件。"
           },
           "unsupported": {
             "title": "模型网关不可用",
-            "body": "当前平台没有兼容的托管网关组件。"
+            "body": "当前平台没有兼容的模型网关组件。"
           },
           "installing": {
             "title": "正在安装模型网关",
-            "body": "安装并启动完成后才会显示来源与路由。"
+            "body": "安装并启动完成后才会显示供应商与路由。"
           },
           "starting": {
             "title": "正在启动模型网关",
-            "body": "网关就绪后才会显示来源与路由。"
+            "body": "模型网关就绪后才会显示供应商与路由。"
           },
           "stopping": {
             "title": "正在关闭模型网关",
-            "body": "运行时停止期间会隐藏网关配置。"
+            "body": "停止期间会隐藏模型网关配置。"
           },
           "unread": {
-            "title": "暂时无法读取网关状态",
-            "body": "确认运行状态前不会显示网关配置。"
+            "title": "暂时无法读取模型网关状态",
+            "body": "确认运行状态前不会显示模型网关配置。"
           }
         },
         "modelsInfo": {
-          "label": "什么是模型",
-          "body": "模型是 Agent 使用的型号。你可以查看每个型号现在能否运行、由谁供给，需要时为单个型号指定路由。"
+          "label": "什么是模型网关",
+          "body": "模型网关集中管理模型供应商和路由；当前供应商不可用时，会按优先级自动切换。"
         },
         "tab": {
-          "hub": "来源与网关",
+          "hub": "供应商与路由",
           "usage": "用量",
           "logs": "日志"
         }
@@ -789,7 +789,7 @@
       "direct": {
         "card": {
           "current": "当前：直连",
-          "current.sub": "每个 Agent 后端各自用自己的登录，直接连厂商。"
+          "current.sub": "每个 Agent 后端使用自己的登录，直接连接模型供应商。"
         },
         "pill": {
           "direct": "直连"
@@ -806,17 +806,17 @@
           }
         },
         "action": {
-          "switchToGateway": "切换到网关",
+          "switchToGateway": "切换到模型网关",
           "refreshAgents": "重新检测 Agent 后端"
         },
         "benefits": {
-          "title": "切换到网关，你会多出三件事",
+          "title": "切换到模型网关，你会多出三件事",
           "1": "额度用尽不断线",
-          "1.detail": "Claude 订阅用满时，自动换到你添加的下一个来源，对话继续。",
-          "2": "一个 Key 供给多个后端",
+          "1.detail": "Claude 订阅用满时，自动切换到下一个供应商，对话继续。",
+          "2": "一个 Key 用于多个后端",
           "2.detail": "同一个 API Key 可以同时给 Claude Code、Codex、OpenCode 用。",
-          "3": "按后端、按型号自己定",
-          "3.detail": "哪个后端的哪个型号走哪个来源，都可以逐条指定。"
+          "3": "按后端、按模型自己定",
+          "3.detail": "哪个后端的哪个模型使用哪个供应商，都可以逐条指定。"
         },
         "note": {
           "perBackend": "逐个后端切换，互不影响——其余后端保持直连。切换后随时可以切换回直连。"
@@ -828,7 +828,7 @@
         }
       },
       "adopt": {
-        "title": "把 {{backend}} 切换到网关",
+        "title": "把 {{backend}} 切换到模型网关",
         "subtitle": "只影响 {{backend}}，其余后端保持原样。",
         "vendor": {
           "claude": "Claude",
@@ -839,44 +839,44 @@
           "undo": "可以撤回"
         },
         "effects": {
-          "1": "你现在的 {{vendor}} 登录成为第一个来源，继续优先使用",
-          "2": "等你添加了别的来源，这个登录用满时会自动换过去",
+          "1": "你现在的 {{vendor}} 登录成为第一个供应商，继续优先使用",
+          "2": "添加其他供应商后，这个登录用满时会自动切换",
           "1.opencode": "OpenCode 自己的模型配置原样保留，这次切换不改动它",
-          "2.opencode": "它的型号从此由这一页上的来源供给；还没有来源时，先添加一个",
-          "3": "型号菜单不变",
+          "2.opencode": "它的模型从此使用这一页上的供应商；还没有供应商时，先添加一个",
+          "3": "模型菜单不变",
           "4": "正在进行的对话不受影响，下一次请求开始生效",
           "install": "先安装网关组件（{{component}}，约 {{duration}}），再切换"
         },
         "undo": {
           "1": "随时可以切换回直连",
           "2": "回退入口：这一页的 {{backend}} 卡片 → 切到直连",
-          "3": "切回后，你添加的来源会留着，只是不再供给 {{backend}}"
+          "3": "切回后，你添加的供应商会保留，只是不再由 {{backend}} 使用"
         },
         "cancel": "取消",
-        "confirm": "切换到网关",
+        "confirm": "切换到模型网关",
         "confirm.install": "安装并切换",
         "fail": {
-          "title": "没能切换到网关",
+          "title": "没能切换到模型网关",
           "detail": "{{request}} · {{status}} · {{reason}}",
           "reason": {
-            "transport": "没能连上网关",
-            "refused": "网关没有接受这次切换",
-            "notReady": "网关起来了，但没有就绪",
+            "transport": "没能连接模型网关",
+            "refused": "模型网关没有接受这次切换",
+            "notReady": "模型网关已经启动，但没有就绪",
             "unknown": "没有给出原因"
           }
         }
       },
       "install": {
         "duration": "1 分钟",
-        "title": "安装网关组件",
+        "title": "安装模型网关组件",
         "subtitle": "只安装组件，后端保持现在的方式",
         "section": {
           "effects": "会发生什么"
         },
         "effects": {
           "1": "下载并安装 {{component}}，约 {{duration}}",
-          "2": "装好后网关自动启动",
-          "3": "没有后端会被切换，型号菜单不变"
+          "2": "装好后模型网关自动启动",
+          "3": "没有后端会被切换，模型菜单不变"
         },
         "confirm": "安装并启动",
         "cancel": "取消",
@@ -888,28 +888,28 @@
         "retry": "重试"
       },
       "gateway": {
-        "heading": "网关路由",
-        "infoLabel": "什么是网关路由",
-        "info": "网关路由决定每个 Agent 的型号在已有路由中的来源里先使用哪个上游来源；当额度不足、触发限流、服务端、认证或网络出错导致请求无法完成时，自动切换下一优先级。",
+        "heading": "路由",
+        "infoLabel": "什么是路由",
+        "info": "路由决定每个 Agent 的模型优先使用哪个供应商；当前供应商不可用时，模型网关按优先级自动切换。",
         "sourceOrder": "调整优先级",
-        "switchToGateway": "切换到网关",
+        "switchToGateway": "切换到模型网关",
         "switchToDirect": "切到直连",
         "fail": {
           "switchToDirect": "没能切回直连"
         },
-        "modelCount_one": "{{count}} 个型号",
-        "modelCount_other": "{{count}} 个型号",
-        "moreModels_one": "还有 {{count}} 个型号",
-        "moreModels_other": "还有 {{count}} 个型号",
+        "modelCount_one": "{{count}} 个模型",
+        "modelCount_other": "{{count}} 个模型",
+        "moreModels_one": "还有 {{count}} 个模型",
+        "moreModels_other": "还有 {{count}} 个模型",
         "collapse": "收起",
         "retry": "重试",
         "supply": {
-          "none": "没有可用来源",
-          "unread": "后端供给情况没读到 · 网关本身正常"
+          "none": "没有可用供应商",
+          "unread": "路由状态暂时不可用 · 模型网关本身正常"
         },
         "row": {
-          "current": "来自 {{source}}",
-          "currentTakeover": "来自 {{source}}（接管）"
+          "current": "当前使用 {{source}}",
+          "currentTakeover": "当前使用 {{source}}（已自动切换）"
         },
         "group": {
           "subtitle": {
@@ -923,26 +923,26 @@
           "status": {
             "ok": "正常",
             "degraded": "降级",
-            "waiting": "供给暂不可用",
-            "interrupted": "无可用来源",
-            "unconfigured": "未配置型号路由",
+            "waiting": "等待供应商恢复",
+            "interrupted": "没有可用供应商",
+            "unconfigured": "未配置模型路由",
             "unused": "暂无 Agent 使用"
           },
-          "emptyModels": "这个后端没有可用型号"
+          "emptyModels": "这个后端没有可用模型"
         }
       },
       "takeover": {
-        "pill_one": "{{count}} 处接管中",
-        "pill_other": "{{count}} 处接管中",
-        "chip": "接管中"
+        "pill_one": "{{count}} 处已自动切换",
+        "pill_other": "{{count}} 处已自动切换",
+        "chip": "已自动切换"
       },
       "legend": {
-        "native": "原生",
-        "viaGateway": "网关供给",
+        "native": "Agent 管理",
+        "viaGateway": "模型网关管理",
         "connectedUnused": "已启用 · 当前未被使用",
-        "takeover": "接管中 · 临时改走",
-        "unavailable": "供给已暂停",
-        "note": "路由链就是各后端配置的来源顺序。"
+        "takeover": "已自动切换 · 临时使用备用供应商",
+        "unavailable": "等待供应商恢复",
+        "note": "路由按供应商优先级执行；也可为单个模型单独调整。"
       },
       "status": {
         "allHealthy": "全部正常",
@@ -951,31 +951,31 @@
         "noIssues": "没有需要处理的模型"
       },
       "statusPill": {
-        "ok_one": "一切正常 · {{count}} 个 Agent 已接入网关",
-        "ok_other": "一切正常 · {{count}} 个 Agent 已接入网关",
-        "none": "还没有 Agent 使用网关",
-        "engineDown": "模型服务未就绪 · 暂时无法供给",
-        "interrupted_one": "{{count}} 个 Agent 供给中断 · 需要处理",
-        "interrupted_other": "{{count}} 个 Agent 供给中断 · 需要处理",
-        "waiting_one": "{{count}} 个 Agent 正在等待来源恢复",
-        "waiting_other": "{{count}} 个 Agent 正在等待来源恢复",
+        "ok_one": "一切正常 · {{count}} 个 Agent 使用模型网关",
+        "ok_other": "一切正常 · {{count}} 个 Agent 使用模型网关",
+        "none": "还没有 Agent 使用模型网关",
+        "engineDown": "模型网关未就绪 · 暂时不可用",
+        "interrupted_one": "{{count}} 个 Agent 没有可用供应商 · 需要处理",
+        "interrupted_other": "{{count}} 个 Agent 没有可用供应商 · 需要处理",
+        "waiting_one": "{{count}} 个 Agent 正在等待供应商恢复",
+        "waiting_other": "{{count}} 个 Agent 正在等待供应商恢复",
         "needsAction": "{{source}} {{detail}}",
         "cooldown": "{{source}} {{detail}} · 已自动切换，恢复后切回",
-        "andMore_one": "另有 {{count}} 个来源",
-        "andMore_other": "另有 {{count}} 个来源"
+        "andMore_one": "另有 {{count}} 个供应商",
+        "andMore_other": "另有 {{count}} 个供应商"
       },
       "upstream": {
-        "heading": "上游来源",
-        "infoLabel": "什么是上游来源",
-        "info": "上游来源是账号或 API Key。网关从这里获取型号，再按路由供给 Agent。",
+        "heading": "模型供应商",
+        "infoLabel": "什么是模型供应商",
+        "info": "模型供应商提供订阅或 API Key；模型网关通过它们调用模型。",
         "count_one": "{{count}} 个",
         "count_other": "{{count}} 个",
         "group": {
-          "native": "本机原生",
-          "hub": "接入网关"
+          "native": "Agent 管理",
+          "hub": "模型网关管理"
         },
         "kind": {
-          "nativeCredential": "原生 · 本机凭据",
+          "nativeCredential": "Agent 管理 · 本机登录",
           "subscription": "订阅",
           "apiKey": "API Key"
         },
@@ -983,17 +983,17 @@
           "anthropic": "Anthropic",
           "openai": "OpenAI"
         },
-        "empty": "还没有来源。先添加一个订阅或 API Key。",
-        "unread": "来源列表没读到 · 网关本身正常",
+        "empty": "还没有模型供应商。先添加订阅或 API Key。",
+        "unread": "供应商列表暂时不可用 · 模型网关本身正常",
         "retry": "重试",
         "addSubscription": "添加订阅",
         "addApiKey": "添加 API Key",
         "state": {
-          "supplyingNative": "正在供给 {{backend}}（原生）",
-          "supplying": "正在供给 {{backends}}",
-          "standby": "可用 · 当前未供给",
+          "supplyingNative": "{{backend}} 正在使用（Agent 管理）",
+          "supplying": "{{backends}} 正在使用",
+          "standby": "可用 · 当前未使用",
           "unavailableRetry": "暂不可用 · {{delay}} 后自动重试",
-          "unavailableDue": "暂不可用 · 已到重试时间"
+          "unavailableDue": "暂不可用 · 正在重试"
         }
       },
       "subscriptionPicker": {
@@ -1002,31 +1002,31 @@
           "openai": "ChatGPT 订阅"
         },
         "recommendation": {
-          "native": "原生推荐",
-          "gateway": "网关推荐"
+          "native": "推荐由 Agent 管理",
+          "gateway": "推荐由模型网关管理"
         }
       },
       "sources": {
-        "title": "来源",
-        "info": "可用于网关路由的账号与凭据",
+        "title": "模型供应商",
+        "info": "可用于模型网关路由的订阅与 API Key",
         "count_one": "{{count}} 个",
         "count_other": "{{count}} 个",
         "group": {
-          "native": "本机原生",
-          "hub": "接入网关"
+          "native": "Agent 管理",
+          "hub": "模型网关管理"
         },
-        "subtitle": "管理全局共用的账号和型号清单；来源顺序在各 Agent 卡片中调整",
-        "modelCount_one": "{{count}} 个型号",
-        "modelCount_other": "{{count}} 个型号",
+        "subtitle": "管理全局共用的供应商和模型；供应商优先级在各 Agent 卡片中调整",
+        "modelCount_one": "{{count}} 个模型",
+        "modelCount_other": "{{count}} 个模型",
         "lastDiscovery": "上次自动获取 {{time}}",
         "neverDiscovered": "尚未自动获取",
-        "addModel": "添加型号",
-        "modelsEmpty": "还没有可供给的型号，请手动添加。",
-        "modelsEmptySubscription": "还没有发现可供给的型号。"
+        "addModel": "添加模型",
+        "modelsEmpty": "还没有可用模型，请手动添加。",
+        "modelsEmptySubscription": "还没有发现可用模型。"
       },
       "source": {
-        "nativeSupply": "原生供给",
-        "hubHosted": "网关托管",
+        "nativeSupply": "Agent 管理",
+        "hubHosted": "模型网关管理",
         "officialEndpoint": "官方地址",
         "customEndpoint": "自定义地址",
         "retryIn": "{{minutes}} 分后重试",
@@ -1034,28 +1034,28 @@
         "oauthSignedOut": "CLI 订阅未登录"
       },
       "order": {
-        "title": "{{backend}} · 全局路由优先级",
-        "subtitle": "在每个型号已有路由中的来源里，排在前面的上游将优先被使用。当额度不足、触发限流、服务端、认证或网络出错导致请求无法完成时，自动切换下一优先级。",
-        "infoLabel": "什么是全局路由优先级",
-        "reorder": "调整来源顺序",
+        "title": "{{backend}} · 供应商优先级",
+        "subtitle": "排在前面的供应商优先使用；请求失败时，模型网关按顺序自动切换。",
+        "infoLabel": "什么是供应商优先级",
+        "reorder": "调整供应商顺序",
         "section": {
-          "ordered": "排在这条顺序里",
+          "ordered": "当前顺序",
           "ordered.note": "拖动排序",
-          "heldOut": "未排入这条顺序",
-          "heldOut.note": "这些来源仍保留在已有路由里，排在这条顺序之后。要从路由中移除，请编辑对应型号的网关路由。"
+          "heldOut": "未加入当前顺序",
+          "heldOut.note": "这些供应商仍保留在已有路由末尾。要从路由中移除，请编辑对应模型的路由。"
         },
         "action": {
           "include": "排进来",
           "exclude": "移出"
         },
         "empty": {
-          "noEligible": "这个后端还没有可用来源。",
-          "ordered": "这条顺序现在是空的。把下面的来源排进来。"
+          "noEligible": "这个后端还没有可用供应商。",
+          "ordered": "当前顺序为空。把下面的供应商加入顺序。"
         },
         "cancel": "取消",
         "save": "保存顺序",
         "fail": {
-          "read": "来源列表没读到",
+          "read": "供应商列表暂时不可用",
           "save": "顺序没保存上"
         },
         "retry": "重试",
@@ -1074,19 +1074,19 @@
       "state": {
         "active": "正常",
         "standby": "正常",
-        "cooldown": "冷却中（自动恢复）",
+        "cooldown": "等待重试（自动恢复）",
         "needs_action": "需要处理",
         "error": "需要处理"
       },
       "usage": {
         "title": "用量",
-        "detail": "网关代理的对话所计量的 token，按本地日期汇总。",
+        "detail": "模型网关代理的对话所计量的 token，按本地日期汇总。",
         "window": {
           "label": "区间",
           "option": "{{days}} 天"
         },
         "range": "{{from}} – {{to}} · 近 {{days}} 天",
-        "empty": "还没有计量数据。网关来源完成请求后，这里就会有内容。",
+        "empty": "还没有计量数据。模型网关完成请求后，这里就会有内容。",
         "blank": "—",
         "tokens": {
           "label": "Tokens",
@@ -1105,16 +1105,16 @@
           "none": "这个区间没有输入 token"
         },
         "bySource": {
-          "title": "按来源",
+          "title": "按供应商",
           "col": {
-            "source": "来源",
+            "source": "供应商",
             "tokens": "Tokens",
             "requests": "请求",
             "cached": "缓存",
             "lastMetered": "最近计量"
           },
           "goneSource": "已删除",
-          "goneModel": "型号已不在列表中"
+          "goneModel": "模型已不在列表中"
         },
         "byDay": {
           "title": "按日",
@@ -1129,15 +1129,15 @@
         }
       },
       "supplyTooltip": {
-        "label": "供应："
+        "label": "使用："
       },
       "mode": {
-        "hub": "统一管理",
+        "hub": "模型网关",
         "direct": "直连 Direct"
       },
       "errors": {
-        "engineDown": "模型引擎未就绪,请稍后重试",
-        "startFailed": "模型引擎启动失败",
+        "engineDown": "模型网关未就绪，请稍后重试",
+        "startFailed": "模型网关启动失败",
         "stopFailed": "模型网关关闭失败"
       },
       "runtime": {
@@ -1148,89 +1148,89 @@
       "experimental": "实验",
       "agents": {
         "title": "Agent",
-        "subtitle": "各自选用来源、各自排序；失败自动切到下一个",
+        "subtitle": "各自选择供应商和优先级；失败时自动切换",
         "backendSettings": "后端设置",
-        "connectHub": "切换到网关",
+        "connectHub": "切换到模型网关",
         "modelCount_one": "{{count}} 个模型",
         "modelCount_other": "{{count}} 个模型",
-        "hubNoSupply": "已使用网关 · 没有启用任何来源，下一个回合会失败",
-        "directNote": "使用 CLI 原生配置供给",
-        "sourceOrder": "来源顺序",
-        "modelListCount_one": "{{count}} 个型号",
-        "modelListCount_other": "{{count}} 个型号",
-        "enableManaged": "统一管理",
-        "emptyModels": "这个 Agent 还没有型号。",
-        "manageModels": "管理型号",
+        "hubNoSupply": "已使用模型网关 · 没有启用任何供应商，下一个回合会失败",
+        "directNote": "使用 Agent 自己的配置",
+        "sourceOrder": "供应商优先级",
+        "modelListCount_one": "{{count}} 个模型",
+        "modelListCount_other": "{{count}} 个模型",
+        "enableManaged": "模型网关",
+        "emptyModels": "这个 Agent 还没有模型。",
+        "manageModels": "管理模型",
         "menuKind": {
-          "fixed": "内置型号",
+          "fixed": "内置模型",
           "open": "菜单开放"
         },
         "attribution": {
-          "interrupted": "{{names}} 供给中断",
-          "waiting": "{{names}} 正在等待来源恢复",
-          "unassigned": "{{models}} 暂无来源可供给"
+          "interrupted": "{{names}} 没有可用供应商",
+          "waiting": "{{names}} 正在等待供应商恢复",
+          "unassigned": "{{models}} 暂无可用供应商"
         }
       },
       "modelStatus": {
         "ok": "正常",
-        "cooldown": "冷却中（自动恢复）",
+        "cooldown": "等待重试（自动恢复）",
         "needsAction": "需要处理",
         "checking": "正在确认",
         "direct": "直连",
-        "noSource": "没有可用来源",
-        "blocked": "当前来源不可用",
-        "currentSwitched": "当前已自动换到 {{source}}",
-        "currentSource": "当前由 {{source}} 供给",
-        "takeover": "当前 {{source}}（接管）",
-        "waiting": "正在等待来源恢复",
-        "source": "由 {{source}} 供给",
+        "noSource": "没有可用供应商",
+        "blocked": "当前供应商不可用",
+        "currentSwitched": "已自动切换到 {{source}}",
+        "currentSource": "当前使用 {{source}}",
+        "takeover": "当前使用 {{source}}（已自动切换）",
+        "waiting": "正在等待供应商恢复",
+        "source": "使用 {{source}}",
         "unknown": "暂时无法确认",
         "retry": "重试",
-        "runtime": "模型服务未就绪",
+        "runtime": "模型网关未就绪",
         "runtimeAction": "去处理"
       },
       "routeDialog": {
-        "title": "{{menuModel}} · 路由链",
-        "open": "打开 {{model}} 的路由链",
-        "label": "这个型号的路由链",
-        "section": "这个型号的路由链",
-        "removeHop": "移除这一跳",
-        "editHop": "修改这一跳",
-        "addHop": "添加一跳",
+        "title": "{{menuModel}} · 路由",
+        "open": "打开 {{model}} 的路由",
+        "label": "这个模型的路由",
+        "section": "这个模型的路由",
+        "removeHop": "移除这个路由项",
+        "editHop": "修改这个路由项",
+        "addHop": "添加路由项",
         "add": {
-          "source": "来源",
-          "model": "型号",
-          "search": "搜索来源或型号",
+          "source": "供应商",
+          "model": "模型",
+          "search": "搜索供应商或模型",
           "confirm": "添加",
-          "noMatch": "没有匹配的来源型号",
-          "none": "没有可添加的来源型号"
+          "noMatch": "没有匹配的供应商或模型",
+          "none": "没有可添加的供应商或模型"
         },
         "edit": {
           "confirm": "替换",
-          "replaced": "已替换第 {{position}} 跳。"
+          "replaced": "已替换第 {{position}} 个路由项。"
         },
-        "sourceMissing": "来源不存在",
-        "invalidAfterRefresh": "这个已编辑的跳在刷新后的来源中不可用。替换或移除它后再保存。",
+        "sourceMissing": "供应商不存在",
+        "invalidAfterRefresh": "这个路由项在刷新后的供应商中不可用。替换或移除后再保存。",
         "reorder": {
-          "label": "按来源顺序重排",
-          "grabbed": "已抓取第 {{position}} 跳。使用方向键移动。",
-          "position": "已移到第 {{position}} 跳。",
-          "dropped": "已放到第 {{position}} 跳。",
-          "cancelled": "已取消重排,恢复到第 {{position}} 跳。",
-          "sorted": "已按来源顺序重排。",
-          "unchanged": "路由链已经符合来源顺序。"
+          "label": "按供应商优先级重排",
+          "grabbed": "已抓取第 {{position}} 个路由项。使用方向键移动。",
+          "position": "已移到第 {{position}} 个路由项。",
+          "dropped": "已放到第 {{position}} 个路由项。",
+          "cancelled": "已取消重排，恢复到第 {{position}} 个路由项。",
+          "sorted": "已按供应商优先级重排。",
+          "unchanged": "路由已经符合供应商优先级。"
         },
-        "grip": "调整这一跳的顺序",
-        "loading": "正在读取路由链…",
+        "grip": "调整这个路由项的顺序",
+        "loading": "正在读取路由…",
         "cancel": "取消",
         "save": "保存",
-        "saving": "正在保存路由链…",
-        "refreshing": "路由链已保存,正在刷新模型页面…",
-        "fail": { "read": "路由链没读到", "save": "路由链没保存上", "unconfirmed": "保存结果还没确认", "reconcileRead": "当前模型页面暂时没读到" },
+        "saving": "正在保存路由…",
+        "refreshing": "路由已保存，正在刷新模型页面…",
+        "fail": { "read": "路由暂时不可用", "save": "路由没有保存", "unconfirmed": "保存结果还没确认", "reconcileRead": "当前模型页面暂时不可用" },
         "retry": "重试",
-        "empty": "这条路由链是空的。添加一跳,或保持为空配置。",
-        "impact": { "title": "路由链已保存", "detail": "以下是这次保存实际移除或中断的项目。", "refreshFail": "路由链已保存,但模型页面暂时无法刷新。", "done": "完成" },
-        "hint": "这条链是写下来的配置。以后调整来源顺序时,其中的来源会按新的顺序重排。"
+        "empty": "这条路由是空的。添加一个路由项，或保持为空。",
+        "impact": { "title": "路由已保存", "detail": "以下是这次保存实际移除或中断的项目。", "refreshFail": "路由已保存，但模型页面暂时无法刷新。", "done": "完成" },
+        "hint": "这是当前保存的路由。以后调整供应商优先级时，其中的供应商会按新顺序重排。"
       },
       "recent": {
         "title": "最近切换",
@@ -1245,7 +1245,7 @@
       },
       "addKey": {
         "title": "添加 API Key",
-        "subtitle": "「添加」时自动连一次:认出接口 + 拉取型号列表",
+        "subtitle": "添加时自动连接一次：识别接口并拉取模型列表",
         "field": {
           "name": "名称(可选)",
           "protocol": "接口类型",
@@ -1256,27 +1256,27 @@
           "apiKey.reveal": "显示 API Key",
           "apiKey.conceal": "隐藏 API Key"
         },
-        "test": "拉取型号",
+        "test": "拉取模型",
         "test.hint": "可选 ·「添加」时会自动拉一次",
         "pull": {
-          "result_one": "拉到 {{count}} 个型号",
-          "result_other": "拉到 {{count}} 个型号",
-          "empty": "连上了,但这个来源没有可用型号"
+          "result_one": "拉到 {{count}} 个模型",
+          "result_other": "拉到 {{count}} 个模型",
+          "empty": "已经连接，但这个供应商没有可用模型"
         },
         "submit": "添加",
         "adding": "连接中…",
-        "adding.detail": "连上 + 验证接口 + 首次拉取型号列表 · 通常 1–3 秒",
+        "adding.detail": "连接 + 验证接口 + 首次拉取模型列表 · 通常 1–3 秒",
         "fail": {
           "subtitle": "认出接口是「添加」的前置条件 · 先按下面这条修,再重试",
-          "auth": "上游拒绝了这个凭据",
+          "auth": "供应商拒绝了这个凭据",
           "auth.detail": "检查 API Key、接口类型和 Base URL 的 API 根路径",
           "address": "地址不对:404 Not Found",
           "network": "无法连接到该地址(不可达或超时)",
           "undetermined": "已连接，但无法确认这是哪种模型接口",
-          "inventory": "接口已确认，但暂时没拿到型号清单",
+          "inventory": "接口已确认，但暂时没有拿到模型清单",
           "unclassified": "连接失败，请检查地址和 API Key 后重试",
-          "engineDown": "网关没有响应,请重试",
-          "save": "没能确认这个来源已经保存"
+          "engineDown": "模型网关没有响应，请重试",
+          "save": "没能确认这个供应商已经保存"
         },
         "retry": "重试",
         "undetermined": {
@@ -1290,12 +1290,12 @@
           "openaiChatCompletions": "OpenAI Chat Completions"
         },
         "inventory": {
-          "title": "接口已经认出来了 —— 但这次没拿到它的型号清单"
+          "title": "接口已经识别，但这次没有拿到模型清单"
         },
         "addAnyway": "仍要添加",
         "success": {
-          "title": "成功 → 弹窗关闭,直接进入「来源详情 · 型号管理」",
-          "detail": "型号列表、重新拉取、推理强度档位都在那里维护"
+          "title": "添加成功，接下来进入供应商详情",
+          "detail": "模型列表、重新拉取和推理强度档位都在那里维护"
         },
         "cancel": "取消"
       },
@@ -1312,17 +1312,17 @@
         "opt": {
           "added": "已添加",
           "native": {
-            "label": "原生使用",
+            "label": "由 Agent 管理",
             "desc": {
               "claude": "Claude Code 直接用这个订阅，凭据只留在本机。",
               "chatgpt": "Codex 直接用这个 ChatGPT 账号登录。"
             }
           },
           "hub": {
-            "label": "登录为网关来源",
+            "label": "添加为模型供应商",
             "desc": {
-              "claude": "把这个订阅交给网关，供给 Codex、OpenCode 等其他 Agent。",
-              "chatgpt": "网关把它供给 Codex 和其他 Agent，用量、额度、接管都能看到。"
+              "claude": "由模型网关管理这个订阅，让 Codex、OpenCode 等其他 Agent 使用。",
+              "chatgpt": "由模型网关管理这个订阅，让 Codex 和其他 Agent 使用；用量、额度和自动切换都能看到。"
             }
           }
         },
@@ -1336,7 +1336,7 @@
         },
         "hint": {
           "claude": "两条都要也可以，分两次添加。",
-          "chatgpt": "额度用完不会自动接管，也看不到用量。"
+          "chatgpt": "额度用完不会自动切换，也看不到用量。"
         },
         "signIn": "去登录",
         "cancel": "取消",
@@ -1344,9 +1344,9 @@
         "error": {
           "oauthFailed": "登录没有完成。可以重试。",
           "startFailed": "没能确认登录已经开始，可以重试",
-          "engineDown": "网关没有响应，请重试",
-          "loginInProgress": "另一个原生登录正在进行中，请先完成或取消后再重试。",
-          "alreadyBound": "这个后端的原生登录位已经被占用了。改用网关托管添加。"
+          "engineDown": "模型网关没有响应，请重试",
+          "loginInProgress": "另一个 Agent 登录正在进行中，请先完成或取消后再重试。",
+          "alreadyBound": "这个后端的登录已经被占用。改为添加模型供应商。"
         }
       },
       "oauth": {
@@ -1357,7 +1357,7 @@
           "reauth": "重新登录「{{name}}」"
         },
         "starting": "正在准备…",
-        "connected": "连接成功，已加入来源列表",
+        "connected": "连接成功，已加入模型供应商列表",
         "step1": {
           "authLink": "打开授权链接（任何设备的浏览器都行）",
           "devicePage": "打开设备授权页"
@@ -1381,71 +1381,71 @@
           "start": "无法开始授权，请重试",
           "timeout": "授权超时，请重新连接",
           "generic": "连接失败，请重试",
-          "finalize": "已完成授权，但创建来源失败，请重试",
-          "finalizeReauth": "已重新登录，但这个来源还是不可用，请重试"
+          "finalize": "已完成授权，但创建模型供应商失败，请重试",
+          "finalizeReauth": "已重新登录，但这个供应商还是不可用，请重试"
         }
       },
       "toast": {
         "reorderFailed": "顺序保存失败",
-        "connected": "已接入网关",
+        "connected": "已接入模型网关",
         "connectFailed": "接入失败，请重试",
         "refreshFailed": "刷新失败，请重试"
       },
       "supply": {
-        "degraded": "已接入网关 · 有来源不可用，已自动切到下一个",
-        "waiting": "已接入网关 · 来源都在冷却中，恢复前的回合会失败",
-        "interrupted": "已接入网关 · 供给中断，下一个回合会失败",
-        "noSources": "已接入网关 · 还没有启用任何来源，下一个回合会失败",
-        "nothingRunnable": "已接入网关 · 已启用的来源当前都无法供给，下一个回合会失败"
+        "degraded": "已接入模型网关 · 有供应商不可用，已自动切换",
+        "waiting": "已接入模型网关 · 所有供应商都在等待重试，恢复前的回合会失败",
+        "interrupted": "已接入模型网关 · 没有可用供应商，下一个回合会失败",
+        "noSources": "已接入模型网关 · 还没有启用任何供应商，下一个回合会失败",
+        "nothingRunnable": "已接入模型网关 · 已启用的供应商当前都不可用，下一个回合会失败"
       },
       "adoption": {
         "enabled": "已加入 {{list}}",
-        "route": "{{backend}} · {{model}} · 第 {{position}} 跳",
-        "none": "已连接。需要使用时，把它加到对应型号的路由中。"
+        "route": "{{backend}} · {{model}} · 第 {{position}} 个路由项",
+        "none": "已连接。需要使用时，把它加到对应模型的路由中。"
       },
       "supplyMode": {
-        "title": "供给方式",
-        "currentHub": "当前：统一管理",
+        "title": "模型管理方式",
+        "currentHub": "当前：模型网关",
         "currentDirect": "当前：直连 Direct",
-        "switchedHub": "已切换到统一管理",
+        "switchedHub": "已切换到模型网关",
         "switchedDirect": "已切换到直连 Direct",
         "switchFailed": "切换失败，请重试",
         "hub": {
-          "title": "网关模式 · Gateway",
+          "title": "模型网关 · Gateway",
           "recommended": "推荐 · 默认",
           "openModels": "打开模型页",
-          "description": "登录、API Key 和逐型号路由都在「设置 → 模型」中管理。不改动 {{backend}} 的原生配置，随时可切走。"
+          "description": "登录、API Key 和模型路由都在「设置 → 模型网关」中管理。不改动 {{backend}} 自己的配置，随时可切换。"
         },
         "direct": {
           "title": "直连模式 · Direct",
-          "description": "{{backend}} 使用自己的原生配置（settings.json / CLI 登录），Avibe 仅负责启动进程、不代管模型。适合排查问题，或想完全自管配置的用户。",
-          "detected": "检测到既有直连配置：{{detail}} —— 可一键导入网关",
-          "import": "导入网关…"
+          "description": "{{backend}} 使用自己的配置（settings.json / CLI 登录），Avibe 仅负责启动进程、不管理模型。适合排查问题，或想完全自行管理配置的用户。",
+          "detected": "检测到现有直连配置：{{detail}}，可一键导入模型网关",
+          "import": "导入模型网关…"
         },
-        "fixHint": "去「模型」页添加或启用来源即可恢复。"
+        "fixHint": "去「模型网关」页添加或启用供应商即可恢复。"
       },
       "migration": {
         "title": "接入模型网关",
-        "subtitle": "把现有的登录和 API Key 一次导入网关；导入后每个 Agent 各自选用来源、各自排序。",
-        "empty": "没有检测到可迁移的原生配置。",
-        "scanFailed": "扫描原生配置失败，请重试",
+        "subtitle": "把现有登录和 API Key 一次导入模型网关；导入后每个 Agent 各自选择供应商和优先级。",
+        "empty": "没有检测到可导入的 Agent 配置。",
+        "scanFailed": "扫描 Agent 配置失败，请重试",
         "applyFailed": "导入失败，请重试",
         "applied_one": "已导入 {{count}} 项",
         "applied_other": "已导入 {{count}} 项",
         "later": "稍后再说",
-        "apply_one": "导入 {{count}} 项并启用网关",
-        "apply_other": "导入 {{count}} 项并启用网关",
-        "nonDestructive": "非破坏迁移：原生配置不改动、不删除，导入只是复制；随时可在「后端」页切回直连。",
+        "apply_one": "导入 {{count}} 项并启用模型网关",
+        "apply_other": "导入 {{count}} 项并启用模型网关",
+        "nonDestructive": "导入只会复制配置，不会改动或删除 Agent 自己的配置；随时可在「后端」页切回直连。",
         "action": {
-          "import": "导入为来源",
+          "import": "导入为模型供应商",
           "controlledImport": "受控导入 · 预留",
-          "keepNative": "保留原生",
+          "keepNative": "保留给 Agent 管理",
           "reauth": "需重新授权 · 浏览器一键"
         },
         "notes": {
           "customBaseUrl": "含自定义 Base URL",
-          "keepNativeSanctioned": "保留在 CLI 自己的凭据库（受官方认可）",
-          "keepNativeReauthHint": "保持原生；需要网关托管时另行添加订阅",
+          "keepNativeSanctioned": "保留在 Agent 自己的凭据库（受官方认可）",
+          "keepNativeReauthHint": "保留给 Agent 管理；需要模型网关管理时另行添加订阅",
           "fromOpencode": "来自 opencode 配置"
         }
       },
@@ -1455,7 +1455,7 @@
         "opencode": "OpenCode"
       },
       "sourceDetail": {
-        "back": "返回来源列表",
+        "back": "返回模型供应商列表",
         "status": {
           "inUse": "使用中",
           "needsAction": {
@@ -1466,30 +1466,30 @@
           },
           "error": "异常",
           "standbyHintLabel": "这个状态是什么意思",
-          "standbyHint": "这个来源是健康的。当网关模式下的某个后端通过它供给一条路由时，它就会显示为使用中。",
-          "listUpdated": "· 型号列表更新于 {{time}}"
+          "standbyHint": "这个供应商当前可用。当模型网关中的某个后端通过它调用模型时，它就会显示为使用中。",
+          "listUpdated": "· 模型列表更新于 {{time}}"
         },
-        "summary_one": "{{host}} · {{count}} 个型号",
-        "summary_other": "{{host}} · {{count}} 个型号",
+        "summary_one": "{{host}} · {{count}} 个模型",
+        "summary_other": "{{host}} · {{count}} 个模型",
         "action": {
           "refetch": "重新拉取",
           "addModel": "添加模型"
         },
         "manage": {
           "label": "管理 {{source}}",
-          "edit": "编辑来源",
-          "remove": "移除来源"
+          "edit": "编辑供应商",
+          "remove": "移除供应商"
         },
         "edit": {
           "title": "编辑 {{source}}",
           "name": "显示名称",
           "baseUrl": "Base URL",
-          "hint": "协议保持不变。更改 Base URL 可能改变可用型号和路由；应用前会先让你确认影响。",
+          "hint": "协议保持不变。更改 Base URL 可能改变可用模型和路由；应用前会先让你确认影响。",
           "cancel": "取消",
           "save": "保存",
           "saving": "保存中…",
-          "fail": "来源没有保存上",
-          "verifyFail": "无法确认来源是否已保存",
+          "fail": "供应商没有保存",
+          "verifyFail": "无法确认供应商是否已保存",
           "validation": {
             "displayNameRequired": "请输入显示名称",
             "displayNameTooLong": "最多输入 64 个字符",
@@ -1497,22 +1497,22 @@
             "baseUrlCredential": "请从 Base URL 中移除凭据和疑似凭据的查询参数"
           },
           "impact": {
-            "title": "来源已更新，部分供给受到影响",
-            "detail": "以下路由或型号已被移除或中断。",
+            "title": "供应商已更新，部分路由受到影响",
+            "detail": "以下路由或模型已被移除或中断。",
             "done": "完成"
           },
           "settlement": {
-            "title": "来源已更新"
+            "title": "供应商已更新"
           }
         },
         "remove": {
           "impact": {
-            "title": "来源已移除，部分供给受到影响",
-            "detail": "以下是这次移除实际影响的路由和型号。",
+            "title": "供应商已移除，部分路由受到影响",
+            "detail": "以下是这次移除实际影响的路由和模型。",
             "done": "完成"
           },
           "settlement": {
-            "title": "来源已移除"
+            "title": "供应商已移除"
           }
         },
         "impact": {
@@ -1520,8 +1520,8 @@
         },
         "refetch": {
           "added": "新增",
-          "removed_one": "本次拉取移除了 {{count}} 个型号：{{models}}",
-          "removed_other": "本次拉取移除了 {{count}} 个型号：{{models}}",
+          "removed_one": "本次拉取移除了 {{count}} 个模型：{{models}}",
+          "removed_other": "本次拉取移除了 {{count}} 个模型：{{models}}",
           "unchangedOnly": "本次拉取没有变化"
         },
         "row": {
@@ -1530,16 +1530,16 @@
         "fail": {
           "refetch": "拉取没有回来，下面是这一页最后一次真的读到的列表",
           "tier": "档位没保存上",
-          "addModel": "这个型号没添加上",
-          "removeModel": "这个型号没移除掉",
-          "deleteSource": "这个来源没有移除掉",
-          "verifyDeleteSource": "无法确认这个来源是否已移除"
+          "addModel": "这个模型没有添加",
+          "removeModel": "这个模型没有移除",
+          "deleteSource": "这个供应商没有移除",
+          "verifyDeleteSource": "无法确认这个供应商是否已移除"
         },
         "retry": "重试",
         "dismissUnverified": "忽略未确认的结果",
-        "search": "搜索型号 ID",
+        "search": "搜索模型 ID",
         "col": {
-          "id": "型号 ID",
+          "id": "模型 ID",
           "entry": "录入",
           "tiers": "推理强度"
         },
@@ -1554,55 +1554,55 @@
           "inputHint": "回车添加 · 任意文本",
           "remove": "移除 {{tier}}",
           "suggest": "添加 {{tier}}",
-          "note": "档位按你输入的原样发送。没有档位的型号照样可以路由，只是请求不带 effort 参数。"
+          "note": "档位按你输入的原样发送。没有档位的模型照样可以路由，只是请求不带 effort 参数。"
         },
         "addRow": {
           "hint": "拉取不到、或只想接入其中一个时用"
         },
-        "empty": "这个来源没有返回型号。可以手动添加，或重新拉取。",
-        "emptyNeverFetched": "还没有成功拉取过这个来源的型号列表。先处理上面的状态，再拉一次，或者手动添加一个型号。",
-        "footnote": "这里只管「这个来源有哪些型号」。型号走哪条路由链，在网关模块里改。档位自己填，两种录入方式都一样。接口类型在添加时确认并固定，页面会显示、但不能修改。"
+        "empty": "这个供应商没有返回模型。可以手动添加，或重新拉取。",
+        "emptyNeverFetched": "还没有成功拉取过这个供应商的模型列表。先处理上面的状态，再拉一次，或者手动添加一个模型。",
+        "footnote": "这里只管理这个供应商提供哪些模型。模型使用哪条路由，在路由模块中调整。档位由你填写，两种录入方式都一样。接口类型在添加时确认并固定，页面会显示但不能修改。"
       },
       "guard": {
-        "label": "会被移除的跳",
-        "count_one": "{{count}} 跳",
-        "count_other": "{{count}} 跳",
+        "label": "会被移除的路由项",
+        "count_one": "{{count}} 个路由项",
+        "count_other": "{{count}} 个路由项",
         "hop": {
           "position": "顺序 #{{n}}"
         },
         "hint": {
-          "safe": "这些型号还有别的来源可用。",
-          "interrupt": "有型号会因此没有可用来源。"
+          "safe": "这些模型还有其他供应商可用。",
+          "interrupt": "有模型会因此没有可用供应商。"
         },
         "gap": {
-          "label": "会失去可用来源的型号",
+          "label": "会失去可用供应商的模型",
           "subject": "{{backend}} · {{menuModel}}",
           "agents": "已指定它的 Agent：{{agents}}"
         },
         "result": {
-          "label": "已移除的跳",
-          "gapLabel": "已经没有可用来源的型号",
+          "label": "已移除的路由项",
+          "gapLabel": "已经没有可用供应商的模型",
           "hint": {
-            "safe": "这些型号仍有别的来源可用。",
-            "interrupt": "有型号现在没有可用来源。"
+            "safe": "这些模型仍有其他供应商可用。",
+            "interrupt": "有模型现在没有可用供应商。"
           }
         },
         "cancel": "取消",
         "title": {
-          "refetch": "重新拉取 {{source}} 的型号",
+          "refetch": "重新拉取 {{source}} 的模型",
           "removeModel": "从 {{source}} 移除 {{model}}",
-          "saveRoute": "保存 {{menuModel}} 的路由链",
+          "saveRoute": "保存 {{menuModel}} 的路由",
           "replaceKey": "更换 {{source}} 的 Key",
           "editSource": "保存 {{source}} 的更改？",
           "deleteSource": "移除 {{source}}？"
         },
         "subtitle": {
-          "refetch": "这次拉取会让部分型号从这个来源的清单里消失。",
-          "removeModel": "这个型号会从这个来源的清单里消失。",
-          "saveRoute": "这次保存会让已配置的型号没有可用来源",
-          "replaceKey": "这次更换会改变这个来源的型号清单。",
-          "editSource": "更改端点可能改变这个来源的型号清单和路由。",
-          "deleteSource": "这会从所有正在使用它的 Agent 和路由中移除该来源。"
+          "refetch": "这次拉取会让部分模型从这个供应商的清单里消失。",
+          "removeModel": "这个模型会从这个供应商的清单里消失。",
+          "saveRoute": "这次保存会让已配置的模型没有可用供应商",
+          "replaceKey": "这次更换会改变这个供应商的模型清单。",
+          "editSource": "更改端点可能改变这个供应商的模型清单和路由。",
+          "deleteSource": "这会从所有正在使用它的 Agent 和路由中移除该供应商。"
         },
         "confirm": {
           "refetch": "仍要拉取",
@@ -1610,7 +1610,7 @@
           "saveRoute": "仍要保存",
           "replaceKey": "仍要更换",
           "editSource": "仍要保存",
-          "deleteSource": "移除来源"
+          "deleteSource": "移除供应商"
         }
       },
       "repair": {
@@ -1619,8 +1619,8 @@
         "retest": "重试",
         "reauthTitle": "重新登录「{{name}}」？",
         "reauthBody": {
-          "immediate": "开始后旧的登录立即失效，用它登录的来源都会不可用。完成后只恢复这一个，其它的需要各自重新登录。",
-          "onFailure": "这次登录如果没成功，这个来源会需要处理，直到你重新登录。"
+          "immediate": "开始后旧的登录立即失效，使用它的供应商都会不可用。完成后只恢复这一个，其他供应商需要各自重新登录。",
+          "onFailure": "这次登录如果没成功，这个供应商会需要处理，直到你重新登录。"
         },
         "reauthConfirm": "开始登录",
         "replaceTitle": "更换「{{name}}」的 API Key",
@@ -1631,19 +1631,19 @@
         "replaceFailed": "更换失败，请重试",
         "forceTitle": "仍要更换？",
         "forceConfirm": "强制更换",
-        "gapsTitle": "继续后这些 Agent 将没有来源可用：",
-        "gapsDone": "这些 Agent 现在没有来源可用：",
-        "gaps": "有 Agent 现在没有来源可用",
+        "gapsTitle": "继续后这些 Agent 将没有供应商可用：",
+        "gapsDone": "这些 Agent 现在没有供应商可用：",
+        "gaps": "有 Agent 现在没有供应商可用",
         "repaired": "已恢复可用",
         "refreshed": "已更新",
         "unresolved": "仍然不可用",
         "failed": "没能处理，请重试"
       },
       "migrationBanner": {
-        "title": "发现可导入网关的原生配置",
-        "body_one": "检测到 {{count}} 项原生登录 / API Key 可搬进网关。",
-        "body_other": "检测到 {{count}} 项原生登录 / API Key 可搬进网关。",
-        "import": "导入网关",
+        "title": "发现可导入模型网关的 Agent 配置",
+        "body_one": "检测到 {{count}} 项登录 / API Key 可导入模型网关。",
+        "body_other": "检测到 {{count}} 项登录 / API Key 可导入模型网关。",
+        "import": "导入模型网关",
         "dismiss": "忽略"
       }
     }
@@ -1753,31 +1753,31 @@
   },
   "models": {
     "eligibility": {
-      "subscription_wrong_client": "{{vendor}} 订阅仅可供 {{backend}} 使用"
+      "subscription_wrong_client": "{{vendor}} 订阅仅可由 {{backend}} 使用"
     },
     "oauth": {
-      "upstream_failed": "厂商没有完成这次登录，请重试",
-      "engine_unavailable": "中枢没有响应，请重试",
+      "upstream_failed": "供应商没有完成这次登录，请重试",
+      "engine_unavailable": "模型网关没有响应，请重试",
       "submission_failed": "粘贴的内容没能提交，请重试",
       "ambiguous_engine_binding": "分不清登录的是哪个账号，请一次只登一个再重试",
-      "binding_failed": "该账号已被另一来源使用",
+      "binding_failed": "该账号已被另一个供应商使用",
       "expired": "授权超时，请重新连接"
     },
     "probe": {
-      "native_cli_unavailable": "用不上 CLI 的登录",
+      "native_cli_unavailable": "无法使用 Agent 的登录",
       "no_candidate": {
-        "waiting": "所有来源都在冷却",
-        "interrupted": "现在没有来源能提供这个模型"
+        "waiting": "所有供应商都在等待重试",
+        "interrupted": "现在没有供应商能提供这个模型"
       }
     },
     "source": {
       "cooldown": {
         "rate_limited": "触发限流",
         "quota_exhausted": "本周期额度用完",
-        "server_error": "上游服务异常"
+        "server_error": "供应商服务异常"
       },
       "backoff": {
-        "connection_failed": "连接失败，短暂退避"
+        "connection_failed": "连接失败，等待重试"
       },
       "needs_action": {
         "oauth_expired": "需要重新登录",
