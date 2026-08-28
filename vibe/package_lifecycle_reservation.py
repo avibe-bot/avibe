@@ -1,4 +1,10 @@
-"""The one OS reservation for package lifecycle and ordinary restart work."""
+"""The one OS reservation for package lifecycle and ordinary restart work.
+
+The process registry is a narrowing cache for an already-held OS lock: its
+token-owned membership starts after acquisition and ends before unlock. During
+either boundary window, the OS lock remains authoritative for probe/acquire;
+only matching-token cleanup may remove an entry, preserving any successor.
+"""
 
 from __future__ import annotations
 
@@ -68,18 +74,25 @@ class BusyResult:
         return True
 
 
-_PROCESS_RESERVATIONS: set[Path] = set()
+_PROCESS_RESERVATIONS: dict[Path, object] = {}
 _PROCESS_RESERVATIONS_LOCK = threading.Lock()
 _PROCESS_RESERVATIONS_PID = os.getpid()
 
 
 def _refresh_process_reservations() -> None:
     global _PROCESS_RESERVATIONS_PID
-
     pid = os.getpid()
     if pid != _PROCESS_RESERVATIONS_PID:
         _PROCESS_RESERVATIONS.clear()
         _PROCESS_RESERVATIONS_PID = pid
+
+
+def _forget_process_reservation(key: Path, registration_token: object) -> None:
+    with _PROCESS_RESERVATIONS_LOCK:
+        _refresh_process_reservations()
+        if _PROCESS_RESERVATIONS.get(key) is registration_token:
+            del _PROCESS_RESERVATIONS[key]
+        assert _PROCESS_RESERVATIONS.get(key) is not registration_token
 
 
 def _try_os_lock(descriptor: int) -> bool:
@@ -138,15 +151,16 @@ class PackageLifecycleReservation:
         key: Path,
         path: Path,
         holder: HolderInformation,
+        registration_token: object,
     ) -> None:
         self._descriptor: int | None = descriptor
         self._key = key
+        self._registration_token = registration_token
         self.path = path
         self.holder = holder
 
     def duplicate_for_runner(self) -> int:
         """Return an inheritable POSIX OFD duplicate without transferring ownership."""
-
         if _IS_WINDOWS:
             raise OSError(errno.ENOTSUP, "Windows runners do not inherit reservation locks")
         descriptor = self._descriptor
@@ -165,13 +179,11 @@ class PackageLifecycleReservation:
         if descriptor is None:
             return
         self._descriptor = None
+        _forget_process_reservation(self._key, self._registration_token)
         try:
             _unlock_os_lock(descriptor)
         finally:
             os.close(descriptor)
-            with _PROCESS_RESERVATIONS_LOCK:
-                _refresh_process_reservations()
-                _PROCESS_RESERVATIONS.discard(self._key)
 
     close = release
 
@@ -192,7 +204,6 @@ class PackageLifecycleReservationManager:
 
     def acquire(self, holder_type: HolderType) -> PackageLifecycleReservation | None:
         """Try once; publish the new holder before doing any other owner work."""
-
         self.runtime_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         with _PROCESS_RESERVATIONS_LOCK:
             _refresh_process_reservations()
@@ -202,10 +213,9 @@ class PackageLifecycleReservationManager:
         descriptor: int | None = None
         locked = False
         registered = False
+        registration_token = object()
         try:
-            flags = os.O_RDWR | os.O_CREAT
-            flags |= getattr(os, "O_CLOEXEC", 0)
-            flags |= getattr(os, "O_NOFOLLOW", 0)
+            flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
             descriptor = os.open(self.lock_path, flags, 0o600)
             os.set_inheritable(descriptor, False)
             if not _try_os_lock(descriptor):
@@ -215,8 +225,10 @@ class PackageLifecycleReservationManager:
             locked = True
             with _PROCESS_RESERVATIONS_LOCK:
                 _refresh_process_reservations()
-                _PROCESS_RESERVATIONS.add(self._key)
+                assert self._key not in _PROCESS_RESERVATIONS
+                _PROCESS_RESERVATIONS[self._key] = registration_token
                 registered = True
+                assert _PROCESS_RESERVATIONS[self._key] is registration_token
 
             holder = HolderInformation(
                 acquisition_id=uuid.uuid4().hex,
@@ -230,21 +242,25 @@ class PackageLifecycleReservationManager:
                 key=self._key,
                 path=self.lock_path,
                 holder=holder,
+                registration_token=registration_token,
             )
             descriptor = None
             return reservation
         except BaseException:
-            if descriptor is not None:
-                if locked:
-                    _unlock_os_lock(descriptor)
-                os.close(descriptor)
-            if registered:
-                self._forget_process_reservation()
+            try:
+                if registered:
+                    _forget_process_reservation(self._key, registration_token)
+            finally:
+                if descriptor is not None:
+                    try:
+                        if locked:
+                            _unlock_os_lock(descriptor)
+                    finally:
+                        os.close(descriptor)
             raise
 
     def probe(self) -> LivenessProbeResult:
         """Classify current lock liveness without trusting stale file bytes."""
-
         first = self._read_holder()
         with _PROCESS_RESERVATIONS_LOCK:
             _refresh_process_reservations()
@@ -278,7 +294,6 @@ class PackageLifecycleReservationManager:
         retry_delay: float = 0.01,
     ) -> BusyResult:
         """Bound publication rereads, then return owner-neutral contention."""
-
         observations = max(0, rereads) + 1
         saw_pending_publication = False
         for index in range(observations):
@@ -302,20 +317,28 @@ class PackageLifecycleReservationManager:
             "acquired_at": holder.acquired_at,
         }
         encoded = (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        assert len(encoded) < _LOCK_BYTE_OFFSET
         os.lseek(descriptor, 0, os.SEEK_SET)
         os.ftruncate(descriptor, 0)
         _write_all(descriptor, encoded)
         os.fsync(descriptor)
 
     def _read_holder(self) -> HolderInformation | None:
+        descriptor: int | None = None
         try:
-            payload = json.loads(self.lock_path.read_text(encoding="utf-8"))
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(self.lock_path, flags)
+            expected_size = os.fstat(descriptor).st_size
+            if expected_size <= 0 or expected_size >= _LOCK_BYTE_OFFSET:
+                return None
+            encoded = os.read(descriptor, _LOCK_BYTE_OFFSET)
+            if len(encoded) != expected_size or os.fstat(descriptor).st_size != expected_size:
+                return None
+            payload = json.loads(encoded.decode("utf-8"))
             acquisition_id = payload["acquisition_id"]
             pid = payload["pid"]
             acquired_at = payload["acquired_at"]
-            if not isinstance(acquisition_id, str) or not acquisition_id:
-                return None
-            if not isinstance(pid, int) or pid <= 0:
+            if not isinstance(acquisition_id, str) or not acquisition_id or not isinstance(pid, int) or pid <= 0:
                 return None
             if not isinstance(acquired_at, str) or not acquired_at:
                 return None
@@ -327,11 +350,9 @@ class PackageLifecycleReservationManager:
             )
         except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError, ValueError):
             return None
-
-    def _forget_process_reservation(self) -> None:
-        with _PROCESS_RESERVATIONS_LOCK:
-            _refresh_process_reservations()
-            _PROCESS_RESERVATIONS.discard(self._key)
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
 
 
 __all__ = [
