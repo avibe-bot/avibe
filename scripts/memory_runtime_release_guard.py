@@ -33,7 +33,7 @@ except ModuleNotFoundError:  # Direct execution adds scripts/, not the repositor
     from release_package_version import package_version_from_release_tag
 
 RELEASE_DOWNLOAD_ROOT = "https://github.com/avibe-bot/avibe/releases/download"
-TRANSITION_RELEASE_VERSION = Version("3.0.14")
+LAST_LEGACY_RELEASE_VERSION = Version("3.0.14rc2")
 EXPECTED_EVEROS_VERSION = "1.2.3"
 EXPECTED_PYTHON_VERSION = "3.12.12"
 EXPECTED_LOCK_SHA256 = "e6acc17e4c0969563d380326e90134965af0822259bb4a9adb4d54433e9737fe"
@@ -305,7 +305,7 @@ def discover_release_manifest(
         raise ReleaseAssetError("legacy release unexpectedly contains an unowned Memory wheel")
     if core_manifest:
         return ManifestDiscovery("core", core_manifest)
-    if release_tag is not None and _release_version(release_tag) >= TRANSITION_RELEASE_VERSION:
+    if release_tag is not None and _release_version(release_tag) > LAST_LEGACY_RELEASE_VERSION:
         raise ReleaseAssetError("transition-and-later release is missing its Memory manifest")
     raise LegacyManifestAbsent("legacy release predates the Memory Runtime manifest")
 

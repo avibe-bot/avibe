@@ -250,8 +250,9 @@ def test_memory_indep_022_023_discovery_distinguishes_legacy_and_ambiguous_trans
     )
     with pytest.raises(guard.LegacyManifestAbsent):
         guard.discover_release_manifest(legacy_dir, release_tag="gh-v3.0.14rc2")
-    with pytest.raises(guard.ReleaseAssetError, match="transition-and-later"):
-        guard.discover_release_manifest(legacy_dir, release_tag="v3.0.14")
+    for release_tag in ("gh-v3.0.14rc3", "v3.0.14"):
+        with pytest.raises(guard.ReleaseAssetError, match="transition-and-later"):
+            guard.discover_release_manifest(legacy_dir, release_tag=release_tag)
 
     package_dir, artifacts = _transition_packages(tmp_path / "ambiguous", manifest)
     _wheel(
