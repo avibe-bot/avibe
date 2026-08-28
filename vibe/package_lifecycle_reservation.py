@@ -14,6 +14,8 @@ from pathlib import Path
 
 
 LOCK_FILENAME = "package-lifecycle.lock"
+_LOCK_BYTE_OFFSET = 4096
+_IS_WINDOWS = os.name == "nt"
 
 
 class _StringEnum(str, Enum):
@@ -44,6 +46,14 @@ class HolderInformation:
     holder_type: HolderType
     pid: int
     acquired_at: str
+
+
+@dataclass(frozen=True)
+class HolderCorrelationEvidence:
+    """Caller-owned proof that a publication names an authoritative owner."""
+
+    acquisition_id: str
+    holder_type: HolderType
 
 
 @dataclass(frozen=True)
@@ -82,10 +92,10 @@ def _refresh_process_reservations() -> None:
 
 
 def _try_os_lock(descriptor: int) -> bool:
-    if os.name == "nt":
+    if _IS_WINDOWS:
         import msvcrt
 
-        os.lseek(descriptor, 0, os.SEEK_SET)
+        os.lseek(descriptor, _LOCK_BYTE_OFFSET, os.SEEK_SET)
         try:
             msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
             return True
@@ -106,10 +116,10 @@ def _try_os_lock(descriptor: int) -> bool:
 
 
 def _unlock_os_lock(descriptor: int) -> None:
-    if os.name == "nt":
+    if _IS_WINDOWS:
         import msvcrt
 
-        os.lseek(descriptor, 0, os.SEEK_SET)
+        os.lseek(descriptor, _LOCK_BYTE_OFFSET, os.SEEK_SET)
         msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
         return
 
@@ -149,12 +159,21 @@ class PackageLifecycleReservation:
         return self._descriptor
 
     def release(self) -> None:
+        self._close(unlock=True)
+
+    def close_parent_duplicate(self) -> None:
+        """Close a post-spawn parent duplicate without releasing the shared lock."""
+
+        self._close(unlock=False)
+
+    def _close(self, *, unlock: bool) -> None:
         descriptor = self._descriptor
         if descriptor is None:
             return
         self._descriptor = None
         try:
-            _unlock_os_lock(descriptor)
+            if unlock:
+                _unlock_os_lock(descriptor)
         finally:
             os.close(descriptor)
             with _PROCESS_RESERVATIONS_LOCK:
@@ -196,8 +215,6 @@ class PackageLifecycleReservationManager:
             flags |= getattr(os, "O_NOFOLLOW", 0)
             descriptor = os.open(self.lock_path, flags, 0o600)
             os.set_inheritable(descriptor, False)
-            if os.name == "nt" and os.fstat(descriptor).st_size == 0:
-                _write_all(descriptor, b"\0")
             if not _try_os_lock(descriptor):
                 os.close(descriptor)
                 descriptor = None
@@ -260,38 +277,40 @@ class PackageLifecycleReservationManager:
     def classify_busy(
         self,
         *,
-        expected_package_acquisition_id: str | None,
+        correlation: HolderCorrelationEvidence | None = None,
         rereads: int = 2,
         retry_delay: float = 0.01,
     ) -> BusyResult:
         """Return an owner-specific result only for a live consistent holder.
 
-        The caller supplies the package acquisition identity from its own state;
-        ``None`` means it established that no package identity exists. This module
-        deliberately knows nothing about the source of that consistency fact.
+        This record-free layer never infers authority from stable publication bytes.
+        The caller supplies correlation only after proving it against authoritative
+        state owned outside this module.
         """
 
         observations = max(0, rereads) + 1
+        saw_stable_publication = False
         for index in range(observations):
             probe = self.probe()
             holder = probe.holder
-            if probe.publication_consistent and holder is not None:
-                if (
-                    holder.holder_type is HolderType.PACKAGE
-                    and holder.acquisition_id == expected_package_acquisition_id
-                ):
+            saw_stable_publication |= probe.publication_consistent
+            if (
+                probe.publication_consistent
+                and holder is not None
+                and correlation is not None
+                and holder.acquisition_id == correlation.acquisition_id
+                and holder.holder_type is correlation.holder_type
+            ):
+                if holder.holder_type is HolderType.PACKAGE:
                     return BusyResult(BusyClassification.PACKAGE_TRANSACTION, holder, index + 1)
-                if (
-                    holder.holder_type is HolderType.ORDINARY_RESTART
-                    and expected_package_acquisition_id is None
-                ):
+                if holder.holder_type is HolderType.ORDINARY_RESTART:
                     return BusyResult(BusyClassification.ORDINARY_RESTART, holder, index + 1)
             if index + 1 < observations:
                 time.sleep(max(0.0, retry_delay))
 
         classification = (
             BusyClassification.RESERVATION_PUBLICATION
-            if rereads <= 0
+            if rereads <= 0 and not saw_stable_publication
             else BusyClassification.BUSY
         )
         return BusyResult(classification, None, observations)
@@ -339,6 +358,7 @@ class PackageLifecycleReservationManager:
 __all__ = [
     "BusyClassification",
     "BusyResult",
+    "HolderCorrelationEvidence",
     "HolderInformation",
     "HolderType",
     "LivenessProbeResult",
