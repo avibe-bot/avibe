@@ -28,9 +28,14 @@ from storage.models import (
     messages,
     run_definitions,
     scope_settings,
+    scopes,
     state_meta,
 )
 from storage.session_reclaim import DEFINITION_AGENT_BINDING_REVISION_KEY
+from storage.settings_revision import (
+    RUNTIME_SETTINGS_SCOPE_TYPES,
+    mark_runtime_settings_changed,
+)
 from vibe.authorization import (
     instance_owner_context,
 )
@@ -1465,8 +1470,14 @@ class VibeAgentStore:
             )
 
         scope_rows = conn.execute(
-            select(scope_settings.c.scope_id, scope_settings.c.agent_name, scope_settings.c.settings_json)
+            select(
+                scope_settings.c.scope_id,
+                scope_settings.c.agent_name,
+                scope_settings.c.settings_json,
+                scopes.c.scope_type,
+            ).select_from(scope_settings.join(scopes, scopes.c.id == scope_settings.c.scope_id))
         ).mappings().all()
+        runtime_settings_changed = False
         for row in scope_rows:
             values: dict[str, Any] = {}
             if _matches_agent_reference(row["agent_name"], reference_names):
@@ -1482,6 +1493,11 @@ class VibeAgentStore:
                     .where(scope_settings.c.scope_id == row["scope_id"])
                     .values(**values)
                 )
+                if str(row["scope_type"]) in RUNTIME_SETTINGS_SCOPE_TYPES:
+                    runtime_settings_changed = True
+
+        if runtime_settings_changed:
+            mark_runtime_settings_changed(conn)
 
         definition_rows = conn.execute(
             select(run_definitions.c.id, run_definitions.c.agent_name, run_definitions.c.metadata_json)

@@ -25,17 +25,16 @@ from config.v2_settings import (
     split_thread_native_id,
 )
 from storage.agent_session_rows import reserve_write_lock
-from storage.db import SqliteInvalidationProbe, create_sqlite_engine
+from storage.db import create_sqlite_engine
 from storage.models import agents, auth_codes, scope_settings, scopes
+from storage.settings_revision import (
+    RUNTIME_SETTINGS_SCOPE_TYPES,
+    mark_runtime_settings_changed,
+    read_runtime_settings_revision,
+)
 
 SETTINGS_VERSION = 1
 GUILD_POLICY_KIND = "guild_policy"
-# Scope types whose settings this store owns. avibe project scopes
-# (storage.projects_service) share the scope_settings table but are NOT managed
-# here, so save_state must never delete or overwrite their rows.
-_MANAGED_SCOPE_TYPES = ("channel", "thread", "platform", "guild", "user")
-
-
 class StaleScopeAgentBindingError(ValueError):
     code = "settings_conflict"
 
@@ -56,14 +55,13 @@ class SQLiteSettingsService:
     def __init__(self, db_path: Path):
         self.db_path = db_path
         self.engine = create_sqlite_engine(db_path)
-        self._probe = SqliteInvalidationProbe(self.engine)
 
     def close(self) -> None:
-        self._probe.close()
         self.engine.dispose()
 
-    def has_external_write(self) -> bool:
-        return self._probe.has_external_write()
+    def current_revision(self) -> str | None:
+        with self.engine.connect() as conn:
+            return read_runtime_settings_revision(conn)
 
     def load_state(self) -> SettingsState:
         with self.engine.connect() as conn:
@@ -77,7 +75,7 @@ class SQLiteSettingsService:
                 bind_codes=self._load_bind_codes(conn),
             )
 
-    def save_state(self, state: SettingsState) -> None:
+    def save_state(self, state: SettingsState) -> str:
         saved_bindings: list[tuple[ChannelSettings | UserSettings, RoutingSettings]] = []
         with self.engine.begin() as conn:
             reserve_write_lock(conn)
@@ -240,10 +238,12 @@ class SQLiteSettingsService:
 
             self._delete_removed_scope_settings(conn, kept)
             self._sync_bind_codes(conn, state.bind_codes, now)
+            revision = mark_runtime_settings_changed(conn)
 
         for item, routing in saved_bindings:
             item.routing = routing
             item._agent_name_at_load = routing.agent_name
+        return revision
 
     @staticmethod
     def _reconcile_agent_binding(
@@ -306,11 +306,13 @@ class SQLiteSettingsService:
     def _delete_removed_scope_settings(self, conn: Connection, kept: set[str]) -> None:
         """Delete settings rows for managed scopes no longer present in the state.
 
-        Scoped to ``_MANAGED_SCOPE_TYPES`` so avibe project scopes (owned by
+        Scoped to ``RUNTIME_SETTINGS_SCOPE_TYPES`` so avibe project scopes (owned by
         projects_service) keep their settings/workdir even though they live in
         the same table.
         """
-        managed_scope_ids = select(scopes.c.id).where(scopes.c.scope_type.in_(_MANAGED_SCOPE_TYPES))
+        managed_scope_ids = select(scopes.c.id).where(
+            scopes.c.scope_type.in_(RUNTIME_SETTINGS_SCOPE_TYPES)
+        )
         stmt = scope_settings.delete().where(scope_settings.c.scope_id.in_(managed_scope_ids))
         if kept:
             stmt = stmt.where(scope_settings.c.scope_id.notin_(kept))

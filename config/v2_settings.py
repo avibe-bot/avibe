@@ -476,7 +476,7 @@ class SettingsStore:
     def get_instance(cls, settings_path: Optional[Path] = None) -> "SettingsStore":
         """Return the process-wide singleton, creating it on first call.
 
-        Automatically reloads from disk if the file has changed.
+        Automatically reloads if the runtime-settings revision has changed.
         """
         with cls._instance_lock:
             target_path = settings_path or paths.get_settings_path()
@@ -499,7 +499,10 @@ class SettingsStore:
         self.db_path = self.settings_path.with_name("vibe.sqlite")
         self.settings: SettingsState = SettingsState()
         self._bind_lock = threading.Lock()  # Guards atomic bind operations
-        self._file_mtime: float = 0
+        self._reload_lock = threading.RLock()
+        self._generation = 0
+        self._observed_revision: str | None = None
+        self._reload_count = 0
         from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
         from storage.settings_service import SQLiteSettingsService
 
@@ -509,33 +512,56 @@ class SettingsStore:
             primary_platform=resolve_primary_platform_from_config(self.settings_path.parent),
         )
         self._service = SQLiteSettingsService(self.db_path)
-        self._load()
-        self._service.has_external_write()
+        self._load_with_revision()
 
     def close(self) -> None:
         service = getattr(self, "_service", None)
         if service is not None:
             service.close()
 
-    def maybe_reload(self) -> None:
-        """Reload from SQLite if another connection has committed changes."""
-        if self._service.has_external_write():
+    @property
+    def generation(self) -> int:
+        return self._generation
+
+    @property
+    def reload_count(self) -> int:
+        return self._reload_count
+
+    def maybe_reload(self) -> bool:
+        """Reload once when another transaction changed runtime settings."""
+        with self._reload_lock:
+            revision = self._service.current_revision()
+            if revision == self._observed_revision:
+                return False
             self._load()
+            # Record the revision read before the load. If a newer write races
+            # with the load, the next check sees it instead of losing it.
+            self._observed_revision = revision
+            self._reload_count += 1
+            return True
+
+    def _load_with_revision(self) -> None:
+        revision = self._service.current_revision()
+        self._load()
+        self._observed_revision = revision
 
     def _load(self) -> None:
         self.settings = self._service.load_state()
-        self._file_mtime += 1
+        self._generation += 1
 
     def save(self) -> None:
-        try:
-            self._service.save_state(self.settings)
-        except Exception:
-            # API helpers mutate the singleton before saving. A refused transaction
-            # must restore the durable snapshot before any later read or save.
-            self._load()
-            raise
-        self._service.has_external_write()
-        self._file_mtime += 1
+        with self._reload_lock:
+            try:
+                revision = self._service.save_state(self.settings)
+            except Exception:
+                # API helpers mutate the singleton before saving. A refused transaction
+                # must restore the durable snapshot before any later read or save.
+                self._load_with_revision()
+                raise
+            # Use the exact revision committed by this transaction. Reading the
+            # current value here could absorb a later external write without loading it.
+            self._observed_revision = revision
+            self._generation += 1
 
     # --- Channel helpers ---
 
