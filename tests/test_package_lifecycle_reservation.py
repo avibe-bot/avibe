@@ -13,7 +13,6 @@ import pytest
 from vibe import package_lifecycle_reservation as reservation_module
 from vibe.package_lifecycle_reservation import (
     BusyClassification,
-    HolderCorrelationEvidence,
     HolderType,
     PackageLifecycleReservationManager,
     ReservationLiveness,
@@ -49,18 +48,14 @@ def _hold_before_publication(runtime_dir: str, ready, proceed) -> None:
         reservation.release()
 
 
-def _hold_inherited_descriptor(descriptor: int, ready, release) -> None:
+def _hold_runner_duplicate(descriptor: int, ready, release) -> None:
     ready.set()
     release.wait(10)
     os.close(descriptor)
 
 
-def _correlation(reservation) -> HolderCorrelationEvidence:
-    return HolderCorrelationEvidence(reservation.holder.acquisition_id, reservation.holder.holder_type)
-
-
 @pytest.mark.parametrize("holder_type", list(HolderType))
-def test_memory_indep_020_holder_publication_names_each_owner(tmp_path, holder_type) -> None:
+def test_memory_indep_020_publication_records_diagnostic_holder_types(tmp_path, holder_type) -> None:
     manager = PackageLifecycleReservationManager(tmp_path / holder_type.value)
 
     reservation = manager.acquire(holder_type)
@@ -95,36 +90,29 @@ def test_memory_indep_020_acquire_overwrites_metadata_and_release_is_reusable(tm
     assert manager.probe().liveness is ReservationLiveness.FREE
 
 
-def test_memory_indep_020_late_contender_uses_consistency_not_id_change(tmp_path) -> None:
-    manager = PackageLifecycleReservationManager(tmp_path)
-    package = manager.acquire(HolderType.PACKAGE)
-    assert package is not None
+@pytest.mark.parametrize("holder_type", list(HolderType))
+def test_memory_indep_020_publication_never_drives_owner_classification(
+    tmp_path,
+    holder_type,
+) -> None:
+    manager = PackageLifecycleReservationManager(tmp_path / holder_type.value)
+    reservation = manager.acquire(holder_type)
+    assert reservation is not None
     publication_before_attempt = json.loads(manager.lock_path.read_text(encoding="utf-8"))
 
-    classified = manager.classify_busy(
-        correlation=_correlation(package),
-    )
+    probe = manager.probe()
+    classified = manager.classify_busy(rereads=0)
 
-    assert classified.classification is BusyClassification.PACKAGE_TRANSACTION
-    assert classified.holder == package.holder
+    assert set(BusyClassification) == {
+        BusyClassification.PENDING_PUBLICATION,
+        BusyClassification.BUSY,
+    }
+    assert probe.liveness is ReservationLiveness.HELD
+    assert probe.publication == reservation.holder
+    assert classified.classification is BusyClassification.BUSY
     assert classified.observations == 1
     assert json.loads(manager.lock_path.read_text(encoding="utf-8")) == publication_before_attempt
-    mismatched = manager.classify_busy(
-        correlation=HolderCorrelationEvidence("different-live-acquisition", HolderType.PACKAGE),
-        rereads=0,
-    )
-    assert mismatched.classification is BusyClassification.BUSY
-    assert mismatched.holder is None
-    package.release()
-
-    ordinary = manager.acquire(HolderType.ORDINARY_RESTART)
-    assert ordinary is not None
-    uncorrelated = manager.classify_busy()
-    assert uncorrelated.classification is BusyClassification.BUSY
-    restart_busy = manager.classify_busy(correlation=_correlation(ordinary))
-    assert restart_busy.classification is BusyClassification.ORDINARY_RESTART
-    assert restart_busy.holder == ordinary.holder
-    ordinary.release()
+    reservation.release()
 
 
 @pytest.mark.parametrize("publication", [b"", b"{unreadable", b'{"acquisition_id":"stale"}'])
@@ -136,23 +124,13 @@ def test_memory_indep_020_inconsistent_live_publication_stays_retry_neutral(
     reservation = manager.acquire(HolderType.PACKAGE)
     assert reservation is not None
     manager.lock_path.write_bytes(publication)
-    correlation = _correlation(reservation)
 
-    immediate = manager.classify_busy(
-        correlation=correlation,
-        rereads=0,
-    )
-    exhausted = manager.classify_busy(
-        correlation=correlation,
-        rereads=2,
-        retry_delay=0,
-    )
+    immediate = manager.classify_busy(rereads=0)
+    exhausted = manager.classify_busy(rereads=2, retry_delay=0)
 
-    assert immediate.classification is BusyClassification.RESERVATION_PUBLICATION
-    assert immediate.holder is None
+    assert immediate.classification is BusyClassification.PENDING_PUBLICATION
     assert immediate.observations == 1
     assert exhausted.classification is BusyClassification.BUSY
-    assert exhausted.holder is None
     assert exhausted.observations == 3
     reservation.release()
 
@@ -166,17 +144,18 @@ def test_memory_indep_020_stale_free_bytes_are_not_a_live_holder(tmp_path) -> No
     )
 
     probe = manager.probe()
+    classified = manager.classify_busy(rereads=0)
 
     assert probe.liveness is ReservationLiveness.FREE
-    assert probe.holder is None
-    assert probe.publication_consistent is False
+    assert probe.publication is None
+    assert probe.publication_observed is False
+    assert classified.classification is BusyClassification.BUSY
 
 
-def test_memory_indep_020_holder_turnover_never_guesses_from_stale_bytes(tmp_path) -> None:
+def test_memory_indep_020_recovery_turnover_never_names_stale_package_owner(tmp_path) -> None:
     manager = PackageLifecycleReservationManager(tmp_path)
     manager.lock_path.write_text(
-        '{"acquisition_id":"previous-restart","holder_type":"ordinary_restart",'
-        '"pid":999999,"acquired_at":"2026-01-01T00:00:00Z"}',
+        '{"acquisition_id":"dead-package-a","holder_type":"package","pid":999999,"acquired_at":"2026-01-01T00:00:00Z"}',
         encoding="utf-8",
     )
     context = multiprocessing.get_context("spawn")
@@ -188,9 +167,11 @@ def test_memory_indep_020_holder_turnover_never_guesses_from_stale_bytes(tmp_pat
     process.start()
     try:
         assert ready.wait(10)
+        observed = manager.probe()
         busy = manager.classify_busy(rereads=2, retry_delay=0)
+        assert observed.publication is not None
+        assert observed.publication.acquisition_id == "dead-package-a"
         assert busy.classification is BusyClassification.BUSY
-        assert busy.holder is None
         assert busy.observations == 3
     finally:
         proceed.set()
@@ -202,27 +183,23 @@ def test_memory_indep_020_holder_turnover_never_guesses_from_stale_bytes(tmp_pat
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX open-file-description evidence")
-def test_memory_indep_020_parent_handoff_closes_without_unlock(tmp_path, monkeypatch) -> None:
+def test_memory_indep_020_supervisor_retains_primary_with_runner_ofd_duplicate(tmp_path) -> None:
     manager = PackageLifecycleReservationManager(tmp_path)
     reservation = manager.acquire(HolderType.ORDINARY_RESTART)
     assert reservation is not None
+    runner_descriptor = reservation.duplicate_for_runner()
+    assert os.get_inheritable(runner_descriptor) is True
     context = multiprocessing.get_context("fork")
     ready, release = context.Event(), context.Event()
     process = context.Process(
-        target=_hold_inherited_descriptor,
-        args=(reservation.fileno(), ready, release),
+        target=_hold_runner_duplicate,
+        args=(runner_descriptor, ready, release),
     )
     process.start()
+    os.close(runner_descriptor)
     try:
         assert ready.wait(10)
-        with monkeypatch.context() as patch:
-            patch.setattr(
-                reservation_module,
-                "_unlock_os_lock",
-                lambda _descriptor: (_ for _ in ()).throw(AssertionError("unexpected unlock")),
-            )
-            reservation.close_parent_duplicate()
-            assert manager.acquire(HolderType.PACKAGE) is None
+        assert manager.acquire(HolderType.PACKAGE) is None
     finally:
         release.set()
         process.join(10)
@@ -230,6 +207,7 @@ def test_memory_indep_020_parent_handoff_closes_without_unlock(tmp_path, monkeyp
             process.terminate()
             process.join(5)
     assert process.exitcode == 0
+    reservation.release()
     recovered = manager.acquire(HolderType.PACKAGE)
     assert recovered is not None
     recovered.release()
@@ -255,7 +233,9 @@ def test_memory_indep_020_windows_lock_byte_does_not_cover_publication(tmp_path,
     publication = manager.lock_path.read_bytes()
     assert len(publication) < reservation_module._LOCK_BYTE_OFFSET
     assert json.loads(publication)["acquisition_id"] == reservation.holder.acquisition_id
-    assert PackageLifecycleReservationManager(tmp_path).probe().holder == reservation.holder
+    assert PackageLifecycleReservationManager(tmp_path).probe().publication == reservation.holder
+    with pytest.raises(OSError, match="Windows runners do not inherit"):
+        reservation.duplicate_for_runner()
     reservation.release()
     assert FakeMsvcrt.calls == [
         (reservation_module._LOCK_BYTE_OFFSET, FakeMsvcrt.LK_NBLCK, 1),
@@ -299,13 +279,11 @@ def test_memory_indep_020_true_multiprocess_contention_and_release(tmp_path) -> 
 
         assert manager.acquire(HolderType.ORDINARY_RESTART) is None
         probe = manager.probe()
-        busy = manager.classify_busy(
-            correlation=HolderCorrelationEvidence(child_holder["acquisition_id"], HolderType.PACKAGE),
-        )
+        busy = manager.classify_busy()
         assert probe.liveness is ReservationLiveness.HELD
-        assert probe.holder is not None
-        assert probe.holder.pid == child_holder["pid"]
-        assert busy.classification is BusyClassification.PACKAGE_TRANSACTION
+        assert probe.publication is not None
+        assert probe.publication.pid == child_holder["pid"]
+        assert busy.classification is BusyClassification.BUSY
     finally:
         release.set()
         process.join(10)

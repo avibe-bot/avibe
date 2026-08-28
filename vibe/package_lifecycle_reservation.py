@@ -34,14 +34,14 @@ class ReservationLiveness(_StringEnum):
 
 
 class BusyClassification(_StringEnum):
-    PACKAGE_TRANSACTION = "busy_package_transaction"
-    ORDINARY_RESTART = "busy_restart"
-    RESERVATION_PUBLICATION = "busy_reservation_publication"
+    PENDING_PUBLICATION = "busy_pending_publication"
     BUSY = "busy"
 
 
 @dataclass(frozen=True)
 class HolderInformation:
+    """Diagnostic publication fields that never prove reservation ownership."""
+
     acquisition_id: str
     holder_type: HolderType
     pid: int
@@ -49,27 +49,18 @@ class HolderInformation:
 
 
 @dataclass(frozen=True)
-class HolderCorrelationEvidence:
-    """Caller-owned proof that a publication names an authoritative owner."""
-
-    acquisition_id: str
-    holder_type: HolderType
-
-
-@dataclass(frozen=True)
 class LivenessProbeResult:
     liveness: ReservationLiveness
-    holder: HolderInformation | None
+    publication: HolderInformation | None
 
     @property
-    def publication_consistent(self) -> bool:
-        return self.liveness is ReservationLiveness.HELD and self.holder is not None
+    def publication_observed(self) -> bool:
+        return self.publication is not None
 
 
 @dataclass(frozen=True)
 class BusyResult:
     classification: BusyClassification
-    holder: HolderInformation | None
     observations: int
 
     @property
@@ -138,7 +129,7 @@ def _write_all(descriptor: int, payload: bytes) -> None:
 
 
 class PackageLifecycleReservation:
-    """A live descriptor plus the holder identity published for that acquisition."""
+    """The supervisor's live reservation and diagnostic publication."""
 
     def __init__(
         self,
@@ -153,27 +144,29 @@ class PackageLifecycleReservation:
         self.path = path
         self.holder = holder
 
-    def fileno(self) -> int:
-        if self._descriptor is None:
+    def duplicate_for_runner(self) -> int:
+        """Return an inheritable POSIX OFD duplicate without transferring ownership."""
+
+        if _IS_WINDOWS:
+            raise OSError(errno.ENOTSUP, "Windows runners do not inherit reservation locks")
+        descriptor = self._descriptor
+        if descriptor is None:
             raise ValueError("package lifecycle reservation is closed")
-        return self._descriptor
+        duplicate = os.dup(descriptor)
+        try:
+            os.set_inheritable(duplicate, True)
+        except BaseException:
+            os.close(duplicate)
+            raise
+        return duplicate
 
     def release(self) -> None:
-        self._close(unlock=True)
-
-    def close_parent_duplicate(self) -> None:
-        """Close a post-spawn parent duplicate without releasing the shared lock."""
-
-        self._close(unlock=False)
-
-    def _close(self, *, unlock: bool) -> None:
         descriptor = self._descriptor
         if descriptor is None:
             return
         self._descriptor = None
         try:
-            if unlock:
-                _unlock_os_lock(descriptor)
+            _unlock_os_lock(descriptor)
         finally:
             os.close(descriptor)
             with _PROCESS_RESERVATIONS_LOCK:
@@ -190,7 +183,7 @@ class PackageLifecycleReservation:
 
 
 class PackageLifecycleReservationManager:
-    """Acquire, probe, and classify the one runtime-scoped reservation."""
+    """Acquire and observe the one runtime-scoped reservation without naming its owner."""
 
     def __init__(self, runtime_dir: Path) -> None:
         self.runtime_dir = Path(runtime_dir)
@@ -277,43 +270,25 @@ class PackageLifecycleReservationManager:
     def classify_busy(
         self,
         *,
-        correlation: HolderCorrelationEvidence | None = None,
         rereads: int = 2,
         retry_delay: float = 0.01,
     ) -> BusyResult:
-        """Return an owner-specific result only for a live consistent holder.
-
-        This record-free layer never infers authority from stable publication bytes.
-        The caller supplies correlation only after proving it against authoritative
-        state owned outside this module.
-        """
+        """Bound publication rereads, then return owner-neutral contention."""
 
         observations = max(0, rereads) + 1
-        saw_stable_publication = False
+        saw_pending_publication = False
         for index in range(observations):
             probe = self.probe()
-            holder = probe.holder
-            saw_stable_publication |= probe.publication_consistent
-            if (
-                probe.publication_consistent
-                and holder is not None
-                and correlation is not None
-                and holder.acquisition_id == correlation.acquisition_id
-                and holder.holder_type is correlation.holder_type
-            ):
-                if holder.holder_type is HolderType.PACKAGE:
-                    return BusyResult(BusyClassification.PACKAGE_TRANSACTION, holder, index + 1)
-                if holder.holder_type is HolderType.ORDINARY_RESTART:
-                    return BusyResult(BusyClassification.ORDINARY_RESTART, holder, index + 1)
+            saw_pending_publication |= probe.liveness is ReservationLiveness.HELD and not probe.publication_observed
             if index + 1 < observations:
                 time.sleep(max(0.0, retry_delay))
 
         classification = (
-            BusyClassification.RESERVATION_PUBLICATION
-            if rereads <= 0 and not saw_stable_publication
+            BusyClassification.PENDING_PUBLICATION
+            if rereads <= 0 and saw_pending_publication
             else BusyClassification.BUSY
         )
-        return BusyResult(classification, None, observations)
+        return BusyResult(classification, observations)
 
     def _publish_holder(self, descriptor: int, holder: HolderInformation) -> None:
         payload = {
@@ -358,7 +333,6 @@ class PackageLifecycleReservationManager:
 __all__ = [
     "BusyClassification",
     "BusyResult",
-    "HolderCorrelationEvidence",
     "HolderInformation",
     "HolderType",
     "LivenessProbeResult",
