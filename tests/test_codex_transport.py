@@ -113,7 +113,6 @@ class CodexTransportHealthTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(
             {
-                "agents.enabled=false",
                 "features.apps=false",
                 "features.goals=false",
                 "features.hooks=false",
@@ -123,6 +122,9 @@ class CodexTransportHealthTests(unittest.IsolatedAsyncioTestCase):
                 "features.terminal_visualization_instructions=false",
             }.issubset(disabled)
         )
+        # ``agents`` is a role-definition table in older supported Codex
+        # releases; native delegation is disabled through the feature gate.
+        self.assertNotIn("agents.enabled=false", disabled)
         self.assertNotIn("features.image_generation=false", disabled)
         self.assertNotIn("features.shell_tool=false", disabled)
         self.assertNotIn("web_search=disabled", disabled)

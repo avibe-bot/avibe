@@ -24,7 +24,6 @@ STREAM_BUFFER_LIMIT = 128 * 1024 * 1024  # 128 MB
 # user's global config. These overrides are appended last so backend extra args
 # cannot re-enable a competing host surface for this process.
 AVIBE_APP_SERVER_CONFIG_OVERRIDES = (
-    "agents.enabled=false",
     "analytics.enabled=false",
     "check_for_update_on_startup=false",
     "feedback.enabled=false",
