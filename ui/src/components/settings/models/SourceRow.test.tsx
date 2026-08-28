@@ -23,8 +23,9 @@ describe('SourceRow', () => {
   it('opens the Source detail without exposing inline source mutations', async () => {
     const onOpen = vi.fn();
     render(<I18nextProvider i18n={i18n}><SourceRow source={source} onOpen={onOpen} /></I18nextProvider>);
-    await userEvent.click(screen.getByRole('button', { name: /Production/ }));
-    expect(onOpen).toHaveBeenCalledWith(source);
+    const opener = screen.getByRole('button', { name: /Production/ });
+    await userEvent.click(opener);
+    expect(onOpen).toHaveBeenCalledWith(source, opener);
     expect(screen.queryByText(/latency/i)).toBeNull();
     expect(screen.getByText('Anthropic · Anthropic Messages')).toBeTruthy();
   });

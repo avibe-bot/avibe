@@ -27,12 +27,14 @@ DialogOverlay.displayName = DialogPrimitive.Overlay.displayName;
 type DialogContentProps = React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & {
   /** Give content-heavy phone dialogs a resolved, near-full-screen sheet height. */
   mobileSheetHeight?: 'content' | 'tall';
+  /** Accessible label for the built-in close control. */
+  closeLabel?: string;
 };
 
 export const DialogContent = React.forwardRef<
   React.ComponentRef<typeof DialogPrimitive.Content>,
   DialogContentProps
->(({ className, children, mobileSheetHeight = 'content', ...props }, ref) => (
+>(({ className, children, mobileSheetHeight = 'content', closeLabel = 'Close', ...props }, ref) => (
   <DialogPortal>
     <DialogOverlay />
     <DialogPrimitive.Content
@@ -55,7 +57,7 @@ export const DialogContent = React.forwardRef<
       {children}
       <DialogPrimitive.Close className="absolute right-4 top-4 rounded-md p-1 text-muted opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring">
         <X className="size-4" />
-        <span className="sr-only">Close</span>
+        <span className="sr-only">{closeLabel}</span>
       </DialogPrimitive.Close>
     </DialogPrimitive.Content>
   </DialogPortal>

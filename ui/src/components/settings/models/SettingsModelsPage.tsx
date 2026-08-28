@@ -1,9 +1,10 @@
 import * as React from 'react';
-import { ArrowLeft, Gauge, LoaderCircle, Power, RefreshCw, Route, ScrollText } from 'lucide-react';
+import { Gauge, LoaderCircle, Power, RefreshCw, Route, ScrollText } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover';
 import { useToast } from '@/context/ToastContext';
 import { cn } from '@/lib/utils';
@@ -252,21 +253,19 @@ const RuntimeClosedState: React.FC<{
   );
 };
 
-const ModelHubShell: React.FC<{ actions?: React.ReactNode; detailBack?: () => void; children: React.ReactNode; rootRef?: React.Ref<HTMLDivElement> }> = ({ actions, detailBack, children, rootRef }) => {
+const ModelHubShell: React.FC<{ actions?: React.ReactNode; children: React.ReactNode; rootRef?: React.Ref<HTMLDivElement> }> = ({ actions, children, rootRef }) => {
   const { t } = useTranslation();
   return (
     <div ref={rootRef} className="model-hub-shell">
       <header className="model-hub-shell-head">
-        {detailBack
-          ? <button type="button" onClick={detailBack} aria-label={t('settings.models.sourceDetail.back') as string} title={t('settings.models.sourceDetail.back') as string} className="model-hub-detail-back"><ArrowLeft aria-hidden="true" /></button>
-          : <span className="flex items-center gap-[9px]">
-              <h1>{t('settings.models.shell.title')}</h1>
-              <ModelHubInfoHint
-                label={t('settings.models.shell.modelsInfo.label')}
-                content={t('settings.models.shell.modelsInfo.body')}
-                className="model-hub-shell-info"
-              />
-            </span>}
+        <span className="flex items-center gap-[9px]">
+          <h1>{t('settings.models.shell.title')}</h1>
+          <ModelHubInfoHint
+            label={t('settings.models.shell.modelsInfo.label')}
+            content={t('settings.models.shell.modelsInfo.body')}
+            className="model-hub-shell-info"
+          />
+        </span>
         {actions}
       </header>
       {children}
@@ -366,6 +365,7 @@ export const SettingsModelsPage: React.FC = () => {
   // owns the success-landing timer and reconcile flag below.
   const [reauthSource, setReauthSource] = React.useState<Source | null>(null);
   const subscriptionTriggerRef = React.useRef<HTMLButtonElement>(null);
+  const apiKeyTriggerRef = React.useRef<HTMLButtonElement | null>(null);
   const subscriptionAnchorRef = subscriptionTriggerRef as React.RefObject<HTMLButtonElement>;
   const subscriptionPickerRefs = React.useRef<Partial<Record<SubscriptionPickerVendor, HTMLButtonElement | null>>>({});
   const subscriptionPickerHandoffRef = React.useRef(false);
@@ -376,7 +376,7 @@ export const SettingsModelsPage: React.FC = () => {
   // so it cannot launch a second refresh that overwrites a successful landing.
   const subscriptionSuccessReconcileRef = React.useRef(false);
   const sourceDetailHeadingRef = React.useRef<HTMLHeadingElement>(null);
-  const focusSourceDetailPendingRef = React.useRef(false);
+  const sourceDetailReturnFocusRef = React.useRef<(() => HTMLElement | null) | null>(null);
   const [orderBackend, setOrderBackend] = React.useState<AgentBackend | null>(null);
   const [adoptAgent, setAdoptAgent] = React.useState<AgentSupply | null>(null);
   const [routeTarget, setRouteTarget] = React.useState<{ agent: AgentSupply; modelId: string; opener: HTMLElement | null } | null>(null);
@@ -911,10 +911,19 @@ export const SettingsModelsPage: React.FC = () => {
     unread: (retryable) => unreadRegion(retryable),
     degraded: (_staleData, cause, retryable) => degradedRegion(installedAgents, cause, retryable),
   });
-  const selectSource = React.useCallback((sourceId: string | null) => {
-    sourceIntentAuthority.commit(() => setSelectedSourceId(sourceId));
-  }, [sourceIntentAuthority]);
+  type SourceDetailSelection = {
+    sourceId: string;
+    returnFocus: () => HTMLElement | null;
+  };
+  const applySourceDetailSelection = React.useCallback((selection: SourceDetailSelection | null) => {
+    if (selection) sourceDetailReturnFocusRef.current = selection.returnFocus;
+    setSelectedSourceId(selection?.sourceId ?? null);
+  }, []);
+  const selectSource = React.useCallback((selection: SourceDetailSelection | null) => {
+    sourceIntentAuthority.commit(() => applySourceDetailSelection(selection));
+  }, [applySourceDetailSelection, sourceIntentAuthority]);
   const selectedSource = sources.find((source) => source.id === selectedSourceId) ?? null;
+  const sourceDetailOpen = selectedSourceId !== null && subscriptionVendor === null;
   const orderAgent = agents.find((agent) => agent.backend === orderBackend && agent.mode === 'hub') ?? null;
   const currentRouteAgent = routeTarget
     ? installedAgents.find((agent) => agent.backend === routeTarget.agent.backend) ?? null
@@ -1081,7 +1090,10 @@ export const SettingsModelsPage: React.FC = () => {
         authority: sourceIntentAuthority,
         apply: () => {
           setApiKeyOpen(false);
-          setSelectedSourceId(created.source.id);
+          applySourceDetailSelection({
+            sourceId: created.source.id,
+            returnFocus: () => apiKeyTriggerRef.current,
+          });
         },
       },
       reconcile: refresh,
@@ -1096,11 +1108,13 @@ export const SettingsModelsPage: React.FC = () => {
       void refresh();
       return;
     }
-    // Keep the success panel readable until its existing handoff timer closes it;
-    // the effect below then moves focus into the committed source detail surface.
-    focusSourceDetailPendingRef.current = true;
+    // Keep the success panel as the only active dialog until its handoff timer
+    // closes it. The provider dialog then opens and owns its normal autofocus.
     sourceEntityAuthority.landLatest(source);
-    selectSource(source.id);
+    selectSource({
+      sourceId: source.id,
+      returnFocus: () => subscriptionTriggerRef.current,
+    });
     subscriptionSuccessReconcileRef.current = true;
     void refresh();
     if (subscriptionCloseTimer.current !== null) window.clearTimeout(subscriptionCloseTimer.current);
@@ -1109,11 +1123,6 @@ export const SettingsModelsPage: React.FC = () => {
       setSubscriptionVendor(null);
     }, 1400);
   }, [refresh, selectSource, sourceEntityAuthority]);
-  React.useEffect(() => {
-    if (!focusSourceDetailPendingRef.current || subscriptionVendor !== null || !selectedSourceId || !selectedSource) return;
-    focusSourceDetailPendingRef.current = false;
-    window.requestAnimationFrame(() => sourceDetailHeadingRef.current?.focus());
-  }, [selectedSource, selectedSourceId, subscriptionVendor]);
   const closeSubscription = React.useCallback(() => {
     if (subscriptionCloseTimer.current !== null) {
       window.clearTimeout(subscriptionCloseTimer.current);
@@ -1166,7 +1175,6 @@ export const SettingsModelsPage: React.FC = () => {
   return (
     <ModelHubShell
       rootRef={pageRef}
-      detailBack={runtimeConfigurationVisible && selectedSourceId ? () => selectSource(null) : undefined}
       actions={!landingLoading
         ? <span className="flex items-center gap-2">
               <RuntimePill
@@ -1200,17 +1208,6 @@ export const SettingsModelsPage: React.FC = () => {
       {landingLoading ? <div className="text-[13px] text-muted">{t('common.loading')}</div>
         : !runtimeConfigurationVisible
           ? <RuntimeClosedState read={runtimeRead} runtime={retainedRuntime} starting={startingRuntime} stopping={stoppingRuntime} />
-        : selectedSourceId
-          ? selectedSource
-              ? <SourceDetailPanel
-                source={selectedSource}
-                activeBackends={activeBackends}
-                headingRef={sourceDetailHeadingRef}
-                trackMutation={trackSourceMutation(selectedSource.id)}
-                onReauth={setReauthSource}
-                onMutationCommitted={sourceMutationReport.present}
-              />
-            : <section className="rounded-xl border border-border bg-surface px-5 py-12 text-center text-[12px] text-muted">{t('settings.models.sourceDetail.gone')}</section>
           : <div className="space-y-[22px]">
                   {/* The tab strip belongs to the Hub, not to the source
                       inventory. Usage and switch history both outlive the Sources
@@ -1229,7 +1226,7 @@ export const SettingsModelsPage: React.FC = () => {
                           onOpenChange={(open) => { if (!open) closeSubscriptionPicker(); }}
                         >
                           <PopoverAnchor virtualRef={subscriptionAnchorRef} />
-                          <SourcesCard read={sourcesRead} activeBackends={activeBackends} readFailureCopy={routeCommitStatus?.failed.has('sources') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} onRetry={() => routeCommitStatus?.failed.has('sources') ? retryRouteCommit() : void retrySources()} onOpenSource={(source) => selectSource(source.id)} onAddApiKey={() => setApiKeyOpen(true)} onAddSubscription={toggleSubscriptionPicker} subscriptionPickerOpen={subscriptionPickerOpen} subscriptionTriggerRef={subscriptionTriggerRef} />
+                          <SourcesCard read={sourcesRead} activeBackends={activeBackends} readFailureCopy={routeCommitStatus?.failed.has('sources') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} onRetry={() => routeCommitStatus?.failed.has('sources') ? retryRouteCommit() : void retrySources()} onOpenSource={(source, opener) => selectSource({ sourceId: source.id, returnFocus: () => opener })} onAddApiKey={(opener) => { apiKeyTriggerRef.current = opener; setApiKeyOpen(true); }} onAddSubscription={toggleSubscriptionPicker} subscriptionPickerOpen={subscriptionPickerOpen} subscriptionTriggerRef={subscriptionTriggerRef} />
                           <PopoverContent
                             role="menu"
                             aria-label={t('settings.models.upstream.addSubscription')}
@@ -1309,7 +1306,7 @@ export const SettingsModelsPage: React.FC = () => {
                             })}
                           </PopoverContent>
                         </Popover>
-                        <div className="hidden lg:block" aria-hidden="true" />
+                        <div className="hidden xl:block" aria-hidden="true" />
                         <GatewayModule supply={installedSupplyRead} readFailureCopy={routeCommitStatus?.failed.has('agents') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} sources={sources} chains={chains} runtime={runtime} runtimeSnapshot={retainedRuntime} onRetry={() => routeCommitStatus?.failed.has('agents') ? retryRouteCommit() : void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={setAdoptAgent} onSwitchDirect={switchToDirect} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId, opener) => setRouteTarget({ agent, modelId, opener })} onProbeSettled={(agent) => void refreshAgentChains(agent)} />
                         <SupplyGraph containerRef={overviewRef} relations={supplyRelations} />
                       </div>
@@ -1318,6 +1315,45 @@ export const SettingsModelsPage: React.FC = () => {
                   </div>}
                 </div>}
       {runtimeConfigurationVisible && <>
+      <Dialog open={sourceDetailOpen} onOpenChange={(open) => { if (!open) selectSource(null); }}>
+        <DialogContent
+          mobileSheetHeight="tall"
+          closeLabel={t('settings.models.sourceDetail.close') as string}
+          className="model-hub-source-dialog flex h-[min(624px,calc(100dvh-32px))] w-[min(720px,calc(100vw-32px))] max-w-[720px] flex-col gap-0 overflow-hidden rounded-[14px] border-border-strong bg-surface p-0 shadow-[var(--model-hub-dialog-shadow)] max-md:w-full max-md:max-w-none max-md:rounded-t-2xl"
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            sourceDetailHeadingRef.current?.focus();
+          }}
+          onCloseAutoFocus={(event) => {
+            const returnFocus = sourceDetailReturnFocusRef.current;
+            sourceDetailReturnFocusRef.current = null;
+            const target = returnFocus?.();
+            if (!target?.isConnected) return;
+            event.preventDefault();
+            target.focus();
+          }}
+          onEscapeKeyDown={(event) => {
+            // Radix observes Escape before React's row handlers; marked editors own it locally.
+            if (event.target instanceof Element && event.target.closest('[data-source-dialog-local-escape]')) {
+              event.preventDefault();
+            }
+          }}
+        >
+          <DialogTitle className="sr-only">{selectedSource?.display_name ?? t('settings.models.sourceDetail.gone')}</DialogTitle>
+          <DialogDescription className="sr-only">{t('settings.models.sourceDetail.footnote')}</DialogDescription>
+          {selectedSource
+            ? <SourceDetailPanel
+                key={selectedSource.id}
+                source={selectedSource}
+                activeBackends={activeBackends}
+                headingRef={sourceDetailHeadingRef}
+                trackMutation={trackSourceMutation(selectedSource.id)}
+                onReauth={setReauthSource}
+                onMutationCommitted={sourceMutationReport.present}
+              />
+            : <section className="grid min-h-0 flex-1 place-items-center px-5 py-12 text-center text-[12px] text-muted">{t('settings.models.sourceDetail.gone')}</section>}
+        </DialogContent>
+      </Dialog>
       <SourceMutationReport
         report={sourceMutationReport.report}
         onComplete={() => { void sourceMutationReport.complete(); }}

@@ -894,6 +894,12 @@
         "sourceOrder": "调整优先级",
         "switchToGateway": "切换到模型网关",
         "switchToDirect": "切到直连",
+        "modeMenu": {
+          "title": "运行模式",
+          "gatewayCurrent": "网关（当前）",
+          "gatewayDescription": "按路由与优先级分配到模型供应商",
+          "directDescription": "改用 {{backend}} 自带的模型与凭据，路由与优先级不再生效"
+        },
         "fail": {
           "switchToDirect": "没能切回直连"
         },
@@ -1456,6 +1462,19 @@
       },
       "sourceDetail": {
         "back": "返回模型供应商列表",
+        "close": "关闭供应商详情",
+        "modelsHeading": "模型",
+        "usageSummary_one": "{{count}} 个模型 · 被 {{backends}} 使用",
+        "usageSummary_other": "{{count}} 个模型 · 被 {{backends}} 使用",
+        "metadata": {
+          "endpoint": "接入地址",
+          "apiKey": "API Key",
+          "account": "账号",
+          "type": "供应商类型",
+          "lastFetched": "最近拉取",
+          "officialEndpoint": "供应商官方地址",
+          "neverFetched": "尚未拉取"
+        },
         "status": {
           "inUse": "使用中",
           "needsAction": {
@@ -1525,7 +1544,8 @@
           "unchangedOnly": "本次拉取没有变化"
         },
         "row": {
-          "remove": "移除"
+          "remove": "移除",
+          "edit": "编辑 {{model}} 的推理强度"
         },
         "fail": {
           "refetch": "拉取没有回来，下面是这一页最后一次真的读到的列表",
@@ -1538,6 +1558,7 @@
         "retry": "重试",
         "dismissUnverified": "忽略未确认的结果",
         "search": "搜索模型 ID",
+        "searchEmpty": "没有匹配的模型",
         "col": {
           "id": "模型 ID",
           "entry": "录入",

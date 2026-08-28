@@ -1,11 +1,11 @@
 import * as React from 'react';
-import { ArrowDownUp, ChevronDown, ChevronRight, ChevronUp, PlugZap, PowerOff, RefreshCw } from 'lucide-react';
+import { ArrowDownUp, Check, ChevronDown, ChevronRight, ChevronUp, PlugZap, Power, RefreshCw, Route } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { ResponsiveMenu } from '@/components/ui/responsive-menu';
 import { cn } from '@/lib/utils';
-import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { collapsedModelRows, listedModelIds, modelChainKey, modelSupplyState, type ModelChainIndex, type ModelChainRead } from './modelRows';
 import { foldRegionRead } from './regionRead';
 import { agentGroupStatus } from './supply';
@@ -91,6 +91,7 @@ const AgentModelCard: React.FC<{
   const { t } = useTranslation();
   const { Icon, accent } = backendVisual(agent.backend);
   const [expanded, setExpanded] = React.useState(false);
+  const [modeMenuOpen, setModeMenuOpen] = React.useState(false);
   const allModels = listedModelIds(agent);
   const chainProjectionLive = agentHasLiveChainProjection(runtime, agent);
   const collapsed = collapsedModelRows(agent, expanded);
@@ -129,12 +130,15 @@ const AgentModelCard: React.FC<{
       : health === 'ok' && agent.mode === 'hub'
         ? 'bg-mint'
         : 'bg-muted';
+  const modeStatus = switchFailed
+    ? t('settings.models.gateway.fail.switchToDirect') as string
+    : subtitle;
   return (
     <section className="overflow-hidden rounded-lg border border-border bg-background" data-agent-backend={agent.backend}>
       <div
         tabIndex={-1}
         data-agent-group-head={agent.backend}
-        className="flex min-h-[66px] flex-col justify-center gap-[7px] border-b border-border px-3.5 py-3 sm:min-h-[66px] sm:py-1"
+        className="flex min-h-[52px] flex-col justify-center border-b border-border px-3.5 py-2"
       >
         <div className="flex min-w-0 flex-col items-stretch gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-3">
           <div className="flex min-w-0 items-center gap-[9px]">
@@ -146,13 +150,58 @@ const AgentModelCard: React.FC<{
               </Badge>
             </span>
           </div>
-          {agent.mode === 'hub' ? <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2"><Button variant="secondary" size="sm" className="model-hub-agent-head-action rounded-md px-3 text-[11.5px] font-bold" onClick={() => onOpenOrder(agent)} disabled={pending}><ArrowDownUp aria-hidden="true" />{t('settings.models.gateway.sourceOrder')}</Button><Button variant="outline" size="sm" className="model-hub-agent-head-action rounded-md px-3 text-[11.5px] font-bold" onClick={() => onSwitchDirect(agent)} disabled={pending}><PowerOff aria-hidden="true" />{t(switchFailed ? 'settings.models.gateway.retry' : 'settings.models.gateway.switchToDirect')}</Button></div> : <Button variant="default" size="sm" className="model-hub-agent-head-action shrink-0 self-start rounded-md px-3 text-[11.5px] font-bold sm:self-auto" onClick={() => onConnectHub(agent)} disabled={connecting}><PlugZap aria-hidden="true" />{t('settings.models.gateway.switchToGateway')}</Button>}
+          {agent.mode === 'hub' ? (
+            <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2">
+              <ResponsiveMenu
+                open={modeMenuOpen}
+                onOpenChange={setModeMenuOpen}
+                sheetTitle={t('settings.models.gateway.modeMenu.title') as string}
+                className="model-hub-mode-menu w-[324px] rounded-[10px] border-border-strong bg-card p-1.5 !shadow-[var(--model-hub-menu-shadow)]"
+                trigger={(
+                  <button
+                    type="button"
+                    disabled={pending}
+                    aria-label={`${t('settings.models.gateway.modeMenu.title')}: ${modeStatus}`}
+                    className={cn('model-hub-agent-mode-trigger flex min-w-0 items-center gap-1.5 rounded-md px-2.5 text-[11px] font-semibold transition-colors hover:text-foreground disabled:opacity-50', statusClass)}
+                  >
+                    <span className={cn('size-[5px] shrink-0 rounded-full', statusDot)} />
+                    <span className="truncate">{modeStatus}</span>
+                    <ChevronDown className={cn('size-3 shrink-0 transition-transform', modeMenuOpen && 'rotate-180')} aria-hidden="true" />
+                  </button>
+                )}
+              >
+                <p className="model-hub-mode-menu-title px-2.5 pb-1.5 pt-1 text-[10px] font-bold uppercase text-muted max-md:hidden">{t('settings.models.gateway.modeMenu.title')}</p>
+                <div role="group" aria-label={t('settings.models.gateway.modeMenu.title') as string}>
+                  <button type="button" aria-pressed="true" className="model-hub-mode-menu-current flex w-full items-start gap-2.5 rounded-[7px] px-2.5 py-2.5 text-left" onClick={() => setModeMenuOpen(false)}>
+                    <Route className="model-hub-ink-mint mt-0.5 size-4 shrink-0" aria-hidden="true" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-[12px] font-bold text-foreground">{t('settings.models.gateway.modeMenu.gatewayCurrent')}</span>
+                      <span className="mt-0.5 block text-[10.5px] leading-[15px] text-muted">{t('settings.models.gateway.modeMenu.gatewayDescription')}</span>
+                    </span>
+                    <Check className="model-hub-ink-mint mt-0.5 size-4 shrink-0" aria-hidden="true" />
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed="false"
+                    disabled={pending}
+                    className="model-hub-mode-menu-item mt-0.5 flex w-full items-start gap-2.5 rounded-[7px] px-2.5 py-2.5 text-left hover:bg-surface-2 disabled:opacity-50"
+                    onClick={() => {
+                      setModeMenuOpen(false);
+                      onSwitchDirect(agent);
+                    }}
+                  >
+                    <Power className="mt-0.5 size-4 shrink-0 text-muted" aria-hidden="true" />
+                    <span className="min-w-0">
+                      <span className="block text-[12px] font-bold text-foreground">{t(switchFailed ? 'settings.models.gateway.retry' : 'settings.models.gateway.switchToDirect')}</span>
+                      <span className="mt-0.5 block text-[10.5px] leading-[15px] text-muted">{t('settings.models.gateway.modeMenu.directDescription', { backend: t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend }) })}</span>
+                    </span>
+                  </button>
+                </div>
+              </ResponsiveMenu>
+              <Button variant="outline" size="xs" className="model-hub-agent-head-action rounded-md bg-background px-2.5 text-[11px] font-semibold shadow-sm" onClick={() => onOpenOrder(agent)} disabled={pending}><ArrowDownUp aria-hidden="true" />{t('settings.models.gateway.sourceOrder')}</Button>
+            </div>
+          ) : <Button variant="default" size="xs" className="model-hub-agent-head-action shrink-0 self-start rounded-md px-2.5 text-[11px] font-semibold sm:self-auto" onClick={() => onConnectHub(agent)} disabled={connecting}><PlugZap aria-hidden="true" />{t('settings.models.gateway.switchToGateway')}</Button>}
         </div>
-        <span className={cn('model-hub-agent-head-status flex items-center gap-1.5 text-[11px] font-semibold sm:ml-[42px]', statusClass)}>
-          <span className={cn('size-[5px] shrink-0 rounded-full', statusDot)} />
-          {switchFailed ? t('settings.models.gateway.fail.switchToDirect') : subtitle}
-          <ModelHubInfoHint label={switchFailed ? t('settings.models.gateway.fail.switchToDirect') : subtitle} content={switchFailed ? t('settings.models.gateway.fail.switchToDirect') : subtitle} className="model-hub-overview-info size-[13px]" />
-        </span>
       </div>
       {agent.mode === 'hub' && (models.length === 0 ? <div className="px-4 py-10 text-center sm:px-5"><p className="text-[12.5px] text-muted">{t('settings.models.gateway.group.emptyModels')}</p></div> : <div className="space-y-2 p-2">{noUsableSource && <p className="px-3 py-1 text-[11px] font-semibold text-muted">{t('settings.models.gateway.supply.none')}</p>}{models.map((modelId) => <ModelRow key={modelId} agent={agent} modelId={modelId} sources={sources} read={chainProjectionLive ? chains[modelChainKey(agent.backend, modelId)] : undefined} onOpenRoute={onOpenRoute} />)}{canCollapse ? <button type="button" onClick={toggleCollapsed} className="model-hub-model-collapse flex h-6 w-full items-center gap-1.5 hover:text-foreground">{expanded ? <ChevronUp /> : <ChevronDown />}{expanded ? t('settings.models.gateway.collapse') : t('settings.models.gateway.moreModels', { count: collapsed.hidden.length })}</button> : needsChainRepair ? <button type="button" onClick={retryChains} className="model-hub-model-collapse flex h-6 w-full items-center gap-1.5 hover:text-foreground"><RefreshCw />{t('settings.models.gateway.retry')}</button> : null}</div>)}
     </section>

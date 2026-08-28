@@ -894,6 +894,12 @@
         "sourceOrder": "Adjust priority",
         "switchToGateway": "Switch to gateway",
         "switchToDirect": "Switch to direct",
+        "modeMenu": {
+          "title": "Runtime mode",
+          "gatewayCurrent": "Gateway (current)",
+          "gatewayDescription": "Assign requests to model providers by route and priority",
+          "directDescription": "Use {{backend}}'s own models and credentials; gateway routes and priority no longer apply"
+        },
         "fail": {
           "switchToDirect": "The switch back to direct did not go through"
         },
@@ -1456,6 +1462,19 @@
       },
       "sourceDetail": {
         "back": "Back to sources",
+        "close": "Close provider details",
+        "modelsHeading": "Models",
+        "usageSummary_one": "{{count}} model · used by {{backends}}",
+        "usageSummary_other": "{{count}} models · used by {{backends}}",
+        "metadata": {
+          "endpoint": "Endpoint",
+          "apiKey": "API key",
+          "account": "Account",
+          "type": "Provider type",
+          "lastFetched": "Last fetched",
+          "officialEndpoint": "Provider default endpoint",
+          "neverFetched": "Not fetched yet"
+        },
         "status": {
           "inUse": "In use",
           "needsAction": {
@@ -1525,7 +1544,8 @@
           "unchangedOnly": "Nothing changed in this fetch"
         },
         "row": {
-          "remove": "Remove"
+          "remove": "Remove",
+          "edit": "Edit reasoning tiers for {{model}}"
         },
         "fail": {
           "refetch": "The fetch did not come back. The list below is the last one this page actually read",
@@ -1538,6 +1558,7 @@
         "retry": "Try again",
         "dismissUnverified": "Dismiss unverified result",
         "search": "Search model IDs",
+        "searchEmpty": "No models match this search",
         "col": {
           "id": "Model ID",
           "entry": "Entry",
