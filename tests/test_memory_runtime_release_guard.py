@@ -364,6 +364,7 @@ def test_requirement_classification_keeps_wildcard_equality_non_exact(tmp_path: 
 
 
 def test_wheel_transition_checks_manifest_identity_before_opening_wheels(tmp_path: Path) -> None:
+    """MEMORY-INDEP-022: manifest identity precedes wheel parsing."""
     manifest, _ = _manifest(tmp_path)
 
     with pytest.raises(guard.ReleaseAssetError, match="does not match"):
@@ -377,6 +378,7 @@ def test_wheel_transition_checks_manifest_identity_before_opening_wheels(tmp_pat
 
 
 def test_wheel_transition_accepts_declared_control_metadata(tmp_path: Path) -> None:
+    """MEMORY-INDEP-023: wheel controls bind to declared release policy."""
     manifest, _ = _manifest(tmp_path)
 
     core, memory, policy = _verify_wheels(tmp_path / "wheels", manifest)
@@ -446,7 +448,8 @@ def test_wheel_requires_exactly_one_purelib_declaration(
 
 
 @pytest.mark.parametrize(
-    ("metadata_version", "accepted"), [(None, False), ("999.0", False), ("2.4", True)]
+    ("metadata_version", "accepted"),
+    [(None, False), ("2.3", False), ("999.0", False), ("2.4", True)],
 )
 def test_wheel_uses_packaging_validated_core_metadata(
     tmp_path: Path, metadata_version: str | None, accepted: bool

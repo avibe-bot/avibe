@@ -46,6 +46,7 @@ PACKAGE_POLICY_SCHEMA_VERSION = 1
 PACKAGE_POLICY_REQUIRES_PYTHON = ">=3.10"
 PACKAGE_POLICY_SUPPORTED_PYTHON_VERSIONS = ("3.10", "3.11", "3.12")
 PACKAGE_POLICY_WHEEL_TAG = "py3-none-any"
+PACKAGE_POLICY_METADATA_VERSION = "2.4"
 SUPPORTED_NAMESPACE_POLICY_VERSIONS = frozenset({1})
 
 
@@ -316,6 +317,8 @@ def inspect_wheel(wheel: Path, *, policy: PackageReleasePolicy) -> PackageMetada
         parsed_metadata = metadata_module.Metadata.from_email(metadata_bytes, validate=True)
     except Exception as exc:
         raise ReleaseAssetError(f"wheel core metadata is invalid: {wheel.name}") from exc
+    if parsed_metadata.metadata_version != PACKAGE_POLICY_METADATA_VERSION:
+        raise ReleaseAssetError(f"wheel core metadata version differs from policy: {wheel.name}")
     try:
         wheel_metadata = Parser().parsestr(wheel_bytes.decode("utf-8"))
     except UnicodeDecodeError as exc:
