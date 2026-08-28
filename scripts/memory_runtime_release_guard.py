@@ -310,7 +310,7 @@ def inspect_wheel(wheel: Path, *, policy: PackageReleasePolicy) -> PackageMetada
             metadata_bytes, wheel_bytes = (archive.read(control) for control in controls)
     except ReleaseAssetError:
         raise
-    except (KeyError, OSError, zipfile.BadZipFile) as exc:
+    except Exception as exc:
         raise ReleaseAssetError(f"cannot read wheel controls: {wheel.name}") from exc
     try:
         parsed_metadata = metadata_module.Metadata.from_email(metadata_bytes, validate=True)

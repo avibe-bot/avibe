@@ -4,6 +4,7 @@ import gzip
 import hashlib
 import io
 import json
+import struct
 import subprocess
 import sys
 import tarfile
@@ -210,6 +211,19 @@ def _verify_wheels(
         manifest_bytes=manifest_bytes,
         expected_manifest=manifest_bytes,
     )
+
+
+def _make_first_zip_member_unreadable(wheel: Path, *, encrypted: bool) -> None:
+    content = bytearray(wheel.read_bytes())
+    local = content.index(b"PK\x03\x04")
+    central = content.index(b"PK\x01\x02")
+    if encrypted:
+        for offset in (local + 6, central + 8):
+            struct.pack_into("<H", content, offset, struct.unpack_from("<H", content, offset)[0] | 1)
+    else:
+        struct.pack_into("<H", content, local + 8, 99)
+        struct.pack_into("<H", content, central + 10, 99)
+    wheel.write_bytes(content)
 
 
 @pytest.mark.parametrize(
@@ -496,6 +510,22 @@ def test_wheel_inspector_rejects_policy_without_declared_source(tmp_path: Path) 
 
     with pytest.raises(guard.ReleaseAssetError, match="inspection policy"):
         guard.inspect_wheel(wheel, policy=invented_policy)
+
+
+@pytest.mark.parametrize("encrypted", [False, True], ids=["unsupported-compression", "encrypted"])
+def test_wheel_translates_unreadable_controls_to_asset_failure(
+    tmp_path: Path, encrypted: bool
+) -> None:
+    manifest, _ = _manifest(tmp_path)
+    manifest_bytes = manifest.read_bytes()
+    policy = guard.load_package_release_policy(
+        manifest_bytes, expected_manifest=manifest_bytes, release_tag="v3.1.0"
+    )
+    wheel = _wheel(tmp_path / "avibe_os-3.1.0-py3-none-any.whl", "avibe-os")
+    _make_first_zip_member_unreadable(wheel, encrypted=encrypted)
+
+    with pytest.raises(guard.ReleaseAssetError, match="cannot read wheel controls"):
+        guard.inspect_wheel(wheel, policy=policy)
 
 
 def test_existing_guard_commands_remain_stdlib_only(tmp_path: Path) -> None:
