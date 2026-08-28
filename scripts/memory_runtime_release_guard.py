@@ -395,7 +395,12 @@ def _portable_wheel_path_key(value: str) -> str | None:
                 for character in component
                 for start, end in grammar.forbidden_codepoint_ranges
             )
-            or key.split(".", 1)[0] in grammar.reserved_component_names
+            or (
+                key.split(".", 1)[0].rstrip(
+                    "".join(grammar.forbidden_component_suffixes)
+                )
+                in grammar.reserved_component_names
+            )
             for component, key in zip(components, keys, strict=True)
         )
     ):

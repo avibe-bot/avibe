@@ -619,6 +619,29 @@ def test_portable_wheel_path_rejects_every_reserved_device_alias(device: str) ->
     assert guard._portable_wheel_path_key(f"pkg/{device.upper()}.txt") is None
 
 
+@pytest.mark.parametrize(
+    "component",
+    [
+        "NUL .txt",
+        "CON..cfg",
+        "COM1  .py",
+        "LPT9..bin",
+        "COM\u00b9 .txt",
+        "LPT\u00b2..cfg",
+        "CONIN$ .txt",
+        "CONOUT$..cfg",
+    ],
+)
+def test_portable_wheel_path_rejects_padded_reserved_device_stems(
+    component: str,
+) -> None:
+    assert guard._portable_wheel_path_key(f"pkg/{component}") is None
+
+
+def test_portable_wheel_path_allows_space_inside_ordinary_stem() -> None:
+    assert guard._portable_wheel_path_key("pkg/normal .txt") == "pkg/normal .txt"
+
+
 def test_portable_wheel_path_enforces_utf8_component_byte_limit() -> None:
     assert guard._portable_wheel_path_key("a" * 255) == "a" * 255
     assert guard._portable_wheel_path_key("a" * 256) is None
