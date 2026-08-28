@@ -38,6 +38,7 @@ POLICY_EXCLUSION_EXIT = 2
 INTERNAL_GUARD_FAILURE_EXIT = 3
 PACKAGE_POLICY_SCHEMA_VERSION = 1
 SUPPORTED_NAMESPACE_POLICY_VERSIONS = frozenset({1})
+WHEEL_DATA_SCHEMES = frozenset({"data", "headers", "platlib", "purelib", "scripts"})
 
 
 class ReleaseGuardError(RuntimeError):
@@ -225,7 +226,7 @@ def classify_requirement(raw: str) -> RequirementClassification:
     return RequirementClassification(str(utils.canonicalize_name(requirement.name)), str(requirement.specifier), exact_version, bool(requirement.extras), requirement.marker is not None, requirement.url is not None)
 
 
-def inspect_wheel(wheel: Path) -> PackageMetadata:
+def inspect_wheel(wheel: Path, *, supported_python_versions: tuple[str, ...] = ()) -> PackageMetadata:
     """Validate wheel controls and metadata without installing the wheel."""
     _, _, tags, utils, versions = _packaging_modules()
     try:
@@ -236,7 +237,7 @@ def inspect_wheel(wheel: Path) -> PackageMetadata:
         with zipfile.ZipFile(wheel) as archive:
             names = archive.namelist()
             canonical = [str(PurePosixPath(name)) + ("/" if name.endswith("/") else "") for name in names]
-            unsafe = any("\\" in name or PurePosixPath(name).is_absolute() or ".." in PurePosixPath(name).parts or name != clean for name, clean in zip(names, canonical))
+            unsafe = any("\\" in name or PurePosixPath(name).is_absolute() or ".." in PurePosixPath(name).parts or name != clean or ("/" in name and name.split("/", 1)[0].endswith(".data") and name.split("/", 2)[1] not in WHEEL_DATA_SCHEMES) for name, clean in zip(names, canonical))
             dist_infos = {name.split("/", 1)[0] for name in names if "/" in name and name.split("/", 1)[0].endswith(".dist-info")}
             if len(names) != len({name.rstrip("/").casefold() for name in canonical}) or unsafe or len(dist_infos) != 1:
                 raise ReleaseAssetError(f"wheel control structure is invalid: {wheel.name}")
@@ -268,6 +269,11 @@ def inspect_wheel(wheel: Path) -> PackageMetadata:
         raise ReleaseAssetError(f"wheel metadata version is unsupported: {wheel.name}")
     if declared_tags != filename_tags:
         raise ReleaseAssetError(f"wheel metadata tags differ from filename: {wheel.name}")
+    platforms = {tag.platform for tag in filename_tags}
+    for supported_version in supported_python_versions:
+        python_version = tuple(map(int, supported_version.split(".")[:2]))
+        if filename_tags.isdisjoint((*tags.cpython_tags(python_version, platforms=platforms), *tags.compatible_tags(python_version, platforms=platforms))):
+            raise ReleaseAssetError(f"wheel tags do not cover supported Python {supported_version}: {wheel.name}")
     parsed = PackageMetadata(str(utils.canonicalize_name(name)), parsed_version, requires_python, tuple(sorted(metadata_message.get_all("Requires-Dist") or [])))
     expected_dist_info = f"{str(filename_name).replace('-', '_')}-{filename_version}.dist-info"
     if parsed.name != str(filename_name) or parsed.version != str(filename_version) or dist_info != expected_dist_info:
@@ -292,8 +298,8 @@ def verify_static_transition(
 ) -> tuple[PackageMetadata, PackageMetadata, PackageReleasePolicy]:
     """Freeze A's static contract for successor B's staged and rebuilt wheels."""
     policy = load_package_release_policy(manifest_bytes, expected_manifest=expected_manifest, release_tag=release_tag)
-    core = inspect_wheel(core_wheel)
-    memory = inspect_wheel(memory_wheel)
+    core = inspect_wheel(core_wheel, supported_python_versions=policy.supported_python_versions)
+    memory = inspect_wheel(memory_wheel, supported_python_versions=policy.supported_python_versions)
     expected_version = _release_version(release_tag)
     if core.name != "avibe-os" or memory.name != "avibe-memory":
         raise ReleaseAssetError("transition wheel distribution identity is invalid")

@@ -131,13 +131,14 @@ def _transition_wheels(
     *,
     version: str = "3.1.0",
     requires_python: str = ">=3.10",
+    wheel_tag: str = "py3-none-any",
     core_requirement: str = "avibe-memory==3.1.0",
     memory_requirement: str = "avibe-os>=3.1,<3.2",
 ) -> tuple[Path, Path]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     def build(name: str, requirement: str) -> Path:
         stem = name.replace("-", "_")
-        return _wheel(tmp_path / f"{stem}-{version}-py3-none-any.whl", name, version=version, requires_python=requires_python, requires_dist=(requirement,))
+        return _wheel(tmp_path / f"{stem}-{version}-{wheel_tag}.whl", name, version=version, requires_python=requires_python, requires_dist=(requirement,), wheel_tag=wheel_tag)
 
     return build("avibe-os", core_requirement), build("avibe-memory", memory_requirement)
 
@@ -210,6 +211,9 @@ def test_wheel_tags_match_filename_tags(tmp_path: Path) -> None:
     wheel = _wheel(tmp_path / "avibe_os-3.1.0-py3-none-any.whl", "avibe-os", wheel_tag="cp312-cp312-linux_x86_64")
     with pytest.raises(guard.ReleaseAssetError, match="tags"):
         guard.inspect_wheel(wheel)
+    manifest, _ = _manifest(tmp_path / "policy")
+    with pytest.raises(guard.ReleaseAssetError, match="supported Python"):
+        _verify_static(tmp_path / "supported", manifest, wheel_tag="cp312-cp312-manylinux_2_17_x86_64")
 
 
 def test_wheel_rejects_path_aliases_and_corrupt_members(tmp_path: Path) -> None:
@@ -218,7 +222,10 @@ def test_wheel_rejects_path_aliases_and_corrupt_members(tmp_path: Path) -> None:
         archive.writestr("avibe_os-3.1.0.dist-info/./METADATA", b"alias")
     corrupt = _wheel(tmp_path / "corrupt" / "avibe_os-3.1.0-py3-none-any.whl", "avibe-os")
     corrupt.write_bytes(corrupt.read_bytes().replace(b"x = 1\n", b"x = 2\n"))
-    for wheel in (alias, corrupt):
+    unsupported = _wheel(tmp_path / "data" / "avibe_os-3.1.0-py3-none-any.whl", "avibe-os")
+    with zipfile.ZipFile(unsupported, "a") as archive:
+        archive.writestr("avibe_os-3.1.0.data/unknown/payload", b"data")
+    for wheel in (alias, corrupt, unsupported):
         with pytest.raises(guard.ReleaseAssetError):
             guard.inspect_wheel(wheel)
 
