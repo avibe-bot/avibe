@@ -130,10 +130,10 @@ class RequirementClassification:
 
 def _packaging_modules():
     try:
-        from packaging import requirements, specifiers, utils, version
+        from packaging import requirements, specifiers, tags, utils, version
     except ModuleNotFoundError as exc:
         raise ReleaseAssetError("static release verification requires packaging") from exc
-    return requirements, specifiers, utils, version
+    return requirements, specifiers, tags, utils, version
 
 
 def _release_version(release_tag: str) -> str:
@@ -190,7 +190,7 @@ def load_package_release_policy(
     release_parts = _release_version(release_tag).split(".")
     if raw["release_tag"] != release_tag or raw["release_family"] != ".".join(release_parts[:2]):
         raise ManifestPolicyError("manifest package_policy release identity is invalid")
-    _, specifiers, _, parsed_versions = _packaging_modules()
+    _, specifiers, _, _, parsed_versions = _packaging_modules()
     try:
         requires_python = specifiers.SpecifierSet(raw["requires_python"])
         supported = tuple(parsed_versions.Version(version) for version in versions)
@@ -203,7 +203,7 @@ def load_package_release_policy(
 
 def classify_requirement(raw: str) -> RequirementClassification:
     """Classify one valid requirement without treating wildcard equality as exact."""
-    requirements, _, utils, versions = _packaging_modules()
+    requirements, _, _, utils, versions = _packaging_modules()
     try:
         requirement = requirements.Requirement(raw)
     except requirements.InvalidRequirement as exc:
@@ -227,22 +227,25 @@ def classify_requirement(raw: str) -> RequirementClassification:
 
 def inspect_wheel(wheel: Path) -> PackageMetadata:
     """Validate wheel controls and metadata without installing the wheel."""
-    _, _, utils, versions = _packaging_modules()
+    _, _, tags, utils, versions = _packaging_modules()
     try:
-        filename_name, filename_version = utils.parse_wheel_filename(wheel.name)[:2]
+        filename_name, filename_version, _, filename_tags = utils.parse_wheel_filename(wheel.name)
     except utils.InvalidWheelFilename as exc:
         raise ReleaseAssetError(f"invalid wheel filename: {wheel.name}") from exc
     try:
         with zipfile.ZipFile(wheel) as archive:
             names = archive.namelist()
-            unsafe = any("\\" in name or PurePosixPath(name).is_absolute() or ".." in PurePosixPath(name).parts for name in names)
+            canonical = [str(PurePosixPath(name)) + ("/" if name.endswith("/") else "") for name in names]
+            unsafe = any("\\" in name or PurePosixPath(name).is_absolute() or ".." in PurePosixPath(name).parts or name != clean for name, clean in zip(names, canonical))
             dist_infos = {name.split("/", 1)[0] for name in names if "/" in name and name.split("/", 1)[0].endswith(".dist-info")}
-            if len(names) != len(set(names)) or unsafe or len(dist_infos) != 1:
+            if len(names) != len({name.rstrip("/").casefold() for name in canonical}) or unsafe or len(dist_infos) != 1:
                 raise ReleaseAssetError(f"wheel control structure is invalid: {wheel.name}")
             dist_info = next(iter(dist_infos))
             required = {f"{dist_info}/{name}" for name in ("METADATA", "WHEEL", "RECORD")}
             if not required <= set(names):
                 raise ReleaseAssetError(f"wheel control structure is invalid: {wheel.name}")
+            if archive.testzip() is not None:
+                raise ReleaseAssetError(f"wheel member integrity is invalid: {wheel.name}")
             metadata_message = Parser().parsestr(archive.read(f"{dist_info}/METADATA").decode("utf-8"))
             wheel_message = Parser().parsestr(archive.read(f"{dist_info}/WHEEL").decode("utf-8"))
     except (OSError, UnicodeDecodeError, zipfile.BadZipFile) as exc:
@@ -254,14 +257,17 @@ def inspect_wheel(wheel: Path) -> PackageMetadata:
     name, version, requires_python = (field[0] for field in values)
     try:
         parsed_version = str(versions.Version(version))
+        declared_tags = {tag for value in wheel_message.get_all("Tag") or [] for tag in tags.parse_tag(value)}
         wheel_version = re.fullmatch(r"([0-9]+)\.([0-9]+)", wheel_versions[0])
         if wheel_version is None:
             raise ValueError
         wheel_major = int(wheel_version.group(1))
     except (ValueError, versions.InvalidVersion) as exc:
-        raise ReleaseAssetError(f"wheel metadata version is invalid: {wheel.name}") from exc
+        raise ReleaseAssetError(f"wheel metadata version or tags are invalid: {wheel.name}") from exc
     if wheel_major > 1:
         raise ReleaseAssetError(f"wheel metadata version is unsupported: {wheel.name}")
+    if declared_tags != filename_tags:
+        raise ReleaseAssetError(f"wheel metadata tags differ from filename: {wheel.name}")
     parsed = PackageMetadata(str(utils.canonicalize_name(name)), parsed_version, requires_python, tuple(sorted(metadata_message.get_all("Requires-Dist") or [])))
     expected_dist_info = f"{str(filename_name).replace('-', '_')}-{filename_version}.dist-info"
     if parsed.name != str(filename_name) or parsed.version != str(filename_version) or dist_info != expected_dist_info:
@@ -270,7 +276,7 @@ def inspect_wheel(wheel: Path) -> PackageMetadata:
 
 
 def _requirements_for(metadata: PackageMetadata, name: str) -> tuple[RequirementClassification, ...]:
-    _, _, utils, _ = _packaging_modules()
+    _, _, _, utils, _ = _packaging_modules()
     expected = str(utils.canonicalize_name(name))
     classified = tuple(classify_requirement(raw) for raw in metadata.requires_dist)
     return tuple(item for item in classified if item.name == expected)
@@ -302,7 +308,7 @@ def verify_static_transition(
     if len(core_dependencies) != 1:
         raise ReleaseAssetError("Memory metadata must contain exactly one avibe-os dependency")
     reverse = core_dependencies[0]
-    _, specifiers, _, versions = _packaging_modules()
+    _, specifiers, _, _, versions = _packaging_modules()
     if reverse.is_direct or reverse.has_marker or reverse.has_extras or not reverse.specifier or versions.Version(expected_version) not in specifiers.SpecifierSet(reverse.specifier):
         raise ReleaseAssetError("Memory avibe-os dependency must accept the release version")
     return core, memory, policy

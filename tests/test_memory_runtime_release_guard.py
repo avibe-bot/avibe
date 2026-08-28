@@ -99,6 +99,7 @@ def _wheel(
     requires_python: str = ">=3.10",
     requires_dist: tuple[str, ...] = (),
     wheel_version: str = "1.0",
+    wheel_tag: str = "py3-none-any",
     include_wheel_metadata: bool = True,
     include_record: bool = True,
 ) -> Path:
@@ -110,11 +111,11 @@ def _wheel(
         + "".join(f"Requires-Dist: {requirement}\n" for requirement in requires_dist)
         + "\n"
     ).encode()
-    files = {f"{dist_info}/METADATA": metadata}
+    files = {f"{dist_info}/METADATA": metadata, f"{name.replace('-', '_')}/__init__.py": b"x = 1\n"}
     if include_wheel_metadata:
         files[f"{dist_info}/WHEEL"] = (
             f"Wheel-Version: {wheel_version}\nGenerator: gate5a-test\n"
-            "Root-Is-Purelib: true\nTag: py3-none-any\n\n"
+            f"Root-Is-Purelib: true\nTag: {wheel_tag}\n\n"
         ).encode()
     if include_record:
         record = f"{dist_info}/RECORD"
@@ -203,6 +204,23 @@ def test_wheel_version_requires_complete_major_minor_syntax(tmp_path: Path) -> N
     wheel = _wheel(tmp_path / "avibe_os-3.1.0-py3-none-any.whl", "avibe-os", wheel_version="1.foo")
     with pytest.raises(guard.ReleaseAssetError, match="metadata version"):
         guard.inspect_wheel(wheel)
+
+
+def test_wheel_tags_match_filename_tags(tmp_path: Path) -> None:
+    wheel = _wheel(tmp_path / "avibe_os-3.1.0-py3-none-any.whl", "avibe-os", wheel_tag="cp312-cp312-linux_x86_64")
+    with pytest.raises(guard.ReleaseAssetError, match="tags"):
+        guard.inspect_wheel(wheel)
+
+
+def test_wheel_rejects_path_aliases_and_corrupt_members(tmp_path: Path) -> None:
+    alias = _wheel(tmp_path / "alias" / "avibe_os-3.1.0-py3-none-any.whl", "avibe-os")
+    with zipfile.ZipFile(alias, "a") as archive:
+        archive.writestr("avibe_os-3.1.0.dist-info/./METADATA", b"alias")
+    corrupt = _wheel(tmp_path / "corrupt" / "avibe_os-3.1.0-py3-none-any.whl", "avibe-os")
+    corrupt.write_bytes(corrupt.read_bytes().replace(b"x = 1\n", b"x = 2\n"))
+    for wheel in (alias, corrupt):
+        with pytest.raises(guard.ReleaseAssetError):
+            guard.inspect_wheel(wheel)
 
 
 def test_static_transition_uses_release_bound_requires_python(tmp_path: Path) -> None:
