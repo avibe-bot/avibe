@@ -1,4 +1,9 @@
-"""Exact package capture, persisted recovery DTOs, and rollback resolution."""
+"""Exact package capture, persisted recovery DTOs, and rollback resolution.
+
+Plan-record dependency-closure semantics belong to the immediate successor
+slice (b). Until that slice merges, consumers must not consume persisted plan
+records for G3-1B outer records or G3-2 rehydration.
+"""
 
 from __future__ import annotations
 
