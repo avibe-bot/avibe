@@ -13,7 +13,7 @@ import type { ModelsSurfaceKind } from './modelHubSurfaceState';
 import { modelsApi } from './modelsApi';
 import { SOURCE_MUTATION_REPORT_PROJECTIONS } from './mutationSettlement';
 import { SettingsModelsPage } from './SettingsModelsPage';
-import type { AgentBackend, AgentChain, AgentSupply, RuntimeDependency, Source, UsageSummary } from './types';
+import { CONTRACT_VERSION, type AgentBackend, type AgentChain, type AgentSupply, type RuntimeDependency, type Source, type UsageSummary } from './types';
 
 const directAgent = (backend: AgentBackend): AgentSupply => ({
   backend,
@@ -189,7 +189,8 @@ describe('SettingsModelsPage surface branches', () => {
     const refreshesBeforeCreate = listSources.mock.calls.length;
     listSources.mockResolvedValue([retainedSource, created]);
     const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: /Add subscription|添加订阅/i }));
+    const trigger = screen.getByRole('button', { name: /Add subscription|添加订阅/i });
+    await user.click(trigger);
     await user.click(await screen.findByRole('menuitem', { name: /Claude subscription|Claude 订阅/i }));
     await user.click(screen.getByRole('button', { name: /Sign in|去登录/i }));
 
@@ -199,7 +200,48 @@ describe('SettingsModelsPage surface branches', () => {
     await waitFor(() => expect(listSources).toHaveBeenCalledTimes(refreshesBeforeCreate + 1));
     await act(async () => Promise.resolve());
     expect(listSources).toHaveBeenCalledTimes(refreshesBeforeCreate + 1);
-    await waitFor(() => expect(screen.getByRole('dialog', { name: 'Created subscription' })).toBeTruthy(), { timeout: 2500 });
+    const detail = await screen.findByRole('dialog', { name: 'Created subscription' }, { timeout: 2500 });
+    await user.click(within(detail).getByRole('button', { name: /Close provider details|关闭供应商详情/i }));
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+  });
+
+  it('returns focus to Add API key after opening and closing the created provider', async () => {
+    const created: Source = {
+      ...retainedSource,
+      id: 'src_created_api_key',
+      vendor: 'custom',
+      display_name: 'Created API key',
+      protocol: 'openai_chat',
+      base_url: 'https://relay.example/v1',
+    };
+    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValue({
+      contract_version: CONTRACT_VERSION,
+      outcome: 'observed',
+      reachable: true,
+      authenticated: 'authenticated',
+      protocol: 'openai_chat',
+      discovery: 'succeeded',
+      models: ['model-a'],
+    });
+    vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValue({
+      source: created,
+      added_to: [],
+      adopted_by: [],
+    });
+    renderPage([retainedSource]);
+
+    await screen.findByText('Retained source');
+    vi.mocked(modelsApi.listSources).mockResolvedValue([retainedSource, created]);
+    const user = userEvent.setup();
+    const trigger = screen.getByRole('button', { name: /Add API key|添加 API Key/i });
+    await user.click(trigger);
+    await user.type(screen.getByRole('textbox', { name: /^Base URL$/i }), 'https://relay.example/v1');
+    await user.type(screen.getByLabelText(/^API key$/i), 'secret-key');
+    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+
+    const detail = await screen.findByRole('dialog', { name: 'Created API key' });
+    await user.click(within(detail).getByRole('button', { name: /Close provider details|关闭供应商详情/i }));
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
   });
 
   it('renders Frame 09 as the sources tab when every backend is direct and no source exists', async () => {

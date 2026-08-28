@@ -365,6 +365,7 @@ export const SettingsModelsPage: React.FC = () => {
   // owns the success-landing timer and reconcile flag below.
   const [reauthSource, setReauthSource] = React.useState<Source | null>(null);
   const subscriptionTriggerRef = React.useRef<HTMLButtonElement>(null);
+  const apiKeyTriggerRef = React.useRef<HTMLButtonElement | null>(null);
   const subscriptionAnchorRef = subscriptionTriggerRef as React.RefObject<HTMLButtonElement>;
   const subscriptionPickerRefs = React.useRef<Partial<Record<SubscriptionPickerVendor, HTMLButtonElement | null>>>({});
   const subscriptionPickerHandoffRef = React.useRef(false);
@@ -375,7 +376,7 @@ export const SettingsModelsPage: React.FC = () => {
   // so it cannot launch a second refresh that overwrites a successful landing.
   const subscriptionSuccessReconcileRef = React.useRef(false);
   const sourceDetailHeadingRef = React.useRef<HTMLHeadingElement>(null);
-  const sourceDetailOpenerRef = React.useRef<HTMLButtonElement | null>(null);
+  const sourceDetailReturnFocusRef = React.useRef<(() => HTMLElement | null) | null>(null);
   const [orderBackend, setOrderBackend] = React.useState<AgentBackend | null>(null);
   const [adoptAgent, setAdoptAgent] = React.useState<AgentSupply | null>(null);
   const [routeTarget, setRouteTarget] = React.useState<{ agent: AgentSupply; modelId: string; opener: HTMLElement | null } | null>(null);
@@ -910,9 +911,17 @@ export const SettingsModelsPage: React.FC = () => {
     unread: (retryable) => unreadRegion(retryable),
     degraded: (_staleData, cause, retryable) => degradedRegion(installedAgents, cause, retryable),
   });
-  const selectSource = React.useCallback((sourceId: string | null) => {
-    sourceIntentAuthority.commit(() => setSelectedSourceId(sourceId));
-  }, [sourceIntentAuthority]);
+  type SourceDetailSelection = {
+    sourceId: string;
+    returnFocus: () => HTMLElement | null;
+  };
+  const applySourceDetailSelection = React.useCallback((selection: SourceDetailSelection | null) => {
+    if (selection) sourceDetailReturnFocusRef.current = selection.returnFocus;
+    setSelectedSourceId(selection?.sourceId ?? null);
+  }, []);
+  const selectSource = React.useCallback((selection: SourceDetailSelection | null) => {
+    sourceIntentAuthority.commit(() => applySourceDetailSelection(selection));
+  }, [applySourceDetailSelection, sourceIntentAuthority]);
   const selectedSource = sources.find((source) => source.id === selectedSourceId) ?? null;
   const sourceDetailOpen = selectedSourceId !== null && subscriptionVendor === null;
   const orderAgent = agents.find((agent) => agent.backend === orderBackend && agent.mode === 'hub') ?? null;
@@ -1081,7 +1090,10 @@ export const SettingsModelsPage: React.FC = () => {
         authority: sourceIntentAuthority,
         apply: () => {
           setApiKeyOpen(false);
-          setSelectedSourceId(created.source.id);
+          applySourceDetailSelection({
+            sourceId: created.source.id,
+            returnFocus: () => apiKeyTriggerRef.current,
+          });
         },
       },
       reconcile: refresh,
@@ -1099,7 +1111,10 @@ export const SettingsModelsPage: React.FC = () => {
     // Keep the success panel as the only active dialog until its handoff timer
     // closes it. The provider dialog then opens and owns its normal autofocus.
     sourceEntityAuthority.landLatest(source);
-    selectSource(source.id);
+    selectSource({
+      sourceId: source.id,
+      returnFocus: () => subscriptionTriggerRef.current,
+    });
     subscriptionSuccessReconcileRef.current = true;
     void refresh();
     if (subscriptionCloseTimer.current !== null) window.clearTimeout(subscriptionCloseTimer.current);
@@ -1211,7 +1226,7 @@ export const SettingsModelsPage: React.FC = () => {
                           onOpenChange={(open) => { if (!open) closeSubscriptionPicker(); }}
                         >
                           <PopoverAnchor virtualRef={subscriptionAnchorRef} />
-                          <SourcesCard read={sourcesRead} activeBackends={activeBackends} readFailureCopy={routeCommitStatus?.failed.has('sources') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} onRetry={() => routeCommitStatus?.failed.has('sources') ? retryRouteCommit() : void retrySources()} onOpenSource={(source, opener) => { sourceDetailOpenerRef.current = opener; selectSource(source.id); }} onAddApiKey={() => setApiKeyOpen(true)} onAddSubscription={toggleSubscriptionPicker} subscriptionPickerOpen={subscriptionPickerOpen} subscriptionTriggerRef={subscriptionTriggerRef} />
+                          <SourcesCard read={sourcesRead} activeBackends={activeBackends} readFailureCopy={routeCommitStatus?.failed.has('sources') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} onRetry={() => routeCommitStatus?.failed.has('sources') ? retryRouteCommit() : void retrySources()} onOpenSource={(source, opener) => selectSource({ sourceId: source.id, returnFocus: () => opener })} onAddApiKey={(opener) => { apiKeyTriggerRef.current = opener; setApiKeyOpen(true); }} onAddSubscription={toggleSubscriptionPicker} subscriptionPickerOpen={subscriptionPickerOpen} subscriptionTriggerRef={subscriptionTriggerRef} />
                           <PopoverContent
                             role="menu"
                             aria-label={t('settings.models.upstream.addSubscription')}
@@ -1310,11 +1325,12 @@ export const SettingsModelsPage: React.FC = () => {
             sourceDetailHeadingRef.current?.focus();
           }}
           onCloseAutoFocus={(event) => {
-            const opener = sourceDetailOpenerRef.current;
-            sourceDetailOpenerRef.current = null;
-            if (!opener?.isConnected) return;
+            const returnFocus = sourceDetailReturnFocusRef.current;
+            sourceDetailReturnFocusRef.current = null;
+            const target = returnFocus?.();
+            if (!target?.isConnected) return;
             event.preventDefault();
-            opener.focus();
+            target.focus();
           }}
           onEscapeKeyDown={(event) => {
             // Radix observes Escape before React's row handlers; marked editors own it locally.

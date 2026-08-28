@@ -13,7 +13,7 @@ export const SourcesCard: React.FC<{
   onRetry: () => void;
   readFailureCopy?: string;
   onOpenSource: (source: Source, opener: HTMLButtonElement) => void;
-  onAddApiKey: () => void;
+  onAddApiKey: (opener: HTMLButtonElement) => void;
   onAddSubscription: () => void;
   subscriptionPickerOpen?: boolean;
   subscriptionTriggerRef?: React.Ref<HTMLButtonElement>;
@@ -74,7 +74,7 @@ export const SourcesCard: React.FC<{
           variant="outline"
           size="xs"
           className="model-hub-footer-action model-hub-footer-action--outlined model-hub-fill-0a"
-          onClick={onAddApiKey}
+          onClick={(event) => onAddApiKey(event.currentTarget)}
         >
           <Plus className="size-3" />
           {t('settings.models.upstream.addApiKey')}

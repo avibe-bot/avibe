@@ -82,8 +82,9 @@ describe('SourcesCard footer', () => {
     expect((subscription as HTMLButtonElement).disabled).toBe(false);
     expect(screen.queryByRole('button', { name: /^Add source$|^添加供应商$/i })).toBeNull();
 
-    await userEvent.click(screen.getByRole('button', { name: /Add API key|添加 API Key/i }));
-    expect(onAddApiKey).toHaveBeenCalledOnce();
+    const apiKey = screen.getByRole('button', { name: /Add API key|添加 API Key/i });
+    await userEvent.click(apiKey);
+    expect(onAddApiKey).toHaveBeenCalledWith(apiKey);
     await userEvent.click(subscription);
     expect(onAddSubscription).toHaveBeenCalledOnce();
   });
