@@ -119,7 +119,7 @@ describe('AgentCard', () => {
   it.each([
     ['en', 'Adjust priority', 'Switch to direct', 'Switch to gateway'],
     ['zh', '调整优先级', '切到直连', '切换到模型网关'],
-  ] as const)('uses explicit gateway action labels and icons in %s', (lng, orderCopy, directCopy, gatewayCopy) => {
+  ] as const)('uses explicit gateway action labels and icons in %s', async (lng, orderCopy, directCopy, gatewayCopy) => {
     const directAgent: AgentSupply = {
       ...hubAgent,
       backend: 'codex',
@@ -149,16 +149,16 @@ describe('AgentCard', () => {
     );
 
     const order = screen.getByRole('button', { name: orderCopy });
-    const direct = screen.getByRole('button', { name: directCopy });
     const gateway = screen.getByRole('button', { name: gatewayCopy });
+    await userEvent.click(screen.getByRole('button', { name: /Runtime mode:|运行模式[:：]/i }));
+    const direct = await screen.findByRole('menuitem', { name: new RegExp(directCopy, 'i') });
     expect(order.querySelector('svg')).toBeTruthy();
-    expect(direct.querySelector('svg')).toBeTruthy();
+    expect(direct.querySelector('.lucide-power')).toBeTruthy();
     expect(gateway.querySelector('svg')).toBeTruthy();
     expect(order.parentElement?.parentElement?.className).toContain('sm:flex-wrap');
     expect(order.parentElement?.className).toContain('items-center');
     expect(order.parentElement?.className).toContain('min-w-0');
-    expect(order.parentElement?.parentElement?.parentElement?.className).toContain('sm:min-h-[66px]');
-    expect(order.parentElement?.parentElement?.parentElement?.className).not.toContain('sm:h-[66px]');
+    expect(order.parentElement?.parentElement?.parentElement?.className).toContain('min-h-[52px]');
     expect(gateway.className).toContain('bg-primary');
   });
 
@@ -229,7 +229,8 @@ describe('AgentCard', () => {
     render(<I18nextProvider i18n={i18n}><AgentCard agents={[hubAgent]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set(['claude'])} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={onSwitchDirect} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
 
     expect(screen.getByText(/did not go through/i)).toBeTruthy();
-    await userEvent.click(screen.getByRole('button', { name: /retry/i }));
+    await userEvent.click(screen.getByRole('button', { name: /Runtime mode:|运行模式[:：]/i }));
+    await userEvent.click(await screen.findByRole('menuitem', { name: /retry|重试/i }));
     expect(onSwitchDirect).toHaveBeenCalledWith(hubAgent);
   });
 });

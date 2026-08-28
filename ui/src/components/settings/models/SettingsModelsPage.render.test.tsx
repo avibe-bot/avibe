@@ -131,6 +131,15 @@ const renderPage = (sources: Source[]) => {
   );
 };
 
+const switchFirstGatewayAgentToDirect = async () => {
+  await userEvent.click((await screen.findAllByRole('button', { name: /Runtime mode:|运行模式[:：]/i }))[0]);
+  await userEvent.click(await screen.findByRole('menuitem', { name: /Switch to direct|切到直连|Retry|重试/i }));
+};
+
+const closeSourceDetails = async () => {
+  await userEvent.click(screen.getByRole('button', { name: /Close provider details|关闭供应商详情/i }));
+};
+
 beforeEach(() => {
   vi.spyOn(modelsApi, 'refreshAgentPresence').mockReturnValue(new Promise(() => {}));
 });
@@ -373,7 +382,7 @@ describe('SettingsModelsPage surface branches', () => {
     expect(toggle.getAttribute('aria-checked')).toBe('true');
     expect((toggle as HTMLButtonElement).disabled).toBe(true);
     expect(await screen.findByText('Retained source')).toBeTruthy();
-    expect(screen.getByRole('button', { name: /^Switch to direct$|^切到直连$/i })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Runtime mode:|运行模式[:：]/i })).toBeTruthy();
     expect(screen.queryAllByRole('tab')).toHaveLength(3);
   });
 
@@ -894,6 +903,8 @@ describe('SettingsModelsPage surface branches', () => {
         </ToastProvider>,
       );
       await userEvent.click((await screen.findByText('Retained source')).closest('button') as HTMLButtonElement);
+      const sourceDialog = await screen.findByRole('dialog', { name: 'Retained source' });
+      expect(within(sourceDialog).getByRole('textbox', { name: /Search model IDs|搜索模型 ID/i })).toBeTruthy();
       await waitFor(() => expect(overviewRead).toHaveBeenCalledOnce());
 
       await userEvent.click(screen.getByRole('button', { name: /Manage Retained source|管理 Retained source/i }));
@@ -968,7 +979,7 @@ describe('SettingsModelsPage surface branches', () => {
     );
 
     await waitFor(() => expect(chainRead).toHaveBeenCalledOnce());
-    await userEvent.click(screen.getByRole('button', { name: /^Switch to direct$|^切到直连$/i }));
+    await switchFirstGatewayAgentToDirect();
     await waitFor(() => expect(agentRead).toHaveBeenCalledTimes(2));
     expect(await screen.findByRole('button', { name: /^Switch to Gateway$|^切换到模型网关$/i })).toBeTruthy();
 
@@ -1099,7 +1110,7 @@ describe('SettingsModelsPage surface branches', () => {
       </ToastProvider>,
     );
 
-    await userEvent.click(await screen.findByRole('button', { name: /^Switch to direct$|^切到直连$/i }));
+    await switchFirstGatewayAgentToDirect();
 
     expect(await screen.findByRole('button', { name: /^Switch to Gateway$|^切换到模型网关$/i })).toBeTruthy();
     expect(screen.queryByText(/did not go through|没切换成功/i)).toBeNull();
@@ -1143,7 +1154,7 @@ describe('SettingsModelsPage surface branches', () => {
     await userEvent.click(await screen.findByRole('button', { name: /^Refetch$|^重新拉取$/i }));
 
     await waitFor(() => expect(agentRead).toHaveBeenCalledTimes(2));
-    await userEvent.click(screen.getByRole('button', { name: /^Back to sources$|^返回模型供应商列表$/i }));
+    await closeSourceDetails();
     expect(await screen.findByText(/Could not read this backend's supply|没有读到后端列表/i)).toBeTruthy();
     expect(screen.queryByText(/From: Replacement source \(takeover\)|来自 Replacement source（接管）/i)).toBeNull();
     expect(screen.getAllByText('—').length).toBeGreaterThan(0);
@@ -1174,7 +1185,7 @@ describe('SettingsModelsPage surface branches', () => {
     await userEvent.click(await screen.findByRole('button', { name: /^Refetch$|^重新拉取$/i }));
 
     await waitFor(() => expect(runtimeRead).toHaveBeenCalledTimes(2));
-    await userEvent.click(screen.getByRole('button', { name: /^Back to sources$|^返回模型供应商列表$/i }));
+    await closeSourceDetails();
     expect(await screen.findByText(/^Gateway status unavailable$|^模型网关状态不可用$/i)).toBeTruthy();
     expect(screen.queryByText(/From: Replacement source \(takeover\)|来自 Replacement source（接管）/i)).toBeNull();
     expect(screen.queryByText(/^Taken over$|^已自动切换$/i)).toBeNull();

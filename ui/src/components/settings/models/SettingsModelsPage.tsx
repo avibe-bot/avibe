@@ -1,9 +1,10 @@
 import * as React from 'react';
-import { ArrowLeft, Gauge, LoaderCircle, Power, RefreshCw, Route, ScrollText } from 'lucide-react';
+import { Gauge, LoaderCircle, Power, RefreshCw, Route, ScrollText } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover';
 import { useToast } from '@/context/ToastContext';
 import { cn } from '@/lib/utils';
@@ -252,21 +253,19 @@ const RuntimeClosedState: React.FC<{
   );
 };
 
-const ModelHubShell: React.FC<{ actions?: React.ReactNode; detailBack?: () => void; children: React.ReactNode; rootRef?: React.Ref<HTMLDivElement> }> = ({ actions, detailBack, children, rootRef }) => {
+const ModelHubShell: React.FC<{ actions?: React.ReactNode; children: React.ReactNode; rootRef?: React.Ref<HTMLDivElement> }> = ({ actions, children, rootRef }) => {
   const { t } = useTranslation();
   return (
     <div ref={rootRef} className="model-hub-shell">
       <header className="model-hub-shell-head">
-        {detailBack
-          ? <button type="button" onClick={detailBack} aria-label={t('settings.models.sourceDetail.back') as string} title={t('settings.models.sourceDetail.back') as string} className="model-hub-detail-back"><ArrowLeft aria-hidden="true" /></button>
-          : <span className="flex items-center gap-[9px]">
-              <h1>{t('settings.models.shell.title')}</h1>
-              <ModelHubInfoHint
-                label={t('settings.models.shell.modelsInfo.label')}
-                content={t('settings.models.shell.modelsInfo.body')}
-                className="model-hub-shell-info"
-              />
-            </span>}
+        <span className="flex items-center gap-[9px]">
+          <h1>{t('settings.models.shell.title')}</h1>
+          <ModelHubInfoHint
+            label={t('settings.models.shell.modelsInfo.label')}
+            content={t('settings.models.shell.modelsInfo.body')}
+            className="model-hub-shell-info"
+          />
+        </span>
         {actions}
       </header>
       {children}
@@ -1166,7 +1165,6 @@ export const SettingsModelsPage: React.FC = () => {
   return (
     <ModelHubShell
       rootRef={pageRef}
-      detailBack={runtimeConfigurationVisible && selectedSourceId ? () => selectSource(null) : undefined}
       actions={!landingLoading
         ? <span className="flex items-center gap-2">
               <RuntimePill
@@ -1200,17 +1198,6 @@ export const SettingsModelsPage: React.FC = () => {
       {landingLoading ? <div className="text-[13px] text-muted">{t('common.loading')}</div>
         : !runtimeConfigurationVisible
           ? <RuntimeClosedState read={runtimeRead} runtime={retainedRuntime} starting={startingRuntime} stopping={stoppingRuntime} />
-        : selectedSourceId
-          ? selectedSource
-              ? <SourceDetailPanel
-                source={selectedSource}
-                activeBackends={activeBackends}
-                headingRef={sourceDetailHeadingRef}
-                trackMutation={trackSourceMutation(selectedSource.id)}
-                onReauth={setReauthSource}
-                onMutationCommitted={sourceMutationReport.present}
-              />
-            : <section className="rounded-xl border border-border bg-surface px-5 py-12 text-center text-[12px] text-muted">{t('settings.models.sourceDetail.gone')}</section>
           : <div className="space-y-[22px]">
                   {/* The tab strip belongs to the Hub, not to the source
                       inventory. Usage and switch history both outlive the Sources
@@ -1309,7 +1296,7 @@ export const SettingsModelsPage: React.FC = () => {
                             })}
                           </PopoverContent>
                         </Popover>
-                        <div className="hidden lg:block" aria-hidden="true" />
+                        <div className="hidden xl:block" aria-hidden="true" />
                         <GatewayModule supply={installedSupplyRead} readFailureCopy={routeCommitStatus?.failed.has('agents') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} sources={sources} chains={chains} runtime={runtime} runtimeSnapshot={retainedRuntime} onRetry={() => routeCommitStatus?.failed.has('agents') ? retryRouteCommit() : void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={setAdoptAgent} onSwitchDirect={switchToDirect} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId, opener) => setRouteTarget({ agent, modelId, opener })} onProbeSettled={(agent) => void refreshAgentChains(agent)} />
                         <SupplyGraph containerRef={overviewRef} relations={supplyRelations} />
                       </div>
@@ -1318,6 +1305,31 @@ export const SettingsModelsPage: React.FC = () => {
                   </div>}
                 </div>}
       {runtimeConfigurationVisible && <>
+      <Dialog open={selectedSourceId !== null} onOpenChange={(open) => { if (!open) selectSource(null); }}>
+        <DialogContent
+          mobileSheetHeight="tall"
+          closeLabel={t('settings.models.sourceDetail.close') as string}
+          className="model-hub-source-dialog flex h-[min(624px,calc(100dvh-32px))] w-[min(720px,calc(100vw-32px))] max-w-[720px] flex-col gap-0 overflow-hidden rounded-[14px] border-border-strong bg-surface p-0 shadow-[var(--model-hub-dialog-shadow)] max-md:w-full max-md:max-w-none max-md:rounded-t-2xl"
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            window.requestAnimationFrame(() => sourceDetailHeadingRef.current?.focus());
+          }}
+        >
+          <DialogTitle className="sr-only">{selectedSource?.display_name ?? t('settings.models.sourceDetail.gone')}</DialogTitle>
+          <DialogDescription className="sr-only">{t('settings.models.sourceDetail.footnote')}</DialogDescription>
+          {selectedSource
+            ? <SourceDetailPanel
+                key={selectedSource.id}
+                source={selectedSource}
+                activeBackends={activeBackends}
+                headingRef={sourceDetailHeadingRef}
+                trackMutation={trackSourceMutation(selectedSource.id)}
+                onReauth={setReauthSource}
+                onMutationCommitted={sourceMutationReport.present}
+              />
+            : <section className="grid min-h-0 flex-1 place-items-center px-5 py-12 text-center text-[12px] text-muted">{t('settings.models.sourceDetail.gone')}</section>}
+        </DialogContent>
+      </Dialog>
       <SourceMutationReport
         report={sourceMutationReport.report}
         onComplete={() => { void sourceMutationReport.complete(); }}

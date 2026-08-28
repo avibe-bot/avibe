@@ -1,6 +1,6 @@
 import * as React from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
-import { Info, Loader2, LogIn, MoreHorizontal, Plus, RefreshCw, X } from 'lucide-react';
+import { Info, Loader2, LogIn, MoreHorizontal, Pencil, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
@@ -51,7 +51,7 @@ import { activeSourceAdoption, sourceStatePresentation } from './sourceStatePres
 import { tierMutationPayload, type TierMutationIntent } from './tierMutation';
 import { TIER_SUGGESTIONS } from './tierSuggestions';
 import { useDeadlineClock } from './useDeadlineClock';
-import { ACCENT_ICON, ACCENT_TILE, isCustomEndpoint, sourceVisual } from './vendorMeta';
+import { ACCENT_ICON, ACCENT_TILE, sourceVisual } from './vendorMeta';
 import type {
   AgentBackend,
   RouteHopRef,
@@ -76,7 +76,7 @@ const ManualModelMenu: React.FC<{
       onOpenChange={setOpen}
       sheetTitle={model.id}
       className="w-40"
-      trigger={<button type="button" disabled={busy} aria-label={label} title={label} className="model-hub-source-more grid place-items-center text-muted hover:bg-surface-2 hover:text-foreground"><MoreHorizontal className="size-4" /></button>}
+      trigger={<button type="button" disabled={busy} aria-label={label} title={label} className="model-hub-source-row-action grid place-items-center text-destructive-ink hover:bg-destructive/[0.08]"><Trash2 className="size-3.5" /></button>}
     >
       <button type="button" role="menuitem" className="flex w-full items-center rounded-md px-2.5 py-2 text-left text-[12px] font-semibold text-destructive-ink hover:bg-destructive/[0.08]" onClick={() => { setOpen(false); onRemove(); }}>{t('settings.models.sourceDetail.row.remove')}</button>
     </ResponsiveMenu>
@@ -146,15 +146,6 @@ const committedPlan = (hops: RouteHopRef[], gaps: SupplyGap[]): ManageGuardPlan 
 type SourceReconciliation =
   | { kind: 'source'; source: Source }
   | { kind: 'gone'; sources: Source[]; snapshot: number };
-
-const enteredHost = (source: Source): string | null => {
-  if (!source.base_url || !isCustomEndpoint(source)) return null;
-  try {
-    return new URL(source.base_url).host;
-  } catch {
-    return null;
-  }
-};
 
 const TierEditor: React.FC<{
   model: SuppliedModel;
@@ -396,7 +387,12 @@ export const SourceDetailPanel: React.FC<{
   const [result, setResult] = React.useState<{ added: string[]; removed: string[] } | null>(null);
   const [refetchFailed, setRefetchFailed] = React.useState(false);
   const [removeFailure, setRemoveFailure] = React.useState<{ modelId: string; retryRead: boolean } | null>(null);
+  const [query, setQuery] = React.useState('');
   const models = source.models;
+  const normalizedQuery = query.trim().toLocaleLowerCase(i18n.language);
+  const filteredModels = normalizedQuery
+    ? models.filter((model) => model.id.toLocaleLowerCase(i18n.language).includes(normalizedQuery))
+    : models;
   const editDraft = 'draft' in manageStage ? manageStage.draft : null;
   const editAssessment = editDraft
     ? assessSourceEdit(source, editDraft)
@@ -824,7 +820,6 @@ export const SourceDetailPanel: React.FC<{
     backends: adoptedBackends,
     native: source.supply_channel === 'native_cli',
   });
-  const host = enteredHost(source);
   // One authority picks the remedy and another total Record names its concrete
   // control. In particular, `retest` points at the existing refetch button; it is
   // not a special case that can fall out of destination-completeness checks.
@@ -845,53 +840,67 @@ export const SourceDetailPanel: React.FC<{
   const providerCopyKey = SOURCE_PROVIDER_COPY_KEYS[providerIdentity];
   const providerLabel = providerCopyKey ? t(providerCopyKey) : providerIdentity;
   const interfaceLabel = `${providerLabel} · ${t(PROTOCOL_COPY_KEYS[source.protocol])}`;
+  const credentialLabel = source.kind === 'api_key'
+    ? t('settings.models.sourceDetail.metadata.apiKey')
+    : t('settings.models.sourceDetail.metadata.account');
+  const credentialValue = source.kind === 'api_key'
+    ? source.masked_credential ?? '—'
+    : source.account_label ?? '—';
+  const endpoint = source.base_url ?? t('settings.models.sourceDetail.metadata.officialEndpoint');
+  const lastFetched = source.last_discovered_at
+    ? formatRelativeTime(source.last_discovered_at, t)
+    : t('settings.models.sourceDetail.metadata.neverFetched');
+  const usageSummary = adoptedBackends.length > 0
+    ? t('settings.models.sourceDetail.usageSummary', { count: source.models.length, backends: adoptedBackends.join(i18n.language.startsWith('zh') ? '、' : ', ') })
+    : t('settings.models.gateway.modelCount', { count: source.models.length });
 
   return (
     <div className="model-hub-source-detail">
-      <section className="model-hub-source-bar flex flex-col border border-border bg-surface sm:flex-row sm:items-center">
+      <section className="model-hub-source-bar flex shrink-0 items-center border-b border-border bg-surface">
         <span className={cn('model-hub-source-tile flex shrink-0 items-center justify-center', ACCENT_TILE[accent])}><Icon className={cn('size-[18px]', ACCENT_ICON[accent])} /></span>
-        {/* Two lines inside a 64px bar, as the design draws it: identity and
-            state share the first, and the mono endpoint summary owns the
-            second. The name leads line one rather than taking a line of its own
-            — the design omits it entirely, but a subscription source has no
-            host to fall back on and would be unidentifiable without it. */}
         <div className="model-hub-source-copy flex min-w-0 flex-1 flex-col">
-          <div className={cn('model-hub-source-line flex min-w-0 flex-wrap items-center gap-x-[7px]', state.textClass)}>
+          <span className="model-hub-source-eyebrow">{t('settings.models.upstream.heading')}</span>
+          <div className="model-hub-source-line flex min-w-0 flex-wrap items-center gap-x-[7px]">
             <h2 ref={headingRef} tabIndex={-1} className="model-hub-source-title truncate font-bold text-foreground">{source.display_name}</h2>
-            <span className="model-hub-pill model-hub-source-interface-pill border" title={interfaceLabel}>
-              <span className="truncate">{interfaceLabel}</span>
-            </span>
-            {/* 备用 is the first thing a just-added source says about itself, and
-                on its own it reads as a failed add. The explanation sits on the
-                label rather than in a subtitle line — the bar draws two lines and
-                the copy register keeps explanations behind a compact info
-                affordance — and the hint is a real control, so keyboard and touch
-                reach the sentence hover alone would keep from them. */}
-            {state.key && <span className="model-hub-source-state flex items-center gap-1.5"><span className={cn('size-[5px] shrink-0 rounded-full', state.dotClass)} />{t(state.key, state.values)}{state.hint && <ModelHubInfoHint label={t(state.hint.labelKey) as string} content={t(state.hint.bodyKey)} className="size-[13px]" />}</span>}
-            {source.last_discovered_at && <span className="model-hub-source-age text-muted">{t('settings.models.sourceDetail.status.listUpdated', { time: formatRelativeTime(source.last_discovered_at, t) })}</span>}
+            {state.key && <span className={cn('model-hub-source-state model-hub-pill flex items-center gap-1.5 border', state.textClass)}><span className={cn('size-[5px] shrink-0 rounded-full', state.dotClass)} />{t(state.key, state.values)}{state.hint && <ModelHubInfoHint label={t(state.hint.labelKey) as string} content={t(state.hint.bodyKey)} className="size-[13px]" />}</span>}
           </div>
-          <p className="model-hub-source-summary truncate font-mono">{t(host ? 'settings.models.sourceDetail.summary' : 'settings.models.gateway.modelCount', { host, count: source.models.length })}</p>
+          <p className="model-hub-source-summary truncate">{usageSummary}</p>
         </div>
-        <div className="flex shrink-0 gap-2">
-          {repairDestination === 'reauth_dialog' && <Button size="sm" className="model-hub-source-action" data-repair-kind={repair} data-repair-destination={repairDestination} disabled={busy} onClick={() => setConfirmingReauth(true)}><LogIn />{t(REPAIR_LABEL_KEY.reauth)}</Button>}
-          {repairDestination === 'replace_key_dialog' && <Button size="sm" className="model-hub-source-action" data-repair-kind={repair} data-repair-destination={repairDestination} disabled={busy} onClick={() => setReplacingKey(true)}>{t(REPAIR_LABEL_KEY.replace_key)}</Button>}
-          {source.supply_channel === 'hub' && <Button variant="outline" size="sm" className="model-hub-source-action" data-repair-kind={repairDestination === 'refetch_button' ? repair : undefined} data-repair-destination={repairDestination === 'refetch_button' ? repairDestination : undefined} disabled={busy} onClick={() => void refetch()}>{busy ? <Loader2 className="animate-spin" /> : <RefreshCw />}{t('settings.models.sourceDetail.action.refetch')}</Button>}
-          {source.kind === 'api_key' && <Button size="sm" className="model-hub-source-action" disabled={busy || manualDraft !== null} onClick={() => setManualDraft({ modelId: '', tiers: [], failed: false, retryRead: false })}><Plus />{t('settings.models.sourceDetail.action.addModel')}</Button>}
+      </section>
+      <dl className="model-hub-source-metadata grid shrink-0 grid-cols-2 gap-x-5 gap-y-3 border-b border-border bg-background px-5 py-3 sm:grid-cols-4">
+        <div className="min-w-0"><dt>{t('settings.models.sourceDetail.metadata.endpoint')}</dt><dd className="truncate font-mono" title={endpoint as string}>{endpoint}</dd></div>
+        <div className="min-w-0"><dt>{credentialLabel}</dt><dd className="truncate font-mono" title={credentialValue}>{credentialValue}</dd></div>
+        <div className="min-w-0"><dt>{t('settings.models.sourceDetail.metadata.type')}</dt><dd className="truncate" title={interfaceLabel}>{interfaceLabel}</dd></div>
+        <div className="min-w-0"><dt>{t('settings.models.sourceDetail.metadata.lastFetched')}</dt><dd className="truncate">{lastFetched}</dd></div>
+      </dl>
+      {(result || refetchFailed || manageStage.kind === 'delete_failed') && <div className="model-hub-source-notices shrink-0 space-y-2 px-5 pt-3">
+        {result && result.removed.length > 0 && <p className="model-hub-status-gold rounded-lg border px-3 py-2 text-[11.5px]">{t('settings.models.sourceDetail.refetch.removed', { count: result.removed.length, models: result.removed.join(', ') })}</p>}
+        {result && result.added.length === 0 && result.removed.length === 0 && <p className="model-hub-status-mint rounded-lg border px-3 py-2 text-[11.5px]">{t('settings.models.sourceDetail.refetch.unchangedOnly')}</p>}
+        {refetchFailed && <p className="rounded-lg border border-destructive/25 bg-destructive/[0.08] px-3 py-2 text-[11.5px] text-destructive-ink">{t('settings.models.sourceDetail.fail.refetch')}</p>}
+        {manageStage.kind === 'delete_failed' && <p data-manage-failure="delete" data-manage-retry-read={String(manageStage.retryRead)} className="rounded-lg border border-destructive/25 bg-destructive/[0.08] px-3 py-2 text-[11.5px] text-destructive-ink">{t(manageStage.retryRead ? 'settings.models.sourceDetail.fail.verifyDeleteSource' : 'settings.models.sourceDetail.fail.deleteSource')} <button type="button" disabled={busy} onClick={retryDelete} className="font-semibold underline underline-offset-2">{t('settings.models.sourceDetail.retry')}</button> <button type="button" disabled={busy} onClick={manageStage.retryRead ? dismissUnresolvedManage : cancelManage} className="font-semibold underline underline-offset-2">{t(manageStage.retryRead ? 'settings.models.sourceDetail.dismissUnverified' : 'common.cancel')}</button></p>}
+      </div>}
+      <section className="model-hub-source-toolbar flex shrink-0 flex-col gap-2 border-b border-border px-5 py-2.5 sm:flex-row sm:items-center">
+        <span className="flex shrink-0 items-center gap-2"><h3 className="text-[13px] font-bold text-foreground">{t('settings.models.sourceDetail.modelsHeading')}</h3><span className="model-hub-pill model-hub-fill-0a border border-border text-muted">{models.length}</span></span>
+        <div className="relative min-w-0 flex-1 sm:ml-auto sm:max-w-[200px]">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted" aria-hidden="true" />
+          <Input value={query} onChange={(event) => setQuery(event.target.value)} aria-label={t('settings.models.sourceDetail.search') as string} placeholder={t('settings.models.sourceDetail.search') as string} className="model-hub-source-search h-8 pl-8 text-[11.5px]" />
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          {repairDestination === 'reauth_dialog' && <Button size="xs" className="model-hub-source-action" data-repair-kind={repair} data-repair-destination={repairDestination} disabled={busy} onClick={() => setConfirmingReauth(true)}><LogIn />{t(REPAIR_LABEL_KEY.reauth)}</Button>}
+          {repairDestination === 'replace_key_dialog' && <Button size="xs" className="model-hub-source-action" data-repair-kind={repair} data-repair-destination={repairDestination} disabled={busy} onClick={() => setReplacingKey(true)}>{t(REPAIR_LABEL_KEY.replace_key)}</Button>}
+          {source.supply_channel === 'hub' && <Button variant="outline" size="xs" className="model-hub-source-action" data-repair-kind={repairDestination === 'refetch_button' ? repair : undefined} data-repair-destination={repairDestination === 'refetch_button' ? repairDestination : undefined} disabled={busy} onClick={() => void refetch()}>{busy ? <Loader2 className="animate-spin" /> : <RefreshCw />}{t('settings.models.sourceDetail.action.refetch')}</Button>}
+          {source.kind === 'api_key' && <Button size="xs" className="model-hub-source-action" disabled={busy || manualDraft !== null} onClick={() => setManualDraft({ modelId: '', tiers: [], failed: false, retryRead: false })}><Plus />{t('settings.models.sourceDetail.action.addModel')}</Button>}
           <SourceManageMenu source={source} busy={busy || manageStage.kind !== 'idle'} onEdit={beginEdit} onDelete={beginDelete} />
         </div>
       </section>
-      {result && result.removed.length > 0 && <p className="model-hub-status-gold rounded-lg border px-3 py-2 text-[11.5px]">{t('settings.models.sourceDetail.refetch.removed', { count: result.removed.length, models: result.removed.join(', ') })}</p>}
-      {result && result.added.length === 0 && result.removed.length === 0 && <p className="model-hub-status-mint rounded-lg border px-3 py-2 text-[11.5px]">{t('settings.models.sourceDetail.refetch.unchangedOnly')}</p>}
-      {refetchFailed && <p className="rounded-lg border border-destructive/25 bg-destructive/[0.08] px-3 py-2 text-[11.5px] text-destructive-ink">{t('settings.models.sourceDetail.fail.refetch')}</p>}
-      {manageStage.kind === 'delete_failed' && <p data-manage-failure="delete" data-manage-retry-read={String(manageStage.retryRead)} className="rounded-lg border border-destructive/25 bg-destructive/[0.08] px-3 py-2 text-[11.5px] text-destructive-ink">{t(manageStage.retryRead ? 'settings.models.sourceDetail.fail.verifyDeleteSource' : 'settings.models.sourceDetail.fail.deleteSource')} <button type="button" disabled={busy} onClick={retryDelete} className="font-semibold underline underline-offset-2">{t('settings.models.sourceDetail.retry')}</button> <button type="button" disabled={busy} onClick={manageStage.retryRead ? dismissUnresolvedManage : cancelManage} className="font-semibold underline underline-offset-2">{t(manageStage.retryRead ? 'settings.models.sourceDetail.dismissUnverified' : 'common.cancel')}</button></p>}
-      <section className="model-hub-source-table overflow-hidden border border-border bg-surface">
+      <section className="model-hub-source-table flex min-h-0 flex-1 flex-col overflow-hidden bg-surface">
         <div className="model-hub-source-table-head hidden border-b border-border font-semibold md:grid">
-          <span className="truncate">{t('settings.models.sourceDetail.col.id')}</span><span className="truncate">{t('settings.models.sourceDetail.col.entry')}</span><span className="flex min-w-0 items-center gap-1"><span className="truncate">{t('settings.models.sourceDetail.col.tiers')}</span><Info className="model-hub-ink-59 size-[13px] shrink-0" /></span><span />
+          <span className="truncate">{t('settings.models.sourceDetail.col.id')}</span><span className="flex min-w-0 items-center gap-1"><span className="truncate">{t('settings.models.sourceDetail.col.tiers')}</span><Info className="model-hub-ink-59 size-[13px] shrink-0" /></span><span />
         </div>
-        {models.length === 0 && !manualDraft ? <p className="px-5 py-12 text-center text-[12px] text-muted">{t(source.last_discovered_at ? 'settings.models.sourceDetail.empty' : 'settings.models.sourceDetail.emptyNeverFetched')}</p> : models.map((model) => (
+        <div className="model-hub-source-table-scroll min-h-0 flex-1 overflow-y-auto">
+        {filteredModels.length === 0 && !manualDraft ? <p className="px-5 py-12 text-center text-[12px] text-muted">{t(normalizedQuery ? 'settings.models.sourceDetail.searchEmpty' : source.last_discovered_at ? 'settings.models.sourceDetail.empty' : 'settings.models.sourceDetail.emptyNeverFetched')}</p> : filteredModels.map((model) => (
           <div key={model.id} className="model-hub-source-table-row grid gap-3 border-b border-border last:border-b-0 md:items-center md:gap-y-0">
-            <span className="flex min-w-0 items-center gap-2"><span className="model-hub-source-model truncate font-mono text-foreground" title={model.id}>{model.id}</span>{result?.added.includes(model.id) && <span className="model-hub-accent-pill--mint model-hub-source-pill rounded-full border px-2 py-0.5 font-semibold">{t('settings.models.sourceDetail.refetch.added')}</span>}</span>
-            <span className={cn('model-hub-source-pill model-hub-source-entry-pill w-fit rounded-full border font-semibold', model.origin !== 'discovered' && 'model-hub-source-entry-pill--manual')}>{t(`settings.models.sourceDetail.entry.${model.origin === 'discovered' ? 'auto' : 'manual'}`)}</span>
+            <span className="flex min-w-0 items-center gap-2"><span className="model-hub-source-model truncate font-mono text-foreground" title={model.id}>{model.id}</span>{model.origin !== 'discovered' && <span className="model-hub-source-pill model-hub-source-entry-pill model-hub-source-entry-pill--manual w-fit rounded-full border font-semibold">{t('settings.models.sourceDetail.entry.manual')}</span>}{result?.added.includes(model.id) && <span className="model-hub-accent-pill--mint model-hub-source-pill rounded-full border px-2 py-0.5 font-semibold">{t('settings.models.sourceDetail.refetch.added')}</span>}</span>
             <TierEditor
               model={model}
               protocol={source.protocol}
@@ -904,7 +913,7 @@ export const SourceDetailPanel: React.FC<{
               onMutating={() => { setResult(null); setRefetchFailed(false); }}
               trackMutation={trackMutation}
             />
-            <div className="flex items-center justify-end gap-2">
+            <div className="model-hub-source-row-actions flex items-center justify-end gap-1">
               {removeFailure?.modelId === model.id && <span className="model-hub-source-tier text-right text-destructive-ink">{t('settings.models.sourceDetail.fail.removeModel')} <button type="button" disabled={busy} onClick={() => {
                 if (!removeFailure.retryRead) void remove(model);
                 else {
@@ -913,40 +922,29 @@ export const SourceDetailPanel: React.FC<{
                     .finally(() => setBusy(false));
                 }
               }} className="font-semibold underline underline-offset-2">{t('settings.models.sourceDetail.retry')}</button></span>}
-              {model.origin === 'manual' && <ManualModelMenu model={model} busy={busy} onRemove={() => void remove(model)} />}
+              {model.origin === 'manual' && <><button type="button" disabled={busy} aria-label={t('settings.models.sourceDetail.row.edit', { model: model.id }) as string} title={t('settings.models.sourceDetail.row.edit', { model: model.id }) as string} className="model-hub-source-row-action grid place-items-center text-muted hover:bg-surface-2 hover:text-foreground" onClick={() => setEditingTiers(model.id)}><Pencil className="size-3.5" /></button><ManualModelMenu model={model} busy={busy} onRemove={() => void remove(model)} /></>}
             </div>
           </div>
         ))}
         {manualDraft && (
           <div data-manual-model-draft className="model-hub-source-table-draft grid gap-3 border-y border-mint/20 bg-mint/[0.05] md:items-center md:gap-y-0">
-            <Input
-              autoFocus
-              value={manualDraft.modelId}
-              onChange={(event) => setManualDraft((current) => current ? { ...current, modelId: event.target.value, failed: false, retryRead: false } : current)}
-              placeholder={t('settings.models.sourceDetail.col.id') as string}
-              className="model-hub-source-manual-id model-hub-source-model h-8 font-mono"
-            />
-            <span className="model-hub-source-pill model-hub-source-entry-pill model-hub-source-entry-pill--manual w-fit rounded-full border font-semibold">{t('settings.models.sourceDetail.entry.manual')}</span>
+            <span className="flex min-w-0 items-center gap-2"><Input
+                autoFocus
+                value={manualDraft.modelId}
+                onChange={(event) => setManualDraft((current) => current ? { ...current, modelId: event.target.value, failed: false, retryRead: false } : current)}
+                placeholder={t('settings.models.sourceDetail.col.id') as string}
+                className="model-hub-source-manual-id model-hub-source-model h-8 min-w-0 font-mono"
+              /><span className="model-hub-source-pill model-hub-source-entry-pill model-hub-source-entry-pill--manual w-fit rounded-full border font-semibold">{t('settings.models.sourceDetail.entry.manual')}</span></span>
             <DraftTiers tiers={manualDraft.tiers} onChange={(tiers) => setManualDraft((current) => current ? { ...current, tiers, failed: false, retryRead: false } : current)} />
             <div className="flex justify-end gap-2">
               <Button variant="ghost" size="xs" disabled={busy} onClick={() => setManualDraft(null)}>{t('common.cancel')}</Button>
               <Button size="xs" disabled={busy || !manualDraft.modelId.trim() || source.models.some((model) => model.id === manualDraft.modelId.trim())} onClick={() => void addManualModel()}>{manualDraft.failed ? t('settings.models.sourceDetail.retry') : t('settings.models.sourceDetail.action.addModel')}</Button>
             </div>
-            {manualDraft.failed && <p className="text-[11px] text-destructive-ink md:col-span-4">{t('settings.models.sourceDetail.fail.addModel')}</p>}
+            {manualDraft.failed && <p className="text-[11px] text-destructive-ink md:col-span-3">{t('settings.models.sourceDetail.fail.addModel')}</p>}
           </div>
         )}
-        {source.kind === 'api_key' && !manualDraft && (
-          <button type="button" className="model-hub-source-table-add model-hub-source-model model-hub-ink-mint flex w-full items-center gap-2 text-left font-semibold" onClick={() => setManualDraft({ modelId: '', tiers: [], failed: false, retryRead: false })}>
-            <Plus className="size-3.5 shrink-0" />
-            {t('settings.models.sourceDetail.action.addModel')}
-            <span className="model-hub-source-add-hint truncate font-mono font-normal">{t('settings.models.sourceDetail.addRow.hint')}</span>
-          </button>
-        )}
+        </div>
       </section>
-      <p className="model-hub-source-footnote flex gap-2">
-        <Info className="model-hub-ink-59 mt-px size-[13px] shrink-0" aria-hidden="true" />
-        <span>{t('settings.models.sourceDetail.footnote')}</span>
-      </p>
       {/* Confirmed before the journey opens, not inside it: `OAuthConnectDialog`
           POSTs the re-auth as it mounts, and on a native source that call is the
           irreversible half — `mark_native_irreversible_start` empties every

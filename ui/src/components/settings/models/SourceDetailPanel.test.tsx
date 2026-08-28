@@ -239,6 +239,18 @@ describe('SourceDetailPanel', () => {
     expect(document.activeElement).toBe(headingRef.current);
   });
 
+  it('filters the model table by model ID without changing the source inventory', async () => {
+    renderPanel();
+
+    const search = screen.getByRole('textbox', { name: /Search model IDs|搜索模型 ID/i });
+    await userEvent.type(search, 'missing-model');
+
+    expect(screen.queryByText('model-a')).toBeNull();
+    expect(screen.getByText(/No models match this search|没有匹配的模型/i)).toBeTruthy();
+    await userEvent.clear(search);
+    expect(screen.getByText('model-a')).toBeTruthy();
+  });
+
   it('keeps the detail surface to inventory, entry kind, tiers, and refetch', () => {
     renderPanel();
     expect(screen.queryByText(/latency|延迟|enrollment|protocol|协议/i)).toBeNull();
