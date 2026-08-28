@@ -133,7 +133,8 @@ const renderPage = (sources: Source[]) => {
 
 const switchFirstGatewayAgentToDirect = async () => {
   await userEvent.click((await screen.findAllByRole('button', { name: /Runtime mode:|运行模式[:：]/i }))[0]);
-  await userEvent.click(await screen.findByRole('menuitem', { name: /Switch to direct|切到直连|Retry|重试/i }));
+  const modeGroup = await screen.findByRole('group', { name: /Runtime mode|运行模式/i });
+  await userEvent.click(within(modeGroup).getByRole('button', { name: /Switch to direct|切到直连|Retry|重试/i }));
 };
 
 const closeSourceDetails = async () => {
