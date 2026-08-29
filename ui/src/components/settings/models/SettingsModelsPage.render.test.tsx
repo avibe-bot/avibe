@@ -85,6 +85,9 @@ const takeoverChain: AgentChain = {
   supply_state: 'ok',
 };
 
+const takeoverMappingTitle = /Replacement source → gpt-5\.6-sol \((?:Taken over|已自动切换)\)/i;
+const headMappingTitle = /^Paused source → gpt-5\.6-sol$/i;
+
 const usageSummary: UsageSummary = {
   window_days: 30,
   from_day: '2026-07-20',
@@ -790,7 +793,7 @@ describe('SettingsModelsPage surface branches', () => {
 
     expect(await screen.findByText(/^1 takeover active$|^1 处已自动切换$/i)).toBeTruthy();
     expect(screen.getByText(/^Taken over$|^已自动切换$/i)).toBeTruthy();
-    expect(screen.getByText(/From: Replacement source \(takeover\)|来自 Replacement source（接管）/i)).toBeTruthy();
+    expect(screen.getByTitle(takeoverMappingTitle)).toBeTruthy();
   });
 
   it('[MH-OVERVIEW-001] reads overview chains once per backend and keeps exact reads for the route dialog', async () => {
@@ -1079,7 +1082,7 @@ describe('SettingsModelsPage surface branches', () => {
 
     expect(screen.queryByRole('button', { name: /route chain|路由链/i })).toBeNull();
     expect(screen.queryByText(/^Taken over$|^已自动切换$/i)).toBeNull();
-    expect(screen.queryByText(/From: Replacement source \(takeover\)|来自 Replacement source（接管）/i)).toBeNull();
+    expect(screen.queryByTitle(takeoverMappingTitle)).toBeNull();
   });
 
   it('cannot let a pre-save chain read overwrite the committed route echo', async () => {
@@ -1119,15 +1122,15 @@ describe('SettingsModelsPage surface branches', () => {
     await userEvent.click(removeButtons[1]);
     await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
     await userEvent.click((await screen.findByText(/^Done$|^完成$/i)).closest('button') as HTMLButtonElement);
-    expect(await screen.findByText(/^From: Paused source$|^来自 Paused source$/i)).toBeTruthy();
+    expect(await screen.findByTitle(headMappingTitle)).toBeTruthy();
 
     await act(async () => {
       pendingOldChain.resolve(takeoverChain);
       await pendingOldChain.promise;
     });
 
-    expect(screen.getByText(/^From: Paused source$|^来自 Paused source$/i)).toBeTruthy();
-    expect(screen.queryByText(/From: Replacement source \(takeover\)|来自 Replacement source（接管）/i)).toBeNull();
+    expect(screen.getByTitle(headMappingTitle)).toBeTruthy();
+    expect(screen.queryByTitle(takeoverMappingTitle)).toBeNull();
   });
 
   it('installs a removed backend before the committed route closes and applies PF-1', async () => {
@@ -1238,14 +1241,14 @@ describe('SettingsModelsPage surface branches', () => {
       </ToastProvider>,
     );
 
-    expect(await screen.findByText(/From: Replacement source \(takeover\)|来自 Replacement source（接管）/i)).toBeTruthy();
+    expect(await screen.findByTitle(takeoverMappingTitle)).toBeTruthy();
     await userEvent.click(screen.getByText('Paused source').closest('button') as HTMLButtonElement);
     await userEvent.click(await screen.findByRole('button', { name: /^Refetch$|^重新拉取$/i }));
 
     await waitFor(() => expect(agentRead).toHaveBeenCalledTimes(2));
     await closeSourceDetails();
     expect(await screen.findByText(/Could not read this backend's supply|没有读到后端列表/i)).toBeTruthy();
-    expect(screen.queryByText(/From: Replacement source \(takeover\)|来自 Replacement source（接管）/i)).toBeNull();
+    expect(screen.queryByTitle(takeoverMappingTitle)).toBeNull();
     expect(screen.getAllByText('—').length).toBeGreaterThan(0);
   });
 
@@ -1269,14 +1272,14 @@ describe('SettingsModelsPage surface branches', () => {
       </ToastProvider>,
     );
 
-    expect(await screen.findByText(/From: Replacement source \(takeover\)|来自 Replacement source（接管）/i)).toBeTruthy();
+    expect(await screen.findByTitle(takeoverMappingTitle)).toBeTruthy();
     await userEvent.click(screen.getByText('Paused source').closest('button') as HTMLButtonElement);
     await userEvent.click(await screen.findByRole('button', { name: /^Refetch$|^重新拉取$/i }));
 
     await waitFor(() => expect(runtimeRead).toHaveBeenCalledTimes(2));
     await closeSourceDetails();
     expect(await screen.findByText(/^Gateway status unavailable$|^模型网关状态不可用$/i)).toBeTruthy();
-    expect(screen.queryByText(/From: Replacement source \(takeover\)|来自 Replacement source（接管）/i)).toBeNull();
+    expect(screen.queryByTitle(takeoverMappingTitle)).toBeNull();
     expect(screen.queryByText(/^Taken over$|^已自动切换$/i)).toBeNull();
     expect(screen.getAllByText('—').length).toBeGreaterThan(0);
   });

@@ -913,10 +913,6 @@
           "none": "No usable source",
           "unread": "Could not read this backend's supply · the gateway itself is fine"
         },
-        "row": {
-          "current": "From: {{source}}",
-          "currentTakeover": "From: {{source}} (takeover)"
-        },
         "group": {
           "subtitle": {
             "direct": "{{mode}}",

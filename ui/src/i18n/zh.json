@@ -913,10 +913,6 @@
           "none": "没有可用供应商",
           "unread": "路由状态暂时不可用 · 模型网关本身正常"
         },
-        "row": {
-          "current": "当前使用 {{source}}",
-          "currentTakeover": "当前使用 {{source}}（已自动切换）"
-        },
         "group": {
           "subtitle": {
             "direct": "{{mode}}",
