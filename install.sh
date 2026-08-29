@@ -421,7 +421,10 @@ uv_tool_install() {
     # durable generation and activate its launcher only after uv exits
     # successfully, so an interrupted copy cannot damage the active install.
     local generation_root="$AVIBE_RUNTIME_HOME/runtime/install-generations/$(date +%s)-$$-${RANDOM}"
-    local generation_tools="$generation_root/tools"
+    # 3.0.13 identifies uv-managed installs from the executable's /uv/tools/
+    # path. Keep that released contract in every generation so the old binary
+    # can hand the first upgrade to uv instead of falling through to pip.
+    local generation_tools="$generation_root/uv/tools"
     local generation_bin="$generation_root/bin"
     local stable_bin_dir="${VIBE_TOOL_BIN_DIR:-$HOME/.local/bin}"
     local previous_target=""

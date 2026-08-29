@@ -131,8 +131,10 @@ def test_build_upgrade_plan_stages_uv_install_for_a_stable_launcher(monkeypatch,
     assert plan.activation is not None
     assert plan.activation.launcher == launcher
     assert plan.env is not None
-    assert plan.env["UV_TOOL_DIR"].startswith(str(tmp_path / "home" / "runtime" / "install-generations"))
-    assert plan.env["UV_TOOL_BIN_DIR"].startswith(str(tmp_path / "home" / "runtime" / "install-generations"))
+    tool_dir = Path(plan.env["UV_TOOL_DIR"])
+    bin_dir = Path(plan.env["UV_TOOL_BIN_DIR"])
+    assert tool_dir == bin_dir.parent / "uv" / "tools"
+    assert bin_dir.parent.parent == tmp_path / "home" / "runtime" / "install-generations"
 
 
 def test_build_upgrade_plan_refuses_uv_install_without_activation_point(monkeypatch):

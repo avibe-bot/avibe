@@ -217,7 +217,10 @@ def launcher_is_current_process(launcher: Path | str) -> bool:
 
 def _staged_uv_environment(vibe_path: str | None) -> tuple[Path, Path, AtomicActivation | None]:
     generation = atomic_uv_install_root() / uuid4().hex
-    tools_dir = generation / "tools"
+    # 3.0.13 only recognizes uv installs whose interpreter path contains
+    # /uv/tools/. Generations must retain that released handoff contract so an
+    # immutable 3.0.13 process can choose uv for its first product upgrade.
+    tools_dir = generation / "uv" / "tools"
     bin_dir = generation / "bin"
     if not vibe_path:
         return tools_dir, bin_dir, None
@@ -245,7 +248,7 @@ def _candidate_python(candidate_launcher: Path) -> Path | None:
     with contextlib.suppress(OSError, RuntimeError, ValueError):
         generation = _generation_for_path(candidate_launcher, atomic_uv_install_root())
         if generation is not None:
-            roots.append(generation / "tools")
+            roots.extend((generation / "uv" / "tools", generation / "tools"))
     names = ("python.exe", "python3.exe", "python3", "python") if os.name == "nt" else ("python3", "python")
     for root in roots:
         for name in names:
