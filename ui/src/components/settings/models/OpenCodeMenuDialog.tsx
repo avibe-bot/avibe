@@ -13,8 +13,8 @@ import { eligibleSources } from './eligibility';
 import {
   applyOpenCodeMenuIntent,
   openCodeMenuIntent,
+  openCodeMenuIntentApplied,
   readOpenCodeMenuBaseline,
-  sameOpenCodeMenu,
   type OpenCodeMenuBaseline,
 } from './menuBaseline';
 import { buildIdentifier } from './menus/identifiers';
@@ -139,36 +139,20 @@ export const OpenCodeMenuDialog: React.FC<{
       current.agent.menu?.checked ?? [],
       [...selectedRef.current],
     );
+    const baselineMenu: AgentMenu = current.agent.menu ?? { view: 'featured', checked: [] };
+    const requestedMenu: AgentMenu = {
+      view: baselineMenu.view,
+      checked: [...selectedRef.current],
+    };
     setSaveFailed(false);
     void menuWrite.track(async () => {
-      let latest: OpenCodeMenuBaseline;
-      try {
-        latest = await readOpenCodeMenuBaseline(modelsApi, sourceReads);
-      } catch {
-        setReadState('error');
-        setSaveFailed(true);
-        return;
-      }
-
-      const latestSelectable = new Set(selectableModels(latest.agent, latest.sources).map((model) => model.id));
-      const attemptedMenu: AgentMenu = {
-        view: latest.agent.menu?.view ?? 'featured',
-        checked: applyOpenCodeMenuIntent(latest.agent.menu?.checked ?? [], intent, latestSelectable),
-      };
-      applyBaseline(latest, attemptedMenu.checked);
-      if (sameOpenCodeMenu(latest.agent.menu, attemptedMenu)) {
-        await Promise.resolve(onObserved(latest.agent)).catch(() => {});
-        onClose();
-        return;
-      }
-
       let echoed: AgentSupply;
       try {
-        echoed = await modelsApi.putMenu(attemptedMenu);
+        echoed = await modelsApi.putMenu(baselineMenu, requestedMenu);
       } catch {
         try {
           const observed = await readOpenCodeMenuBaseline(modelsApi, sourceReads);
-          if (sameOpenCodeMenu(observed.agent.menu, attemptedMenu)) {
+          if (openCodeMenuIntentApplied(observed.agent.menu?.checked ?? [], intent)) {
             applyBaseline(observed, observed.agent.menu?.checked ?? []);
             await Promise.resolve(onSaved(observed.agent)).catch(() => {});
             onClose();

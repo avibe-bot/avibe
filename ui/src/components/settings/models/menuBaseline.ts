@@ -1,7 +1,7 @@
 import type { CollectionReadAuthority } from './collectionReadAuthority';
 import type { ModelsApi } from './modelsApi';
 import { combineSourceOrderReads } from './sourceOrderComposition';
-import type { AgentMenu, AgentSupply, Source } from './types';
+import type { AgentSupply, Source } from './types';
 
 export type OpenCodeMenuBaseline = {
   agent: AgentSupply;
@@ -62,7 +62,11 @@ export const applyOpenCodeMenuIntent = (
   return rebased;
 };
 
-export const sameOpenCodeMenu = (left: AgentMenu | null | undefined, right: AgentMenu): boolean => {
-  if (!left || left.view !== right.view || left.checked.length !== right.checked.length) return false;
-  return left.checked.every((id, index) => id === right.checked[index]);
+export const openCodeMenuIntentApplied = (
+  current: readonly string[],
+  intent: OpenCodeMenuIntent,
+): boolean => {
+  const currentSet = new Set(current);
+  return intent.added.every((id) => currentSet.has(id))
+    && [...intent.removed].every((id) => !currentSet.has(id));
 };

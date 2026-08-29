@@ -3,8 +3,8 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   applyOpenCodeMenuIntent,
   openCodeMenuIntent,
+  openCodeMenuIntentApplied,
   readOpenCodeMenuBaseline,
-  sameOpenCodeMenu,
 } from './menuBaseline';
 import type { AgentSupply, Source } from './types';
 
@@ -83,10 +83,10 @@ describe('OpenCode menu intent', () => {
     )).toEqual(['openai/concurrent', 'openai/kept', 'openai/added']);
   });
 
-  it('compares the server menu as an ordered total value', () => {
-    const expected = { view: 'featured' as const, checked: ['openai/a', 'openai/b'] };
-    expect(sameOpenCodeMenu(expected, expected)).toBe(true);
-    expect(sameOpenCodeMenu({ ...expected, checked: ['openai/b', 'openai/a'] }, expected)).toBe(false);
-    expect(sameOpenCodeMenu(null, expected)).toBe(false);
+  it('recognizes an applied intent while ignoring unrelated concurrent selections', () => {
+    const intent = openCodeMenuIntent(['openai/a', 'openai/remove'], ['openai/a', 'openai/add']);
+    expect(openCodeMenuIntentApplied(['openai/a', 'openai/concurrent', 'openai/add'], intent)).toBe(true);
+    expect(openCodeMenuIntentApplied(['openai/a', 'openai/add', 'openai/remove'], intent)).toBe(false);
+    expect(openCodeMenuIntentApplied(['openai/a'], intent)).toBe(false);
   });
 });

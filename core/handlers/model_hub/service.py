@@ -3612,17 +3612,45 @@ class ModelHubService:
             await self._commit_synced(previous, config)
             return self._agent_payload(config, agent)
 
-    async def set_opencode_menu(self, menu: object) -> dict:
+    async def set_opencode_menu(self, baseline: object, menu: object) -> dict:
         async with self._mutation_lock:
             previous = self.store.load()
             config = self._clone_config(previous)
             agent = config.agents["opencode"]
             try:
+                parsed_baseline = ModelHubMenuConfig.from_payload(cast(dict, baseline))
                 parsed_menu = ModelHubMenuConfig.from_payload(cast(dict, menu))
+                current_menu = agent.menu or ModelHubMenuConfig()
+                baseline_checked = set(parsed_baseline.checked)
+                requested_checked = set(parsed_menu.checked)
+                removed = baseline_checked - requested_checked
+                added = [
+                    identifier
+                    for identifier in parsed_menu.checked
+                    if identifier not in baseline_checked
+                ]
+                merged_checked = [
+                    identifier
+                    for identifier in current_menu.checked
+                    if identifier not in removed
+                ]
+                present = set(merged_checked)
+                for identifier in added:
+                    if identifier not in present:
+                        merged_checked.append(identifier)
+                        present.add(identifier)
+                merged_menu = ModelHubMenuConfig(
+                    view=(
+                        parsed_menu.view
+                        if parsed_menu.view != parsed_baseline.view
+                        else current_menu.view
+                    ),
+                    checked=merged_checked,
+                )
                 candidate = agent.to_payload()
-                candidate["menu"] = parsed_menu.to_payload()
+                candidate["menu"] = merged_menu.to_payload()
                 candidate_routes = cast(dict, candidate["routes"])
-                for identifier in parsed_menu.checked:
+                for identifier in merged_menu.checked:
                     candidate_routes.setdefault(identifier, ModelHubRouteConfig().to_payload())
                 parsed = ModelHubAgentSupplyConfig.from_payload(
                     candidate,
@@ -3630,9 +3658,8 @@ class ModelHubService:
                 )
             except (TypeError, ValueError) as exc:
                 raise ModelHubError("mapping_target_unavailable") from exc
-            existing_checked = set(agent.menu.checked if agent.menu else ())
-            added = set(parsed_menu.checked) - existing_checked
-            if not added.issubset(opencode_inventory_menu_ids(config)):
+            added_to_current = set(merged_menu.checked) - set(current_menu.checked)
+            if not added_to_current.issubset(opencode_inventory_menu_ids(config)):
                 raise ModelHubError("mapping_target_unavailable", status=409)
             agent.menu = parsed.menu
             agent.routes = parsed.routes

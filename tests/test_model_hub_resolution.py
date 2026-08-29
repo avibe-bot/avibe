@@ -1055,6 +1055,7 @@ def test_opencode_menu_validation_rejects_noncanonical_identifier(tmp_path):
     with pytest.raises(ModelHubError) as exc:
         asyncio.run(
             service.set_opencode_menu(
+                {"view": "featured", "checked": []},
                 {"view": "featured", "checked": ["gpt-5"]}
             )
         )
@@ -1068,6 +1069,7 @@ def test_opencode_menu_validation_rejects_credential_material(tmp_path):
     with pytest.raises(ModelHubError) as exc:
         asyncio.run(
             service.set_opencode_menu(
+                {"view": "featured", "checked": []},
                 {
                     "view": "featured",
                     "checked": ["custom/sk-test-credential-material"],
@@ -1086,6 +1088,7 @@ def test_opencode_menu_rejects_a_new_model_absent_from_current_inventory(tmp_pat
     with pytest.raises(ModelHubError) as exc:
         asyncio.run(
             service.set_opencode_menu(
+                {"view": "featured", "checked": []},
                 {"view": "featured", "checked": ["openai/removed-model"]}
             )
         )
@@ -1115,6 +1118,7 @@ def test_opencode_menu_preserves_an_existing_route_alias_while_adding_inventory(
 
     asyncio.run(
         service.set_opencode_menu(
+            {"view": "featured", "checked": ["openai/menu-model"]},
             {
                 "view": "featured",
                 "checked": ["openai/menu-model", "openai/new-model"],
@@ -1127,6 +1131,63 @@ def test_opencode_menu_preserves_an_existing_route_alias_while_adding_inventory(
     assert saved.routes["openai/menu-model"].hops == (
         ModelHubRouteHopConfig(source.id, "upstream-model"),
     )
+
+
+def test_opencode_menu_applies_local_intent_to_the_latest_saved_menu(tmp_path):
+    source = _source(
+        "src_opencode03",
+        ("model-a", "model-b", "model-c"),
+        vendor="openai",
+    )
+    config = _config([source])
+    config.agents["opencode"].menu = ModelHubMenuConfig(
+        view="featured",
+        checked=["openai/model-a", "openai/model-b"],
+    )
+    config.agents["opencode"].routes.update(
+        {
+            "openai/model-a": ModelHubRouteConfig(),
+            "openai/model-b": ModelHubRouteConfig(),
+        }
+    )
+    service, store, _ = _service(tmp_path, config)
+
+    asyncio.run(
+        service.set_opencode_menu(
+            {"view": "featured", "checked": ["openai/model-a"]},
+            {
+                "view": "featured",
+                "checked": ["openai/model-a", "openai/model-c"],
+            },
+        )
+    )
+
+    assert store.load().agents["opencode"].menu.checked == [
+        "openai/model-a",
+        "openai/model-b",
+        "openai/model-c",
+    ]
+
+
+def test_opencode_menu_does_not_restore_a_concurrently_removed_model(tmp_path):
+    source = _source(
+        "src_opencode04",
+        ("model-a", "model-c"),
+        vendor="openai",
+    )
+    service, store, _ = _service(tmp_path, _config([source]))
+
+    asyncio.run(
+        service.set_opencode_menu(
+            {"view": "featured", "checked": ["openai/model-a"]},
+            {
+                "view": "featured",
+                "checked": ["openai/model-a", "openai/model-c"],
+            },
+        )
+    )
+
+    assert store.load().agents["opencode"].menu.checked == ["openai/model-c"]
 
 
 def test_explicit_opencode_selection_outside_menu_remains_visible(tmp_path):

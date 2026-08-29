@@ -98,10 +98,10 @@ describe('OpenCodeMenuDialog', () => {
     expect(screen.getByText('1 of 2 selected')).toBeTruthy();
     await user.click(screen.getByRole('button', { name: 'Save selection' }));
 
-    await waitFor(() => expect(putMenu).toHaveBeenCalledWith({
-      view: 'featured',
-      checked: ['openai/gpt-5.6-luna'],
-    }));
+    await waitFor(() => expect(putMenu).toHaveBeenCalledWith(
+      { view: 'featured', checked: [] },
+      { view: 'featured', checked: ['openai/gpt-5.6-luna'] },
+    ));
     expect(onSaved).toHaveBeenCalledWith(echoed);
     expect(onClose).toHaveBeenCalledOnce();
   });
@@ -158,7 +158,10 @@ describe('OpenCodeMenuDialog', () => {
     expect(screen.getByText('1 of 3 selected')).toBeTruthy();
     await user.click(alias);
     await user.click(screen.getByRole('button', { name: 'Save selection' }));
-    await waitFor(() => expect(putMenu).toHaveBeenCalledWith({ view: 'featured', checked: [] }));
+    await waitFor(() => expect(putMenu).toHaveBeenCalledWith(
+      { view: 'featured', checked: ['openai/menu-model'] },
+      { view: 'featured', checked: [] },
+    ));
   });
 
   it('preserves a checked cross-model route while saving an unrelated addition', async () => {
@@ -188,10 +191,10 @@ describe('OpenCodeMenuDialog', () => {
 
     await user.click(await screen.findByRole('checkbox', { name: /openai\/gpt-5\.6-luna/i }));
     await user.click(screen.getByRole('button', { name: 'Save selection' }));
-    await waitFor(() => expect(putMenu).toHaveBeenCalledWith({
-      view: 'featured',
-      checked: ['openai/menu-model', 'openai/gpt-5.6-luna'],
-    }));
+    await waitFor(() => expect(putMenu).toHaveBeenCalledWith(
+      { view: 'featured', checked: ['openai/menu-model'] },
+      { view: 'featured', checked: ['openai/menu-model', 'openai/gpt-5.6-luna'] },
+    ));
   });
 
   it('blocks editing when its dedicated baseline read fails', async () => {
@@ -220,10 +223,12 @@ describe('OpenCodeMenuDialog', () => {
     const user = userEvent.setup();
     const committed = {
       ...agent,
-      menu: { view: 'featured' as const, checked: ['openai/gpt-5.6-luna'] },
+      menu: {
+        view: 'featured' as const,
+        checked: ['openai/gpt-5.6-sol', 'openai/gpt-5.6-luna'],
+      },
     };
     vi.spyOn(modelsApi, 'getAgentSources')
-      .mockResolvedValueOnce(agent)
       .mockResolvedValueOnce(agent)
       .mockResolvedValueOnce(committed);
     vi.spyOn(modelsApi, 'putMenu').mockRejectedValue(new ApiCallError('bad_response', undefined, false));
@@ -251,7 +256,6 @@ describe('OpenCodeMenuDialog', () => {
   it('rebases a failed draft on the observed menu before enabling retry', async () => {
     const user = userEvent.setup();
     vi.spyOn(modelsApi, 'getAgentSources')
-      .mockResolvedValueOnce(agent)
       .mockResolvedValueOnce(agent)
       .mockResolvedValueOnce(agent);
     vi.spyOn(modelsApi, 'putMenu').mockRejectedValue(new ApiCallError('bad_response', undefined, false));
