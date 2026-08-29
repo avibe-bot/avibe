@@ -1870,15 +1870,20 @@ OpenCode identifier. Saving performs `PUT /api/models/agents/opencode/menu`; a s
 model with no Route then appears as an ordinary row whose current-text slot reads
 `gateway.group.status.unconfigured`, and that row opens frame 02. The dialog preserves
 the saved menu view, blocks dismissal while its write is outstanding, and retains the
-draft after a failed save. The dialog owns a dedicated `AgentSupply` + `Source[]` read pair
-rather than composing the page's independently settled regions. It detects source-membership
-holes and regroups the pair once before enabling search, selection, or save, then reads the
-pair again immediately before its total write and rebases only the user's explicit additions
-and removals. Existing checked identifiers remain visible and selected even when their Route
+draft after a failed save. The dialog owns a dedicated `Source[]` → `AgentSupply` →
+`Source[]` read bracket rather than composing the page's independently settled regions.
+Search, selection, and save become available only when the complete Source projections on
+both sides are identical and the Agent projection has no source-composition hole. Save sends
+that observed menu as `baseline` beside the user's `menu` draft; the server derives additions,
+removals, and any view change, then applies that intent to the latest stored menu under the
+mutation lock. Concurrent unrelated selections therefore survive without another client-side
+pre-write read. Existing checked identifiers remain visible and selected even when their Route
 maps to a differently named upstream model. A failed or undecodable `PUT` is reconciled with
-another dedicated pair before the dialog reports failure or enables another edit. An unread
-or non-convergent pair preserves the draft, shows `gateway.menu.baselineUnavailable`, and
-cannot issue the menu `PUT`; stale or absent data is never interpreted as an empty selection.
+another dedicated bracket before the dialog reports failure or enables another edit; the write
+is accepted when every requested addition is present and every requested removal is absent,
+regardless of unrelated concurrent selections. An unread or non-convergent bracket preserves
+the draft, shows `gateway.menu.baselineUnavailable`, and cannot issue the menu `PUT`; stale or
+absent data is never interpreted as an empty selection.
 
 **Extreme data**
 
