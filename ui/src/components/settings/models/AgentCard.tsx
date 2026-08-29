@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { ArrowDownUp, ArrowRight, Check, ChevronDown, ChevronRight, ChevronUp, PlugZap, Power, RefreshCw, Route } from 'lucide-react';
+import { ArrowDownUp, Check, ChevronDown, ChevronRight, ChevronUp, PlugZap, Power, RefreshCw, Route } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Badge } from '@/components/ui/badge';
@@ -55,15 +55,21 @@ const ModelRow: React.FC<{
   const currentCopy = supplyState === 'paused'
     ? t('settings.models.legend.unavailable') as string
     : resolved
-      ? `${currentSource} → ${current.model_id}${takeover ? ` (${t('settings.models.takeover.chip')})` : ''}`
+      ? t(takeover ? 'settings.models.gateway.row.currentTakeover' : 'settings.models.gateway.row.current', {
+        source: currentSource,
+        model: current.model_id,
+      }) as string
       : '—';
+  const openRouteLabel = resolved && supplyState !== 'paused'
+    ? t('settings.models.routeDialog.openWithMapping', { model: modelId, mapping: currentCopy }) as string
+    : t('settings.models.routeDialog.open', { model: modelId }) as string;
   return (
     <button
       type="button"
       data-route-backend={agent.backend}
       data-route-model={modelId}
       onClick={(event) => onOpenRoute(agent, modelId, event.currentTarget)}
-      aria-label={t('settings.models.routeDialog.open', { model: modelId }) as string}
+      aria-label={openRouteLabel}
       className="model-hub-model-row flex h-9 w-full min-w-0 items-center gap-2.5 overflow-hidden rounded-md border border-border px-3 text-left"
     >
       <span className="flex min-w-0 flex-1 items-center justify-between gap-2.5">
@@ -72,14 +78,11 @@ const ModelRow: React.FC<{
           <span className="model-hub-pill model-hub-model-mode-chip shrink-0 border border-border text-muted">{mode}</span>
           {resolved && supplyState !== 'paused' ? (
             <span
-              className={cn('model-hub-model-current flex min-w-0 flex-1 items-center justify-end gap-1.5 text-right text-[10.5px]', takeover && 'model-hub-model-current--takeover')}
+              className={cn('model-hub-model-current min-w-0 flex-1 truncate text-right text-[10.5px]', takeover && 'model-hub-model-current--takeover')}
               title={currentCopy}
               data-route-mapping
             >
-              <span className="min-w-0 truncate" data-route-source>{currentSource}</span>
-              <ArrowRight className="size-3 shrink-0" aria-hidden="true" />
-              <span className="min-w-0 truncate font-mono" data-route-upstream-model>{current.model_id}</span>
-              {takeover ? <span className="hidden shrink-0 sm:inline">({t('settings.models.takeover.chip')})</span> : null}
+              {currentCopy}
             </span>
           ) : (
             <span className={cn('model-hub-model-current min-w-0 flex-1 truncate text-right text-[10.5px]', supplyState === 'paused' && 'model-hub-ink-gold')} title={currentCopy}>{currentCopy}</span>

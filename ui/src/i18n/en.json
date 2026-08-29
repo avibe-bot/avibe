@@ -913,6 +913,10 @@
           "none": "No usable source",
           "unread": "Could not read this backend's supply · the gateway itself is fine"
         },
+        "row": {
+          "current": "{{source}} → {{model}}",
+          "currentTakeover": "{{source}} → {{model}} (Taken over)"
+        },
         "group": {
           "subtitle": {
             "direct": "{{mode}}",
@@ -1194,6 +1198,7 @@
       "routeDialog": {
         "title": "{{menuModel}} · Route chain",
         "open": "Open {{model}} route chain",
+        "openWithMapping": "Open {{model}} route chain · {{mapping}}",
         "label": "Route chain for this model",
         "section": "Route chain for this model",
         "removeHop": "Remove hop",

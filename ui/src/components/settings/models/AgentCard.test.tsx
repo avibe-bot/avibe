@@ -82,17 +82,21 @@ describe('AgentCard', () => {
     expect(screen.getByText(copy)).toBeTruthy();
   });
 
-  it('derives takeover from the exact current hop', () => {
+  it.each([
+    ['en', 'Backup → claude-opus-4-6 (Taken over)', 'Open claude-opus-4-6 route chain · Backup → claude-opus-4-6 (Taken over)'],
+    ['zh', 'Backup → claude-opus-4-6（已自动切换）', '打开 claude-opus-4-6 的路由 · Backup → claude-opus-4-6（已自动切换）'],
+  ] as const)('derives and announces takeover from the exact current hop in %s', (lng, mappingCopy, accessibleName) => {
     const key = modelChainKey('claude', 'claude-opus-4-6');
-    render(<I18nextProvider i18n={i18n}><AgentCard agents={[hubAgent]} sources={[source('src_a', 'Primary'), source('src_b', 'Backup')]} chains={{ [key]: readyRegion({ contract_version: 6, backend: 'claude', model_id: 'claude-opus-4-6', current: { source_id: 'src_b', model_id: 'claude-opus-4-6' }, chain: [{ source_id: 'src_a', model_id: 'claude-opus-4-6', channel: 'hub', health: 'cooldown', runnable: false, reason: null, retry_at: '2099-01-01T00:00:00Z' }, { source_id: 'src_b', model_id: 'claude-opus-4-6', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }], supply_state: 'ok' }) }} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
+    render(<I18nextProvider i18n={localeInstance(lng)}><AgentCard agents={[hubAgent]} sources={[source('src_a', 'Primary'), source('src_b', 'Backup')]} chains={{ [key]: readyRegion({ contract_version: 6, backend: 'claude', model_id: 'claude-opus-4-6', current: { source_id: 'src_b', model_id: 'claude-opus-4-6' }, chain: [{ source_id: 'src_a', model_id: 'claude-opus-4-6', channel: 'hub', health: 'cooldown', runnable: false, reason: null, retry_at: '2099-01-01T00:00:00Z' }, { source_id: 'src_b', model_id: 'claude-opus-4-6', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }], supply_state: 'ok' }) }} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
     expect(screen.getByText(/Backup/)).toBeTruthy();
-    expect(screen.getByTitle('Backup → claude-opus-4-6 (Taken over)')).toBeTruthy();
+    expect(screen.getByTitle(mappingCopy)).toBeTruthy();
+    expect(screen.getByRole('button', { name: accessibleName })).toBeTruthy();
   });
 
   it.each([
-    ['en', 'Gateway', 'Backup source → routed-opus'],
-    ['zh', '网关', 'Backup source → routed-opus'],
-  ] as const)('renders the %s mode label beside the exact source-to-model mapping', (lng, modeCopy, title) => {
+    ['en', 'Gateway', 'Backup source → routed-opus', 'Open claude-opus-4-6 route chain · Backup source → routed-opus'],
+    ['zh', '网关', 'Backup source → routed-opus', '打开 claude-opus-4-6 的路由 · Backup source → routed-opus'],
+  ] as const)('renders and announces the %s source-to-model mapping', (lng, modeCopy, mappingCopy, accessibleName) => {
     const key = modelChainKey('claude', 'claude-opus-4-6');
     render(
       <I18nextProvider i18n={localeInstance(lng)}>
@@ -121,11 +125,11 @@ describe('AgentCard', () => {
       </I18nextProvider>,
     );
 
-    const mapping = screen.getByTitle(title);
+    const routeButton = screen.getByRole('button', { name: accessibleName });
+    const mapping = screen.getByTitle(mappingCopy);
+    expect(routeButton.contains(mapping)).toBe(true);
     expect(mapping.parentElement?.textContent).toContain(modeCopy);
-    expect(mapping.querySelector('[data-route-source]')?.textContent).toBe('Backup source');
-    expect(mapping.querySelector('[data-route-upstream-model]')?.textContent).toBe('routed-opus');
-    expect(mapping.querySelector('.lucide-arrow-right')).toBeTruthy();
+    expect(mapping.textContent).toBe(mappingCopy);
   });
 
   it('does not call a later current hop takeover unless the head is unavailable for cooldown', () => {
