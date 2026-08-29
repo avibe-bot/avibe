@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from .stream_wire import SSEFrameTokenizer, parse_sse_frame
+from .stream_wire import SSE_MAX_FRAME_BYTES, SSEFrameTokenizer, parse_sse_frame
 
 
 _OPENCODE_UPSTREAM_TOOL_ALIASES = {
@@ -29,23 +29,25 @@ def translate_opencode_tool_names(request: Mapping[str, Any]) -> ToolNameTransla
     if not isinstance(tools, list):
         return ToolNameTranslation(request=request, response_aliases={})
 
-    names = {
+    names = [
         function.get("name")
         for item in tools
         if isinstance(item, Mapping)
         and isinstance((function := item.get("function")), Mapping)
         and isinstance(function.get("name"), str)
-    }
+    ]
+    occupied_names = {name.casefold() for name in names}
     aliases: dict[str, str] = {}
-    for original, preferred in _OPENCODE_UPSTREAM_TOOL_ALIASES.items():
-        if original not in names:
+    for original in names:
+        preferred = _OPENCODE_UPSTREAM_TOOL_ALIASES.get(original.casefold())
+        if preferred is None or original in aliases:
             continue
         alias = preferred
         suffix = 2
-        while alias in names:
+        while alias.casefold() in occupied_names:
             alias = f"{preferred}_{suffix}"
             suffix += 1
-        names.add(alias)
+        occupied_names.add(alias.casefold())
         aliases[original] = alias
 
     if not aliases:
@@ -84,42 +86,154 @@ def rewrite_buffered_tool_names(payload: bytes, aliases: Mapping[str, str]) -> b
 
 
 class StreamingToolNameRewriter:
-    """Restore aliases in complete SSE frames while retaining bounded parser state."""
+    """Restore aliases across SSE deltas while retaining bounded parser state."""
 
     def __init__(self, aliases: Mapping[str, str]) -> None:
         self._aliases = aliases
         self._tokenizer = SSEFrameTokenizer()
+        self._pending_frames: list[tuple[bytes, dict[str, Any]]] = []
+        self._pending_size = 0
 
     def feed(self, chunk: bytes) -> bytes:
         if not self._aliases:
             return chunk
-        return b"".join(self._rewrite_frame(frame) for frame in self._tokenizer.feed(chunk))
+        output: list[bytes] = []
+        for frame in self._tokenizer.feed(chunk):
+            output.extend(self._consume_frame(frame))
+        return b"".join(output)
 
     def finish(self) -> bytes:
-        return self._tokenizer.drain_partial_frame()
+        if not self._aliases:
+            return self._tokenizer.drain_partial_frame()
+        return b"".join(
+            (*self._flush_pending(rewrite=True), self._tokenizer.drain_partial_frame())
+        )
 
-    def _rewrite_frame(self, frame: bytes) -> bytes:
+    def _consume_frame(self, frame: bytes) -> list[bytes]:
         _event_name, data = parse_sse_frame(frame)
         if data is None or data == b"[DONE]":
-            return frame + b"\n\n"
+            return [*self._flush_pending(rewrite=True), frame + b"\n\n"]
         try:
             decoded = json.loads(data)
         except (UnicodeDecodeError, ValueError):
-            return frame + b"\n\n"
-        if not isinstance(decoded, dict) or not _rewrite_chat_response(decoded, self._aliases):
-            return frame + b"\n\n"
-        rewritten = json.dumps(decoded, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        lines: list[bytes] = []
-        inserted = False
-        for line in frame.split(b"\n"):
-            field, separator, _value = line.partition(b":")
-            if separator and field == b"data":
-                if not inserted:
-                    lines.append(b"data: " + rewritten)
-                    inserted = True
+            return [*self._flush_pending(rewrite=True), frame + b"\n\n"]
+        if not isinstance(decoded, dict):
+            return [*self._flush_pending(rewrite=True), frame + b"\n\n"]
+
+        output: list[bytes] = []
+        if len(frame) > SSE_MAX_FRAME_BYTES:
+            return [*self._flush_pending(rewrite=False), frame + b"\n\n"]
+        if self._pending_size + len(frame) > SSE_MAX_FRAME_BYTES:
+            output.extend(self._flush_pending(rewrite=False))
+        self._pending_frames.append((frame, decoded))
+        self._pending_size += len(frame)
+        if self._has_partial_alias():
+            return output
+        output.extend(self._flush_pending(rewrite=True))
+        return output
+
+    def _has_partial_alias(self) -> bool:
+        for assembled, _locations in self._assembled_stream_names().values():
+            if assembled and assembled not in self._aliases and any(
+                alias.startswith(assembled) for alias in self._aliases
+            ):
+                return True
+        return False
+
+    def _assembled_stream_names(
+        self,
+    ) -> dict[tuple[int, str, int], tuple[str, list[tuple[int, dict[str, Any]]]]]:
+        assembled: dict[
+            tuple[int, str, int],
+            tuple[str, list[tuple[int, dict[str, Any]]]],
+        ] = {}
+        for frame_index, (_frame, payload) in enumerate(self._pending_frames):
+            for key, function, fragment in _stream_function_names(payload):
+                current, locations = assembled.get(key, ("", []))
+                assembled[key] = (
+                    current + fragment,
+                    [*locations, (frame_index, function)],
+                )
+        return assembled
+
+    def _flush_pending(self, *, rewrite: bool) -> list[bytes]:
+        if not self._pending_frames:
+            return []
+        changed_frames: set[int] = set()
+        if rewrite:
+            for assembled, locations in self._assembled_stream_names().values():
+                original = self._aliases.get(assembled)
+                if original is None or not locations:
+                    continue
+                first_index, first_function = locations[0]
+                first_function["name"] = original
+                changed_frames.add(first_index)
+                for frame_index, function in locations[1:]:
+                    function.pop("name", None)
+                    changed_frames.add(frame_index)
+
+        output = [
+            _render_sse_frame(frame, payload) if index in changed_frames else frame + b"\n\n"
+            for index, (frame, payload) in enumerate(self._pending_frames)
+        ]
+        self._pending_frames.clear()
+        self._pending_size = 0
+        return output
+
+
+def _render_sse_frame(frame: bytes, decoded: Mapping[str, Any]) -> bytes:
+    rewritten = json.dumps(decoded, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    lines: list[bytes] = []
+    inserted = False
+    for line in frame.split(b"\n"):
+        field, separator, _value = line.partition(b":")
+        if separator and field == b"data":
+            if not inserted:
+                lines.append(b"data: " + rewritten)
+                inserted = True
+            continue
+        lines.append(line)
+    return b"\n".join(lines) + b"\n\n"
+
+
+def _stream_function_names(
+    payload: Mapping[str, Any],
+) -> list[tuple[tuple[int, str, int], dict[str, Any], str]]:
+    names: list[tuple[tuple[int, str, int], dict[str, Any], str]] = []
+    choices = payload.get("choices")
+    if not isinstance(choices, list):
+        return names
+    for choice_position, choice in enumerate(choices):
+        if not isinstance(choice, Mapping):
+            continue
+        choice_index = choice.get("index")
+        if not isinstance(choice_index, int):
+            choice_index = choice_position
+        for envelope_name in ("delta", "message"):
+            envelope = choice.get(envelope_name)
+            if not isinstance(envelope, Mapping):
                 continue
-            lines.append(line)
-        return b"\n".join(lines) + b"\n\n"
+            function_call = envelope.get("function_call")
+            if isinstance(function_call, dict):
+                name = function_call.get("name")
+                if isinstance(name, str):
+                    names.append(((choice_index, "function_call", 0), function_call, name))
+            tool_calls = envelope.get("tool_calls")
+            if not isinstance(tool_calls, list):
+                continue
+            for call_position, call in enumerate(tool_calls):
+                if not isinstance(call, Mapping):
+                    continue
+                call_index = call.get("index")
+                if not isinstance(call_index, int):
+                    call_index = call_position
+                function = call.get("function")
+                if not isinstance(function, dict):
+                    continue
+                name = function.get("name")
+                if isinstance(name, str):
+                    names.append(((choice_index, "tool_calls", call_index), function, name))
+    return names
 
 
 def _rewrite_tool_definition(tool: Mapping[str, Any], aliases: Mapping[str, str]) -> dict[str, Any]:
@@ -133,7 +247,7 @@ def _rewrite_tool_definition(tool: Mapping[str, Any], aliases: Mapping[str, str]
 def _rewrite_message(message: Mapping[str, Any], aliases: Mapping[str, str]) -> dict[str, Any]:
     translated = dict(message)
     name = message.get("name")
-    if isinstance(name, str) and name in aliases:
+    if message.get("role") in {"tool", "function"} and isinstance(name, str) and name in aliases:
         translated["name"] = aliases[name]
     tool_calls = message.get("tool_calls")
     if isinstance(tool_calls, list):

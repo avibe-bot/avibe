@@ -54,6 +54,26 @@ def test_opencode_tool_name_translation_covers_every_request_reference_without_m
     assert request["messages"][0]["tool_calls"][0]["function"]["name"] == "todowrite"
 
 
+def test_opencode_tool_name_translation_matches_reserved_names_case_insensitively() -> None:
+    request = {
+        "tools": [
+            {"type": "function", "function": {"name": "TodoWrite"}},
+            {"type": "function", "function": {"name": "AVIBE_TODO_WRITE"}},
+        ],
+        "messages": [
+            {"role": "system", "name": "TodoWrite", "content": "participant"},
+            {"role": "function", "name": "TodoWrite", "content": "result"},
+        ],
+    }
+
+    translation = translate_opencode_tool_names(request)
+
+    assert translation.request["tools"][0]["function"]["name"] == "avibe_todo_write_2"
+    assert translation.request["messages"][0]["name"] == "TodoWrite"
+    assert translation.request["messages"][1]["name"] == "avibe_todo_write_2"
+    assert translation.response_aliases == {"avibe_todo_write_2": "TodoWrite"}
+
+
 def test_buffered_chat_response_restores_only_tool_name_fields() -> None:
     payload = json.dumps(
         {
@@ -105,6 +125,32 @@ def test_streaming_chat_response_restores_alias_across_transport_chunks() -> Non
     first_payload = json.loads(payloads[0])
     assert first_payload["choices"][0]["delta"]["tool_calls"][0]["function"]["name"] == "todowrite"
     assert json.loads(payloads[1])["choices"][0]["delta"]["content"] == "avibe_todo_write"
+    assert payloads[2] == b"[DONE]"
+
+
+def test_streaming_chat_response_reassembles_semantic_tool_name_deltas() -> None:
+    first = (
+        b'data: {"choices":[{"index":0,"delta":{"tool_calls":'
+        b'[{"index":2,"function":{"name":"avibe_todo"}}]}}]}\n\n'
+    )
+    second = (
+        b'data: {"choices":[{"index":0,"delta":{"tool_calls":'
+        b'[{"index":2,"function":{"name":"_write","arguments":"{}"}}]}}]}\n\n'
+    )
+    rewriter = StreamingToolNameRewriter({"avibe_todo_write": "todowrite"})
+
+    assert rewriter.feed(first) == b""
+    output = rewriter.feed(second) + rewriter.feed(b"data: [DONE]\n\n")
+
+    frames = SSEFrameTokenizer().feed(output)
+    payloads = [parse_sse_frame(frame)[1] for frame in frames]
+    first_payload = json.loads(payloads[0])
+    second_payload = json.loads(payloads[1])
+    first_function = first_payload["choices"][0]["delta"]["tool_calls"][0]["function"]
+    second_function = second_payload["choices"][0]["delta"]["tool_calls"][0]["function"]
+    assert first_function["name"] == "todowrite"
+    assert "name" not in second_function
+    assert second_function["arguments"] == "{}"
     assert payloads[2] == b"[DONE]"
 
 
