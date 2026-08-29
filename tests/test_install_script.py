@@ -36,6 +36,7 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
         set -euo pipefail
 
         printf '%s' "${{UV_TOOL_BIN_DIR:-}}" > "{uv_log}"
+        printf '%s' "${{UV_TOOL_DIR:-}}" > "{uv_log}.tools"
 
         if [ -n "${{AVIBE_PAIRING_KEY:-}}" ]; then
             printf 'uv leaked key\\n' >> "${{VIBE_TEST_CALL_LOG:-/dev/null}}"
@@ -257,10 +258,14 @@ def _vibe_version(env: dict[str, str], *, cwd: Path = REPO_ROOT) -> subprocess.C
 
 
 def _assert_staged_uv_bin(uv_log: Path, home_dir: Path) -> None:
-    staged = Path(uv_log.read_text(encoding="utf-8"))
-    assert staged.is_absolute()
-    assert staged.name == "bin"
-    assert staged.parent.parent == home_dir / ".avibe" / "runtime" / "install-generations"
+    staged_bin = Path(uv_log.read_text(encoding="utf-8"))
+    staged_tools = Path(f"{uv_log}.tools").read_text(encoding="utf-8")
+    generation_root = home_dir / ".avibe" / "runtime" / "install-generations"
+
+    assert staged_bin.is_absolute()
+    assert staged_bin.name == "bin"
+    assert staged_bin.parent.parent == generation_root
+    assert Path(staged_tools) == staged_bin.parent / "uv" / "tools"
 
 
 def test_install_script_keeps_vibe_available_on_current_path(tmp_path):
@@ -411,6 +416,50 @@ def test_install_script_uses_the_current_owner_for_a_legacy_candidate(tmp_path):
     assert second.returncode == 0, second.stdout + second.stderr
     assert Path(owner_log.read_text(encoding="utf-8")).samefile(first_owner)
     assert (path_dir / "vibe").resolve() != first_owner
+
+
+def test_install_script_recovers_an_existing_3_0_13_generation(tmp_path):
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    path_dir = tmp_path / "path-bin"
+    path_dir.mkdir()
+    uv_log = tmp_path / "uv-tool-bin-dir.txt"
+    _write_fake_uv(path_dir / "uv", uv_log)
+
+    old_generation = home_dir / ".avibe" / "runtime" / "install-generations" / "3.0.13"
+    old_vibe = old_generation / "tools" / "avibe-os" / "bin" / "vibe"
+    old_vibe.parent.mkdir(parents=True)
+    _write_executable(
+        old_vibe,
+        """\
+        #!/usr/bin/env bash
+        if [ "${1:-}" = "version" ]; then
+            echo "avibe-os 3.0.13"
+            exit 0
+        fi
+        exit 2
+        """,
+    )
+    generation_launcher = old_generation / "bin" / "vibe"
+    generation_launcher.parent.mkdir(parents=True)
+    generation_launcher.symlink_to(old_vibe)
+    stable_launcher = path_dir / "vibe"
+    stable_launcher.symlink_to(generation_launcher)
+    state_marker = home_dir / ".avibe" / "state-preserved"
+    state_marker.write_text("preserved\n", encoding="utf-8")
+
+    env = os.environ.copy()
+    env["HOME"] = str(home_dir)
+    env["PATH"] = os.pathsep.join([str(path_dir), "/usr/bin", "/bin"])
+    env["VIBE_TEST_REQUIRE_SOURCE_GENERATION"] = "1"
+
+    result = _install(env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert stable_launcher.resolve() != old_vibe
+    assert old_vibe.exists()
+    assert state_marker.read_text(encoding="utf-8") == "preserved\n"
+    _assert_staged_uv_bin(uv_log, home_dir)
 
 
 def test_install_script_keeps_active_launcher_when_uv_install_fails(tmp_path):
@@ -674,6 +723,7 @@ def test_windows_installer_honors_configured_tool_bin_and_cross_volume_copy_fall
     assert "function Get-StableBinDirectory" in powershell
     assert "function Resolve-InstallPath" in powershell
     assert "function Get-LauncherState" in powershell
+    assert '$generationTools = Join-Path $generationRoot "uv\\tools"' in powershell
     assert "Get-Content -LiteralPath $marker" not in powershell
     assert "function Get-GenerationPath" not in powershell
     assert '$expanded.StartsWith("~\\")' in powershell

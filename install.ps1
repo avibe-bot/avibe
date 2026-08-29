@@ -415,7 +415,10 @@ function Invoke-UvToolInstallAttempt {
     }
     $runtimeHome = Resolve-InstallPath $runtimeHome
     $generationRoot = Join-Path (Join-Path $runtimeHome "runtime\install-generations") ([Guid]::NewGuid().ToString("N"))
-    $generationTools = Join-Path $generationRoot "tools"
+    # 3.0.13 identifies uv-managed installs from the executable's /uv/tools/
+    # path. Keep that released contract in every generation so the old binary
+    # can hand the first upgrade to uv instead of falling through to pip.
+    $generationTools = Join-Path $generationRoot "uv\tools"
     $generationBin = Join-Path $generationRoot "bin"
     $stableBin = Get-StableBinDirectory
     $stableLauncher = Join-Path $stableBin "vibe.exe"

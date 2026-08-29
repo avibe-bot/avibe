@@ -1,13 +1,15 @@
-"""Docker smoke test for release-style upgrade flow using a built wheel."""
+"""Docker regression for upgrading the released 3.0.13 wheel to a built wheel."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -15,7 +17,11 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BASE_IMAGE = os.environ.get("VIBE_UPGRADE_TEST_IMAGE", "debian:trixie-slim")
-INITIAL_RELEASE_VERSION = "9998.0.0"
+INITIAL_RELEASE_VERSION = "3.0.13"
+INITIAL_RELEASE_WHEEL_URL = (
+    "https://github.com/avibe-bot/avibe/releases/download/v3.0.13/avibe_os-3.0.13-py3-none-any.whl"
+)
+INITIAL_RELEASE_WHEEL_SHA256 = "994adbfd23228ea387f0479db8a4efe0ef121847bd04efa550486203a6b03542"
 TEST_RELEASE_VERSION = "9999.0.0"
 
 
@@ -48,14 +54,29 @@ def _build_test_wheel(fixtures_dir: Path, version: str) -> Path:
     return wheel_path
 
 
+def _released_initial_wheel(fixtures_dir: Path) -> Path:
+    wheel_path = fixtures_dir / f"avibe_os-{INITIAL_RELEASE_VERSION}-py3-none-any.whl"
+    local_wheel = os.environ.get("VIBE_UPGRADE_INITIAL_WHEEL")
+    if local_wheel:
+        shutil.copy2(local_wheel, wheel_path)
+    else:
+        request = urllib.request.Request(INITIAL_RELEASE_WHEEL_URL, headers={"User-Agent": "avibe-upgrade-test"})
+        with urllib.request.urlopen(request, timeout=120) as response, wheel_path.open("wb") as destination:
+            shutil.copyfileobj(response, destination)
+
+    digest = hashlib.sha256(wheel_path.read_bytes()).hexdigest()
+    assert digest == INITIAL_RELEASE_WHEEL_SHA256, f"Unexpected {INITIAL_RELEASE_VERSION} wheel digest: {digest}"
+    return wheel_path
+
+
 @pytest.mark.integration
-def test_upgrade_command_uses_built_release_artifact():
+def test_upgrade_command_bridges_released_3_0_13_generation():
     if not _docker_available():
         pytest.skip("Docker is not available")
 
     with tempfile.TemporaryDirectory(prefix="vibe-upgrade-fixtures-") as tmpdir:
         fixtures_dir = Path(tmpdir)
-        initial_wheel_path = _build_test_wheel(fixtures_dir, INITIAL_RELEASE_VERSION)
+        initial_wheel_path = _released_initial_wheel(fixtures_dir)
         wheel_path = _build_test_wheel(fixtures_dir, TEST_RELEASE_VERSION)
 
         metadata_path = fixtures_dir / "metadata.json"
@@ -68,10 +89,13 @@ def test_upgrade_command_uses_built_release_artifact():
                 "apt-get install -y --no-install-recommends curl ca-certificates bash procps >/dev/null",
                 "curl -LsSf https://astral.sh/uv/install.sh | sh",
                 'export PATH="$HOME/.local/bin:$PATH"',
-                f"uv tool install /fixtures/{initial_wheel_path.name} --force",
-                'ln -sf "$HOME/.local/bin/vibe" /usr/local/bin/vibe',
-                'export PATH="/usr/local/bin:/usr/bin:/bin"',
+                "VIBE_INSTALL_SKIP_NODE=1 VIBE_INSTALL_SKIP_SHOW_RUNTIME=1 "
+                f"AVIBE_INSTALL_PACKAGE_SPEC=/fixtures/{initial_wheel_path.name} bash /work/install.sh",
+                'export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"',
+                'initial_vibe="$(readlink -f "$HOME/.local/bin/vibe")"',
+                'printf "%s\\n" "$initial_vibe" | grep "/uv/tools/"',
                 "vibe version",
+                'printf "preserved\\n" > "$HOME/.avibe/upgrade-state-marker"',
                 "AVIBE_UPDATE_METADATA_URL=file:///fixtures/metadata.json "
                 f"VIBE_INSTALL_SKIP_SHOW_RUNTIME=1 AVIBE_UPGRADE_PACKAGE_SPEC=/fixtures/{wheel_path.name} vibe check-update",
                 "AVIBE_UPDATE_METADATA_URL=file:///fixtures/metadata.json "
@@ -79,6 +103,8 @@ def test_upgrade_command_uses_built_release_artifact():
                 "hash -r",
                 'printf "launcher=%s\n" "$(command -v vibe)"',
                 "vibe version",
+                'test -x "$initial_vibe"',
+                'test "$(cat "$HOME/.avibe/upgrade-state-marker")" = "preserved"',
                 "AVIBE_UPDATE_METADATA_URL=file:///fixtures/metadata.json vibe check-update",
                 "vibe",
                 "sleep 2",
@@ -116,7 +142,7 @@ def test_upgrade_command_uses_built_release_artifact():
     assert f"avibe-os {INITIAL_RELEASE_VERSION}" in result.stdout
     assert "New version available: 9999.0.0" in result.stdout
     assert "Upgrade successful!" in result.stdout
-    assert "launcher=/usr/local/bin/vibe" in result.stdout
+    assert "launcher=/root/.local/bin/vibe" in result.stdout
     assert f"avibe-os {TEST_RELEASE_VERSION}" in result.stdout
     assert "You are using the latest version." in result.stdout
     assert '"running": true' in result.stdout
