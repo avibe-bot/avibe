@@ -41,7 +41,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_OPENCODE_PORT = 4096
 DEFAULT_OPENCODE_HOST = "127.0.0.1"
-SERVER_START_TIMEOUT = 15
+# A cold OpenCode process can take more than 15 seconds to load on a busy or
+# freshly provisioned host. This is a startup ceiling, not a request timeout.
+SERVER_START_TIMEOUT = 60
 OPENCODE_LOG_TAIL_BYTES = 2_000_000
 MODEL_HUB_OVERLAY_DRAIN_TIMEOUT_SECONDS = 30.0
 _USE_CURRENT_CALLER_CONTEXT_PATH = object()
@@ -1616,9 +1618,20 @@ class OpenCodeServerManager:
                 self._observe_runtime_generation(self._read_pid_file())
                 logger.info(f"OpenCode server started at {self._base_url}")
                 return
+            if self._process.returncode is not None:
+                break
             await asyncio.sleep(0.5)
 
         exit_code = self._process.returncode
+        if exit_code is None:
+            # A late-starting process must not become a healthy but unmanaged
+            # server after this call reports failure and clears its PID file.
+            await terminate_process_tree(
+                self._process,
+                logger,
+                "OpenCode server after startup timeout",
+                terminate_timeout=5,
+            )
         self._clear_pid_file()
         self._process = None
         self._process_loop = None
