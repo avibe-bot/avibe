@@ -8,9 +8,10 @@
 ## Scope
 
 This document retains the release behavior that current workflows enforce for
-Memory Runtime assets. It covers release identity, immutable runtime bytes,
-publication ordering, public availability, exact hash and archive validation,
-published-manifest compatibility, and scheduled backup/recovery.
+the independent `avibe-memory` distribution and Memory Runtime assets. It
+covers release identity, immutable runtime bytes, publication ordering, public
+availability, exact hash and archive validation, published-manifest
+compatibility, and scheduled backup/recovery.
 
 It does not define an upgrade rollback protocol, a package-transition verifier,
 or a future release architecture. Historical scenario IDs
@@ -26,31 +27,41 @@ must not be marked covered or reused for a different capability.
 - Runtime archives and manifests are immutable per tag. A rerun may reuse a
   byte-identical asset, but a same-name mismatch fails and requires a new
   version. It must never overwrite the hosted runtime bytes.
-- A GitHub-only `gh-v*` prerelease carries the installable wheel, sdist, runtime
-  archives, and manifests under the same identity. It does not trigger PyPI.
+- A GitHub-only `gh-v*` prerelease carries the `avibe-memory` and `avibe-os`
+  wheel/sdist pairs, runtime archives, and manifests under the same identity.
+  It does not trigger PyPI.
 
 ## Publication Order
 
 The existing workflows keep one asset-complete GitHub Draft and one official
 finalizer:
 
-1. Build the Python distributions and the Show and Memory Runtime archives and
-   manifests from the tagged source.
-2. Verify the locally staged Memory Runtime manifest and exact asset set before
+1. Derive one package version from the tagged source and use explicit VCS
+   pretend-version variables for both `avibe-memory` and `avibe-os`.
+2. Build both wheel/sdist pairs plus the Show and Memory Runtime archives and
+   manifests from that source.
+3. Verify the distributions have the same version, independent contents and
+   metadata, and pass the core-only/core-plus-Memory installation matrix.
+4. Verify the locally staged Memory Runtime manifest and exact asset set before
    any release publication.
-3. Create or reuse the Draft for that tag. Check every existing runtime asset
-   for byte identity before mutating any release asset.
-4. Upload missing runtime archives and manifests before uploading package
-   artifacts whose manifests advertise those runtime bytes.
-5. `Release (AI Notes)` may update the Draft notes and assets, but it never
+5. Create or reuse the Draft for that tag. Check every existing runtime asset
+   for byte identity before mutating any release asset, then upload both
+   distribution pairs and the runtime assets.
+6. `Release (AI Notes)` may update the Draft notes and assets, but it never
    publishes an official release.
-6. `Publish to PyPI` verifies the exact notes run and the asset-complete Draft,
-   publishes the GitHub Release, and only then permits PyPI publication. PyPI
-   uses immutable, skip-existing uploads for the matching package version.
+7. `Publish to PyPI` verifies the exact notes run and the asset-complete Draft,
+   then publishes the GitHub Release before either distribution reaches PyPI.
+8. Publish only `avibe-memory` through its trusted-publishing environment with
+   skip-existing semantics. Retry a direct PyPI wheel download without
+   dependencies or cache and byte-compare it with the staged wheel. An existing
+   non-identical wheel fails closed.
+9. Publish only `avibe-os` through its existing trusted-publishing environment
+   after the public `avibe-memory` wheel verification succeeds.
 
 A release failure resumes through the same tag and Draft only when all existing
-runtime bytes are identical. It does not mint a replacement identity or publish
-around a failed integrity check.
+runtime bytes are identical. It does not mint a replacement identity, publish
+around a failed integrity check, or invoke automatic package rollback or
+lifecycle recovery.
 
 ## Guard CLI Contract
 
@@ -111,6 +122,10 @@ window, and the retained backup remains tied to one exact manifest hash.
 
 - Do not pre-create or manually edit an official `v*` GitHub Release; the
   annotated tag and workflows own release state.
+- Before the first `avibe-memory` publication, configure its PyPI
+  pending/trusted publisher for repository `avibe-bot/avibe`, workflow
+  `publish.yml`, and GitHub environment `pypi-avibe-memory`. This external
+  configuration is a required operator action and is not performed by CI.
 - Do not overwrite a mismatched runtime asset, weaken a digest, bypass the
   public re-fetch, or continue to PyPI before the GitHub Release is published.
 - Do not classify policy exclusions as recoverable missing bytes.

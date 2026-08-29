@@ -24,11 +24,26 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
 ROOT = Path(__file__).resolve().parents[1]
 MEMORY_PROJECT = ROOT / "packaging" / "avibe-memory"
 COMPATIBILITY = SpecifierSet(">=3.0.14.dev0,<3.1")
-RELEASE_GATE = "Block Memory Wave 3a release until Waves 3b and 3c"
+WORKFLOW_DIR = ROOT / ".github" / "workflows"
 
 
 def _project(path: Path) -> dict[str, Any]:
     return tomllib.loads(path.read_text(encoding="utf-8"))["project"]
+
+
+def _workflow(name: str) -> dict[str, Any]:
+    return yaml.safe_load((WORKFLOW_DIR / name).read_text(encoding="utf-8"))
+
+
+def _step(job: dict[str, Any], name: str) -> dict[str, Any]:
+    matches = [step for step in job["steps"] if step.get("name") == name]
+    assert len(matches) == 1
+    return matches[0]
+
+
+def _needs(job: dict[str, Any]) -> set[str]:
+    needs = job.get("needs", [])
+    return {needs} if isinstance(needs, str) else set(needs)
 
 
 def _requirement(requirements: list[str], name: str) -> Requirement:
@@ -86,47 +101,166 @@ def test_memory_extra_and_distribution_share_one_compatibility_window() -> None:
     assert host_requirement.specifier == COMPATIBILITY
 
 
-def test_publish_order_guard_requires_memory_before_the_first_host_extra() -> None:
+def test_distribution_release_contract_is_forward_only_and_memory_first() -> None:
     contract = " ".join(
         (MEMORY_PROJECT / "README.md").read_text(encoding="utf-8").split()
     )
 
-    assert "publish the matching `avibe-memory` release first" in contract
-    assert "before publishing `avibe-os`" in contract
-    assert "This package split is not release-ready by itself" in contract
-    assert "upgrade and rollback package-shape planner (Wave 3b)" in contract
-    assert "release automation and manifest ownership changes (Wave 3c)" in contract
-    assert "Wave 3a intentionally leaves both the upgrade planner" in contract
-    assert "Upgrade and rollback package-shape planning is" in contract
+    assert "asset-complete GitHub Release" in contract
+    assert "Publish `avibe-memory`" in contract
+    assert "byte-identical to the staged wheel" in contract
+    assert "Publish `avibe-os` only after that verification succeeds" in contract
+    assert "forward-only" in contract
+    assert "not release-ready by itself" not in contract
+    assert "Wave 3b" not in contract
+    assert "Wave 3c" not in contract
 
 
-def test_release_workflows_fail_closed_before_the_split_package_builds() -> None:
-    expectations = (
-        ("publish.yml", "Build package", "Verify package runtime manifests"),
-        ("release_ai.yml", "Build Python package", "Verify bundled runtime manifests"),
+def test_release_workflows_have_no_unconditional_memory_wave_blocker() -> None:
+    for name in ("publish.yml", "release_ai.yml"):
+        workflow = (WORKFLOW_DIR / name).read_text(encoding="utf-8")
+        assert "Block Memory Wave" not in workflow
+        assert "Memory Wave 3a release blocked" not in workflow
+
+
+@pytest.mark.parametrize(
+    ("workflow_name", "job_name", "manifest_step"),
+    [
+        ("publish.yml", "build", "Verify package runtime manifests"),
+        ("release_ai.yml", "build-assets", "Verify bundled runtime manifests"),
+    ],
+)
+def test_release_paths_build_and_verify_both_distributions(
+    workflow_name: str,
+    job_name: str,
+    manifest_step: str,
+) -> None:
+    job = _workflow(workflow_name)["jobs"][job_name]
+    names = [step.get("name") for step in job["steps"]]
+    pin = _step(job, "Pin package version to release tag")["run"]
+    build = _step(job, "Build Python distributions")["run"]
+    assets = _step(job, "Verify Python distribution asset matrix")["run"]
+    manifests = _step(job, manifest_step)["run"]
+    package_matrix = _step(job, "Verify distribution package matrix")["run"]
+
+    assert "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS=$PACKAGE_VERSION" in pin
+    assert "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_MEMORY=$PACKAGE_VERSION" in pin
+    assert "python -m build --outdir dist packaging/avibe-memory" in build
+    assert "python -m build" in build
+    for pattern in (
+        "avibe_memory-*.whl",
+        "avibe_memory-*.tar.gz",
+        "avibe_os-*.whl",
+        "avibe_os-*.tar.gz",
+    ):
+        assert pattern in assets
+    assert 'AVIBE_CORE_WHEEL="$(ls dist/avibe_os-*.whl)"' in package_matrix
+    assert 'AVIBE_MEMORY_WHEEL="$(ls dist/avibe_memory-*.whl)"' in package_matrix
+    assert "pytest tests/test_memory_distribution.py" in package_matrix
+    assert 'Path("dist").glob("avibe_os-*.whl")' in manifests or "avibe_os-" in manifests
+    assert "avibe_memory-" in manifests
+    assert "avibe-os wheel unexpectedly owns the Memory Runtime manifest" in manifests
+    assert "avibe-memory wheel is missing vibe/memory_runtime_manifest.json" in manifests
+    assert names.index("Build Python distributions") < names.index(manifest_step)
+    assert names.index(manifest_step) < names.index("Verify distribution package matrix")
+
+
+def test_github_only_release_uploads_both_distribution_pairs() -> None:
+    workflow = _workflow("release_ai.yml")
+    build_job = workflow["jobs"]["build-assets"]
+    release_job = workflow["jobs"]["release"]
+    artifact_upload = _step(build_job, "Upload release artifacts")
+    release_upload = _step(release_job, "Create GitHub-only Release")["run"]
+
+    assert artifact_upload["with"]["path"] == "dist/"
+    assert "for path in dist/*" in release_upload
+    assert 'package_assets+=("$path")' in release_upload
+    assert 'gh release upload "$TAG"' in release_upload
+    assert '"${package_assets[@]}" --clobber' in release_upload
+
+
+def test_official_draft_uploads_both_verified_distribution_pairs() -> None:
+    build_job = _workflow("publish.yml")["jobs"]["build"]
+    names = [step.get("name") for step in build_job["steps"]]
+    release_upload = _step(build_job, "Upload GitHub release assets")["run"]
+
+    assert names.index("Verify Python distribution asset matrix") < names.index(
+        "Upload GitHub release assets"
     )
+    assert 'gh release upload "$TAG" --repo "${GITHUB_REPOSITORY}" dist/* --clobber' in release_upload
 
-    for workflow_name, build_step, wheel_assertion_step in expectations:
-        workflow = yaml.safe_load(
-            (ROOT / ".github" / "workflows" / workflow_name).read_text(
-                encoding="utf-8"
-            )
-        )
-        matching_jobs = []
-        for job in workflow["jobs"].values():
-            steps = job.get("steps", [])
-            names = [step.get("name") for step in steps]
-            if RELEASE_GATE in names:
-                matching_jobs.append((steps, names))
 
-        assert len(matching_jobs) == 1
-        steps, names = matching_jobs[0]
-        gate_index = names.index(RELEASE_GATE)
-        gate_command = steps[gate_index]["run"]
-        assert gate_index < names.index(build_step) < names.index(wheel_assertion_step)
-        assert "Wave 3b" in gate_command
-        assert "Wave 3c" in gate_command
-        assert "exit 1" in gate_command
+def test_official_release_publishes_and_verifies_memory_before_core() -> None:
+    jobs = _workflow("publish.yml")["jobs"]
+
+    assert {"build", "finalize-github-release"} <= _needs(
+        jobs["publish-avibe-memory"]
+    )
+    assert jobs["publish-avibe-memory"]["environment"] == "pypi-avibe-memory"
+    assert "publish-avibe-memory" in _needs(jobs["verify-avibe-memory-pypi"])
+    assert "verify-avibe-memory-pypi" in _needs(jobs["publish-avibe-os"])
+    assert "finalize-github-release" in _needs(jobs["publish-avibe-os"])
+
+    verify = _step(
+        jobs["verify-avibe-memory-pypi"],
+        "Verify PyPI serves the exact avibe-memory wheel",
+    )["run"]
+    for fragment in (
+        "for attempt in {1..12}",
+        "python -m pip --isolated download",
+        "--index-url https://pypi.org/simple",
+        "--no-deps",
+        "--no-cache-dir",
+        "--only-binary=:all:",
+        'cmp -s "${staged_wheels[0]}" "${public_wheels[0]}"',
+        "PyPI already serves a non-identical avibe-memory wheel",
+    ):
+        assert fragment in verify
+
+
+@pytest.mark.parametrize(
+    ("job_name", "keep_step", "allowed", "excluded"),
+    [
+        (
+            "publish-avibe-memory",
+            "Keep avibe-memory distributions only",
+            "avibe_memory-*",
+            "avibe_os-*",
+        ),
+        (
+            "publish-avibe-os",
+            "Keep avibe-os distributions only",
+            "avibe_os-*",
+            "avibe_memory-*",
+        ),
+        (
+            "publish-vibe-remote",
+            "Keep vibe-remote distributions only",
+            "vibe_remote-*",
+            "avibe_",
+        ),
+    ],
+)
+def test_each_trusted_publisher_receives_only_its_distribution(
+    job_name: str,
+    keep_step: str,
+    allowed: str,
+    excluded: str,
+) -> None:
+    job = _workflow("publish.yml")["jobs"][job_name]
+    names = [step.get("name") for step in job["steps"]]
+    keep = _step(job, keep_step)["run"]
+    publish_steps = [
+        step
+        for step in job["steps"]
+        if str(step.get("uses", "")).startswith("pypa/gh-action-pypi-publish@")
+    ]
+
+    assert len(publish_steps) == 1
+    assert names.index(keep_step) < job["steps"].index(publish_steps[0])
+    assert allowed in keep
+    assert excluded not in keep
+    assert publish_steps[0]["with"]["skip-existing"] is True
 
 
 def test_built_wheels_have_independent_contents_and_compatible_metadata() -> None:
