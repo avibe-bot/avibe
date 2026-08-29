@@ -1924,6 +1924,7 @@ def test_private_show_page_uses_runtime_when_available(monkeypatch, tmp_path):
     assert "authorization" not in manager.calls[0][2]
     assert "cookie" not in manager.calls[0][2]
     assert "x-vibe-csrf-token" not in manager.calls[0][2]
+    assert manager.render_markdown_capability_calls == 0
 
 
 def _markdown_runtime_manager(
@@ -2558,6 +2559,7 @@ def test_show_page_markdown_unavailable_never_falls_back_to_html(
     assert b"Show Page" not in response.content
     _assert_markdown_response_headers(response, success=False)
     if failure == "capability_missing":
+        assert manager.render_markdown_capability_calls == 1
         assert manager.calls == []
 
 

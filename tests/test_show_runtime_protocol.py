@@ -99,13 +99,42 @@ def test_show_live_015_transport_failure_is_transient(monkeypatch, tmp_path):
         (httpx.Response(404), False),
         (httpx.Response(200, json={"protocol": 1}), False),
         (httpx.Response(200, json={"protocol": 1, "render_markdown": False}), False),
-        (httpx.Response(200, json={"protocol": 1, "render_markdown": True}), True),
-        (httpx.Response(200, json={"protocol": 2, "render_markdown": True}), False),
+        (httpx.Response(200, json={"protocol": 1, "render_markdown": True}), False),
+        (
+            httpx.Response(
+                200,
+                json={"protocol": 1, "render_markdown": True, "render_markdown_ssr": False},
+            ),
+            False,
+        ),
+        (
+            httpx.Response(
+                200,
+                json={"protocol": 1, "render_markdown": True, "render_markdown_ssr": "true"},
+            ),
+            False,
+        ),
+        (
+            httpx.Response(
+                200,
+                json={"protocol": 1, "render_markdown": True, "render_markdown_ssr": True},
+            ),
+            True,
+        ),
+        (httpx.Response(200, json={"protocol": 1, "render_markdown_ssr": True}), True),
+        (
+            httpx.Response(
+                200,
+                json={"protocol": 2, "render_markdown": True, "render_markdown_ssr": True},
+            ),
+            False,
+        ),
+        (httpx.Response(200, json={"protocol": True, "render_markdown_ssr": True}), False),
         (httpx.Response(503), None),
         (httpx.Response(200, content=b'{"protocol":1'), None),
     ],
 )
-def test_render_markdown_capability_requires_explicit_protocol_evidence(
+def test_render_markdown_capability_requires_explicit_ssr_protocol_evidence(
     monkeypatch,
     tmp_path,
     response,
