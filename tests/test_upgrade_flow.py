@@ -131,8 +131,10 @@ def test_build_upgrade_plan_stages_uv_install_for_a_stable_launcher(monkeypatch,
     assert plan.activation is not None
     assert plan.activation.launcher == launcher
     assert plan.env is not None
-    assert plan.env["UV_TOOL_DIR"].startswith(str(tmp_path / "home" / "runtime" / "install-generations"))
-    assert plan.env["UV_TOOL_BIN_DIR"].startswith(str(tmp_path / "home" / "runtime" / "install-generations"))
+    tool_dir = Path(plan.env["UV_TOOL_DIR"])
+    bin_dir = Path(plan.env["UV_TOOL_BIN_DIR"])
+    assert tool_dir == bin_dir.parent / "uv" / "tools"
+    assert bin_dir.parent.parent == tmp_path / "home" / "runtime" / "install-generations"
 
 
 def test_build_upgrade_plan_refuses_uv_install_without_activation_point(monkeypatch):
@@ -825,14 +827,15 @@ def test_restart_state_with_a_non_object_shape_is_not_pending(monkeypatch, tmp_p
     assert not restart_is_pending()
 
 
-def test_doctor_resolves_hardlinked_atomic_generation(monkeypatch, tmp_path):
+@pytest.mark.parametrize("tools_path", [Path("uv/tools"), Path("tools")], ids=["bridged", "legacy"])
+def test_doctor_resolves_hardlinked_atomic_generation(monkeypatch, tmp_path, tools_path):
     from vibe import upgrade
 
     root = tmp_path / "home" / "runtime" / "install-generations"
     generation = root / "old"
     launcher_source = generation / "bin" / "vibe.exe"
     launcher = tmp_path / ".local" / "bin" / "vibe.exe"
-    site_packages = generation / "tools" / "avibe-os" / "lib" / "python3.12" / "site-packages"
+    site_packages = generation / tools_path / "avibe-os" / "lib" / "python3.12" / "site-packages"
     launcher_source.parent.mkdir(parents=True)
     site_packages.mkdir(parents=True)
     launcher.parent.mkdir(parents=True)
