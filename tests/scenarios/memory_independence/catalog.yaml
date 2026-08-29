@@ -18,7 +18,7 @@ capability:
     - tests/test_local_deps.py
     - tests/test_memory_upgrade_packaged.py
     - tests/test_upgrade_flow.py
-    - tests/scenarios/memory_independence/test_memory_rollback_types.py
+    - tests/scenarios/memory_independence/test_memory_package_shape.py
 contract:
   dispatch: capture_must_not_fence_turn_start
   destructive_ops: new_and_archive_fail_open_on_capture_timeout
@@ -135,11 +135,11 @@ scenarios:
     layer: scenario
     test: tests/test_memory_disabled_isolation.py::test_memory_indep_017_core_workflows_run_without_avibe_memory
   - id: MEMORY-INDEP-019
-    name: Every captured release family resolves only to an exact staged rollback shape
+    name: Forward upgrades inspect Memory package shape without retired lifecycle imports
     status: covered
     kind: guardrail
     layer: scenario
-    test: tests/scenarios/memory_independence/test_memory_rollback_types.py::test_memory_indep_019_release_family_property_table
+    test: tests/scenarios/memory_independence/test_memory_package_shape.py::test_memory_indep_019_forward_memory_package_inspection
   - id: MEMORY-INDEP-021
     name: Not-required and unreadable Memory status imports no optional implementation
     status: covered
