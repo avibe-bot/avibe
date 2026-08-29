@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -14,7 +15,9 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BASE_IMAGE = os.environ.get("VIBE_INSTALL_TEST_IMAGE", "debian:trixie-slim")
-PUBLIC_INSTALL_COMMAND = "curl -fsSL https://avibe.bot/install.sh | bash -s -- --launch"
+PUBLIC_INSTALL_COMMAND = (
+    "bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --launch'"
+)
 
 
 def _resolve_install_wheel(fixtures_dir: Path) -> Path:
@@ -67,22 +70,24 @@ def test_install_command_starts_vibe_for_new_user_without_local_bin_on_path():
             "curl -fsSL https://avibe.bot/install.sh",
             "cat /work/install.sh",
         )
-        command = (
-            "apt-get update >/dev/null && "
-            "apt-get install -y --no-install-recommends curl ca-certificates bash procps passwd >/dev/null && "
-            "useradd -m -s /bin/bash installer && "
-            "su - installer -s /bin/bash -c '"
+        install_as_user = (
             "set -euo pipefail; "
             "export PATH=/usr/bin:/bin; "
             "export VIBE_INSTALL_SKIP_NODE=1; "
             "export VIBE_INSTALL_SKIP_SHOW_RUNTIME=1; "
             f"export AVIBE_INSTALL_PACKAGE_SPEC=/fixtures/{wheel_path.name}; "
             f"{local_install_command}; "
-            "test \"$PATH\" = /usr/bin:/bin; "
+            'test "$PATH" = /usr/bin:/bin; '
             "! command -v vibe; "
             "/home/installer/.local/bin/vibe version; "
             "sleep 2; "
-            "/home/installer/.local/bin/vibe status'"
+            "/home/installer/.local/bin/vibe status"
+        )
+        command = (
+            "apt-get update >/dev/null && "
+            "apt-get install -y --no-install-recommends curl ca-certificates bash procps passwd >/dev/null && "
+            "useradd -m -s /bin/bash installer && "
+            f"su - installer -s /bin/bash -c {shlex.quote(install_as_user)}"
         )
 
         try:

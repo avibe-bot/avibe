@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Avibe Installation Script
-# Usage: curl -fsSL https://avibe.bot/install.sh | bash -s -- --launch
+# Usage: bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --launch'
 #
 # Prerequisites: None! uv will be installed automatically and manages Python for you.
 

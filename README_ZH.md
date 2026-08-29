@@ -41,7 +41,7 @@ Claude Code、Codex、OpenCode 都很能打。但是：
 **一条命令，把你自己的机器变成 AI 伙伴的家。** 你驱动的是*官方*的 Claude Code、Codex、OpenCode——从浏览器或任意聊天软件——而代码与密钥都留在你的机器上，avibe.bot 也看不到你的数据。
 
 ```bash
-curl -fsSL https://avibe.bot/install.sh | bash -s -- --launch
+bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --launch'
 ```
 
 浏览器自动打开，跟着简短向导走完，你的机器就成了一个随处可达的 Agent OS。
