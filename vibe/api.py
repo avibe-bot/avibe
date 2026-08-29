@@ -6108,20 +6108,6 @@ def get_version_info() -> dict:
     return result
 
 
-def get_local_version_info() -> dict:
-    """Return only the version already loaded by this process.
-
-    Upgrade recovery must be able to identify the release that is still
-    running even when the package index is unavailable. Keep this endpoint
-    separate from :func:`get_version_info`, whose update check is intentionally
-    allowed to perform network I/O for the user-facing version screen.
-    """
-
-    from vibe import __version__
-
-    return {"current": __version__, "build": get_build_identity().as_dict()}
-
-
 def do_upgrade(auto_restart: bool = True) -> dict:
     """Perform upgrade to latest version.
 
@@ -6175,7 +6161,6 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                         vibe_path=current_vibe_path,
                         trigger="upgrade",
                         prepare_show_runtime=not should_skip_show_runtime_prepare(),
-                        rollback_to=plan.rollback_to,
                     )
                     restarting = True
                 except Exception as exc:

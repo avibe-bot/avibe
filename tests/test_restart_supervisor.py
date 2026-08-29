@@ -1,48 +1,24 @@
 from __future__ import annotations
 
-import ast
-import inspect
 import io
 import os
-import sqlite3
 import sys
-import textwrap
 import threading
-from contextlib import contextmanager
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from config import paths
-from storage.backups import create_sqlite_migration_backup
 from vibe import restart_supervisor
 from vibe import runtime
-from vibe.upgrade import RollbackTarget
 
-
-#: The install the machine was on before the upgrade replaced it. Deliberately
-#: not this process's own interpreter: the case the launcher exists for is the
-#: `vibe-remote` -> `avibe-os` rename, where the two generations live in
-#: different directories, and a fixture reusing `sys.executable` would pass
-#: whether or not the target's install is carried anywhere at all.
-_REPLACED_INSTALL = runtime.ServiceLauncher(
-    python="/uv/tools/vibe-remote/bin/python",
-    main="/uv/tools/vibe-remote/lib/python3.13/site-packages/vibe/service_main.py",
-)
-
-
-def _rollback_target(version: str = "3.0.10") -> RollbackTarget:
-    """The install to go back to, as the upgrade captured it before installing."""
-
-    return RollbackTarget(version=version, package="vibe-remote", launcher=_REPLACED_INSTALL)
 
 
 def _fake_start_runtime(calls, service_pid: int = 222, ui_pid: int = 333):
     calls.append("start_runtime")
     runtime.write_status("running", f"pid={service_pid}", service_pid, ui_pid)
-    return restart_supervisor.StartedRuntime(service_pid, ui_pid, ("127.0.0.1", 5123))
+    return restart_supervisor.StartedRuntime(service_pid, ui_pid)
 
 
 def _fake_stop_runtime(calls, *, ui_stopped=True, ui_pid=None, service_stopped=True):
@@ -56,60 +32,6 @@ def _fake_stop_runtime(calls, *, ui_stopped=True, ui_pid=None, service_stopped=T
         0.03,
     )
 
-
-def _fake_pinned_install(calls, installs, *, pin: str = "vibe-remote==3.0.10"):
-    """Record only the rollback's pinned install, never host process-table probes.
-
-    Patching ``restart_supervisor.subprocess.run`` replaces the stdlib function
-    for every importer. Rollback then inspects leftover pids through
-    ``get_process_command``, which shells out to ``ps -p <pid>``. Capturing that
-    probe as ``installs[0]`` makes the pin assertion fail on whatever pid the
-    host happens to have live.
-    """
-
-    def run(command, **_kwargs):
-        argv = list(command)
-        if any(pin in str(part) for part in argv):
-            calls.append("install")
-            installs.append(argv)
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    return run
-
-
-@contextmanager
-def _serve_version_endpoints(responses):
-    requests = []
-
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            requests.append(self.path)
-            status, content_type, body = responses[self.path]
-            self.send_response(status)
-            self.send_header("Content-Type", content_type)
-            self.end_headers()
-            self.wfile.write(body)
-
-        def log_message(self, _format, *_args):
-            return
-
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield server.server_port, requests
-    finally:
-        server.shutdown()
-        thread.join()
-        server.server_close()
-
-
-def _point_running_ui_probe_at(monkeypatch, port):
-    from core.services import settings as settings_service
-
-    config = SimpleNamespace(ui=SimpleNamespace(setup_port=port))
-    monkeypatch.setattr(settings_service, "load_config", lambda **_kwargs: config)
-    monkeypatch.setattr(runtime, "effective_ui_bind_host", lambda _config: "127.0.0.1")
 
 
 def test_schedule_restart_spawns_supervisor_and_records_status(monkeypatch, tmp_path):
@@ -146,310 +68,6 @@ def test_schedule_restart_spawns_supervisor_and_records_status(monkeypatch, tmp_
     assert calls["kwargs"]["env"] == {"PATH": "/bin"}
     assert runtime.read_json(runtime.get_restart_status_path())["job_id"] == result["job_id"]
 
-
-def test_legacy_upgrade_target_reads_the_running_release_and_launcher(monkeypatch, tmp_path):
-    """A pre-rollback release can still hand the new supervisor its target."""
-
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
-    paths.ensure_data_dirs()
-    tool_root = tmp_path / "uv" / "tools" / "avibe-os"
-    python_path = tool_root / "bin" / "python"
-    vibe_path = tool_root / "bin" / "vibe"
-    service_main = tool_root / "lib" / "python3.12" / "site-packages" / "vibe" / "service_main.py"
-    python_path.parent.mkdir(parents=True)
-    service_main.parent.mkdir(parents=True)
-    python_path.write_text("#!/bin/sh\n", encoding="utf-8")
-    vibe_path.write_text(f"#!{python_path}\n", encoding="utf-8")
-    service_main.write_text("# old release\n", encoding="utf-8")
-    metadata_dir = service_main.parent.parent / "avibe_os-3.0.12.dist-info"
-    metadata_dir.mkdir()
-    (metadata_dir / "METADATA").write_text("Name: avibe-os\nVersion: 3.0.12\n", encoding="utf-8")
-
-    monkeypatch.setattr(restart_supervisor, "_read_recorded_pid", lambda: 123)
-    monkeypatch.setattr(restart_supervisor, "_running_ui_version", lambda: None)
-    monkeypatch.setattr(
-        runtime,
-        "get_process_command",
-        lambda pid: f"{python_path} {service_main}",
-    )
-
-    target = restart_supervisor._discover_legacy_upgrade_target(
-        trigger="upgrade", vibe_path=str(tmp_path / "retargeted-vibe")
-    )
-
-    assert target == RollbackTarget(
-        version="3.0.12",
-        package="avibe-os",
-        launcher=runtime.ServiceLauncher(python=str(python_path), main=str(service_main)),
-    )
-
-
-@pytest.mark.parametrize("core_package", ["avibe-os", "vibe-remote"])
-def test_legacy_upgrade_target_keeps_memory_out_of_core_ownership(
-    monkeypatch, tmp_path, core_package
-):
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
-    paths.ensure_data_dirs()
-    package_dir = core_package.replace("-", "_")
-    tool_root = tmp_path / "uv" / "tools" / core_package
-    python_path = tool_root / "bin" / "python"
-    service_main = tool_root / "lib" / "python3.12" / "site-packages" / "vibe" / "service_main.py"
-    python_path.parent.mkdir(parents=True)
-    service_main.parent.mkdir(parents=True)
-    python_path.write_text("#!/bin/sh\n", encoding="utf-8")
-    service_main.write_text("# old release\n", encoding="utf-8")
-    metadata_root = service_main.parent.parent
-    for directory, name in (("avibe_memory", "avibe-memory"), (package_dir, core_package)):
-        metadata_dir = metadata_root / f"{directory}-3.0.14.dist-info"
-        metadata_dir.mkdir()
-        (metadata_dir / "METADATA").write_text(
-            f"Name: {name}\nVersion: 3.0.14\n", encoding="utf-8"
-        )
-
-    monkeypatch.setattr(restart_supervisor, "_read_recorded_pid", lambda: 123)
-    monkeypatch.setattr(restart_supervisor, "_read_recorded_ui_pid", lambda: None)
-    monkeypatch.setattr(restart_supervisor, "_running_ui_version", lambda: "3.0.14")
-    monkeypatch.setattr(runtime, "get_process_command", lambda _pid: f"{python_path} {service_main}")
-
-    target = restart_supervisor._discover_legacy_upgrade_target(
-        trigger="upgrade", vibe_path=str(tmp_path / "retargeted-vibe")
-    )
-
-    assert target == RollbackTarget(
-        version="3.0.14",
-        package=core_package,
-        launcher=runtime.ServiceLauncher(python=str(python_path), main=str(service_main)),
-        memory_package=True,
-        memory_version="3.0.14",
-    )
-
-
-def test_legacy_upgrade_target_skips_broken_metadata_entries(monkeypatch, tmp_path):
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
-    paths.ensure_data_dirs()
-    tool_root = tmp_path / "uv" / "tools" / "avibe-os"
-    python_path = tool_root / "bin" / "python"
-    service_main = tool_root / "lib" / "python3.12" / "site-packages" / "vibe" / "service_main.py"
-    python_path.parent.mkdir(parents=True)
-    service_main.parent.mkdir(parents=True)
-    python_path.write_text("#!/bin/sh\n", encoding="utf-8")
-    service_main.write_text("# old release\n", encoding="utf-8")
-    metadata_root = service_main.parent.parent
-    broken = metadata_root / "000_broken-1.0.dist-info" / "METADATA"
-    broken.parent.mkdir()
-    broken.write_text("unreadable", encoding="utf-8")
-    non_utf8 = metadata_root / "001_non_utf8-1.0.dist-info" / "METADATA"
-    non_utf8.parent.mkdir()
-    non_utf8.write_bytes(b"\xff")
-    for directory, name in (("avibe_os", "avibe-os"), ("avibe_memory", "avibe-memory")):
-        metadata = metadata_root / f"{directory}-3.0.14.dist-info" / "METADATA"
-        metadata.parent.mkdir()
-        metadata.write_text(f"Name: {name}\nVersion: 3.0.14\n", encoding="utf-8")
-
-    original_read_text = Path.read_text
-
-    def read_text(path, *args, **kwargs):
-        if path == broken:
-            raise OSError("broken metadata")
-        return original_read_text(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "read_text", read_text)
-    launcher = runtime.ServiceLauncher(python=str(python_path), main=str(service_main))
-    monkeypatch.setattr(restart_supervisor, "_read_recorded_pid", lambda: 123)
-    monkeypatch.setattr(restart_supervisor, "_read_recorded_ui_pid", lambda: None)
-    monkeypatch.setattr(restart_supervisor, "_running_ui_version", lambda: "3.0.14")
-    monkeypatch.setattr(runtime, "get_process_command", lambda _pid: f"{python_path} {service_main}")
-
-    assert restart_supervisor._launcher_core_dist_metadata(launcher) == [("avibe-os", "3.0.14")]
-    assert restart_supervisor._launcher_memory_version(launcher) == "3.0.14"
-    assert restart_supervisor._discover_legacy_upgrade_target(trigger="upgrade", vibe_path=None) == RollbackTarget(
-        version="3.0.14",
-        package="avibe-os",
-        launcher=launcher,
-        memory_package=True,
-        memory_version="3.0.14",
-    )
-
-
-def test_legacy_upgrade_target_prefers_running_version_over_stale_metadata(monkeypatch, tmp_path):
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
-    paths.ensure_data_dirs()
-    tool_root = tmp_path / "venv"
-    python_path = tool_root / "bin" / "python"
-    service_main = tool_root / "lib" / "python3.12" / "site-packages" / "vibe" / "service_main.py"
-    python_path.parent.mkdir(parents=True)
-    service_main.parent.mkdir(parents=True)
-    python_path.write_text("#!/bin/sh\n", encoding="utf-8")
-    service_main.write_text("# replaced release\n", encoding="utf-8")
-    metadata_root = service_main.parent.parent
-    for name, version in (("avibe_os", "3.0.13"), ("vibe_remote", "2.9.4")):
-        metadata_dir = metadata_root / f"{name}-{version}.dist-info"
-        metadata_dir.mkdir()
-        package_name = "avibe-os" if name == "avibe_os" else "vibe-remote"
-        (metadata_dir / "METADATA").write_text(
-            f"Name: {package_name}\nVersion: {version}\n", encoding="utf-8"
-        )
-
-    monkeypatch.setattr(restart_supervisor, "_read_recorded_pid", lambda: 123)
-    monkeypatch.setattr(
-        runtime,
-        "get_process_command",
-        lambda pid: f"{python_path} {service_main}",
-    )
-    responses = {
-        "/api/version/local": (200, "text/html", b"<!doctype html><title>Avibe</title>"),
-        "/api/version": (200, "application/json", b'{"current":"3.0.12"}'),
-    }
-    with _serve_version_endpoints(responses) as (port, requests):
-        _point_running_ui_probe_at(monkeypatch, port)
-        target = restart_supervisor._discover_legacy_upgrade_target(
-            trigger="upgrade", vibe_path=str(tmp_path / "retargeted-vibe")
-        )
-
-    assert target == RollbackTarget(
-        version="3.0.12",
-        package="avibe-os",
-        launcher=runtime.ServiceLauncher(python=str(python_path), main=str(service_main)),
-    )
-    assert requests == ["/api/version/local", "/api/version"]
-
-
-def test_running_ui_version_falls_back_from_missing_new_endpoint(monkeypatch):
-    responses = {
-        "/api/version/local": (404, "application/json", b'{"detail":"Not Found"}'),
-        "/api/version": (200, "application/json", b'{"current":"3.0.12"}'),
-    }
-    with _serve_version_endpoints(responses) as (port, requests):
-        _point_running_ui_probe_at(monkeypatch, port)
-
-        version = restart_supervisor._running_ui_version()
-
-    assert version == "3.0.12"
-    assert requests == ["/api/version/local", "/api/version"]
-
-
-def test_legacy_upgrade_target_stays_unavailable_when_all_identity_sources_are_invalid(
-    monkeypatch, tmp_path
-):
-    tool_root = tmp_path / "uv" / "tools" / "avibe-os"
-    python_path = tool_root / "bin" / "python"
-    service_main = tool_root / "lib" / "python3.12" / "site-packages" / "vibe" / "service_main.py"
-    python_path.parent.mkdir(parents=True)
-    service_main.parent.mkdir(parents=True)
-    python_path.write_text("#!/bin/sh\n", encoding="utf-8")
-    service_main.write_text("# replaced release without trusted metadata\n", encoding="utf-8")
-    monkeypatch.setattr(restart_supervisor, "_read_recorded_pid", lambda: 123)
-    monkeypatch.setattr(restart_supervisor, "_read_recorded_ui_pid", lambda: None)
-    monkeypatch.setattr(runtime, "get_process_command", lambda _pid: f"{python_path} {service_main}")
-    responses = {
-        "/api/version/local": (200, "text/html", b"<!doctype html><title>Avibe</title>"),
-        "/api/version": (200, "application/json", b'{"current":"not-a-release"}'),
-    }
-    with _serve_version_endpoints(responses) as (port, requests):
-        _point_running_ui_probe_at(monkeypatch, port)
-        target = restart_supervisor._discover_legacy_upgrade_target(
-            trigger="upgrade", vibe_path=str(tmp_path / "retargeted-vibe")
-        )
-
-    assert target is None
-    assert requests == ["/api/version/local", "/api/version"]
-
-
-def test_legacy_upgrade_target_recovers_from_ui_only_process(monkeypatch, tmp_path):
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
-    paths.ensure_data_dirs()
-    tool_root = tmp_path / "uv" / "tools" / "vibe-remote"
-    python_path = tool_root / "bin" / "python"
-    service_main = tool_root / "lib" / "python3.12" / "site-packages" / "vibe" / "service_main.py"
-    python_path.parent.mkdir(parents=True)
-    service_main.parent.mkdir(parents=True)
-    python_path.write_text("#!/bin/sh\n", encoding="utf-8")
-    service_main.write_text("# old release\n", encoding="utf-8")
-    metadata_dir = service_main.parent.parent / "vibe_remote-2.9.4.dist-info"
-    metadata_dir.mkdir()
-    (metadata_dir / "METADATA").write_text("Name: vibe-remote\nVersion: 2.9.4\n", encoding="utf-8")
-
-    monkeypatch.setattr(restart_supervisor, "_read_recorded_pid", lambda: 999)
-    monkeypatch.setattr(restart_supervisor, "_read_recorded_ui_pid", lambda: 456)
-    monkeypatch.setattr(
-        runtime,
-        "get_process_command",
-        lambda pid: None if pid == 999 else f'{python_path} -c "from vibe.ui_server import run_ui_server; run_ui_server()"',
-    )
-    monkeypatch.setattr(restart_supervisor, "_running_ui_version", lambda: "2.9.4")
-
-    target = restart_supervisor._discover_legacy_upgrade_target(
-        trigger="upgrade", vibe_path=str(tmp_path / "retargeted-vibe")
-    )
-
-    assert target == RollbackTarget(
-        version="2.9.4",
-        package="vibe-remote",
-        launcher=runtime.ServiceLauncher(python=str(python_path), main=str(service_main)),
-    )
-
-
-def test_service_launcher_from_process_strips_windows_quotes(monkeypatch, tmp_path):
-    python_path = tmp_path / "Program Files" / "uv" / "tools" / "avibe-os" / "Scripts" / "python.exe"
-    service_main = tmp_path / "Program Files" / "uv" / "tools" / "avibe-os" / "Lib" / "site-packages" / "vibe" / "service_main.py"
-    service_main.parent.mkdir(parents=True)
-    service_main.write_text("# old release\n", encoding="utf-8")
-    command = f'"{python_path}" "{service_main}"'
-    monkeypatch.setattr(runtime, "get_process_command", lambda pid: command)
-
-    target = restart_supervisor._service_launcher_from_process(123)
-
-    assert target == runtime.ServiceLauncher(python=str(python_path), main=str(service_main))
-
-
-def test_legacy_upgrade_without_target_leaves_packaged_runtime_running(monkeypatch, tmp_path):
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    paths.ensure_data_dirs()
-    monkeypatch.setattr(restart_supervisor, "get_build_identity", lambda: SimpleNamespace(kind="package"))
-    monkeypatch.setattr(restart_supervisor, "_discover_legacy_upgrade_target", lambda **kwargs: None)
-    monkeypatch.setattr(
-        restart_supervisor,
-        "_stop_runtime_for_restart",
-        lambda **kwargs: pytest.fail("a legacy upgrade without a target must not stop the runtime"),
-    )
-
-    rc = restart_supervisor._run_restart_job(
-        job_id="job-legacy-no-target",
-        delay_seconds=0,
-        vibe_path="/bin/vibe",
-        trigger="upgrade",
-    )
-
-    assert rc == 2
-    status = runtime.read_json(runtime.get_restart_status_path())
-    assert status["state"] == "failed"
-    assert "existing runtime was left running" in status["error"]
-
-
-def test_failed_legacy_upgrade_uses_discovered_target_for_rollback(monkeypatch, tmp_path):
-    """The v3.0.12 path is recoverable even though it passed no rollback argv."""
-
-    armed = _upgrade_restart_that_dies_after_migrating(monkeypatch, tmp_path, service_running=False)
-    monkeypatch.setattr(
-        restart_supervisor,
-        "_discover_legacy_upgrade_target",
-        lambda **kwargs: _rollback_target(),
-    )
-
-    rc = restart_supervisor._run_restart_job(
-        job_id="joblegacy",
-        delay_seconds=0,
-        vibe_path="/bin/vibe",
-        trigger="upgrade",
-        rollback_to=None,
-    )
-
-    assert rc == 1
-    status = runtime.read_json(runtime.get_restart_status_path())
-    assert status["rollback_to"] == "3.0.10"
-    assert status["rollback_target_source"] == "running_service"
-    assert status["rollback"]["state"] == "succeeded"
-    assert armed.observed_by_the_rolled_back_version == [["before the upgrade"]]
 
 
 def test_schedule_restart_can_prepare_show_runtime_after_restart(monkeypatch, tmp_path):
@@ -521,21 +139,7 @@ def test_schedule_restart_passes_memory_ui_secret_only_through_stdin(monkeypatch
 
 
 def test_the_argv_the_job_builds_is_the_argv_the_entry_point_accepts(monkeypatch, tmp_path):
-    """One command, one parser, proved by running the built argv through the CLI.
-
-    `schedule_restart` builds a command line and a detached `vibe` process parses
-    it back. For a while both ends were owned by different parsers -- this module
-    built the `--rollback-*` flags, `vibe/cli.py` declared the ones it knew about,
-    and the top-level parser ran first. So the flags were not merely unsupported,
-    they were rejected: the child exited on `unrecognized arguments`, the seeded
-    "scheduled" record was never overwritten by anyone, and the machine stayed on
-    the release that could not start. Every test in this file called
-    `restart_supervisor.main([...])` directly, so nothing crossed that seam.
-
-    Asserted as a round trip rather than as a list of flags: the spawned argv is
-    taken exactly as `Popen` received it and handed to the real entry point, so a
-    flag added to the builder later is covered without touching this test.
-    """
+    """The detached restart command round-trips through the real CLI parser."""
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
@@ -545,80 +149,84 @@ def test_the_argv_the_job_builds_is_the_argv_the_entry_point_accepts(monkeypatch
     monkeypatch.setattr(restart_supervisor, "get_restart_environment", lambda vibe_path=None: None)
     monkeypatch.setattr(restart_supervisor, "get_safe_cwd", lambda: str(tmp_path))
     monkeypatch.setattr(restart_supervisor, "_prune_restart_logs", lambda: None)
+    monkeypatch.setattr(
+        restart_supervisor.subprocess,
+        "Popen",
+        lambda command, **kwargs: spawned.setdefault("command", command) and SimpleNamespace(pid=45678),
+    )
 
-    def fake_popen(command, **kwargs):
-        spawned["command"] = command
-        return SimpleNamespace(pid=45678)
-
-    monkeypatch.setattr(restart_supervisor.subprocess, "Popen", fake_popen)
-
-    rollback_to = _rollback_target("3.0.10")
     restart_supervisor.schedule_restart(
         delay_seconds=0,
         vibe_path="/bin/vibe",
         trigger="upgrade",
         scope="service",
         prepare_show_runtime=True,
-        rollback_to=rollback_to,
     )
+    assert not any(argument.startswith("--rollback") for argument in spawned["command"])
 
     from vibe import cli
 
     ran = {}
-
-    def fake_run_restart_job(**kwargs):
-        ran.update(kwargs)
-        return 0
-
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: None)
-    monkeypatch.setattr(restart_supervisor, "_run_restart_job", fake_run_restart_job)
+    monkeypatch.setattr(restart_supervisor, "_run_restart_job", lambda **kwargs: ran.update(kwargs) or 0)
     monkeypatch.setattr(sys, "argv", list(spawned["command"]))
 
     with pytest.raises(SystemExit) as exit_info:
         cli.main()
 
     assert exit_info.value.code == 0
-    # Not just "it parsed": the rollback target has to arrive whole, because a
-    # partially-carried one is the failure this whole path exists to prevent.
-    assert ran["rollback_to"] == rollback_to
-    assert ran["trigger"] == "upgrade"
-    assert ran["scope"] == "service"
-    assert ran["prepare_show_runtime"] is True
+    assert ran == {
+        "job_id": ran["job_id"],
+        "delay_seconds": 0.0,
+        "vibe_path": "/bin/vibe",
+        "trigger": "upgrade",
+        "scope": "service",
+        "prepare_show_runtime": True,
+    }
 
 
-def test_incomplete_legacy_memory_argv_stays_restartable(monkeypatch):
+def test_entry_point_accepts_and_ignores_retired_rollback_argv(monkeypatch):
+    from vibe import cli
+
     ran = {}
-
-    def fake_run_restart_job(**kwargs):
-        ran.update(kwargs)
-        return 0
-
-    monkeypatch.setattr(restart_supervisor, "_run_restart_job", fake_run_restart_job)
-
-    result = restart_supervisor.main(
+    monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: None)
+    monkeypatch.setattr(restart_supervisor, "_run_restart_job", lambda **kwargs: ran.update(kwargs) or 0)
+    monkeypatch.setattr(
+        sys,
+        "argv",
         [
+            "vibe",
+            "__restart-supervisor",
             "--job-id",
-            "legacy-incomplete-memory",
+            "legacy-upgrade",
             "--trigger",
             "upgrade",
             "--rollback-to",
             "3.0.14",
             "--rollback-package",
             "avibe-os",
+            "--rollback-memory-package",
+            "--rollback-memory-version",
+            "3.0.14",
             "--rollback-python",
             "/opt/avibe/bin/python",
             "--rollback-main",
-            "/opt/avibe/lib/python/site-packages/vibe/service_main.py",
-            "--rollback-memory-package",
-        ]
+            "/opt/avibe/vibe/service_main.py",
+        ],
     )
 
-    assert result == 0
-    target = ran["rollback_to"]
-    assert target is not None
-    assert not target
-    assert target.memory_package is False
-    assert target.memory_version is None
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main()
+
+    assert exit_info.value.code == 0
+    assert ran == {
+        "job_id": "legacy-upgrade",
+        "delay_seconds": 0.0,
+        "vibe_path": None,
+        "trigger": "upgrade",
+        "scope": "all",
+        "prepare_show_runtime": False,
+    }
 
 
 def test_schedule_restart_marks_status_failed_when_spawn_fails(monkeypatch, tmp_path):
@@ -758,8 +366,6 @@ def test_restart_job_prepares_show_runtime_after_service_start(monkeypatch, tmp_
     monkeypatch.setattr(restart_supervisor, "get_safe_cwd", lambda: str(tmp_path))
     monkeypatch.setattr(restart_supervisor, "get_restart_command", lambda vibe_path=None: ["/bin/vibe"])
     monkeypatch.setattr(restart_supervisor, "get_restart_environment", lambda vibe_path=None: None)
-    monkeypatch.setattr(restart_supervisor, "_discover_legacy_upgrade_target", lambda **kwargs: None)
-    monkeypatch.setattr(restart_supervisor, "get_build_identity", lambda: SimpleNamespace(kind="source"))
 
     def fake_run(command, **kwargs):
         calls.append(("run", command))
@@ -934,7 +540,7 @@ def test_restart_job_adopts_slow_starting_service_pid(monkeypatch, tmp_path):
             paths.get_runtime_pid_path().unlink()
         except FileNotFoundError:
             pass
-        return restart_supervisor.StartedRuntime(222, 333, ("127.0.0.1", 5123))
+        return restart_supervisor.StartedRuntime(222, 333)
 
     monkeypatch.setattr(restart_supervisor, "_start_runtime_processes", slow_start_runtime)
     # Both halves of the generation this start launched are alive: the status
@@ -1072,30 +678,13 @@ def test_start_runtime_processes_starts_service_and_ui(monkeypatch, tmp_path):
 
     assert started.service_pid == 222
     assert started.ui_pid == 333
-    # The health target is resolved here or nowhere: this is the only place that
-    # loads the config to decide the bind host and port, so it is the only answer
-    # to "where is the UI" that cannot disagree with where the UI was started.
-    assert started.ui_health_target == ("0.0.0.0", 5123)
     assert calls[:2] == ["ensure_data_dirs", "load_config"]
     assert calls[2][:3] == ("start_service", False, 0)
     assert calls[3] == ("bind_host", config)
     assert calls[4][:4] == ("start_ui", "0.0.0.0", 5123, False)
     assert calls[2][3]["memory_ui_secret"] == calls[4][4]["memory_ui_secret"]
-
-    # Every process this helper starts comes from the one install it was given,
-    # asserted over whatever it started rather than over two named spawns: the
-    # service and the UI are two halves of one generation, and a rollback that
-    # started one from the restored install and the other from the replaced one
-    # is a state neither release was ever run in. `None` is "this process",
-    # which is the right answer for every restart except a rollback.
-    def started_from() -> list:
-        return [call[-1].get("launcher") for call in calls if call[0] in ("start_service", "start_ui")]
-
-    assert started_from() == [None, None]
-
-    calls.clear()
-    restart_supervisor._start_runtime_processes(launcher=_REPLACED_INSTALL)
-    assert started_from() == [_REPLACED_INSTALL, _REPLACED_INSTALL]
+    assert "launcher" not in calls[2][3]
+    assert "launcher" not in calls[4][4]
 
     status = runtime.read_status()
     # "starting", not "running", and the stubbed lock says the pid is recorded.
@@ -1207,468 +796,56 @@ def test_restart_job_service_scope_keeps_ui(monkeypatch, tmp_path):
     assert status["scope"] == "service"
 
 
-def _seed_state_database(db_path):
-    """The database as the machine had it before the upgrade touched anything."""
-
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(db_path) as conn:
-        conn.execute("create table if not exists alembic_version (version_num varchar(32) not null)")
-        conn.execute("delete from alembic_version")
-        conn.execute("insert into alembic_version (version_num) values ('20260806_0047')")
-        conn.execute("create table payload (value text)")
-        conn.execute("insert into payload (value) values ('before the upgrade')")
-
-
-def _payload_rows(db_path) -> list[str]:
-    with sqlite3.connect(db_path) as conn:
-        return [row[0] for row in conn.execute("select value from payload order by rowid")]
-
-
-def _upgrade_restart_that_dies_after_migrating(
-    monkeypatch,
-    tmp_path,
-    *,
-    service_running: bool,
-    ui_serving: bool = True,
-):
-    """Arm the incident this whole path exists for, and hand back what it did.
-
-    The new version stops the old one, starts, takes its pre-migration backup,
-    commits a row, and then dies without ever holding the service lock. Only the
-    two processes and the package index are stubbed: the database, the backup
-    window, and the watermark the job reads out of it are the real ones, because
-    they are the things the rollback has to get right.
-    """
-
+def test_failed_upgrade_restart_reports_terminal_failure_without_package_rollback(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     paths.get_runtime_pid_path().write_text("111", encoding="utf-8")
-    db_path = paths.get_sqlite_state_path()
-    _seed_state_database(db_path)
-
-    calls: list[str] = []
-    installs: list[list[str]] = []
-    launchers: list = []
-    observed_by_the_rolled_back_version: list[list[str]] = []
-
-    def start(start_ui=True, launcher=None):
-        calls.append("start_runtime")
-        launchers.append(launcher)
-        if calls.count("start_runtime") == 1:
-            # The new version gets far enough to take its rollback point and
-            # commit, then dies without ever holding the lock.
-            create_sqlite_migration_backup(db_path, backups_dir=paths.get_state_backups_dir())
-            with sqlite3.connect(db_path) as conn:
-                conn.execute("insert into payload (value) values ('committed by the new version')")
-            raise RuntimeError("service refused to start")
-        observed_by_the_rolled_back_version.append(_payload_rows(db_path))
-        return _fake_start_runtime([], service_pid=222, ui_pid=333)
+    package_commands = []
+    calls = []
 
     monkeypatch.setattr(restart_supervisor, "_stop_runtime_for_restart", lambda stop_ui=True: _fake_stop_runtime(calls))
-    monkeypatch.setattr(restart_supervisor, "_start_runtime_processes", start)
     monkeypatch.setattr(restart_supervisor, "_wait_for_service_lock_release", lambda: True)
-    monkeypatch.setattr(restart_supervisor, "get_safe_cwd", lambda: str(tmp_path))
-    monkeypatch.setattr(restart_supervisor.subprocess, "run", _fake_pinned_install(calls, installs))
-    monkeypatch.setattr(runtime, "verified_service_running", lambda: service_running)
-    monkeypatch.setattr(runtime, "wait_for_service_ready", lambda pid, timeout=None: pid)
-    # The machine as this failure actually leaves it: the version that died in
-    # its migration is gone, and so nothing of it is still holding the database
-    # open. Stated here rather than left to the host's real process table, which
-    # a test may not read and must never depend on.
-    monkeypatch.setattr(restart_supervisor, "_remaining_service_pids_after_stop", list)
-    monkeypatch.setattr(runtime, "ui_pid_file_points_to_running_ui", lambda *args, **kwargs: False)
-    # The UI the rollback restarts, and whether it answers. Both are stubbed
-    # rather than left to the host: `_ui_is_serving` opens a real socket, and a
-    # test that let it would wait out the timeout against whatever happens to be
-    # listening on the developer's machine.
-    ui_probes: list[tuple[str, int]] = []
-    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 333)
+    monkeypatch.setattr(restart_supervisor, "_start_runtime_processes", lambda start_ui=True: _fake_start_runtime(calls))
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 222)
+    monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: pid == 222)
+    monkeypatch.setattr(runtime, "wait_for_service_ready", lambda pid, timeout: None)
     monkeypatch.setattr(
-        runtime,
-        "wait_for_ui_server",
-        lambda host, port, timeout=None: ui_probes.append((host, port)) or ui_serving,
-    )
-
-    return SimpleNamespace(
-        db_path=db_path,
-        calls=calls,
-        installs=installs,
-        launchers=launchers,
-        ui_probes=ui_probes,
-        observed_by_the_rolled_back_version=observed_by_the_rolled_back_version,
-    )
-
-
-def test_a_rollback_whose_ui_never_serves_is_not_reported_as_recovered(monkeypatch, tmp_path):
-    """A live pid is not a serving UI, and this job is the one that cannot guess.
-
-    The service came back and holds the lock; the UI process was started and is
-    alive, and never answers. Everything a pid-based check can see says the
-    machine is up, which is exactly the evidence this record must not accept:
-    nobody is watching an unattended rollback, so the half that is dark has to be
-    the half that is reported. The service pid is still recorded either way --
-    the run failed, it did not vanish.
-    """
-
-    armed = _upgrade_restart_that_dies_after_migrating(
-        monkeypatch, tmp_path, service_running=False, ui_serving=False
-    )
-
-    restart_supervisor._run_restart_job(
-        job_id="jobdark", delay_seconds=0, vibe_path="/bin/vibe", trigger="upgrade", rollback_to=_rollback_target()
-    )
-
-    rollback = runtime.read_json(runtime.get_restart_status_path())["rollback"]
-    assert rollback["state"] == "failed"
-    assert rollback["ui"] == {"pid": 333, "serving": False}
-    assert rollback["service_pid"] == 222
-    assert "Web UI" in rollback["error"]
-    # It reached the UI at all, rather than failing for want of a probe.
-    assert armed.ui_probes
-
-
-def test_a_restart_that_leaves_nothing_running_puts_the_old_version_back(monkeypatch, tmp_path):
-    """The property the change exists for: an upgrade cannot end with a dark instance.
-
-    Install, then restore, then start -- and the started version has to find the
-    database the version it is reads. That last part is why the order is asserted
-    through what the started process sees rather than through a call log: a
-    restore that lands after the start is a restore that lands after the service
-    has already opened a schema it cannot read.
-    """
-
-    armed = _upgrade_restart_that_dies_after_migrating(monkeypatch, tmp_path, service_running=False)
-
-    rc = restart_supervisor._run_restart_job(
-        job_id="jobroll", delay_seconds=0, vibe_path="/bin/vibe", trigger="upgrade", rollback_to=_rollback_target()
-    )
-
-    # The restart still failed, and still says so: a rollback recovers the
-    # machine, it does not turn a failed upgrade into a successful one.
-    assert rc == 1
-    status = runtime.read_json(runtime.get_restart_status_path())
-    assert status["ok"] is False
-    assert "start runtime failed: service refused to start" in status["error"]
-
-    # Nothing of the failed generation is left alive across the install and the
-    # restore: the second stop is the rollback's own, and without it a process
-    # that never reached the lock is still holding the database file open when
-    # the restore rewrites it -- and is what the final start would adopt.
-    assert armed.calls == ["stop_runtime", "start_runtime", "stop_runtime", "install", "start_runtime"]
-    # The distribution the OLD release was published as, not the one this build
-    # is: a machine that predates the `vibe-remote` -> `avibe-os` rename has no
-    # `avibe-os==3.0.10` to go back to, and pinning one is an index round-trip
-    # that fails and leaves the instance dark.
-    assert "vibe-remote==3.0.10" in armed.installs[0]
-    assert armed.observed_by_the_rolled_back_version == [["before the upgrade"]]
-    assert _payload_rows(armed.db_path) == ["before the upgrade"]
-
-    # The rollback starts the install it just reinstalled, not the one this job
-    # is running out of. An upgrade spawns the job through the `vibe` on PATH,
-    # which the install has already replaced, so by now `sys.executable` names
-    # the failed generation -- and across the `vibe-remote` -> `avibe-os` rename
-    # the two are different directories, both present, both startable. `None`
-    # for the first start is the upgrade's own: it is what should run next.
-    assert armed.launchers == [None, _REPLACED_INSTALL]
-
-    rollback = status["rollback"]
-    assert rollback["target_version"] == "3.0.10"
-    assert rollback["state"] == "succeeded"
-    assert rollback["install"]["ok"] is True
-    assert rollback["database"]["restored"] is True
-    assert runtime.read_status()["service_pid"] == 222
-
-
-def test_a_service_still_holding_the_lock_is_never_rolled_back_underneath(monkeypatch, tmp_path):
-    """The same failure, the opposite answer, decided by one fact: the lock.
-
-    A restart that failed while a service is still serving has not produced the
-    state this recovery exists for, and reinstalling and restoring underneath
-    that live process is the damage rather than the repair. Nothing about the
-    failure itself distinguishes the two cases -- only what is holding the lock
-    when it is over does.
-    """
-
-    armed = _upgrade_restart_that_dies_after_migrating(monkeypatch, tmp_path, service_running=True)
-
-    rc = restart_supervisor._run_restart_job(
-        job_id="jobheld", delay_seconds=0, vibe_path="/bin/vibe", trigger="upgrade", rollback_to=_rollback_target()
-    )
-
-    assert rc == 1
-    assert armed.calls == ["stop_runtime", "start_runtime"]
-    assert armed.installs == []
-    assert _payload_rows(armed.db_path) == ["before the upgrade", "committed by the new version"]
-    status = runtime.read_json(runtime.get_restart_status_path())
-    assert status["rollback"] == {"target_version": "3.0.10", "state": "skipped", "reason": "service_running"}
-
-
-def test_a_service_that_took_the_lock_and_then_died_is_rolled_back(monkeypatch, tmp_path):
-    """The incident this path exists for, in the shape it actually has.
-
-    The lock is taken BEFORE the database is migrated -- it has to be, since the
-    migration is what it excludes. So a release that fails on its migration does
-    hold the lock, for the seconds it takes to get there and die, and a job that
-    stopped at "the pid is recorded" spends those seconds writing
-    `state: succeeded` about an instance that ends them with nothing running.
-
-    Which makes the recorded pid unusable as the finish line, in the one case
-    that matters. What ends the wait is the service saying it is up, which it
-    says after the migration.
-    """
-
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    paths.ensure_data_dirs()
-    paths.get_runtime_pid_path().write_text("111", encoding="utf-8")
-    db_path = paths.get_sqlite_state_path()
-    _seed_state_database(db_path)
-    calls: list[str] = []
-    installs: list[list[str]] = []
-    launchers: list = []
-    observed_by_the_rolled_back_version: list[list[str]] = []
-    alive = {222: True, 333: True, 444: True}
-
-    def start(start_ui=True, launcher=None):
-        calls.append("start_runtime")
-        launchers.append(launcher)
-        if calls.count("start_runtime") == 1:
-            # The new version takes its rollback point, commits, and is now in
-            # the migration that will kill it -- all of it under the lock.
-            create_sqlite_migration_backup(db_path, backups_dir=paths.get_state_backups_dir())
-            with sqlite3.connect(db_path) as conn:
-                conn.execute("insert into payload (value) values ('committed by the new version')")
-            runtime.write_status("running", "pid=222", 222, 333)
-            return restart_supervisor.StartedRuntime(222, 333, ("127.0.0.1", 5123))
-        observed_by_the_rolled_back_version.append(_payload_rows(db_path))
-        return _fake_start_runtime([], service_pid=444, ui_pid=333)
-
-    def started(pid: int) -> bool:
-        # Asking is what finds out: the migration failed, so by the time anyone
-        # looks a second time the holder is gone and the lock with it.
-        alive[pid] = False
-        return pid == 444
-
-    monkeypatch.setattr(restart_supervisor, "_stop_runtime_for_restart", lambda stop_ui=True: _fake_stop_runtime(calls))
-    monkeypatch.setattr(restart_supervisor, "_start_runtime_processes", start)
-    monkeypatch.setattr(restart_supervisor, "_wait_for_service_lock_release", lambda: True)
-    monkeypatch.setattr(restart_supervisor, "get_safe_cwd", lambda: str(tmp_path))
-    monkeypatch.setattr(restart_supervisor.subprocess, "run", _fake_pinned_install(calls, installs))
-    # The failed generation is gone: nothing of it is still holding the database
-    # open. Stated here rather than left to the host's real process table, which
-    # a test may not read and must never depend on -- the sibling helper already
-    # isolates this, and without it ``ps -p 444`` (a pid this test invented)
-    # lands in the shared ``subprocess.run`` mock as a fake install.
-    monkeypatch.setattr(restart_supervisor, "_remaining_service_pids_after_stop", list)
-    monkeypatch.setattr(runtime, "ui_pid_file_points_to_running_ui", lambda *args, **kwargs: False)
-    monkeypatch.setattr(runtime, "pid_alive", lambda pid: alive.get(pid, False))
-    monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: True)
-    monkeypatch.setattr(runtime, "service_instance_started", started)
-    monkeypatch.setattr(runtime, "verified_service_running", lambda: False)
-    monkeypatch.setattr(runtime, "wait_for_ui_server", lambda host, port, timeout=None: True)
-
-    rc = restart_supervisor._run_restart_job(
-        job_id="jobdark", delay_seconds=0, vibe_path="/bin/vibe", trigger="upgrade", rollback_to=_rollback_target()
-    )
-
-    assert rc == 3
-    status = runtime.read_json(runtime.get_restart_status_path())
-    assert status["ok"] is False
-    assert "did not finish starting" in status["error"]
-    assert status["rollback"]["state"] == "succeeded"
-    assert "vibe-remote==3.0.10" in installs[0]
-    assert observed_by_the_rolled_back_version == [["before the upgrade"]]
-    assert _payload_rows(db_path) == ["before the upgrade"]
-
-
-def test_a_generation_that_was_already_gone_is_quiesced(monkeypatch, tmp_path):
-    """The ordinary case, and the one a stop report gets exactly backwards.
-
-    A version that died in its migration has nothing left to kill, so
-    `stop_service` reports that it stopped nothing -- the same answer it gives
-    for a process that refused to die, because the two states are
-    indistinguishable from the report and distinguishable only from the machine.
-    A rollback gated on the report therefore refuses to run on the failure it was
-    built for, which is the one where the instance is already dark.
-    """
-
-    armed = _upgrade_restart_that_dies_after_migrating(monkeypatch, tmp_path, service_running=False)
-    monkeypatch.setattr(
-        restart_supervisor,
-        "_stop_runtime_for_restart",
-        lambda stop_ui=True: _fake_stop_runtime(armed.calls, service_stopped=False, ui_stopped=False),
+        restart_supervisor.subprocess,
+        "run",
+        lambda command, **kwargs: package_commands.append(command),
     )
 
     rc = restart_supervisor._run_restart_job(
-        job_id="jobgone", delay_seconds=0, vibe_path="/bin/vibe", trigger="upgrade", rollback_to=_rollback_target()
-    )
-
-    assert rc == 1
-    status = runtime.read_json(runtime.get_restart_status_path())
-    assert status["rollback"]["quiesced"] is True
-    assert status["rollback"]["state"] == "succeeded"
-    assert _payload_rows(armed.db_path) == ["before the upgrade"]
-
-
-@pytest.mark.parametrize(
-    "survivor",
-    [
-        {"service_pids": [999]},
-        {"ui_alive": True},
-    ],
-    ids=["a-service-process-of-the-failed-generation", "a-ui-process-that-would-not-die"],
-)
-def test_a_failed_generation_that_will_not_stop_stops_the_rollback_instead(monkeypatch, tmp_path, survivor):
-    """Quiescing is a step with an outcome, not a step with a side effect.
-
-    A process that resists termination is the entire reason the stop is there, so
-    a rollback that ran it and then carried on regardless would be at its most
-    confident in the only case it is about. What follows makes that concrete: the
-    restore rewrites a database file that process holds open, and the final start
-    adopts its live recorded pid instead of launching what was just reinstalled --
-    so the rollback would report success for the version it was rolling back from,
-    over a database it had corrupted underneath it.
-
-    So the database is what this asserts on. Untouched is the whole claim; the
-    status record only has to be readable enough to send someone to look.
-    """
-
-    armed = _upgrade_restart_that_dies_after_migrating(monkeypatch, tmp_path, service_running=False)
-    # Whichever process survived, and whatever the stop said about it: what
-    # decides is the machine afterwards, so the stop is left reporting success.
-    monkeypatch.setattr(
-        restart_supervisor, "_remaining_service_pids_after_stop", lambda: list(survivor.get("service_pids", []))
-    )
-    monkeypatch.setattr(
-        runtime, "ui_pid_file_points_to_running_ui", lambda *args, **kwargs: bool(survivor.get("ui_alive"))
-    )
-
-    rc = restart_supervisor._run_restart_job(
-        job_id="jobstuck", delay_seconds=0, vibe_path="/bin/vibe", trigger="upgrade", rollback_to=_rollback_target()
-    )
-
-    assert rc == 1
-    status = runtime.read_json(runtime.get_restart_status_path())
-    assert status["rollback"]["state"] == "failed"
-    assert status["rollback"]["quiesced"] is False
-    assert "still running" in status["rollback"]["error"]
-    # Nothing was installed and nothing was restored: the machine is left exactly
-    # as the failed upgrade left it, which is recoverable by hand.
-    assert [command for command in armed.installs if any("3.0.10" in argument for argument in command)] == []
-    assert _payload_rows(armed.db_path) == ["before the upgrade", "committed by the new version"]
-
-
-def test_a_restart_with_no_version_to_go_back_to_changes_nothing(monkeypatch, tmp_path):
-    """A plain restart is already running what it would reinstall.
-
-    It has no rollback target, so the failure is left exactly as it happened for
-    whoever looks at it -- including the database, which nothing here is entitled
-    to move backwards. The absent record is the readable part: a failed restart
-    with a `rollback_to` and no `rollback` was armed and killed before it could
-    recover, which is a different incident from one that was never recoverable.
-    """
-
-    armed = _upgrade_restart_that_dies_after_migrating(monkeypatch, tmp_path, service_running=False)
-
-    rc = restart_supervisor._run_restart_job(job_id="jobplain", delay_seconds=0, vibe_path="/bin/vibe", trigger="cli")
-
-    assert rc == 1
-    assert armed.calls == ["stop_runtime", "start_runtime"]
-    assert armed.installs == []
-    assert _payload_rows(armed.db_path) == ["before the upgrade", "committed by the new version"]
-    status = runtime.read_json(runtime.get_restart_status_path())
-    assert status["rollback_to"] is None
-    assert "rollback" not in status
-
-
-def test_no_failure_branch_can_end_the_job_without_the_rollback_decision():
-    """Whether to roll back is asked once, not per failure branch.
-
-    A list of the branches that deserve a rollback is complete only until the
-    next branch is added, and the one nobody remembered is exactly the one that
-    leaves an instance dark. So the job has a single failure exit, and this
-    asserts that structurally: any new branch reaching the raw `_fail` directly
-    fails here, at the moment it is written, rather than in the incident.
-    """
-
-    tree = ast.parse(textwrap.dedent(inspect.getsource(restart_supervisor._run_restart_job)))
-    wrapper = next(
-        node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "fail"
-    )
-    inside_the_wrapper = {id(node) for node in ast.walk(wrapper)}
-    calls = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_fail"
-    ]
-
-    assert [node for node in calls if id(node) in inside_the_wrapper], "the wrapper is what ends a failed job"
-    assert [node for node in calls if id(node) not in inside_the_wrapper] == []
-
-
-def test_a_recoverable_restart_carries_its_rollback_target_into_the_job(monkeypatch, tmp_path):
-    """The target survives the process boundary the restart is built on.
-
-    `schedule_restart` spawns a detached job, so the install to go back to has to
-    travel as argv and be read back by the job's own parser. Asserted as a round
-    trip rather than as two independent expectations: the two sides are what can
-    drift, and a flag renamed on one of them would leave every rollback silently
-    disarmed while both halves still look right.
-
-    Asserted as equality against the whole target rather than field by field.
-    Argv is the one place the fields are apart, so it is the one place they can
-    be separated by accident -- a version arriving without its distribution pins
-    a name the old release never had, and one arriving without its install
-    reinstalls the right release and then starts the wrong one -- and a field
-    added later is carried by this test without it being edited, or fails it.
-    """
-
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    paths.ensure_data_dirs()
-    commands: list[list[str]] = []
-
-    monkeypatch.setattr(restart_supervisor, "get_restart_invocation_command", lambda vibe_path=None: ["/bin/vibe", "restart"])
-    monkeypatch.setattr(restart_supervisor, "get_restart_environment", lambda vibe_path=None: {"PATH": "/bin"})
-    monkeypatch.setattr(restart_supervisor, "get_safe_cwd", lambda: str(tmp_path))
-    monkeypatch.setattr(restart_supervisor, "_prune_restart_logs", lambda: None)
-
-    def fake_popen(command, **kwargs):
-        commands.append(command)
-        return SimpleNamespace(pid=4242)
-
-    monkeypatch.setattr(restart_supervisor.subprocess, "Popen", fake_popen)
-
-    target = _rollback_target()
-    restart_supervisor.schedule_restart(
+        job_id="job-upgrade-failed",
         delay_seconds=0,
         vibe_path="/bin/vibe",
         trigger="upgrade",
-        rollback_to=target,
     )
-    upgrade_argv = commands[-1]
-    restart_supervisor.schedule_restart(delay_seconds=0, vibe_path="/bin/vibe", trigger="cli")
-    plain_argv = commands[-1]
-    assert [argument for argument in plain_argv if argument.startswith("--rollback")] == []
 
-    parsed: dict = {}
-    monkeypatch.setattr(restart_supervisor, "_run_restart_job", lambda **kwargs: parsed.update(kwargs) or 0)
-    assert restart_supervisor.main(upgrade_argv[2:]) == 0
-    assert parsed["rollback_to"] == target
-
-    parsed.clear()
-    assert restart_supervisor.main(plain_argv[2:]) == 0
-    assert parsed["rollback_to"] is None
-
-    # A partial set is refused rather than completed from this process. The job
-    # runs the release the rollback is undoing, so "fill in the missing install
-    # from here" is the exact wrong answer, and a silent one.
-    with pytest.raises(SystemExit):
-        restart_supervisor.main(["--job-id", "jobpartial", "--rollback-to", "3.0.10"])
+    assert rc == 3
+    assert calls == ["stop_runtime", "start_runtime"]
+    assert package_commands == []
+    status = runtime.read_json(runtime.get_restart_status_path())
+    assert status["ok"] is False
+    assert status["state"] == "failed"
+    assert status["error"] == "service pid 222 did not finish starting"
+    assert not any("rollback" in key for key in status)
 
 
-def test_recoverable_restart_carries_memory_shape_into_rollback_job(monkeypatch, tmp_path):
+def test_terminal_restart_failure_does_not_block_a_subsequent_attempt(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
-    commands: list[list[str]] = []
+    restart_supervisor._write_status(
+        {
+            "ok": False,
+            "job_id": "failed-attempt",
+            "state": "failed",
+            "trigger": "upgrade",
+            "error": "new release failed readiness",
+        }
+    )
+    spawned = []
+
     monkeypatch.setattr(restart_supervisor, "get_restart_invocation_command", lambda vibe_path=None: ["/bin/vibe", "restart"])
     monkeypatch.setattr(restart_supervisor, "get_restart_environment", lambda vibe_path=None: {"PATH": "/bin"})
     monkeypatch.setattr(restart_supervisor, "get_safe_cwd", lambda: str(tmp_path))
@@ -1676,22 +853,18 @@ def test_recoverable_restart_carries_memory_shape_into_rollback_job(monkeypatch,
     monkeypatch.setattr(
         restart_supervisor.subprocess,
         "Popen",
-        lambda command, **kwargs: commands.append(command) or SimpleNamespace(pid=4242),
-    )
-    target = RollbackTarget(
-        version="3.0.10",
-        package="avibe-os",
-        launcher=_REPLACED_INSTALL,
-        memory_package=True,
-        memory_version="3.0.10",
+        lambda command, **kwargs: spawned.append(command) or SimpleNamespace(pid=45678),
     )
 
-    restart_supervisor.schedule_restart(vibe_path="/bin/vibe", trigger="upgrade", rollback_to=target)
-    argv = commands[-1]
-    assert "--rollback-memory-package" in argv
-    assert argv[argv.index("--rollback-memory-version") + 1] == "3.0.10"
+    admitted = restart_supervisor.schedule_restart(
+        delay_seconds=0,
+        vibe_path="/bin/vibe",
+        trigger="upgrade",
+    )
 
-    parsed: dict = {}
-    monkeypatch.setattr(restart_supervisor, "_run_restart_job", lambda **kwargs: parsed.update(kwargs) or 0)
-    assert restart_supervisor.main(argv[2:]) == 0
-    assert parsed["rollback_to"] == target
+    assert admitted["job_id"] != "failed-attempt"
+    assert spawned
+    status = runtime.read_json(runtime.get_restart_status_path())
+    assert status["job_id"] == admitted["job_id"]
+    assert status["state"] == "scheduled"
+    assert status["error"] is None

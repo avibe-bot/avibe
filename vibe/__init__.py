@@ -2,9 +2,8 @@
 
 #: The version a build-less tree reports: a source checkout, an editable
 #: install, or a regression environment built with a pretend version. It names no
-#: published release, so anything that has to INSTALL a specific version has to
-#: treat it as "unknown" instead of as a target -- see
-#: `vibe.upgrade.rollback_target`.
+#: published release, so update comparisons must treat it as "unknown" rather
+#: than as an index-served release.
 UNKNOWN_VERSION = "0.0.0.dev0"
 
 try:

@@ -14435,7 +14435,6 @@ def cmd_upgrade():
                         vibe_path=current_vibe_path,
                         trigger="upgrade",
                         prepare_show_runtime=not should_skip_show_runtime_prepare(),
-                        rollback_to=plan.rollback_to,
                     )
                 except Exception as exc:
                     print("\033[33mUpgrade installed, but restart scheduling failed.\033[0m")
