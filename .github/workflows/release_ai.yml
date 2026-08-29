@@ -200,16 +200,32 @@ jobs:
           PACKAGE_VERSION="$(python scripts/release_package_version.py "$RELEASE_TAG")"
           echo "SETUPTOOLS_SCM_PRETEND_VERSION=$PACKAGE_VERSION" >> "$GITHUB_ENV"
           echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS=$PACKAGE_VERSION" >> "$GITHUB_ENV"
+          echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_MEMORY=$PACKAGE_VERSION" >> "$GITHUB_ENV"
 
-      - name: Block Memory Wave 3a release until Waves 3b and 3c
+      - name: Build Python distributions
         run: |
-          echo "::error title=Memory Wave 3a release blocked::Wave 3b must preserve the optional package across upgrade and rollback, and Wave 3c must own manifest validation and memory-first publication."
-          exit 1
-
-      - name: Build Python package
-        run: |
-          pip install build
+          pip install -e . build pytest
+          python -m build --outdir dist packaging/avibe-memory
           python -m build
+
+      - name: Verify Python distribution asset matrix
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          patterns = (
+              "avibe_memory-*.whl",
+              "avibe_memory-*.tar.gz",
+              "avibe_os-*.whl",
+              "avibe_os-*.tar.gz",
+          )
+          for pattern in patterns:
+              matches = sorted(Path("dist").glob(pattern))
+              if len(matches) != 1:
+                  raise SystemExit(
+                      f"Expected exactly one release asset matching {pattern}, found {len(matches)}"
+                  )
+          PY
 
       - name: Verify bundled runtime manifests
         run: |
@@ -218,29 +234,45 @@ jobs:
           import zipfile
           from pathlib import Path
 
-          wheels = sorted(Path("dist").glob("*.whl"))
-          if len(wheels) != 1:
-              raise SystemExit(f"Expected exactly one wheel, found {len(wheels)}")
+          core_wheels = sorted(Path("dist").glob("avibe_os-*.whl"))
+          memory_wheels = sorted(Path("dist").glob("avibe_memory-*.whl"))
+          if len(core_wheels) != 1:
+              raise SystemExit(f"Expected exactly one avibe-os wheel, found {len(core_wheels)}")
+          if len(memory_wheels) != 1:
+              raise SystemExit(f"Expected exactly one avibe-memory wheel, found {len(memory_wheels)}")
 
-          with zipfile.ZipFile(wheels[0]) as wheel:
-              names = set(wheel.namelist())
+          with zipfile.ZipFile(core_wheels[0]) as wheel:
+              core_names = set(wheel.namelist())
               archives = {
-                  name for name in names
+                  name for name in core_names
                   if name.startswith("vibe/show_runtime/") and name.endswith(".tgz")
               }
 
           if archives:
               raise SystemExit("Wheel unexpectedly contains Show Runtime archives:\n" + "\n".join(sorted(archives)))
-          if "vibe/show_runtime_manifest.json" not in names:
+          if "vibe/show_runtime_manifest.json" not in core_names:
               raise SystemExit("Wheel is missing vibe/show_runtime_manifest.json")
-          if any(name.startswith("vibe/memory_runtime/") for name in names):
+          if any(name.startswith("vibe/memory_runtime/") for name in core_names):
               raise SystemExit("Wheel unexpectedly contains Memory Runtime archives")
-          if "vibe/memory_runtime_manifest.json" not in names:
-              raise SystemExit("Wheel is missing vibe/memory_runtime_manifest.json")
+          if "vibe/memory_runtime_manifest.json" in core_names:
+              raise SystemExit("avibe-os wheel unexpectedly owns the Memory Runtime manifest")
+
+          with zipfile.ZipFile(memory_wheels[0]) as wheel:
+              memory_names = set(wheel.namelist())
+          if "vibe/memory_runtime_manifest.json" not in memory_names:
+              raise SystemExit("avibe-memory wheel is missing vibe/memory_runtime_manifest.json")
+          if any(name.startswith("vibe/memory_runtime/") for name in memory_names):
+              raise SystemExit("avibe-memory wheel unexpectedly contains Memory Runtime archives")
 
           print("vibe/show_runtime_manifest.json")
           print("vibe/memory_runtime_manifest.json")
           PY
+
+      - name: Verify distribution package matrix
+        run: |
+          AVIBE_CORE_WHEEL="$(ls dist/avibe_os-*.whl)" \
+          AVIBE_MEMORY_WHEEL="$(ls dist/avibe_memory-*.whl)" \
+            pytest tests/test_memory_distribution.py -v
 
       - name: Run Memory Runtime release guard for GitHub-only assets
         shell: bash
