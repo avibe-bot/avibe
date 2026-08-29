@@ -29,7 +29,6 @@ from vibe.package_shape import (
     CORE_PACKAGE_NAME,
     LEGACY_CORE_PACKAGE_NAME,
     MEMORY_PACKAGE_NAME as SHAPE_MEMORY_PACKAGE_NAME,
-    MEMORY_SPLIT_MIN_VERSION,
 )
 
 
@@ -39,7 +38,6 @@ PACKAGE_NAME = CORE_PACKAGE_NAME
 LEGACY_PACKAGE_NAME = LEGACY_CORE_PACKAGE_NAME
 MEMORY_PACKAGE_NAME = SHAPE_MEMORY_PACKAGE_NAME
 MEMORY_EXTRA_NAME = "memory"
-_MEMORY_SPLIT_MIN_VERSION = MEMORY_SPLIT_MIN_VERSION
 PIP_DOWNLOAD_DEST_PLACEHOLDER = "{avibe-pip-download-destination}"
 DEFAULT_UPDATE_METADATA_URL = f"https://pypi.org/pypi/{PACKAGE_NAME}/json"
 CURRENT_VIBE_EXECUTABLE_ENV = "VIBE_CURRENT_EXECUTABLE"
@@ -51,9 +49,6 @@ UV_FALLBACK_BIN_DIRS = (".local/bin", ".cargo/bin")
 # anything with a path separator, a URL scheme, extras, a marker, or a version
 # of its own is deliberately excluded. See `pinned_package_spec`.
 _BARE_PACKAGE_NAME_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
-# uv names a tool's directory after the distribution it installed, so this reads
-# back the name THIS process was installed under. See `installed_package_name`.
-_UV_TOOL_PATH_RE = re.compile(r"/uv/tools/(?P<name>[^/]+)/")
 # PEP 440-ish parser: release + optional pre-release (a/b/rc) + optional
 # post + optional dev, plus a local version segment (``+local``) that we
 # accept but ignore for ordering. Word forms (alpha/beta/preview) are listed
@@ -93,8 +88,6 @@ class UpgradePlan:
     method: str
     preflight_command: list[str] | None = None
     preflight_fallback_command: list[str] | None = None
-    cleanup_command: list[str] | None = None
-    cleanup_after_command: bool = False
 
 
 def execute_upgrade_plan(
@@ -103,7 +96,7 @@ def execute_upgrade_plan(
     run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     **run_kwargs: object,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a validated plan in its recorded preflight/cleanup order.
+    """Run a validated plan after its non-mutating preflight.
 
     The caller owns package mutation sequencing. This helper deliberately does
     not acquire a lifecycle lock: callers can run the plan synchronously while
@@ -115,21 +108,7 @@ def execute_upgrade_plan(
         if preflight.returncode != 0:
             return preflight
 
-    if plan.cleanup_command is not None and not plan.cleanup_after_command:
-        cleaned = run(plan.cleanup_command, env=plan.env, **run_kwargs)
-        if cleaned.returncode != 0:
-            return cleaned
-
-    installed = run(plan.command, env=plan.env, **run_kwargs)
-    if installed.returncode != 0:
-        return installed
-
-    if plan.cleanup_command is not None and plan.cleanup_after_command:
-        cleaned = run(plan.cleanup_command, env=plan.env, **run_kwargs)
-        if cleaned.returncode != 0:
-            return cleaned
-
-    return installed
+    return run(plan.command, env=plan.env, **run_kwargs)
 
 
 def preflight_upgrade_plan(
@@ -557,51 +536,6 @@ def is_legacy_uv_tool_install(python_executable: str | None = None) -> bool:
     return f"/uv/tools/{LEGACY_PACKAGE_NAME}/" in executable
 
 
-def installed_package_name(python_executable: str | None = None) -> str | None:
-    """The distribution this install was published as.
-
-    Which distribution published the running version is not the same question as
-    which one the next install should ask for, and the two genuinely differ: a
-    machine still on `vibe-remote` upgrades to `avibe-os`, that being the rename.
-    Anything going FORWARD wants the configured spec. Anything going BACK wants
-    this, because `avibe-os==2.x` names a release that was never published under
-    that name and an install of it can only fail.
-
-    Asked of the installed metadata first, because that is where the answer
-    actually is: the distribution that provides the running `vibe` package says
-    so itself, whatever layout it was installed into. Reading it off the
-    interpreter path recognised exactly one layout -- uv's tool directory -- and
-    answered `None` for every supported install that is not one, pip into a
-    virtualenv among them. `None` there is not neutral: the caller falls back to
-    the configured FORWARD package, so a `vibe-remote` install in a virtualenv
-    armed a rollback to `avibe-os==2.x` and spent the one recovery attempt on a
-    release that was never published.
-
-    The path heuristic stays as the fallback for the case metadata genuinely
-    cannot answer -- a source checkout, or providers that record the same release,
-    where naming one would be a guess. `None` when neither can say, which is the
-    honest answer for a tree that was never installed at all.
-    """
-
-    executable = (python_executable or sys.executable or "").replace("\\", "/")
-    # Only this process can be asked about its own metadata. A path belonging to
-    # some OTHER interpreter is answerable only by the layout it is written in.
-    if not python_executable or executable == (sys.executable or "").replace("\\", "/"):
-        distributions = _distributions_providing_this_package()
-        if len(distributions) == 1:
-            return distributions[0]
-        # More than one provider is not an unanswerable environment. It is the
-        # state a rollback leaves behind and never cleans up, so it is the state
-        # every subsequent upgrade measures its own rollback target in -- see
-        # `_providers_describing_running_code`.
-        describing = _providers_describing_running_code()
-        if len(describing) == 1:
-            return describing[0]
-
-    match = _UV_TOOL_PATH_RE.search(executable)
-    return match.group("name") if match else None
-
-
 def memory_package_installed() -> bool:
     """Return whether the optional Memory distribution is installed."""
 
@@ -615,19 +549,6 @@ def memory_package_installed() -> bool:
         logger.warning("Could not inspect %s metadata; preserving package shape", MEMORY_PACKAGE_NAME, exc_info=True)
         return True
     return True
-
-
-def installed_memory_package_version() -> str | None:
-    try:
-        from importlib.metadata import PackageNotFoundError, distribution
-
-        version = distribution(MEMORY_PACKAGE_NAME).version
-    except PackageNotFoundError:
-        return None
-    except Exception:
-        logger.warning("Could not inspect %s version", MEMORY_PACKAGE_NAME, exc_info=True)
-        return None
-    return str(version).strip() or None
 
 
 def configured_memory_enabled() -> bool:
@@ -696,24 +617,11 @@ def _providers_recording_a_published_release() -> list[tuple[str, str]]:
 
 
 def _providers_describing_running_code() -> list[str]:
-    """The providers whose recorded release is the one this process is running.
+    """Return providers whose recorded release matches the running code.
 
-    One owner for a question two callers ask for different purposes:
-    `installed_package_name` wants WHICH provider describes the files on disk,
-    and `installed_metadata_describes_running_code` wants WHETHER they all do.
-    Answering them separately is how the rename pair got two different rulings one
-    function apart -- the second was taught that two providers is the state it
-    exists for, while the first went on reading it as unanswerable.
-
-    That asymmetry is not academic, because the pair is permanent: installing
-    `avibe-os` over a `vibe-remote` machine never uninstalls the older
-    distribution, so once a rollback has crossed the rename the tree holds both
-    forever. `avibe-os` records the release that failed and `vibe-remote` records
-    the files actually running, and the metadata is what distinguishes them --
-    naming neither meant every later upgrade armed its rollback with no
-    distribution, and `pinned_package_spec` fell back to the configured forward
-    name. `avibe-os==2.9.0` was never published, so that one recovery attempt
-    could only fail, on a machine that is already down.
+    Multiple providers can remain after the `vibe-remote` to `avibe-os` rename.
+    Comparing every published record prevents a forward install from becoming a
+    silent no-op when stale metadata claims the requested release is present.
     """
 
     from vibe import __version__
@@ -726,35 +634,12 @@ def _providers_describing_running_code() -> list[str]:
 
 
 def installed_metadata_describes_running_code() -> bool:
-    """Whether the installed distribution's recorded version matches the files.
+    """Whether every published provider record matches the running files.
 
-    pip decides whether to act by reading metadata, and a rollback is the one
-    operation that makes metadata stop describing the code. Installing `avibe-os`
-    over a `vibe-remote` machine never uninstalls the older distribution, so
-    after the rollback reinstalls `vibe-remote==3.0.10` the tree holds two: the
-    files under `vibe/` are 3.0.10, and `avibe-os` still records 3.0.11 with
-    nothing on disk to back it.
-
-    The next forward upgrade is then a silent no-op. `vibe upgrade` compares this
-    process's 3.0.10 against the published 3.0.11 and decides to install; pip
-    reads `avibe-os==3.0.11` as already satisfied and does nothing; the command
-    reports success and the machine keeps running 3.0.10. Same shape as the
-    rollback no-op, one release later and with a person watching it happen.
-
-    Measured by comparing our own two answers rather than by trusting either --
-    the version this process bound at import against the version the metadata
-    records for each distribution providing it. Unknown answers `True`: only a
-    disagreement between two published releases is evidence, so a source checkout
-    or an editable install is never forced on a guess.
-
-    Every provider is asked, not just a single one, because the rename pair is
-    the state this exists for: after a rollback across `vibe-remote` ->
-    `avibe-os` the tree holds BOTH, and only one of them can be describing the
-    files on disk. Treating "more than one provider" as unknown would have made
-    the exact state described above the one state that answers `True` -- the
-    check declining to fire on its own scenario. `installed_package_name` reads
-    the same measurement for the other half of that state; both go through
-    `_providers_describing_running_code` so neither can be taught it alone.
+    pip trusts installed metadata when deciding whether an upgrade has work to
+    do. A mismatch therefore forces the forward reinstall. Unknown source or
+    editable layouts remain unforced because they provide no reliable published
+    version to compare.
     """
 
     from vibe import __version__
@@ -785,10 +670,7 @@ def _names_a_published_release(version: str) -> bool:
     A development build's version describes the tree it was built from rather
     than anything published: PEP 440 spells that as a `dev` segment, a local
     segment (`+<sha>`), or both, and the regression builder emits exactly that
-    shape. Testing for one hard-coded sentinel string recognised the fallback
-    version and nothing else, so a regression instance armed a rollback to
-    `avibe-os==0.0.0.dev0+<sha>` and spent its one recovery attempt asking an
-    index for a release that cannot exist there.
+    shape.
 
     Asking the property instead of listing the strings is what stops the next
     unlisted shape from costing the same attempt. Unparseable reads as
@@ -876,45 +758,21 @@ def _memory_target_version(package_spec: str, target_version: str | None) -> str
 def pinned_package_spec(
     version: str,
     *,
-    python_executable: str | None = None,
-    package_name: str | None = None,
-    memory_package: bool = False,
+    package_name: str,
 ) -> str:
-    """The distribution this install came from, pinned to exactly one version.
+    """Pin one explicit distribution name to one exact published version.
 
-    `package_name` is the name measured before the forward install ran, and it
-    wins when given. Reading the name here instead would read it on the wrong side
-    of the event: the upgrade replaces the tool before it schedules the restart,
-    so by the time the detached supervisor asks, the install it can see is the new
-    one. Only the caller that ran before the install can answer for what was
-    replaced.
-
-    Falling back to the install on disk, and to configuration after that. A pin is
-    a claim that a specific release exists under a specific name, and something
-    has to witness which name that was.
-
-    Raises when the resulting name cannot carry a pin -- a local path, a direct
-    URL, or a spec that already states its own version. Refusing is the whole
-    point of the function existing: the caller that wants a pin is rolling back,
-    and an unpinned command resolves forward to the release it is rolling back
-    FROM, reinstalling the failure and reporting success. A rollback that cannot
-    be pinned has to fail loudly instead.
+    The explicit Memory install uses this to reinstall the running core release
+    together with its matching optional package. The distribution name must be a
+    bare package name; direct URLs and pre-versioned requirements are rejected.
 
     The message never quotes the spec. An operator-supplied spec can be an index
-    URL carrying credentials, and this error is written to a restart log.
-
-    `memory_package` remains a compatibility argument for existing callers. It
-    never changes the core requirement: rollback Memory is always a separate
-    exact pin.
+    URL carrying credentials.
     """
 
-    spec = package_name or installed_package_name(python_executable) or get_upgrade_package_spec()
+    spec = package_name
     if _BARE_PACKAGE_NAME_RE.fullmatch(spec) is None:
         raise ValueError("The configured upgrade package spec cannot carry a version pin")
-    # Rollback requirements are independent exact pins. An extra couples the
-    # core pin back to whichever Memory constraint that historical core happens
-    # to declare, which cannot express optional-era mismatches or residual
-    # Memory next to a bundled pre-split core.
     return f"{spec}=={version}"
 
 
@@ -934,14 +792,9 @@ def build_upgrade_plan(
 ) -> UpgradePlan:
     """How to install avibe: the newest release, or `version` exactly.
 
-    A pinned plan is not an upgrade plan with an extra argument. It never asks
-    for the newest release, because the caller pinning a version is going
-    backwards from one -- and both package managers treat "upgrade" as a
-    direction, not a preference: uv resolves forward past the pin's own
-    requirement, and pip's `--upgrade` declines to install an older version than
-    the one already there. So the pin replaces the upgrade request rather than
-    qualifying it, and `--force` becomes unconditional on the uv path, where
-    installing over an existing tool is otherwise refused.
+    Exact-version plans support the explicit Memory package install action. They
+    replace the ordinary upgrade request and force the installer so the matching
+    optional distribution is applied even when core is already satisfied.
     """
 
     executable = python_executable or sys.executable
@@ -958,9 +811,7 @@ def build_upgrade_plan(
     package_spec = (
         pinned_package_spec(
             version,
-            python_executable=executable,
-            package_name=package_name,
-            memory_package=include_memory,
+            package_name=package_name or PACKAGE_NAME,
         )
         if version
         else (package_spec or get_upgrade_package_spec())
@@ -1005,32 +856,15 @@ def build_upgrade_plan(
     command = [executable, "-m", "pip", "install"]
     if not version:
         command.append("--upgrade")
-    # Neither a pin nor `--upgrade` makes pip act; metadata does, and a rollback
-    # is what makes metadata stop describing the code. So the command forces
-    # whenever the version being asked for is not already the version on disk --
-    # measured here, never read off the metadata that is the thing in doubt.
-    #
-    # A pinned plan always forces: it IS the rollback, running on a machine where
-    # `avibe-os` was just installed over `vibe-remote`, so `pip install
-    # vibe-remote==<old>` reads as already satisfied, pip does nothing, and the
-    # supervisor starts the failed generation again and reports success. The uv
-    # branch above has always forced a pinned install; this branch quietly did
-    # not. A forward plan forces only once that has happened -- the leftover
-    # `avibe-os==3.0.11` metadata would otherwise make the next upgrade a no-op
-    # too, silently, with a person watching it report success.
+    # pip decides whether to act from metadata. Exact installs always force so a
+    # matching optional package is applied even when core is already satisfied;
+    # forward installs force only when published provider metadata disagrees with
+    # the running files.
     if version or not installed_metadata_describes_running_code():
         command.append("--force-reinstall")
     command.append(package_spec)
     if pinned_memory_spec:
         command.append(pinned_memory_spec)
-    cleanup_command = None
-    cleanup_after_command = False
-    if version and not include_memory and memory_package_installed():
-        cleanup_command = [executable, "-m", "pip", "uninstall", "--yes", MEMORY_PACKAGE_NAME]
-        try:
-            cleanup_after_command = Version(version) >= _MEMORY_SPLIT_MIN_VERSION
-        except InvalidVersion:
-            pass
     preflight_command = None
     # Preflight only when the optional package shape is part of the operation.
     # Core-only forward installs retain the origin/dev synchronous behavior: the
@@ -1059,7 +893,7 @@ def build_upgrade_plan(
         if pinned_memory_spec:
             preflight_command.append(pinned_memory_spec)
             preflight_fallback_command.append(pinned_memory_spec)
-    elif include_memory or cleanup_command is not None:
+    elif include_memory:
         preflight_command = [
             executable,
             "-m",
@@ -1077,8 +911,6 @@ def build_upgrade_plan(
         method="pip",
         preflight_command=preflight_command,
         preflight_fallback_command=preflight_fallback_command,
-        cleanup_command=cleanup_command,
-        cleanup_after_command=cleanup_after_command,
     )
 
 def get_safe_cwd() -> str:

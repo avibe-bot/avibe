@@ -26,7 +26,6 @@ from vibe.upgrade import (
     get_restart_shell_command,
     get_running_vibe_path,
     get_safe_cwd,
-    installed_package_name,
     pinned_package_spec,
     execute_upgrade_plan,
 )
@@ -36,19 +35,9 @@ from vibe.upgrade import (
 def _tree_is_not_an_installed_distribution(monkeypatch):
     """Every test here describes a machine, not the machine running the tests.
 
-    `installed_package_name()` asks this process's own metadata which
-    distribution provides `vibe`, and the answer differs by checkout: a developer
-    running from a source tree gets nothing, while CI installs the package first
-    and gets `avibe-os`. Tests written against the first answer pass locally and
-    then fail on a runner for a reason that has nothing to do with the change --
-    `test_a_spec_that_cannot_carry_a_pin_is_refused` did exactly that, because an
-    installed name outranks the configured spec whose refusal it was asserting.
-
-    Answering `[]` here is the honest state for a checkout, and it is the state
-    every test in this module was already written against. Only the ambient
-    metadata is removed; the interpreter-path heuristic stays live, so a test can
-    still hand in a uv tool path and be answered from it, and a test that wants a
-    measured name sets one explicitly.
+    Installed provider metadata differs between a source checkout and CI. Empty
+    provider metadata keeps forward-plan tests deterministic; tests for a mixed
+    provider state replace it explicitly.
     """
 
     monkeypatch.setattr("vibe.upgrade._distributions_providing_this_package", lambda: [])
@@ -127,24 +116,15 @@ def test_build_upgrade_plan_uses_env_package_spec(monkeypatch):
 #: How each installer spells "do it even though you believe it is already done".
 #: Written as a mapping rather than as two assertions so that an installer added
 #: to `build_upgrade_plan` later fails this test until someone decides what its
-#: word is, instead of silently shipping a rollback path that can no-op.
+#: word is, instead of silently shipping an exact install that can no-op.
 FORCES_THE_INSTALL = {"uv": "--force", "pip": "--force-reinstall"}
 
 
-def test_a_pinned_plan_never_asks_for_an_upgrade_and_always_forces_the_install(monkeypatch):
-    # Two ways for a rollback command to install nothing and still exit 0, one
-    # per word, and both silent on every installer path.
-    #
-    # Asking for an upgrade resolves forward to the exact release being rolled
-    # back FROM: uv resolves past the pin, pip declines to move backwards at all.
-    #
-    # Not forcing leaves the installer free to decide the pin is already
-    # satisfied -- and on the case this change exists for, it is. Installing
-    # `avibe-os` over a `vibe-remote` machine never uninstalls `vibe-remote`, so
-    # that distribution's metadata still stands and still claims the old version,
-    # while the files under `vibe/` are the new release's, written over the top.
-    # `pip install vibe-remote==<old>` reads as satisfied, pip does nothing, and
-    # the supervisor starts the failed generation again and calls it a recovery.
+def test_an_exact_plan_never_asks_for_an_upgrade_and_always_forces_the_install(monkeypatch):
+    # The explicit Memory install targets the running core release. Asking for an
+    # upgrade would widen that request, while omitting force lets the installer
+    # declare the already-present core requirement satisfied without applying the
+    # matching optional package.
     monkeypatch.setattr("vibe.upgrade.os.path.exists", lambda path: True)
     monkeypatch.setattr("vibe.upgrade.os.access", lambda path, mode: True)
 
@@ -154,6 +134,7 @@ def test_a_pinned_plan_never_asks_for_an_upgrade_and_always_forces_the_install(m
         vibe_path="/custom/bin/vibe",
         base_env={"PATH": "/usr/bin"},
         version="3.0.10",
+        package_name="avibe-os",
     )
     assert uv_plan.method == "uv"
     assert uv_plan.command == [
@@ -172,6 +153,7 @@ def test_a_pinned_plan_never_asks_for_an_upgrade_and_always_forces_the_install(m
         uv_path=None,
         base_env={"PATH": "/usr/bin"},
         version="3.0.10",
+        package_name="avibe-os",
     )
     assert pip_plan.method == "pip"
     assert pip_plan.command == [
@@ -196,23 +178,7 @@ def _metadata_records(monkeypatch, distribution: str, version: str) -> None:
 
 
 def test_a_forward_upgrade_forces_the_install_once_metadata_stops_describing_the_code(monkeypatch):
-    """The rollback's own no-op, one release later and with a person watching.
-
-    A rollback installs `vibe-remote==3.0.10` over a machine whose forward upgrade
-    installed `avibe-os==3.0.11`, and pip never uninstalls the distribution it
-    replaced. So the tree ends up holding both: the files under `vibe/` are 3.0.10,
-    and `avibe-os` still records 3.0.11 with nothing on disk behind it.
-
-    Then `vibe upgrade` runs. It compares this process's 3.0.10 against the
-    published 3.0.11 and decides to install; pip reads `avibe-os==3.0.11` as
-    already satisfied and does nothing; the command reports success and the
-    machine keeps running 3.0.10 -- silently, indefinitely, and now on the path a
-    user invokes by hand.
-
-    So `--force-reinstall` is not a property of pinned plans, it is a property of
-    asking for a version that is not the version on disk. Measured from our own
-    two answers, never read off the metadata that is the thing in doubt.
-    """
+    """A forward install cannot trust stale metadata over the running files."""
 
     monkeypatch.setattr("vibe.upgrade.os.path.exists", lambda path: True)
     monkeypatch.setattr("vibe.upgrade.os.access", lambda path, mode: True)
@@ -233,18 +199,8 @@ def test_a_forward_upgrade_forces_the_install_once_metadata_stops_describing_the
     assert "--force-reinstall" in plan.command
 
 
-def test_the_rename_pair_left_by_a_rollback_forces_the_next_install(monkeypatch):
-    """The state this check exists for is the one where two distributions are present.
-
-    A rollback across the rename installs `vibe-remote==3.0.10` over a tree whose
-    forward upgrade installed `avibe-os==3.0.11`, and pip does not uninstall the
-    distribution it replaced. So both are recorded and only one of them can be
-    describing the files under `vibe/`. Asking a single distribution -- or
-    treating "more than one" as unreadable -- would make this exact machine the
-    one machine that answers "metadata agrees", which is how the no-op ships:
-    the next upgrade asks pip for a version `avibe-os` already claims, pip does
-    nothing, and the instance keeps running the rolled-back code forever.
-    """
+def test_a_stale_rename_pair_forces_the_next_install(monkeypatch):
+    """Two disagreeing distribution records cannot make an upgrade a no-op."""
 
     monkeypatch.setattr("vibe.upgrade.os.path.exists", lambda path: True)
     monkeypatch.setattr("vibe.upgrade.os.access", lambda path, mode: True)
@@ -329,107 +285,8 @@ def test_an_unknown_install_shape_is_never_forced_on_a_guess(monkeypatch, case, 
     assert "--force-reinstall" not in plan.command, case
 
 
-def test_a_rollback_pins_the_distribution_the_install_actually_came_from(monkeypatch):
-    # Which distribution published the running version and which one the next
-    # upgrade should ask for are different questions, and on a machine that
-    # predates the rename they have different answers. Going forward wants the
-    # configured spec -- that is what the rename is for. Going back wants this,
-    # because `avibe-os==2.x` names a release that was never published under that
-    # name, so the rollback resolves to nothing and the instance stays dark.
-    monkeypatch.setenv("VIBE_UPGRADE_PACKAGE_SPEC", "avibe-os")
-
-    legacy = "/home/ai/.local/share/uv/tools/vibe-remote/bin/python"
-    assert pinned_package_spec("2.9.4", python_executable=legacy) == "vibe-remote==2.9.4"
-    plan = build_upgrade_plan(
-        python_executable=legacy,
-        uv_path="/usr/local/bin/uv",
-        base_env={"PATH": "/usr/bin"},
-        version="2.9.4",
-    )
-    assert "vibe-remote==2.9.4" in plan.command
-    assert not any(argument.startswith("avibe-os") for argument in plan.command)
-
-    # An install whose path says nothing about a distribution -- pip into a shared
-    # environment -- has only the configured spec to go on, and gets it.
-    assert pinned_package_spec("3.0.10", python_executable="/usr/bin/python3") == "avibe-os==3.0.10"
-
-
-def test_the_rename_pair_still_names_the_distribution_that_describes_the_code(monkeypatch):
-    """Two providers is not an unreadable machine, it is the aftermath of a rollback.
-
-    Installing `avibe-os` over a `vibe-remote` machine never uninstalls the older
-    distribution, so once a rollback has crossed the rename the tree holds both
-    for good. Every upgrade after that measures its rollback target in this state,
-    which is why reading two providers as unanswerable does not cost one recovery
-    -- it costs every recovery the machine will ever attempt.
-
-    The metadata is what tells them apart: `avibe-os` records the release that
-    failed, `vibe-remote` records the files that are running. Naming neither left
-    `package=None`, `pinned_package_spec` fell back to the configured forward
-    name, and `avibe-os==2.9.0` was never published under that name -- so the one
-    recovery attempt could only fail, on an instance that is already down.
-    """
-
-    monkeypatch.setenv("VIBE_UPGRADE_PACKAGE_SPEC", "avibe-os")
-    monkeypatch.setattr(
-        "vibe.upgrade._distributions_providing_this_package",
-        lambda: ["avibe-os", "vibe-remote"],
-    )
-    recorded = {"avibe-os": "3.0.11", "vibe-remote": "2.9.0"}
-    monkeypatch.setattr("importlib.metadata.version", lambda name: recorded[name])
-    monkeypatch.setattr("vibe.__version__", "2.9.0", raising=False)
-
-    assert installed_package_name() == "vibe-remote"
-
-
-
-
-def test_providers_that_cannot_be_told_apart_are_left_to_the_path(monkeypatch):
-    """Metadata answers this only while it distinguishes them.
-
-    Two distributions recording the same release is a vendored or mid-rename
-    environment, not a rollback, and there is nothing in the metadata to prefer
-    one name over the other. Guessing would put the pin on a distribution that may
-    never have published the version -- the same failure, arrived at from the
-    opposite direction -- so the interpreter path answers instead, and `None` when
-    it cannot either.
-    """
-
-    monkeypatch.setattr(
-        "vibe.upgrade._distributions_providing_this_package",
-        lambda: ["avibe-os", "vibe-remote"],
-    )
-    monkeypatch.setattr("importlib.metadata.version", lambda name: "3.0.11")
-    monkeypatch.setattr("vibe.__version__", "3.0.11", raising=False)
-
-    monkeypatch.setattr("vibe.upgrade.sys.executable", "/usr/bin/python3")
-    assert installed_package_name() is None
-
-    monkeypatch.setattr("vibe.upgrade.sys.executable", "/home/ai/.local/share/uv/tools/vibe-remote/bin/python")
-    assert installed_package_name() == "vibe-remote"
-
-
-def test_a_spec_that_cannot_carry_a_pin_is_refused(monkeypatch):
-    # The alternative to refusing is falling back to the unpinned spec, which is
-    # the reinstall-the-failure command above. Whoever configured a wheel path or
-    # an index URL as the upgrade source gets a rollback that fails loudly instead
-    # of one that lies. The message must not quote the spec: it can be an index
-    # URL carrying credentials, and it is written to a restart log.
-    monkeypatch.setenv("VIBE_UPGRADE_PACKAGE_SPEC", "https://user:secret@example.invalid/simple/avibe-os")
-
-    with pytest.raises(ValueError) as refusal:
-        pinned_package_spec("3.0.10")
-    assert "secret" not in str(refusal.value)
-
-    monkeypatch.setattr("vibe.upgrade.os.path.exists", lambda path: True)
-    monkeypatch.setattr("vibe.upgrade.os.access", lambda path, mode: True)
-    with pytest.raises(ValueError):
-        build_upgrade_plan(
-            python_executable="/usr/bin/python3",
-            uv_path=None,
-            base_env={"PATH": "/usr/bin"},
-            version="3.0.10",
-        )
+def test_exact_package_spec_uses_the_explicit_distribution() -> None:
+    assert pinned_package_spec("3.0.10", package_name="avibe-os") == "avibe-os==3.0.10"
 
 
 
@@ -798,13 +655,29 @@ def test_do_upgrade_uses_upgrade_plan_env_and_restarts(monkeypatch):
     }
 
 
-def test_do_upgrade_install_failure_is_terminal_and_does_not_restart(monkeypatch):
+def test_memory_indep_025_failed_upgrade_is_terminal_and_retryable(monkeypatch):
     plan = UpgradePlan(
         command=["/usr/bin/python3", "-m", "pip", "install", "--upgrade", "avibe-os"],
         env=None,
         method="pip",
     )
-    restart = Mock(side_effect=AssertionError("failed install scheduled a restart"))
+    restart = Mock(return_value={"job_id": "retry-restart"})
+    install = Mock(
+        side_effect=[
+            subprocess.CompletedProcess(
+                plan.command,
+                1,
+                stdout="",
+                stderr="resolver rejected the release",
+            ),
+            subprocess.CompletedProcess(
+                plan.command,
+                0,
+                stdout="installed on retry",
+                stderr="",
+            ),
+        ]
+    )
 
     monkeypatch.setattr(api, "configured_memory_enabled", lambda: False)
     monkeypatch.setattr(api, "get_version_info", lambda: {"latest": "3.0.15"})
@@ -812,26 +685,28 @@ def test_do_upgrade_install_failure_is_terminal_and_does_not_restart(monkeypatch
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/custom/bin/vibe")
     monkeypatch.setattr(api, "_runtime_process_was_running", lambda: True)
     monkeypatch.setattr(api, "schedule_restart", restart)
-    monkeypatch.setattr(
-        api.subprocess,
-        "run",
-        lambda command, **kwargs: subprocess.CompletedProcess(
-            command,
-            1,
-            stdout="",
-            stderr="resolver rejected the release",
-        ),
-    )
+    monkeypatch.setattr(api.subprocess, "run", install)
 
-    result = api.do_upgrade(auto_restart=True)
+    failed = api.do_upgrade(auto_restart=True)
+    succeeded = api.do_upgrade(auto_restart=True)
 
-    assert result == {
+    assert failed == {
         "ok": False,
         "message": "Upgrade failed",
         "output": "resolver rejected the release",
         "restarting": False,
     }
-    restart.assert_not_called()
+    assert succeeded == {
+        "ok": True,
+        "message": "Upgrade successful. Restarting...",
+        "output": "installed on retry",
+        "restarting": True,
+    }
+    assert [call.args[0] for call in install.call_args_list] == [
+        plan.command,
+        plan.command,
+    ]
+    restart.assert_called_once()
 
 def test_do_upgrade_blocks_mutation_when_memory_requirement_is_unreadable(
     monkeypatch,
@@ -1711,9 +1586,8 @@ def test_uv_forward_plan_locks_memory_to_target_release(monkeypatch):
     ]
 
 
-def test_pinned_rollback_keeps_exact_memory_version(monkeypatch):
+def test_explicit_memory_install_keeps_exact_package_version(monkeypatch):
     monkeypatch.setattr("vibe.upgrade.find_uv_binary", lambda **kwargs: None)
-    monkeypatch.setattr("vibe.upgrade.memory_package_installed", lambda: True)
 
     plan = build_upgrade_plan(
         python_executable="/usr/bin/python3",

@@ -5,14 +5,10 @@ from __future__ import annotations
 import ast
 from importlib.metadata import PackageNotFoundError
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
-from vibe.upgrade import (
-    installed_memory_package_version,
-    memory_package_installed,
-)
+from vibe.upgrade import memory_package_installed
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -21,23 +17,21 @@ FORWARD_PACKAGE_SHAPE_IMPORTS = {
     "CORE_PACKAGE_NAME",
     "LEGACY_CORE_PACKAGE_NAME",
     "MEMORY_PACKAGE_NAME",
-    "MEMORY_SPLIT_MIN_VERSION",
 }
 
 
 @pytest.mark.parametrize(
-    ("metadata_result", "expected_present", "expected_version"),
+    ("metadata_result", "expected_present"),
     [
-        pytest.param(SimpleNamespace(version="3.0.15"), True, "3.0.15", id="installed"),
-        pytest.param(PackageNotFoundError(), False, None, id="absent"),
-        pytest.param(OSError("unreadable"), True, None, id="unreadable"),
+        pytest.param(object(), True, id="installed"),
+        pytest.param(PackageNotFoundError(), False, id="absent"),
+        pytest.param(OSError("unreadable"), True, id="unreadable"),
     ],
 )
 def test_memory_indep_024_forward_package_shape_and_import_contract(
     monkeypatch: pytest.MonkeyPatch,
     metadata_result: object,
     expected_present: bool,
-    expected_version: str | None,
 ) -> None:
     """Forward upgrades preserve installed Memory unless absence is certain."""
 
@@ -49,7 +43,6 @@ def test_memory_indep_024_forward_package_shape_and_import_contract(
     monkeypatch.setattr("importlib.metadata.distribution", distribution)
 
     assert memory_package_installed() is expected_present
-    assert installed_memory_package_version() == expected_version
 
     package_shape_imports, reservation_imports = _production_imports()
 

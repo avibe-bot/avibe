@@ -146,3 +146,9 @@ scenarios:
     kind: guardrail
     layer: scenario
     test: tests/scenarios/memory_independence/test_memory_package_shape.py::test_memory_indep_024_forward_package_shape_and_import_contract
+  - id: MEMORY-INDEP-025
+    name: A failed upgrade is terminal, has no compensating package mutation, and permits retry
+    status: covered
+    kind: correctness
+    layer: scenario
+    test: tests/test_upgrade_flow.py::test_memory_indep_025_failed_upgrade_is_terminal_and_retryable
