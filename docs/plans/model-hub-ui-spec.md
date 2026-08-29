@@ -1484,6 +1484,7 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | `gateway.group.emptySelection` `[derived]` | 尚未选择模型 | No models selected |
 | `gateway.group.emptyModels` `[derived]` | 这个后端没有可用型号 | This backend has no models |
 | `gateway.menu.title` `[derived]` | OpenCode 模型菜单 | OpenCode model menu |
+| `gateway.menu.description` `[derived]` | 选择 OpenCode 可通过网关使用的模型；保存后，在模型行中配置各自路由。 | Choose which models OpenCode can use through the gateway, then configure each selected model's route from its row. |
 | `gateway.menu.search` `[derived]` | 搜索模型或供应商 | Search models or sources |
 | `gateway.menu.selected` `[derived]` | 已选 {{selected}} / {{total}} | {{selected}} of {{total}} selected |
 | `gateway.menu.empty` `[derived]` | 没有可供 OpenCode 选择的模型 | No eligible source models are available |
