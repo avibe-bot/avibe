@@ -141,6 +141,9 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
             fi
             printf 'start\\n' >> "${{VIBE_TEST_CALL_LOG:-/dev/null}}"
             echo "Web UI:"
+        elif [ "$#" -eq 0 ]; then
+            printf 'launch\\n' >> "${{VIBE_TEST_CALL_LOG:-/dev/null}}"
+            echo "Web UI:"
         else
             echo "started"
         fi
@@ -485,6 +488,41 @@ def test_install_script_pairs_and_starts_with_verified_vibe_path(tmp_path):
         "remote pair vrp_test --backend-url https://avibe.bot",
         "start",
     ]
+
+
+def test_pipe_to_shell_launch_uses_verified_vibe_path(tmp_path):
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    uv_bin = tmp_path / "uv-bin"
+    uv_bin.mkdir()
+    call_log = tmp_path / "vibe-calls.log"
+    uv_log = tmp_path / "uv-tool-bin-dir.txt"
+
+    _write_fake_uv(uv_bin / "uv", uv_log)
+    uv_bin.chmod(0o555)
+
+    env = os.environ.copy()
+    env["HOME"] = str(home_dir)
+    env["PATH"] = os.pathsep.join([str(uv_bin), "/usr/bin", "/bin"])
+    env["VIBE_INSTALL_SKIP_NODE"] = "1"
+    env["VIBE_INSTALL_SKIP_SHOW_RUNTIME"] = "1"
+    env["VIBE_TEST_CALL_LOG"] = str(call_log)
+
+    install_result = _run(
+        f'cat "{INSTALL_SCRIPT}" | bash -s -- --launch',
+        cwd=tmp_path,
+        env=env,
+    )
+    version_result = _vibe_version(env, cwd=tmp_path)
+    uv_bin.chmod(0o755)
+
+    expected_vibe = home_dir / ".local" / "bin" / "vibe"
+    assert install_result.returncode == 0, install_result.stdout + install_result.stderr
+    assert f"Launching Avibe with {expected_vibe}" in install_result.stdout
+    assert "Avibe launched" in install_result.stdout
+    assert install_result.stdout.index("Avibe launched") < install_result.stdout.index("Installation complete!")
+    assert call_log.read_text(encoding="utf-8").splitlines() == ["launch"]
+    assert version_result.returncode != 0
 
 
 def test_install_script_stops_when_remote_pair_cannot_start_tunnel(tmp_path):
