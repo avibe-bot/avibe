@@ -1079,6 +1079,56 @@ def test_opencode_menu_validation_rejects_credential_material(tmp_path):
     assert store.load().agents["opencode"].menu.checked == []
 
 
+def test_opencode_menu_rejects_a_new_model_absent_from_current_inventory(tmp_path):
+    source = _source("src_opencode01", (), vendor="openai")
+    service, store, _ = _service(tmp_path, _config([source]))
+
+    with pytest.raises(ModelHubError) as exc:
+        asyncio.run(
+            service.set_opencode_menu(
+                {"view": "featured", "checked": ["openai/removed-model"]}
+            )
+        )
+
+    assert exc.value.code == "mapping_target_unavailable"
+    assert exc.value.status == 409
+    assert store.load().agents["opencode"].menu.checked == []
+    assert "openai/removed-model" not in store.load().agents["opencode"].routes
+
+
+def test_opencode_menu_preserves_an_existing_route_alias_while_adding_inventory(tmp_path):
+    source = _source(
+        "src_opencode02",
+        ("upstream-model", "new-model"),
+        vendor="openai",
+    )
+    config = _config([source])
+    opencode = config.agents["opencode"]
+    opencode.menu = ModelHubMenuConfig(
+        view="featured",
+        checked=["openai/menu-model"],
+    )
+    opencode.routes["openai/menu-model"] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, "upstream-model"),)
+    )
+    service, store, _ = _service(tmp_path, config)
+
+    asyncio.run(
+        service.set_opencode_menu(
+            {
+                "view": "featured",
+                "checked": ["openai/menu-model", "openai/new-model"],
+            }
+        )
+    )
+
+    saved = store.load().agents["opencode"]
+    assert saved.menu.checked == ["openai/menu-model", "openai/new-model"]
+    assert saved.routes["openai/menu-model"].hops == (
+        ModelHubRouteHopConfig(source.id, "upstream-model"),
+    )
+
+
 def test_explicit_opencode_selection_outside_menu_remains_visible(tmp_path):
     config = ModelHubConfig()
     config.agents["opencode"].mode = "hub"

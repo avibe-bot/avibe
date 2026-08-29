@@ -8,7 +8,7 @@ import {
 } from './menuBaseline';
 import type { AgentSupply, Source } from './types';
 
-const source = (id: string): Source => ({
+const source = (id: string, modelIds: string[] = []): Source => ({
   id,
   last_discovered_at: null,
   kind: 'api_key',
@@ -18,7 +18,7 @@ const source = (id: string): Source => ({
   supply_channel: 'hub',
   billing: 'metered',
   state: { status: 'active', retry_at: null, detail_key: null },
-  models: [],
+  models: modelIds.map((modelId) => ({ id: modelId, origin: 'manual', reasoning_efforts: [] })),
 });
 
 const agent = (sourceIds: string[]): AgentSupply => ({
@@ -36,22 +36,30 @@ const agent = (sourceIds: string[]): AgentSupply => ({
 });
 
 describe('readOpenCodeMenuBaseline', () => {
-  it('regroups once when concurrent reads expose a source-membership hole', async () => {
-    const getAgentSources = vi.fn()
-      .mockResolvedValueOnce(agent(['src_a', 'src_new']))
-      .mockResolvedValueOnce(agent(['src_a', 'src_new']));
-    const readValue = vi.fn()
-      .mockResolvedValueOnce([source('src_a')])
-      .mockResolvedValueOnce([source('src_a'), source('src_new')]);
+  it('accepts an Agent read bracketed by identical complete Source snapshots', async () => {
+    const getAgentSources = vi.fn().mockResolvedValue(agent(['src_a']));
+    const stable = [source('src_a', ['model-a'])];
+    const readValue = vi.fn().mockResolvedValue(stable);
 
     const baseline = await readOpenCodeMenuBaseline({ getAgentSources }, { readValue });
 
-    expect(baseline.sources.map(({ id }) => id)).toEqual(['src_a', 'src_new']);
-    expect(getAgentSources).toHaveBeenCalledTimes(2);
+    expect(baseline.sources).toEqual(stable);
+    expect(getAgentSources).toHaveBeenCalledTimes(1);
     expect(readValue).toHaveBeenCalledTimes(2);
   });
 
-  it('rejects a pair that still has a composition hole after regrouping', async () => {
+  it('rejects Source model content that changes across the Agent read', async () => {
+    const getAgentSources = vi.fn().mockResolvedValue(agent(['src_a']));
+    const readValue = vi.fn()
+      .mockResolvedValueOnce([source('src_a', ['retired-model'])])
+      .mockResolvedValueOnce([source('src_a')]);
+
+    await expect(readOpenCodeMenuBaseline({ getAgentSources }, { readValue })).rejects.toThrow(
+      'did not converge',
+    );
+  });
+
+  it('rejects stable Source snapshots with an Agent composition hole', async () => {
     const getAgentSources = vi.fn().mockResolvedValue(agent(['src_a', 'src_new']));
     const readValue = vi.fn().mockResolvedValue([source('src_a')]);
 

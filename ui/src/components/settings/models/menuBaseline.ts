@@ -13,33 +13,25 @@ export type OpenCodeMenuIntent = {
   removed: Set<string>;
 };
 
-const readPair = async (
-  api: Pick<ModelsApi, 'getAgentSources'>,
-  sourceReads: Pick<CollectionReadAuthority<Source[]>, 'readValue'>,
-): Promise<OpenCodeMenuBaseline> => {
-  const [agent, sources] = await Promise.all([
-    api.getAgentSources('opencode'),
-    sourceReads.readValue(),
-  ]);
-  if (agent.backend !== 'opencode' || agent.mode !== 'hub' || agent.menu_kind !== 'open') {
-    throw new Error('OpenCode Model Hub menu is unavailable');
-  }
-  return { agent, sources };
-};
+const sameSourceSnapshot = (left: Source[], right: Source[]): boolean =>
+  JSON.stringify(left) === JSON.stringify(right);
 
-/** A total menu write owns a dedicated pair, never the page's independently settled reads. */
+/** The Agent read is authoritative only when the complete Source projection is
+ * unchanged on both sides of it. Source ids alone cannot detect model edits. */
 export const readOpenCodeMenuBaseline = async (
   api: Pick<ModelsApi, 'getAgentSources'>,
   sourceReads: Pick<CollectionReadAuthority<Source[]>, 'readValue'>,
 ): Promise<OpenCodeMenuBaseline> => {
-  const first = await readPair(api, sourceReads);
-  if (!combineSourceOrderReads(first.agent, first.sources).hasHole) return first;
-
-  const regrouped = await readPair(api, sourceReads);
-  if (combineSourceOrderReads(regrouped.agent, regrouped.sources).hasHole) {
+  const before = await sourceReads.readValue();
+  const agent = await api.getAgentSources('opencode');
+  const after = await sourceReads.readValue();
+  if (agent.backend !== 'opencode' || agent.mode !== 'hub' || agent.menu_kind !== 'open') {
+    throw new Error('OpenCode Model Hub menu is unavailable');
+  }
+  if (!sameSourceSnapshot(before, after) || combineSourceOrderReads(agent, after).hasHole) {
     throw new Error('OpenCode Model Hub menu reads did not converge');
   }
-  return regrouped;
+  return { agent, sources: after };
 };
 
 export const openCodeMenuIntent = (

@@ -104,6 +104,7 @@ from .resolver import (
     allowed_origins,
     inspect_exact_hop,
     matching_v1_model_id as _matching_v1_model_id,
+    opencode_inventory_menu_ids,
     resolve_model_hub_turn,
     source_after_cooldown_recovery,
     source_eligible_for_backend,
@@ -3629,6 +3630,10 @@ class ModelHubService:
                 )
             except (TypeError, ValueError) as exc:
                 raise ModelHubError("mapping_target_unavailable") from exc
+            existing_checked = set(agent.menu.checked if agent.menu else ())
+            added = set(parsed_menu.checked) - existing_checked
+            if not added.issubset(opencode_inventory_menu_ids(config)):
+                raise ModelHubError("mapping_target_unavailable", status=409)
             agent.menu = parsed.menu
             agent.routes = parsed.routes
             await self._commit_synced(previous, config)
