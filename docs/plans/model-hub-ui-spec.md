@@ -231,7 +231,7 @@ make explicit.
 | --- | --- |
 | `POST /api/models/migration/scan` | The migration surface. None of these frames offers an import, and a scan with nothing to show it is not a screen. This is also the one row here that is not a mutation — the read-only `POST` counted out above — and it is listed anyway, because the question this table answers is 「where is this route drawn」 and not 「what does it write」 |
 | `POST /api/models/migration/apply` | The migration surface, following its own scan |
-| `PUT /api/models/agents/opencode/menu` | The open-menu configuration surface, which is where a menu is chosen; frame 01 renders the resulting supply and never edits the menu behind it |
+| `PUT /api/models/agents/opencode/menu` | The OpenCode model-menu dialog opened by frame 01's **Manage models** action. It is the one owner of the explicit open-menu selection; frame 01 renders the saved selection as route rows |
 | `POST /api/models/agents/<backend>/probe` | Diagnostics. It answers "would a turn resolve right now", which none of these frames asks — 01 reports the supply it already has, and a probe run from a page that is not asking would report on something the user is not looking at |
 
 ### 0.5 Contract-gap registry
@@ -821,7 +821,8 @@ state exit; held intent never bypasses the evidence column.
 | §1.1 | Group interrupted — a hop's source is gone | The enabled-Agent aggregate reads `interrupted`, no Agent is usable or waiting, and at least one member's chain names a source that no longer exists `[derived]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | The payload stops reporting the blocker → whichever aggregate the named Agents then produce. Adding the source again produces a different source and does not re-satisfy the stored hop, so the exit is §1.2's explicit remove/change of that exact stale pair |
 | §1.1 | Group interrupted — a hop's model is no longer callable | The enabled-Agent aggregate reads `interrupted`, no Agent is usable or waiting, and at least one member's chain pins a model its source no longer advertises `[derived]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | 重新拉取 on 06 puts the model back into that source's inventory → whichever aggregate the named Agents then produce. The contract keeps the hop visible and non-runnable until an explicit refresh or edit and never re-points it `[contract]`; §1.2 owns the explicit remove/change while allowing the unchanged stale pair to remain |
 | §1.1 | Backend has no usable source | Every candidate filtered out | F5 | `gateway.supply.none` | Any source becomes eligible; 来源顺序 → 03 |
-| §1.1 | Backend has no models | The group resolves to zero model rows `[derived]` | F5 | `gateway.group.emptyModels` | A model becomes available to that backend |
+| §1.1 | Fixed backend has no models | A fixed-menu backend resolves to zero model rows `[derived]` | F5 | `gateway.group.emptyModels` | A model becomes available to that backend |
+| §1.1 | OpenCode menu has no selection | OpenCode is in Hub mode and `menu.checked` is empty `[contract]` | F5 | `gateway.group.emptySelection`, `gateway.selectedModelCount_*`, `gateway.manageModels` | **Manage models** opens the OpenCode model-menu dialog; saving at least one eligible identifier returns to Ready with one route row per saved model |
 | §1.1 | No enabled Agent uses this backend | `mode` reads `hub` and `named_agents` is empty `[contract]` | F5 — a rendered report, not a request | `gateway.group.subtitle.gateway`, `gateway.group.mode.gateway`, `gateway.group.status.unused` | An enabled Agent begins using this backend; its model, Route and live rollup enter the aggregate and select Ready, unconfigured, waiting, degraded or interrupted |
 | §1.1 | Per-model route unconfigured | The page-grain `model_supply` row reads `chain_length: 0`; this structural branch is evaluated before the forced `has_runnable_hop: false` reading `[contract]` | F5 for the page-grain statement; an outstanding or failed chain detail read remains F2 only for its other derived columns | server-owned `models.launch.route_unconfigured`, consumed verbatim | Render the existing route-unconfigured family in the current-text slot; never gold 供给已暂停 / Supply paused. A later page-grain payload with `chain_length > 0` leaves this structural state and is dispatched by `has_runnable_hop` |
 | §1.1 | Per-model supply paused | The page-grain `model_supply` row reads `chain_length > 0` and `has_runnable_hop: false` `[contract]` | F5 for the page-grain marker; an outstanding or failed chain-collection member remains F2 only for its other derived columns | `legend.unavailable` in the existing current-text slot | Render 供给已暂停 / Supply paused immediately in `$--gold`; do not wait for the backend chain collection. A later page-grain payload with `has_runnable_hop: true` removes the marker; `chain_length: 0` instead enters Per-model route unconfigured. The collection member may still fill its other derived columns, but a pending or failed detail read cannot erase or replace this page-owned marker |
@@ -1458,10 +1459,13 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | `gateway.infoLabel` `[derived]` | 什么是网关路由 | What gateway routes are |
 | `gateway.info` `[derived]` | 网关路由决定每个 Agent 的型号在已有路由中的来源里先使用哪个上游来源;当额度不足、触发限流、服务端、认证或网络出错导致请求无法完成时，自动切换下一优先级。 | Gateway routes decide which upstream source each Agent's model uses first among the sources already configured in its route. When quota, rate-limit, server, authentication, or network failures prevent a request, the next priority is used automatically. |
 | `gateway.sourceOrder` | 调整优先级 | Adjust priority |
+| `gateway.manageModels` `[derived]` | 管理模型 | Manage models |
 | `gateway.switchToGateway` | 切换到网关 | Switch to gateway |
 | `gateway.switchToDirect` | 切到直连 | Switch to direct |
 | `gateway.modelCount_one` | {{count}} 个型号 | {{count}} model |
 | `gateway.modelCount_other` | {{count}} 个型号 | {{count}} models |
+| `gateway.selectedModelCount_one` `[derived]` | 已选 {{count}} 个模型 | {{count}} selected |
+| `gateway.selectedModelCount_other` `[derived]` | 已选 {{count}} 个模型 | {{count}} selected |
 | `gateway.group.subtitle.direct` `[frame]` | {{mode}} | {{mode}} |
 | `gateway.group.subtitle.gateway` `[frame]` | {{mode}} · {{health}} | {{mode}} · {{health}} |
 | `gateway.group.mode.direct` | 直连 | Direct |
@@ -1477,7 +1481,20 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | `gateway.supply.unread` `[derived]` | 后端供给情况没读到 · 网关本身正常 | Could not read this backend's supply · the gateway itself is fine |
 | `gateway.fail.switchToDirect` `[derived]` | 没能切回直连 | The switch back to direct did not go through |
 | `gateway.retry` `[derived]` | 重试 | Retry |
+| `gateway.group.emptySelection` `[derived]` | 尚未选择模型 | No models selected |
 | `gateway.group.emptyModels` `[derived]` | 这个后端没有可用型号 | This backend has no models |
+| `gateway.menu.title` `[derived]` | OpenCode 模型菜单 | OpenCode model menu |
+| `gateway.menu.description` `[derived]` | 选择 OpenCode 可通过网关使用的模型；保存后，在模型行中配置各自路由。 | Choose which models OpenCode can use through the gateway, then configure each selected model's route from its row. |
+| `gateway.menu.search` `[derived]` | 搜索模型或供应商 | Search models or sources |
+| `gateway.menu.selected` `[derived]` | 已选 {{selected}} / {{total}} | {{selected}} of {{total}} selected |
+| `gateway.menu.empty` `[derived]` | 没有可供 OpenCode 选择的模型 | No eligible source models are available |
+| `gateway.menu.configured` `[derived]` | 已有配置模型 | Existing configured model |
+| `gateway.menu.baselineUnavailable` `[derived]` | 模型菜单数据暂未更新，请等待刷新完成，或重试读取失败的区域后再编辑。 | Model menu data is not current. Wait for refresh, or retry the failed section before editing. |
+| `gateway.menu.noMatch` `[derived]` | 没有匹配的模型 | No models match this search |
+| `gateway.menu.save` `[derived]` | 保存选择 | Save selection |
+| `gateway.menu.saving` `[derived]` | 正在保存… | Saving… |
+| `gateway.menu.cancel` `[derived]` | 取消 | Cancel |
+| `gateway.menu.saveFailed` `[derived]` | 模型选择未保存，请重试 | The model selection was not saved |
 | `gateway.row.current` | {{source}} → {{model}} | {{source}} → {{model}} |
 | `gateway.row.currentTakeover` | {{source}} → {{model}}（已自动切换） | {{source}} → {{model}} (Taken over) |
 | `models.launch.route_unconfigured` `[contract]` | 模型 {{model}} 尚未配置路由。请前往 Models 配置。 | Model {{model}} has no configured route. Open Models to configure one. |
@@ -1729,8 +1746,9 @@ dispatch arbitrates → each backend's models resolve to these sources today.
 | `YcOFo` status | which Hub-mode backends have this source configured into a route — `adopted_by` (§1.0) | the complete server-derived Source projection, never a computation over chains (D-28) | no | — |
 | `wmROQ` / `Xitl7` footer buttons | Add subscription / Add API key | — | yes | 添加订阅 opens frame 13; its selected vendor opens 04. 添加 API Key opens 05 |
 | `f8w6Xp` + `pnYa0` rail | dispatch happens between the columns | decorative | no | — |
-| `GLylJ` backend group | backend tile, name, model count, head buttons, and one `{{mode}} · {{health}}` line | per-backend mode + supply health | head: buttons only | — |
+| `GLylJ` backend group | backend tile, name, model count, head buttons, and one `{{mode}} · {{health}}` line. For an open menu the count is the explicit selected count, never the number of models available from Sources | per-backend mode + supply health | head: buttons only | OpenCode's **Manage models** opens its model-menu dialog; other actions are registered below |
 | `ehGRK` / `bGsC7` 「调整优先级」 | — | — | yes | Open 03 **for that backend** |
+| OpenCode 「管理模型」 `[derived]` | — | `menu.checked` plus the server-owned eligible Source inventory | yes | Open the OpenCode model-menu dialog; the same action remains available in the empty row area |
 | `IyKyp` 「切换到网关」 | — | backend in 直连 | yes | Open the 10 confirm for that backend |
 | `z02Ep` / `gbrq2` 「切到直连」 | — | backend on the gateway | yes | That backend leaves the gateway immediately — **no confirm** (D-30) |
 | `Exx0a` model row | model id (mono 12), a chain chip, current-source text; `legend.unavailable` occupies that text slot when the page-grain row has no runnable hop | `AgentSupply.model_supply[].has_runnable_hop`; per-model AgentChain and its `current` member | yes | Open 02 for `(backend, model)` |
@@ -1835,19 +1853,37 @@ way into 06. §1.11 owns those controls so the cause vocabulary here and on 06 s
 vocabulary rather than a second set of card-only status strings.
 
 **A backend with zero model rows is a different emptiness from a backend with no usable
-source, and they must not share a message** `[derived]`. 没有可用来源 says *this backend
-has models and nothing can serve them* — the fix is a source. 「这个后端没有可用型号」 says
-*this backend has no models to serve* — the fix is a model. One message for both spends
-the single action the user takes on the strength of it, and spends it on the wrong thing
-half the time. The group keeps its header and its `<mode> · <status>` line either way;
-only the row area differs.
+source, and an open menu adds one more distinction** `[derived]`. 没有可用来源 says *this
+backend has selected models and nothing can serve them* — the fix is a source or route.
+「这个后端没有可用型号」 is reserved for a fixed backend whose catalog is genuinely empty.
+OpenCode with `menu.checked == []` instead says 「尚未选择模型」: the eligible Source
+inventory may be full, but none of it belongs to OpenCode's explicit menu until the user
+chooses it. A persisted Route left behind after a model is unchecked is dormant: it does
+not keep a row visible or trigger a chain read, and becomes visible with its saved mapping
+if that model is selected again. The group keeps its header and its `<mode> · <status>`
+line in every branch; only the row area differs.
 
-**This list states the cause and does not offer the fix, and that is a scope fact rather
-than an omission** `[derived]`. None of the covered frames draws the surface that edits a
-backend's model menu, so there is no add affordance on this list to keep enabled — and
-naming where that surface lives would be a navigation path, which §0.1 forbids this file
-to draw. The empty state claims the message and the preserved shell here, and claims a
-live add affordance only for the lists that actually draw one.
+**The OpenCode empty branch offers the exact fix in place** `[derived]`. **Manage models**
+is present both in the group head and beside 「尚未选择模型」. It opens a dialog populated
+only from the server-owned eligible Source inventory, deduplicated by the contract's
+OpenCode identifier. Saving performs `PUT /api/models/agents/opencode/menu`; a selected
+model with no Route then appears as an ordinary row whose current-text slot reads
+`gateway.group.status.unconfigured`, and that row opens frame 02. The dialog preserves
+the saved menu view, blocks dismissal while its write is outstanding, and retains the
+draft after a failed save. The dialog owns a dedicated `Source[]` → `AgentSupply` →
+`Source[]` read bracket rather than composing the page's independently settled regions.
+Search, selection, and save become available only when the complete Source projections on
+both sides are identical and the Agent projection has no source-composition hole. Save sends
+that observed menu as `baseline` beside the user's `menu` draft; the server derives additions,
+removals, and any view change, then applies that intent to the latest stored menu under the
+mutation lock. Concurrent unrelated selections therefore survive without another client-side
+pre-write read. Existing checked identifiers remain visible and selected even when their Route
+maps to a differently named upstream model. A failed or undecodable `PUT` is reconciled with
+another dedicated bracket before the dialog reports failure or enables another edit; the write
+is accepted when every requested addition is present and every requested removal is absent,
+regardless of unrelated concurrent selections. An unread or non-convergent bracket preserves
+the draft, shows `gateway.menu.baselineUnavailable`, and cannot issue the menu `PUT`; stale or
+absent data is never interpreted as an empty selection.
 
 **Extreme data**
 

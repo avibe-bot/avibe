@@ -71,6 +71,12 @@ export function listedModelIds(agent: AgentSupply): string[] {
   });
 }
 
+/** OpenCode rows are its saved menu, not dormant routes left behind by an earlier selection. */
+export function visibleModelIds(agent: AgentSupply): string[] {
+  if (agent.menu_kind !== 'open') return listedModelIds(agent);
+  return [...new Set(agent.menu?.checked ?? [])].filter(Boolean);
+}
+
 export const COLLAPSED_MODEL_LIMIT = 6;
 
 export type CollapsedModelRows = {
@@ -90,7 +96,7 @@ export function modelSupplyState(agent: AgentSupply, modelId: string): ModelSupp
 
 /** Keep the backend menu order stable while bounding each collapsed group. */
 export function collapsedModelRows(agent: AgentSupply, expanded = false): CollapsedModelRows {
-  const models = listedModelIds(agent);
+  const models = visibleModelIds(agent);
   if (expanded) return { visible: models, hidden: [] };
   return {
     visible: models.slice(0, COLLAPSED_MODEL_LIMIT),
@@ -103,7 +109,7 @@ export function modelChainRequests(agents: AgentSupply[]): ModelChainRequest[] {
   const requests = new Map<string, ModelChainRequest>();
   for (const agent of agents) {
     if (agent.mode !== 'hub') continue;
-    for (const modelId of listedModelIds(agent)) {
+    for (const modelId of visibleModelIds(agent)) {
       const key = modelChainKey(agent.backend, modelId);
       if (!requests.has(key)) requests.set(key, { backend: agent.backend, modelId });
     }

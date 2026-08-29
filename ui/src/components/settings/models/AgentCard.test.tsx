@@ -20,8 +20,10 @@ const runtime: RuntimeDependency = {
   manifest: { name: 'cliproxyapi', resolution: 'resolved', version: '1.0.0', source_sha: 'fixture', assets: [] },
   status: { installed_version: '1.0.0', verified: true, listening: null, health: 'ok', last_check: null },
 };
-const AgentCard = (props: Omit<ComponentProps<typeof RuntimeAgentCard>, 'runtime'>) =>
-  <RuntimeAgentCard {...props} runtime={freshRuntimeProjection(readyRegion(runtime))} />;
+type AgentCardProps = Omit<ComponentProps<typeof RuntimeAgentCard>, 'runtime' | 'onOpenModels'>
+  & Partial<Pick<ComponentProps<typeof RuntimeAgentCard>, 'onOpenModels'>>;
+const AgentCard = ({ onOpenModels = vi.fn(), ...props }: AgentCardProps) =>
+  <RuntimeAgentCard {...props} onOpenModels={onOpenModels} runtime={freshRuntimeProjection(readyRegion(runtime))} />;
 
 const localeInstance = (lng: 'en' | 'zh') => {
   const instance = createInstance();
@@ -45,10 +47,65 @@ const hubAgent: AgentSupply = {
   routes: { 'claude-opus-4-6': { hops: [{ source_id: 'src_a', model_id: 'claude-opus-4-6' }, { source_id: 'src_b', model_id: 'claude-opus-4-6' }] } },
   supply_status: 'degraded', model_supply: [{ model_id: 'claude-opus-4-6', chain_length: 2, has_runnable_hop: true }], named_agents: [{ name: 'claude', effective_model_id: 'claude-opus-4-6', supply_status: 'degraded' }], builtin_models: ['claude-opus-4-6'], menu: null,
 };
+const openCodeAgent: AgentSupply = {
+  backend: 'opencode',
+  cli_present: true,
+  mode: 'hub',
+  menu_kind: 'open',
+  selected_model_id: null,
+  selected_model_explicit: false,
+  sources: { order: ['src_a'], eligibility: [{ source_id: 'src_a', eligible: true }] },
+  routes: {},
+  supply_status: null,
+  model_supply: [],
+  named_agents: [{
+    name: 'opencode',
+    effective_model_id: 'openai/gpt-5.6-terra',
+    supply_status: 'interrupted',
+    route_reason: 'route_unconfigured',
+  }],
+  builtin_models: null,
+  standard_vendors: ['openai'],
+  menu: { view: 'featured', checked: [] },
+};
 
 afterEach(cleanup);
 
 describe('AgentCard', () => {
+  it('renders an empty OpenCode selection as configurable rather than as missing backend supply', async () => {
+    const onOpenModels = vi.fn();
+    const retainedModelId = 'openai/gpt-5.6-luna';
+    const agentWithRetainedRoute = {
+      ...openCodeAgent,
+      routes: { [retainedModelId]: { hops: [{ source_id: 'src_a', model_id: 'gpt-5.6-luna' }] } },
+      model_supply: [{ model_id: retainedModelId, chain_length: 1, has_runnable_hop: true }],
+    };
+    render(<I18nextProvider i18n={localeInstance('zh')}><AgentCard agents={[agentWithRetainedRoute]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenModels={onOpenModels} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
+
+    expect(screen.getByText('网关 · 未配置模型路由')).toBeTruthy();
+    expect(screen.getByText('已选 0 个模型')).toBeTruthy();
+    expect(screen.getByText('尚未选择模型')).toBeTruthy();
+    expect(screen.queryByText(retainedModelId)).toBeNull();
+    expect(screen.queryByText('这个后端没有可用模型')).toBeNull();
+
+    await userEvent.click(screen.getAllByRole('button', { name: '管理模型' })[0]);
+    expect(onOpenModels).toHaveBeenCalledWith(agentWithRetainedRoute);
+  });
+
+  it('labels a selected OpenCode model with an empty route as unconfigured', () => {
+    const modelId = 'openai/gpt-5.6-luna';
+    render(<I18nextProvider i18n={localeInstance('zh')}><AgentCard agents={[{
+      ...openCodeAgent,
+      menu: { view: 'featured', checked: [modelId] },
+      model_supply: [{ model_id: modelId, chain_length: 0, has_runnable_hop: false }],
+    }]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
+
+    expect(screen.getByText('已选 1 个模型')).toBeTruthy();
+    expect(screen.getByText(modelId)).toBeTruthy();
+    expect(screen.getByText('未配置模型路由')).toBeTruthy();
+    expect(screen.queryByText('没有可用供应商')).toBeNull();
+  });
+
   it.each([
     ['en', 'Gateway · Supply unavailable for now'],
     ['zh', '网关 · 等待供应商恢复'],
@@ -142,7 +199,7 @@ describe('AgentCard', () => {
   it('hides current and takeover projections while the runtime is stopped', () => {
     const key = modelChainKey('claude', 'claude-opus-4-6');
     const stopped = { ...runtime, status: { ...runtime.status, health: 'down' as const } };
-    render(<I18nextProvider i18n={i18n}><RuntimeAgentCard runtime={freshRuntimeProjection(readyRegion(stopped))} agents={[hubAgent]} sources={[source('src_a', 'Primary'), source('src_b', 'Backup')]} chains={{ [key]: readyRegion({ contract_version: 6, backend: 'claude', model_id: 'claude-opus-4-6', current: { source_id: 'src_b', model_id: 'claude-opus-4-6' }, chain: [{ source_id: 'src_a', model_id: 'claude-opus-4-6', channel: 'hub', health: 'cooldown', runnable: false, reason: null, retry_at: '2099-01-01T00:00:00Z' }, { source_id: 'src_b', model_id: 'claude-opus-4-6', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }], supply_state: 'ok' }) }} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><RuntimeAgentCard runtime={freshRuntimeProjection(readyRegion(stopped))} agents={[hubAgent]} sources={[source('src_a', 'Primary'), source('src_b', 'Backup')]} chains={{ [key]: readyRegion({ contract_version: 6, backend: 'claude', model_id: 'claude-opus-4-6', current: { source_id: 'src_b', model_id: 'claude-opus-4-6' }, chain: [{ source_id: 'src_a', model_id: 'claude-opus-4-6', channel: 'hub', health: 'cooldown', runnable: false, reason: null, retry_at: '2099-01-01T00:00:00Z' }, { source_id: 'src_b', model_id: 'claude-opus-4-6', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }], supply_state: 'ok' }) }} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenModels={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
 
     expect(screen.queryByText(/Backup/)).toBeNull();
     expect(screen.queryByText(/takeover/i)).toBeNull();

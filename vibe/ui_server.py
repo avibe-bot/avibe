@@ -4641,8 +4641,10 @@ async def model_hub_opencode_menu_put():
     from core.handlers.model_hub import ModelHubError
 
     try:
+        payload = _model_hub_json_object("mapping_target_unavailable")
         agent = await _model_hub_service().set_opencode_menu(
-            _model_hub_json_object("mapping_target_unavailable").get("menu")
+            payload.get("baseline"),
+            payload.get("menu"),
         )
         return _model_hub_success(agent=agent)
     except ModelHubError as exc:

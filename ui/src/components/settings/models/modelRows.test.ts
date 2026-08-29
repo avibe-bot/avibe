@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { COLLAPSED_MODEL_LIMIT, collapsedModelRows, listedModelIds, modelChainKey, modelChainRequests, modelSupplyState } from './modelRows';
+import { COLLAPSED_MODEL_LIMIT, collapsedModelRows, listedModelIds, modelChainKey, modelChainRequests, modelSupplyState, visibleModelIds } from './modelRows';
 import type { AgentSupply } from './types';
 
 const agent: AgentSupply = {
@@ -20,6 +20,15 @@ describe('modelRows', () => {
       { backend: 'claude', modelId: 'route-only' },
     ]);
     expect(modelChainKey('claude', 'builtin')).toBe('claude\u0000builtin');
+  });
+
+  it('keeps dormant OpenCode routes hidden until their model is selected again', () => {
+    const open = { ...agent, backend: 'opencode' as const, menu_kind: 'open' as const, builtin_models: null, menu: { view: 'featured' as const, checked: [] } };
+
+    expect(visibleModelIds(open)).toEqual([]);
+    expect(collapsedModelRows(open)).toEqual({ visible: [], hidden: [] });
+    expect(modelChainRequests([open])).toEqual([]);
+    expect(visibleModelIds({ ...open, menu: { view: 'featured', checked: ['route-only'] } })).toEqual(['route-only']);
   });
 
 });

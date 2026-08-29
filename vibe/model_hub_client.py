@@ -171,8 +171,11 @@ class ModelHubRemoteService:
             {"backend": backend, "model_id": model_id, "chain": chain},
         )
 
-    async def set_opencode_menu(self, menu: object) -> dict:
-        return await _rpc("set_opencode_menu", {"menu": menu})
+    async def set_opencode_menu(self, baseline: object, menu: object) -> dict:
+        return await _rpc(
+            "set_opencode_menu",
+            {"baseline": baseline, "menu": menu},
+        )
 
     async def add_custom_model(self, source_id: object, payload: dict) -> dict:
         return await _rpc(

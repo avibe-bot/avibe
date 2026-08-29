@@ -15,6 +15,7 @@ import { EnableGatewayDialog } from './EnableGatewayDialog';
 import { GatewayModule } from './GatewayModule';
 import { InstallGatewayDialog } from './InstallGatewayDialog';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
+import { OpenCodeMenuDialog } from './OpenCodeMenuDialog';
 import { RecentSwitchesCard } from './RecentSwitchesCard';
 import { RouteChainDialog, type RouteCollectionObservation, type RouteCommitReconciliation, type RouteReport } from './RouteChainDialog';
 import { routeChainMatchesAttempt } from './routeChainDraft';
@@ -378,6 +379,7 @@ export const SettingsModelsPage: React.FC = () => {
   const sourceDetailHeadingRef = React.useRef<HTMLHeadingElement>(null);
   const sourceDetailReturnFocusRef = React.useRef<(() => HTMLElement | null) | null>(null);
   const [orderBackend, setOrderBackend] = React.useState<AgentBackend | null>(null);
+  const [menuBackend, setMenuBackend] = React.useState<AgentBackend | null>(null);
   const [adoptAgent, setAdoptAgent] = React.useState<AgentSupply | null>(null);
   const [routeTarget, setRouteTarget] = React.useState<{ agent: AgentSupply; modelId: string; opener: HTMLElement | null } | null>(null);
   const [routeCommitStatus, setRouteCommitStatus] = React.useState<RouteProjectionStatus | null>(null);
@@ -925,6 +927,7 @@ export const SettingsModelsPage: React.FC = () => {
   const selectedSource = sources.find((source) => source.id === selectedSourceId) ?? null;
   const sourceDetailOpen = selectedSourceId !== null && subscriptionVendor === null;
   const orderAgent = agents.find((agent) => agent.backend === orderBackend && agent.mode === 'hub') ?? null;
+  const menuAgent = agents.find((agent) => agent.backend === menuBackend && agent.backend === 'opencode' && agent.mode === 'hub') ?? null;
   const currentRouteAgent = routeTarget
     ? installedAgents.find((agent) => agent.backend === routeTarget.agent.backend) ?? null
     : null;
@@ -1307,7 +1310,7 @@ export const SettingsModelsPage: React.FC = () => {
                           </PopoverContent>
                         </Popover>
                         <div className="hidden xl:block" aria-hidden="true" />
-                        <GatewayModule supply={installedSupplyRead} readFailureCopy={routeCommitStatus?.failed.has('agents') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} sources={sources} chains={chains} runtime={runtime} runtimeSnapshot={retainedRuntime} onRetry={() => routeCommitStatus?.failed.has('agents') ? retryRouteCommit() : void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={setAdoptAgent} onSwitchDirect={switchToDirect} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId, opener) => setRouteTarget({ agent, modelId, opener })} onProbeSettled={(agent) => void refreshAgentChains(agent)} />
+                        <GatewayModule supply={installedSupplyRead} readFailureCopy={routeCommitStatus?.failed.has('agents') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} sources={sources} chains={chains} runtime={runtime} runtimeSnapshot={retainedRuntime} onRetry={() => routeCommitStatus?.failed.has('agents') ? retryRouteCommit() : void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={setAdoptAgent} onSwitchDirect={switchToDirect} onOpenModels={(agent) => setMenuBackend(agent.backend)} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId, opener) => setRouteTarget({ agent, modelId, opener })} onProbeSettled={(agent) => void refreshAgentChains(agent)} />
                         <SupplyGraph containerRef={overviewRef} relations={supplyRelations} />
                       </div>
                       <SupplyLegend relations={supplyRelations} />
@@ -1380,6 +1383,7 @@ export const SettingsModelsPage: React.FC = () => {
         />
       )}
       {orderAgent && <SourceOrderDrawer open agent={orderAgent} sources={sources} sourceReads={sourceCollectionReads} onClose={() => setOrderBackend(null)} onSaved={agentSaved} orderWrite={{ pending: agentWrites.has(orderAgent.backend), track: (work) => agentWriteRegistry.track(orderAgent.backend, work) }} />}
+      {menuAgent && <OpenCodeMenuDialog open sourceReads={sourceCollectionReads} onClose={() => setMenuBackend(null)} onSaved={agentSaved} onObserved={applyAgentEcho} menuWrite={{ pending: agentWrites.has(menuAgent.backend), track: (work) => agentWriteRegistry.track(menuAgent.backend, work) }} />}
       <RouteChainDialog
         selection={routeSelection}
         sources={sources}

@@ -141,7 +141,10 @@ async def dispatch_model_hub_rpc(
         )
     if operation == "set_opencode_menu":
         await _refresh_agent_presence(service, ("opencode",))
-        return await service.set_opencode_menu(payload.get("menu"))
+        return await service.set_opencode_menu(
+            payload.get("baseline"),
+            payload.get("menu"),
+        )
     if operation == "add_custom_model":
         return await service.add_custom_model(payload.get("source_id"), payload.get("model"))
     if operation == "update_model_reasoning_efforts":

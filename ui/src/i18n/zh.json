@@ -892,6 +892,7 @@
         "infoLabel": "什么是路由",
         "info": "路由决定每个 Agent 的模型优先使用哪个供应商；当前供应商不可用时，模型网关按优先级自动切换。",
         "sourceOrder": "调整优先级",
+        "manageModels": "管理模型",
         "switchToGateway": "切换到模型网关",
         "switchToDirect": "切到直连",
         "modeMenu": {
@@ -905,6 +906,8 @@
         },
         "modelCount_one": "{{count}} 个模型",
         "modelCount_other": "{{count}} 个模型",
+        "selectedModelCount_one": "已选 {{count}} 个模型",
+        "selectedModelCount_other": "已选 {{count}} 个模型",
         "moreModels_one": "还有 {{count}} 个模型",
         "moreModels_other": "还有 {{count}} 个模型",
         "collapse": "收起",
@@ -934,7 +937,22 @@
             "unconfigured": "未配置模型路由",
             "unused": "暂无 Agent 使用"
           },
+          "emptySelection": "尚未选择模型",
           "emptyModels": "这个后端没有可用模型"
+        },
+        "menu": {
+          "title": "OpenCode 模型菜单",
+          "description": "选择 OpenCode 可通过网关使用的模型；保存后，在模型行中配置各自路由。",
+          "search": "搜索模型或供应商",
+          "selected": "已选 {{selected}} / {{total}}",
+          "empty": "没有可供 OpenCode 选择的模型",
+          "configured": "已有配置模型",
+          "baselineUnavailable": "模型菜单数据暂未更新，请等待刷新完成，或重试读取失败的区域后再编辑。",
+          "noMatch": "没有匹配的模型",
+          "save": "保存选择",
+          "saving": "正在保存…",
+          "cancel": "取消",
+          "saveFailed": "模型选择未保存，请重试"
         }
       },
       "takeover": {
