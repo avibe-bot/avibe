@@ -39,33 +39,38 @@ export const OpenCodeMenuDialog: React.FC<{
   open: boolean;
   agent: AgentSupply;
   sources: Source[];
+  inventoryReady: boolean;
   onClose: () => void;
   onSaved: (echoed: AgentSupply) => void | Promise<void>;
   menuWrite: PendingWrite;
-}> = ({ open, agent, sources, onClose, onSaved, menuWrite }) => {
+}> = ({ open, agent, sources, inventoryReady, onClose, onSaved, menuWrite }) => {
   const { t } = useTranslation();
   const models = React.useMemo(() => selectableModels(agent, sources), [agent, sources]);
   const availableIds = React.useMemo(() => new Set(models.map((model) => model.id)), [models]);
   const rawChecked = React.useMemo(() => agent.menu?.checked ?? [], [agent.menu?.checked]);
   const savedChecked = React.useMemo(
-    () => (agent.menu?.checked ?? []).filter((id) => availableIds.has(id)),
-    [agent.menu?.checked, availableIds],
+    () => inventoryReady ? rawChecked.filter((id) => availableIds.has(id)) : rawChecked,
+    [availableIds, inventoryReady, rawChecked],
   );
   const [selected, setSelected] = React.useState<Set<string>>(() => new Set(savedChecked));
   const [query, setQuery] = React.useState('');
   const [saveFailed, setSaveFailed] = React.useState(false);
   const seed = React.useRef(initialSeedState);
 
-  const authoritative = savedMenuKey(agent.menu);
+  const inventoryKey = React.useMemo(() => JSON.stringify(models.map((model) => model.id)), [models]);
+  const [lastReadyInventory, setLastReadyInventory] = React.useState<string | null>(() => inventoryReady ? inventoryKey : null);
+  const inventoryAuthority = inventoryReady ? inventoryKey : lastReadyInventory ?? 'unread';
+  const authoritative = JSON.stringify([savedMenuKey(agent.menu), inventoryAuthority]);
   React.useEffect(() => {
     if (!open) return;
+    if (inventoryReady && lastReadyInventory !== inventoryKey) setLastReadyInventory(inventoryKey);
     const step = seedStep(seed.current, authoritative);
     seed.current = step.state;
     if (!step.reseed) return;
     setSelected(new Set(savedChecked));
     setQuery('');
     setSaveFailed(false);
-  }, [open, authoritative, savedChecked]);
+  }, [open, authoritative, inventoryKey, inventoryReady, lastReadyInventory, savedChecked]);
 
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const visibleModels = normalizedQuery
@@ -75,7 +80,7 @@ export const OpenCodeMenuDialog: React.FC<{
   const dirty = selected.size !== savedSet.size || [...selected].some((id) => !savedSet.has(id));
 
   const toggle = (id: string) => {
-    if (menuWrite.pending) return;
+    if (!inventoryReady || menuWrite.pending) return;
     setSaveFailed(false);
     setSelected((previous) => {
       const next = new Set(previous);
@@ -86,7 +91,7 @@ export const OpenCodeMenuDialog: React.FC<{
   };
 
   const save = () => {
-    if (!dirty || menuWrite.pending) return;
+    if (!inventoryReady || !dirty || menuWrite.pending) return;
     setSaveFailed(false);
     void menuWrite.track(async () => {
       let echoed: AgentSupply;
@@ -130,14 +135,20 @@ export const OpenCodeMenuDialog: React.FC<{
               placeholder={t('settings.models.gateway.menu.search') as string}
               aria-label={t('settings.models.gateway.menu.search') as string}
               className="min-w-0 flex-1 text-[12.5px]"
-              disabled={menuWrite.pending}
+              disabled={!inventoryReady || menuWrite.pending}
             />
           </div>
-          <span className="shrink-0 text-[11px] font-semibold text-muted">{t('settings.models.gateway.menu.selected', { selected: selected.size, total: models.length })}</span>
+          <span className="shrink-0 text-[11px] font-semibold text-muted">
+            {inventoryReady
+              ? t('settings.models.gateway.menu.selected', { selected: selected.size, total: models.length })
+              : t('settings.models.gateway.selectedModelCount', { count: selected.size })}
+          </span>
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-border bg-background p-1.5">
-          {models.length === 0 ? (
+          {!inventoryReady ? (
+            <p className="px-4 py-10 text-center text-[12.5px] text-muted">{t('settings.models.gateway.menu.inventoryUnavailable')}</p>
+          ) : models.length === 0 ? (
             <p className="px-4 py-10 text-center text-[12.5px] text-muted">{t('settings.models.gateway.menu.empty')}</p>
           ) : visibleModels.length === 0 ? (
             <p className="px-4 py-10 text-center text-[12.5px] text-muted">{t('settings.models.gateway.menu.noMatch')}</p>
@@ -151,7 +162,7 @@ export const OpenCodeMenuDialog: React.FC<{
                     type="button"
                     role="checkbox"
                     aria-checked={checked}
-                    disabled={menuWrite.pending}
+                    disabled={!inventoryReady || menuWrite.pending}
                     onClick={() => toggle(model.id)}
                     className={cn(
                       'flex min-h-11 w-full min-w-0 items-center gap-3 rounded-md px-3 py-2 text-left transition-colors hover:bg-surface-2 disabled:opacity-50',
@@ -174,7 +185,7 @@ export const OpenCodeMenuDialog: React.FC<{
           <div className="min-h-5 text-[11px] font-semibold text-destructive-ink" role="status">{saveFailed ? t('settings.models.gateway.menu.saveFailed') : null}</div>
           <div className="flex w-full flex-col-reverse gap-2 sm:w-auto sm:flex-row">
             <Button type="button" variant="outline" onClick={onClose} disabled={menuWrite.pending}>{t('settings.models.gateway.menu.cancel')}</Button>
-            <Button type="button" onClick={save} disabled={!dirty || menuWrite.pending}>
+            <Button type="button" onClick={save} disabled={!inventoryReady || !dirty || menuWrite.pending}>
               {menuWrite.pending && <LoaderCircle className="animate-spin" aria-hidden="true" />}
               {t(menuWrite.pending ? 'settings.models.gateway.menu.saving' : 'settings.models.gateway.menu.save')}
             </Button>

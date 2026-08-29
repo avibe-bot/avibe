@@ -1488,6 +1488,7 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | `gateway.menu.search` `[derived]` | 搜索模型或供应商 | Search models or sources |
 | `gateway.menu.selected` `[derived]` | 已选 {{selected}} / {{total}} | {{selected}} of {{total}} selected |
 | `gateway.menu.empty` `[derived]` | 没有可供 OpenCode 选择的模型 | No eligible source models are available |
+| `gateway.menu.inventoryUnavailable` `[derived]` | 暂时无法读取模型清单，请先重试供应商列表，再编辑此选择。 | Model inventory is unavailable. Retry the source list before editing this selection. |
 | `gateway.menu.noMatch` `[derived]` | 没有匹配的模型 | No models match this search |
 | `gateway.menu.save` `[derived]` | 保存选择 | Save selection |
 | `gateway.menu.saving` `[derived]` | 正在保存… | Saving… |
@@ -1856,8 +1857,10 @@ backend has selected models and nothing can serve them* — the fix is a source 
 「这个后端没有可用型号」 is reserved for a fixed backend whose catalog is genuinely empty.
 OpenCode with `menu.checked == []` instead says 「尚未选择模型」: the eligible Source
 inventory may be full, but none of it belongs to OpenCode's explicit menu until the user
-chooses it. The group keeps its header and its `<mode> · <status>` line in every branch;
-only the row area differs.
+chooses it. A persisted Route left behind after a model is unchecked is dormant: it does
+not keep a row visible or trigger a chain read, and becomes visible with its saved mapping
+if that model is selected again. The group keeps its header and its `<mode> · <status>`
+line in every branch; only the row area differs.
 
 **The OpenCode empty branch offers the exact fix in place** `[derived]`. **Manage models**
 is present both in the group head and beside 「尚未选择模型」. It opens a dialog populated
@@ -1866,7 +1869,10 @@ OpenCode identifier. Saving performs `PUT /api/models/agents/opencode/menu`; a s
 model with no Route then appears as an ordinary row whose current-text slot reads
 `gateway.group.status.unconfigured`, and that row opens frame 02. The dialog preserves
 the saved menu view, blocks dismissal while its write is outstanding, and retains the
-draft after a failed save.
+draft after a failed save. The Source inventory must be an authoritative ready read before
+the dialog enables search, selection, or save. An unread or failed inventory preserves the
+stored `menu.checked` values, shows `gateway.menu.inventoryUnavailable`, and cannot issue
+the menu `PUT`; stale or absent inventory is never interpreted as an empty selection.
 
 **Extreme data**
 

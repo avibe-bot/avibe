@@ -6,7 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ResponsiveMenu } from '@/components/ui/responsive-menu';
 import { cn } from '@/lib/utils';
-import { collapsedModelRows, listedModelIds, modelChainKey, modelSupplyState, type ModelChainIndex, type ModelChainRead } from './modelRows';
+import { collapsedModelRows, modelChainKey, modelSupplyState, visibleModelIds, type ModelChainIndex, type ModelChainRead } from './modelRows';
 import { foldRegionRead } from './regionRead';
 import { agentGroupStatus } from './supply';
 import { agentHasLiveChainProjection, type FreshRuntimeProjection } from './runtimeLifecycle';
@@ -116,7 +116,7 @@ const AgentModelCard: React.FC<{
   const { Icon, accent } = backendVisual(agent.backend);
   const [expanded, setExpanded] = React.useState(false);
   const [modeMenuOpen, setModeMenuOpen] = React.useState(false);
-  const allModels = listedModelIds(agent);
+  const allModels = visibleModelIds(agent);
   const hasOpenMenu = agent.menu_kind === 'open';
   const displayedModelCount = hasOpenMenu ? agent.menu?.checked.length ?? 0 : allModels.length;
   const chainProjectionLive = agentHasLiveChainProjection(runtime, agent);

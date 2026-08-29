@@ -1383,7 +1383,7 @@ export const SettingsModelsPage: React.FC = () => {
         />
       )}
       {orderAgent && <SourceOrderDrawer open agent={orderAgent} sources={sources} sourceReads={sourceCollectionReads} onClose={() => setOrderBackend(null)} onSaved={agentSaved} orderWrite={{ pending: agentWrites.has(orderAgent.backend), track: (work) => agentWriteRegistry.track(orderAgent.backend, work) }} />}
-      {menuAgent && <OpenCodeMenuDialog open agent={menuAgent} sources={sources} onClose={() => setMenuBackend(null)} onSaved={agentSaved} menuWrite={{ pending: agentWrites.has(menuAgent.backend), track: (work) => agentWriteRegistry.track(menuAgent.backend, work) }} />}
+      {menuAgent && <OpenCodeMenuDialog open agent={menuAgent} sources={sources} inventoryReady={sourcesRead.kind === 'ready'} onClose={() => setMenuBackend(null)} onSaved={agentSaved} menuWrite={{ pending: agentWrites.has(menuAgent.backend), track: (work) => agentWriteRegistry.track(menuAgent.backend, work) }} />}
       <RouteChainDialog
         selection={routeSelection}
         sources={sources}

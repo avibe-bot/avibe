@@ -74,15 +74,22 @@ afterEach(cleanup);
 describe('AgentCard', () => {
   it('renders an empty OpenCode selection as configurable rather than as missing backend supply', async () => {
     const onOpenModels = vi.fn();
-    render(<I18nextProvider i18n={localeInstance('zh')}><AgentCard agents={[openCodeAgent]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenModels={onOpenModels} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
+    const retainedModelId = 'openai/gpt-5.6-luna';
+    const agentWithRetainedRoute = {
+      ...openCodeAgent,
+      routes: { [retainedModelId]: { hops: [{ source_id: 'src_a', model_id: 'gpt-5.6-luna' }] } },
+      model_supply: [{ model_id: retainedModelId, chain_length: 1, has_runnable_hop: true }],
+    };
+    render(<I18nextProvider i18n={localeInstance('zh')}><AgentCard agents={[agentWithRetainedRoute]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenModels={onOpenModels} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
 
     expect(screen.getByText('网关 · 未配置模型路由')).toBeTruthy();
     expect(screen.getByText('已选 0 个模型')).toBeTruthy();
     expect(screen.getByText('尚未选择模型')).toBeTruthy();
+    expect(screen.queryByText(retainedModelId)).toBeNull();
     expect(screen.queryByText('这个后端没有可用模型')).toBeNull();
 
     await userEvent.click(screen.getAllByRole('button', { name: '管理模型' })[0]);
-    expect(onOpenModels).toHaveBeenCalledWith(openCodeAgent);
+    expect(onOpenModels).toHaveBeenCalledWith(agentWithRetainedRoute);
   });
 
   it('labels a selected OpenCode model with an empty route as unconfigured', () => {

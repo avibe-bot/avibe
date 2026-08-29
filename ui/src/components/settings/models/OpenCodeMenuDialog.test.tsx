@@ -82,6 +82,7 @@ describe('OpenCodeMenuDialog', () => {
           open
           agent={agent}
           sources={sources}
+          inventoryReady
           onClose={onClose}
           onSaved={onSaved}
           menuWrite={{ pending: false, track: async (work) => work() }}
@@ -113,6 +114,7 @@ describe('OpenCodeMenuDialog', () => {
           open
           agent={{ ...agent, menu: { view: 'full', checked: ['openai/gpt-5.6-sol'] } }}
           sources={sources}
+          inventoryReady
           onClose={vi.fn()}
           onSaved={vi.fn()}
           menuWrite={{ pending: false, track: async (work) => work() }}
@@ -135,6 +137,7 @@ describe('OpenCodeMenuDialog', () => {
           open
           agent={{ ...agent, menu: { view: 'featured', checked: ['openai/missing-model'] } }}
           sources={sources}
+          inventoryReady
           onClose={vi.fn()}
           onSaved={vi.fn()}
           menuWrite={{ pending: false, track: async (work) => work() }}
@@ -145,5 +148,30 @@ describe('OpenCodeMenuDialog', () => {
     expect(screen.getByText('0 of 2 selected')).toBeTruthy();
     await user.click(screen.getByRole('button', { name: 'Save selection' }));
     await waitFor(() => expect(putMenu).toHaveBeenCalledWith({ view: 'featured', checked: [] }));
+  });
+
+  it('keeps the saved menu immutable while source inventory is unread', async () => {
+    const user = userEvent.setup();
+    const putMenu = vi.spyOn(modelsApi, 'putMenu');
+    render(
+      <I18nextProvider i18n={i18n}>
+        <OpenCodeMenuDialog
+          open
+          agent={{ ...agent, menu: { view: 'featured', checked: ['openai/gpt-5.6-luna'] } }}
+          sources={[]}
+          inventoryReady={false}
+          onClose={vi.fn()}
+          onSaved={vi.fn()}
+          menuWrite={{ pending: false, track: async (work) => work() }}
+        />
+      </I18nextProvider>,
+    );
+
+    expect(screen.getByText('1 selected')).toBeTruthy();
+    expect(screen.getByText('Model inventory is unavailable. Retry the source list before editing this selection.')).toBeTruthy();
+    const save = screen.getByRole('button', { name: 'Save selection' });
+    expect(save.hasAttribute('disabled')).toBe(true);
+    await user.click(save);
+    expect(putMenu).not.toHaveBeenCalled();
   });
 });

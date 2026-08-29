@@ -946,6 +946,7 @@
           "search": "Search models or sources",
           "selected": "{{selected}} of {{total}} selected",
           "empty": "No eligible source models are available",
+          "inventoryUnavailable": "Model inventory is unavailable. Retry the source list before editing this selection.",
           "noMatch": "No models match this search",
           "save": "Save selection",
           "saving": "Saving…",
