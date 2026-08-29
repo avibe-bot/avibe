@@ -134,15 +134,15 @@ scenarios:
     kind: guardrail
     layer: scenario
     test: tests/test_memory_disabled_isolation.py::test_memory_indep_017_core_workflows_run_without_avibe_memory
-  - id: MEMORY-INDEP-019
-    name: Forward upgrades inspect Memory package shape without retired lifecycle imports
-    status: covered
-    kind: guardrail
-    layer: scenario
-    test: tests/scenarios/memory_independence/test_memory_package_shape.py::test_memory_indep_019_forward_memory_package_inspection
   - id: MEMORY-INDEP-021
     name: Not-required and unreadable Memory status imports no optional implementation
     status: covered
     kind: guardrail
     layer: scenario
     test: tests/test_local_deps.py::test_memory_indep_021_status_import_fence
+  - id: MEMORY-INDEP-024
+    name: Forward upgrades inspect Memory package shape without retired lifecycle imports
+    status: covered
+    kind: guardrail
+    layer: scenario
+    test: tests/scenarios/memory_independence/test_memory_package_shape.py::test_memory_indep_024_forward_memory_package_inspection
