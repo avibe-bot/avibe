@@ -946,6 +946,7 @@
           "search": "搜索模型或供应商",
           "selected": "已选 {{selected}} / {{total}}",
           "empty": "没有可供 OpenCode 选择的模型",
+          "configured": "已有配置模型",
           "baselineUnavailable": "模型菜单数据暂未更新，请等待刷新完成，或重试读取失败的区域后再编辑。",
           "noMatch": "没有匹配的模型",
           "save": "保存选择",

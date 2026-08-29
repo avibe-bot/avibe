@@ -25,7 +25,6 @@ import { SourceOrderDrawer } from './SourceOrderDrawer';
 import { SourcesCard } from './SourcesCard';
 import { modelsSurfaceKindFromReads } from './modelHubSurfaceState';
 import { focusModelHubProjection } from './modelHubFocus';
-import { openCodeMenuBaselineReady } from './menuBaseline';
 import { buildSupplyRelations } from './supplyRelations';
 import {
   emptySuspendedRouteAttempts,
@@ -929,7 +928,6 @@ export const SettingsModelsPage: React.FC = () => {
   const sourceDetailOpen = selectedSourceId !== null && subscriptionVendor === null;
   const orderAgent = agents.find((agent) => agent.backend === orderBackend && agent.mode === 'hub') ?? null;
   const menuAgent = agents.find((agent) => agent.backend === menuBackend && agent.backend === 'opencode' && agent.mode === 'hub') ?? null;
-  const menuBaselineReady = openCodeMenuBaselineReady(supplyRead, sourcesRead);
   const currentRouteAgent = routeTarget
     ? installedAgents.find((agent) => agent.backend === routeTarget.agent.backend) ?? null
     : null;
@@ -1385,7 +1383,7 @@ export const SettingsModelsPage: React.FC = () => {
         />
       )}
       {orderAgent && <SourceOrderDrawer open agent={orderAgent} sources={sources} sourceReads={sourceCollectionReads} onClose={() => setOrderBackend(null)} onSaved={agentSaved} orderWrite={{ pending: agentWrites.has(orderAgent.backend), track: (work) => agentWriteRegistry.track(orderAgent.backend, work) }} />}
-      {menuAgent && <OpenCodeMenuDialog open agent={menuAgent} sources={sources} baselineReady={menuBaselineReady} onClose={() => setMenuBackend(null)} onSaved={agentSaved} menuWrite={{ pending: agentWrites.has(menuAgent.backend), track: (work) => agentWriteRegistry.track(menuAgent.backend, work) }} />}
+      {menuAgent && <OpenCodeMenuDialog open sourceReads={sourceCollectionReads} onClose={() => setMenuBackend(null)} onSaved={agentSaved} onObserved={applyAgentEcho} menuWrite={{ pending: agentWrites.has(menuAgent.backend), track: (work) => agentWriteRegistry.track(menuAgent.backend, work) }} />}
       <RouteChainDialog
         selection={routeSelection}
         sources={sources}

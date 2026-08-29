@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { LoaderCircle, Search } from 'lucide-react';
+import { LoaderCircle, RefreshCw, Search } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
@@ -7,11 +7,19 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
-import { initialSeedState, savedMenuKey, seedStep, type PendingWrite } from './asyncLifetime';
+import type { PendingWrite } from './asyncLifetime';
+import type { CollectionReadAuthority } from './collectionReadAuthority';
 import { eligibleSources } from './eligibility';
+import {
+  applyOpenCodeMenuIntent,
+  openCodeMenuIntent,
+  readOpenCodeMenuBaseline,
+  sameOpenCodeMenu,
+  type OpenCodeMenuBaseline,
+} from './menuBaseline';
 import { buildIdentifier } from './menus/identifiers';
 import { modelsApi } from './modelsApi';
-import type { AgentSupply, Source } from './types';
+import type { AgentMenu, AgentSupply, Source } from './types';
 
 type MenuModel = {
   id: string;
@@ -21,6 +29,7 @@ type MenuModel = {
 const selectableModels = (agent: AgentSupply, sources: Source[]): MenuModel[] => {
   const standardVendors = new Set(agent.standard_vendors ?? []);
   const namesById = new Map<string, Set<string>>();
+  const sourceNames = new Map(sources.map((source) => [source.id, source.display_name]));
   for (const source of eligibleSources(sources, agent)) {
     for (const model of source.models) {
       if (model.retired) continue;
@@ -30,6 +39,15 @@ const selectableModels = (agent: AgentSupply, sources: Source[]): MenuModel[] =>
       namesById.set(id, names);
     }
   }
+  for (const id of agent.menu?.checked ?? []) {
+    if (namesById.has(id)) continue;
+    const names = new Set<string>();
+    for (const hop of agent.routes?.[id]?.hops ?? []) {
+      const name = sourceNames.get(hop.source_id);
+      if (name) names.add(name);
+    }
+    namesById.set(id, names);
+  }
   return [...namesById.entries()]
     .map(([id, names]) => ({ id, sourceNames: [...names].sort((left, right) => left.localeCompare(right)) }))
     .sort((left, right) => left.id.localeCompare(right.id));
@@ -37,40 +55,64 @@ const selectableModels = (agent: AgentSupply, sources: Source[]): MenuModel[] =>
 
 export const OpenCodeMenuDialog: React.FC<{
   open: boolean;
-  agent: AgentSupply;
-  sources: Source[];
-  baselineReady: boolean;
+  sourceReads: Pick<CollectionReadAuthority<Source[]>, 'readValue'>;
   onClose: () => void;
   onSaved: (echoed: AgentSupply) => void | Promise<void>;
+  onObserved: (observed: AgentSupply) => void | Promise<void>;
   menuWrite: PendingWrite;
-}> = ({ open, agent, sources, baselineReady, onClose, onSaved, menuWrite }) => {
+}> = ({ open, sourceReads, onClose, onSaved, onObserved, menuWrite }) => {
   const { t } = useTranslation();
-  const models = React.useMemo(() => selectableModels(agent, sources), [agent, sources]);
-  const availableIds = React.useMemo(() => new Set(models.map((model) => model.id)), [models]);
-  const rawChecked = React.useMemo(() => agent.menu?.checked ?? [], [agent.menu?.checked]);
-  const savedChecked = React.useMemo(
-    () => baselineReady ? rawChecked.filter((id) => availableIds.has(id)) : rawChecked,
-    [availableIds, baselineReady, rawChecked],
+  const [baseline, setBaseline] = React.useState<OpenCodeMenuBaseline | null>(null);
+  const baselineRef = React.useRef<OpenCodeMenuBaseline | null>(null);
+  const [readState, setReadState] = React.useState<'loading' | 'ready' | 'error'>('loading');
+  const [selected, setSelectedState] = React.useState<Set<string>>(new Set());
+  const selectedRef = React.useRef<Set<string>>(new Set());
+  const readAttempt = React.useRef(0);
+  const models = React.useMemo(
+    () => baseline ? selectableModels(baseline.agent, baseline.sources) : [],
+    [baseline],
   );
-  const [selected, setSelected] = React.useState<Set<string>>(() => new Set(savedChecked));
+  const rawChecked = React.useMemo(() => baseline?.agent.menu?.checked ?? [], [baseline]);
   const [query, setQuery] = React.useState('');
   const [saveFailed, setSaveFailed] = React.useState(false);
-  const seed = React.useRef(initialSeedState);
 
-  const inventoryKey = React.useMemo(() => JSON.stringify(models.map((model) => model.id)), [models]);
-  const [lastReadyInventory, setLastReadyInventory] = React.useState<string | null>(() => baselineReady ? inventoryKey : null);
-  const inventoryAuthority = baselineReady ? inventoryKey : lastReadyInventory ?? 'unread';
-  const authoritative = JSON.stringify([savedMenuKey(agent.menu), inventoryAuthority]);
+  const applyBaseline = React.useCallback((next: OpenCodeMenuBaseline, checked: readonly string[]) => {
+    const nextSelected = new Set(checked);
+    baselineRef.current = next;
+    selectedRef.current = nextSelected;
+    setBaseline(next);
+    setSelectedState(nextSelected);
+    setReadState('ready');
+  }, []);
+
+  const loadBaseline = React.useCallback(async (preserveDraft: boolean) => {
+    const attempt = ++readAttempt.current;
+    const previous = baselineRef.current;
+    const intent = preserveDraft && previous
+      ? openCodeMenuIntent(previous.agent.menu?.checked ?? [], [...selectedRef.current])
+      : null;
+    setReadState('loading');
+    try {
+      const next = await readOpenCodeMenuBaseline(modelsApi, sourceReads);
+      if (attempt !== readAttempt.current) return;
+      const selectableIds = new Set(selectableModels(next.agent, next.sources).map((model) => model.id));
+      applyBaseline(
+        next,
+        intent
+          ? applyOpenCodeMenuIntent(next.agent.menu?.checked ?? [], intent, selectableIds)
+          : next.agent.menu?.checked ?? [],
+      );
+      setQuery('');
+      setSaveFailed(false);
+    } catch {
+      if (attempt === readAttempt.current) setReadState('error');
+    }
+  }, [applyBaseline, sourceReads]);
+
   React.useEffect(() => {
-    if (!open) return;
-    if (baselineReady && lastReadyInventory !== inventoryKey) setLastReadyInventory(inventoryKey);
-    const step = seedStep(seed.current, authoritative);
-    seed.current = step.state;
-    if (!step.reseed) return;
-    setSelected(new Set(savedChecked));
-    setQuery('');
-    setSaveFailed(false);
-  }, [open, authoritative, baselineReady, inventoryKey, lastReadyInventory, savedChecked]);
+    if (open) void loadBaseline(false);
+    else readAttempt.current += 1;
+  }, [loadBaseline, open]);
 
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const visibleModels = normalizedQuery
@@ -78,31 +120,69 @@ export const OpenCodeMenuDialog: React.FC<{
     : models;
   const savedSet = new Set(rawChecked);
   const dirty = selected.size !== savedSet.size || [...selected].some((id) => !savedSet.has(id));
+  const baselineReady = readState === 'ready' && baseline !== null;
 
   const toggle = (id: string) => {
     if (!baselineReady || menuWrite.pending) return;
     setSaveFailed(false);
-    setSelected((previous) => {
-      const next = new Set(previous);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
+    const next = new Set(selectedRef.current);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    selectedRef.current = next;
+    setSelectedState(next);
   };
 
   const save = () => {
-    if (!baselineReady || !dirty || menuWrite.pending) return;
+    const current = baselineRef.current;
+    if (!baselineReady || !current || !dirty || menuWrite.pending) return;
+    const intent = openCodeMenuIntent(
+      current.agent.menu?.checked ?? [],
+      [...selectedRef.current],
+    );
     setSaveFailed(false);
     void menuWrite.track(async () => {
+      let latest: OpenCodeMenuBaseline;
+      try {
+        latest = await readOpenCodeMenuBaseline(modelsApi, sourceReads);
+      } catch {
+        setReadState('error');
+        setSaveFailed(true);
+        return;
+      }
+
+      const latestSelectable = new Set(selectableModels(latest.agent, latest.sources).map((model) => model.id));
+      const attemptedMenu: AgentMenu = {
+        view: latest.agent.menu?.view ?? 'featured',
+        checked: applyOpenCodeMenuIntent(latest.agent.menu?.checked ?? [], intent, latestSelectable),
+      };
+      applyBaseline(latest, attemptedMenu.checked);
+      if (sameOpenCodeMenu(latest.agent.menu, attemptedMenu)) {
+        await Promise.resolve(onObserved(latest.agent)).catch(() => {});
+        onClose();
+        return;
+      }
+
       let echoed: AgentSupply;
       try {
-        const existing = rawChecked.filter((id) => availableIds.has(id) && selected.has(id));
-        const added = models.map((model) => model.id).filter((id) => selected.has(id) && !savedSet.has(id));
-        echoed = await modelsApi.putMenu({
-          view: agent.menu?.view ?? 'featured',
-          checked: [...existing, ...added],
-        });
+        echoed = await modelsApi.putMenu(attemptedMenu);
       } catch {
+        try {
+          const observed = await readOpenCodeMenuBaseline(modelsApi, sourceReads);
+          if (sameOpenCodeMenu(observed.agent.menu, attemptedMenu)) {
+            applyBaseline(observed, observed.agent.menu?.checked ?? []);
+            await Promise.resolve(onSaved(observed.agent)).catch(() => {});
+            onClose();
+            return;
+          }
+          const observedSelectable = new Set(selectableModels(observed.agent, observed.sources).map((model) => model.id));
+          applyBaseline(
+            observed,
+            applyOpenCodeMenuIntent(observed.agent.menu?.checked ?? [], intent, observedSelectable),
+          );
+          await Promise.resolve(onObserved(observed.agent)).catch(() => {});
+        } catch {
+          setReadState('error');
+        }
         setSaveFailed(true);
         return;
       }
@@ -147,7 +227,11 @@ export const OpenCodeMenuDialog: React.FC<{
 
         <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-border bg-background p-1.5">
           {!baselineReady ? (
-            <p className="px-4 py-10 text-center text-[12.5px] text-muted">{t('settings.models.gateway.menu.baselineUnavailable')}</p>
+            <div className="flex flex-col items-center gap-3 px-4 py-10 text-center text-[12.5px] text-muted">
+              {readState === 'loading' && <LoaderCircle className="size-4 animate-spin" aria-hidden="true" />}
+              <p>{t('settings.models.gateway.menu.baselineUnavailable')}</p>
+              {readState === 'error' && <Button type="button" variant="outline" size="xs" onClick={() => void loadBaseline(true)}><RefreshCw aria-hidden="true" />{t('settings.models.gateway.retry')}</Button>}
+            </div>
           ) : models.length === 0 ? (
             <p className="px-4 py-10 text-center text-[12.5px] text-muted">{t('settings.models.gateway.menu.empty')}</p>
           ) : visibleModels.length === 0 ? (
@@ -156,6 +240,9 @@ export const OpenCodeMenuDialog: React.FC<{
             <div className="space-y-1">
               {visibleModels.map((model) => {
                 const checked = selected.has(model.id);
+                const sourceLabel = model.sourceNames.length > 0
+                  ? model.sourceNames.join(' · ')
+                  : t('settings.models.gateway.menu.configured');
                 return (
                   <button
                     key={model.id}
@@ -172,7 +259,7 @@ export const OpenCodeMenuDialog: React.FC<{
                     <Checkbox checked={checked} presentational />
                     <span className="min-w-0 flex-1">
                       <span className="block truncate font-mono text-[12px] font-medium text-foreground" title={model.id}>{model.id}</span>
-                      <span className="mt-0.5 block truncate text-[10.5px] text-muted" title={model.sourceNames.join(', ')}>{model.sourceNames.join(' · ')}</span>
+                      <span className="mt-0.5 block truncate text-[10.5px] text-muted" title={sourceLabel}>{sourceLabel}</span>
                     </span>
                   </button>
                 );

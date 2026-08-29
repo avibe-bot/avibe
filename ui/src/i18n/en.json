@@ -946,6 +946,7 @@
           "search": "Search models or sources",
           "selected": "{{selected}} of {{total}} selected",
           "empty": "No eligible source models are available",
+          "configured": "Existing configured model",
           "baselineUnavailable": "Model menu data is not current. Wait for refresh, or retry the failed section before editing.",
           "noMatch": "No models match this search",
           "save": "Save selection",
