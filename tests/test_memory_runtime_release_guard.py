@@ -369,3 +369,13 @@ def test_guard_workflow_reports_and_verifies_supported_published_manifests() -> 
     assert "Excluded Memory Runtime manifests" in resolution
     assert "fromJSON(needs.resolve_manifests.outputs.manifests)" in workflow
     assert "matrix.manifest.release_tag" in workflow
+
+
+def test_guard_workflow_reads_manifests_from_memory_distribution() -> None:
+    workflow = (ROOT / ".github/workflows/memory-runtime-release-guard.yml").read_text(encoding="utf-8")
+
+    assert workflow.count("--pattern 'avibe_memory-*.whl'") == 2
+    assert workflow.count('glob("avibe_memory-*.whl")') == 2
+    assert 'startsWith("avibe_memory-")' not in workflow
+    assert 'startswith("avibe_memory-")' in workflow
+    assert "avibe_os-*.whl" not in workflow

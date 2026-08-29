@@ -48,7 +48,7 @@ jobs:
             rm -rf "$candidate_dir"
             mkdir -p "$candidate_dir"
             if ! gh release download "$candidate_tag" --repo "$GITHUB_REPOSITORY" \
-              --pattern 'avibe_os-*.whl' --dir "$candidate_dir" >/dev/null 2>&1; then
+              --pattern 'avibe_memory-*.whl' --dir "$candidate_dir" >/dev/null 2>&1; then
               jq -nc --arg release_tag "$candidate_tag" \
                 --arg reason "published wheel could not be downloaded" \
                 '{release_tag: $release_tag, reason: $reason}' >> "$excluded_file"
@@ -62,7 +62,7 @@ jobs:
           import zipfile
           from pathlib import Path
 
-          wheels = sorted(Path(os.environ["CANDIDATE_DIR"]).glob("avibe_os-*.whl"))
+          wheels = sorted(Path(os.environ["CANDIDATE_DIR"]).glob("avibe_memory-*.whl"))
           if len(wheels) != 1:
               raise SystemExit(1)
           with zipfile.ZipFile(wheels[0]) as wheel:
@@ -77,7 +77,7 @@ jobs:
           PY
             manifest_status=$?
             set -e
-            # Wheels without a manifest predate Memory Runtime and are not scope exclusions.
+            # Memory wheels without a manifest predate Memory Runtime and are not scope exclusions.
             if [ "$manifest_status" -eq 4 ]; then
               continue
             elif [ "$manifest_status" -ne 0 ]; then
@@ -108,7 +108,7 @@ jobs:
             fi
           done < <(
             gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-              --jq '.[] | select(any(.assets[]?; (.name | startswith("avibe_os-")) and (.name | endswith(".whl")))) | .tag_name'
+              --jq '.[] | select(any(.assets[]?; (.name | startswith("avibe_memory-")) and (.name | endswith(".whl")))) | .tag_name'
           )
           RECORDS_FILE="$records_file" EXCLUDED_FILE="$excluded_file" python3 - <<'PY'
           import json
@@ -179,7 +179,7 @@ jobs:
           rm -rf "$manifest_dir"
           mkdir -p "$manifest_dir"
           gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
-            --pattern 'avibe_os-*.whl' --dir "$manifest_dir" >/dev/null
+            --pattern 'avibe_memory-*.whl' --dir "$manifest_dir" >/dev/null
           CANDIDATE_TAG="$RELEASE_TAG" CANDIDATE_DIR="$manifest_dir" \
             python3 - <<'PY'
           import json
@@ -187,9 +187,9 @@ jobs:
           import zipfile
           from pathlib import Path
 
-          wheels = sorted(Path(os.environ["CANDIDATE_DIR"]).glob("avibe_os-*.whl"))
+          wheels = sorted(Path(os.environ["CANDIDATE_DIR"]).glob("avibe_memory-*.whl"))
           if len(wheels) != 1:
-              raise SystemExit("expected exactly one avibe_os wheel")
+              raise SystemExit("expected exactly one avibe_memory wheel")
           with zipfile.ZipFile(wheels[0]) as wheel:
               manifest = wheel.read("vibe/memory_runtime_manifest.json")
           payload = json.loads(manifest)

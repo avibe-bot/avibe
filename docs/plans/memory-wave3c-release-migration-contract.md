@@ -90,20 +90,20 @@ does not remove older supported entries. A manifest with unsupported provenance
 is excluded visibly by `check-policy`; it is not treated as a byte-recovery
 failure.
 
-Published wheels that predate the Memory Runtime manifest are skipped by the
-scheduled inventory. A wheel that contains a candidate manifest must self-pin
-the selected release tag and pass current policy before it enters guarded backup
-and recovery coverage. Changes to a shipped manifest shape require compatible
-loading or a deliberate visible exclusion, never startup or workflow failure by
-accident.
+Published `avibe-memory` wheels that predate the Memory Runtime manifest are
+skipped by the scheduled inventory. A wheel that contains a candidate manifest
+must self-pin the selected release tag and pass current policy before it enters
+guarded backup and recovery coverage. Changes to a shipped manifest shape
+require compatible loading or a deliberate visible exclusion, never startup or
+workflow failure by accident.
 
 ## Availability, Backup, And Recovery
 
 The scheduled `Memory Runtime Release Guard` preserves the managed-runtime
 availability contract:
 
-1. Enumerate published releases with an `avibe-os` wheel and extract each
-   self-pinned Memory Runtime manifest.
+1. Enumerate published releases with an `avibe-memory` wheel and extract each
+   self-pinned Memory Runtime manifest from that wheel.
 2. Record the exact manifest hash, run `check-policy`, and report guarded and
    excluded releases separately.
 3. Run `fetch` for every guarded manifest. A successful fetch is the public
