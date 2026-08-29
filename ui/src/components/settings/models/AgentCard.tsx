@@ -51,25 +51,46 @@ const ModelRow: React.FC<{
       ? t('settings.models.legend.native') as string
       : t('settings.models.gateway.group.mode.gateway') as string
     : '—';
+  const currentSource = resolved ? sourceName(sources, current.source_id) : '';
   const currentCopy = supplyState === 'paused'
     ? t('settings.models.legend.unavailable') as string
     : supplyState === 'unconfigured'
       ? t('settings.models.gateway.group.status.unconfigured') as string
     : resolved
-      ? t(takeover ? 'settings.models.gateway.row.currentTakeover' : 'settings.models.gateway.row.current', { source: sourceName(sources, current.source_id) }) as string
+      ? t(takeover ? 'settings.models.gateway.row.currentTakeover' : 'settings.models.gateway.row.current', {
+        source: currentSource,
+        model: current.model_id,
+      }) as string
       : '—';
+  const hasCurrentMapping = resolved && supplyState === 'available';
+  const openRouteLabel = hasCurrentMapping
+    ? t('settings.models.routeDialog.openWithMapping', { model: modelId, mapping: currentCopy }) as string
+    : t('settings.models.routeDialog.open', { model: modelId }) as string;
   return (
     <button
       type="button"
       data-route-backend={agent.backend}
       data-route-model={modelId}
       onClick={(event) => onOpenRoute(agent, modelId, event.currentTarget)}
-      aria-label={t('settings.models.routeDialog.open', { model: modelId }) as string}
+      aria-label={openRouteLabel}
       className="model-hub-model-row flex h-9 w-full min-w-0 items-center gap-2.5 overflow-hidden rounded-md border border-border px-3 text-left"
     >
       <span className="flex min-w-0 flex-1 items-center justify-between gap-2.5">
-        <span className="flex min-w-0 flex-1 items-center gap-[7px]"><span className="min-w-0 flex-1 truncate font-mono text-[12px] font-medium text-foreground" title={modelId}>{modelId}</span><span className="model-hub-pill model-hub-model-mode-chip border border-border text-muted">{mode}</span></span>
-        <span className={cn('model-hub-model-current min-w-0 flex-1 truncate text-right text-[10.5px]', supplyState === 'paused' ? 'model-hub-ink-gold' : takeover && 'model-hub-model-current--takeover')} title={currentCopy}>{currentCopy}</span>
+        <span className="min-w-0 flex-1 truncate font-mono text-[12px] font-medium text-foreground" title={modelId}>{modelId}</span>
+        <span className="flex min-w-0 flex-1 items-center justify-end gap-[7px]">
+          <span className="model-hub-pill model-hub-model-mode-chip shrink-0 border border-border text-muted">{mode}</span>
+          {hasCurrentMapping ? (
+            <span
+              className={cn('model-hub-model-current min-w-0 flex-1 truncate text-right text-[10.5px]', takeover && 'model-hub-model-current--takeover')}
+              title={currentCopy}
+              data-route-mapping
+            >
+              {currentCopy}
+            </span>
+          ) : (
+            <span className={cn('model-hub-model-current min-w-0 flex-1 truncate text-right text-[10.5px]', supplyState === 'paused' && 'model-hub-ink-gold')} title={currentCopy}>{currentCopy}</span>
+          )}
+        </span>
       </span>
       <ChevronRight className="model-hub-overview-chevron size-[15px] shrink-0" aria-hidden="true" />
     </button>
