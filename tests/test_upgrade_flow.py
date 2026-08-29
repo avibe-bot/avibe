@@ -827,14 +827,15 @@ def test_restart_state_with_a_non_object_shape_is_not_pending(monkeypatch, tmp_p
     assert not restart_is_pending()
 
 
-def test_doctor_resolves_hardlinked_atomic_generation(monkeypatch, tmp_path):
+@pytest.mark.parametrize("tools_path", [Path("uv/tools"), Path("tools")], ids=["bridged", "legacy"])
+def test_doctor_resolves_hardlinked_atomic_generation(monkeypatch, tmp_path, tools_path):
     from vibe import upgrade
 
     root = tmp_path / "home" / "runtime" / "install-generations"
     generation = root / "old"
     launcher_source = generation / "bin" / "vibe.exe"
     launcher = tmp_path / ".local" / "bin" / "vibe.exe"
-    site_packages = generation / "tools" / "avibe-os" / "lib" / "python3.12" / "site-packages"
+    site_packages = generation / tools_path / "avibe-os" / "lib" / "python3.12" / "site-packages"
     launcher_source.parent.mkdir(parents=True)
     site_packages.mkdir(parents=True)
     launcher.parent.mkdir(parents=True)

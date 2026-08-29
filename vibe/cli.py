@@ -12112,8 +12112,9 @@ def _uv_tool_site_packages_for_vibe(vibe_path: Path) -> list[Path]:
     generation_root = atomic_uv_install_root().expanduser().resolve()
     generation = _launcher_generation(vibe_path, generation_root)
     if generation:
-        for package_name in UV_TOOL_PACKAGE_NAMES:
-            add_tool_root(generation / "tools" / package_name)
+        for tools_dir in (generation / "uv" / "tools", generation / "tools"):
+            for package_name in UV_TOOL_PACKAGE_NAMES:
+                add_tool_root(tools_dir / package_name)
 
     parts = vibe_path.parts
     try:
