@@ -1,0 +1,47 @@
+{
+  "archives": {
+    "darwin-arm64": {
+      "name": "vibe-show-runtime-node-darwin-arm64.tgz",
+      "sha256": "c4f5885ebcb5d0577575eae39aa15c4c95dd365f9d18828d8c6d8c376a3500b5",
+      "size": 23517034,
+      "url": "https://github.com/avibe-bot/avibe/releases/download/gh-v3.0.14rc3/vibe-show-runtime-node-darwin-arm64.tgz"
+    },
+    "darwin-x64": {
+      "name": "vibe-show-runtime-node-darwin-x64.tgz",
+      "sha256": "3d68952826dd76186e73274fbf2bfddd1ff6742fc7aedd84583ac5e3932e34fd",
+      "size": 24430150,
+      "url": "https://github.com/avibe-bot/avibe/releases/download/gh-v3.0.14rc3/vibe-show-runtime-node-darwin-x64.tgz"
+    },
+    "linux-arm64": {
+      "name": "vibe-show-runtime-node-linux-arm64.tgz",
+      "sha256": "3736365817f9c4657a6232fce25dd43c5ed6f2bd3557e3786554ecd53c045f3f",
+      "size": 23514599,
+      "url": "https://github.com/avibe-bot/avibe/releases/download/gh-v3.0.14rc3/vibe-show-runtime-node-linux-arm64.tgz"
+    },
+    "linux-x64": {
+      "name": "vibe-show-runtime-node-linux-x64.tgz",
+      "sha256": "a12a50177d1a1d2dcf270bfb98a74d126eb88214cf471fa613eab3c3f11c89c7",
+      "size": 24467227,
+      "url": "https://github.com/avibe-bot/avibe/releases/download/gh-v3.0.14rc3/vibe-show-runtime-node-linux-x64.tgz"
+    },
+    "win32-arm64": {
+      "name": "vibe-show-runtime-node-win32-arm64.tgz",
+      "sha256": "42ba4630c6535cdf6fc9f4e3aa16ec119e3f247d01d779cb2ea9769ebf4e63ca",
+      "size": 23476469,
+      "url": "https://github.com/avibe-bot/avibe/releases/download/gh-v3.0.14rc3/vibe-show-runtime-node-win32-arm64.tgz"
+    },
+    "win32-x64": {
+      "name": "vibe-show-runtime-node-win32-x64.tgz",
+      "sha256": "78289b4401c644d64dd0ebd23dd682c6dc978b00ea09899e277ae68fe1bb0caf",
+      "size": 25411057,
+      "url": "https://github.com/avibe-bot/avibe/releases/download/gh-v3.0.14rc3/vibe-show-runtime-node-win32-x64.tgz"
+    }
+  },
+  "minimum_node": "^20.19.0 || >=22.12.0",
+  "runtime_source": {
+    "ref": "8e122eceffe3c48ca7eb9dc577b9f480289be587",
+    "repo": "avibe-bot/vibe-show-runtime"
+  },
+  "runtime_version": "8e122eceffe3c48ca7eb9dc577b9f480289be587",
+  "schema_version": 1
+}
