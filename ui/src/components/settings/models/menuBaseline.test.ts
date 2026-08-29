@@ -48,6 +48,23 @@ describe('readOpenCodeMenuBaseline', () => {
     expect(readValue).toHaveBeenCalledTimes(2);
   });
 
+  it('accepts identical Source and model inventories returned in different orders', async () => {
+    const getAgentSources = vi.fn().mockResolvedValue(agent(['src_a', 'src_b']));
+    const readValue = vi.fn()
+      .mockResolvedValueOnce([
+        source('src_b', ['model-b', 'model-a']),
+        source('src_a', ['model-c']),
+      ])
+      .mockResolvedValueOnce([
+        source('src_a', ['model-c']),
+        source('src_b', ['model-a', 'model-b']),
+      ]);
+
+    const baseline = await readOpenCodeMenuBaseline({ getAgentSources }, { readValue });
+
+    expect(baseline.sources.map(({ id }) => id)).toEqual(['src_a', 'src_b']);
+  });
+
   it('rejects Source model content that changes across the Agent read', async () => {
     const getAgentSources = vi.fn().mockResolvedValue(agent(['src_a']));
     const readValue = vi.fn()

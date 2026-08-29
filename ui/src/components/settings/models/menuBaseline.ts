@@ -13,8 +13,19 @@ export type OpenCodeMenuIntent = {
   removed: Set<string>;
 };
 
+const byId = <T extends { id: string }>(left: T, right: T): number =>
+  left.id.localeCompare(right.id);
+
+const canonicalSourceSnapshot = (sources: Source[]): Source[] =>
+  sources
+    .map((source) => ({
+      ...source,
+      models: [...source.models].sort(byId),
+    }))
+    .sort(byId);
+
 const sameSourceSnapshot = (left: Source[], right: Source[]): boolean =>
-  JSON.stringify(left) === JSON.stringify(right);
+  JSON.stringify(canonicalSourceSnapshot(left)) === JSON.stringify(canonicalSourceSnapshot(right));
 
 /** The Agent read is authoritative only when the complete Source projection is
  * unchanged on both sides of it. Source ids alone cannot detect model edits. */
