@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { ArrowDownUp, Check, ChevronDown, ChevronRight, ChevronUp, PlugZap, Power, RefreshCw, Route } from 'lucide-react';
+import { ArrowDownUp, Check, ChevronDown, ChevronRight, ChevronUp, ListChecks, PlugZap, Power, RefreshCw, Route } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Badge } from '@/components/ui/badge';
@@ -53,6 +53,8 @@ const ModelRow: React.FC<{
     : '—';
   const currentCopy = supplyState === 'paused'
     ? t('settings.models.legend.unavailable') as string
+    : supplyState === 'unconfigured'
+      ? t('settings.models.gateway.group.status.unconfigured') as string
     : resolved
       ? t(takeover ? 'settings.models.gateway.row.currentTakeover' : 'settings.models.gateway.row.current', { source: sourceName(sources, current.source_id) }) as string
       : '—';
@@ -84,15 +86,18 @@ const AgentModelCard: React.FC<{
   switchFailed: boolean;
   onConnectHub: (agent: AgentSupply) => void;
   onSwitchDirect: (agent: AgentSupply) => void;
+  onOpenModels: (agent: AgentSupply) => void;
   onOpenOrder: (agent: AgentSupply) => void;
   onOpenRoute: (agent: AgentSupply, modelId: string, opener: HTMLElement) => void;
   onProbeSettled: (agent: AgentSupply) => void;
-}> = ({ agent, runtime, sources, chains, pending, connecting, switchFailed, onConnectHub, onSwitchDirect, onOpenOrder, onOpenRoute, onProbeSettled }) => {
+}> = ({ agent, runtime, sources, chains, pending, connecting, switchFailed, onConnectHub, onSwitchDirect, onOpenModels, onOpenOrder, onOpenRoute, onProbeSettled }) => {
   const { t } = useTranslation();
   const { Icon, accent } = backendVisual(agent.backend);
   const [expanded, setExpanded] = React.useState(false);
   const [modeMenuOpen, setModeMenuOpen] = React.useState(false);
   const allModels = listedModelIds(agent);
+  const hasOpenMenu = agent.menu_kind === 'open';
+  const displayedModelCount = hasOpenMenu ? agent.menu?.checked.length ?? 0 : allModels.length;
   const chainProjectionLive = agentHasLiveChainProjection(runtime, agent);
   const collapsed = collapsedModelRows(agent, expanded);
   const collapsedAtRest = collapsedModelRows(agent);
@@ -117,7 +122,7 @@ const AgentModelCard: React.FC<{
   const retryChains = () => onProbeSettled(agent);
   const noUsableSource = agent.mode === 'hub'
     && Boolean(agent.model_supply?.length)
-    && agent.model_supply?.every((entry) => !entry.has_runnable_hop);
+    && agent.model_supply?.every((entry) => entry.chain_length > 0 && !entry.has_runnable_hop);
   const statusClass = switchFailed || health === 'interrupted'
     ? 'text-destructive-ink'
     : hasTakeover || health === 'degraded' || health === 'waiting'
@@ -146,7 +151,9 @@ const AgentModelCard: React.FC<{
             <span className="flex min-w-0 items-center gap-[7px]">
               <h2 className="truncate text-[14px] font-bold leading-[17px] text-foreground">{t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend })}</h2>
               <Badge variant="secondary" className={cn('model-hub-pill model-hub-fill-0a', hasTakeover && 'model-hub-takeover-chip')}>
-                {hasTakeover ? t('settings.models.takeover.chip') : t('settings.models.gateway.modelCount', { count: allModels.length })}
+                {hasTakeover
+                  ? t('settings.models.takeover.chip')
+                  : t(hasOpenMenu ? 'settings.models.gateway.selectedModelCount' : 'settings.models.gateway.modelCount', { count: displayedModelCount })}
               </Badge>
             </span>
           </div>
@@ -198,12 +205,13 @@ const AgentModelCard: React.FC<{
                   </button>
                 </div>
               </ResponsiveMenu>
+              {hasOpenMenu && <Button variant="outline" size="xs" className="model-hub-agent-head-action rounded-md bg-background px-2.5 text-[11px] font-semibold shadow-sm" onClick={() => onOpenModels(agent)} disabled={pending}><ListChecks aria-hidden="true" />{t('settings.models.gateway.manageModels')}</Button>}
               <Button variant="outline" size="xs" className="model-hub-agent-head-action rounded-md bg-background px-2.5 text-[11px] font-semibold shadow-sm" onClick={() => onOpenOrder(agent)} disabled={pending}><ArrowDownUp aria-hidden="true" />{t('settings.models.gateway.sourceOrder')}</Button>
             </div>
           ) : <Button variant="default" size="xs" className="model-hub-agent-head-action shrink-0 self-start rounded-md px-2.5 text-[11px] font-semibold sm:self-auto" onClick={() => onConnectHub(agent)} disabled={connecting}><PlugZap aria-hidden="true" />{t('settings.models.gateway.switchToGateway')}</Button>}
         </div>
       </div>
-      {agent.mode === 'hub' && (models.length === 0 ? <div className="px-4 py-10 text-center sm:px-5"><p className="text-[12.5px] text-muted">{t('settings.models.gateway.group.emptyModels')}</p></div> : <div className="space-y-2 p-2">{noUsableSource && <p className="px-3 py-1 text-[11px] font-semibold text-muted">{t('settings.models.gateway.supply.none')}</p>}{models.map((modelId) => <ModelRow key={modelId} agent={agent} modelId={modelId} sources={sources} read={chainProjectionLive ? chains[modelChainKey(agent.backend, modelId)] : undefined} onOpenRoute={onOpenRoute} />)}{canCollapse ? <button type="button" onClick={toggleCollapsed} className="model-hub-model-collapse flex h-6 w-full items-center gap-1.5 hover:text-foreground">{expanded ? <ChevronUp /> : <ChevronDown />}{expanded ? t('settings.models.gateway.collapse') : t('settings.models.gateway.moreModels', { count: collapsed.hidden.length })}</button> : needsChainRepair ? <button type="button" onClick={retryChains} className="model-hub-model-collapse flex h-6 w-full items-center gap-1.5 hover:text-foreground"><RefreshCw />{t('settings.models.gateway.retry')}</button> : null}</div>)}
+      {agent.mode === 'hub' && (models.length === 0 ? <div className="flex flex-col items-center gap-3 px-4 py-10 text-center sm:px-5"><p className="text-[12.5px] text-muted">{t(hasOpenMenu ? 'settings.models.gateway.group.emptySelection' : 'settings.models.gateway.group.emptyModels')}</p>{hasOpenMenu && <Button variant="outline" size="xs" className="rounded-md bg-background px-2.5 text-[11px] font-semibold shadow-sm" onClick={() => onOpenModels(agent)} disabled={pending}><ListChecks aria-hidden="true" />{t('settings.models.gateway.manageModels')}</Button>}</div> : <div className="space-y-2 p-2">{noUsableSource && <p className="px-3 py-1 text-[11px] font-semibold text-muted">{t('settings.models.gateway.supply.none')}</p>}{models.map((modelId) => <ModelRow key={modelId} agent={agent} modelId={modelId} sources={sources} read={chainProjectionLive ? chains[modelChainKey(agent.backend, modelId)] : undefined} onOpenRoute={onOpenRoute} />)}{canCollapse ? <button type="button" onClick={toggleCollapsed} className="model-hub-model-collapse flex h-6 w-full items-center gap-1.5 hover:text-foreground">{expanded ? <ChevronUp /> : <ChevronDown />}{expanded ? t('settings.models.gateway.collapse') : t('settings.models.gateway.moreModels', { count: collapsed.hidden.length })}</button> : needsChainRepair ? <button type="button" onClick={retryChains} className="model-hub-model-collapse flex h-6 w-full items-center gap-1.5 hover:text-foreground"><RefreshCw />{t('settings.models.gateway.retry')}</button> : null}</div>)}
     </section>
   );
 };
@@ -217,6 +225,7 @@ export const AgentCard: React.FC<{
   switchFailures: ReadonlySet<string>;
   onConnectHub: (agent: AgentSupply) => void;
   onSwitchDirect: (agent: AgentSupply) => void;
+  onOpenModels: (agent: AgentSupply) => void;
   onOpenOrder: (agent: AgentSupply) => void;
   onOpenRoute: (agent: AgentSupply, modelId: string, opener: HTMLElement) => void;
   onProbeSettled: (agent: AgentSupply) => void;

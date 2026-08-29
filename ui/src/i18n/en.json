@@ -892,6 +892,7 @@
         "infoLabel": "What gateway routes are",
         "info": "Gateway routes decide which upstream source each Agent's model uses first among the sources already configured in its route. When quota, rate-limit, server, authentication, or network failures prevent a request, the next priority is used automatically.",
         "sourceOrder": "Adjust priority",
+        "manageModels": "Manage models",
         "switchToGateway": "Switch to gateway",
         "switchToDirect": "Switch to direct",
         "modeMenu": {
@@ -905,6 +906,8 @@
         },
         "modelCount_one": "{{count}} model",
         "modelCount_other": "{{count}} models",
+        "selectedModelCount_one": "{{count}} selected",
+        "selectedModelCount_other": "{{count}} selected",
         "moreModels_one": "{{count}} more model",
         "moreModels_other": "{{count}} more models",
         "collapse": "Collapse",
@@ -934,7 +937,20 @@
             "unconfigured": "No model route configured",
             "unused": "No Agent uses this backend"
           },
+          "emptySelection": "No models selected",
           "emptyModels": "This backend has no models"
+        },
+        "menu": {
+          "title": "OpenCode model menu",
+          "description": "Choose which models OpenCode can use through the gateway, then configure each selected model's route from its row.",
+          "search": "Search models or sources",
+          "selected": "{{selected}} of {{total}} selected",
+          "empty": "No eligible source models are available",
+          "noMatch": "No models match this search",
+          "save": "Save selection",
+          "saving": "Saving…",
+          "cancel": "Cancel",
+          "saveFailed": "The model selection was not saved"
         }
       },
       "takeover": {
