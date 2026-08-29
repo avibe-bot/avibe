@@ -10,6 +10,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 INSTALL_SCRIPT = REPO_ROOT / "install.sh"
 INSTALL_POWERSHELL = REPO_ROOT / "install.ps1"
+PUBLIC_INSTALL_COMMAND = (
+    "bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --launch'"
+)
 
 
 def _write_executable(path: Path, content: str) -> None:
@@ -141,6 +144,9 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
                 exit 8
             fi
             printf 'start\\n' >> "${{VIBE_TEST_CALL_LOG:-/dev/null}}"
+            echo "Web UI:"
+        elif [ "$#" -eq 0 ]; then
+            printf 'launch\\n' >> "${{VIBE_TEST_CALL_LOG:-/dev/null}}"
             echo "Web UI:"
         else
             echo "started"
@@ -534,6 +540,69 @@ def test_install_script_pairs_and_starts_with_verified_vibe_path(tmp_path):
         "remote pair vrp_test --backend-url https://avibe.bot",
         "start",
     ]
+
+
+def test_pipe_to_shell_launch_uses_verified_vibe_path(tmp_path):
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    uv_bin = tmp_path / "uv-bin"
+    uv_bin.mkdir()
+    call_log = tmp_path / "vibe-calls.log"
+    uv_log = tmp_path / "uv-tool-bin-dir.txt"
+
+    _write_fake_uv(uv_bin / "uv", uv_log)
+    _write_executable(
+        uv_bin / "curl",
+        """\
+        #!/usr/bin/env bash
+        cat "$VIBE_TEST_INSTALL_SCRIPT"
+        """,
+    )
+    uv_bin.chmod(0o555)
+
+    env = os.environ.copy()
+    env["HOME"] = str(home_dir)
+    env["PATH"] = os.pathsep.join([str(uv_bin), "/usr/bin", "/bin"])
+    env["VIBE_INSTALL_SKIP_NODE"] = "1"
+    env["VIBE_INSTALL_SKIP_SHOW_RUNTIME"] = "1"
+    env["VIBE_TEST_INSTALL_SCRIPT"] = str(INSTALL_SCRIPT)
+    env["VIBE_TEST_CALL_LOG"] = str(call_log)
+
+    for readme in (REPO_ROOT / "README.md", REPO_ROOT / "README_ZH.md"):
+        assert PUBLIC_INSTALL_COMMAND in readme.read_text(encoding="utf-8")
+
+    install_result = _run(PUBLIC_INSTALL_COMMAND, cwd=tmp_path, env=env)
+    version_result = _vibe_version(env, cwd=tmp_path)
+    uv_bin.chmod(0o755)
+
+    expected_vibe = home_dir / ".local" / "bin" / "vibe"
+    assert install_result.returncode == 0, install_result.stdout + install_result.stderr
+    assert f"Launching Avibe with {expected_vibe}" in install_result.stdout
+    assert "Avibe launched" in install_result.stdout
+    assert install_result.stdout.index("Avibe launched") < install_result.stdout.index("Installation complete!")
+    assert call_log.read_text(encoding="utf-8").splitlines() == ["launch"]
+    assert version_result.returncode != 0
+
+
+def test_public_install_command_propagates_download_failure(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_executable(
+        fake_bin / "curl",
+        """\
+        #!/usr/bin/env bash
+        exit 22
+        """,
+    )
+
+    env = os.environ.copy()
+    env["HOME"] = str(tmp_path / "home")
+    env["PATH"] = os.pathsep.join([str(fake_bin), "/usr/bin", "/bin"])
+
+    result = _run(PUBLIC_INSTALL_COMMAND, cwd=tmp_path, env=env)
+
+    assert result.returncode == 22, result.stdout + result.stderr
+    assert not (tmp_path / "home" / ".local" / "bin" / "vibe").exists()
 
 
 def test_install_script_stops_when_remote_pair_cannot_start_tunnel(tmp_path):

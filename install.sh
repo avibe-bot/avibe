@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Avibe Installation Script
-# Usage: curl -fsSL https://avibe.bot/install.sh | bash
+# Usage: bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --launch'
 #
 # Prerequisites: None! uv will be installed automatically and manages Python for you.
 
@@ -20,6 +20,8 @@ NODE_MINIMUM_REQUIREMENT="20.19+ or 22.12+"
 VIBE_BIN_PATH=""
 VIBE_TOOL_BIN_DIR=""
 VIBE_CANDIDATE_BIN_PATH=""
+LAUNCH_AFTER_INSTALL=""
+AVIBE_LAUNCHED=""
 ORIGINAL_PATH="$PATH"
 if [ -n "${AVIBE_HOME:-}" ]; then
     AVIBE_RUNTIME_HOME="${AVIBE_HOME/#\~/$HOME}"
@@ -731,6 +733,22 @@ pair_remote_access() {
     success "Avibe service started"
 }
 
+launch_vibe() {
+    if [ "${LAUNCH_AFTER_INSTALL:-}" != "1" ] || [ "${REMOTE_ACCESS_PAIRED:-}" = "1" ]; then
+        return 0
+    fi
+
+    local vibe_cmd="${VIBE_BIN_PATH:-}"
+    if [ -z "$vibe_cmd" ] || [ ! -x "$vibe_cmd" ]; then
+        error "Cannot launch Avibe because the verified vibe command is not available."
+    fi
+
+    info "Launching Avibe with $vibe_cmd..."
+    "$vibe_cmd"
+    AVIBE_LAUNCHED="1"
+    success "Avibe launched"
+}
+
 print_uninstall_commands() {
     echo "  avibe_home=\"\${AVIBE_HOME:-\$HOME/.avibe}\""
     echo '  avibe_home="${avibe_home/#\~/$HOME}"'
@@ -784,7 +802,20 @@ print_next_steps() {
         return
     fi
 
-    if is_vibe_immediately_available; then
+    if [ "${AVIBE_LAUNCHED:-}" = "1" ]; then
+        if is_vibe_immediately_available; then
+            echo "  1. Finish setup in the browser"
+            echo "  2. Choose your chat platform and agent backend"
+            echo "  3. Enable a channel or DM and send your first task"
+            echo "  4. Optional: run 'vibe remote' to open the Web UI from another device"
+        else
+            echo "  1. Finish setup in the browser"
+            echo "  2. Run 'export PATH=\"${vibe_dir}:\$PATH\"' for future terminal commands"
+            echo "  3. Choose your chat platform and agent backend"
+            echo "  4. Enable a channel or DM and send your first task"
+            echo "  5. Optional: run 'vibe remote' to open the Web UI from another device"
+        fi
+    elif is_vibe_immediately_available; then
         echo "  1. Run 'vibe' to open the setup wizard"
         echo "  2. Choose your chat platform and agent backend"
         echo "  3. Enable a channel or DM and send your first task"
@@ -820,6 +851,14 @@ main() {
     print_banner
     REMOTE_ACCESS_PAIRING_KEY="${AVIBE_PAIRING_KEY:-}"
     unset AVIBE_PAIRING_KEY
+
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            --launch) LAUNCH_AFTER_INSTALL="1" ;;
+            *) error "Unsupported installer option: $arg" ;;
+        esac
+    done
     
     local os
     os=$(detect_os)
@@ -857,6 +896,10 @@ main() {
     # verified absolute vibe path, not PATH, so it works even when the installer
     # put the command into a fallback tool bin directory.
     pair_remote_access
+
+    # The public pipe-to-shell flow cannot update its parent shell's PATH.
+    # Launch through the verified absolute path while this process still owns it.
+    launch_vibe
     
     # Done
     print_next_steps
